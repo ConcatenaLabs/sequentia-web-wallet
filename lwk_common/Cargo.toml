@@ -10,6 +10,9 @@ documentation = "https://docs.rs/lwk_common"
 [dependencies]
 aes-gcm-siv = { version = "0.11", features = ["std"] }
 base64 = "0.21.4"
+# SEQUENTIA: Hrp for the custom Sequentia address-params const; pinned to the
+# same bech32 major elements depends on so the Hrp type unifies.
+bech32 = "0.11"
 elements.workspace = true
 elements-miniscript.workspace = true
 qr_code = { version = "2.0.0", features = ["bmp"] }

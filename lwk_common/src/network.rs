@@ -1,10 +1,24 @@
 use std::str::FromStr;
 
+use bech32::Hrp;
 use elements::hashes::{sha256, Hash};
 use elements::{AddressParams, AssetId, BlockHash};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::Error;
+
+/// SEQUENTIA: address parameters for the Sequentia testnet (`chain=test`).
+/// base58 p2pkh 111 / p2sh 196 / blinded 70; bech32 `tb`; blech32 `tsqb`
+/// (see Sequentia's chainparams.cpp). Built as a `const` like elements' own
+/// `AddressParams::LIQUID_TESTNET`, so `address_params()` can return a
+/// `&'static` reference.
+pub const SEQUENTIA_TESTNET_ADDRESS_PARAMS: AddressParams = AddressParams {
+    p2pkh_prefix: 111,
+    p2sh_prefix: 196,
+    blinded_prefix: 70,
+    bech_hrp: Hrp::parse_unchecked("tb"),
+    blech_hrp: Hrp::parse_unchecked("tsqb"),
+};
 
 const LIQUID_TESTNET_POLICY_ASSET: &AssetId = &AssetId::from_inner(sha256::Midstate([
     0x49, 0x9a, 0x81, 0x85, 0x45, 0xf6, 0xba, 0xe3, 0x9f, 0xc0, 0x3b, 0x63, 0x7f, 0x2a, 0x4e, 0x1e,
@@ -36,6 +50,7 @@ pub const GENESIS_LIQUID_REGTEST: [u8; 32] = [
 pub struct ElementsParamsBuilder {
     policy_asset: Option<AssetId>,
     genesis_hash: Option<BlockHash>,
+    address_params: Option<&'static AddressParams>,
 }
 
 impl ElementsParamsBuilder {
@@ -56,6 +71,13 @@ impl ElementsParamsBuilder {
         self
     }
 
+    /// Specify the address parameters (base58/bech32/blech32 prefixes) used to
+    /// derive addresses. Defaults to the generic Elements params.
+    pub fn with_address_params(mut self, address_params: &'static AddressParams) -> Self {
+        self.address_params = Some(address_params);
+        self
+    }
+
     /// Build Elements network parameters.
     ///
     /// Unspecified values would defined as default Liquid regtest parameters
@@ -65,6 +87,7 @@ impl ElementsParamsBuilder {
             genesis_hash: self
                 .genesis_hash
                 .unwrap_or(BlockHash::from_byte_array(GENESIS_LIQUID_REGTEST)),
+            address_params: self.address_params.unwrap_or(&AddressParams::ELEMENTS),
         })
     }
 }
@@ -74,6 +97,8 @@ impl ElementsParamsBuilder {
 pub struct ElementsParams {
     policy_asset: AssetId,
     genesis_hash: BlockHash,
+    /// Address parameters used to derive addresses for this network.
+    address_params: &'static AddressParams,
 }
 
 /// The network of the elements blockchain.
@@ -116,8 +141,32 @@ impl Network {
         match self {
             Network::Liquid => &AddressParams::LIQUID,
             Network::TestnetLiquid => &AddressParams::LIQUID_TESTNET,
-            Network::CustomElements(_) => &AddressParams::ELEMENTS,
+            Network::CustomElements(params) => params.address_params,
         }
+    }
+
+    /// Return the Sequentia testnet (`chain=test`) network.
+    ///
+    /// Sequentia is an Elements chain, modelled here as a custom Elements
+    /// network carrying Sequentia's policy (native) asset, genesis hash, and
+    /// address parameters (base58 111/196/70, bech32 `tb`, blech32 `tsqb`).
+    pub fn sequentia_testnet() -> Self {
+        let policy_asset = AssetId::from_str(
+            "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40",
+        )
+        .expect("valid Sequentia policy asset id");
+        let genesis_hash = BlockHash::from_str(
+            "c2a0a99b4c307e8423b98140af1f539aa4e1feec25c62d655d91d8df51c7dfba",
+        )
+        .expect("valid Sequentia genesis hash");
+        Network::CustomElements(
+            ElementsParamsBuilder::new()
+                .with_policy_asset(policy_asset)
+                .with_genesis_hash(genesis_hash)
+                .with_address_params(&SEQUENTIA_TESTNET_ADDRESS_PARAMS)
+                .build()
+                .expect("valid Sequentia params"),
+        )
     }
 
     /// Return Elements network with default parameters
@@ -222,6 +271,28 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn sequentia_testnet_network() {
+        let n = Network::sequentia_testnet();
+        // policy (native) asset + genesis match the Sequentia testnet
+        assert_eq!(
+            n.policy_asset().to_string(),
+            "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40"
+        );
+        assert_eq!(
+            n.genesis_hash().to_string(),
+            "c2a0a99b4c307e8423b98140af1f539aa4e1feec25c62d655d91d8df51c7dfba"
+        );
+        // address params are Sequentia's, not the generic Elements defaults
+        let p = n.address_params();
+        assert_eq!(p.p2pkh_prefix, 111);
+        assert_eq!(p.p2sh_prefix, 196);
+        assert_eq!(p.blinded_prefix, 70);
+        assert_eq!(p.bech_hrp.to_string(), "tb");
+        assert_eq!(p.blech_hrp.to_string(), "tsqb");
+        assert_ne!(p, &AddressParams::ELEMENTS);
+    }
 
     #[test]
     fn network_constants_regression() {
