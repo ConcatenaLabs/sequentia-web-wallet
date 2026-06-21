@@ -1,5 +1,0 @@
-lwk_boltz/regtest
-*target*
-./bin
-./lwk_wasm/pkg
-./lwk_wasm/pkg_node

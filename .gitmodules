@@ -1,3 +1,0 @@
-[submodule "lwk_boltz/regtest"]
-	path = lwk_boltz/regtest
-	url = https://github.com/BoltzExchange/regtest
