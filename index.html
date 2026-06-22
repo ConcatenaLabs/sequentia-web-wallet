@@ -4,64 +4,99 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sequentia Wallet</title>
+<link rel="icon" type="image/png" href="./sequentia-mark.png">
 <style>
-  :root{ --bg:#0d1014; --panel:#161b22; --line:#262d36; --txt:#e6edf3; --dim:#8b949e;
-         --amber:#f0a500; --amber2:#ffb733; --green:#27ae60; --red:#c0392b; }
+  :root{ --bg:#0d1014; --panel:#161b22; --panel2:#0b0e12; --line:#262d36; --txt:#e6edf3; --dim:#8b949e;
+         --amber:#f0a500; --amber2:#ffb733; --green:#27ae60; --red:#e0564b; --blue:#4aa3df; }
   *{box-sizing:border-box}
   body{margin:0;background:radial-gradient(1100px 560px at 50% -10%,#1a212b 0%,var(--bg) 60%);
        color:var(--txt);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
        min-height:100vh}
-  .wrap{max-width:560px;margin:0 auto;padding:40px 20px 80px}
-  .top{display:flex;align-items:center;gap:12px;margin-bottom:8px}
-  .mark{width:42px;height:42px;border-radius:11px;background:linear-gradient(135deg,var(--amber),var(--amber2));
-        display:flex;align-items:center;justify-content:center;font-weight:800;font-size:23px;color:#1a1200}
-  h1{font-size:23px;margin:0;letter-spacing:-.01em}
+  .wrap{max-width:600px;margin:0 auto;padding:32px 18px 90px}
+  .top{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .mark{width:42px;height:42px;border-radius:50%;display:block}
+  h1{font-size:21px;margin:0;letter-spacing:-.01em}
   .net{font-size:12px;color:var(--amber2);border:1px solid var(--line);border-radius:999px;padding:2px 10px;margin-left:auto}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;margin-top:18px}
+  .tip{font-size:11.5px;color:var(--dim);margin-left:8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:16px}
   .muted{color:var(--dim);font-size:14px}
+  .sub{font-size:12.5px;color:var(--dim)}
   button{font:inherit;font-weight:650;cursor:pointer;border-radius:10px;border:1px solid var(--line);
-         background:#1d242d;color:var(--txt);padding:11px 16px;transition:filter .15s,transform .08s}
-  button:hover{filter:brightness(1.12)} button:active{transform:translateY(1px)}
-  button:disabled{opacity:.5;cursor:default}
+         background:#1d242d;color:var(--txt);padding:10px 15px;transition:filter .15s,transform .08s}
+  button:hover{filter:brightness(1.13)} button:active{transform:translateY(1px)}
+  button:disabled{opacity:.45;cursor:default}
   .primary{background:linear-gradient(135deg,var(--amber),var(--amber2));color:#1a1200;border:none}
-  .row{display:flex;gap:10px;flex-wrap:wrap}
-  .bal{font-size:44px;font-weight:800;letter-spacing:-.02em;margin:2px 0 0}
-  .bal small{font-size:18px;color:var(--amber2);font-weight:700;margin-left:6px}
-  textarea,input{width:100%;background:#0b0e12;border:1px solid var(--line);border-radius:10px;color:var(--txt);
-        font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;padding:11px;resize:vertical}
+  .danger{color:var(--red);border-color:#5a2a26}
+  .ghost{background:transparent}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .grow{flex:1 1 auto}
+  .bal{font-size:42px;font-weight:800;letter-spacing:-.02em;margin:2px 0 0}
+  .bal small{font-size:17px;color:var(--amber2);font-weight:700;margin-left:6px}
+  textarea,input,select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+        font:14px/1.5 inherit;padding:10px 11px;resize:vertical}
+  input.mono,textarea{font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
+  label.lbl{display:block;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:0 0 5px}
+  .field{margin-top:12px}
   .mono{font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;word-break:break-all;color:#c9d4df;
-        background:#0b0e12;border:1px solid var(--line);border-radius:10px;padding:11px}
+        background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px}
   .words{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0}
-  .words span{background:#0b0e12;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:13px ui-monospace,monospace}
+  .words span{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:13px ui-monospace,monospace}
   .words span b{color:var(--dim);margin-right:7px;font-weight:500}
-  .lbl{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
   .warn{background:#2a1d0a;border:1px solid #6b4e12;color:#ffcf7a;border-radius:10px;padding:10px 12px;font-size:13px;margin-top:12px}
   .status{font-size:13px;min-height:18px;margin-top:10px}
   .ok{color:var(--green)} .err{color:var(--red)}
-  a{color:var(--amber2)}
+  a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
+  /* tabs */
+  .tabs{display:flex;gap:4px;margin-top:18px;background:var(--panel);border:1px solid var(--line);
+        border-radius:12px;padding:4px;overflow-x:auto}
+  .tabs button{flex:1 0 auto;border:none;background:transparent;color:var(--dim);padding:9px 12px;font-size:13.5px;border-radius:8px;white-space:nowrap}
+  .tabs button.active{background:#1d242d;color:var(--txt)}
+  /* lists */
+  .list{margin-top:6px}
+  .item{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+  .item:first-child{border-top:none}
+  .badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+  .b-in{color:var(--green);border-color:#1f4d33;background:#10241a}
+  .b-out{color:var(--amber2);border-color:#5a4412;background:#241c0a}
+  .b-iss{color:var(--blue);border-color:#244a63;background:#0d1f2a}
+  .amt{margin-left:auto;font-weight:700;font:14px ui-monospace,monospace;white-space:nowrap}
+  .amt.pos{color:var(--green)} .amt.neg{color:var(--amber2)}
+  .asset-row{display:flex;align-items:baseline;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+  .asset-row:first-child{border-top:none}
+  .tk{font-weight:700} .aid{font:12px ui-monospace,monospace;color:var(--dim);word-break:break-all}
+  .qr{image-rendering:pixelated;width:200px;height:200px;border:10px solid #fff;border-radius:8px;background:#fff;display:block;margin:4px auto 0}
+  .rec{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px;position:relative}
+  .rec .x{position:absolute;top:8px;right:8px;background:transparent;border:none;color:var(--dim);padding:2px 7px}
   .foot{margin-top:26px;color:var(--dim);font-size:12.5px;text-align:center}
   .spin{display:inline-block;width:13px;height:13px;border:2px solid #ffffff44;border-top-color:var(--amber2);
         border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:7px}
   @keyframes s{to{transform:rotate(360deg)}}
+  /* modal */
+  .modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
+  .modal .card{margin:0;max-width:480px;width:100%;max-height:88vh;overflow:auto}
+  .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+  .kv:first-child{border-top:none} .kv .k{color:var(--dim)} .kv .v{text-align:right;word-break:break-all;font:13px ui-monospace,monospace}
+  /* toast */
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d242d;border:1px solid var(--line);
+         border-radius:10px;padding:12px 16px;font-size:13.5px;max-width:92vw;box-shadow:0 8px 30px #0008;z-index:60}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
-    <div class="mark">S</div>
+    <img class="mark" src="./sequentia-mark.png" alt="Sequentia">
     <h1>Sequentia Wallet</h1>
     <span class="net" id="net">testnet</span>
   </div>
-  <p class="muted">A watch-and-sign wallet that runs entirely in your browser, powered by
-    <b>SWK</b> (Sequentia Wallet Kit, WebAssembly). Keys never leave this device.</p>
+  <div class="sub" id="tipline">A self-custodial wallet powered by SWK (Sequentia Wallet Kit), running entirely in your browser.</div>
 
   <!-- boot -->
   <div class="card" id="boot"><span class="spin"></span>Loading wallet engine…</div>
 
   <!-- welcome -->
   <div class="card hide" id="welcome">
-    <div class="lbl">Get started</div>
+    <label class="lbl">Get started</label>
     <div class="row" style="margin-top:6px">
       <button class="primary" id="btnCreate">Create new wallet</button>
       <button id="btnImport">Import a recovery phrase</button>
@@ -69,54 +104,148 @@
     <div class="warn">Testnet only. Your recovery phrase is stored in this browser — for real funds, use a hardware wallet.</div>
   </div>
 
-  <!-- create: show mnemonic -->
+  <!-- create -->
   <div class="card hide" id="createView">
-    <div class="lbl">Your recovery phrase — write it down</div>
+    <label class="lbl">Your recovery phrase — write it down</label>
     <div class="words" id="words"></div>
     <div class="warn">Anyone with these 12 words controls the wallet. Back them up before continuing.</div>
     <div class="row" style="margin-top:12px">
       <button class="primary" id="btnConfirm">I've backed it up</button>
-      <button id="btnCancelCreate">Cancel</button>
+      <button class="ghost" id="btnCancelCreate">Cancel</button>
     </div>
   </div>
 
   <!-- import -->
   <div class="card hide" id="importView">
-    <div class="lbl">Recovery phrase (12 or 24 words)</div>
+    <label class="lbl">Recovery phrase (12 or 24 words)</label>
     <textarea id="importPhrase" rows="3" placeholder="abandon abandon abandon …"></textarea>
     <div class="row" style="margin-top:12px">
       <button class="primary" id="btnDoImport">Import</button>
-      <button id="btnCancelImport">Cancel</button>
+      <button class="ghost" id="btnCancelImport">Cancel</button>
     </div>
     <div class="status err" id="importErr"></div>
   </div>
 
-  <!-- dashboard -->
-  <div class="hide" id="dash">
-    <div class="card">
-      <div class="lbl">Balance</div>
-      <div class="bal"><span id="balNum">—</span><small>tSEQ</small></div>
-      <div class="status" id="syncStatus"></div>
-      <div class="row" style="margin-top:14px">
-        <button class="primary" id="btnSync">Refresh balance</button>
-        <button id="btnLock">Lock / switch wallet</button>
+  <!-- ===== app ===== -->
+  <div class="hide" id="app">
+    <div class="tabs" id="tabs">
+      <button data-tab="balance" class="active">Balance</button>
+      <button data-tab="send">Send</button>
+      <button data-tab="receive">Receive</button>
+      <button data-tab="assets">Assets</button>
+      <button data-tab="history">History</button>
+      <button data-tab="settings">Settings</button>
+    </div>
+
+    <!-- balance -->
+    <section data-panel="balance">
+      <div class="card">
+        <label class="lbl">Balance</label>
+        <div class="bal"><span id="balNum">—</span><small>tSEQ</small></div>
+        <div class="status" id="syncStatus"></div>
+        <button class="primary" id="btnSync" style="margin-top:12px">Refresh</button>
       </div>
-    </div>
-    <div class="card">
-      <div class="lbl">Receive — your address</div>
-      <p class="muted" style="margin:0 0 10px">Non-confidential, Bitcoin-compatible format. Confidential addresses are opt-in on Sequentia.</p>
-      <div class="mono" id="addr">—</div>
-      <div class="row" style="margin-top:12px">
-        <button id="btnCopy">Copy address</button>
-        <button id="btnNewAddr">New address</button>
+      <div class="card">
+        <label class="lbl">Testnet faucet</label>
+        <p class="sub" style="margin:0 0 12px">Get free testnet tSEQ to try out the wallet — sent straight to this wallet.</p>
+        <button id="btnFaucet">Request 50,000 tSEQ</button>
+        <div class="status" id="faucetStatus"></div>
       </div>
-    </div>
-    <div class="card">
-      <div class="lbl">Recovery phrase</div>
-      <p class="muted" style="margin:0 0 10px">Keep it safe — it's the only way to restore this wallet.</p>
-      <div class="mono hide" id="seedReveal"></div>
-      <button id="btnReveal">Reveal phrase</button>
-    </div>
+      <div class="card">
+        <label class="lbl">Assets you hold</label>
+        <div class="list" id="assetList"><div class="muted">No assets yet.</div></div>
+      </div>
+    </section>
+
+    <!-- send -->
+    <section data-panel="send" class="hide">
+      <div class="card">
+        <label class="lbl">Send</label>
+        <div id="recipients"></div>
+        <button class="ghost" id="btnAddRec" style="margin-top:10px">+ Add recipient</button>
+        <div class="field">
+          <label class="lbl">Fee rate (sat/vB, optional)</label>
+          <input id="feeRate" class="mono" placeholder="leave blank for the default">
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button class="primary" id="btnReview">Review &amp; send</button>
+        </div>
+        <div class="status err" id="sendErr"></div>
+      </div>
+    </section>
+
+    <!-- receive -->
+    <section data-panel="receive" class="hide">
+      <div class="card">
+        <label class="lbl">Receive</label>
+        <p class="sub" style="margin:0 0 10px">Non-confidential, Bitcoin-compatible format. Confidential addresses are opt-in on Sequentia.</p>
+        <img class="qr" id="qr" alt="address QR">
+        <div class="mono" id="addr" style="margin-top:12px">—</div>
+        <div class="row" style="margin-top:12px">
+          <button id="btnCopy">Copy</button>
+          <button id="btnNewAddr">New address</button>
+          <button class="ghost" id="btnConf">Show confidential</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- assets -->
+    <section data-panel="assets" class="hide">
+      <div class="card">
+        <label class="lbl">Issue a new asset</label>
+        <div class="row">
+          <div class="grow"><label class="lbl">Name</label><input id="isName" placeholder="My Token"></div>
+          <div style="width:120px"><label class="lbl">Ticker</label><input id="isTicker" placeholder="MYT"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div class="grow"><label class="lbl">Amount</label><input id="isAmount" class="mono" placeholder="1000"></div>
+          <div style="width:120px"><label class="lbl">Precision</label><input id="isPrec" class="mono" value="0"></div>
+          <div style="width:130px"><label class="lbl">Reissue tokens</label><input id="isTokens" class="mono" value="0"></div>
+        </div>
+        <button class="primary" id="btnIssue" style="margin-top:14px">Review issuance</button>
+        <div class="status err" id="issueErr"></div>
+      </div>
+      <div class="card">
+        <label class="lbl">Reissue / burn an asset</label>
+        <div class="field"><label class="lbl">Asset id</label><input id="raAsset" class="mono" placeholder="64-hex asset id"></div>
+        <div class="row" style="margin-top:10px">
+          <div class="grow"><label class="lbl">Amount (atoms)</label><input id="raAmount" class="mono" placeholder="100"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="btnReissue">Reissue</button>
+          <button class="danger" id="btnBurn">Burn</button>
+        </div>
+        <p class="sub" style="margin-top:10px">Reissue needs the asset's reissuance token in this wallet. Burn permanently destroys the amount.</p>
+        <div class="status err" id="raErr"></div>
+      </div>
+    </section>
+
+    <!-- history -->
+    <section data-panel="history" class="hide">
+      <div class="card">
+        <label class="lbl">History</label>
+        <div class="list" id="histList"><div class="muted">No transactions yet.</div></div>
+      </div>
+    </section>
+
+    <!-- settings -->
+    <section data-panel="settings" class="hide">
+      <div class="card">
+        <label class="lbl">Backend</label>
+        <div class="kv"><span class="k">Explorer API</span><span class="v" id="setApi"></span></div>
+        <div class="kv"><span class="k">Network</span><span class="v" id="setNet"></span></div>
+        <div class="kv"><span class="k">Policy asset (tSEQ)</span><span class="v" id="setPolicy"></span></div>
+      </div>
+      <div class="card">
+        <label class="lbl">Recovery phrase</label>
+        <p class="sub" style="margin:0 0 10px">Keep it safe — it's the only way to restore this wallet.</p>
+        <div class="mono hide" id="seedReveal"></div>
+        <div class="row" style="margin-top:8px">
+          <button id="btnReveal">Reveal phrase</button>
+          <button class="danger" id="btnLock">Remove wallet</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <div class="foot">
@@ -126,99 +255,305 @@
 </div>
 
 <script type="module">
-import init, { Mnemonic, Network, Signer, Wollet, EsploraClient }
+import init, { Mnemonic, Network, Signer, Wollet, EsploraClient, Address, AssetId, Contract }
   from './pkg/lwk_wasm.js';
 
-const ESPLORA = location.origin + '/api';   // the Sequentia esplora on this host
-const TSEQ = 'c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40';
+const ESPLORA = location.origin + '/api';
 const KEY = 'swk.sequentia.mnemonic';
+const LBL = 'swk.sequentia.assets';      // { assetHex: {name,ticker,precision} }
+const DEFAULT_FEERATE = 2000;            // sat/kvB (2 sat/vB) — above the network min relay fee
 const $ = id => document.getElementById(id);
-const show = (id, on=true) => $(id).classList.toggle('hide', !on);
+const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e;};
 
-let network, wollet, addrIndex = null;
+let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false;
 
-function views(active){ for (const v of ['welcome','createView','importView','dash']) show(v, v===active); }
+// ---------- amount helpers (lwk takes u64 -> JS BigInt) ----------
+function fmtAtoms(atoms, d){ atoms = BigInt(atoms); const neg = atoms<0n; if(neg) atoms=-atoms;
+  const base = 10n**BigInt(d); let s = (atoms/base).toString();
+  if(d>0){ const f=(atoms%base).toString().padStart(d,'0').replace(/0+$/,''); if(f) s+='.'+f; }
+  return (neg?'-':'')+s; }
+function parseAtoms(str, d){ str=(str||'').trim();
+  if(!/^\d+(\.\d+)?$/.test(str)) throw new Error('enter a valid amount');
+  let [i,f='']=str.split('.'); if(f.length>d) throw new Error(`max ${d} decimals for this asset`);
+  f=(f+'0'.repeat(d)).slice(0,d); return BigInt(i)*(10n**BigInt(d))+BigInt(f||'0'); }
 
-async function init_engine(){
+// ---------- local asset labels ----------
+const labels = () => { try { return JSON.parse(localStorage.getItem(LBL)||'{}'); } catch { return {}; } };
+function saveLabel(hex, info){ const m=labels(); m[hex]=info; localStorage.setItem(LBL, JSON.stringify(m)); }
+function assetMeta(hex){ if(hex===POLICY_HEX) return {ticker:'tSEQ', name:'Sequentia', precision:8};
+  return labels()[hex] || {ticker:hex.slice(0,8)+'…', name:'Asset', precision:0}; }
+let POLICY_HEX='';
+
+// ---------- views ----------
+function show(id,on=true){ $(id).classList.toggle('hide', !on); }
+function views(active){ for(const v of ['welcome','createView','importView','app']) show(v, v===active); }
+function tab(name){
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
+  document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
+  if(name==='receive') renderReceive();
+  if(name==='history') renderHistory();
+}
+
+// ---------- boot ----------
+async function boot(){
   await init();
   network = Network.sequentiaTestnet();
+  POLICY = network.policyAsset(); POLICY_HEX = POLICY.toString();
+  client = new EsploraClient(network, ESPLORA, false, 1, false);
   $('net').textContent = network.toString();
+  $('setApi').textContent = ESPLORA; $('setNet').textContent = network.toString(); $('setPolicy').textContent = POLICY_HEX;
   show('boot', false);
   const saved = localStorage.getItem(KEY);
-  if (saved) { await openWallet(saved); } else { views('welcome'); }
+  if(saved) await openWallet(saved); else views('welcome');
 }
 
 function buildWollet(phrase){
-  const mnemonic = new Mnemonic(phrase.trim().replace(/\s+/g,' '));
-  const signer = new Signer(mnemonic, network);
-  const desc = signer.wpkhSlip77Descriptor();
-  wollet = new Wollet(network, desc);
+  const m = new Mnemonic(phrase.trim().replace(/\s+/g,' '));
+  signer = new Signer(m, network);
+  wollet = new Wollet(network, signer.wpkhSlip77Descriptor());
 }
-
 async function openWallet(phrase){
   buildWollet(phrase);
   localStorage.setItem(KEY, phrase.trim().replace(/\s+/g,' '));
-  addrIndex = null;
-  views('dash');
-  refreshAddress();
-  $('balNum').textContent = '—';
+  addrIndex=null; views('app'); tab('balance'); addRecipientRow();
   await sync();
 }
 
-function refreshAddress(){
-  const r = wollet.address(addrIndex == null ? undefined : addrIndex);
-  // Sequentia defaults to non-confidential, Bitcoin-format (tb1…) addresses.
-  // Confidentiality is opt-in; the unconfidential form shares the same
-  // scriptPubkey, so funds sent here are still detected on sync.
-  $('addr').textContent = r.address().toUnconfidential().toString();
-  addrIndex = r.index();
-}
-
+// ---------- sync + balance ----------
 async function sync(){
-  const btn = $('btnSync'); btn.disabled = true;
-  $('syncStatus').className = 'status';
-  $('syncStatus').innerHTML = '<span class="spin"></span>Syncing against the Sequentia explorer…';
-  try {
-    const client = new EsploraClient(network, ESPLORA, false, 1, false);
+  const btn=$('btnSync'); if(btn) btn.disabled=true;
+  $('syncStatus').className='status'; $('syncStatus').innerHTML='<span class="spin"></span>Syncing…';
+  try{
     const update = await client.fullScan(wollet);
-    if (update) wollet.applyUpdate(update);
-    const bal = Object.fromEntries(wollet.balance().entries());
-    const sats = BigInt(bal[TSEQ] ?? 0);
-    $('balNum').textContent = (Number(sats) / 1e8).toLocaleString(undefined,{maximumFractionDigits:8});
-    $('syncStatus').className = 'status ok';
-    $('syncStatus').textContent = 'Synced.';
-    refreshAddress();
-  } catch(e){
-    $('syncStatus').className = 'status err';
-    $('syncStatus').textContent = 'Sync failed: ' + (e?.message ?? e);
-  } finally { btn.disabled = false; }
+    if(update) wollet.applyUpdate(update);
+    renderBalance(); renderHistory();
+    const t = wollet.tip();
+    $('tipline').textContent = `Synced to block ${t.height()} · ${network.toString()}`;
+    $('syncStatus').className='status ok'; $('syncStatus').textContent='Up to date.';
+  }catch(e){ $('syncStatus').className='status err'; $('syncStatus').textContent='Sync failed: '+(e?.message??e); }
+  finally{ if(btn) btn.disabled=false; }
+}
+function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
+function renderBalance(){
+  const b = balObj();
+  $('balNum').textContent = fmtAtoms(b[POLICY_HEX]||'0', 8);
+  const list=$('assetList'); list.innerHTML='';
+  const others = Object.keys(b).filter(h=>h!==POLICY_HEX);
+  if(!others.length){ list.appendChild(el('div','muted','No assets yet.')); return; }
+  for(const h of others){
+    const m=assetMeta(h); const row=el('div','asset-row');
+    row.appendChild(el('span','tk', m.ticker));
+    const mid=el('div','grow'); mid.appendChild(el('div',null,`<a href="/asset/${h}" target="_blank" rel="noopener" class="aid">${h}</a>`));
+    row.appendChild(mid);
+    row.appendChild(el('span','amt', fmtAtoms(b[h], m.precision)));
+    list.appendChild(row);
+  }
 }
 
-// --- wiring ---
-$('btnCreate').onclick = () => {
-  const m = Mnemonic.fromRandom(12);
-  window._pending = m.toString();
-  const wEl = $('words'); wEl.innerHTML='';
-  window._pending.split(' ').forEach((w,i)=>{
-    const s=document.createElement('span'); s.innerHTML=`<b>${i+1}</b>${w}`; wEl.appendChild(s);
-  });
-  views('createView');
-};
-$('btnConfirm').onclick = () => openWallet(window._pending);
-$('btnCancelCreate').onclick = () => views('welcome');
-$('btnImport').onclick = () => { $('importErr').textContent=''; $('importPhrase').value=''; views('importView'); };
-$('btnCancelImport').onclick = () => views('welcome');
-$('btnDoImport').onclick = async () => {
-  try { await openWallet($('importPhrase').value); }
-  catch(e){ $('importErr').textContent = 'Invalid phrase: ' + (e?.message ?? e); }
-};
-$('btnSync').onclick = sync;
-$('btnNewAddr').onclick = () => { addrIndex = (addrIndex ?? 0) + 1; refreshAddress(); };
-$('btnCopy').onclick = () => navigator.clipboard.writeText($('addr').textContent);
-$('btnReveal').onclick = () => { $('seedReveal').textContent = localStorage.getItem(KEY) || ''; show('seedReveal'); $('btnReveal').classList.add('hide'); };
-$('btnLock').onclick = () => { if(confirm('Remove this wallet from the browser? Make sure you have your recovery phrase.')){ localStorage.removeItem(KEY); location.reload(); } };
+// ---------- receive ----------
+function currentAddress(){
+  const r = wollet.address(addrIndex==null?undefined:addrIndex); addrIndex=r.index();
+  const a = r.address(); return showConf ? a : a.toUnconfidential();
+}
+function renderReceive(){
+  const a = currentAddress();
+  $('addr').textContent = a.toString();
+  try{ $('qr').src = a.QRCodeUri(); }catch{ $('qr').removeAttribute('src'); }
+  $('btnConf').textContent = showConf ? 'Show non-confidential' : 'Show confidential';
+}
 
-init_engine().catch(e => { $('boot').innerHTML = '<span class="err">Failed to load: '+(e?.message??e)+'</span>'; });
+// ---------- send ----------
+function ownedOptions(sel){
+  const b=balObj(); sel.innerHTML='';
+  const add=(h)=>{ const o=el('option'); o.value=h; o.textContent=assetMeta(h).ticker; sel.appendChild(o); };
+  add(POLICY_HEX);
+  for(const h of Object.keys(b)) if(h!==POLICY_HEX) add(h);
+}
+function addRecipientRow(){
+  const box=$('recipients'); const i=box.children.length;
+  const r=el('div','rec');
+  r.innerHTML = `<button class="x" title="remove">✕</button>
+    <label class="lbl">Address</label><input class="mono raddr" placeholder="tb1… or tsqb1…">
+    <div class="row" style="margin-top:10px">
+      <div class="grow"><label class="lbl">Amount</label><input class="mono ramt" placeholder="0.0"></div>
+      <div style="width:130px"><label class="lbl">Asset</label><select class="rasset"></select></div>
+    </div>`;
+  ownedOptions(r.querySelector('.rasset'));
+  r.querySelector('.x').onclick=()=>{ if(box.children.length>1) r.remove(); };
+  box.appendChild(r);
+}
+function buildSendPset(){
+  let b = network.txBuilder();
+  const recs = [...$('recipients').children];
+  let count=0;
+  for(const r of recs){
+    const addr=r.querySelector('.raddr').value.trim();
+    const amtS=r.querySelector('.ramt').value.trim();
+    const asset=r.querySelector('.rasset').value;
+    if(!addr && !amtS) continue;
+    const a=new Address(addr);
+    const d=assetMeta(asset).precision;
+    const sats=parseAtoms(amtS, d);
+    if(sats<=0n) throw new Error('amount must be greater than zero');
+    const assetId = asset===POLICY_HEX ? POLICY : new AssetId(asset);
+    // Sequentia default addresses are non-confidential (tb1…): lwk only accepts
+    // those via addExplicitRecipient. Confidential (tsqb1…) go through the blinded path.
+    if(a.isBlinded()) b = asset===POLICY_HEX ? b.addLbtcRecipient(a, sats) : b.addRecipient(a, sats, assetId);
+    else b = b.addExplicitRecipient(a, sats, assetId);
+    count++;
+  }
+  if(!count) throw new Error('add at least one recipient');
+  // lwk's feeRate is sat/kvB; the field is sat/vB, so ×1000. Default keeps us above min relay.
+  const fr=$('feeRate').value.trim();
+  b=b.feeRate(fr ? parseFloat(fr)*1000 : DEFAULT_FEERATE);
+  return b.finish(wollet);
+}
+
+// ---------- review + broadcast (shared) ----------
+function modalRows(rows){
+  const m=el('div','modal'); const c=el('div','card');
+  c.appendChild(el('label','lbl', rows.title));
+  for(const [k,v] of rows.kv){ const d=el('div','kv'); d.appendChild(el('span','k',k)); d.appendChild(el('span','v',v)); c.appendChild(d); }
+  const act=el('div','row'); act.style.marginTop='16px';
+  const ok=el('button','primary','Confirm &amp; sign'); const no=el('button','ghost','Cancel');
+  const st=el('div','status'); act.appendChild(ok); act.appendChild(no); c.appendChild(act); c.appendChild(st);
+  m.appendChild(c); document.body.appendChild(m);
+  no.onclick=()=>m.remove();
+  return {m, ok, st};
+}
+async function reviewBroadcast(pset, title, onDone){
+  const kv=[];
+  // psetDetails assumes blinded outputs (Liquid); it throws on Sequentia's
+  // explicit (non-confidential) outputs, so fall back to a minimal review.
+  try{
+    const bal = wollet.psetDetails(pset).balance();
+    for(const r of bal.recipients()){
+      const asset=r.asset()?.toString()||POLICY_HEX; const m=assetMeta(asset);
+      kv.push(['→ '+(r.address()?.toString()||'(script)'), fmtAtoms(r.value()||0n, m.precision)+' '+m.ticker]);
+    }
+    const net = bal.balances().toJSON();   // {asset: signed atoms}
+    for(const [h,v] of Object.entries(net)){ const m=assetMeta(h); kv.push(['Net '+m.ticker, fmtAtoms(v, m.precision)]); }
+    kv.push(['Network fee', fmtAtoms(bal.fee(), 8)+' tSEQ']);
+  }catch{
+    kv.push(['Transaction', 'Ready to sign']);
+    kv.push(['Note', 'Non-confidential transfer — amounts are as entered; a network fee applies.']);
+  }
+  const {m, ok, st} = modalRows({title, kv});
+  ok.onclick=async()=>{
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Signing &amp; broadcasting…';
+    try{
+      const signed = signer.sign(pset);
+      const finalized = wollet.finalize(signed);
+      const txid = await client.broadcast(finalized);
+      m.remove(); toast(`Broadcast: <a href="/tx/${txid}" target="_blank" rel="noopener">${txid.toString().slice(0,18)}…</a>`);
+      if(onDone) onDone(txid); await sync();
+    }catch(e){ st.className='status err'; st.textContent='Failed: '+(e?.message??e); ok.disabled=false; }
+  };
+}
+
+// ---------- issuance ----------
+function buildIssuePset(){
+  const name=$('isName').value.trim(), ticker=$('isTicker').value.trim().toUpperCase();
+  const prec=parseInt($('isPrec').value||'0',10);
+  if(!(prec>=0&&prec<=8)) throw new Error('precision must be 0–8');
+  const amount=parseAtoms($('isAmount').value, prec);
+  const tokens=BigInt(parseInt($('isTokens').value||'0',10));
+  if(amount<=0n) throw new Error('issue amount must be greater than zero');
+  const pset = network.txBuilder().issueAsset(amount, undefined, tokens, undefined, undefined).feeRate(DEFAULT_FEERATE).finish(wollet);
+  return {pset, meta:{name, ticker:ticker||'ASSET', precision:prec}};
+}
+
+// ---------- wiring ----------
+document.querySelectorAll('#tabs button').forEach(b=> b.onclick=()=>tab(b.dataset.tab));
+$('btnCreate').onclick=()=>{ const m=Mnemonic.fromRandom(12); window._pending=m.toString();
+  const w=$('words'); w.innerHTML=''; window._pending.split(' ').forEach((x,i)=>{ const s=el('span'); s.innerHTML=`<b>${i+1}</b>${x}`; w.appendChild(s); });
+  views('createView'); };
+$('btnConfirm').onclick=()=>openWallet(window._pending);
+$('btnCancelCreate').onclick=()=>views('welcome');
+$('btnImport').onclick=()=>{ $('importErr').textContent=''; $('importPhrase').value=''; views('importView'); };
+$('btnCancelImport').onclick=()=>views('welcome');
+$('btnDoImport').onclick=async()=>{ try{ await openWallet($('importPhrase').value); }
+  catch(e){ $('importErr').textContent='Invalid phrase: '+(e?.message??e); } };
+
+$('btnSync').onclick=sync;
+$('btnFaucet').onclick=async()=>{
+  const btn=$('btnFaucet'); btn.disabled=true;
+  $('faucetStatus').className='status'; $('faucetStatus').innerHTML='<span class="spin"></span>Requesting from the faucet…';
+  try{
+    // Request to the confidential (tsqb1) form — the funding node sends to it natively;
+    // it shares the same script as the displayed tb1, so funds are detected either way.
+    const addr=wollet.address(addrIndex==null?undefined:addrIndex).address().toString();
+    const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:addr})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    $('faucetStatus').className='status ok';
+    $('faucetStatus').innerHTML=`Sent ${Number(j.amount).toLocaleString()} tSEQ — <a href="/tx/${j.txid}" target="_blank" rel="noopener">${j.txid.slice(0,16)}…</a>. It'll show up once it confirms.`;
+    setTimeout(sync, 8000);
+  }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
+  finally{ btn.disabled=false; }
+};
+$('btnAddRec').onclick=addRecipientRow;
+$('btnReview').onclick=async()=>{ $('sendErr').textContent='';
+  try{ const pset=buildSendPset(); await reviewBroadcast(pset, 'Confirm payment', ()=>{ $('recipients').innerHTML=''; addRecipientRow(); }); }
+  catch(e){ $('sendErr').textContent=e?.message??String(e); } };
+
+$('btnCopy').onclick=()=>navigator.clipboard.writeText($('addr').textContent);
+$('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
+$('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
+
+$('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
+  try{ const {pset, meta}=buildIssuePset();
+    await reviewBroadcast(pset, `Issue ${meta.ticker}`, ()=>{
+      try{ const ids=pset.issuanceIds?.(); if(ids&&ids[0]) saveLabel(ids[0].toString(), meta); }catch{}
+      $('isName').value=$('isTicker').value=$('isAmount').value=''; });
+  }catch(e){ $('issueErr').textContent=e?.message??String(e); } };
+
+$('btnReissue').onclick=async()=>{ $('raErr').textContent='';
+  try{ const asset=$('raAsset').value.trim(); const m=assetMeta(asset);
+    const amt=parseAtoms($('raAmount').value, m.precision);
+    const pset=network.txBuilder().reissueAsset(new AssetId(asset), amt, undefined, undefined).feeRate(DEFAULT_FEERATE).finish(wollet);
+    await reviewBroadcast(pset, 'Reissue '+m.ticker);
+  }catch(e){ $('raErr').textContent=e?.message??String(e); } };
+$('btnBurn').onclick=async()=>{ $('raErr').textContent='';
+  try{ const asset=$('raAsset').value.trim(); const m=assetMeta(asset);
+    const amt=parseAtoms($('raAmount').value, m.precision);
+    const pset=network.txBuilder().addBurn(amt, new AssetId(asset)).feeRate(DEFAULT_FEERATE).finish(wollet);
+    await reviewBroadcast(pset, 'Burn '+m.ticker);
+  }catch(e){ $('raErr').textContent=e?.message??String(e); } };
+
+$('btnReveal').onclick=()=>{ $('seedReveal').textContent=localStorage.getItem(KEY)||''; show('seedReveal'); $('btnReveal').classList.add('hide'); };
+$('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make sure you have your recovery phrase.')){ localStorage.removeItem(KEY); location.reload(); } };
+
+// ---------- history ----------
+function renderHistory(){
+  const list=$('histList'); if(!wollet){ return; } list.innerHTML='';
+  let txs; try{ txs=wollet.transactions(); }catch(e){ list.appendChild(el('div','err','History error: '+(e?.message??e))); return; }
+  if(!txs.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  txs.sort((a,b)=>(b.height()??9e9)-(a.height()??9e9));
+  for(const t of txs.slice(0,60)){
+    const type=t.txType(); const txid=t.txid().toString();
+    const delta=t.balance().toJSON(); const ts=t.timestamp();
+    const item=el('div','item');
+    const bcls = type==='incoming'?'b-in':(type==='outgoing'||type==='burn')?'b-out':'b-iss';
+    item.appendChild(el('span','badge '+bcls, type));
+    const mid=el('div','grow');
+    const when = t.height()? (ts? new Date(ts*1000).toLocaleString() : 'block '+t.height()) : 'unconfirmed';
+    mid.appendChild(el('div',null,`<a href="/tx/${txid}" target="_blank" rel="noopener" class="aid">${txid.slice(0,20)}…</a>`));
+    mid.appendChild(el('div','sub', when));
+    item.appendChild(mid);
+    const pol = delta[POLICY_HEX];
+    if(pol!=null){ const neg=BigInt(pol)<0n; item.appendChild(el('span','amt '+(neg?'neg':'pos'), fmtAtoms(pol,8)+' tSEQ')); }
+    else { const k=Object.keys(delta)[0]; if(k){ const m=assetMeta(k); item.appendChild(el('span','amt', fmtAtoms(delta[k],m.precision)+' '+m.ticker)); } }
+    list.appendChild(item);
+  }
+}
+
+// ---------- toast ----------
+let toastT;
+function toast(html){ clearTimeout(toastT); let t=$('_toast'); if(!t){ t=el('div','toast'); t.id='_toast'; document.body.appendChild(t); }
+  t.innerHTML=html; t.style.display='block'; toastT=setTimeout(()=>t.style.display='none', 9000); }
+
+boot().catch(e=>{ $('boot').innerHTML='<span class="err">Failed to load: '+(e?.message??e)+'</span>'; });
 </script>
 </body>
 </html>
