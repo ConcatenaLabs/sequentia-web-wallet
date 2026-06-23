@@ -176,7 +176,7 @@
               <label class="lbl">Fee rate (sat/vB, optional)</label>
               <input id="feeRate" class="mono" placeholder="leave blank for the default">
             </div>
-            <div style="width:160px">
+            <div style="width:160px" id="feeAssetBox">
               <label class="lbl">Pay fee in</label>
               <select id="feeAsset"></select>
             </div>
@@ -516,7 +516,7 @@ function tab(name){
   if(name==='receive') renderReceive();
   if(name==='history') renderHistory();
   if(name==='stake') refreshStakes();
-  if(name==='send'){ refreshRecipientAssets(); populateFeeAssets(); }
+  if(name==='send'){ refreshRecipientAssets(); populateFeeAssets(); updateFeeForSendType(); }
 }
 
 // ---------- boot ----------
@@ -622,6 +622,19 @@ function refreshRecipientAssets(){
   const box=$('recipients'); if(!box) return;
   for(const r of box.children){ const sel=r.querySelector('.rasset'); if(sel) ownedOptions(sel); }
 }
+// A Bitcoin (testnet4) payment is routed through the parent-chain layer and pays its fee in BTC,
+// so the Sequentia fee-asset picker doesn't apply — hide it. (BTC is never a Sequentia fee asset:
+// the picker only lists Sequentia assets, and a Sequentia-asset send is never paid in BTC.)
+function isBtcSend(){
+  const box=$('recipients'); if(!box) return false;
+  return [...box.children].some(r=>{ const s=r.querySelector('.rasset'); return s && s.value==='BTC'; });
+}
+function updateFeeForSendType(){
+  const btc=isBtcSend();
+  const box=$('feeAssetBox'); if(box) box.style.display = btc ? 'none' : '';
+  if(btc){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4) — this is a parent-chain payment.'; }
+  else { updateFeeAssetHint(); }
+}
 function addRecipientRow(){
   const box=$('recipients'); const i=box.children.length;
   const r=el('div','rec');
@@ -631,9 +644,12 @@ function addRecipientRow(){
       <div class="grow"><label class="lbl">Amount</label><input class="mono ramt" placeholder="0.0"></div>
       <div style="width:130px"><label class="lbl">Asset</label><select class="rasset"></select></div>
     </div>`;
-  ownedOptions(r.querySelector('.rasset'));
-  r.querySelector('.x').onclick=()=>{ if(box.children.length>1) r.remove(); };
+  const rsel=r.querySelector('.rasset');
+  ownedOptions(rsel);
+  rsel.onchange=updateFeeForSendType;   // BTC vs Sequentia send → which fee asset applies
+  r.querySelector('.x').onclick=()=>{ if(box.children.length>1){ r.remove(); updateFeeForSendType(); } };
   box.appendChild(r);
+  updateFeeForSendType();
 }
 function collectRows(){
   const out=[];
