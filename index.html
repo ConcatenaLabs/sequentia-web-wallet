@@ -138,6 +138,12 @@
       <button data-tab="settings">Settings</button>
     </div>
 
+    <!-- wallet-wide reference-currency picker: every tab/amount field reflects this -->
+    <div class="sub" id="refBar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:8px 2px 14px">
+      <span>Show values in</span>
+      <select id="refCcySel" style="width:auto"></select>
+    </div>
+
     <!-- balance -->
     <section data-panel="balance">
       <div class="card">
@@ -394,7 +400,9 @@ async function loadPrices(){
     const m = {};
     for(const [t,v] of Object.entries(d)){ const p=(v&&typeof v==='object')?v.price:v; if(p>0) m[t.toUpperCase()]=p; }
     PRICES = m;
+    try{ initRefSelector(); }catch{}
     try{ if(typeof renderBalance==='function') renderBalance(); }catch{}
+    try{ refreshAllRefHints(); }catch{}
   }catch(e){ console.warn('[prices] fetch failed:', e?.message??e); }
 }
 loadPrices();
@@ -411,16 +419,42 @@ function refValueStr(hex, atoms){
   const dp = REF==='BTC' ? 8 : (Math.abs(v) >= 1 ? 2 : 6);
   return '≈ ' + v.toLocaleString(undefined,{maximumFractionDigits:dp}) + ' ' + REF;
 }
-function setRef(r){ REF=r; try{ localStorage.setItem('seqRefCcy', r); }catch{} try{ renderBalance(); }catch{} }
-function ensureRefSelector(list){
-  if(!list || !list.parentNode || $('refCcySel')) { const s=$('refCcySel'); if(s){ s.innerHTML=''; for(const o of refOptions()){ const op=el('option'); op.value=o; op.textContent=o; if(o===REF) op.selected=true; s.appendChild(op);} } return; }
-  const wrap=el('div','ref-ccy'); wrap.style.cssText='display:flex;align-items:center;gap:8px;margin:0 0 10px';
-  wrap.appendChild(el('span','sub','Show values in'));
-  const sel=el('select'); sel.id='refCcySel'; sel.style.width='auto';
-  sel.onchange=()=>setRef(sel.value);
-  for(const o of refOptions()){ const op=el('option'); op.value=o; op.textContent=o; if(o===REF) op.selected=true; sel.appendChild(op); }
-  wrap.appendChild(sel);
-  list.parentNode.insertBefore(wrap, list);
+// Changing the reference re-denominates the whole wallet at once: the balance rows
+// and every live "≈" hint under an amount field.
+function setRef(r){ REF=r; try{ localStorage.setItem('seqRefCcy', r); }catch{} initRefSelector(); try{ renderBalance(); }catch{} refreshAllRefHints(); }
+// The picker lives in the header (#refCcySel) so it governs every tab. Options are
+// USD + every priced asset, always including the current choice; wired once.
+function initRefSelector(){
+  const sel=$('refCcySel'); if(!sel) return;
+  const opts=refOptions(); if(!opts.includes(REF)) opts.push(REF);
+  sel.innerHTML=''; for(const o of opts){ const op=el('option'); op.value=o; op.textContent=o; if(o===REF) op.selected=true; sel.appendChild(op); }
+  if(!sel._wired){ sel._wired=true; sel.onchange=()=>setRef(sel.value); }
+}
+// --- live "≈ <ref>" hints under any asset-amount <input>, wallet-wide ---
+// attachRefHint(input, assetFn) drops a muted line under `input` that re-values the
+// typed amount (in asset assetFn()/assetFn) into the chosen reference as the user
+// types; refreshAllRefHints() re-runs them all when the reference or prices change.
+const _refHints = new Set();
+function refHintFor(amountStr, hex){
+  if(!hex || !String(amountStr||'').trim()) return '';
+  let atoms; try{ atoms = parseAtoms(String(amountStr), assetMeta(hex).precision||0); }catch{ return ''; }
+  if(atoms===0n) return '';
+  return refValueStr(hex, atoms);
+}
+function attachRefHint(input, assetFn){
+  if(!input || input._refHinted) return ()=>{}; input._refHinted=true;
+  const node=el('div','sub'); node.style.cssText='margin-top:4px;min-height:1.1em';
+  input.insertAdjacentElement('afterend', node);
+  const upd=()=>{ const hex=(typeof assetFn==='function')?assetFn():assetFn; node.textContent=refHintFor(input.value, hex); };
+  input.addEventListener('input', upd);
+  _refHints.add({upd, alive:()=>input.isConnected}); upd(); return upd;
+}
+function refreshAllRefHints(){ for(const r of [..._refHints]){ if(r.alive && !r.alive()){ _refHints.delete(r); continue; } try{ r.upd(); }catch{} } }
+// Populate the header picker + attach hints to the static amount fields (idempotent).
+function initAppRefUI(){
+  initRefSelector();
+  attachRefHint($('stAmount'), ()=>POLICY_HEX);                 // stake is always tSEQ
+  attachRefHint($('raAmount'), ()=>($('raAsset')?.value||'').trim());  // reissue: existing asset
 }
 
 // Fill the "pay fee in" picker: tSEQ (default) + any owned asset the node accepts for fees.
@@ -599,7 +633,7 @@ function buildWollet(phrase){
 async function openWallet(phrase){
   buildWollet(phrase);
   localStorage.setItem(KEY, phrase.trim().replace(/\s+/g,' '));
-  addrIndex=null; views('app'); tab('balance'); addRecipientRow();
+  addrIndex=null; views('app'); tab('balance'); addRecipientRow(); initAppRefUI();
   await sync();
 }
 
@@ -625,7 +659,6 @@ function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr
 function renderBalance(){
   const b = balObj();
   const list=$('assetList'); list.innerHTML='';
-  ensureRefSelector(list);   // user-chosen reference-currency picker (above the list)
   // Asset-agnostic + dual-chain: Bitcoin (parent chain) and tSEQ (native) are
   // first-class rows, then other Sequentia assets — all displayed equally. Each
   // amount also carries its value in the chosen reference currency (if priced).
@@ -728,7 +761,8 @@ function addRecipientRow(){
     </div>`;
   const rsel=r.querySelector('.rasset');
   ownedOptions(rsel);
-  rsel.onchange=updateFeeForSendType;   // BTC vs Sequentia send → which fee asset applies
+  const updRecHint=attachRefHint(r.querySelector('.ramt'), ()=>rsel.value);   // ≈ ref under the amount
+  rsel.onchange=()=>{ updateFeeForSendType(); updRecHint(); };   // BTC vs Sequentia send → which fee asset applies; re-value too
   r.querySelector('.x').onclick=()=>{ if(box.children.length>1){ r.remove(); updateFeeForSendType(); } };
   box.appendChild(r);
   updateFeeForSendType();
@@ -1069,6 +1103,7 @@ function replaceDialog(txid){
   const asset=el('select'); const addA=(v,l)=>{ const o=el('option'); o.value=v; o.textContent=l; asset.appendChild(o); };
   addA(POLICY_HEX,'tSEQ'); for(const h of Object.keys(balObj())){ if(h!==POLICY_HEX) addA(h, assetMeta(h).ticker); }
   arow.appendChild(amt); arow.appendChild(asset); c.appendChild(arow);
+  const updRH=attachRefHint(amt, ()=>asset.value); asset.addEventListener('change', updRH);   // ≈ ref under the amount
   c.appendChild(el('label','lbl','Pay the fee in')); const fsel=feeAssetSelect(); c.appendChild(fsel);
   const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
   const setRl=()=>{ rl.textContent='Fee rate ('+feeUnitOf(fsel.value)+'/vB)'; }; setRl(); fsel.onchange=setRl;
