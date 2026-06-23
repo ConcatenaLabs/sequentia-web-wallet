@@ -381,6 +381,48 @@ async function fetchFeeRates(){
     feeRates = map;
   }catch(e){ console.warn('[feerates] fetch failed:', e?.message??e); feeRates={}; }
 }
+
+// ---------- reference-currency valuation (user-chosen display denomination) ----------
+// Value everything in a denomination the user picks — which need NOT be a Sequentia
+// asset (USD, BTC, ...). Prices come from the public market feed (/prices: per-asset
+// base/USD price); value = amount * price[asset] / price[reference]. Display only.
+let PRICES = {};   // TICKER -> base (USD) price
+let REF = (typeof localStorage!=='undefined' && localStorage.getItem('seqRefCcy')) || 'USD';
+async function loadPrices(){
+  try{
+    const d = await fetch('/prices', {cache:'no-store'}).then(r=>r.json());
+    const m = {};
+    for(const [t,v] of Object.entries(d)){ const p=(v&&typeof v==='object')?v.price:v; if(p>0) m[t.toUpperCase()]=p; }
+    PRICES = m;
+    try{ if(typeof renderBalance==='function') renderBalance(); }catch{}
+  }catch(e){ console.warn('[prices] fetch failed:', e?.message??e); }
+}
+loadPrices();
+// Market-feed ticker for an asset (BTC parent-chain -> WBTC price; tSEQ -> SEQ).
+function priceTicker(hex){ if(hex==='BTC') return 'WBTC'; if(hex===POLICY_HEX) return 'SEQ'; return assetMeta(hex).ticker; }
+function refOptions(){ const s=new Set(['USD']); for(const t of Object.keys(PRICES)) s.add(t==='WBTC'?'BTC':t); return [...s]; }
+function priceOf(ref){ return ref==='USD' ? 1 : (PRICES[ref==='BTC'?'WBTC':ref] || null); }
+// "≈ 12.34 USD" for `atoms` of asset `hex` in the chosen reference, or '' if unpriced.
+function refValueStr(hex, atoms){
+  const pu = PRICES[priceTicker(hex)], pr = priceOf(REF);
+  if(!(pu>0) || !(pr>0)) return '';
+  const units = Number(BigInt(atoms)) / Math.pow(10, assetMeta(hex).precision||0);
+  const v = units * pu / pr;
+  const dp = REF==='BTC' ? 8 : (Math.abs(v) >= 1 ? 2 : 6);
+  return '≈ ' + v.toLocaleString(undefined,{maximumFractionDigits:dp}) + ' ' + REF;
+}
+function setRef(r){ REF=r; try{ localStorage.setItem('seqRefCcy', r); }catch{} try{ renderBalance(); }catch{} }
+function ensureRefSelector(list){
+  if(!list || !list.parentNode || $('refCcySel')) { const s=$('refCcySel'); if(s){ s.innerHTML=''; for(const o of refOptions()){ const op=el('option'); op.value=o; op.textContent=o; if(o===REF) op.selected=true; s.appendChild(op);} } return; }
+  const wrap=el('div','ref-ccy'); wrap.style.cssText='display:flex;align-items:center;gap:8px;margin:0 0 10px';
+  wrap.appendChild(el('span','sub','Show values in'));
+  const sel=el('select'); sel.id='refCcySel'; sel.style.width='auto';
+  sel.onchange=()=>setRef(sel.value);
+  for(const o of refOptions()){ const op=el('option'); op.value=o; op.textContent=o; if(o===REF) op.selected=true; sel.appendChild(op); }
+  wrap.appendChild(sel);
+  list.parentNode.insertBefore(wrap, list);
+}
+
 // Fill the "pay fee in" picker: tSEQ (default) + any owned asset the node accepts for fees.
 function populateFeeAssets(){
   const sel=$('feeAsset'); if(!sel) return;
@@ -583,19 +625,23 @@ function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr
 function renderBalance(){
   const b = balObj();
   const list=$('assetList'); list.innerHTML='';
+  ensureRefSelector(list);   // user-chosen reference-currency picker (above the list)
   // Asset-agnostic + dual-chain: Bitcoin (parent chain) and tSEQ (native) are
-  // first-class rows, then other Sequentia assets — all displayed equally.
-  const row=(ticker, sub, amt)=>{ const r=el('div','asset-row');
+  // first-class rows, then other Sequentia assets — all displayed equally. Each
+  // amount also carries its value in the chosen reference currency (if priced).
+  const row=(ticker, sub, amt, ref)=>{ const r=el('div','asset-row');
     r.appendChild(el('span','tk', ticker));
     const m=el('div','grow'); m.appendChild(el('div',null,sub)); r.appendChild(m);
-    r.appendChild(el('span','amt', amt)); list.appendChild(r); };
-  row('BTC', '<span class="sub">Bitcoin testnet4 · parent chain</span>', fmtAtoms(btcBalance, 8));
+    const a=el('span','amt'); a.appendChild(el('div',null,amt));
+    if(ref) a.appendChild(el('div','sub', ref));
+    r.appendChild(a); list.appendChild(r); };
+  row('BTC', '<span class="sub">Bitcoin testnet4 · parent chain</span>', fmtAtoms(btcBalance, 8), refValueStr('BTC', btcBalance));
   const keys = Object.keys(b).sort((x,y)=> x===POLICY_HEX?-1 : y===POLICY_HEX?1 : 0);
   for(const h of keys){
     const meta=assetMeta(h);
     row(meta.ticker, h===POLICY_HEX ? '<span class="sub">Sequentia native asset</span>'
       : `<a href="/asset/${h}" target="_blank" rel="noopener" class="aid">${h}</a>`,
-      fmtAtoms(b[h], meta.precision));
+      fmtAtoms(b[h], meta.precision), refValueStr(h, b[h]));
   }
 }
 
