@@ -173,7 +173,7 @@
         <div class="field">
           <div class="row">
             <div class="grow">
-              <label class="lbl">Fee rate (sat/vB, optional)</label>
+              <label class="lbl" id="feeRateLabel">Fee rate (sat/vB, optional)</label>
               <input id="feeRate" class="mono" placeholder="leave blank for the default">
             </div>
             <div style="width:160px" id="feeAssetBox">
@@ -503,7 +503,7 @@ async function btcReviewBroadcast(outputs, onDone){
       if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);  // advance only on a confirmed broadcast
       m.remove(); toast(`Sent BTC: <a href="/testnet4/tx/${txt}" target="_blank" rel="noopener">${txt.slice(0,18)}…</a>`);
       if(onDone) onDone(txt); await sync();
-    }catch(e){ st.className='status err'; st.textContent='Failed: '+(e?.message??e); ok.disabled=false; }
+    }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
 }
 
@@ -629,11 +629,28 @@ function isBtcSend(){
   const box=$('recipients'); if(!box) return false;
   return [...box.children].some(r=>{ const s=r.querySelector('.rasset'); return s && s.value==='BTC'; });
 }
+// Map cryptic node rejections to actionable messages (shared by the send/bump/CPFP broadcast).
+function prettyErr(e){
+  const m=(e?.message??String(e));
+  if(/conflicting|already known|txn-already|already in (block|the mempool)|already.?confirmed/i.test(m))
+    return 'This transaction conflicts with one already in the mempool or a block — it may have already confirmed. Refresh to check; a confirmed transaction needs no bump.';
+  if(/insufficient fee|min relay|fee too low|rejecting replacement/i.test(m))
+    return 'The fee is too low for the network to accept — raise the fee rate and try again.';
+  return m;
+}
+// The fee is paid in the chosen asset (BTC for a parent-chain send), so the rate is in that
+// asset's units per vByte — label it accordingly rather than the misleading "sat/vB".
+function feeRateTicker(){
+  if(isBtcSend()) return 'BTC';
+  const fa=$('feeAsset') && $('feeAsset').value;
+  return (fa && fa!==POLICY_HEX) ? assetMeta(fa).ticker : 'tSEQ';
+}
 function updateFeeForSendType(){
   const btc=isBtcSend();
   const box=$('feeAssetBox'); if(box) box.style.display = btc ? 'none' : '';
   if(btc){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4) — this is a parent-chain payment.'; }
   else { updateFeeAssetHint(); }
+  const l=$('feeRateLabel'); if(l) l.textContent='Fee rate ('+feeRateTicker()+'/vB, optional)';
 }
 function addRecipientRow(){
   const box=$('recipients'); const i=box.children.length;
@@ -729,7 +746,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex){
       const txid = await client.broadcast(finalized);
       m.remove(); toast(`Broadcast: <a href="/tx/${txid}" target="_blank" rel="noopener">${txid.toString().slice(0,18)}…</a>`);
       if(onDone) onDone(txid); await sync();
-    }catch(e){ st.className='status err'; st.textContent='Failed: '+(e?.message??e); ok.disabled=false; }
+    }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
 }
 
@@ -814,7 +831,7 @@ $('btnCopy').onclick=async()=>{
 };
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
-$('feeAsset').onchange=updateFeeAssetHint;
+$('feeAsset').onchange=updateFeeForSendType;
 
 $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
   try{ const {pset, meta}=buildIssuePset();
@@ -846,8 +863,15 @@ function renderHistory(){
   if(!txs.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
   txs.sort((a,b)=>(b.height()??9e9)-(a.height()??9e9));
   for(const t of txs.slice(0,60)){
-    const type=t.txType(); const txid=t.txid().toString();
+    const txid=t.txid().toString();
     const delta=t.balance().toJSON(); const ts=t.timestamp();
+    // lwk returns "unknown" when the policy asset nets to 0 (e.g. an asset send that pays its
+    // fee in that asset and passes tSEQ through), so classify from the NON-ZERO deltas.
+    const nz=Object.entries(delta).filter(([,v])=>BigInt(v)!==0n);
+    let type=t.txType();
+    if(type==='unknown' && nz.length){
+      type = nz.every(([,v])=>BigInt(v)<0n) ? 'outgoing' : nz.every(([,v])=>BigInt(v)>0n) ? 'incoming' : 'unknown';
+    }
     const item=el('div','item');
     const bcls = type==='incoming'?'b-in':(type==='outgoing'||type==='burn')?'b-out':'b-iss';
     item.appendChild(el('span','badge '+bcls, type));
@@ -863,9 +887,11 @@ function renderHistory(){
       mid.appendChild(acts);
     }
     item.appendChild(mid);
-    const pol = delta[POLICY_HEX];
-    if(pol!=null){ const neg=BigInt(pol)<0n; item.appendChild(el('span','amt '+(neg?'neg':'pos'), fmtAtoms(pol,8)+' tSEQ')); }
-    else { const k=Object.keys(delta)[0]; if(k){ const m=assetMeta(k); item.appendChild(el('span','amt', fmtAtoms(delta[k],m.precision)+' '+m.ticker)); } }
+    // Show the most significant NON-ZERO asset delta (not a passed-through 0 tSEQ).
+    const absBig=(x)=>x<0n?-x:x;
+    const amt = nz.reduce((best,e)=> best && absBig(BigInt(best[1]))>=absBig(BigInt(e[1])) ? best : e, null) || [POLICY_HEX, delta[POLICY_HEX]??'0'];
+    const am=assetMeta(amt[0]); const aneg=BigInt(amt[1])<0n;
+    item.appendChild(el('span','amt '+(aneg?'neg':'pos'), fmtAtoms(amt[1],am.precision)+' '+am.ticker));
     list.appendChild(item);
   }
 }
