@@ -661,6 +661,9 @@ function feeRateTicker(){
   const fa=$('feeAsset') && $('feeAsset').value;
   return (fa && fa!==POLICY_HEX) ? assetMeta(fa).ticker : 'tSEQ';
 }
+// The fee unit for a given fee-asset hex — used by the bump/replace/CPFP dialogs to label
+// their rate field in the asset the fee is actually paid in (not the misleading "sat/vB").
+function feeUnitOf(hex){ return (hex && hex!==POLICY_HEX) ? assetMeta(hex).ticker : 'tSEQ'; }
 function updateFeeForSendType(){
   const btc=isBtcSend();
   const box=$('feeAssetBox'); if(box) box.style.display = btc ? 'none' : '';
@@ -950,7 +953,8 @@ function bumpFeeDialog(txid){
   c.appendChild(el('div','sub','Re-broadcasts the same payment at a higher fee. Pay the bump in any asset — confirmation depends on the producer that mines it accepting that asset.'));
   c.appendChild(el('label','lbl','Pay the bump fee in'));
   const sel=feeAssetSelect(); c.appendChild(sel);
-  const rl=el('label','lbl','New fee rate (sat/vB)'); rl.style.marginTop='10px'; c.appendChild(rl);
+  const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
+  const setRl=()=>{ rl.textContent='New fee rate ('+feeUnitOf(sel.value)+'/vB)'; }; setRl(); sel.onchange=setRl;
   const rate=el('input'); rate.type='number'; rate.min='1'; rate.step='1'; rate.value=String(BUMP_FEERATE/1000); rate.style.marginTop='4px';
   c.appendChild(rate);
   c.appendChild(el('div','sub',"Must exceed the original's fee rate (in reference value), or the network rejects the replacement."));
@@ -981,7 +985,8 @@ function cpfpDialog(txid){
   c.appendChild(el('div','sub','Attaches a child transaction whose high fee lifts this one into a block. Works when the parent is just under-priced — not when its fee asset is one producers reject (use Replace for that).'));
   c.appendChild(el('label','lbl','Pay the child fee in'));
   const sel=feeAssetSelect(); c.appendChild(sel);
-  const rl=el('label','lbl','Child fee rate (sat/vB)'); rl.style.marginTop='10px'; c.appendChild(rl);
+  const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
+  const setRl=()=>{ rl.textContent='Child fee rate ('+feeUnitOf(sel.value)+'/vB)'; }; setRl(); sel.onchange=setRl;
   let sug = BUMP_FEERATE/1000;
   try{ sug = Math.max(1, Math.ceil(wollet.cpfpSuggestedFeerate(new Txid(txid), BUMP_FEERATE)/1000)); }catch(e){}
   const rate=el('input'); rate.type='number'; rate.min='1'; rate.step='1'; rate.value=String(sug); rate.style.marginTop='4px';
@@ -1019,7 +1024,8 @@ function replaceDialog(txid){
   addA(POLICY_HEX,'tSEQ'); for(const h of Object.keys(balObj())){ if(h!==POLICY_HEX) addA(h, assetMeta(h).ticker); }
   arow.appendChild(amt); arow.appendChild(asset); c.appendChild(arow);
   c.appendChild(el('label','lbl','Pay the fee in')); const fsel=feeAssetSelect(); c.appendChild(fsel);
-  const rl=el('label','lbl','Fee rate (sat/vB)'); rl.style.marginTop='10px'; c.appendChild(rl);
+  const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
+  const setRl=()=>{ rl.textContent='Fee rate ('+feeUnitOf(fsel.value)+'/vB)'; }; setRl(); fsel.onchange=setRl;
   const rate=el('input'); rate.type='number'; rate.min='1'; rate.step='1'; rate.value=String(BUMP_FEERATE/1000); rate.style.marginTop='4px'; c.appendChild(rate);
   const act=el('div','row'); act.style.marginTop='14px';
   const ok=el('button','primary','Replace'); const no=el('button','ghost','Cancel');
