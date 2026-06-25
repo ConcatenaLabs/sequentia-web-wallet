@@ -80,6 +80,83 @@
   /* toast */
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d242d;border:1px solid var(--line);
          border-radius:10px;padding:12px 16px;font-size:13.5px;max-width:92vw;box-shadow:0 8px 30px #0008;z-index:60}
+
+  /* ===== SeqDEX swap composer (the symmetric Pay -> Receive signature) ===== */
+  /* The card holds two weighted-equal panes with a circular flip on the seam. */
+  .swcard{position:relative;padding:0;overflow:visible}
+  .swpane{padding:18px 20px}
+  /* A hairline seam between the two panes — the balance's pivot line. */
+  #swRecvPane{border-top:1px solid var(--line)}
+  .swpane-top{display:flex;align-items:center;justify-content:space-between;min-height:18px}
+  .swrow{display:flex;align-items:flex-start;gap:10px;margin-top:8px}
+  .swamt-wrap{flex:1 1 auto;min-width:0}
+  /* The ref-hint attachRefHint drops under the amount: keep it small + clickable, no top gap. */
+  .swamt-wrap .sub{margin-top:3px!important}
+  /* The amount is the hero content: large, mono, borderless — it reads as a number, not a form field. */
+  .swamt{width:100%;background:transparent;border:none;border-radius:0;padding:2px 0;
+         font:600 30px/1.1 ui-monospace,Menlo,Consolas,monospace;color:var(--txt);min-width:0}
+  .swamt:focus{outline:none}
+  .swamt::placeholder{color:#3a434e}
+  .swamt:focus-visible{outline:none}
+  .swrow:focus-within{box-shadow:none}
+  /* Both pickers are byte-identical — that visual equality IS the no-base/quote principle. */
+  .swpick{display:inline-flex;align-items:center;gap:7px;flex:0 0 auto;background:#1d242d;border:1px solid var(--line);
+          color:var(--txt);border-radius:999px;padding:8px 13px;font-weight:700;font-size:15px;white-space:nowrap}
+  .swpick:hover{filter:brightness(1.13)}
+  .swpick-sm{padding:6px 11px;font-size:13px}
+  .swpick-tk{letter-spacing:.01em}
+  .swpick-caret{color:var(--dim);font-size:11px;margin-top:1px}
+  .swpane-foot{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-top:8px;min-height:1.1em}
+  .swbal{cursor:default;text-align:right}
+  .swmax{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:999px;
+         padding:2px 9px;font-size:11px;font-weight:700;letter-spacing:.04em}
+  .swmax:hover{color:var(--amber2);border-color:#5a4412}
+  /* The flip: a circular focal control straddling the seam. The one amber accent in the composer body. */
+  .swflip-wrap{position:relative;height:0;display:flex;justify-content:center;z-index:2}
+  .swflip{position:absolute;top:-21px;width:42px;height:42px;border-radius:50%;display:grid;place-items:center;
+          background:var(--panel);border:1px solid var(--line);color:var(--amber2);padding:0;
+          box-shadow:0 0 0 5px var(--panel);transition:transform .22s cubic-bezier(.34,1.56,.64,1),color .15s,border-color .15s}
+  .swflip:hover{color:#1a1200;background:linear-gradient(135deg,var(--amber),var(--amber2));border-color:transparent}
+  .swflip:active{transform:rotate(180deg) scale(.94)}
+  .swflip.spun{transform:rotate(180deg)}
+  .swflip:focus-visible{outline:2px solid var(--amber2);outline-offset:3px}
+  /* meta card below: rate, fee market, finality, action — all quiet. */
+  .swmeta{display:flex;flex-direction:column;gap:14px}
+  .swmeta-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  #swRate{color:var(--txt);font-size:13.5px}
+  .swfee{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel2)}
+  .swfee-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .swfee-body{display:flex;align-items:center;gap:12px;margin-top:9px;flex-wrap:wrap}
+  .swfee-amt{font-size:14px;color:var(--txt)}
+  .swfin{display:flex;align-items:center;gap:9px}
+  .swfin-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex:0 0 auto;
+             box-shadow:0 0 0 3px #10241a}
+  .swreview{width:100%;padding:13px;font-size:15px}
+  .swback{font-size:13px;padding:6px 11px}
+  /* asset-picker popover (searchable; quiet, not a second accent) */
+  .swpop{position:fixed;z-index:70;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+         box-shadow:0 12px 40px #000b;width:min(360px,92vw);max-height:60vh;display:flex;flex-direction:column;overflow:hidden}
+  .swpop-search{padding:12px 12px 8px}
+  .swpop-search input{font-size:14px}
+  .swpop-list{overflow:auto;padding:4px 6px 8px}
+  .swopt{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:transparent;border:none;
+         border-radius:10px;padding:9px 10px;color:var(--txt);font:inherit}
+  .swopt:hover,.swopt.kbd{background:#1d242d}
+  .swopt[disabled]{opacity:.4;cursor:default}
+  .swopt-tk{font-weight:700;font-size:15px;min-width:62px}
+  .swopt-mid{flex:1 1 auto;min-width:0}
+  .swopt-name{font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .swopt-bal{margin-left:auto;text-align:right;white-space:nowrap}
+  .swopt-bal .b{font:13px ui-monospace,monospace}
+  .swopt-bal .r{font-size:11px;color:var(--dim)}
+  .swopt-empty{padding:14px 12px;color:var(--dim);font-size:13px}
+  @media (max-width:480px){
+    .swamt{font-size:26px}
+    .swpane{padding:16px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .swflip,.swflip.spun,.swflip:active{transition:none;transform:none}
+  }
 </style>
 </head>
 <body>
@@ -212,108 +289,125 @@
       </div>
     </section>
 
-    <!-- swap (SeqDEX atomic swaps: same-chain + cross-chain) -->
+    <!-- swap (SeqDEX: one symmetric Pay -> Receive composer; routes to the
+         same-chain atomic swap or the cross-chain BTC HTLC wizard automatically) -->
     <section data-panel="swap" class="hide">
-      <!-- swap-types-first: choose the kind of swap before anything else -->
-      <div class="tabs" id="swapSeg" style="margin-top:0">
-        <button data-mode="same" class="active">Same-chain</button>
-        <button data-mode="cross">Cross-chain (BTC ↔ SEQ)</button>
-      </div>
 
-    <!-- ===== same-chain swap ===== -->
-    <div id="swapSameWrap">
-      <div class="card">
-        <label class="lbl">Swap</label>
-        <p class="sub" id="swapTip" style="margin:0 0 12px">Trade one asset for another in a single atomic transaction through a SeqDEX market maker. The swap either fully settles or not at all; no asset is privileged.</p>
-        <div class="field">
-          <label class="lbl">Market</label>
-          <select id="swMarket"></select>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <div style="width:150px">
-            <label class="lbl">Side</label>
-            <select id="swSide">
-              <option value="BUY">Buy base</option>
-              <option value="SELL">Sell base</option>
-            </select>
-          </div>
-          <div class="grow">
-            <label class="lbl" id="swAmtLbl">Amount (base)</label>
-            <input id="swAmount" class="mono" placeholder="0.0">
-          </div>
-        </div>
-        <div class="field">
-          <div class="row">
-            <div style="width:160px" id="swFeeAssetBox">
-              <label class="lbl">Pay fee in</label>
-              <select id="swFeeAsset"></select>
+      <!-- ===== the composer (the signature) ===== -->
+      <div id="swComposer">
+        <div class="card swcard">
+          <!-- PAY pane -->
+          <div class="swpane" id="swPayPane">
+            <div class="swpane-top">
+              <label class="lbl" style="margin:0">You pay</label>
+              <button type="button" class="swmax" id="swMax" title="Use your full balance">Max</button>
             </div>
-            <div class="grow sub" id="swFeeAssetHint" style="align-self:flex-end"></div>
+            <div class="swrow">
+              <div class="swamt-wrap">
+                <input id="swPayAmt" class="swamt mono" inputmode="decimal" placeholder="0.0"
+                       aria-label="Amount you pay" autocomplete="off">
+                <!-- attachRefHint drops the "≈ <ref>" line here, under the amount -->
+              </div>
+              <button type="button" class="swpick" id="swPayPick" aria-haspopup="listbox" aria-expanded="false">
+                <span class="swpick-tk" id="swPayTk">Select</span><span class="swpick-caret">▾</span>
+              </button>
+            </div>
+            <div class="swpane-foot">
+              <span class="sub swbal" id="swPayBal"></span>
+            </div>
           </div>
-        </div>
-        <div class="row" style="margin-top:14px">
-          <button id="btnSwapQuote">Get quote</button>
-          <button class="primary hide" id="btnSwapReview">Review &amp; swap</button>
-        </div>
-        <div class="status" id="swapStatus"></div>
-        <div id="swapQuote" class="hide" style="margin-top:14px">
-          <div class="kv"><span class="k">You send</span><span class="v" id="swQSend">—</span></div>
-          <div class="sub" id="swQSendRef" style="text-align:right;margin:-4px 0 0"></div>
-          <div class="kv"><span class="k">You receive</span><span class="v" id="swQRecv">—</span></div>
-          <div class="sub" id="swQRecvRef" style="text-align:right;margin:-4px 0 0"></div>
-          <div class="kv"><span class="k">Network fee</span><span class="v" id="swQFee">—</span></div>
-          <div class="kv"><span class="k">Price</span><span class="v" id="swQPrice">—</span></div>
-        </div>
-        <div class="status err" id="swapErr"></div>
-      </div>
-      <div class="card">
-        <label class="lbl">Markets</label>
-        <p class="sub" style="margin:0 0 6px">Open markets on this SeqDEX provider, with the maker fee on each leg.</p>
-        <div class="list" id="swMarketList"><div class="muted">No markets loaded.</div></div>
-      </div>
-    </div><!-- /swapSameWrap -->
 
-    <!-- ===== cross-chain (BTC <-> SEQ) swap wizard ===== -->
-    <div id="swapCrossWrap" class="hide">
-      <!-- quote form (shown when no swap is in flight) -->
-      <div id="xQuoteForm">
-        <div class="card">
-          <label class="lbl">Cross-chain swap (BTC → SEQ asset)</label>
-          <p class="sub" style="margin:0 0 12px">Buy a Sequentia asset by paying Bitcoin, settled trustlessly with a single-secret HTLC across both chains. You lock BTC first; the maker locks the SEQ leg in an anchored Sequentia block; you claim it, revealing your secret so the maker can claim the BTC. Either both legs settle or you refund.</p>
-          <div class="field">
-            <label class="lbl">Market</label>
-            <select id="xMarket"></select>
+          <!-- the flip control (the one place we spend boldness) -->
+          <div class="swflip-wrap">
+            <button type="button" class="swflip" id="swFlip" aria-label="Flip pay and receive" title="Flip pay and receive">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                <path d="M7 4v13M7 4L4 7M7 4l3 3M17 20V7M17 20l3-3M17 20l-3-3"
+                      fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
           </div>
-          <div class="field" style="margin-top:10px">
-            <label class="lbl" id="xAmtLbl">Amount to buy</label>
-            <input id="xAmount" class="mono" placeholder="0.0">
-          </div>
-          <div class="row" style="margin-top:14px">
-            <button id="btnXswapQuote">Get quote</button>
-            <button class="primary hide" id="btnXLockBtc">Lock BTC leg</button>
-          </div>
-          <div class="status" id="xswapStatus"></div>
-          <div id="xQuoteBox" class="hide" style="margin-top:14px">
-            <div class="kv"><span class="k">You receive</span><span class="v" id="xQBuy">—</span></div>
-            <div class="sub" id="xQBuyRef" style="text-align:right;margin:-4px 0 0"></div>
-            <div class="kv"><span class="k">You pay (lock)</span><span class="v" id="xQPay">—</span></div>
-            <div class="sub" id="xQPayRef" style="text-align:right;margin:-4px 0 0"></div>
-            <div class="kv"><span class="k">Maker fee</span><span class="v" id="xQFee">—</span></div>
-            <div class="kv"><span class="k">Timeouts</span><span class="v" id="xQTimeouts">—</span></div>
-            <div class="sub" id="xQExpiry" style="margin-top:6px"></div>
+
+          <!-- RECEIVE pane -->
+          <div class="swpane" id="swRecvPane">
+            <div class="swpane-top">
+              <label class="lbl" style="margin:0">You receive</label>
+            </div>
+            <div class="swrow">
+              <div class="swamt-wrap">
+                <input id="swRecvAmt" class="swamt mono" inputmode="decimal" placeholder="0.0"
+                       aria-label="Amount you receive" autocomplete="off">
+                <!-- attachRefHint drops the "≈ <ref>" line here, under the amount -->
+              </div>
+              <button type="button" class="swpick" id="swRecvPick" aria-haspopup="listbox" aria-expanded="false">
+                <span class="swpick-tk" id="swRecvTk">Select</span><span class="swpick-caret">▾</span>
+              </button>
+            </div>
+            <div class="swpane-foot">
+              <span class="sub swbal" id="swRecvBal"></span>
+            </div>
           </div>
         </div>
-        <div class="card">
-          <label class="lbl">Cross-chain markets</label>
-          <p class="sub" style="margin:0 0 6px">BTC/SEQ-asset pairs the maker will swap, with reserves and price.</p>
-          <div class="list" id="xMarketList"><div class="muted">No cross-chain markets loaded.</div></div>
+
+        <!-- rate + fee market + finality + action -->
+        <div class="card swmeta">
+          <div class="swmeta-row" id="swRateRow">
+            <span class="sub" id="swRate">Pick two assets to see a rate.</span>
+            <span class="sub" id="swRoute"></span>
+          </div>
+
+          <!-- open fee market: pay the network fee in any asset the node prices -->
+          <div class="swfee" id="swFeeRow">
+            <div class="swfee-head">
+              <label class="lbl" style="margin:0">Fee</label>
+              <span class="sub" id="swFeeNote">Pay the fee in any asset the network prices.</span>
+            </div>
+            <div class="swfee-body">
+              <button type="button" class="swpick swpick-sm" id="swFeePick" aria-haspopup="listbox" aria-expanded="false">
+                <span class="swpick-tk" id="swFeeTk">tSEQ</span><span class="swpick-caret">▾</span>
+              </button>
+              <span class="swfee-amt mono" id="swFeeAmt">—</span>
+              <span class="sub" id="swFeeRef"></span>
+            </div>
+          </div>
+
+          <!-- anchor-aware finality (never "instant") -->
+          <div class="swfin" id="swFinality">
+            <span class="swfin-dot" aria-hidden="true"></span>
+            <span class="sub" id="swFinText">Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).</span>
+          </div>
+
+          <button class="primary swreview" id="swReview" disabled>Review swap</button>
+          <div class="status" id="swStatus"></div>
+          <div class="status err" id="swErr"></div>
         </div>
       </div>
-      <!-- stepper (shown when a swap is in flight; rendered by xswap.js) -->
-      <div id="xStepper" class="hide"></div>
-      <!-- shared error/status line (visible in both quote + stepper modes) -->
-      <div class="status err" id="xswapErr" style="margin-top:8px"></div>
-    </div><!-- /swapCrossWrap -->
+
+      <!-- cross-chain HTLC wizard host: hidden until Review routes a BTC swap here.
+           Rendered entirely by xswap.js; the composer is the single entry point. -->
+      <div id="swapCrossWrap" class="hide" style="margin-top:16px">
+        <div class="row" style="margin-bottom:4px">
+          <!-- Back is only meaningful before BTC is locked; once a swap is in flight
+               it hides itself (you resume/abandon/refund from the stepper instead). -->
+          <button class="ghost swback hide" id="swXBack">‹ Back to composer</button>
+        </div>
+        <!-- xswap.js still drives these (quote form is bypassed; the stepper is the live UI) -->
+        <div id="xQuoteForm" class="hide">
+          <select id="xMarket" class="hide"></select>
+          <input id="xAmount" class="hide">
+          <button id="btnXswapQuote" class="hide">Get quote</button>
+          <button id="btnXLockBtc" class="hide">Lock BTC leg</button>
+          <div id="xQuoteBox" class="hide">
+            <span id="xQBuy"></span><span id="xQBuyRef"></span><span id="xQPay"></span>
+            <span id="xQPayRef"></span><span id="xQFee"></span><span id="xQTimeouts"></span><span id="xQExpiry"></span>
+          </div>
+          <div id="xMarketList" class="hide"></div>
+          <label id="xAmtLbl" class="hide"></label>
+          <div id="xswapStatus" class="hide"></div>
+        </div>
+        <div id="xStepper"></div>
+        <div class="status err" id="xswapErr" style="margin-top:8px"></div>
+      </div>
     </section>
 
     <!-- assets -->
@@ -406,7 +500,7 @@ import init, { Mnemonic, Network, Signer, Wollet, EsploraClient, Address, AssetI
   from './pkg/lwk_wasm.js';
 import { HDKey, mnemonicToSeedSync, btc } from './btc.js';
 import { initSwap, renderSwap } from './swap.js';
-import { initXswap, renderXswap } from './xswap.js';
+import { initXswap, renderXswap, fetchXmarkets, fetchXquote, openFromComposer, hasInFlight } from './xswap.js';
 
 const ESPLORA = location.origin + '/api';
 const KEY = 'swk.sequentia.mnemonic';
@@ -934,21 +1028,8 @@ async function openWallet(phrase){
 // them current), and the shared UI helpers it must reuse (equal-standing asset
 // metadata, the fee-asset selector, ref-currency hints, the review/toast UX).
 function initSwapTab(){
-  initSwap({
-    wasm: { Wollet, Signer, AssetId, Address, Pset, Txid },
-    get wollet(){ return wollet; }, get signer(){ return signer; },
-    get network(){ return network; }, get client(){ return client; },
-    get POLICY(){ return POLICY; }, get POLICY_HEX(){ return POLICY_HEX; },
-    get addrIndex(){ return addrIndex; },
-    el, $, assetMeta, balObj, fmtAtoms, parseAtoms,
-    refValueStr, attachRefHint, feeRateFor, prettyErr,
-    get feeRates(){ return feeRates; },   // reassigned by fetchFeeRates — read fresh
-    modalRows, toast, sync,
-    // Where the daemon's same-chain Trade API lives. A reverse-proxy prefix in
-    // production (same-origin /dex), overridable for local testing via a global.
-    DEX: (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
-  });
-  // The cross-chain (BTC<->SEQ) wizard. It reuses the same helpers, plus the
+  // The cross-chain (BTC<->SEQ) wizard. Wired FIRST so its bridge functions are
+  // ready for the composer to call. It reuses the same helpers, plus the
   // Transaction class (to broadcast the raw SEQ-leg claim), the SEQ esplora base
   // (broadcast fallback), and the btc.js BTC-leg bridge (fund/refund/refundKey).
   initXswap({
@@ -964,30 +1045,38 @@ function initSwapTab(){
     refValueStr, attachRefHint, prettyErr, modalRows, toast, sync,
     btcLeg,                                   // the BTC-leg bridge (testnet4)
     SEQ_ESPLORA: ESPLORA,                     // Sequentia esplora for the claim broadcast
+    onExit: () => renderSwap(),               // no swap left -> back to the composer (single entry point)
     // The daemon's cross-chain API. Same one-port daemon as same-chain in
     // production; overridable for local testing via a global.
     XDEX: (typeof window!=='undefined' && window.SEQ_XDEX_BASE) || (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
   });
-  // Default to the same-chain sub-tab; wire the swap-type toggle.
-  swapMode = 'same';
-  const seg = $('swapSeg');
-  if(seg && !seg._wired){ seg._wired = true;
-    seg.querySelectorAll('button').forEach(b=>{ b.onclick = ()=>setSwapMode(b.dataset.mode); });
-  }
-  setSwapMode('same');
+  // The symmetric Pay -> Receive composer (the single swap entry point). It
+  // discovers same-chain markets itself, and reaches the cross-chain wizard
+  // through the `xroute` bridge below (markets/quote/openFromComposer/hasInFlight).
+  initSwap({
+    wasm: { Wollet, Signer, AssetId, Address, Pset, Txid },
+    get wollet(){ return wollet; }, get signer(){ return signer; },
+    get network(){ return network; }, get client(){ return client; },
+    get POLICY(){ return POLICY; }, get POLICY_HEX(){ return POLICY_HEX; },
+    get addrIndex(){ return addrIndex; },
+    el, $, assetMeta, balObj, fmtAtoms, parseAtoms,
+    refValueStr, attachRefHint, assetAmountOf, feeRateFor, prettyErr,
+    get feeRates(){ return feeRates; },   // reassigned by fetchFeeRates — read fresh
+    modalRows, toast, sync,
+    // Where the daemon's same-chain Trade API lives. A reverse-proxy prefix in
+    // production (same-origin /dex), overridable for local testing via a global.
+    DEX: (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
+    // Cross-chain bridge: the composer routes a BTC swap into the xswap.js wizard.
+    xroute: {
+      markets: () => fetchXmarkets(),
+      quote: (seqAsset, seqAtoms) => fetchXquote(seqAsset, seqAtoms),
+      openFromComposer: (q) => openFromComposer(q),
+      hasInFlight: () => hasInFlight(),
+      renderXswap: () => renderXswap(),
+    },
+  });
 }
-// Swap-types-first ordering: a "Same-chain · Cross-chain" toggle at the top of
-// the Swap panel switches which wizard shows. Re-renders the active one.
-let swapMode = 'same';
-function setSwapMode(mode){
-  swapMode = (mode==='cross') ? 'cross' : 'same';
-  const seg = $('swapSeg');
-  if(seg) seg.querySelectorAll('button').forEach(b=>b.classList.toggle('active', b.dataset.mode===swapMode));
-  show('swapSameWrap', swapMode==='same');
-  show('swapCrossWrap', swapMode==='cross');
-  renderActiveSwap();
-}
-function renderActiveSwap(){ if(swapMode==='cross') renderXswap(); else renderSwap(); }
+function renderActiveSwap(){ renderSwap(); }
 
 // ---------- sync + balance ----------
 async function sync(){

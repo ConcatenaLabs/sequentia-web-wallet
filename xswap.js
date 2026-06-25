@@ -171,6 +171,61 @@ export function initXswap(ctx){
   }
 }
 
+// ---------------------------------------------------------------------------
+// Composer bridge (Phase 6d-3): the symmetric Pay->Receive composer in swap.js
+// is the single entry point. It discovers BTC<->asset markets and gets a quote
+// through these thin exports, then hands the priced quote to openFromComposer(),
+// which seeds LAST_XQUOTE and shows the live wizard stepper. All the proven
+// internals (lock/propose/anchor gate/claim/poll, localStorage resume) are reused
+// untouched — only the quote FORM is bypassed (the composer replaces it).
+// ---------------------------------------------------------------------------
+export async function fetchXmarkets(){
+  const resp = await dexPost('/v1/xchain/markets', {});
+  XMARKETS = (Array.isArray(pick(resp, 'markets')) ? pick(resp, 'markets') : []).map(normMarket);
+  return XMARKETS;
+}
+// Get a cross-chain quote for `seqAtoms` of `seqAsset`. Returns the SAME normalized
+// quote object the form's onQuote builds (incl. the T_btc>T_seq ordering check),
+// so openFromComposer can drive the rest of the wizard identically.
+export async function fetchXquote(seqAsset, seqAtoms){
+  const market = XMARKETS.find(m => m.seq_asset === seqAsset);
+  const resp = await dexPost('/v1/xchain/quote', { seq_asset: seqAsset, seq_amount: String(seqAtoms) });
+  const q = {
+    market: market || { btc_asset:'', seq_asset:seqAsset, name:'BTC / SEQ-asset', price_seq_per_btc:0 },
+    quote_id:            pick(resp, 'quote_id', 'quoteId'),
+    seq_amount:          big(pick(resp, 'seq_amount', 'seqAmount')),
+    btc_amount:          big(pick(resp, 'btc_amount', 'btcAmount')),
+    price_seq_per_btc:   num(pick(resp, 'price_seq_per_btc', 'priceSeqPerBtc')),
+    fee_btc:             big(pick(resp, 'fee_btc', 'feeBtc')),
+    maker_btc_claim_pub: pick(resp, 'maker_btc_claim_pub', 'makerBtcClaimPub'),
+    maker_seq_refund_pub:pick(resp, 'maker_seq_refund_pub', 'makerSeqRefundPub'),
+    btc_locktime:        num(pick(resp, 'btc_locktime', 'btcLocktime')),
+    seq_locktime:        num(pick(resp, 'seq_locktime', 'seqLocktime')),
+    expires_at_unix:     Number(pick(resp, 'expires_at_unix', 'expiresAtUnix') || 0),
+  };
+  if (!(q.btc_locktime > q.seq_locktime))
+    throw new Error(`maker returned a bad ordering: T_btc(${q.btc_locktime}) must exceed T_seq(${q.seq_locktime})`);
+  return q;
+}
+// Seed the wizard with a composer-supplied quote and show the lock step. The
+// stepper host (#xStepper) + the lock review modal (onLockBtc) take over from here.
+export function openFromComposer(q){
+  LAST_XQUOTE = q;
+  if (!XMARKETS.length && q && q.market) XMARKETS = [q.market];
+  // No in-flight swap yet → renderStepper shows nothing; we drive the lock review
+  // directly (the composer already showed the quote, so we go straight to "lock").
+  renderStepper();
+  startCountdown();
+  onLockBtc();
+}
+// True when a cross-chain swap is persisted and not terminal — the composer uses
+// this to resume the stepper instead of showing the composer on tab entry.
+export function hasInFlight(){
+  loadSwap();
+  if (!SWAP) return false;
+  return SWAP.state !== ST.BTC_CLAIMED && SWAP.state !== ST.REFUNDED && SWAP.state !== ST.FAILED;
+}
+
 function selMarket(){
   const sel = C.$('xMarket'); if (!sel || !XMARKETS.length) return null;
   return XMARKETS[sel.selectedIndex] || XMARKETS[0];
@@ -583,9 +638,11 @@ async function onRefundBtc(){
 }
 
 // Abandon/clear a terminal or stuck swap from local storage (after BTC_CLAIMED /
-// REFUNDED / FAILED, or to start over). Does not touch on-chain funds.
+// REFUNDED / FAILED, or to start over). Does not touch on-chain funds. With no
+// swap left, hand control back to the composer (the single swap entry point).
 function onAbandon(){
   stopPoll(); clearSwap(); renderStepper();
+  if (C.onExit) C.onExit();
 }
 
 // ---- stepper rendering ----
