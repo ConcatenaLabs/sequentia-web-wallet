@@ -609,8 +609,12 @@ async function fetchFeeRates(){
 // The published rate (atoms-of-asset per reference unit) the tx must build its fee with.
 // There is NO 1:1 fallback: a fabricated rate produces a wrong fee, so an unpriced asset is
 // a hard error. (The selectors gate unpriced assets out, so this is a last-line guard.)
+// /feerates is keyed by ticker ("OILX") plus "bitcoin" (=tSEQ); the rest of the wallet keys
+// fee rates by hex. Resolve a hex's published-rate entry by hex OR by its ticker.
+function feeRateEntry(hex){ return feeRates[hex] || feeRates[assetMeta(hex).ticker]; }
 function feeRateFor(hex){
-  const r = feeRates[hex] && feeRates[hex].rate;
+  const e = feeRateEntry(hex);
+  const r = e && e.rate;
   if(!(r>0)) throw new Error('no fee rate for '+assetMeta(hex).ticker+'; try again');
   return BigInt(r);
 }
@@ -769,7 +773,7 @@ function populateFeeAssets(){
   const b=balObj();
   for(const h of Object.keys(b)){
     if(h===POLICY_HEX) continue;
-    if(!(feeRates[h] && feeRates[h].rate>0)) continue;   // unpriced: gate it out of the selector
+    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)) continue;   // unpriced: gate it out of the selector
     add(h, assetMeta(h).ticker);
   }
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;
@@ -781,9 +785,10 @@ function updateFeeAssetHint(){
   hint.textContent='';                          // textContent only (never innerHTML) — a ticker can't inject markup
   if(!h || h===POLICY_HEX) return;
   const t=assetMeta(h).ticker;
-  const priced = !!(feeRates[h] && feeRates[h].rate);
+  const e=feeRateEntry(h);
+  const priced = !!(e && e.rate);
   if(priced){
-    const rel=feeRates[h].rate / feeRefRate;    // value of one unit of the asset in reference units (rfa)
+    const rel=e.rate / feeRefRate;    // value of one unit of the asset in reference units (rfa)
     hint.textContent = `Fee charged in ${t} at this node's published rate (≈ ${rel.toPrecision(4)} reference units per ${t}). The wallet needs enough ${t} to cover it.`;
   } else {
     hint.textContent = `This node has no published rate for ${t}; the fee will be estimated 1:1 with the reference unit, which may be off.`;
@@ -1191,7 +1196,7 @@ function sentAssetHex(){ const box=$('recipients'); const sel=box && box.querySe
 function defaultFeeAssetToSent(){
   const sel=$('feeAsset'); if(!sel || feeAssetManual) return;
   const sent=sentAssetHex();
-  const priced = sent && sent!==POLICY_HEX && feeRates[sent] && feeRates[sent].rate>0
+  const priced = sent && sent!==POLICY_HEX && feeRateEntry(sent) && feeRateEntry(sent).rate>0
     && [...sel.options].some(o=>o.value===sent);
   sel.value = priced ? sent : POLICY_HEX;   // tSEQ only as the always-accepted fallback
   updateFeeAssetHint();
@@ -1511,7 +1516,7 @@ function feeAssetSelect(){
   const add=(v,l)=>{ const o=el('option'); o.value=v; o.textContent=l; sel.appendChild(o); };
   add(POLICY_HEX, 'tSEQ');                       // the protocol's default-accepted asset — always available
   // Only priced assets: an unpriced asset has no valid fee rate (feeRateFor would throw).
-  for(const h of Object.keys(balObj())){ if(h!==POLICY_HEX && feeRates[h] && feeRates[h].rate>0) add(h, assetMeta(h).ticker); }
+  for(const h of Object.keys(balObj())){ if(h!==POLICY_HEX && feeRateEntry(h) && feeRateEntry(h).rate>0) add(h, assetMeta(h).ticker); }
   return sel;
 }
 // Add one recipient to a builder, mirroring buildSendPset's blinded/explicit + policy/asset handling.
