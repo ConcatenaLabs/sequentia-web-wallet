@@ -788,10 +788,13 @@ function updateFeeAssetHint(){
   const e=feeRateEntry(h);
   const priced = !!(e && e.rate);
   if(priced){
-    const rel=e.rate / feeRefRate;    // value of one unit of the asset in reference units (rfa)
-    hint.textContent = `Fee charged in ${t} at this node's published rate (≈ ${rel.toPrecision(4)} reference units per ${t}). The wallet needs enough ${t} to cover it.`;
+    // Value 1 unit of the asset in the user's chosen reference currency (the "show values in"
+    // picker) — never the consensus reference unit, which is SEQ-denominated. SEQ is not
+    // privileged in the UI.
+    const rv = refValueStr(h, Math.pow(10, assetMeta(h).precision||0));
+    hint.textContent = `Fee charged in ${t} at this node's published rate` + (rv ? ` (1 ${t} ${rv})` : '') + `. The wallet needs enough ${t} to cover it.`;
   } else {
-    hint.textContent = `This node has no published rate for ${t}; the fee will be estimated 1:1 with the reference unit, which may be off.`;
+    hint.textContent = `This node has no published rate for ${t}; the fee may be estimated and could be rejected. Try another asset.`;
   }
   // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
   // depends on the producer that mines it also accepting THIS asset; the rescue is RBF/CPFP
