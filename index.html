@@ -995,7 +995,7 @@ function tab(name){
   if(name==='history') renderHistory();
   if(name==='stake') refreshStakes();
   if(name==='swap') renderActiveSwap();
-  if(name==='send'){ refreshRecipientAssets(); populateFeeAssets(); updateFeeForSendType(); }
+  if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); }
 }
 
 // ---------- boot ----------
@@ -1184,6 +1184,18 @@ function feeRateTicker(){
 // The fee unit for a given fee-asset hex — used by the bump/replace/CPFP dialogs to label
 // their rate field in the asset the fee is actually paid in (not the misleading "sat/vB").
 function feeUnitOf(hex){ return (hex && hex!==POLICY_HEX) ? assetMeta(hex).ticker : 'tSEQ'; }
+// SEQ is not privileged: default the fee to the asset being sent (when the node prices it),
+// not tSEQ. A manual pick in the fee picker sticks (feeAssetManual) until the send is reset.
+let feeAssetManual=false;
+function sentAssetHex(){ const box=$('recipients'); const sel=box && box.querySelector('.rasset'); return sel ? sel.value : ''; }
+function defaultFeeAssetToSent(){
+  const sel=$('feeAsset'); if(!sel || feeAssetManual) return;
+  const sent=sentAssetHex();
+  const priced = sent && sent!==POLICY_HEX && feeRates[sent] && feeRates[sent].rate>0
+    && [...sel.options].some(o=>o.value===sent);
+  sel.value = priced ? sent : POLICY_HEX;   // tSEQ only as the always-accepted fallback
+  updateFeeAssetHint();
+}
 function updateFeeForSendType(){
   const btc=isBtcSend();
   const box=$('feeAssetBox'); if(box) box.style.display = btc ? 'none' : '';
@@ -1203,7 +1215,7 @@ function addRecipientRow(){
   const rsel=r.querySelector('.rasset');
   ownedOptions(rsel);
   const updRecHint=attachRefHint(r.querySelector('.ramt'), ()=>rsel.value);   // ≈ ref under the amount
-  rsel.onchange=()=>{ updateFeeForSendType(); updRecHint(); };   // BTC vs Sequentia send → which fee asset applies; re-value too
+  rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); };   // default the fee to the sent asset; re-value too
   r.querySelector('.x').onclick=()=>{ if(box.children.length>1){ r.remove(); updateFeeForSendType(); } };
   box.appendChild(r);
   updateFeeForSendType();
@@ -1283,7 +1295,12 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
     }
     if(feeAssetHex!==undefined) kv.push(['Fee paid in', (feeAssetHex && feeAssetHex!==POLICY_HEX) ? assetMeta(feeAssetHex).ticker : 'tSEQ']);
     // Best-effort fee cross-check only — never the source of truth, never blocks the review.
-    try{ const fee=wollet.psetDetails(pset).balance().fee(); if(fee!=null) kv.push(['Network fee (est.)', fmtAtoms(fee,8)+' tSEQ']); }catch{}
+    try{ const fee=wollet.psetDetails(pset).balance().fee(); if(fee!=null){
+      const fa=(feeAssetHex && feeAssetHex!==POLICY_HEX)?feeAssetHex:POLICY_HEX;
+      const tk=(fa===POLICY_HEX)?'tSEQ':assetMeta(fa).ticker, dec=(fa===POLICY_HEX)?8:assetMeta(fa).precision;
+      const rv=refValueStr(fa, fee);
+      kv.push(['Network fee (est.)', fmtAtoms(fee,dec)+' '+tk+(rv?('  ('+rv+')'):'')]);
+    } }catch{}
   } else {
     // No structured rows supplied (issuance, etc.): keep the psetDetails best-effort, then a clear note.
     try{
@@ -1294,7 +1311,9 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       }
       const net = bal.balances().toJSON();   // {asset: signed atoms}
       for(const [h,v] of Object.entries(net)){ const m=assetMeta(h); kv.push(['Net '+m.ticker, fmtAtoms(v, m.precision)]); }
-      kv.push(['Network fee', fmtAtoms(bal.fee(), 8)+' tSEQ']);
+      { const fa=(feeAssetHex && feeAssetHex!==POLICY_HEX)?feeAssetHex:POLICY_HEX;
+        const tk=(fa===POLICY_HEX)?'tSEQ':assetMeta(fa).ticker, dec=(fa===POLICY_HEX)?8:assetMeta(fa).precision;
+        kv.push(['Network fee', fmtAtoms(bal.fee(), dec)+' '+tk]); }
     }catch{
       kv.push(['Note', 'Non-confidential transfer; amounts are as entered, and a network fee applies.']);
     }
@@ -1397,7 +1416,7 @@ $('btnCopy').onclick=async()=>{
 };
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
-$('feeAsset').onchange=updateFeeForSendType;
+$('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
 $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
   try{ const {pset, meta}=buildIssuePset();
