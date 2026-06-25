@@ -132,6 +132,7 @@
       <button data-tab="balance" class="active">Balance</button>
       <button data-tab="send">Send</button>
       <button data-tab="receive">Receive</button>
+      <button data-tab="swap">Swap</button>
       <button data-tab="assets">Assets</button>
       <button data-tab="stake">Stake</button>
       <button data-tab="history">History</button>
@@ -208,6 +209,59 @@
           <button id="btnNewAddr">New address</button>
           <button class="ghost" id="btnConf">Show confidential</button>
         </div>
+      </div>
+    </section>
+
+    <!-- swap (SeqDEX same-chain atomic swap) -->
+    <section data-panel="swap" class="hide">
+      <div class="card">
+        <label class="lbl">Swap</label>
+        <p class="sub" id="swapTip" style="margin:0 0 12px">Trade one asset for another in a single atomic transaction through a SeqDEX market maker. The swap either fully settles or not at all; no asset is privileged.</p>
+        <div class="field">
+          <label class="lbl">Market</label>
+          <select id="swMarket"></select>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div style="width:150px">
+            <label class="lbl">Side</label>
+            <select id="swSide">
+              <option value="BUY">Buy base</option>
+              <option value="SELL">Sell base</option>
+            </select>
+          </div>
+          <div class="grow">
+            <label class="lbl" id="swAmtLbl">Amount (base)</label>
+            <input id="swAmount" class="mono" placeholder="0.0">
+          </div>
+        </div>
+        <div class="field">
+          <div class="row">
+            <div style="width:160px" id="swFeeAssetBox">
+              <label class="lbl">Pay fee in</label>
+              <select id="swFeeAsset"></select>
+            </div>
+            <div class="grow sub" id="swFeeAssetHint" style="align-self:flex-end"></div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button id="btnSwapQuote">Get quote</button>
+          <button class="primary hide" id="btnSwapReview">Review &amp; swap</button>
+        </div>
+        <div class="status" id="swapStatus"></div>
+        <div id="swapQuote" class="hide" style="margin-top:14px">
+          <div class="kv"><span class="k">You send</span><span class="v" id="swQSend">—</span></div>
+          <div class="sub" id="swQSendRef" style="text-align:right;margin:-4px 0 0"></div>
+          <div class="kv"><span class="k">You receive</span><span class="v" id="swQRecv">—</span></div>
+          <div class="sub" id="swQRecvRef" style="text-align:right;margin:-4px 0 0"></div>
+          <div class="kv"><span class="k">Network fee</span><span class="v" id="swQFee">—</span></div>
+          <div class="kv"><span class="k">Price</span><span class="v" id="swQPrice">—</span></div>
+        </div>
+        <div class="status err" id="swapErr"></div>
+      </div>
+      <div class="card">
+        <label class="lbl">Markets</label>
+        <p class="sub" style="margin:0 0 6px">Open markets on this SeqDEX provider, with the maker fee on each leg.</p>
+        <div class="list" id="swMarketList"><div class="muted">No markets loaded.</div></div>
       </div>
     </section>
 
@@ -296,9 +350,10 @@
 </div>
 
 <script type="module">
-import init, { Mnemonic, Network, Signer, Wollet, EsploraClient, Address, AssetId, Txid, Contract }
+import init, { Mnemonic, Network, Signer, Wollet, EsploraClient, Address, AssetId, Txid, Contract, Pset }
   from './pkg/lwk_wasm.js';
 import { HDKey, mnemonicToSeedSync, btc } from './btc.js';
+import { initSwap, renderSwap } from './swap.js';
 
 const ESPLORA = location.origin + '/api';
 const KEY = 'swk.sequentia.mnemonic';
@@ -704,6 +759,7 @@ function tab(name){
   if(name==='receive') renderReceive();
   if(name==='history') renderHistory();
   if(name==='stake') refreshStakes();
+  if(name==='swap') renderSwap();
   if(name==='send'){ refreshRecipientAssets(); populateFeeAssets(); updateFeeForSendType(); }
 }
 
@@ -729,8 +785,28 @@ function buildWollet(phrase){
 async function openWallet(phrase){
   buildWollet(phrase);
   localStorage.setItem(KEY, phrase.trim().replace(/\s+/g,' '));
-  addrIndex=null; views('app'); tab('balance'); addRecipientRow(); initAppRefUI();
+  addrIndex=null; views('app'); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
   await sync();
+}
+// Hand the Swap module everything it needs from the app: the wasm classes, the
+// live wallet/signer/network handles (read fresh via getters so a re-open keeps
+// them current), and the shared UI helpers it must reuse (equal-standing asset
+// metadata, the fee-asset selector, ref-currency hints, the review/toast UX).
+function initSwapTab(){
+  initSwap({
+    wasm: { Wollet, Signer, AssetId, Address, Pset, Txid },
+    get wollet(){ return wollet; }, get signer(){ return signer; },
+    get network(){ return network; }, get client(){ return client; },
+    get POLICY(){ return POLICY; }, get POLICY_HEX(){ return POLICY_HEX; },
+    get addrIndex(){ return addrIndex; },
+    el, $, assetMeta, balObj, fmtAtoms, parseAtoms,
+    refValueStr, attachRefHint, feeRateFor, prettyErr,
+    get feeRates(){ return feeRates; },   // reassigned by fetchFeeRates — read fresh
+    modalRows, toast, sync,
+    // Where the daemon's same-chain Trade API lives. A reverse-proxy prefix in
+    // production (same-origin /dex), overridable for local testing via a global.
+    DEX: (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
+  });
 }
 
 // ---------- sync + balance ----------
