@@ -101,12 +101,12 @@
       <button class="primary" id="btnCreate">Create new wallet</button>
       <button id="btnImport">Import a recovery phrase</button>
     </div>
-    <div class="warn">Testnet only. Your recovery phrase is stored in this browser — for real funds, use a hardware wallet.</div>
+    <div class="warn">Testnet only. Your recovery phrase is stored in this browser; for real funds, use a hardware wallet.</div>
   </div>
 
   <!-- create -->
   <div class="card hide" id="createView">
-    <label class="lbl">Your recovery phrase — write it down</label>
+    <label class="lbl">Your recovery phrase: write it down</label>
     <div class="words" id="words"></div>
     <div class="warn">Anyone with these 12 words controls the wallet. Back them up before continuing.</div>
     <div class="row" style="margin-top:12px">
@@ -156,7 +156,7 @@
       </div>
       <div class="card">
         <label class="lbl">Testnet faucet</label>
-        <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet — sent straight to this wallet (tSEQ for fees + staking; the others for asset sends and paying fees in an asset).</p>
+        <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to this wallet (tSEQ for fees + staking; the others for asset sends and paying fees in an asset).</p>
         <div class="row" id="faucetBtns">
           <button class="primary" data-faucet="">tSEQ</button>
           <button data-faucet="USDX">USDX</button>
@@ -200,7 +200,7 @@
     <section data-panel="receive" class="hide">
       <div class="card">
         <label class="lbl">Receive</label>
-        <p class="sub" id="recvTip" style="margin:0 0 10px">Non-confidential (tb1…), Bitcoin-compatible — the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.</p>
+        <p class="sub" id="recvTip" style="margin:0 0 10px">Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.</p>
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
         <div class="row" style="margin-top:12px">
@@ -246,7 +246,7 @@
     <section data-panel="stake" class="hide">
       <div class="card">
         <label class="lbl">Stake tSEQ</label>
-        <p class="sub" style="margin:0 0 12px">Staking locks tSEQ in a time-locked script to support the Sequentia network. Your stake weight equals the amount staked, so there's no benefit to a longer lock — the wallet uses the network minimum unbonding period.</p>
+        <p class="sub" style="margin:0 0 12px">Staking locks tSEQ in a time-locked script to support the Sequentia network. Your stake weight equals the amount staked, so there's no benefit to a longer lock; the wallet uses the network minimum unbonding period.</p>
         <div class="field"><label class="lbl">Amount</label><input id="stAmount" class="mono" placeholder="0.0"></div>
         <button class="primary" id="btnStake" style="margin-top:14px">Review stake</button>
         <div class="status err" id="stakeErr"></div>
@@ -279,7 +279,7 @@
       </div>
       <div class="card">
         <label class="lbl">Recovery phrase</label>
-        <p class="sub" style="margin:0 0 10px">Keep it safe — it's the only way to restore this wallet.</p>
+        <p class="sub" style="margin:0 0 10px">Keep it safe; it's the only way to restore this wallet.</p>
         <div class="mono hide" id="seedReveal"></div>
         <div class="row" style="margin-top:8px">
           <button id="btnReveal">Reveal phrase</button>
@@ -371,7 +371,7 @@ function precisionKnown(hex){
 }
 // Precision for an asset being SENT; throws if it's owned but unlabeled (unknown precision).
 function sendPrecision(hex){
-  if(!precisionKnown(hex)) throw new Error('unknown precision for asset '+hex.slice(0,12)+'… — label it before sending');
+  if(!precisionKnown(hex)) throw new Error('unknown precision for asset '+hex.slice(0,12)+'…; label it before sending');
   return assetMeta(hex).precision;
 }
 
@@ -583,15 +583,15 @@ function updateFeeAssetHint(){
     const rel=feeRates[h].rate / feeRefRate;    // value of one unit of the asset in reference units (rfa)
     hint.textContent = `Fee charged in ${t} at this node's published rate (≈ ${rel.toPrecision(4)} reference units per ${t}). The wallet needs enough ${t} to cover it.`;
   } else {
-    hint.textContent = `This node has no published rate for ${t} — the fee will be estimated 1:1 with the reference unit, which may be off.`;
+    hint.textContent = `This node has no published rate for ${t}; the fee will be estimated 1:1 with the reference unit, which may be off.`;
   }
   // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
   // depends on the producer that mines it also accepting THIS asset; the rescue is RBF/CPFP
   // paying the bump in any asset producers accept, compared in the same reference unit.
   const warn=el('div','warn');
   warn.textContent = priced
-    ? `⚠ Confirmation still depends on the producer that mines it accepting ${t}. If it doesn't confirm, RBF (on by default) lets you replace it — paying the bump in any asset producers accept.`
-    : `⚠ Your relay node doesn't price ${t}, so it may reject this and the estimated fee may be off. You can still try — another producer may accept ${t}. RBF is on by default, so you can replace it (e.g. with a different fee asset) if needed.`;
+    ? `⚠ Confirmation still depends on the producer that mines it accepting ${t}. If it doesn't confirm, RBF (on by default) lets you replace it, paying the bump in any asset producers accept.`
+    : `⚠ Your relay node doesn't price ${t}, so it may reject this and the estimated fee may be off. You can still try; another producer may accept ${t}. RBF is on by default, so you can replace it (e.g. with a different fee asset) if needed.`;
   hint.appendChild(warn);
 }
 
@@ -648,7 +648,7 @@ function btcFeeRate(){ const v=parseFloat(($('feeRate').value||'').trim()); retu
 // build + sign a P2WPKH transaction spending wallet utxos to `outputs` ([{address, amount}])
 async function btcBuildTx(outputs, feeRate){
   const utxos = await btcGatherUtxos();
-  if(!utxos.length) throw new Error('no spendable BTC — testnet4 balance is empty');
+  if(!utxos.length) throw new Error('no spendable BTC; testnet4 balance is empty');
   utxos.sort((a,b)=> a.value<b.value?1:a.value>b.value?-1:0);   // largest first
   const target = outputs.reduce((s,o)=>s+o.amount, 0n);
   const feeFor=(nin,nout)=> BigInt(Math.ceil(btcVbytes(nin,nout)*feeRate));
@@ -676,7 +676,7 @@ async function btcBuildTx(outputs, feeRate){
 // review + broadcast a Bitcoin testnet4 payment (mirrors the Sequentia reviewBroadcast UX)
 async function btcReviewBroadcast(outputs, onDone){
   const built = await btcBuildTx(outputs, btcFeeRate());
-  const kv=[['Network', '⚠ Bitcoin testnet4 (parent chain) — sending BTC, not a Sequentia asset']];
+  const kv=[['Network', '⚠ Bitcoin testnet4 (parent chain): sending BTC, not a Sequentia asset']];
   for(const o of outputs) kv.push(['→ '+o.address, fmtAtoms(o.amount,8)+' BTC']);
   kv.push(['Network fee', `${fmtAtoms(built.fee,8)} BTC · ${built.inputs} input${built.inputs>1?'s':''}, ${built.vsize} vB`]);
   kv.push(['Total', fmtAtoms(outputs.reduce((s,o)=>s+o.amount,0n)+built.fee,8)+' BTC']);
@@ -768,7 +768,7 @@ function renderBalance(){
   const keys = Object.keys(b).sort((x,y)=> x===POLICY_HEX?-1 : y===POLICY_HEX?1 : 0);
   for(const h of keys){
     const meta=assetMeta(h);
-    row(meta.ticker, h===POLICY_HEX ? '<span class="sub">Sequentia native asset</span>'
+    row(meta.ticker, h===POLICY_HEX ? '<span class="sub">Sequentia staking asset</span>'
       : `<a href="/asset/${h}" target="_blank" rel="noopener" class="aid">${h}</a>`,
       fmtAtoms(b[h], meta.precision), refValueStr(h, b[h]));
   }
@@ -793,8 +793,8 @@ function renderReceive(){
   try{ $('qr').src = a.QRCodeUri(); }catch{ $('qr').removeAttribute('src'); }
   $('btnConf').textContent = showConf ? 'Show non-confidential' : 'Show confidential';
   $('recvTip').textContent = showConf
-    ? 'Confidential (tsqb1…) — amounts and assets are hidden on-chain. A separate, opt-in private receive; the Bitcoin side always uses the non-confidential form.'
-    : 'Non-confidential (tb1…), Bitcoin-compatible — the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.';
+    ? 'Confidential (tsqb1…): amounts and assets are hidden on-chain. A separate, opt-in private receive; the Bitcoin side always uses the non-confidential form.'
+    : 'Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.';
 }
 
 // ---------- send ----------
@@ -824,9 +824,9 @@ function isBtcSend(){
 function prettyErr(e){
   const m=(e?.message??String(e));
   if(/conflicting|already known|txn-already|already in (block|the mempool)|already.?confirmed/i.test(m))
-    return 'This transaction conflicts with one already in the mempool or a block — it may have already confirmed. Refresh to check; a confirmed transaction needs no bump.';
+    return 'This transaction conflicts with one already in the mempool or a block; it may have already confirmed. Refresh to check; a confirmed transaction needs no bump.';
   if(/insufficient fee|min relay|fee too low|rejecting replacement/i.test(m))
-    return 'The fee is too low for the network to accept — raise the fee rate and try again.';
+    return 'The fee is too low for the network to accept; raise the fee rate and try again.';
   return m;
 }
 // The fee is paid in the chosen asset (BTC for a parent-chain send), so the rate is in that
@@ -842,7 +842,7 @@ function feeUnitOf(hex){ return (hex && hex!==POLICY_HEX) ? assetMeta(hex).ticke
 function updateFeeForSendType(){
   const btc=isBtcSend();
   const box=$('feeAssetBox'); if(box) box.style.display = btc ? 'none' : '';
-  if(btc){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4) — this is a parent-chain payment.'; }
+  if(btc){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4); this is a parent-chain payment.'; }
   else { updateFeeAssetHint(); }
   const l=$('feeRateLabel'); if(l) l.textContent='Fee rate ('+feeRateTicker()+'/vB, optional)';
 }
@@ -882,7 +882,7 @@ function buildSendPset(rows){
   let b = network.txBuilder();
   for(const r of rows){
     const a=new Address(r.addr);   // throws on a non-Sequentia / malformed address
-    if(a.isMainnet()) throw new Error('That looks like a mainnet address — this is a Sequentia testnet wallet.');
+    if(a.isMainnet()) throw new Error('That looks like a mainnet address; this is a Sequentia testnet wallet.');
     const sats=parseAtoms(r.amtS, sendPrecision(r.asset));
     if(sats<=0n) throw new Error('amount must be greater than zero');
     const assetId = r.asset===POLICY_HEX ? POLICY : new AssetId(r.asset);
@@ -924,7 +924,7 @@ function modalRows(rows){
 async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
   const kv=[];
   // First line: this is a Sequentia (testnet) payment, NOT a parent-chain BTC one.
-  kv.push(['Network', 'Sequentia (testnet) — not parent-chain BTC']);
+  kv.push(['Network', 'Sequentia (testnet); not parent-chain BTC']);
   if(review && Array.isArray(review.rows)){
     for(const r of review.rows){
       const m=assetMeta(r.hex);
@@ -951,7 +951,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       for(const [h,v] of Object.entries(net)){ const m=assetMeta(h); kv.push(['Net '+m.ticker, fmtAtoms(v, m.precision)]); }
       kv.push(['Network fee', fmtAtoms(bal.fee(), 8)+' tSEQ']);
     }catch{
-      kv.push(['Note', 'Non-confidential transfer — amounts are as entered; a network fee applies.']);
+      kv.push(['Note', 'Non-confidential transfer; amounts are as entered, and a network fee applies.']);
     }
     if(feeAssetHex && feeAssetHex!==POLICY_HEX) kv.push(['Fee paid in', assetMeta(feeAssetHex).ticker]);
   }
@@ -1006,7 +1006,7 @@ async function requestFaucet(asset){
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
     $('faucetStatus').className='status ok';
-    $('faucetStatus').innerHTML=`Sent ${Number(j.amount).toLocaleString()} ${j.asset} — <a href="/tx/${j.txid}" target="_blank" rel="noopener">${j.txid.slice(0,16)}…</a>. It'll show up once it confirms.`;
+    $('faucetStatus').innerHTML=`Sent ${Number(j.amount).toLocaleString()} ${j.asset}: <a href="/tx/${j.txid}" target="_blank" rel="noopener">${j.txid.slice(0,16)}…</a>. It'll show up once it confirms.`;
     setTimeout(sync, 8000);
   }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
   finally{ btns.forEach(b=>b.disabled=false); }
@@ -1147,7 +1147,7 @@ function feeAssetSelect(){
 // Add one recipient to a builder, mirroring buildSendPset's blinded/explicit + policy/asset handling.
 function addOneRecipient(b, addrStr, assetHex, amtStr){
   const a=new Address(addrStr);
-  if(a.isMainnet()) throw new Error('That looks like a mainnet address — this is a Sequentia testnet wallet.');
+  if(a.isMainnet()) throw new Error('That looks like a mainnet address; this is a Sequentia testnet wallet.');
   const sats=parseAtoms(amtStr, sendPrecision(assetHex));
   if(sats<=0n) throw new Error('amount must be greater than zero');
   const assetId = assetHex===POLICY_HEX ? POLICY : new AssetId(assetHex);
@@ -1157,7 +1157,7 @@ function addOneRecipient(b, addrStr, assetHex, amtStr){
 function bumpFeeDialog(txid){
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Replace with a higher fee (RBF)'));
-  c.appendChild(el('div','sub','Re-broadcasts the same payment at a higher fee. Pay the bump in any asset — confirmation depends on the producer that mines it accepting that asset.'));
+  c.appendChild(el('div','sub','Re-broadcasts the same payment at a higher fee. Pay the bump in any asset; confirmation depends on the producer that mines it accepting that asset.'));
   c.appendChild(el('label','lbl','Pay the bump fee in'));
   const sel=feeAssetSelect(); c.appendChild(sel);
   const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
@@ -1188,7 +1188,7 @@ async function doBump(txid, feeAssetHex, feeRateVb){
 function cpfpDialog(txid){
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Speed up (child-pays-for-parent)'));
-  c.appendChild(el('div','sub','Attaches a child transaction whose high fee lifts this one into a block. Works when the parent is just under-priced — not when its fee asset is one producers reject (use Replace for that).'));
+  c.appendChild(el('div','sub','Attaches a child transaction whose high fee lifts this one into a block. Works when the parent is just under-priced, not when its fee asset is one producers reject (use Replace for that).'));
   c.appendChild(el('label','lbl','Pay the child fee in'));
   const sel=feeAssetSelect(); c.appendChild(sel);
   const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
