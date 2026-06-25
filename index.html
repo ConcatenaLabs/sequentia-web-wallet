@@ -1177,7 +1177,7 @@ function prettyErr(e){
 // The fee is paid in the chosen asset (BTC for a parent-chain send), so the rate is in that
 // asset's units per vByte — label it accordingly rather than the misleading "sat/vB".
 function feeRateTicker(){
-  if(isBtcSend()) return 'BTC';
+  if(isBtcSend()) return 'sat';   // BTC fee rate is sat/vB (a Bitcoin unit); only here
   const fa=$('feeAsset') && $('feeAsset').value;
   return (fa && fa!==POLICY_HEX) ? assetMeta(fa).ticker : 'tSEQ';
 }
@@ -1248,13 +1248,19 @@ function buildSendPset(rows){
     if(a.isBlinded()) b = r.asset===POLICY_HEX ? b.addLbtcRecipient(a, sats) : b.addRecipient(a, sats, assetId);
     else b = b.addExplicitRecipient(a, sats, assetId);
   }
-  // lwk's feeRate is sat/kvB; the field is sat/vB, so ×1000. Default keeps us above min relay.
   const fr=$('feeRate').value.trim();
-  b=b.feeRate(fr ? parseFloat(fr)*1000 : DEFAULT_FEERATE);
+  const fa=$('feeAsset') && $('feeAsset').value;
+  const feeHex=(fa && fa!==POLICY_HEX)?fa:POLICY_HEX;
+  // The rate field is in the fee asset's own units per vByte (e.g. OILX/vB, tSEQ/vB) — never
+  // sat/vB, which is a Bitcoin unit and only applies to an actual BTC send. Convert it to the
+  // internal rate lwk needs: r * 10^precision * R / 1e5, where R is the asset's published rate
+  // (tSEQ, the native asset, uses EXCHANGE_RATE_SCALE). Blank leaves it at the network default.
+  const feeR=(feeHex===POLICY_HEX)?EXCHANGE_RATE_SCALE:Number(feeRateFor(feeHex));
+  const feePrec=assetMeta(feeHex).precision||8;
+  b=b.feeRate(fr ? (parseFloat(fr)*Math.pow(10,feePrec)*feeR/1e5) : DEFAULT_FEERATE);
   // Pay the fee in whatever asset the user chose, at this node's published rate. There is no 1:1
   // fallback — a fabricated rate yields a wrong fee, so an unpriced asset is a hard error
   // (feeRateFor throws). The selectors already gate unpriced assets out; this is the last guard.
-  const fa=$('feeAsset') && $('feeAsset').value;
   if(fa && fa!==POLICY_HEX){
     b=b.feeAsset(new AssetId(fa), feeRateFor(fa));
   }
