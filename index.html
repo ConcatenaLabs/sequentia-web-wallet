@@ -1232,10 +1232,14 @@ function updateFeeForSendType(){
   else { updateFeeAssetHint(); }
   const l=$('feeRateLabel'); if(l) l.textContent='Fee rate ('+feeRateTicker()+'/vB, optional)';
 }
+// Only one scanner at a time; also stop the camera if the page is hidden/unloaded with it open.
+let activeScannerCleanup=null;
+window.addEventListener('pagehide', ()=>{ if(activeScannerCleanup){ try{ activeScannerCleanup(); }catch{} } });
 // Scan a QR code into an address field. Live camera needs a secure (https) context; over plain
 // http the photo/upload fallback still works (and on a phone, capture opens the camera to shoot it).
 async function openScanner(addrInput, amtInput){
   if(!addrInput) return;
+  if(activeScannerCleanup){ try{ activeScannerCleanup(); }catch{} }   // close any prior scanner (one at a time)
   const m=el('div','modal'); const c=el('div','card'); c.style.maxWidth='440px';
   c.appendChild(el('label','lbl','Scan a QR code'));
   const video=document.createElement('video'); video.setAttribute('playsinline',''); video.muted=true;
@@ -1251,11 +1255,14 @@ async function openScanner(addrInput, amtInput){
 
   let stream=null, raf=null, done=false;
   const canvas=document.createElement('canvas'); const ctx=canvas.getContext('2d',{willReadFrequently:true});
-  const cleanup=()=>{ if(done) return; done=true; if(raf) cancelAnimationFrame(raf); if(stream){ try{ stream.getTracks().forEach(t=>t.stop()); }catch{} } m.remove(); };
+  const cleanup=()=>{ if(done) return; done=true; if(raf) cancelAnimationFrame(raf); if(stream){ try{ stream.getTracks().forEach(t=>t.stop()); }catch{} } m.remove(); if(activeScannerCleanup===cleanup) activeScannerCleanup=null; };
+  activeScannerCleanup=cleanup;
   cancel.onclick=cleanup; m.addEventListener('click', e=>{ if(e.target===m) cleanup(); });
+  if(!window.jsQR){ status.textContent='QR decoder is unavailable; paste or type the address instead.'; fileBtn.style.display='none'; return; }
 
-  const decode=(img)=> (window.jsQR ? window.jsQR(img.data, img.width, img.height, {inversionAttempts:'attemptBoth'}) : null);
+  const decode=(img)=> window.jsQR(img.data, img.width, img.height, {inversionAttempts:'attemptBoth'});
   const onDecoded=(text)=>{
+    if(done) return;                                                 // a result already won (camera vs in-flight file decode)
     let s=(text||'').trim(); if(!s) return;
     if(s.includes(':')) s=s.slice(s.indexOf(':')+1);                 // drop any URI scheme (mirror the mobile wallet)
     let amt=null; const q=s.indexOf('?');
