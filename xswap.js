@@ -38,7 +38,7 @@
 //  • SEQ equal standing — the SEQ asset is shown by its `assetMeta` ticker, no
 //    privileged "native" hero; BTC is the parent-chain leg, labelled as such.
 //  • Reference currency — amounts carry an `≈ <ref>` hint where priced.
-//  • Anchor-aware finality — the anchor gate + success copy say the SEQ leg is
+//  • Anchor-aware finality — the anchor gate + success copy say the Sequentia leg is
 //    bound to a Bitcoin block and can reorg only if Bitcoin does (never
 //    "instant/irreversible").
 //
@@ -107,7 +107,7 @@ function normMarket(m){
   return {
     btc_asset:        pick(m, 'btc_asset', 'btcAsset') || '',
     seq_asset:        pick(m, 'seq_asset', 'seqAsset'),
-    name:             pick(m, 'name') || 'BTC / SEQ-asset',
+    name:             pick(m, 'name') || 'BTC / Sequentia asset',
     seq_reserve:      big(pick(m, 'seq_reserve', 'seqReserve')),
     btc_reserve:      big(pick(m, 'btc_reserve', 'btcReserve')),
     price_seq_per_btc: num(pick(m, 'price_seq_per_btc', 'priceSeqPerBtc')),
@@ -191,7 +191,7 @@ export async function fetchXquote(seqAsset, seqAtoms){
   const market = XMARKETS.find(m => m.seq_asset === seqAsset);
   const resp = await dexPost('/v1/xchain/quote', { seq_asset: seqAsset, seq_amount: String(seqAtoms) });
   const q = {
-    market: market || { btc_asset:'', seq_asset:seqAsset, name:'BTC / SEQ-asset', price_seq_per_btc:0 },
+    market: market || { btc_asset:'', seq_asset:seqAsset, name:'BTC / Sequentia asset', price_seq_per_btc:0 },
     quote_id:            pick(resp, 'quote_id', 'quoteId'),
     seq_amount:          big(pick(resp, 'seq_amount', 'seqAmount')),
     btc_amount:          big(pick(resp, 'btc_amount', 'btcAmount')),
@@ -350,7 +350,7 @@ function showQuote(){
   $('xQPay').textContent = C.fmtAtoms(q.btc_amount, 8) + ' BTC';
   $('xQPayRef').textContent = (C.refValueStr && C.refValueStr('BTC', q.btc_amount)) || '';
   $('xQFee').textContent = C.fmtAtoms(q.fee_btc, 8) + ' BTC';
-  $('xQTimeouts').textContent = `T_btc=${q.btc_locktime} (you refund BTC) · T_seq=${q.seq_locktime} (maker refunds SEQ)`;
+  $('xQTimeouts').textContent = `T_btc=${q.btc_locktime} (you refund BTC) · T_seq=${q.seq_locktime} (maker refunds on Sequentia)`;
   startCountdown();
   $('btnXLockBtc') && $('btnXLockBtc').classList.remove('hide');
 }
@@ -439,7 +439,7 @@ async function onLockBtc(){
   };
 }
 
-// ---- step 3: propose (maker verifies BTC leg + locks SEQ leg) ----
+// ---- step 3: propose (maker verifies BTC leg + locks Sequentia leg) ----
 async function propose(){
   if (!SWAP) throw new Error('no in-flight swap');
   const resp = await dexPost('/v1/xchain/propose', {
@@ -465,6 +465,7 @@ async function propose(){
   if (!accepted) throw new Error('no XchainSwapAccepted in propose response');
   SWAP.swap_id = pick(accepted, 'swap_id', 'swapId');
   SWAP.seq_leg = normSeqLeg(pick(accepted, 'seq_leg', 'seqLeg'));
+  { const lg = verifyLeg(); if (!lg.ok){ SWAP.state = ST.FAILED; SWAP.detail = lg.reason; saveSwap(); throw new Error('swap aborted: ' + lg.reason); } }
   SWAP.state = ST.SEQ_LOCKED;
   saveSwap();
   return SWAP;
@@ -476,7 +477,7 @@ async function onPropose(){
   try {
     await propose();
     renderStepper();
-    C.toast && C.toast('SEQ leg locked by the maker — verify the anchor next.');
+    C.toast && C.toast('Sequentia leg locked by the maker — verify the anchor next.');
   } catch (e){
     $('xswapErr').textContent = 'Propose failed: ' + C.prettyErr(e);
     renderStepper();
@@ -485,32 +486,48 @@ async function onPropose(){
 
 // ---- step 4: anchor-ordering verification (FIRST-CLASS, MANDATORY GATE) ----
 // The Sequentia value-add. We REQUIRE seq_leg.anchor_height >= btc_leg.height
-// before allowing the SEQ claim: the SEQ leg is bound to a Bitcoin block at or
+// before allowing the SEQ claim: the Sequentia leg is bound to a Bitcoin block at or
 // after the one your BTC lock confirmed in, so it can't outlive your BTC — if
-// Bitcoin reorgs your lock away, the SEQ leg reorgs with it. We verify the
+// Bitcoin reorgs your lock away, the Sequentia leg reorgs with it. We verify the
 // maker-returned anchor_height against our own btc_leg.height, and (when a SEQ
 // anchor-status reader is wired) surface the node's live anchorstatus too.
+// Value-binding gate: the maker's locked Sequentia leg must match what we agreed to
+// buy (asset + at least the agreed amount). Without it, a malicious maker locks dust
+// or a substituted asset; we claim it, leak the preimage, and they sweep our full BTC.
+function verifyLeg(){
+  if (!SWAP || !SWAP.seq_leg) return { ok:false, reason:'no Sequentia leg yet' };
+  const want = SWAP.market && SWAP.market.seq_asset;
+  if (want && SWAP.seq_leg.asset_id !== want)
+    return { ok:false, reason:`maker locked ${C.assetMeta(SWAP.seq_leg.asset_id).ticker}, not the agreed ${C.assetMeta(want).ticker} — do not claim; refund your BTC` };
+  try {
+    if (SWAP.seq_amount != null && BigInt(String(SWAP.seq_leg.amount)) < BigInt(String(SWAP.seq_amount)))
+      return { ok:false, reason:'maker locked less than agreed — do not claim; refund your BTC' };
+  } catch { return { ok:false, reason:'unreadable leg amount — do not claim' }; }
+  return { ok:true };
+}
 function verifyAnchor(){
-  if (!SWAP || !SWAP.seq_leg) return { ok: false, reason: 'no SEQ leg yet' };
+  if (!SWAP || !SWAP.seq_leg) return { ok: false, reason: 'no Sequentia leg yet' };
   const ah = SWAP.seq_leg.anchor_height;
   const bh = Number(SWAP.btc_leg.height);
   if (ah == null || ah < 0)
-    return { ok: false, anchor_height: ah, btc_height: bh, reason: 'maker returned no anchor height (-1): the SEQ block is not anchored' };
+    return { ok: false, anchor_height: ah, btc_height: bh, reason: 'maker returned no anchor height (-1): the Sequentia block is not anchored' };
   if (!(ah >= bh))
-    return { ok: false, anchor_height: ah, btc_height: bh, reason: `anchor_height ${ah} < BTC-leg height ${bh}: SEQ leg is NOT bound to a Bitcoin block at/after your lock` };
+    return { ok: false, anchor_height: ah, btc_height: bh, reason: `anchor_height ${ah} < BTC-leg height ${bh}: Sequentia leg is NOT bound to a Bitcoin block at/after your lock` };
   return { ok: true, anchor_height: ah, btc_height: bh };
 }
 
-// ---- step 5: claim the SEQ leg (reveals the preimage) ----
+// ---- step 5: claim the Sequentia leg (reveals the preimage) ----
 // Build the claim with the 6c-2 binding (IF/redeem branch, revealing s) and
 // broadcast via the wallet's Sequentia esplora. The destination is a fresh
 // wallet address' (unconfidential) scriptPubKey; the claim fee is an explicit
 // Elements fee output (C.seqClaimFee atoms, default 100000 — the taker CLI's
 // ClaimSEQLeg fee).
 async function claimSeq(){
-  if (!SWAP || !SWAP.seq_leg) throw new Error('no SEQ leg to claim');
+  if (!SWAP || !SWAP.seq_leg) throw new Error('no Sequentia leg to claim');
   const gate = verifyAnchor();
   if (!gate.ok) throw new Error('anchor gate not satisfied: ' + gate.reason);   // belt-and-suspenders; the UI also gates the button
+  const lg = verifyLeg();
+  if (!lg.ok) throw new Error('leg mismatch: ' + lg.reason);   // never reveal the preimage on a mismatched leg
   const { wasm } = C;
   // Destination SPK: a fresh wallet address, unconfidential (explicit output).
   const destSpk = takerDestSpkHex();
@@ -562,23 +579,25 @@ async function onClaimSeq(){
   $('xswapErr').textContent = '';
   const gate = verifyAnchor();
   if (!gate.ok){ $('xswapErr').textContent = 'cannot claim: ' + gate.reason; return; }
+  const leg = verifyLeg();
+  if (!leg.ok){ $('xswapErr').textContent = 'cannot claim: ' + leg.reason; return; }
   const sm = C.assetMeta(SWAP.seq_leg.asset_id);
   const kv = [
-    ['Network', 'Sequentia (testnet): claiming the SEQ leg reveals your secret on-chain'],
+    ['Network', 'Sequentia (testnet): claiming the Sequentia leg reveals your secret on-chain'],
     ['You receive', C.fmtAtoms(SWAP.seq_leg.amount, sm.precision) + ' ' + sm.ticker],
-    ['Anchor verified', `SEQ anchor_height ${gate.anchor_height} ≥ your BTC-leg height ${gate.btc_height}`],
+    ['Anchor verified', `Sequentia anchor_height ${gate.anchor_height} ≥ your BTC-leg height ${gate.btc_height}`],
     ['Effect', 'Revealing the secret lets the maker claim your BTC, completing the atomic swap.'],
     ['Finality', 'Anchor-bounded: this can reorg only if the Bitcoin block it is anchored to does.'],
   ];
-  const { m: modal, ok, st } = C.modalRows({ title: 'Claim the SEQ leg', kv });
+  const { m: modal, ok, st } = C.modalRows({ title: 'Claim the Sequentia leg', kv });
   ok.onclick = async () => {
-    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Claiming SEQ leg…';
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Claiming Sequentia leg…';
     try {
       const txid = await claimSeq();
       modal.remove();
       renderStepper();
       startPoll();
-      C.toast && C.toast('SEQ leg claimed (anchor-bounded):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast && C.toast('Sequentia leg claimed (anchor-bounded):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
     } catch (e){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
   };
 }
@@ -619,7 +638,7 @@ async function onRefundBtc(){
     ['Network', '⚠ Bitcoin: refunding YOUR locked BTC leg (parent chain) via the CLTV branch'],
     ['Refund amount', C.fmtAtoms(SWAP.btc_leg.amount, 8) + ' BTC (minus the refund tx fee)'],
     ['Valid after', 'block ' + SWAP.btc_locktime],
-    ['Note', 'Only do this if the maker stalled / the quote expired and the SEQ leg was never safely claimable.'],
+    ['Note', 'Only do this if the maker stalled / the quote expired and the Sequentia leg was never safely claimable.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Refund the BTC leg', kv });
   ok.onclick = async () => {
@@ -651,8 +670,8 @@ function badge(state){
   const map = {
     [ST.QUOTED]:      ['Quoted', 'b-out'],
     [ST.PENDING]:     ['BTC locked', 'b-out'],
-    [ST.SEQ_LOCKED]:  ['SEQ locked', 'b-out'],
-    [ST.SEQ_CLAIMED]: ['SEQ claimed', 'b-in'],
+    [ST.SEQ_LOCKED]:  ['Sequentia locked', 'b-out'],
+    [ST.SEQ_CLAIMED]: ['Sequentia claimed', 'b-in'],
     [ST.BTC_CLAIMED]: ['Complete', 'b-in'],
     [ST.REFUNDED]:    ['Refunded', 'b-out'],
     [ST.FAILED]:      ['Failed', 'b-out'],
@@ -752,9 +771,9 @@ function stepLockCard(){
 function stepProposeCard(){
   const done = !!(SWAP.swap_id);
   const active = !done && !!(SWAP.btc_leg && SWAP.btc_leg.txid) && SWAP.state !== ST.FAILED;
-  const body = [ C.el('div','sub','The maker verifies your BTC leg, then locks the SEQ leg in an anchored Sequentia block.') ];
+  const body = [ C.el('div','sub','The maker verifies your BTC leg, then locks the Sequentia leg in an anchored Sequentia block.') ];
   if (done) body.push(kvRow('Swap id', short(SWAP.swap_id)));
-  if (SWAP.seq_leg && SWAP.seq_leg.txid) body.push(kvRowHtml('SEQ lock tx', txLink(SWAP.seq_leg.txid, false)));
+  if (SWAP.seq_leg && SWAP.seq_leg.txid) body.push(kvRowHtml('Sequentia lock tx', txLink(SWAP.seq_leg.txid, false)));
   if (SWAP.state === ST.FAILED) body.push(errLine(SWAP.detail || 'propose failed'));
   const c = stepCard(2, 'Propose to maker', done, active, body);
   if (active){
@@ -768,13 +787,13 @@ function stepAnchorCard(){
   const gate = have ? verifyAnchor() : { ok:false };
   const done = have && gate.ok;
   const body = [
-    C.el('div','sub','Mandatory anchor gate (the Sequentia value-add): the SEQ leg must be bound to a Bitcoin block at or after your BTC lock.'),
+    C.el('div','sub','Mandatory anchor gate (the Sequentia value-add): the Sequentia leg must be bound to a Bitcoin block at or after your BTC lock.'),
   ];
   if (have){
-    body.push(kvRow('SEQ anchor_height', String(SWAP.seq_leg.anchor_height)));
+    body.push(kvRow('Sequentia anchor_height', String(SWAP.seq_leg.anchor_height)));
     body.push(kvRow('Your BTC-leg height', String(SWAP.btc_leg.height)));
     if (gate.ok){
-      body.push(okLine(`Anchor verified: anchor_height ${gate.anchor_height} ≥ your BTC-leg height ${gate.btc_height} — the SEQ leg is bound to a Bitcoin block ≥ your BTC lock, so it can't outlive your BTC.`));
+      body.push(okLine(`Anchor verified: anchor_height ${gate.anchor_height} ≥ your BTC-leg height ${gate.btc_height} — the Sequentia leg is bound to a Bitcoin block ≥ your BTC lock, so it can't outlive your BTC.`));
     } else {
       body.push(errLine('Anchor NOT verified: ' + (gate.reason || 'ordering not satisfied') + ' — do NOT claim; refund the BTC leg after T_btc instead.'));
     }
@@ -786,11 +805,11 @@ function stepClaimCard(){
   const gate = have ? verifyAnchor() : { ok:false };
   const claimed = !!(SWAP.seq_claim_txid) || SWAP.state === ST.SEQ_CLAIMED || SWAP.state === ST.BTC_CLAIMED;
   const active = have && gate.ok && !claimed;
-  const body = [ C.el('div','sub','Claim the SEQ leg with your secret. This reveals the secret on-chain so the maker can claim your BTC — completing the atomic swap.') ];
-  if (SWAP.seq_claim_txid) body.push(kvRowHtml('SEQ claim tx', txLink(SWAP.seq_claim_txid, false)));
-  const c = stepCard(4, 'Claim SEQ leg', claimed, active, body);
+  const body = [ C.el('div','sub','Claim the Sequentia leg with your secret. This reveals the secret on-chain so the maker can claim your BTC — completing the atomic swap.') ];
+  if (SWAP.seq_claim_txid) body.push(kvRowHtml('Sequentia claim tx', txLink(SWAP.seq_claim_txid, false)));
+  const c = stepCard(4, 'Claim Sequentia leg', claimed, active, body);
   if (active){
-    const btn = C.el('button','primary','Claim SEQ leg'); btn.id = 'btnXClaim'; btn.onclick = onClaimSeq;
+    const btn = C.el('button','primary','Claim Sequentia leg'); btn.id = 'btnXClaim'; btn.onclick = onClaimSeq;
     btn.style.marginTop = '10px'; c.appendChild(btn);
   } else if (have && !gate.ok && !claimed){
     c.appendChild(C.el('div','warn','Claiming is blocked until the anchor gate passes.'));

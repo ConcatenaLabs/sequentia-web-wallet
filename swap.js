@@ -587,7 +587,7 @@ function feeAssetSubline(hex){
 function setFinality(kind){
   const t = C.$('swFinText'); if (!t) return;
   t.textContent = kind === 'cross'
-    ? 'Settles across both chains · the SEQ leg is anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'
+    ? 'Settles across both chains · the Sequentia leg is anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'
     : 'Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).';
 }
 
@@ -881,7 +881,7 @@ export const __test__ = { proposeSignComplete, stripBip32, dexPost,
   setXMarkets: (m) => { XMARKETS = (m||[]).map(x => ({
     btc_asset: x.btc_asset ?? x.btcAsset ?? '',
     seq_asset: x.seq_asset ?? x.seqAsset,
-    name: x.name || 'BTC / SEQ-asset',
+    name: x.name || 'BTC / Sequentia asset',
     price_seq_per_btc: x.price_seq_per_btc ?? x.priceSeqPerBtc ?? 0,
   })); },
   orientLegs, pick,
