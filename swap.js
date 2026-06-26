@@ -458,6 +458,14 @@ function paintQuoteSame(){
 async function requoteCross(route, amtStr){
   const { $ } = C;
   if (!X || !X.quote){ $('swErr').textContent = 'Cross-chain route unavailable in this build.'; setReviewEnabled(false); return; }
+  // Cross-chain MVP only does BTC -> asset (you pay BTC, the maker locks the asset).
+  // Selling an asset for BTC isn't supported yet, so guard BEFORE quoting; otherwise the
+  // doomed quote returns a confusing reserve error instead of telling you to flip.
+  if (!route.payIsBtc){
+    const t = C.assetMeta(S.payAsset).ticker || 'that asset';
+    $('swErr').textContent = `Cross-chain currently only supports BTC → asset (pay BTC, receive the asset). Selling ${t} for BTC isn't supported yet; flip the sides so you pay BTC.`;
+    $('swStatus').textContent = ''; clearOpposite(); setReviewEnabled(false); return;
+  }
   // The daemon prices in seq_amount; quoting is anchored on the SEQ-asset side.
   const seqAsset = route.xm.seq_asset;
   const seqIsPay = (S.payAsset === seqAsset);
@@ -481,9 +489,7 @@ async function requoteCross(route, amtStr){
     LAST_QUOTE = { kind:'cross', route, xq, seqAsset };
     status.textContent = '';
     paintQuoteCross();
-    // Only the daemon-supported direction (pay BTC, receive asset) is reviewable.
-    setReviewEnabled(route.payIsBtc);
-    if (!route.payIsBtc) $('swErr').textContent = 'This maker only sells the asset for BTC. Flip so you pay BTC.';
+    setReviewEnabled(true);   // reached only for the supported BTC -> asset direction
   } catch (e){
     status.textContent = '';
     $('swErr').textContent = 'Quote failed: ' + (e.message || e);
@@ -737,7 +743,7 @@ async function reviewSame(q){
 // Cross-chain: hand the priced quote to xswap.js and show its wizard stepper.
 async function reviewCross(q){
   const { $ } = C;
-  if (!q.route.payIsBtc){ $('swErr').textContent = 'This maker only sells the asset for BTC. Flip so you pay BTC.'; return; }
+  if (!q.route.payIsBtc){ $('swErr').textContent = 'Cross-chain currently only supports BTC → asset; flip the sides so you pay BTC.'; return; }
   if (!X || !X.openFromComposer){ $('swErr').textContent = 'Cross-chain route unavailable in this build.'; return; }
   // Switch to the wizard host; xswap.js takes over from here (its own review modals,
   // anchor gate, claim/poll, and localStorage resume are unchanged).
