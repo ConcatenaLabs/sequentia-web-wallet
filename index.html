@@ -1361,7 +1361,7 @@ function buildSendPset(rows){
   // internal rate lwk needs: r * 10^precision * R / 1e5, where R is the asset's published rate
   // (tSEQ, the native asset, uses EXCHANGE_RATE_SCALE). Blank leaves it at the network default.
   const feeR=(feeHex===POLICY_HEX)?EXCHANGE_RATE_SCALE:Number(feeRateFor(feeHex));
-  const feePrec=assetMeta(feeHex).precision||8;
+  const feePrec=assetMeta(feeHex).precision||0;   // genuine 0-precision asset must not be treated as 8 (would inflate the rate 1e8x)
   b=b.feeRate(fr ? (parseFloat(fr)*Math.pow(10,feePrec)*feeR/1e5) : DEFAULT_FEERATE);
   // Pay the fee in whatever asset the user chose, at this node's published rate. There is no 1:1
   // fallback — a fabricated rate yields a wrong fee, so an unpriced asset is a hard error
