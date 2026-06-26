@@ -578,7 +578,7 @@ async function onClaimSeq(){
       modal.remove();
       renderStepper();
       startPoll();
-      C.toast && C.toast(`SEQ leg claimed: <a href="/tx/${txid}" target="_blank" rel="noopener">${String(txid).slice(0,18)}…</a> — anchor-bounded.`);
+      C.toast && C.toast('SEQ leg claimed (anchor-bounded):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
     } catch (e){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
   };
 }

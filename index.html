@@ -523,7 +523,10 @@ const STAKE_PERIOD_LABEL = '~15 days (network minimum)';
 // Chain minimum stake: 40,000 tSEQ = 4e12 atoms (tSEQ precision 8). Mirrors the desktop wallet.
 const STAKE_MIN_ATOMS = 4000000000000n;
 const $ = id => document.getElementById(id);
-const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e;};
+// el() sets content as TEXT, never HTML — untrusted strings (asset tickers/names from the registry,
+// server responses, decoded data) must never become markup. Use txLink() / explicit nodes for links.
+const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.textContent=h; return e;};
+const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href); a.target='_blank'; a.rel='noopener'; a.textContent=label; return a; };
 
 let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false;
 
@@ -560,7 +563,8 @@ async function loadRegistry(){
   try {
     const r = await fetch(REGISTRY_URL, {cache:'no-store'}); if(!r.ok) return;
     const idx = await r.json(); const m = {};            // { id: [domain, ticker, name, precision] }
-    for(const [id,v] of Object.entries(idx)) if(Array.isArray(v)) m[id]={ticker:v[1], name:v[2], precision:v[3], domain:v[0]};
+    const clean=(s,n)=> (typeof s==='string') ? s.replace(/[<>]/g,'').slice(0,n) : s;   // defense-in-depth: registry strings are display text
+    for(const [id,v] of Object.entries(idx)) if(Array.isArray(v)) m[id]={ticker:clean(v[1],16), name:clean(v[2],48), precision:v[3], domain:v[0]};
     REGISTRY_ASSETS = m;
     try { if(typeof renderBalance==='function') renderBalance(); } catch {}   // refresh labels if the UI is already up
   } catch {}
@@ -921,7 +925,7 @@ async function btcReviewBroadcast(outputs, onDone){
       if(!r.ok) throw new Error(txt||('HTTP '+r.status));
       if(!/^[0-9a-fA-F]{64}$/.test(txt)) throw new Error('unexpected broadcast response: '+txt.slice(0,80));
       if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);  // advance only on a confirmed broadcast
-      m.remove(); toast(`Sent BTC: <a href="/testnet4/tx/${txt}" target="_blank" rel="noopener">${txt.slice(0,18)}…</a>`);
+      m.remove(); toast('Sent BTC:', {href:'/testnet4/tx/'+txt, label:txt.slice(0,18)+'…'});
       if(onDone) onDone(txt); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
@@ -1374,7 +1378,7 @@ function modalRows(rows){
   c.appendChild(el('label','lbl', rows.title));
   for(const [k,v] of rows.kv){ const d=el('div','kv'); d.appendChild(el('span','k',k)); d.appendChild(el('span','v',v)); c.appendChild(d); }
   const act=el('div','row'); act.style.marginTop='16px';
-  const ok=el('button','primary','Confirm &amp; sign'); const no=el('button','ghost','Cancel');
+  const ok=el('button','primary','Confirm & sign'); const no=el('button','ghost','Cancel');
   const st=el('div','status'); act.appendChild(ok); act.appendChild(no); c.appendChild(act); c.appendChild(st);
   m.appendChild(c); document.body.appendChild(m);
   no.onclick=()=>m.remove();
@@ -1433,7 +1437,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       const signed = signer.sign(pset);
       const finalized = wollet.finalize(signed);
       const txid = await client.broadcast(finalized);
-      m.remove(); toast(`Broadcast: <a href="/tx/${txid}" target="_blank" rel="noopener">${txid.toString().slice(0,18)}…</a>`);
+      m.remove(); toast('Broadcast:', {href:'/tx/'+txid.toString(), label:txid.toString().slice(0,18)+'…'});
       if(onDone) onDone(txid); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
@@ -1477,7 +1481,9 @@ async function requestFaucet(asset){
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
     $('faucetStatus').className='status ok';
-    $('faucetStatus').innerHTML=`Sent ${Number(j.amount).toLocaleString()} ${j.asset}: <a href="/tx/${j.txid}" target="_blank" rel="noopener">${j.txid.slice(0,16)}…</a>. It'll show up once it confirms.`;
+    { const fs=$('faucetStatus'); fs.textContent=`Sent ${Number(j.amount).toLocaleString()} ${j.asset}: `;
+      fs.appendChild(txLink('/tx/'+j.txid, String(j.txid).slice(0,16)+'…'));
+      fs.appendChild(document.createTextNode(". It'll show up once it confirms.")); }
     setTimeout(sync, 8000);
   }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
   finally{ btns.forEach(b=>b.disabled=false); }
@@ -1573,7 +1579,7 @@ function renderHistory(){
     item.appendChild(el('span','badge '+bcls, type));
     const mid=el('div','grow');
     const when = t.height()? (ts? new Date(ts*1000).toLocaleString() : 'block '+t.height()) : 'unconfirmed';
-    mid.appendChild(el('div',null,`<a href="/tx/${txid}" target="_blank" rel="noopener" class="aid">${txid.slice(0,20)}…</a>`));
+    { const _d=el('div'); _d.appendChild(txLink('/tx/'+txid, txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub', when));
     if(!t.height() && (type==='outgoing' || type==='incoming')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -1737,7 +1743,7 @@ function renderStake(){
     if(pending) badge.style.opacity='.55';
     item.appendChild(badge);
     const mid=el('div','grow');
-    mid.appendChild(el('div',null,`<a href="/tx/${s.txid}" target="_blank" rel="noopener" class="aid">${s.txid.slice(0,18)}…</a>`));
+    { const _d=el('div'); _d.appendChild(txLink('/tx/'+s.txid, s.txid.slice(0,18)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub', `${s.period} · bonded ${new Date(s.time).toLocaleDateString()}`));
     item.appendChild(mid);
     item.appendChild(el('span','amt', fmtAtoms(s.atoms,8)+' tSEQ'));
@@ -1783,8 +1789,10 @@ $('btnStake').onclick=async()=>{ $('stakeErr').textContent='';
 
 // ---------- toast ----------
 let toastT;
-function toast(html){ clearTimeout(toastT); let t=$('_toast'); if(!t){ t=el('div','toast'); t.id='_toast'; document.body.appendChild(t); }
-  t.innerHTML=html; t.style.display='block'; toastT=setTimeout(()=>t.style.display='none', 9000); }
+function toast(text, link){ clearTimeout(toastT); let t=$('_toast'); if(!t){ t=el('div','toast'); t.id='_toast'; document.body.appendChild(t); }
+  t.textContent=text||'';   // TEXT only — error/server strings can't inject markup
+  if(link && link.href){ t.appendChild(document.createTextNode(' ')); t.appendChild(txLink(link.href, link.label||link.href)); }
+  t.style.display='block'; toastT=setTimeout(()=>t.style.display='none', 9000); }
 
 boot().catch(e=>{ $('boot').innerHTML='<span class="err">Failed to load: '+(e?.message??e)+'</span>'; });
 </script>

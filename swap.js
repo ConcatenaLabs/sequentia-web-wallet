@@ -720,7 +720,7 @@ async function reviewSame(q){
     try {
       const txid = await proposeSignComplete(q, st);
       modal.remove();
-      C.toast(`Swap settled: <a href="/tx/${txid}" target="_blank" rel="noopener">${String(txid).slice(0,18)}…</a> — anchor-bound; reverts only if Bitcoin reverts.`);
+      C.toast('Swap settled (anchor-bound; reverts only if Bitcoin reverts):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
       resetComposer();
       await C.sync();
       renderSwap();
