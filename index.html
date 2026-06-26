@@ -24,6 +24,9 @@
   .amt-row{display:flex;align-items:center;gap:8px}
   .amt-row input{flex:1 1 auto;min-width:0}
   .denom{color:var(--dim);font-weight:650;white-space:nowrap;font-size:13px}
+  .addr-row{display:flex;align-items:center;gap:8px}
+  .addr-row input{flex:1 1 auto;min-width:0}
+  .scanbtn{flex:0 0 auto;padding:10px 12px;white-space:nowrap}
   button{font:inherit;font-weight:650;cursor:pointer;border-radius:10px;border:1px solid var(--line);
          background:#1d242d;color:var(--txt);padding:10px 15px;transition:filter .15s,transform .08s}
   button:hover{filter:brightness(1.13)} button:active{transform:translateY(1px)}
@@ -497,6 +500,7 @@
   </div>
 </div>
 
+<script src="./jsqr.js"></script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
   generateSwapSecret, buildSeqHtlcRedeemScript, buildSeqHtlcClaimTx, buildSeqHtlcRefundTx }
@@ -1228,15 +1232,82 @@ function updateFeeForSendType(){
   else { updateFeeAssetHint(); }
   const l=$('feeRateLabel'); if(l) l.textContent='Fee rate ('+feeRateTicker()+'/vB, optional)';
 }
+// Scan a QR code into an address field. Live camera needs a secure (https) context; over plain
+// http the photo/upload fallback still works (and on a phone, capture opens the camera to shoot it).
+async function openScanner(addrInput, amtInput){
+  if(!addrInput) return;
+  const m=el('div','modal'); const c=el('div','card'); c.style.maxWidth='440px';
+  c.appendChild(el('label','lbl','Scan a QR code'));
+  const video=document.createElement('video'); video.setAttribute('playsinline',''); video.muted=true;
+  video.style.cssText='width:100%;max-height:60vh;border-radius:12px;background:#000;display:none;margin-top:8px';
+  c.appendChild(video);
+  const status=el('div','sub'); status.style.marginTop='8px';
+  status.textContent='Point the camera at an address QR, or upload an image.'; c.appendChild(status);
+  const file=document.createElement('input'); file.type='file'; file.accept='image/*'; file.setAttribute('capture','environment'); file.style.display='none';
+  const fileBtn=el('button','ghost','Upload / photograph a QR'); fileBtn.style.marginTop='10px'; fileBtn.onclick=()=>file.click();
+  const cancel=el('button','ghost','Cancel'); cancel.style.cssText='margin-top:8px;margin-left:8px';
+  c.appendChild(file); c.appendChild(fileBtn); c.appendChild(cancel);
+  m.appendChild(c); document.body.appendChild(m);
+
+  let stream=null, raf=null, done=false;
+  const canvas=document.createElement('canvas'); const ctx=canvas.getContext('2d',{willReadFrequently:true});
+  const cleanup=()=>{ if(done) return; done=true; if(raf) cancelAnimationFrame(raf); if(stream){ try{ stream.getTracks().forEach(t=>t.stop()); }catch{} } m.remove(); };
+  cancel.onclick=cleanup; m.addEventListener('click', e=>{ if(e.target===m) cleanup(); });
+
+  const decode=(img)=> (window.jsQR ? window.jsQR(img.data, img.width, img.height, {inversionAttempts:'attemptBoth'}) : null);
+  const onDecoded=(text)=>{
+    let s=(text||'').trim(); if(!s) return;
+    if(s.includes(':')) s=s.slice(s.indexOf(':')+1);                 // drop any URI scheme (mirror the mobile wallet)
+    let amt=null; const q=s.indexOf('?');
+    if(q>=0){ try{ amt=new URLSearchParams(s.slice(q+1)).get('amount'); }catch{} s=s.slice(0,q); }
+    cleanup();
+    addrInput.value=s.trim(); addrInput.dispatchEvent(new Event('input'));   // value (never innerHTML) → XSS-safe
+    if(amt && amtInput && !amtInput._refMode){ amtInput.value=amt; amtInput.dispatchEvent(new Event('input')); }  // only in asset mode
+  };
+
+  file.onchange=()=>{ const f=file.files && file.files[0]; if(!f) return;
+    const url=URL.createObjectURL(f); const im=new Image();
+    im.onload=()=>{ const w=im.naturalWidth||im.width, h=im.naturalHeight||im.height, scale=Math.min(1,1280/Math.max(w,h,1));
+      canvas.width=Math.max(1,Math.round(w*scale)); canvas.height=Math.max(1,Math.round(h*scale));
+      ctx.drawImage(im,0,0,canvas.width,canvas.height); URL.revokeObjectURL(url);
+      const code=decode(ctx.getImageData(0,0,canvas.width,canvas.height));
+      if(code && code.data) onDecoded(code.data); else status.textContent='No QR code found in that image. Try another.';
+    };
+    im.onerror=()=>{ URL.revokeObjectURL(url); status.textContent='Could not read that image.'; };
+    im.src=url;
+  };
+
+  if(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}});
+      if(done){ stream.getTracks().forEach(t=>t.stop()); return; }   // cancelled during the permission prompt
+      video.style.display='block'; video.srcObject=stream; try{ await video.play(); }catch{}
+      const tick=()=>{ if(done) return;
+        if(video.readyState>=2 && video.videoWidth){
+          const w=video.videoWidth, h=video.videoHeight, scale=Math.min(1,640/Math.max(w,h));
+          canvas.width=Math.round(w*scale); canvas.height=Math.round(h*scale); ctx.drawImage(video,0,0,canvas.width,canvas.height);
+          const code=decode(ctx.getImageData(0,0,canvas.width,canvas.height));
+          if(code && code.data){ onDecoded(code.data); return; }
+        }
+        raf=requestAnimationFrame(tick);
+      };
+      raf=requestAnimationFrame(tick);
+    }catch(e){ status.textContent='Live camera unavailable ('+((e&&e.name)||e)+'). Upload or photograph the QR instead.'; }
+  } else {
+    status.textContent='Live camera needs a secure (https) connection. Upload or photograph the QR instead.';
+  }
+}
 function addRecipientRow(){
   const box=$('recipients'); const i=box.children.length;
   const r=el('div','rec');
   r.innerHTML = `<button class="x" title="remove">✕</button>
-    <label class="lbl">Address</label><input class="mono raddr" placeholder="tb1… or tsqb1…">
+    <label class="lbl">Address</label>
+    <div class="addr-row"><input class="mono raddr" placeholder="tb1… or tsqb1…"><button type="button" class="ghost scanbtn" title="Scan a QR code">⊡ Scan</button></div>
     <label class="lbl" style="margin-top:10px">Asset</label><select class="rasset" style="width:100%"></select>
     <label class="lbl" style="margin-top:10px">Amount</label><input class="mono ramt" placeholder="0.0">`;
   const rsel=r.querySelector('.rasset');
   ownedOptions(rsel);
+  const sbtn=r.querySelector('.scanbtn'); if(sbtn) sbtn.onclick=()=> openScanner(r.querySelector('.raddr'), r.querySelector('.ramt'));
   const updRecHint=attachRefHint(r.querySelector('.ramt'), ()=>rsel.value);   // ≈ ref under the amount
   rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); };   // default the fee to the sent asset; re-value too
   r.querySelector('.x').onclick=()=>{ if(box.children.length>1){ r.remove(); updateFeeForSendType(); } };
