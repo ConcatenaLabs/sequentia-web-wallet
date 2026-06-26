@@ -558,8 +558,10 @@ function feeAssetOptions(){
   const add = (hex) => { if (hex && !seen.has(hex) && acceptedFee(hex)){ seen.add(hex); out.push({ hex, ticker: C.assetMeta(hex).ticker }); } };
   add(S.payAsset);
   const bal = C.balObj() || {};
+  // You can only pay a fee in an asset you actually hold, so list held+accepted
+  // assets (plus tSEQ), not every node-accepted asset — the latter showed assets
+  // you don't hold at a confusing 0 balance.
   Object.keys(bal).filter(h => big(bal[h]) > 0n).forEach(add);
-  Object.keys(C.feeRates||{}).forEach(add);
   add(C.POLICY_HEX);
   return out;
 }
