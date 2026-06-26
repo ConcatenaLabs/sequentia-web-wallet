@@ -572,7 +572,7 @@ async function loadRegistry(){
 loadRegistry();
 function assetMeta(hex){ if(!hex) return {ticker:'—', name:'Asset', precision:0};   // null/'' guard: live ref-hints value an asset before a market is selected
   if(hex==='BTC') return {ticker:'BTC', name:'Bitcoin testnet4', precision:8};
-  if(hex===POLICY_HEX) return {ticker:'tSEQ', name:'Sequentia', precision:8};
+  if(hex===POLICY_HEX) return {ticker:'tSEQ', name:'Sequence', precision:8};
   return labels()[hex] || REGISTRY_ASSETS[hex] || DEFAULT_ASSETS[hex] || {ticker:hex.slice(0,8)+'…', name:'Asset', precision:0}; }
 let POLICY_HEX='';
 // True when we have NO authoritative precision for this asset — assetMeta() only
@@ -1137,18 +1137,19 @@ function renderBalance(){
   // Asset-agnostic + dual-chain: Bitcoin (parent chain) and tSEQ (native) are
   // first-class rows, then other Sequentia assets — all displayed equally. Each
   // amount also carries its value in the chosen reference currency (if priced).
+  // sub is a DOM node (not an HTML string): el() sets textContent, so passing
+  // markup as a string would render it literally. Build nodes instead.
   const row=(ticker, sub, amt, ref)=>{ const r=el('div','asset-row');
     r.appendChild(el('span','tk', ticker));
-    const m=el('div','grow'); m.appendChild(el('div',null,sub)); r.appendChild(m);
+    const m=el('div','grow'); const sd=el('div'); if(sub) sd.appendChild(sub); m.appendChild(sd); r.appendChild(m);
     const a=el('span','amt'); a.appendChild(el('div',null,amt));
     if(ref) a.appendChild(el('div','sub', ref));
     r.appendChild(a); list.appendChild(r); };
-  row('BTC', '<span class="sub">Bitcoin testnet4</span>', fmtAtoms(btcBalance, 8), refValueStr('BTC', btcBalance));
+  row('BTC', el('span','sub','Bitcoin testnet4'), fmtAtoms(btcBalance, 8), refValueStr('BTC', btcBalance));
   const keys = Object.keys(b).sort((x,y)=> x===POLICY_HEX?-1 : y===POLICY_HEX?1 : 0);
   for(const h of keys){
     const meta=assetMeta(h);
-    row(meta.ticker, h===POLICY_HEX ? '<span class="sub">Sequentia staking asset</span>'
-      : `<a href="/asset/${h}" target="_blank" rel="noopener" class="aid">${h}</a>`,
+    row(meta.ticker, h===POLICY_HEX ? el('span','sub','Sequentia staking asset') : txLink('/asset/'+h, h),
       fmtAtoms(b[h], meta.precision), refValueStr(h, b[h]));
   }
 }
