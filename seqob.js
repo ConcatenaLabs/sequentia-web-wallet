@@ -22,6 +22,9 @@
 // ---------------------------------------------------------------------------
 
 import { secp256k1, sha256 } from './btc.js';
+// Pure-JS AES-256-GCM (vendored from @noble/ciphers v2.2.0). The wallet is served
+// over plain HTTP, where WebCrypto's crypto.subtle is undefined; this works there.
+import { gcm } from './noble-ciphers.js';
 
 // --- byte helpers ----------------------------------------------------------
 
@@ -277,23 +280,21 @@ export function verifyOffer(offer){
 // --- E2E Crypter (ECDH + AES-256-GCM) --------------------------------------
 
 export class Crypter {
-  constructor(key){ this.key = key; }
+  constructor(keyBytes){ this.keyBytes = keyBytes; }                 // 32B AES-256 key
   static async fromECDH(myPriv, peerPub){
     const shared = secp256k1.getSharedSecret(myPriv, peerPub, true); // 33B [prefix||X]
     const x = shared.subarray(shared.length - 32);                   // 32B X coordinate
-    const keyBytes = sha256(x);
-    const key = await crypto.subtle.importKey('raw', keyBytes, { name:'AES-GCM' }, false, ['encrypt','decrypt']);
-    return new Crypter(key);
+    return new Crypter(sha256(x));
   }
   async seal(plaintext){
-    const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv: nonce }, this.key, plaintext));
-    return concatBytes(nonce, ct);                                   // nonce || ct||tag (Go layout)
+    const nonce = (crypto || window.crypto).getRandomValues(new Uint8Array(12));
+    const ct = gcm(this.keyBytes, nonce).encrypt(plaintext);        // ct || tag(16) — Go's gcm.Seal layout
+    return concatBytes(nonce, ct);                                   // nonce(12) || ct || tag
   }
   async open(sealed){
-    if (sealed.length < 12) throw new Error('ciphertext too short');
-    const nonce = sealed.subarray(0,12), ct = sealed.subarray(12);
-    return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv: nonce }, this.key, ct));
+    if (sealed.length < 12 + 16) throw new Error('ciphertext too short');
+    const nonce = sealed.subarray(0, 12), ct = sealed.subarray(12);
+    return gcm(this.keyBytes, nonce).decrypt(ct);                    // throws on tag mismatch
   }
 }
 

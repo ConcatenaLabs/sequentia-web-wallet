@@ -1091,13 +1091,14 @@ const seqLeg = {
   htlcSpkHex(redeemHex){ return hexOfBytes(btc.p2sh({ script: bytesOfHex(redeemHex) }, btc.TEST_NETWORK).script); },
   htlcAddress(redeemHex){
     const a = btc.p2sh({ script: bytesOfHex(redeemHex) }, btc.TEST_NETWORK).address;
-    Address.parse(a, network);                            // validate under Sequentia (p2sh prefix 196)
+    new Address(a);                                       // validate it parses; the constructor accepts the
+                                                          // non-blinded HTLC P2SH (Address.parse() requires a blinded address)
     return a;
   },
   // Fund the SEQ asset HTLC: send `amountAtoms` of `assetHex` to the P2SH as an
   // explicit output via the proven TxBuilder -> sign -> finalize -> broadcast path.
   async fund(redeemHex, assetHex, amountAtoms){
-    const addr = Address.parse(this.htlcAddress(redeemHex), network);
+    const addr = new Address(this.htlcAddress(redeemHex));   // non-blinded HTLC P2SH; Address.parse() would reject it as non-blinded
     const pset = network.txBuilder()
       .addExplicitRecipient(addr, BigInt(amountAtoms), new AssetId(assetHex))
       .feeRate(DEFAULT_FEERATE)
