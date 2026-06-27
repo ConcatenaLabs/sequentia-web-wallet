@@ -1052,7 +1052,7 @@ function stripBip32(b64){
 
 // Test-only exports: drive the REAL same-chain pipeline + the composer mapping
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
-export const __test__ = { proposeSignComplete, stripBip32, dexPost,
+export const __test__ = { stripBip32, dexPost,
   setMarkets: (m) => { MARKETS = m; },
   // XMARKETS in the composer are the snake_case shape xswap.js's normMarket emits
   // (and that C.xroute.markets() returns). Normalize camelCase test fixtures to match.
