@@ -1235,6 +1235,7 @@ function initSwapTab(){
     get network(){ return network; }, get client(){ return client; },
     get addrIndex(){ return addrIndex; },
     el, $, assetMeta, fmtAtoms, refValueStr, prettyErr, modalRows, toast, sync,
+    feeRateFor, DEFAULT_FEERATE, EXCHANGE_RATE_SCALE, get POLICY_HEX(){ return POLICY_HEX; }, // open-fee-market refund fee
     btcLeg, seqLeg,                            // the BTC-leg + SEQ-leg bridges
     SEQ_ESPLORA: ESPLORA,
     onExit: () => renderSwap(),

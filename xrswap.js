@@ -421,7 +421,18 @@ async function onRefundSeq(){
   ok.onclick = async () => {
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Refunding the asset leg…';
     try {
-      const fee = C.seqClaimFee != null ? Number(C.seqClaimFee) : 100000;
+      // Refund fee paid IN THE ASSET (the HTLC holds only the asset, no native tSEQ):
+      // convert the native policy fee to the asset via its published rate. A flat 100000
+      // atoms of a valuable asset is a huge native-equivalent fee that the node rejects
+      // ("Fee exceeds maximum ... maxfeerate") — a valuable asset needs only ~1 atom.
+      let fee = 1;
+      try {
+        const asset = SWAP.market.seq_asset;
+        const rate = (asset === C.POLICY_HEX) ? C.EXCHANGE_RATE_SCALE : Number(C.feeRateFor(asset));
+        const nativeFeeSats = Math.ceil(C.DEFAULT_FEERATE * 350 / 1000);   // ~policy fee (tSEQ-sats), ~350-vB refund
+        fee = Math.max(1, Math.ceil(nativeFeeSats * C.EXCHANGE_RATE_SCALE / rate));
+      } catch {}
+      if (fee > Math.floor(SWAP.seq_amount / 2)) fee = Math.max(1, Math.floor(SWAP.seq_amount / 2));
       const txid = await C.seqLeg.refund({
         txid: SWAP.seq_leg.txid, vout: SWAP.seq_leg.vout, amount: SWAP.seq_amount,
         asset_id: SWAP.market.seq_asset, redeem_script: SWAP.seq_leg.redeem_script,
