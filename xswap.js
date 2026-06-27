@@ -752,6 +752,28 @@ function renderStepper(){
 function kvRow(k, v){
   const d = C.el('div','kv'); d.appendChild(C.el('span','k',k)); d.appendChild(C.el('span','v',v)); return d;
 }
+// Like kvRow but the value is shown in full (monospace, wrapping), selectable, and
+// click-to-copy. Used for ids the user must act on (e.g. a swap_id to refund), where
+// truncation would force manual transcription. The wallet is served over plain HTTP,
+// a non-secure context where navigator.clipboard is unavailable, so fall back to the
+// textarea + execCommand trick (same as index.html's btnCopy).
+function kvRowCopy(k, value){
+  const d = C.el('div','kv'); d.appendChild(C.el('span','k',k));
+  const v = C.el('span','v'); v.textContent = value || '—';
+  v.style.cssText = 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;cursor:pointer;user-select:all';
+  v.title = 'Click to copy';
+  const fb = C.el('span','',''); fb.style.cssText = 'margin-left:6px;color:#3fb950;font-size:.8em;opacity:0;transition:opacity .15s';
+  v.onclick = async () => {
+    if (!value) return; let ok = false;
+    try{ if (navigator.clipboard?.writeText){ await navigator.clipboard.writeText(value); ok = true; } }catch{}
+    if (!ok){ const ta = document.createElement('textarea'); ta.value = value;
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'; document.body.appendChild(ta);
+      ta.focus(); ta.select(); try{ ok = document.execCommand('copy'); }catch{} document.body.removeChild(ta); }
+    fb.textContent = ok ? 'Copied!' : 'Copy failed'; fb.style.opacity = '1';
+    setTimeout(()=>{ fb.style.opacity = '0'; }, 1200);
+  };
+  d.appendChild(v); d.appendChild(fb); return d;
+}
 function short(s){ return s ? (String(s).slice(0,10) + '…' + String(s).slice(-6)) : '—'; }
 function txLink(txid, parent){
   if (!txid) return '—';
@@ -783,7 +805,7 @@ function stepProposeCard(){
   const done = !!(SWAP.swap_id);
   const active = !done && !!(SWAP.btc_leg && SWAP.btc_leg.txid) && SWAP.state !== ST.FAILED;
   const body = [ C.el('div','sub','The maker verifies your BTC leg, then locks the Sequentia leg in an anchored Sequentia block.') ];
-  if (done) body.push(kvRow('Swap id', short(SWAP.swap_id)));
+  if (done) body.push(kvRowCopy('Swap id', SWAP.swap_id));
   if (SWAP.seq_leg && SWAP.seq_leg.txid) body.push(kvRowHtml('Sequentia lock tx', txLink(SWAP.seq_leg.txid, false)));
   if (SWAP.state === ST.FAILED) body.push(errLine(SWAP.detail || 'propose failed'));
   const c = stepCard(2, 'Propose to maker', done, active, body);

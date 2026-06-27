@@ -528,7 +528,7 @@ function stepOpenCard(){
   const body = [
     C.el('div','sub','The maker locks BTC in an HTLC you can claim with the secret it will reveal, refundable by the maker only after T_btc.'),
   ];
-  if (done) body.push(kvRow('Swap id', short(SWAP.swap_id)));
+  if (done) body.push(kvRowCopy('Swap id', SWAP.swap_id));
   if (SWAP.btc_leg && SWAP.btc_leg.txid) body.push(kvRowHtml('Maker BTC lock tx', txLink(SWAP.btc_leg.txid, true)));
   if (SWAP.state === ST.FAILED) body.push(errLine(SWAP.detail || 'open failed'));
   return stepCard(1, 'Maker locks BTC', done, !done, body);
@@ -588,6 +588,25 @@ function stepCard(n, title, done, active, bodyNodes){
 }
 function kvRow(k, v){ const d = C.el('div','kv'); d.appendChild(C.el('span','k',k)); d.appendChild(C.el('span','v',v)); return d; }
 function kvRowHtml(k, html){ const d = C.el('div','kv'); d.appendChild(C.el('span','k',k)); const v = C.el('span','v'); v.innerHTML = html; d.appendChild(v); return d; }
+// Full-value, selectable, click-to-copy row (for ids the user must act on, e.g. swap_id).
+// Plain-HTTP is a non-secure context (no navigator.clipboard), so fall back to execCommand.
+function kvRowCopy(k, value){
+  const d = C.el('div','kv'); d.appendChild(C.el('span','k',k));
+  const v = C.el('span','v'); v.textContent = value || '—';
+  v.style.cssText = 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;cursor:pointer;user-select:all';
+  v.title = 'Click to copy';
+  const fb = C.el('span','',''); fb.style.cssText = 'margin-left:6px;color:#3fb950;font-size:.8em;opacity:0;transition:opacity .15s';
+  v.onclick = async () => {
+    if (!value) return; let ok = false;
+    try{ if (navigator.clipboard?.writeText){ await navigator.clipboard.writeText(value); ok = true; } }catch{}
+    if (!ok){ const ta = document.createElement('textarea'); ta.value = value;
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'; document.body.appendChild(ta);
+      ta.focus(); ta.select(); try{ ok = document.execCommand('copy'); }catch{} document.body.removeChild(ta); }
+    fb.textContent = ok ? 'Copied!' : 'Copy failed'; fb.style.opacity = '1';
+    setTimeout(()=>{ fb.style.opacity = '0'; }, 1200);
+  };
+  d.appendChild(v); d.appendChild(fb); return d;
+}
 function short(s){ return s ? (String(s).slice(0,10) + '…' + String(s).slice(-6)) : '—'; }
 function txLink(txid, parent){
   if (!txid) return '—';
