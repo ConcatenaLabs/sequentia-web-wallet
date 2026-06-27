@@ -1918,7 +1918,7 @@ function renderStake(){
     if(pending) badge.style.opacity='.55';
     item.appendChild(badge);
     const mid=el('div','grow');
-    { const _d=el('div'); _d.appendChild(txLink('/tx/'+s.txid, s.txid.slice(0,18)+'…')); mid.appendChild(_d); }
+    { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+s.txid, s.txid.slice(0,18)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub', `${s.period} · bonded ${new Date(s.time).toLocaleDateString()}`));
     item.appendChild(mid);
     item.appendChild(el('span','amt', fmtAtoms(s.atoms,8)+' tSEQ'));
