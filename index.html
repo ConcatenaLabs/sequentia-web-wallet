@@ -1004,7 +1004,9 @@ const btcLeg = {
   },
 };
 // Poll testnet4 for the HTLC funding tx's confirmation; resolve its vout+height.
-async function btcWaitConf(txid, spkHex, tries=40){
+// testnet4 blocks target ~10 min and vary, so wait up to ~25 min (300 x 5s); the
+// per-poll try/catch tolerates transient fetch failures (flaky connectivity).
+async function btcWaitConf(txid, spkHex, tries=300){
   for(let i=0;i<tries;i++){
     try{
       const tx = await fetch(`${T4_API}/tx/${txid}`).then(r=>r.json());
@@ -1013,9 +1015,9 @@ async function btcWaitConf(txid, spkHex, tries=40){
       if(tx.status && tx.status.confirmed){ return { vout: vout<0?0:vout, height: tx.status.block_height }; }
       if(vout>=0 && i>2){ /* seen in mempool; keep waiting for a conf */ }
     }catch{}
-    await new Promise(r=>setTimeout(r, 3000));
+    await new Promise(r=>setTimeout(r, 5000));
   }
-  throw new Error('BTC HTLC funding tx did not confirm in time');
+  throw new Error('BTC HTLC funding tx did not confirm in time (testnet4 ~10 min blocks)');
 }
 
 // ---------- views ----------
