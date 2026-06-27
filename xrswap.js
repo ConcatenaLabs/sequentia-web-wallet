@@ -432,7 +432,7 @@ async function onRefundSeq(){
         const nativeFeeSats = Math.ceil(C.DEFAULT_FEERATE * 350 / 1000);   // ~policy fee (tSEQ-sats), ~350-vB refund
         fee = Math.max(1, Math.ceil(nativeFeeSats * C.EXCHANGE_RATE_SCALE / rate));
       } catch {}
-      if (fee > Math.floor(SWAP.seq_amount / 2)) fee = Math.max(1, Math.floor(SWAP.seq_amount / 2));
+      { const amt = Number(SWAP.seq_amount); if (fee > Math.floor(amt/2)) fee = Math.max(1, Math.floor(amt/2)); }
       const txid = await C.seqLeg.refund({
         txid: SWAP.seq_leg.txid, vout: SWAP.seq_leg.vout, amount: SWAP.seq_amount,
         asset_id: SWAP.market.seq_asset, redeem_script: SWAP.seq_leg.redeem_script,
