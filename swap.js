@@ -29,11 +29,30 @@
 //  • Anchor-aware finality — "settles in ~1 block · anchor-bound to Bitcoin"; never "instant".
 // ---------------------------------------------------------------------------
 
+import * as seqob from './seqob.js';
+import { secp256k1 } from './btc.js';
+
 let C = null;            // injected app context (see index.html initSwapTab)
 let X = null;            // the cross-chain route handle ({ openFromComposer, renderXswap, hasInFlight })
-let MARKETS = [];        // same-chain: [{ market:{base_asset,quote_asset}, fee }]
+let MARKETS = [];        // legacy RFQ markets (kept only to seed the picker; routing is order-book)
 let XMARKETS = [];       // cross-chain: [{ btc_asset, seq_asset, ... }] (BTC<->asset)
 let LAST_QUOTE = null;   // the priced/oriented same-chain legs for the current composer state
+let BOOK = { offers: [], pair: null };   // the resting offers for the selected same-chain pair
+
+// The wallet's SeqOB MAKER identity: a stable per-browser key that signs resting
+// offers + doubles as the E2E session key. It is NOT a fund key (funds move via the
+// on-chain co-sign with the wallet's real keys), so persisting it locally is safe.
+function makerPriv(){
+  let h = (typeof localStorage !== 'undefined') && localStorage.getItem('seqobMakerKey');
+  if (!h || !/^[0-9a-f]{64}$/.test(h)){
+    const a = new Uint8Array(32); (crypto || window.crypto).getRandomValues(a);
+    h = [...a].map(b => b.toString(16).padStart(2,'0')).join('');
+    try { localStorage.setItem('seqobMakerKey', h); } catch {}
+  }
+  return seqob.hexToBytes(h);
+}
+function makerPubHex(){ return seqob.bytesToHex(secp256k1.getPublicKey(makerPriv(), true)); }
+const EST_SWAP_VSIZE = 1500n;   // explicit same-chain swap fee estimate (vbytes)
 
 // Composer state. payAsset/receiveAsset are asset hexes (or 'BTC' for the parent leg).
 const S = {
@@ -81,6 +100,7 @@ function normMarket(m){
 export function initSwap(ctx){
   C = ctx;
   X = ctx.xroute || null;     // cross-chain bridge wired in index.html (see initSwapTab)
+  seqob.setSeqobBase(C.SEQOB || '/seqob');   // the order-book relay (same-origin proxy)
   const { $ } = C;
   if ($('swReview') && !$('swReview')._wired){
     $('swReview')._wired = true;
@@ -133,6 +153,8 @@ export async function renderSwap(){
     return;
   }
   showCross(false); showReverse(false);
+  const _bh = C.$('swBook'); if (_bh) _bh.innerHTML = '';   // cleared; requote re-renders for the selected pair
+  renderMyOrders();
   await loadMarkets();
   // Default the pay/receive assets to the first sensible tradable pair so the
   // composer is never empty: tSEQ on top if it trades, else the first market.
@@ -189,6 +211,9 @@ function startableAssets(){
   const set = new Set();
   const bal = C.balObj() || {};
   for (const h of Object.keys(bal)){ if (big(bal[h]) > 0n) set.add(h); }   // what you hold
+  // Every registry/known asset: the order book lets you trade (or start) ANY pair,
+  // not just ones with a pre-existing market.
+  if (C.registryAssets){ for (const h of C.registryAssets()){ if (h && h !== 'BTC') set.add(h); } }
   for (const m of MARKETS){ set.add(m.market.base_asset); set.add(m.market.quote_asset); }
   for (const xm of XMARKETS){ set.add('BTC'); set.add(xm.seq_asset); }
   return [...set];
@@ -200,10 +225,10 @@ function startableAssets(){
 function counterpartsOf(other){
   if (!other) return startableAssets();
   const set = new Set();
-  for (const m of MARKETS){
-    const b = m.market.base_asset, q = m.market.quote_asset;
-    if (b === other) set.add(q);
-    if (q === other) set.add(b);
+  // Same-chain order book: any OTHER Sequentia asset is a valid counterpart (the
+  // pair may have no resting offers yet — then it's startable).
+  if (other !== 'BTC'){
+    for (const h of startableAssets()){ if (h !== other && h !== 'BTC') set.add(h); }
   }
   for (const xm of XMARKETS){
     // BTC <-> seq_asset is a tradable pair in both directions.
@@ -227,13 +252,9 @@ function findRoute(pay, receive){
     // unsupported direction when routing.)
     return { kind: 'cross', xm, payIsBtc: pay === 'BTC' };
   }
-  // Same-chain: find the market and the TradeType that yields pay->receive.
-  for (const m of MARKETS){
-    const b = m.market.base_asset, q = m.market.quote_asset;
-    if (b === pay && q === receive)      return { kind: 'same', m, side: 'SELL' }; // sell base, receive quote
-    if (q === pay && b === receive)      return { kind: 'same', m, side: 'BUY'  }; // buy base, pay quote
-  }
-  return null;
+  // Same-chain order book: ANY two distinct Sequentia assets form a market. It may
+  // have no resting offers yet, in which case the user can start it by posting one.
+  return { kind: 'same', pay, receive };
 }
 
 // The composer deliberately opens with NO pair preselected — both sides sit on
@@ -310,7 +331,7 @@ function paintRouteLine(){
   }
   $('swRoute').textContent = route.kind === 'cross'
     ? (route.payIsBtc ? 'Cross-chain · buy with BTC' : 'Cross-chain · sell for BTC')
-    : 'Same-chain · SeqDEX maker';
+    : 'Same-chain · order book';
   // The rate line is filled by the quote (showQuote / showXRate); a placeholder until then.
   if (!LAST_QUOTE) $('swRate').textContent = '1 ' + tk(S.payAsset) + ' = … ' + tk(S.receiveAsset);
 }
@@ -371,69 +392,101 @@ function clearOpposite(){
 }
 function setReviewEnabled(on){ const b = C.$('swReview'); if (b) b.disabled = !on; }
 
-// --- same-chain quote (PreviewTrade) ---
+// --- same-chain quote (SeqOB order book) ---
+// "No price" is never an error: we render the resting offers, and if there are
+// none the user can start the market by posting their own offer.
 async function requoteSame(route, amtStr){
   const { $ } = C;
-  const m = route.m, side = route.side, base = m.market.base_asset, quote = m.market.quote_asset;
-  // PreviewTrade is parameterised by the BASE leg amount. Depending on which side
-  // the user typed (pay vs receive) and the side (BUY/SELL), the base leg is
-  // either the typed amount or the OTHER amount. We can always express the typed
-  // amount as the base leg when it IS the base asset; otherwise we quote off the
-  // base asset using whichever side carries it.
-  // Map: SELL => pay=base, receive=quote.  BUY => pay=quote, receive=base.
-  const editedAsset = S.edited === 'pay' ? S.payAsset : S.receiveAsset;
-  let baseAtoms, anchoredOnBase;
-  try {
-    const editedPrec = C.assetMeta(editedAsset).precision || 0;
-    const editedAtoms = C.parseAtoms(amtStr, editedPrec);
-    if (editedAtoms <= 0n) throw new Error('enter an amount greater than zero');
-    if (editedAsset === base){ baseAtoms = editedAtoms; anchoredOnBase = true; }
-    else { baseAtoms = null; anchoredOnBase = false; } // need a price to convert the quote-leg input to base
-  } catch (e){ $('swErr').textContent = e.message || String(e); setReviewEnabled(false); return; }
-
+  const pay = route.pay, receive = route.receive;
   const status = $('swStatus');
-  status.className = 'status'; status.innerHTML = '<span class="spin"></span>Quoting…';
+  status.className = 'status'; status.innerHTML = '<span class="spin"></span>Loading the order book…';
+  $('swErr').textContent = '';
   try {
-    // Lazily pick a neutral fee asset (the one you're paying with) the first time we
-    // actually quote — no asset is defaulted up front. Persist it so chip/review agree.
     if (!S.feeAsset) S.feeAsset = defaultFeeAsset();
-    const feeAsset = S.feeAsset;
-    // When the user typed the QUOTE-leg amount, first get the market price to
-    // convert it into a base-leg amount the preview can take.
-    if (!anchoredOnBase){
-      const priced = await dexPost('/v1/market/price', {
-        market: { base_asset: base, quote_asset: quote }, fee_asset: feeAsset,
-      });
-      const sp = pick(priced, 'spot_price', 'spotPrice') || priced;
-      // base_price = quote units per 1 base (string). Convert typed quote -> base.
-      const bp = Number(pick(sp, 'base_price', 'basePrice') || 0);
-      if (!(bp > 0)) throw new Error('no price for this market yet');
-      const editedAtoms = C.parseAtoms(amtStr, C.assetMeta(editedAsset).precision || 0);
-      const basePrec = C.assetMeta(base).precision || 0, quotePrec = C.assetMeta(quote).precision || 0;
-      const quoteUnits = Number(editedAtoms) / Math.pow(10, quotePrec);
-      const baseUnits = quoteUnits / bp;
-      baseAtoms = BigInt(Math.max(1, Math.round(baseUnits * Math.pow(10, basePrec))));
+    // The relay keys markets by exact base/quote order, so fetch BOTH orientations
+    // and keep the offers we can TAKE for pay->receive: maker gives `receive`, wants `pay`.
+    const [b1, b2] = await Promise.all([
+      seqob.fetchBook(receive, pay).catch(()=>({offers:[]})),
+      seqob.fetchBook(pay, receive).catch(()=>({offers:[]})),
+    ]);
+    const now = Math.floor(Date.now()/1000);
+    const seen = new Set(), liftable = [];
+    for (const o of [...(b1.offers||[]), ...(b2.offers||[])]){
+      const id = (o.maker_pubkey||o.makerPubkey)+':'+(o.offer_id||o.offerId);
+      if (seen.has(id)) continue; seen.add(id);
+      if (o._verified === false) continue;                       // untrusted relay: skip forged rows
+      if ((o.offer_asset||o.offerAsset) !== receive || (o.want_asset||o.wantAsset) !== pay) continue;
+      const exp = Number(o.expires_at_unix || o.expiresAtUnix || 0);
+      if (exp && exp <= now) continue;
+      liftable.push(o);
     }
-    const prev = await dexPost('/v1/trade/preview', {
-      market: { base_asset: base, quote_asset: quote },
-      type: TRADE_TYPE[side], amount: baseAtoms.toString(), asset: base, fee_asset: feeAsset,
-    });
-    const p = (prev.previews && prev.previews[0]) || null;
-    if (!p) throw new Error('no preview returned for this market/amount');
-    const legs = orientLegs(m, side, baseAtoms, p);
-    const price = pick(p, 'price') || null;
-    LAST_QUOTE = { kind:'same', market: m.market, side, ...legs,
-      feeAsset: pick(p, 'fee_asset', 'feeAsset') || feeAsset,
-      feeAmount: big(pick(p, 'fee_amount', 'feeAmount') || 0),
-      price: price ? { base_price: pick(price,'base_price','basePrice'), quote_price: pick(price,'quote_price','quotePrice') } : null };
+    liftable.sort((a,bb)=> ratioRecvPerPay(bb) - ratioRecvPerPay(a));  // best price for the taker first
+    BOOK = { pair:{ base_asset: receive, quote_asset: pay }, offers: liftable };
+    renderBook(pay, receive);
+
+    if (!amtStr || !amtStr.trim()){ status.textContent=''; setReviewEnabled(false); paintEmptyRate(pay, receive, liftable.length); return; }
+
+    if (!liftable.length){
+      // No resting liquidity: offer to START the market rather than erroring.
+      status.textContent = '';
+      LAST_QUOTE = { kind:'same', startMarket:true, pay, receive };
+      $('swRate').textContent = `No resting offers yet — Review to post your own and start this market.`;
+      $('swRoute').textContent = 'Order book · be the first';
+      paintFee(S.feeAsset, null);
+      setFinality('same');
+      setReviewEnabled(true);
+      return;
+    }
+
+    const editedAsset = S.edited === 'pay' ? pay : receive;
+    const typed = C.parseAtoms(amtStr, C.assetMeta(editedAsset).precision || 0);
+    if (typed <= 0n) throw new Error('enter an amount greater than zero');
+    LAST_QUOTE = executableQuote(liftable[0], pay, receive, editedAsset, typed);
     status.textContent = '';
     paintQuoteSame();
     setReviewEnabled(true);
   } catch (e){
     status.textContent = '';
-    $('swErr').textContent = 'Quote failed: ' + (e.message || e);
+    $('swErr').textContent = 'Order book: ' + (e.message || e);
     setReviewEnabled(false);
   }
+}
+
+function ratioRecvPerPay(o){
+  const off = Number(o.offer_amount || o.offerAmount || 0), want = Number(o.want_amount || o.wantAmount || 0);
+  return want > 0 ? off/want : 0;
+}
+function ceilDiv(a, b){ return (a + b - 1n) / b; }
+
+// Executable legs against ONE resting offer, using the daemon's exact proRata:
+//   recv = floor(offer_amount * take / base),  pay = ceil(want_amount * take / base)
+// with `take` in BASE atoms. The user's typed amount selects `take`; the executed
+// amounts are the authoritative proRata, capped at the offer's size (single-offer fill).
+function executableQuote(o, payAsset, receiveAsset, editedAsset, typedAtoms){
+  const baseAsset = o.pair ? (o.pair.base_asset||o.pair.baseAsset) : (o.base_asset||o.baseAsset);
+  const baseAmt = big(o.base_amount||o.baseAmount), offerAmt = big(o.offer_amount||o.offerAmount), wantAmt = big(o.want_amount||o.wantAmount);
+  let take;
+  if (editedAsset === baseAsset)       take = typedAtoms;
+  else if (baseAsset === receiveAsset) take = wantAmt > 0n ? (typedAtoms * baseAmt) / wantAmt : 0n;   // typed the pay leg
+  else                                 take = offerAmt > 0n ? ceilDiv(typedAtoms * baseAmt, offerAmt) : 0n; // typed the receive leg
+  if (take < 1n) take = 1n;
+  if (take > baseAmt) take = baseAmt;
+  const recv = (offerAmt * take) / baseAmt;
+  const pay  = ceilDiv(wantAmt * take, baseAmt);
+  const feeAsset = S.feeAsset || defaultFeeAsset();
+  let feeAmount = 0n; try { feeAmount = C.feeRateFor(feeAsset) * EST_SWAP_VSIZE; } catch {}
+  return { kind:'same', offer:o, takeBase:take,
+    assetP: payAsset, amountP: pay, assetR: receiveAsset, amountR: recv,
+    feeAsset, feeAmount, capped: take >= baseAmt };
+}
+
+function paintEmptyRate(pay, receive, n){
+  const { $ } = C;
+  $('swRate').textContent = n
+    ? `${n} resting offer${n>1?'s':''} for ${C.assetMeta(receive).ticker} — enter an amount.`
+    : `No resting offers for ${C.assetMeta(receive).ticker}/${C.assetMeta(pay).ticker} yet — enter an amount to start this market.`;
+  $('swRoute').textContent = 'Order book';
+  setFinality('same');
 }
 
 // Derive pay/receive legs (the proven 6d-1 mapping).
@@ -464,7 +517,7 @@ function paintQuoteSame(){
   const recvU = Number(q.amountR) / Math.pow(10, rm.precision || 0);
   if (payU > 0){
     const r = recvU / payU;
-    $('swRate').textContent = `1 ${pm.ticker} = ${trim(r)} ${rm.ticker} · SeqDEX maker`;
+    $('swRate').textContent = `1 ${pm.ticker} = ${trim(r)} ${rm.ticker} · order book`;
   }
   paintFee(q.feeAsset, q.feeAmount);
   setFinality('same');
@@ -727,21 +780,23 @@ async function onReview(){
 
 async function reviewSame(q){
   const { $ } = C;
-  const pm = C.assetMeta(q.assetP), rm = C.assetMeta(q.assetR), fm = C.assetMeta(q.feeAsset);
+  if (q.startMarket) return postOfferReview(q);   // no resting liquidity -> start the market
+  const fm = C.assetMeta(q.feeAsset);
   const kv = [
-    ['Network', 'Sequentia (testnet) atomic swap; not parent-chain BTC'],
+    ['Network', 'Sequentia (testnet) atomic swap via the order book; not parent-chain BTC'],
     ['You pay', amtRow(q.assetP, q.amountP) + refSuffix(q.assetP, q.amountP)],
     ['You receive', amtRow(q.assetR, q.amountR) + refSuffix(q.assetR, q.amountR)],
-    ['Network fee', amtRow(q.feeAsset, q.feeAmount)],
+    ['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'],
     ['Fee paid in', fm.ticker],
+    ['Maker', short(q.offer && (q.offer.maker_pubkey || q.offer.makerPubkey))],
     ['Finality', 'Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
     ['Settlement', 'Atomic — settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
   ok.onclick = async () => {
-    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Proposing…';
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Opening lift…';
     try {
-      const txid = await proposeSignComplete(q, st);
+      const txid = await liftOffer(q, st);
       modal.remove();
       C.toast('Swap settled (anchor-bound; reverts only if Bitcoin reverts):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
       resetComposer();
@@ -783,53 +838,146 @@ function trim(n){ if (!isFinite(n)) return '—'; const s = (Math.round(n*1e8)/1
 // ---------------------------------------------------------------------------
 // build -> propose -> sign (add_details + strip bip32) -> complete  (UNCHANGED)
 // ---------------------------------------------------------------------------
-async function proposeSignComplete(q, st){
+// Lift a resting offer to settlement over the SeqOB courier. The two wasm-bound
+// steps are passed as hooks; seqob.js owns the WS + E2E + protobuf transport.
+// The taker builds its half (seqdexSwapRequest), the maker co-signs over the
+// relay, then the taker signs + self-broadcasts (the proven 6d-1 finalize path)
+// and couriers the SwapComplete receipt back.
+async function liftOffer(q, st){
   const { wasm } = C;
   const receiveAddr = C.wollet.address(C.addrIndex == null ? undefined : C.addrIndex).address();
-  const sreq = C.wollet.seqdexSwapRequest(
-    new wasm.AssetId(q.assetP), q.amountP,
-    new wasm.AssetId(q.assetR), q.amountR,
-    receiveAddr,
-    new wasm.AssetId(q.feeAsset), q.feeAmount,
-  );
-  st.innerHTML = '<span class="spin"></span>Proposing…';
-  const propose = await dexPost('/v1/trade/propose', {
-    market: { base_asset: q.market.base_asset, quote_asset: q.market.quote_asset },
-    type: TRADE_TYPE[q.side],
-    swap_request: sreq.toJson(),
-    fee_amount: q.feeAmount.toString(),
-    fee_asset: q.feeAsset,
-  });
-  const fail = pick(propose, 'swap_fail', 'swapFail');
-  if (fail) throw new Error('Provider rejected the swap: ' + (pick(fail,'failure_message','failureMessage') || 'unknown reason'));
-  const accept = pick(propose, 'swap_accept', 'swapAccept');
-  const acceptTx = accept && pick(accept, 'transaction');
-  if (!acceptTx) throw new Error('no SwapAccept returned');
-  const acceptId = pick(accept, 'id');
-
-  st.innerHTML = '<span class="spin"></span>Signing…';
-  const pset = new wasm.Pset(acceptTx);
-  pset.addDetails(C.wollet);
-  const signed = C.signer.sign(pset);
-  const strippedB64 = stripBip32(signed.toString());
-
-  st.innerHTML = '<span class="spin"></span>Completing…';
-  try {
-    const done = await dexPost('/v1/trade/complete', {
-      swap_complete: { id: randId(), accept_id: acceptId, transaction: strippedB64 },
-    });
-    const cfail = pick(done, 'swap_fail', 'swapFail');
-    if (cfail) throw new Error(pick(cfail,'failure_message','failureMessage') || 'CompleteTrade failed');
-    const txid = pick(done, 'txid');
-    if (txid) return txid;
-    throw new Error('CompleteTrade returned no txid');
-  } catch (e){
-    st.innerHTML = '<span class="spin"></span>Self-broadcasting…';
+  const buildRequest = async () => {
+    const sreq = C.wollet.seqdexSwapRequest(
+      new wasm.AssetId(q.assetP), q.amountP,
+      new wasm.AssetId(q.assetR), q.amountR,
+      receiveAddr,
+      new wasm.AssetId(q.feeAsset), q.feeAmount,
+    );
+    return sreq.toJson();
+  };
+  const finalizeAccept = async (acc) => {
+    const pset = new wasm.Pset(acc.transaction);
+    pset.addDetails(C.wollet);
+    const signed = C.signer.sign(pset);
+    const strippedB64 = stripBip32(signed.toString());
     const finalPset = new wasm.Pset(strippedB64);
     const finalized = C.wollet.finalize(finalPset);
     const txid = await C.client.broadcast(finalized);
-    return txid.toString ? txid.toString() : String(txid);
-  }
+    return { transaction: strippedB64, txid: (txid && txid.toString) ? txid.toString() : String(txid) };
+  };
+  const onStatus = (msg) => { st.innerHTML = '<span class="spin"></span>' + msg; };
+  return seqob.lift(q.offer, q.takeBase, q.feeAsset, { buildRequest, finalizeAccept, onStatus });
+}
+
+// Start a market: post the user's desired trade as a resting offer (they become
+// the maker — give `pay`, want `receive`). Honest about filling: it needs the
+// maker online to co-sign, which is a follow-up; the offer rests + is cancellable.
+async function postOfferReview(q){
+  const { $ } = C;
+  const pay = q.pay, receive = q.receive;
+  let payAtoms, recvAtoms;
+  try {
+    payAtoms = C.parseAtoms($('swPayAmt').value.trim(), C.assetMeta(pay).precision || 0);
+    recvAtoms = C.parseAtoms($('swRecvAmt').value.trim(), C.assetMeta(receive).precision || 0);
+    if (payAtoms <= 0n || recvAtoms <= 0n) throw 0;
+  } catch { $('swErr').textContent = 'Enter both amounts — what you give and what you want — to start a market.'; return; }
+  const pm = C.assetMeta(pay), rm = C.assetMeta(receive);
+  const payU = Number(payAtoms)/Math.pow(10, pm.precision||0), recvU = Number(recvAtoms)/Math.pow(10, rm.precision||0);
+  const kv = [
+    ['Posting', 'A resting offer — you become the maker of this market'],
+    ['You give', amtRow(pay, payAtoms) + refSuffix(pay, payAtoms)],
+    ['You want', amtRow(receive, recvAtoms) + refSuffix(receive, recvAtoms)],
+    ['Price', payU>0 ? `1 ${pm.ticker} = ${trim(recvU/payU)} ${rm.ticker}` : '—'],
+    ['Filling', 'A taker fills it from the other side. Filling needs you (the maker) online to co-sign; in-wallet co-sign is coming, so for now the offer rests publicly and you can cancel it anytime.'],
+    ['Expires', 'In 1 hour (re-post to refresh).'],
+    ['Finality', 'Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+  ];
+  const { m: modal, ok, st } = C.modalRows({ title: 'Start this market', kv });
+  if (ok) ok.textContent = 'Post offer';
+  ok.onclick = async () => {
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Signing + posting…';
+    try {
+      const recvAddr = C.wollet.address(C.addrIndex == null ? undefined : C.addrIndex).address();
+      const now = Math.floor(Date.now()/1000);
+      const offer = {
+        offer_id: seqob.randHex(16), schema_version: 1,
+        pair: { base_asset: pay, quote_asset: receive },
+        trade_dir: 1,                       // SELL: maker gives base (= pay)
+        base_amount: payAtoms.toString(), offer_amount: payAtoms.toString(), offer_asset: pay,
+        want_amount: recvAtoms.toString(), want_asset: receive,
+        allow_partial: true,
+        created_at_unix: String(now), expires_at_unix: String(now + 3600),
+        fee_asset_hint: S.feeAsset || pay,
+        same_chain: { maker_recv_address: recvAddr },
+      };
+      seqob.signOffer(offer, makerPriv());
+      await seqob.postOffer(offer);
+      modal.remove();
+      C.toast('Offer posted — your market is live in the order book.');
+      resetComposer();
+      renderSwap();
+    } catch (e){
+      st.className = 'status err'; st.textContent = 'Could not post: ' + C.prettyErr(e); ok.disabled = false;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// order-book rendering (resting offers + your own orders)
+// ---------------------------------------------------------------------------
+function short(s){ s = s || ''; return s.length > 14 ? s.slice(0,8) + '…' + s.slice(-4) : s; }
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function renderBook(pay, receive){
+  const host = C.$('swBook'); if (!host) return;
+  const offers = BOOK.offers || [];
+  const pm = C.assetMeta(pay), rm = C.assetMeta(receive);
+  const rows = offers.slice(0, 12).map(o => {
+    const offerAmt = big(o.offer_amount||o.offerAmount), wantAmt = big(o.want_amount||o.wantAmount);
+    const recvU = Number(offerAmt)/Math.pow(10, rm.precision||0), payU = Number(wantAmt)/Math.pow(10, pm.precision||0);
+    const price = payU > 0 ? recvU/payU : 0;
+    return `<button type="button" class="swbook-row" data-id="${esc(o.offer_id||o.offerId)}" data-maker="${esc(o.maker_pubkey||o.makerPubkey)}">
+      <span class="mono">${esc(C.fmtAtoms(offerAmt, rm.precision))} ${esc(rm.ticker)}</span>
+      <span class="sub">@ ${esc(trim(price))} ${esc(rm.ticker)}/${esc(pm.ticker)}</span></button>`;
+  }).join('');
+  host.innerHTML = `<div class="swbook"><div class="swbook-head">
+      <span class="lbl">Order book · ${esc(rm.ticker)} for ${esc(pm.ticker)}</span>
+      <span class="sub">${offers.length} resting offer${offers.length===1?'':'s'}</span></div>
+    ${rows || '<div class="sub" style="padding:6px 2px">No resting offers — enter an amount and Review to start this market.</div>'}</div>`;
+  host.querySelectorAll('.swbook-row').forEach(b => b.onclick = () => fillFromOffer(b.dataset.id, b.dataset.maker, pay, receive));
+  renderMyOrders();
+}
+
+function fillFromOffer(id, maker, pay, receive){
+  const o = (BOOK.offers||[]).find(x => (x.offer_id||x.offerId) === id && (x.maker_pubkey||x.makerPubkey) === maker);
+  if (!o) return;
+  const offerAmt = big(o.offer_amount||o.offerAmount);
+  S.edited = 'receive';
+  C.$('swRecvAmt').value = C.fmtAtoms(offerAmt, C.assetMeta(receive).precision||0);
+  LAST_QUOTE = executableQuote(o, pay, receive, receive, offerAmt);
+  C.$('swPayAmt').value = C.fmtAtoms(LAST_QUOTE.amountP, C.assetMeta(pay).precision||0);
+  paintQuoteSame();
+  setReviewEnabled(true);
+}
+
+async function renderMyOrders(){
+  const host = C.$('swMyOrders'); if (!host) return;
+  let orders = [];
+  try { orders = await seqob.fetchMyOrders(makerPubHex()); } catch { host.innerHTML = ''; return; }
+  if (!orders.length){ host.innerHTML = ''; return; }
+  const rows = orders.map(o => {
+    const give = C.assetMeta(o.offer_asset||o.offerAsset), want = C.assetMeta(o.want_asset||o.wantAsset);
+    return `<div class="swbook-row myorder">
+      <span class="mono">give ${esc(C.fmtAtoms(big(o.offer_amount||o.offerAmount), give.precision))} ${esc(give.ticker)} · want ${esc(C.fmtAtoms(big(o.want_amount||o.wantAmount), want.precision))} ${esc(want.ticker)}</span>
+      <button type="button" class="ghost swcancel" data-id="${esc(o.offer_id||o.offerId)}">Cancel</button></div>`;
+  }).join('');
+  host.innerHTML = `<div class="swbook"><div class="swbook-head"><span class="lbl">Your resting orders</span>
+      <span class="sub">co-sign coming; offers rest until then</span></div>${rows}</div>`;
+  host.querySelectorAll('.swcancel').forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = 'Cancelling…';
+    try { await seqob.signAndCancel(b.dataset.id, makerPriv()); renderSwap(); }
+    catch (e){ b.disabled = false; b.textContent = 'Cancel'; C.toast('Cancel failed: ' + C.prettyErr(e)); }
+  });
 }
 
 function randId(){

@@ -8192,7 +8192,9 @@ var utils2 = /* @__PURE__ */ (() => Object.freeze({
 export {
   HDKey,
   btc_signer_exports as btc,
-  mnemonicToSeedSync
+  mnemonicToSeedSync,
+  secp256k1,
+  sha256
 };
 /*! Bundled license information:
 
