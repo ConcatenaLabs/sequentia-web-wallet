@@ -597,7 +597,7 @@ async function onClaimSeq(){
       modal.remove();
       renderStepper();
       startPoll();
-      C.toast && C.toast('Sequentia leg claimed (anchor-bounded):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast && C.toast('Sequentia leg claimed (anchor-bounded):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
     } catch (e){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
   };
 }
@@ -744,7 +744,7 @@ function kvRow(k, v){
 function short(s){ return s ? (String(s).slice(0,10) + '…' + String(s).slice(-6)) : '—'; }
 function txLink(txid, parent){
   if (!txid) return '—';
-  const href = parent ? ('/testnet4/tx/' + txid) : ('/tx/' + txid);
+  const href = parent ? ('/testnet4/tx/' + txid) : ('/explorer/tx/' + txid);
   return `<a href="${href}" target="_blank" rel="noopener">${short(txid)}</a>`;
 }
 

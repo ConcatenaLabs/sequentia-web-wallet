@@ -272,6 +272,9 @@ async function onOpen(){
 // ---- step 3: fund the Sequentia asset leg ----
 async function fundSeq(){
   if (!SWAP) throw new Error('no in-flight swap');
+  // Idempotent recovery: NEVER re-broadcast the asset HTLC. If the leg is already
+  // funded + confirmed (e.g. a prior submit was rejected by the maker), just (re)submit.
+  if (SWAP.seq_leg && SWAP.seq_leg.txid){ await submitSeq(); return SWAP; }
   if (SWAP.btc_leg_height <= 0) throw new Error('the maker BTC leg has not confirmed yet');
   const v = verifyMakerBtcLeg();
   if (!v.ok) throw new Error('BTC leg check failed: ' + v.reason);
@@ -285,9 +288,13 @@ async function fundSeq(){
     SWAP.hash_hex, SWAP.maker_seq_claim_pub, SWAP.taker_seq_refund_pub, SWAP.seq_locktime);
   SWAP.seq_redeem = redeem;
   saveSwap();
-  const { txid } = await C.seqLeg.fund(redeem, SWAP.market.seq_asset, SWAP.seq_amount);
-  SWAP.seq_fund_txid = txid;
-  saveSwap();
+  // Reuse a prior funding broadcast if one exists (don't double-fund); else fund now.
+  let txid = SWAP.seq_fund_txid;
+  if (!txid){
+    txid = (await C.seqLeg.fund(redeem, SWAP.market.seq_asset, SWAP.seq_amount)).txid;
+    SWAP.seq_fund_txid = txid;
+    saveSwap();
+  }
   // Wait for the funding tx to confirm and capture the HTLC vout.
   const conf = await C.seqLeg.waitConf(txid, redeem);
   SWAP.seq_leg = {
@@ -567,7 +574,7 @@ function kvRowHtml(k, html){ const d = C.el('div','kv'); d.appendChild(C.el('spa
 function short(s){ return s ? (String(s).slice(0,10) + '…' + String(s).slice(-6)) : '—'; }
 function txLink(txid, parent){
   if (!txid) return '—';
-  const href = parent ? ('/testnet4/tx/' + txid) : ('/tx/' + txid);
+  const href = parent ? ('/testnet4/tx/' + txid) : ('/explorer/tx/' + txid);
   return `<a href="${href}" target="_blank" rel="noopener">${short(txid)}</a>`;
 }
 function okLine(t){ const d = C.el('div','status ok'); d.textContent = t; return d; }

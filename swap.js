@@ -807,7 +807,7 @@ async function reviewSame(q){
     try {
       const txid = await liftOffer(q, st);
       modal.remove();
-      C.toast('Swap settled (anchor-bound; reverts only if Bitcoin reverts):', {href:'/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast('Swap settled (anchor-bound; reverts only if Bitcoin reverts):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
       resetComposer();
       await C.sync();
       renderSwap();
