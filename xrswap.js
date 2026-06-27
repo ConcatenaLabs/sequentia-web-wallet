@@ -352,10 +352,16 @@ async function onFundSeq(){
 }
 
 // ---- step 5/6: poll for the revealed secret, then claim the BTC leg ----
+// Wallet-set terminal states the daemon CANNOT see (the asset-leg refund and the BTC claim
+// are off-daemon): once we're in one, polling the daemon would downgrade us back to
+// BTC_LOCKED/SEQ_CLAIMED ("open"). Treat them as final locally.
+function localTerminal(){ return SWAP && (SWAP.state === ST.REFUNDED || SWAP.state === ST.BTC_CLAIMED || SWAP.state === ST.FAILED); }
 async function pollOnce(){
   if (!SWAP || !SWAP.swap_id) return;
+  if (localTerminal()){ stopPoll(); return; }
   const resp = await dexPost('/v1/xchain/swap', { swap_id: SWAP.swap_id });
-  const state = pick(resp, 'state'); if (state) SWAP.state = state;
+  // Guard the assignment too, in case this poll was already in flight when we went terminal.
+  const state = pick(resp, 'state'); if (state && !localTerminal()) SWAP.state = state;
   const blh = Number(pick(resp, 'btc_leg_height', 'btcLegHeight') ?? 0);
   if (blh > 0 && (!SWAP.btc_leg_height || SWAP.btc_leg_height <= 0)) SWAP.btc_leg_height = blh;
   const pre = pick(resp, 'preimage'); if (pre) SWAP.preimage = pre;
