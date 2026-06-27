@@ -470,17 +470,27 @@ async function propose(){
   saveSwap();
   return SWAP;
 }
+// The cross-chain quote is SINGLE-USE: the first propose consumes it on the maker.
+// The propose then blocks ~1-2 min while the maker locks AND confirms the Sequentia
+// leg, so a double-click in that window would hit the maker with an already-consumed
+// quote and fail "unknown or expired quote_id". Guard against it and disable the button.
+let PROPOSING = false;
 async function onPropose(){
   const { $ } = C;
+  if (PROPOSING) return;
+  PROPOSING = true;
+  const btn = $('btnXPropose'); if (btn) btn.disabled = true;
   $('xswapErr').textContent = '';
-  setStepStatus('propose', 'Proposing to the maker…', true);
+  setStepStatus('propose', 'Proposing to the maker; locking and confirming the Sequentia leg (can take 1-2 min on testnet). Please wait, do not re-click.', true);
   try {
     await propose();
     renderStepper();
-    C.toast && C.toast('Sequentia leg locked by the maker — verify the anchor next.');
+    C.toast && C.toast('Sequentia leg locked by the maker; verify the anchor next.');
   } catch (e){
     $('xswapErr').textContent = 'Propose failed: ' + C.prettyErr(e);
     renderStepper();
+  } finally {
+    PROPOSING = false;
   }
 }
 
