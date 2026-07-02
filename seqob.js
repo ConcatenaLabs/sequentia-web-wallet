@@ -197,6 +197,22 @@ function encodeSameChain(s){
   return w.bytes();
 }
 
+// seqob.v1.CrossChainTerms (offer settlement oneof field 21). Field numbers and
+// proto3 omit-zero semantics match the Go relay's deterministic marshal exactly,
+// so a maker-signed CROSS offer verifies here byte-for-byte (direction 0 =
+// BTC_TO_ASSET is omitted on both sides, like any proto3 zero uint).
+function encodeCrossChain(c){
+  if (!c) return null;
+  const w = new PW();
+  w.str(1, O(c,'btc_sentinel','btcSentinel'));
+  w.str(2, O(c,'maker_claim_pub','makerClaimPub'));
+  w.str(3, O(c,'maker_refund_pub','makerRefundPub'));
+  w.uint(4, O(c,'maker_leg_locktime','makerLegLocktime'));
+  w.str(5, O(c,'maker_recv_address','makerRecvAddress'));
+  w.uint(6, O(c,'direction'));
+  return w.bytes();
+}
+
 // Deterministic proto encoding of seqob.v1.Offer with maker_sig cleared, fields
 // in ascending number order — the exact bytes the Go relay signs/verifies.
 // Only the same_chain settlement variant is produced (the wallet posts same-chain
@@ -223,8 +239,12 @@ export function canonicalOfferBytes(o){
   w.str(17, O(o,'maker_ln_node_pubkey','makerLnNodePubkey'));
   const hints = O(o,'ln_connect_hints','lnConnectHints') || [];
   for (const h of hints) w.str(18, h);
-  // oneof settlement (same_chain = 20). Other variants intentionally unsupported here.
+  // oneof settlement, in field-number order: same_chain = 20, cross_chain = 21.
+  // Only the set variant is present in a served offer, so exactly one emits; a
+  // cross offer now verifies here too (was: cross offers could never verify).
+  // lightning = 22 is reserved and not yet encoded.
   w.msg(20, encodeSameChain(O(o,'same_chain','sameChain')));
+  w.msg(21, encodeCrossChain(O(o,'cross_chain','crossChain')));
   // maker_sig (31) is deliberately omitted.
   return w.bytes();
 }
