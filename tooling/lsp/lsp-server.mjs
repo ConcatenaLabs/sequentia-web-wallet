@@ -3217,6 +3217,49 @@ const server = http.createServer(async (req, res) => {
       } catch (e) { return send(res, 502, { ok: false, error: `pay: ${e.message}` }); }
     }
 
+    // POST /node/payhash { node_key, node_id, hash, amount_msat, min_final_cltv, connect_hints? } -> { committed, status }.
+    // The user's hosted node commits a BARE-HASH HTLC to node_id keyed on `hash`, with a final-hop CLTV of
+    // min_final_cltv blocks — the primitive the LSP PAYER leg-bridge needs (the seqln holdinvoice mints NO
+    // bolt11, so the taker pays the LSP's hold by hash, mirror of the receiver-bridge / sub-asset bare-hash
+    // sendpay). FUND-SAFETY: this is a HOLD payment — it lands HELD at the LSP and settles only at the very end
+    // (when the LSP recoups with P read from the on-chain asset claim). So it FIRES sendpay and returns the
+    // instant the HTLC is committed ('pending'); it MUST NOT waitsendpay (that blocks until settle, deadlocking
+    // the taker's own verify+claim step that reveals P). A route/commit failure exposes nothing — the taker's
+    // BTC is only ever in an in-flight HTLC that refunds at its final-hop CLTV if never settled. The DEVICE
+    // co-signs every HTLC; the LSP commands sendpay but cannot sign it (non-custodial).
+    if (req.method === 'POST' && url.pathname === '/node/payhash') {
+      if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
+      const body = await readBody(req);
+      const nodeKey = ((body && body.node_key) || '').toLowerCase();
+      const dest = String((body && body.node_id) || '').trim().toLowerCase();
+      const hash = String((body && body.hash) || '').trim().toLowerCase();
+      const amtMsat = Math.round(Number(body && body.amount_msat));
+      const minFinalCltv = Math.max(0, Math.ceil(Number(body && body.min_final_cltv) || 0));
+      if (!nodeKey || !/^[0-9a-f]{66}$/.test(dest) || !/^[0-9a-f]{64}$/.test(hash) || !(amtMsat > 0))
+        return send(res, 400, { ok: false, error: 'body { node_key, node_id (66-hex), hash (64-hex), amount_msat, min_final_cltv } required' });
+      const rec = PROV.getByKey(nodeKey);
+      if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
+      try {
+        // Best-effort connect to the destination first so getroute can find a channel to it. Non-fatal: a taker
+        // already channeled to the LSP routes without it, and connect alone cannot create routable liquidity.
+        for (const h of (Array.isArray(body.connect_hints) ? body.connect_hints : [])) {
+          if (h && h.address) { try { await lnrpc('connect', [dest, String(h.address), String(h.port || 9735)], rec.rpc, SIGNER_RPC_TIMEOUT_MS); } catch {} }
+        }
+        // final-hop CLTV delta = min_final_cltv so the committed incoming HTLC at the LSP stays settleable past
+        // T_seq (the LSP re-verifies the ACTUAL committed CLTV via listhtlcs before it funds the maker BTC leg).
+        const finalCltv = minFinalCltv > 0 ? minFinalCltv : 18;
+        const route = await lnrpc('getroute', [dest, String(amtMsat), '10', String(finalCltv)], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+        if (!route || !Array.isArray(route.route) || !route.route.length)
+          return send(res, 502, { ok: false, error: 'no route from your Bitcoin Lightning node to the service hold node — move Bitcoin to Lightning first (a channel with the service), then retry' });
+        // FIRE the HTLC on the BARE HASH; do NOT waitsendpay (see the fund-safety note above). It is HELD at the
+        // LSP the instant sendpay returns 'pending'; the driver then verifies the maker's asset leg + self-claims.
+        const sp = await lnrpc('sendpay', [JSON.stringify(route.route), hash], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+        const status = (sp && sp.status) || 'pending';
+        return send(res, 200, { ok: true, committed: status === 'pending' || status === 'complete', status,
+          payment_hash: hash, amount_msat: amtMsat });
+      } catch (e) { return send(res, 502, { ok: false, error: `payhash: ${scrubDetail(String((e && e.message) || e))}` }); }
+    }
+
     if (req.method === 'GET' && url.pathname === '/node/getinfo') {
       if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
       const nodeKey = url.searchParams.get('node') || '';
@@ -3404,8 +3447,17 @@ const server = http.createServer(async (req, res) => {
         const ni = await lnrpc('getinfo', [], lspRpc, SIGNER_RPC_TIMEOUT_MS).catch(() => ({}));
         sb.holdIssued = true; sb.lnRpc = lspRpc; persistJobs();
         const expirySecs = Number(job.bridge_terms && job.bridge_terms.hold_expiry_secs);
+        // CONNECT HINTS — the LSP's own reachable addresses, so the taker's node can `connect` to it before
+        // getroute (a bare-hash sendpay needs a route to node_id). Best-effort; a taker already channeled to the
+        // LSP (its BTC Move-to-Lightning peer) routes without them. bolt11 is null (seqln mints none): the target
+        // is BARE HASH — { node_id, payment_hash(H), amount_msat, hold_min_final_cltv, connect_hints }.
+        const connectHints = []
+          .concat(Array.isArray(ni.address) ? ni.address : [])
+          .concat(Array.isArray(ni.binding) ? ni.binding : [])
+          .map((a) => (a && a.address ? { type: a.type || null, address: a.address, port: a.port || null } : null))
+          .filter(Boolean);
         return send(res, 200, { ok: true, payment_hash: H, node_id: ni.id || null, bolt11: inv.bolt11 || null,
-          amount_msat: Number(amtMsat),
+          amount_msat: Number(amtMsat), connect_hints: connectHints,
           hold_min_final_cltv: minFinalCltv > 0 ? Math.ceil(minFinalCltv) : null,
           hold_expiry_secs: expirySecs > 0 ? Math.ceil(expirySecs) : null,
           note: 'Pay this hold on H at the returned node_id (bare-hash sendpay). Size your payment\'s final-hop '
