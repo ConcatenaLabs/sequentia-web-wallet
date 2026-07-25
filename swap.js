@@ -161,10 +161,10 @@ function exportTrades(fmt){
     blob = new Blob([JSON.stringify(h, null, 2)], { type: 'application/json' });
     name = 'sequentia-trades.json';
   } else {
-    const cols = ['time', 'pair', 'side', 'price', 'size', 'size_asset', 'fee', 'fee_asset', 'rail', 'status', 'txids', 'preimage'];
+    const cols = ['time', 'pair', 'side', 'price', 'size', 'size_asset', 'fee', 'fee_asset', 'settles', 'status', 'txids'];
     const cell = (v) => { const s = (v == null ? '' : String(v)); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
     const lines = [cols.join(',')];
-    for (const e of h) lines.push([iso(e.ts || e.at), e.pair, e.side, e.price, e.size, e.sizeTicker, e.fee, e.feeTicker, e.rail, e.status, (e.txids || []).join(' '), e.preimage].map(cell).join(','));
+    for (const e of h) lines.push([iso(e.ts || e.at), e.pair, e.side, e.price, e.size, e.sizeTicker, e.fee, e.feeTicker, railLabel(e.rail), e.status, (e.txids || []).join(' ')].map(cell).join(','));
     blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     name = 'sequentia-trades.csv';
   }
@@ -878,7 +878,16 @@ function overviewPairs(){
     const k = base + '|' + quote; if (seen.has(k)) return; seen.add(k);
     out.push({ base, quote });
   };
+  // SAME-CHAIN: every distinct pair of the known Sequentia assets (registry + held + any market asset,
+  // deduped by ticker via startableAssets). The legacy /v1/markets source is DEAD (returns 405), so the
+  // pair universe comes from the registry/known assets, not that endpoint — every market shows, and the
+  // per-row depth signal reveals which have resting liquidity.
+  const seqAssets = startableAssets().filter(h => h && h !== 'BTC');
+  for (let i = 0; i < seqAssets.length; i++)
+    for (let j = i + 1; j < seqAssets.length; j++) add(seqAssets[i], seqAssets[j]);
+  // Legacy same-chain markets, if any still load (harmless + deduped).
   for (const m of MARKETS) add(m.market.base_asset, m.market.quote_asset);
+  // CROSS: BTC <-> each asset that has a cross market.
   for (const xm of XMARKETS) add('BTC', xm.seq_asset);
   return out;
 }
@@ -1357,8 +1366,8 @@ function paintBookSeg(){
   seg.querySelectorAll('button[data-book]').forEach(b => b.classList.toggle('on', b.dataset.book === _book));
   const note = C.$('swBookNote');
   if (note) note.textContent = isConfBook()
-    ? 'Blinded book: both legs settle confidentially (amounts and assets hidden on-chain). Sequentia assets only.'
-    : 'Unblinded book: transparent settlement, the default. Bitcoin (cross-chain) pairs trade here.';
+    ? 'Blinded book: both sides settle confidentially (amounts and assets hidden on-chain). Sequentia assets only.'
+    : 'Unblinded book: transparent settlement, the default. Bitcoin pairs trade here.';
 }
 // Switch the active book namespace. Distinct order sets: the desk reloads from the
 // selected namespace and posts into it. Blinded is Sequentia-only, so a BTC pick is
@@ -1419,7 +1428,7 @@ function paintModeSeg(){
         const route = findRoute(S.payAsset, S.receiveAsset);
         hint.textContent = postSupported(route)
           ? 'Set your price (or an amount) — the order fills what crosses now and rests the remainder at your price. Switch to Market to fill now.'
-          : 'Limit rests at your price only on-chain (the Lightning rail can’t rest while your wallet is closed) · set both legs on-chain to rest a durable limit.';
+          : 'Limit rests at your price only on-chain (the Lightning rail can’t rest while your wallet is closed) · set both sides on-chain to rest a durable limit.';
       } else {
         hint.textContent = 'Type an amount; the other fills at the best price. Switch to Limit to set your own.';
       }
@@ -1492,16 +1501,14 @@ function renderRailNote(ra){
     const crossFallback = (S.payAsset === 'BTC' || S.receiveAsset === 'BTC')
       && !(pick.direction === 'pay' ? sellCapable(legAsset) : subassetCapable(legAsset));
     if (crossFallback){
-      html = `<span>Settles over Lightning for ${nm} when a Lightning counterparty is resting, otherwise on-chain at the same price · nothing to set up.</span>`;
+      html = `<span>Settles over Lightning when possible, otherwise on-chain - same price, nothing to set up.</span>`;
     } else {
-      html = pick.direction === 'pay'
-        ? `<span>A Lightning channel for ${nm} opens from your balance when you place the order · near-instant (0-conf).</span>`
-        : `<span>Inbound ${nm} Lightning liquidity is fronted for you when you place the order · near-instant, nothing to set up.</span>`;
+      html = `<span>Lightning is set up for you when you place the order · near-instant, nothing to set up.</span>`;
     }
   }
   note.innerHTML = html + (withBtn ? ` <button type="button" class="swfix" id="swRailMove">${btnLabel}</button>` : '');
   const b = C.$('swRailMove');
-  if (b) b.onclick = () => { if (C.gotoLightning) C.gotoLightning(); else try { C.toast('Open a Lightning channel from the Balance tab.'); } catch {} };
+  if (b) b.onclick = () => { if (C.gotoLightning) C.gotoLightning(); else try { C.toast('Set up Lightning from the Balance tab.'); } catch {} };
 }
 // DYNAMIC sub-asset rail availability from the order book (L.book) — NO hardcoded maker
 // list. The sub-asset relays are a permissionless signed-intent book, so a rail is offered
@@ -1555,8 +1562,7 @@ function wireRailSeg(id, leg){
 }
 function paintRailSegs(ra){
   ra = ra || railAvail(S.payAsset, S.receiveAsset);
-  const badTip = 'Coming soon · this asset-over-Lightning with BTC on-chain shape has no maker yet. '
-    + 'Keep the asset on-chain and BTC on Lightning, or set both legs the same way.';
+  const badTip = 'This way of paying isn’t available for this pair yet.';
   const paint = (id, leg) => { const seg = C.$(id); if (!seg) return;
     const cur = leg === 'pay' ? S.payRail : S.recvRail;
     const legLn = leg === 'pay' ? ra.payLn : ra.recvLn;   // real per-asset LN verdict for this leg
@@ -1577,7 +1583,7 @@ function paintRailSegs(ra){
         const subAssetNoInbound = leg === 'recv' && S.payAsset === 'BTC' && p2 === 'chain'
           && subassetCapable(S.receiveAsset);
         tip = subAssetNoInbound
-          ? `Receiving ${C.assetMeta(S.receiveAsset).ticker} over Lightning needs inbound Lightning liquidity for it (coming soon). For now, receive it on-chain.`
+          ? `Receiving ${C.assetMeta(S.receiveAsset).ticker} over Lightning isn’t available yet · for now, receive it on-chain.`
           : badTip;
       }
       else if (r === 'ln' && legLn.unfrontable){
@@ -1586,7 +1592,7 @@ function paintRailSegs(ra){
         bad = true; tip = legLn.hint || `Lightning isn't available for ${legLn.name} right now · use on-chain.`; }
       else if (r === 'ln' && !legLn.ok){ tip = legLn.cta === 'add'
         ? (legLn.reason + (legLn.hint ? ' ' + legLn.hint : ''))
-        : 'No channel yet · one is opened for you when you place the order.'; }
+        : 'Lightning is set up for you when you place the order.'; }
       b.disabled = bad;
       if (tip) b.title = tip; else b.removeAttribute('title');   // informative title even when selectable
     }); };
@@ -1646,11 +1652,13 @@ function paintRouteLine(){
     $('swRoute').textContent = '';
     return;
   }
+  // The settlement rail is INVISIBLE to the user (it never changes which liquidity exists), so a BTC<->asset
+  // pair shows only the plain direction — never a "Mixed rails" / "Cross-chain" / rail label. Same-chain
+  // asset<->asset keeps a plain "order book" hint.
   $('swRoute').textContent =
-      route.kind === 'mixed' ? 'Mixed rails · Lightning + on-chain'
-    : route.kind === 'cross' ? (route.payIsBtc ? 'Cross-chain · buy with BTC' : 'Cross-chain · sell for BTC')
-    : route.kind === 'ln'    ? (route.payIsBtc ? 'Lightning · buy with BTC' : 'Lightning · sell for BTC')
-    : 'Same-chain · order book';
+      (route.kind === 'mixed' || route.kind === 'cross' || (route.kind === 'ln' && !route.assetAsset))
+        ? (route.payIsBtc ? `Buy ${tk(S.receiveAsset)} with Bitcoin` : `Sell ${tk(S.payAsset)} for Bitcoin`)
+    : 'Order book';
   // The rate line is filled by the quote (showQuote / showXRate); a placeholder until then.
   if (!LAST_QUOTE){ const _d = pairDir(S.payAsset, S.receiveAsset); $('swRate').textContent = '1 ' + tk(_d.base) + ' = … ' + tk(_d.quote); }
 }
@@ -2331,214 +2339,218 @@ function deriveXOpposite(route){
   } catch {}
 }
 
-// --- MIXED rails (one leg LN, one on-chain) -------------------------------------
-// The front end is priced from the same book and the timing banner is exact. Review
-// now runs a real submarine swap via the LSP (reviewMixed -> POST /swap with
-// payRail/recvRail -> seqob-cli xsubbuy/xsublift): the asset leg is an anchored
-// on-chain HTLC, the BTC leg is Lightning, bound by one preimage. Anchor-gated (not
-// instant-final). The one undeployed shape (asset over LN + BTC on-chain) fails closed.
+// --- RAIL-BLIND take preview (BTC<->asset) --------------------------------------
+// ONE order book per market, matched RAIL-BLIND on {asset,price,size,side}. The rail a user picks ONLY
+// selects the (invisible) settlement path; it NEVER changes which liquidity exists or the fill. Every
+// resting offer is partial-fillable down to its min_fill. This shared preview paints the SAME matched
+// offer + fill for ANY rail combo, so the Lightning-pay branch shows exactly what the on-chain branch does.
+
+// BTC (units) per 1 asset unit, from a whole offer's atoms — for the plain "1 GOLD = X BTC" price line.
+function btcPerAssetUnits(assetAtoms, btcAtoms, aprec){
+  const a = Number(assetAtoms) / Math.pow(10, aprec || 0), b = Number(btcAtoms) / 1e8;
+  return a > 0 ? b / a : 0;
+}
+// The asset amount (in the asset's own atoms) the user wants, from whichever leg they edited — read the
+// asset leg directly, else convert the typed BTC at the offer's price (mirrors requoteCross's editedIsSeq).
+function wantAssetAtomsFor(route, offerAtoms, offerBtc){
+  const seqAsset = route.seqAsset;
+  const editedEl = S.edited === 'pay' ? C.$('swPayAmt') : C.$('swRecvAmt');
+  const editedHex = S.edited === 'pay' ? S.payAsset : S.receiveAsset;
+  if (editedHex === seqAsset) return fieldAtoms(editedEl, seqAsset);
+  const btcAtoms = fieldAtoms(editedEl, 'BTC');
+  return (btcAtoms > 0n && offerBtc > 0n) ? (btcAtoms * BigInt(offerAtoms)) / BigInt(offerBtc) : 0n;
+}
+// One-tap "Use minimum": accept the offer's minimum fill (a real placeable take) and re-quote so Place enables.
+function useMinimumFill(route, sz){
+  const buy = route.payIsBtc;
+  const assetEl = buy ? C.$('swRecvAmt') : C.$('swPayAmt');
+  const am = C.assetMeta(route.seqAsset) || {};
+  setNativeField(assetEl, C.fmtAtoms(BigInt(sz.minAtoms || 0), am.precision || 0));
+  assetEl._userTyped = true;
+  S.edited = buy ? 'receive' : 'pay';
+  requote().catch(()=>{});
+}
+// Paint the rail-blind take for a BTC<->asset market order + return the sizing decision. `plan` is
+// { side, offerAtoms, offerBtc, minFill } sourced from the unified rail-blind book (or the shape's own
+// settlement book). Guarantees pay & receive stay CONSISTENT (both reflect a real placeable take), shows
+// the true minimum when the request is below it, and NEVER prints partial-impossible / whole-only vocab.
+function renderMixedTake(route, plan){
+  const { $ } = C;
+  const am = C.assetMeta(route.seqAsset) || {};
+  const tk = am.ticker || 'asset', aprec = am.precision || 0;
+  const buy = plan.side === 'buy';
+  const offerAtoms = BigInt(plan.offerAtoms || 0), offerBtc = BigInt(plan.offerBtc || 0);
+  const want = wantAssetAtomsFor(route, offerAtoms, offerBtc);
+  const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: BigInt(plan.minFill || 0), side: plan.side });
+  const assetStr = C.fmtAtoms(sz.takeAtoms, aprec), btcStr = C.fmtAtoms(sz.takeBtc, 8);
+  const minAssetStr = C.fmtAtoms(sz.minAtoms, aprec), minBtcStr = C.fmtAtoms(sz.minBtc, 8);
+  const priceU = btcPerAssetUnits(offerAtoms, offerBtc, aprec);
+  const payEl = $('swPayAmt'), recvEl = $('swRecvAmt');
+  const [payStr, recvStr] = buy ? [btcStr, assetStr] : [assetStr, btcStr];
+  $('swRoute').textContent = '';   // the settlement path is invisible — no rail label
+  // NO amount typed yet: show the plain price and wait for an amount.
+  if (want <= 0n){
+    $('swRate').textContent = priceU > 0 ? `1 ${tk} = ${trim(priceU)} BTC` : `${tk} / BTC`;
+    return { ...sz, hasAmount: false };
+  }
+  // Paint BOTH legs to the sized take so pay & receive can NEVER disagree.
+  setNativeField(payEl, payStr); setNativeField(recvEl, recvStr);
+  if (sz.belowMin){
+    // Below this offer's minimum: show the true minimum plainly + a one-tap to use it, and BLOCK Place right
+    // here (the caller also fails closed). Pay & receive were painted to the minimum above, so they agree.
+    setReviewEnabled(false);
+    const msg = `The smallest amount you can ${buy ? 'buy' : 'sell'} here is ${minAssetStr} ${tk} (${minBtcStr} BTC).`;
+    $('swRate').innerHTML = esc(msg) + ` <a href="#" class="swusemin" style="text-decoration:underline;cursor:pointer">Use minimum</a>`;
+    const link = ($('swRate').querySelector && $('swRate').querySelector('.swusemin')) || null;
+    if (link) link.onclick = (e) => { if (e && e.preventDefault) e.preventDefault(); useMinimumFill(route, sz); };
+    return { ...sz, hasAmount: true };
+  }
+  // IOC truth: a market take reads only this single best-price offer, so a request larger than it fills THIS
+  // offer and the remainder does NOT walk to further offers right now (multi-offer walk is a separate follow-up).
+  const capNote = sz.capped ? ' · this fills the best resting offer; the rest of your order will not fill right now' : '';
+  $('swRate').textContent = buy
+    ? `${btcStr} BTC → ${assetStr} ${tk}${capNote}`
+    : `${assetStr} ${tk} → ${btcStr} BTC${capNote}`;
+  return { ...sz, hasAmount: true };
+}
+
+// --- MIXED rails (one leg LN, one on-chain), RAIL-BLIND -------------------------
+// Priced from the ONE unified rail-blind book (bridgedTakePlan) for the submarine shapes, and from the
+// shape's own settlement book for the sub-asset shapes — but the DISPLAY (matched offer + fill, partial /
+// minimum handling, plain wording) is identical, so the composer looks the same on every rail. The rail
+// combo only picks the (invisible) settlement path (native / P2P submarine / LSP payer or receiver bridge).
 async function requoteMixed(route, amtStr){
   const { $ } = C;
-  const am = C.assetMeta(route.seqAsset);
   $('swStatus').textContent = ''; $('swErr').textContent = '';
-  // P2.5: LIMIT on a mixed (submarine / sub-asset) rail. These settle by lifting a whole resting offer
-  // or an LSP-fronted leg — there is NO durable offline rest here — so selecting Limit must never
-  // silently market-execute at the maker's price. Render the book, then gate honestly + point at the
-  // on-chain (covenant CLOB) path, which DOES rest a durable cross limit at the user's price.
+  await loadBtcBook(route);   // loads the on-chain cross book AND the unified rail-blind book (UBOOK)
+
+  // LIMIT: a resting order at YOUR price stays live while your wallet is closed only on-chain. Point there;
+  // the "keep resting while offline" opt-in (with its custody-risk disclosure) surfaces only for a BTC-pay
+  // on-chain limit, via the offline toggle — never here.
   if (S.mode === 'post'){
-    try { await loadBtcBook(route); } catch {}
     LAST_QUOTE = null; setReviewEnabled(false);
-    $('swRoute').textContent = 'Mixed rails · Lightning + on-chain';
-    $('swRate').textContent = `Limit orders need a rail that can rest offline · put both legs on-chain to rest a durable ${am.ticker}/BTC limit at your price (the Lightning leg can’t rest while your wallet is closed).`;
+    $('swRoute').textContent = '';
+    $('swRate').textContent = `To keep an order resting at your price while your wallet is closed, set both sides on-chain.`;
     paintFee('BTC', null, null);
     renderTiming(route);
     return;
   }
-  // Defensive: the rail toggles already grey out the undeployed mixed shape (asset over LN
-  // + BTC on-chain), but if state ever lands there, don't offer a doomed Review — render
-  // the book, then nudge the user to a supported combo instead of hitting an HTTP 422.
-  if (!railSupported(route.payRail, route.recvRail)){
-    await loadBtcBook(route);
-    $('swRate').textContent = 'This rail combination isn’t available yet.';
-    $('swRoute').textContent = 'Mixed rails · coming soon';
-    $('swErr').textContent = `Asset-over-Lightning with BTC on-chain has no maker yet. `
-      + `Put ${am.ticker} on-chain and BTC on Lightning, or set both legs the same way.`;
-    setReviewEnabled(false);
-    renderTiming(route);
-    return;
-  }
-  // Sub-asset SELL (pay the asset over Lightning, receive BTC on-chain): take a resting sell offer
-  // from the sub-asset book — a whole-offer lift at the maker's fixed terms. Attach the offer so
-  // startSell takes exactly THIS one (unambiguous amount), fill both amount fields, and show the
-  // BTC received. Distinct from the submarine path below (which reads the on-chain cross book).
-  if (route.payRail === 'ln' && route.recvRail === 'chain' && !route.payIsBtc){
-    const offer = subassetOffers(route.seqAsset, 'sell')[0] || null;
-    if (!offer){
-      $('swRate').textContent = `No resting ${am.ticker}→BTC sell offer right now · try again shortly.`;
-      $('swRoute').textContent = 'Mixed rails · sell over Lightning, receive BTC on-chain';
-      setReviewEnabled(false); renderTiming(route); return;
+
+  const buy = !!route.payIsBtc;
+  const side = buy ? 'buy' : 'sell';
+  const feeNote = 'You trade at the price shown · your funds stay in your control until it completes.';
+  // The BTC leg's rail decides the settlement FAMILY (invisible to the user):
+  //   • BTC over Lightning  -> submarine / LSP-bridge family: read the ONE rail-blind unified book
+  //     (bridgedTakePlan), so the fill is IDENTICAL to the on-chain branch.
+  //   • BTC on-chain (asset over LN) -> sub-asset family: lift a resting sub-asset offer (its own book).
+  const btcLeg = buy ? route.payRail : route.recvRail;
+  const isSubmarine = (btcLeg === 'ln');
+
+  if (isSubmarine){
+    // RAIL-BLIND: match the ONE unified book on {asset,price,size,side}; the rail only selects the invisible
+    // settlement path. Show the SAME matched offer + fill the on-chain branch shows.
+    const bp = bridgedTakePlan(route);
+    if (!bp || !bp.offer){
+      LAST_QUOTE = null; setReviewEnabled(false);
+      $('swRoute').textContent = '';
+      $('swRate').textContent = 'No offers resting here yet.';
+      paintFee('BTC', null, null);
+      renderTiming(route);
+      return;
     }
-    // MED-4: format each leg at its own precision (asset at am.precision, BTC at 8), not the
-    // generic 8dp trim(), so a sub-8-decimal asset writes a re-parseable value into the field.
-    const assetStr = C.fmtAtoms(BigInt(offer.asset_amount), am.precision || 0);
-    const btcStr = C.fmtAtoms(BigInt(offer.btc_sats), 8);
-    setNativeField($('swPayAmt'), assetStr);
-    setNativeField($('swRecvAmt'), btcStr);
-    $('swRate').textContent = `${assetStr} ${am.ticker} → ${btcStr} BTC · best resting offer`;
-    $('swRoute').textContent = 'Mixed rails · sell over Lightning, receive BTC on-chain';
-    paintFee('BTC', null, 'You pay the ' + am.ticker + ' over Lightning; your device claims the BTC from its on-chain HTLC.');
-    LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: false,
-      payRail: 'ln', recvRail: 'chain', sellOffer: offer };
+    const raw = bp.offer.raw || {};
+    const dec = renderMixedTake(route, { side, offerAtoms: bp.offer.assetAtoms, offerBtc: bp.offer.btcSats,
+      minFill: BigInt(raw.min_fill || raw.minFill || 0) });
+    paintFee('BTC', null, feeNote);
     renderTiming(route);
+    // GENUINE fail-closed (the invisible settlement can't carry this crossing in THIS build). Not a rail /
+    // liquidity message — the SAME shared predicate onReview uses (bridgedTakeSupported), so Review is never
+    // offered then refused. A happy coincidence (native) or a supported crossing passes.
+    if (bp.crosses && !bp.supported){
+      LAST_QUOTE = null; setReviewEnabled(false);
+      $('swErr').textContent = 'This trade could not be placed right now - try again shortly.';
+      return;
+    }
+    // PAYER LEG-BRIDGE capability gate (spec §4 — kill offer-then-refuse): a BUY that crosses to an
+    // on-chain-only maker settles via the LSP payer bridge, which needs the bare-hash hold (L.bridgeHold) +
+    // hold pay (L.nodePayHash). Gate Place on the SAME condition reviewLspPayerBridge enforces, so Review
+    // never enables a Place that reviewLspPayerBridge then refuses. A peer-to-peer submarine maker
+    // (bp.submarine) settles without those, so it is not gated here.
+    if (buy && bp.crosses && bp.supported && !bp.submarine && !(L && L.swap && L.bridgeHold && L.nodePayHash)){
+      LAST_QUOTE = null; setReviewEnabled(false);
+      $('swErr').textContent = payerBridgeDisabledNote();
+      return;
+    }
+    // Paying BTC over your OWN Lightning needs spendable BTC in Lightning (a genuine capability gate — the
+    // settlement bridge does not open your outbound channel). The fill stays shown; only Place is gated.
+    if (buy && route.payRail === 'ln' && !railAvail('BTC', route.seqAsset).payLn.ok){
+      LAST_QUOTE = null; setReviewEnabled(false);
+      $('swErr').textContent = 'You will need Bitcoin in Lightning to pay this way · move it to Lightning first (Balance tab), then take this offer.';
+      return;
+    }
+    if (dec.belowMin || !dec.hasAmount){ LAST_QUOTE = null; setReviewEnabled(false); return; }   // block Place until met / an amount is entered
+    LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: buy,
+      payRail: route.payRail, recvRail: route.recvRail };
     setReviewEnabled(true);
     return;
   }
-  // Sub-asset BUY shape (pay BTC on-chain, receive the asset over Lightning) with NO resting sub-asset buy
-  // offer (subassetCapable false): there is no maker that delivers the asset over Lightning, so this shape
-  // cannot settle — HONEST-DISABLE Review up front rather than offer a doomed take (no offer-then-refuse).
-  if (route.payRail === 'chain' && route.recvRail === 'ln' && route.payIsBtc && !subassetCapable(route.seqAsset)){
-    await loadBtcBook(route);
-    $('swRate').textContent = `No resting BTC→${am.ticker} offer that delivers over Lightning right now · this rail needs a sub-asset maker. Try again shortly, or set the receive leg to on-chain.`;
-    $('swRoute').textContent = 'Mixed rails · buy over Lightning, pay BTC on-chain';
-    setReviewEnabled(false); renderTiming(route); return;
-  }
-  // Sub-asset BUY (pay BTC on-chain, receive the asset over Lightning): like the sell, reviewMixed
-  // lifts the WHOLE resting sub-asset BUY offer at the maker's fixed terms (startBuy uses
-  // offer.asset_amount and ignores the typed amount). So quote off THAT offer — not the on-chain
-  // cross book — attach it, and show its exact BTC↔asset terms, so the displayed rate is what
-  // actually executes (fixes the price-honesty gap where the cross book and the lifted offer differ).
-  if (route.payRail === 'chain' && route.recvRail === 'ln' && route.payIsBtc && subassetCapable(route.seqAsset)){
-    const offer = subassetOffers(route.seqAsset, 'buy')[0] || null;
-    if (!offer){
-      $('swRate').textContent = `No resting BTC→${am.ticker} buy offer right now · try again shortly.`;
-      $('swRoute').textContent = 'Mixed rails · buy over Lightning, pay BTC on-chain';
-      setReviewEnabled(false); renderTiming(route); return;
-    }
-    // T8 PARTIAL FILL: this rail can take a SLICE of the resting sub-asset BUY offer, not only the whole
-    // thing. startBuy already computes a proportional slice when the user enters LESS BTC than the offer's
-    // full price (assetAtoms scaled by the BTC fraction; btcSats = the maker's ceil-proportional need),
-    // and the maker re-rests the remainder. So DON'T clobber the user's typed BTC with the whole offer's
-    // amount — that overwrote the slice and always lifted the whole offer, making the partial path
-    // unreachable. Read the SAME typed BTC reviewMixed passes to startBuy, mirror startBuy's exact BigInt
-    // slice math, and paint the proportional asset received, so the composer preview equals what executes.
-    const wholeAsset = BigInt(offer.asset_amount), wholeBtc = BigInt(offer.btc_sats);
-    const typedBtcU = fieldUnits($('swPayAmt'), 'BTC') || 0;
-    const reqBtcSats = typedBtcU > 0 ? BigInt(Math.round(typedBtcU * 1e8)) : 0n;
-    let assetAtoms = wholeAsset, btcSats = wholeBtc, sliced = false;
-    if (reqBtcSats > 0n && reqBtcSats < wholeBtc){
-      let a = (wholeAsset * reqBtcSats) / wholeBtc;   // floor slice of the entered BTC (mirror startBuy)
-      if (a < 1n) a = 1n;
-      assetAtoms = a;
-      btcSats = ceilDiv(wholeBtc * a, wholeAsset);    // = the maker's ProportionalBtc(ceil), never rejected
-      sliced = true;
-    }
-    const assetStr = C.fmtAtoms(assetAtoms, am.precision || 0);
-    const btcStr = C.fmtAtoms(btcSats, 8);
-    const wholeAssetStr = C.fmtAtoms(wholeAsset, am.precision || 0), wholeBtcStr = C.fmtAtoms(wholeBtc, 8);
-    // Paint the asset the user RECEIVES for their slice (derived field). For a SLICE, leave the pay (BTC)
-    // field exactly as the user typed it so their number routes through startBuy's partial path; only fill
-    // the pay field for the whole-offer default (nothing typed / at-or-above the offer's full price).
-    setNativeField($('swRecvAmt'), assetStr);
-    if (!sliced) setNativeField($('swPayAmt'), btcStr);
-    const sliceNote = sliced
-      ? `fills up to ${wholeAssetStr} ${am.ticker} (${wholeBtcStr} BTC); the maker re-rests the rest`
-      : (reqBtcSats >= wholeBtc && reqBtcSats > 0n
-        ? `capped at this offer’s ${wholeBtcStr} BTC (the most it can fill) · switch to Limit to rest a larger order`
-        : 'best resting offer');
-    $('swRate').textContent = `${btcStr} BTC → ${assetStr} ${am.ticker} · ${sliceNote}`;
-    $('swRoute').textContent = 'Mixed rails · buy over Lightning, pay BTC on-chain';
-    paintFee('BTC', null, 'You pay BTC on-chain; the maker pays the ' + am.ticker + ' to your device over Lightning.');
-    LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: true,
-      payRail: 'chain', recvRail: 'ln', buyOffer: offer };
-    renderTiming(route);
-    setReviewEnabled(true);
-    return;
-  }
-  await loadBtcBook(route);
-  // Submarine BUY (pay BTC over Lightning, receive the asset on-chain): NO native settlement — it settles
-  // PEER-TO-PEER against an interactive submarine maker, else via the LSP payer leg-bridge. NEVER the inline
-  // BTC-LN channel + LSP custodial submarine (reviewMixed/startMixed). Price off the routable best offer, or
-  // HONEST-DISABLE Review when the book has no maker that can settle it (no offer-then-refuse).
-  if (route.payRail === 'ln' && route.recvRail === 'chain' && route.payIsBtc){
-    const disp = settlementDispatch(route);
-    // ONLY the P2P submarine (an interactive maker that accepts BTC-LN) is a live buy shape here. The LSP PAYER
-    // leg-bridge (an on-chain-only maker) needs the seqln hold-invoice node update the node does not yet mint,
-    // so onReview honest-DISABLES it — surfacing a priced+enabled "Bridged buy" row that onReview then refuses
-    // is offer-then-refuse. SINGLE SOURCE: settlementDispatch -> lsp-bridge&&payer is DISABLED here too, with
-    // the same honest note onReview shows.
-    if (disp && disp.path === 'p2p-submarine'){
-      // BUY OUTBOUND CHECK (same gate reviewSubmarineP2P enforces): a P2P submarine BUY pays BTC over the
-      // taker's OWN Lightning and does NOT JIT-provision a channel like the LSP bridge. Require REAL spendable
-      // BTC-LN outbound (a funded BTC channel) BEFORE enabling Review — else honest-disable up front, so Review
-      // is never enabled for a buy the taker can't pay (no click-then-refuse in reviewSubmarineP2P).
-      if (!railAvail('BTC', route.seqAsset).payLn.ok){
-        $('swRate').textContent = `Paying Bitcoin over Lightning needs a funded Bitcoin Lightning channel · move Bitcoin to Lightning first (Balance tab), then take this offer. This peer-to-peer route does not open a channel for you.`;
-        $('swRoute').textContent = 'Peer-to-peer submarine · pay BTC over Lightning, receive ' + am.ticker + ' on-chain';
-        paintFee('BTC', null, 'Move Bitcoin to Lightning first · this direct route does not open a channel for you.');
-        LAST_QUOTE = null; setReviewEnabled(false); renderTiming(route); return;
-      }
-      // §2.4 SIZE GUARD (mirror reviewSubmarineP2P): a submarine offer is WHOLE-OFFER-ONLY. When the user's
-      // requested size differs from the whole resting offer, settlementDispatch/sizeSubswapTake sets
-      // disp.overshoot (+ disp.wholeOnly for a submarine) — surface the size mismatch and DISABLE Review (fail
-      // closed), NEVER paint the whole-offer size + enable Review (which would silently sign the user up for the
-      // whole offer). This keeps the composer preview == what reviewSubmarineP2P/startSubswapP2P actually execute.
-      const offerAssetStr = C.fmtAtoms(BigInt(disp.offer.assetAtoms || 0), am.precision || 0) + ' ' + am.ticker;
-      if (disp.overshoot){
-        const wantStr = C.fmtAtoms(BigInt(disp.want || 0), am.precision || 0);
-        $('swRate').textContent = disp.wholeOnly
-          ? `This peer-to-peer submarine offer settles as a WHOLE (${offerAssetStr}) · you asked to buy ${wantStr} ${am.ticker}. Enter ${offerAssetStr} to take it, or place a limit order to trade a different size.`
-          : `You asked to buy ${wantStr} ${am.ticker}, but the best resting offer (${offerAssetStr}) can't be partially filled · enter a matching size, or place a limit order.`;
-        $('swRoute').textContent = 'Peer-to-peer submarine · pay BTC over Lightning, receive ' + am.ticker + ' on-chain';
-        paintFee('BTC', null, 'Size does not match a resting offer · adjust the amount or place a limit order.');
-        LAST_QUOTE = null; setReviewEnabled(false); renderTiming(route); return;
-      }
-      // Paint the SIZED take (disp.takeAtoms/takeBtc — for a submarine this is the whole offer), never a raw
-      // whole-offer figure disconnected from what executes.
-      const assetStr = C.fmtAtoms(BigInt(disp.takeAtoms || 0), am.precision || 0);
-      const btcStr = C.fmtAtoms(BigInt(disp.takeBtc || 0), 8);
-      setNativeField($('swRecvAmt'), assetStr); setNativeField($('swPayAmt'), btcStr);
-      $('swRate').textContent = `${btcStr} BTC → ${assetStr} ${am.ticker} · best resting offer`;
-      $('swRoute').textContent = 'Peer-to-peer submarine · pay BTC over Lightning, receive ' + am.ticker + ' on-chain';
-      paintFee('BTC', null, 'Direct peer-to-peer · no bridge fee. Your device verifies the on-chain ' + am.ticker + ' is anchor-buried in your key before it pays.');
-      LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: true, payRail: 'ln', recvRail: 'chain' };
-      renderTiming(route); setReviewEnabled(true); return;
-    }
-    if (disp && disp.path === 'lsp-bridge' && disp.lnSide === 'payer'){
-      // SHARED honest-disable (payerBridgeDisabledNote) — identical across requoteMixed / onReview / reviewMixed;
-      // the payer bridge never reaches an enabled Place until the seqln hold-invoice capability lands.
-      $('swErr').textContent = payerBridgeDisabledNote(am.ticker);
-      $('swRate').textContent = `This ${am.ticker} maker settles Bitcoin on-chain · paying Bitcoin over Lightning to it needs the hold-invoice node update.`;
-      $('swRoute').textContent = 'Mixed rails · buy over Lightning, receive ' + am.ticker + ' on-chain';
-      paintFee('BTC', null, 'This on-chain-only maker can’t receive Bitcoin over Lightning yet · set the pay leg to on-chain to post a durable limit order.');
-      LAST_QUOTE = null; setReviewEnabled(false); renderTiming(route); return;
-    }
-    $('swRate').textContent = `No resting BTC→${am.ticker} offer that settles over Lightning right now · this rail needs a resting maker.`;
-    $('swRoute').textContent = 'Mixed rails · buy over Lightning, receive ' + am.ticker + ' on-chain';
-    paintFee('BTC', null, 'This rail needs a resting maker. Try again shortly, or set the pay leg to on-chain to post a durable limit order.');
-    LAST_QUOTE = null; setReviewEnabled(false); renderTiming(route); return;
-  }
-  deriveXOpposite(route);
-  const o = (XBOOK.offers || [])[0];
-  if (o){
-    const { asset, btc } = xOfferAmts(o, route.payIsBtc);
-    const assetU = Number(big(asset)) / Math.pow(10, am.precision || 0), btcU = Number(big(btc)) / 1e8;
-    $('swRate').textContent = (assetU > 0 && btcU > 0)
-      ? `1 ${am.ticker} = ${trim(btcU / assetU)} BTC · best resting offer`
-      : `Mixed rails · ${am.ticker}/BTC`;
+
+  // SUB-ASSET (asset over LN, BTC on-chain): the SAME rail-blind DISPLAY as the submarine branch — match +
+  // fill from the ONE unified book (bridgedTakePlan/UBOOK), so chain/chain and chain/ln render an IDENTICAL
+  // matched offer + fill for the same market + size. Only the invisible settlement path (a resting sub-asset
+  // offer) differs, and it gates ONLY Place. Fall back to the sub-asset book only when the unified book has
+  // no offer for the pair.
+  const bp = bridgedTakePlan(route);
+  // The SETTLEMENT handle MUST be the SAME offer whose fill is DISPLAYED — never a different sub-asset offer at a
+  // different price (that showed one price and delivered another: "50 GOLD for 500000 sats" but received 25).
+  // subassetOffers merges the same relay reads the unified book does, so when the unified best (bp.offer) is a
+  // sub-asset / LN-leg offer it is present here BY ID; when the best is an on-chain / submarine maker the
+  // sub-asset (asset-over-LN) path cannot deliver, there is NO matching sub-asset offer to lift.
+  let offerAtoms, offerBtc, minFill, matchedSub = null;
+  if (bp && bp.offer){
+    const raw = bp.offer.raw || {};
+    offerAtoms = bp.offer.assetAtoms; offerBtc = bp.offer.btcSats;
+    minFill = BigInt(raw.min_fill || raw.minFill || 0);
+    const oid = String(bp.offer.id || '');
+    matchedSub = oid ? (subassetOffers(route.seqAsset, side).find(o => String(o.offer_id || o.offerId || '') === oid) || null) : null;
   } else {
-    $('swRate').textContent = `No resting offers for ${am.ticker}/BTC yet.`;
+    // Unified feed has NO offer for this pair -> fall back to the sub-asset book for BOTH the display AND the
+    // settlement (consistent: the displayed offer IS the one lifted).
+    const subOffer = subassetOffers(route.seqAsset, side)[0] || null;
+    if (!subOffer){
+      LAST_QUOTE = null; setReviewEnabled(false);
+      $('swRoute').textContent = '';
+      $('swRate').textContent = 'No offers resting here yet.';
+      paintFee('BTC', null, null);
+      renderTiming(route);
+      return;
+    }
+    matchedSub = subOffer;
+    offerAtoms = subOffer.asset_amount; offerBtc = subOffer.btc_sats;
+    minFill = BigInt(subOffer.min_fill || subOffer.minFill || 0);
   }
-  $('swRoute').textContent = 'Mixed rails · Lightning + on-chain';
-  // Fronted case (pay on-chain -> receive on LN, within the instant-front CAP): the
-  // fee note flags the instant-settlement cover; otherwise it's quoted when the route lands.
-  const fronted = (route.recvRail === 'ln' && route.payRail === 'chain' && btcLegAtoms() <= frontCapAtoms());
-  paintFee('BTC', null, fronted
-    ? 'Includes instant-settlement cover for the fronted on-chain leg.'
-    : 'Mixed-rail settlement · fees are quoted when this route lands.');
-  LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: route.payIsBtc,
-    payRail: route.payRail, recvRail: route.recvRail };
+  const dec = renderMixedTake(route, { side, offerAtoms, offerBtc, minFill });
+  paintFee('BTC', null, feeNote);
   renderTiming(route);
-  setReviewEnabled(!!(amtStr && amtStr.trim()));   // clickable -> reviewMixed runs the submarine swap
+  if (dec.belowMin || !dec.hasAmount){ LAST_QUOTE = null; setReviewEnabled(false); return; }
+  // GATE ONLY PLACE on sub-asset SETTLEABILITY (mirrors requoteCross's show-fill-then-gate-Place): the
+  // (invisible) sub-asset settlement lifts a resting sub-asset offer for the pair, and it MUST be the SAME offer
+  // the DISPLAY priced (matchedSub, by id). When the unified best is an on-chain / submarine maker the sub-asset
+  // path cannot deliver over LN, there is no matching sub-asset offer to lift — show the SAME fill but DISABLE
+  // Place with the shared plain note (never lift a DIFFERENT offer than shown, never give rail advice).
+  if (!matchedSub){
+    LAST_QUOTE = null; setReviewEnabled(false);
+    $('swErr').textContent = payerBridgeDisabledNote();
+    return;
+  }
+  LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: buy,
+    payRail: route.payRail, recvRail: route.recvRail,
+    // Carry the SIZED take from the DISPLAYED unified book as the AUTHORITATIVE fill, so startBuy/startSell lift
+    // EXACTLY what was shown (never re-derive off a different offer's ratio) — Review == execution for a partial.
+    takeBtcSats: String(dec.takeBtc), takeAssetAtoms: String(dec.takeAtoms),
+    // The settlement handle is the sub-asset offer that IS the displayed unified offer (matched by id).
+    [buy ? 'buyOffer' : 'sellOffer']: matchedSub };
+  setReviewEnabled(true);
 }
 
 // --- cross-chain quote (GetXchainQuote) ---
@@ -2561,20 +2573,21 @@ function postModeCross(route){
   LAST_QUOTE = { kind:'cross-make', reverse, assetHex: route.seqAsset };
   const both = fieldUnits($('swPayAmt'), S.payAsset) > 0 && fieldUnits($('swRecvAmt'), S.receiveAsset) > 0;
   $('swRate').textContent = both
-    ? `Your price · ${reverse ? `buy ${am.ticker} with BTC` : `sell ${am.ticker} for BTC`} · Post to rest this offer.`
-    : `Set both amounts (the ${am.ticker} and the BTC) · their ratio is your price · then Post.`;
-  $('swRoute').textContent = reverse ? 'Cross-chain · post a bid (buy with BTC)' : 'Cross-chain · post an offer (sell for BTC)';
+    ? `Your price · ${reverse ? `buy ${am.ticker} with Bitcoin` : `sell ${am.ticker} for Bitcoin`} · Post to rest this offer.`
+    : `Set both amounts (the ${am.ticker} and the Bitcoin) · their ratio is your price · then Post.`;
+  $('swRoute').textContent = reverse ? `Post an offer to buy ${am.ticker} with Bitcoin` : `Post an offer to sell ${am.ticker} for Bitcoin`;
   setFinality('cross');
   setReviewEnabled(both);
 }
 
 async function requoteCross(route, amtStr){
   const { $ } = C;
-  if (!X || !X.quote){ $('swErr').textContent = 'Cross-chain route unavailable in this build.'; setReviewEnabled(false); return; }
+  if (!X || !X.quote){ $('swErr').textContent = 'This trade isn’t available right now - try again shortly.'; setReviewEnabled(false); return; }
   const seqAsset = route.seqAsset;
   const am = C.assetMeta(seqAsset);
   const seqPrec = am.precision || 0;
-  const status = $('swStatus'); status.className = 'status'; status.innerHTML = '<span class="spin"></span>Loading the cross-chain order book…';
+  const dirLabel = route.payIsBtc ? `Buy ${am.ticker} with Bitcoin` : `Sell ${am.ticker} for Bitcoin`;
+  const status = $('swStatus'); status.className = 'status'; status.innerHTML = '<span class="spin"></span>Loading the order book…';
   $('swErr').textContent = '';
   try {
     // Fetch + render the ONE (cross) order book for this pair, then pick the side
@@ -2584,19 +2597,95 @@ async function requoteCross(route, amtStr){
     // same-chain pair the wallet can't self-start one yet).
     const { offers, unreachable } = await loadBtcBook(route);
 
-    // T7: cross-chain relay unreachable AND nothing to show — offer a retry, never invite first-maker.
-    if (unreachable && !offers.length){
+    // ONE BOOK, rail-blind: the on-chain-pay (chain/chain) buy + its mirror sell match the SAME unified book
+    // and show the SAME renderMixedTake preview the Lightning-pay (submarine) combo uses — identical matched
+    // offer, takeAtoms/takeBtc, price and partial/min_fill handling. The rail combo ONLY selects the invisible
+    // settlement dispatch (chain/chain -> the on-chain courier, below in reviewCross). bridgedTakePlan is
+    // rail-blind, so the fill never differs per rail.
+    const bp = bridgedTakePlan(route);
+    const haveUnified = !!(bp && bp.offer);
+
+    // T7: relay unreachable AND nothing to show on EITHER book — offer a retry, never invite first-maker.
+    if (unreachable && !offers.length && !haveUnified){
       status.textContent = ''; clearOpposite(); LAST_QUOTE = null; setReviewEnabled(false);
-      $('swRate').textContent = 'Cross-chain order book unreachable - retry.';
+      $('swRate').textContent = 'Could not load the order book · retry.';
       $('swRoute').textContent = '';
-      $('swErr').textContent = 'Could not reach the cross-chain order book (' + (unreachable === true ? 'relay unreachable' : unreachable) + '). Check your connection and try again (re-enter the amount to retry).';
+      $('swErr').textContent = 'Could not reach the order book right now. Check your connection and try again (re-enter the amount to retry).';
       return;
     }
 
-    // Take vs Post (Post defaults for an empty cross book). In Post mode the fields are the
-    // user's own price; Review posts a resting cross offer via the maker (postCrossOfferReview).
-    applyAutoMode(offers.length, route);
+    // Take vs Post (Post defaults for an empty book). In Post mode the fields are the user's own price;
+    // Review posts a resting cross offer via the maker (postCrossOfferReview).
+    applyAutoMode((offers.length || (haveUnified ? 1 : 0)), route);
     if (S.mode === 'post'){ status.textContent = ''; return postModeCross(route); }
+
+    // === UNIFIED MATCH + PREVIEW (the ONE rail-blind book) ===================================
+    // SPEC §1/§2 — ONE book, matched RAIL-BLIND: the on-chain-pay preview renders the SAME matched offer + fill
+    // the Lightning-pay (submarine) combo shows. The DISPLAY never depends on the invisible settlement path;
+    // only Place is gated on whether THIS on-chain courier can settle the matched offer. The matched offer
+    // carries offer_id/maker_pubkey/amounts from the same cross relay, so the courier can lift exactly it
+    // (settlement is UNCHANGED — see reviewCross). This mirrors requoteMixed's show-fill-then-block-Place.
+    if (haveUnified){
+      status.textContent = '';
+      const raw = bp.offer.raw || {};
+      const side = route.payIsBtc ? 'buy' : 'sell';
+      // ALWAYS render the SAME matched offer + fill (the identical rail-blind preview both rails show). The
+      // display is never gated on the settlement path — the gates below (capability + affordability) touch ONLY Place.
+      const dec = renderMixedTake(route, { side, offerAtoms: bp.offer.assetAtoms, offerBtc: bp.offer.btcSats,
+        minFill: BigInt(raw.min_fill || raw.minFill || 0) });
+      // IDENTICAL fee row + finality reassurance to the submarine combo, so the two look the same.
+      paintFee('BTC', null, 'You trade at the price shown · your funds stay in your control until it completes.');
+      renderTiming(route);
+      if (!dec.hasAmount){ LAST_QUOTE = null; setReviewEnabled(false); return; }   // book + price shown; wait for an amount
+      if (dec.belowMin){ LAST_QUOTE = null; setReviewEnabled(false); return; }      // renderMixedTake showed the minimum + blocked Place
+      // GATE ONLY PLACE (spec §4 — never offer-then-refuse; never match a DIFFERENT offer per rail). The
+      // on-chain courier lifts ONLY a happy-coincidence match: an on-chain maker whose asset leg is on-chain
+      // (!bp.crosses). When the best offer rests its asset over Lightning (bp.crosses), THIS courier cannot lift
+      // it — show the SAME fill but DISABLE Place with the shared plain note. NEVER silently fall through to a
+      // different XBOOK offer, NEVER give rail advice; the user sees the true best match, told plainly it can't
+      // be placed right now (mirrors requoteMixed's submarine-crosses block).
+      if (bp.crosses){
+        LAST_QUOTE = null; setReviewEnabled(false);
+        $('swErr').textContent = payerBridgeDisabledNote();
+        return;
+      }
+      const takeAtoms = BigInt(dec.takeAtoms || 0), takeBtc = BigInt(dec.takeBtc || 0);
+      // AFFORDABILITY (mirrors the fallback below): gate Review on the amount actually committed (the sized
+      // take), with a little BTC headroom for the on-chain funding fee when paying BTC.
+      const _payAtoms = route.payIsBtc ? takeBtc : takeAtoms;
+      const _payBal   = balAtoms(route.payIsBtc ? 'BTC' : seqAsset);
+      const _payNeed  = route.payIsBtc ? (_payAtoms + 1000n) : _payAtoms;
+      if (_payNeed > _payBal){
+        $('swErr').textContent = `You only hold ${C.fmtAtoms(_payBal, route.payIsBtc ? 8 : seqPrec)} ${route.payIsBtc ? 'BTC' : am.ticker}${route.payIsBtc ? ' (an on-chain fee is also needed)' : ''} · reduce the amount.`;
+        LAST_QUOTE = null; setReviewEnabled(false);
+        return;
+      }
+      // Build the courier settlement quote from the SAME matched offer + sized take. reviewCross hands this
+      // straight to X.openFromComposer / X.openReverseFromComposer UNCHANGED — the courier lifts THIS offer.
+      const offerObj = { ...raw, offer_id: bp.offer.id || raw.offer_id || raw.offerId,
+        maker_pubkey: bp.offer.maker || raw.maker_pubkey || raw.makerPubkey };
+      const market = (typeof XMARKETS !== 'undefined' && XMARKETS.find(m => m.seq_asset === seqAsset)) ||
+        { btc_asset: '', seq_asset: seqAsset, name: 'BTC / ' + am.ticker, price_seq_per_btc: 0 };
+      const xq = { reverse: !route.payIsBtc, market, offer: offerObj, courier: true, quote_id: 'courier',
+        seq_amount: takeAtoms, btc_amount: takeBtc, fee_btc: 0n,
+        price_seq_per_btc: takeBtc > 0n ? Number(takeAtoms) / Number(takeBtc) : 0,
+        candidates: [], maker_btc_claim_pub: '', maker_seq_refund_pub: '', btc_locktime: 0, seq_locktime: 0,
+        expires_at_unix: Number(raw.expires_at_unix || raw.expiresAtUnix || 0) };
+      LAST_QUOTE = { kind: 'cross', unified: true, reverse: !route.payIsBtc, route, seqAsset, xq,
+        offer: bp.offer, takeAtoms: String(takeAtoms), takeBtc: String(takeBtc), partial: dec.partial,
+        // A market take on the unified book is IOC-capped to the matched offer (renderMixedTake states the
+        // capped remainder honestly) — there is no separate resting remainder here.
+        remainderSeqAtoms: 0n, fillSeqAtoms: String(takeAtoms) };
+      setReviewEnabled(true);
+      return;
+    }
+
+    // === FALLBACK: the unified feed is genuinely UNREACHABLE (!haveUnified) -> the proven on-chain cross book
+    // (X.quote). One book is the goal; this keeps chain/chain working (never empty) ONLY when the LSP's unified
+    // feed is down. A best offer that rests its asset over Lightning (bp.crosses) no longer falls here — it
+    // showed the same fill and blocked Place above, never a silent rail-siloed re-match. Log ONLY a genuine
+    // divergence (on-chain offers exist but the unified feed gave nothing), so empty pairs stay quiet.
+    if (offers.length) console.warn('[cross] unified feed unreachable for this pair; using the on-chain cross book instead');
 
     if (!offers.length){
       status.textContent = ''; clearOpposite(); setFinality('cross');
@@ -2604,20 +2693,20 @@ async function requoteCross(route, amtStr){
         // SELL asset for BTC with no resting bid: self-start via the FORWARD maker
         // (the wallet holds the asset, locks it, claims the taker's BTC).
         LAST_QUOTE = { kind: 'cross-make', reverse: false, assetHex: seqAsset };
-        $('swRate').textContent = `No resting offers yet - Review to post your own and sell ${am.ticker} for BTC.`;
-        $('swRoute').textContent = 'Cross-chain · be the first (sell for BTC)';
+        $('swRate').textContent = `No offers resting here yet · set a price and Review to post your own.`;
+        $('swRoute').textContent = dirLabel;
         setReviewEnabled(true);
       } else if (route.payIsBtc && X && X.makerStartReverse){
-        // BUY asset with BTC with no resting ask: self-start via the REVERSE maker
-        // (the wallet funds a BTC bid, holds the secret, claims the taker's asset).
+        // BUY asset with BTC with no resting ask: self-start (the wallet funds a BTC bid, holds the
+        // secret, claims the counterparty's asset). Posting your own price is a real capability, not a dead end.
         LAST_QUOTE = { kind: 'cross-make', reverse: true, assetHex: seqAsset };
-        $('swRate').textContent = `No resting offers yet - Review to post your own and buy ${am.ticker} with BTC.`;
-        $('swRoute').textContent = 'Cross-chain · be the first (buy with BTC)';
+        $('swRate').textContent = `No offers resting here yet · set a price and Review to post your own.`;
+        $('swRoute').textContent = dirLabel;
         setReviewEnabled(true);
       } else {
         LAST_QUOTE = null; setReviewEnabled(false);
-        $('swRate').textContent = `No resting offers for ${am.ticker}/BTC yet - a market maker needs to post one.`;
-        $('swRoute').textContent = route.payIsBtc ? 'Cross-chain · buy with BTC' : 'Cross-chain · sell for BTC';
+        $('swRate').textContent = `No offers resting here yet.`;
+        $('swRoute').textContent = dirLabel;
       }
       return;
     }
@@ -2625,8 +2714,8 @@ async function requoteCross(route, amtStr){
     if (!amtStr || !amtStr.trim()){
       status.textContent = ''; clearOpposite(); setReviewEnabled(false);
       const n = offers.length;
-      $('swRate').textContent = `${n} resting cross-chain offer${n>1?'s':''} - enter an amount.`;
-      $('swRoute').textContent = route.payIsBtc ? 'Cross-chain · buy with BTC' : 'Cross-chain · sell for BTC';
+      $('swRate').textContent = `${n} resting offer${n>1?'s':''} · enter an amount.`;
+      $('swRoute').textContent = dirLabel;
       setFinality('cross');
       return;
     }
@@ -2635,7 +2724,7 @@ async function requoteCross(route, amtStr){
     // the cross daemon returns what the best maker can fill NOW (its liquidity) — the immediate-fill
     // portion. The unfilled remainder rests as a limit order at the same price (posted on Review).
     const { asset: bestAsset, btc: bestBtc } = xOfferAmts(offers[0], route.payIsBtc);
-    if (!(bestAsset > 0n && bestBtc > 0n)) throw new Error('no cross-chain price yet');
+    if (!(bestAsset > 0n && bestBtc > 0n)) throw new Error('Could not load the order book right now.');
     const editedIsSeq = (S.edited === 'pay' ? S.payAsset : S.receiveAsset) === seqAsset;
     let reqSeqAtoms, reqBtcAtoms;
     if (editedIsSeq){
@@ -2650,6 +2739,21 @@ async function requoteCross(route, amtStr){
       ? await X.quote(seqAsset, reqSeqAtoms)                  // { seq_amount, btc_amount, fee_btc } — capped to the maker's fillable
       : (X.reverseQuote ? await X.reverseQuote(seqAsset, reqSeqAtoms)
                         : (() => { throw new Error('selling an asset for BTC is unavailable in this build'); })());
+    // A whole-HTLC courier lift: the FORWARD courier quote (fetchXquoteCourier) marks itself `courier:true`;
+    // the REVERSE courier quote (fetchRQuote) carries the resting `offer` with no `quote_id` (an RFQ quote
+    // instead carries a `quote_id` and is already daemon-capped to the fillable). Detect BOTH so the cap +
+    // fee note apply symmetrically on buy and sell.
+    const wholeOffer = !!rawXq.courier || (!!rawXq.offer && !rawXq.quote_id);
+    // COURIER CAP (spec §2 — every resting offer is partial-fillable, never whole-only): a courier quote
+    // returns the chosen offer's WHOLE size. When that exceeds the request, cap the lift to exactly the
+    // requested size (BTC recomputed ceil-proportional so pay==receive) instead of overshooting to the whole
+    // offer. openFromComposer opens the courier session for exactly this seq_amount; the maker locks exactly
+    // it, or the pre-lock terms-binding check aborts BEFORE any funds move — so a capped take NEVER overshoots.
+    if (wholeOffer && big(rawXq.seq_amount) > reqSeqAtoms){
+      const _oSeq = big(rawXq.seq_amount), _oBtc = big(rawXq.btc_amount);
+      rawXq.seq_amount = reqSeqAtoms;
+      rawXq.btc_amount = ceilDiv(reqSeqAtoms * _oBtc, _oSeq);
+    }
     // fill-now = what the maker can fill (the quote); remainder = requested − fill, rested at the
     // same price. A <0.5% sliver is treated as rounding (full fill, no remainder).
     const fillSeq = big(rawXq.seq_amount);
@@ -2658,29 +2762,21 @@ async function requoteCross(route, amtStr){
     const remSeq = split ? split.rest : 0n;
     const hasRemainder = remSeq > 0n;
     const remBtc = hasRemainder ? (remSeq * bestBtc) / bestAsset : 0n;
-    // Courier lifts the chosen offer WHOLE (no partial fill): when its size EXCEEDS the request there
-    // is no "rests" remainder — the taker simply takes MORE than they typed, and locks the offer's
-    // larger BTC. Carry that so the paint, the affordability gate, and Review all use the REAL
-    // committed amounts, not the smaller request (mirrors the pure-LN whole-offer note). The courier
-    // quote's fee_btc is 0 because the maker sets the lift fee at claim time, not a genuine zero.
-    const wholeOffer = !!rawXq.courier;
-    const offerSeqAtoms = big(rawXq.seq_amount), offerBtcAtoms = big(rawXq.btc_amount);
-    const overshoot = wholeOffer && offerSeqAtoms > reqSeqAtoms;
+    // The courier take is capped to the request above, so it NEVER overshoots the whole offer (there is no
+    // overshoot state to carry). wholeOffer stays a flag only for the fee note — the maker sets the BTC lift
+    // fee at claim time, so fee_btc is 0 here (not a genuine zero; paintQuoteCross shows the honest note).
     LAST_QUOTE = { kind:'cross', reverse: !route.payIsBtc, route, xq: rawXq, seqAsset,
       requestedSeqAtoms: reqSeqAtoms, requestedBtcAtoms: reqBtcAtoms, fillSeqAtoms: fillSeq,
       remainderSeqAtoms: hasRemainder ? remSeq : 0n, remainderBtcAtoms: remBtc,
-      wholeOffer, overshoot, offerSeqAtoms: String(offerSeqAtoms), offerBtcAtoms: String(offerBtcAtoms) };
+      wholeOffer };
     status.textContent = '';
     paintQuoteCross();
     // AFFORDABILITY (C4): a MARKET cross order is IOC — it funds only the FILLABLE portion now and
-    // CANCELS (never rests) the rest, so only the fill is committed. Gate Review on the committed amount,
-    // not the full request, so a user who can afford what actually fills isn't blocked by a remainder
-    // that is never funded. For a whole-offer overshoot the real commit is the OFFER's size (larger than
-    // the request), so gate on THAT (else a user who can afford their typed amount but not the whole
-    // offer passes Review and fails at funding).
+    // CANCELS (never rests) the rest, so only the fill is committed. Gate Review on the committed amount
+    // (the courier take is capped to the request, so the fill IS the committed amount — never a larger whole
+    // offer), so a user who can afford what actually fills isn't blocked by a remainder that is never funded.
     const fillBtcAtoms = big(rawXq.btc_amount);
-    const _payAtoms = overshoot ? (route.payIsBtc ? offerBtcAtoms : offerSeqAtoms)
-                                : (route.payIsBtc ? fillBtcAtoms : fillSeq);
+    const _payAtoms = route.payIsBtc ? fillBtcAtoms : fillSeq;
     const _payBal   = balAtoms(route.payIsBtc ? 'BTC' : seqAsset);
     // Paying BTC funds an on-chain HTLC whose funding tx also needs a Bitcoin miner fee on top of the
     // locked amount, so reserve a little headroom (the exact fee is computed at btcBuildTx). Without it a
@@ -2695,7 +2791,10 @@ async function requoteCross(route, amtStr){
     setReviewEnabled(true);
   } catch (e){
     status.textContent = '';
-    $('swErr').textContent = 'Cross-chain order book: ' + C.prettyErr(e);
+    // Route the message through prettyErr as a plain literal; don't double-prefix a message that already
+    // reads as a full sentence (so 'Could not load the order book right now.' renders once, cleanly).
+    const msg = C.prettyErr(e);
+    $('swErr').textContent = /^could not load/i.test(msg) ? msg : ('Could not load the order book: ' + msg);
     setReviewEnabled(false);
   }
 }
@@ -2772,7 +2871,7 @@ function renderXBook(seqAsset, payIsBtc, forward, reverse, unified){
     priceLabel: `(${am.ticker}/BTC)`, sizeLabel: am.ticker,
     refMidStr: oneUnitRefStr(seqAsset),
     headTitle: 'Order book', headSub: `${n} offer${n === 1 ? '' : 's'}`,
-    emptyMsg: 'No resting offers yet - a market maker with BTC reserves needs to post one.',
+    emptyMsg: 'No offers resting here yet.',
   });
   renderPairBar();
 }
@@ -2814,13 +2913,10 @@ function renderLadder(host, o){
 function paintQuoteCross(){
   const { $ } = C; const q = LAST_QUOTE; if (!q || q.kind !== 'cross') return;
   const sm = C.assetMeta(q.seqAsset);
-  // Show the user's FULL requested amount (never the fillable sliver): the order they typed. EXCEPT a
-  // courier whole-offer overshoot, where the lift takes the OFFER's larger size — show THAT (the real
-  // commit), not the smaller request, so the panes match what actually locks.
-  const reqSeq = q.overshoot ? BigInt(q.offerSeqAtoms)
-                             : (q.requestedSeqAtoms != null ? BigInt(q.requestedSeqAtoms) : big(q.xq.seq_amount));
-  const reqBtc = q.overshoot ? BigInt(q.offerBtcAtoms)
-                             : (q.requestedBtcAtoms != null ? BigInt(q.requestedBtcAtoms) : big(q.xq.btc_amount));
+  // Show the user's requested amount. A courier take is now CAPPED to the request (never a whole-offer
+  // overshoot), so the requested amount IS what the courier lifts — the panes match what actually locks.
+  const reqSeq = q.requestedSeqAtoms != null ? BigInt(q.requestedSeqAtoms) : big(q.xq.seq_amount);
+  const reqBtc = q.requestedBtcAtoms != null ? BigInt(q.requestedBtcAtoms) : big(q.xq.btc_amount);
   const seqStr = C.fmtAtoms(reqSeq, sm.precision);
   const btcStr = C.fmtAtoms(reqBtc, 8);
   // Map BTC<->asset onto pay/receive panes (whichever the user has on each side).
@@ -2835,7 +2931,7 @@ function paintQuoteCross(){
   paintRefHints();
   const seqUnits = Number(reqSeq) / Math.pow(10, sm.precision || 0);
   const btcUnits = Number(reqBtc) / 1e8;
-  let line = seqUnits > 0 ? `1 ${sm.ticker} = ${trim(btcUnits / seqUnits)} BTC · cross-chain HTLC` : `cross-chain HTLC`;
+  let line = seqUnits > 0 ? `1 ${sm.ticker} = ${trim(btcUnits / seqUnits)} BTC` : '';
   // Market order bigger than the maker's depth: a MARKET cross order is IOC — it fills what the book
   // crosses now and CANCELS the rest (it never rests it; that is the Limit path). Say so honestly so the
   // composer preview matches what reviewCross executes (spec §6: Review == execution).
@@ -2845,20 +2941,13 @@ function paintQuoteCross(){
     const restU = Number(rem) / Math.pow(10, sm.precision || 0);
     line += ` · fills ~${trim(fillU)} ${sm.ticker} now, ~${trim(restU)} won’t fill (not rested)`;
   }
-  // Whole-offer overshoot: the courier lifts this offer IN FULL (no partial fill on the cross rail), so
-  // it takes more than the user typed. Say so plainly in the composer's info line — the same honesty the
-  // pure-LN rail's Review note gives — rather than surfacing the larger amount only in the final modal.
-  if (q.overshoot){
-    const reqU = Number(BigInt(q.requestedSeqAtoms)) / Math.pow(10, sm.precision || 0);
-    line += ` · ⚠ fills whole: takes ${trim(Number(reqSeq) / Math.pow(10, sm.precision || 0))} ${sm.ticker} for ${btcStr} BTC (more than the ${trim(reqU)} you entered · partial fills aren't possible here)`;
-  }
   $('swRate').textContent = line;
-  // Cross-chain "fee" is the maker fee in BTC (no open fee-asset market on the BTC leg). The courier
-  // quote does not know it up front (the maker sets it at lift), so never show a misleading "0 BTC".
+  // The trading fee is set in BTC by the maker at lift time (no open fee-asset market on the BTC leg). The
+  // courier quote does not know it up front, so never show a misleading "0 BTC".
   if (q.wholeOffer && (!q.xq.fee_btc || big(q.xq.fee_btc) === 0n))
-    paintFee('BTC', null, 'Maker fee set at lift · added to the BTC you lock on the parent chain.');
+    paintFee('BTC', null, 'Trading fee set when the trade is placed · added to the Bitcoin you lock.');
   else
-    paintFee('BTC', q.xq.fee_btc, 'Maker fee, paid in BTC on the parent chain.');
+    paintFee('BTC', q.xq.fee_btc, 'Trading fee, paid in Bitcoin.');
   setFinality('cross');
 }
 
@@ -2884,7 +2973,7 @@ function paintFee(feeAssetHex, feeAtoms, noteOverride){
   $('swFeeNote').textContent = noteOverride || (payFromLn
     ? `In ${fm.ticker} · the asset you pay over Lightning.`
     : payIsBtc
-    ? 'In BTC · the Bitcoin network fee for the parent-chain leg (sat/vB).'
+    ? 'In BTC · the Bitcoin network fee.'
     : 'Pay the fee in any asset the network prices.');
   // The fee picker is disabled when paying from Lightning (fee frozen to the pay asset), and for
   // the cross-chain (BTC-only) leg / LN leg / mixed rail (their cost is the LP spread / BTC-leg fee
@@ -3017,7 +3106,7 @@ function capDisplay(route){
   return C.fmtAtoms(cap, 8) + ' BTC';
 }
 // Anchor-honest wording reused across the on-chain-receipt cases.
-const ANCHOR_FINAL = 'anchor-bound to Bitcoin (reverts only if Bitcoin reverts)';
+const ANCHOR_FINAL = 'reverts only if Bitcoin reverts';
 
 // Render the timing banner for the current route. The matrix is keyed off the RECEIVE
 // leg (an on-chain RECEIPT is never made instant by the CAP; the CAP only fronts an
@@ -3046,7 +3135,7 @@ function renderTiming(route){
   const tk = esc(C.assetMeta(route.seqAsset).ticker);
   if (rr === 'ln' && pr === 'ln'){
     el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
-    tx.innerHTML = '<b>Instant &amp; final</b> · both legs on Lightning, nothing on-chain, no reorg risk.';
+    tx.innerHTML = '<b>Instant &amp; final</b> · both sides on Lightning, nothing on-chain to revert.';
   } else if (rr === 'ln' && pr === 'chain' && btcLegAtoms() <= frontCapAtoms()){
     el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
     tx.innerHTML = `<b>Instant.</b> Your on-chain payment is fronted; you receive final ${tk} now.`;
@@ -3248,43 +3337,35 @@ function bridgedTakePlan(route){
     // there is never a Review that fails post-confirm. Unsupported -> bridged:false, so onReview FALLS BACK
     // to the native/on-chain path at the same price (never a dead-end promise).
     const supported = crosses && bridgedTakeSupported(take);
-    // SUBMARINE = a P2P submarine settlement (an interactive maker that accepts BTC-LN). Those makers
-    // (RunMakerReverseSubmarine / RunMakerSubmarine) lock the WHOLE offer, so a submarine take is
-    // whole-offer-only — sizeSubswapTake must NOT slice it (partial fill is the covenant CLOB's job). The LSP
-    // leg-bridge (an on-chain-only / passive maker) is NOT a submarine, so it keeps the partial path.
+    // SUBMARINE = a P2P submarine settlement (an interactive maker that accepts BTC-LN). This selects the
+    // settlement PATH only — it is INVISIBLE to the user and NEVER changes the matched offer or the fill.
+    // Every offer is partial-fillable down to its min_fill (spec §2), submarine included.
     const submarine = crosses && chooseSettlementPath(match, (offer && offer.meta) || {}).path === 'p2p-submarine';
-    // P3.1 — SIZE THE TAKE to the USER's composer amount, never the whole resting offer (spec §2.4: asking
-    // to sell 10 must not sign you up for 43). Partial-fill the offer when it allows it and the slice clears
-    // its min_fill; otherwise flag an overshoot so Review warns and Place is blocked (fail closed, never a
-    // silent whole-offer overshoot). The LSP + maker re-verify every amount and fail closed on any mismatch.
+    // SIZE THE TAKE to the USER's composer amount, RAIL-BLIND, via the SHARED sizeSubswapTake authority
+    // (subswap.js) so every entry point (on-chain preview, LN preview, P2P submarine review, LSP payer/receiver
+    // bridge review) agrees on takeAtoms/takeBtc. Every offer is partial-fillable down to its min_fill; a
+    // request below the minimum returns the MINIMUM (belowMin) so pay & receive never disagree. BTC is CEIL'd
+    // (the maker is never underpaid). The LSP + maker re-verify every amount and fail closed on any mismatch.
     const offerAtoms = BigInt(offer.assetAtoms || 0), offerBtc = BigInt(offer.btcSats || 0);
     const want = assetLegAtoms(route);
-    // P3.1 — SIZE the take to the USER's composer amount, never the whole resting offer, via the SHARED
-    // sizeSubswapTake authority (subswap.js) so the P2P submarine review + the bridged review agree on
-    // takeAtoms/takeBtc/partial/overshoot. Partial-fill when allowed + the slice clears min_fill; else flag
-    // overshoot so Review BLOCKS Place (fail closed, never a silent whole-offer lift). A submarine offer is
-    // whole-offer-only (never sliced -> wholeOnly overshoot on a size mismatch). BTC is floored.
     const raw = offer.raw || {};
-    const { takeAtoms, takeBtc, partial, overshoot, wholeOnly } = sizeSubswapTake({ want, offerAtoms, offerBtc,
-      allowPartial: raw.allow_partial === true || raw.allowPartial === true, minFill: BigInt(raw.min_fill || raw.minFill || 0), submarine });
+    const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: BigInt(raw.min_fill || raw.minFill || 0), side });
     return { side, offer, match, plan, describe: describeBridge(match), bridged: crosses && supported,
       crosses, supported, makerBtcRail, makerAssetRail, submarine,
-      takeAtoms, takeBtc, want, partial, overshoot, wholeOnly };
+      takeAtoms: sz.takeAtoms, takeBtc: sz.takeBtc, want, partial: sz.partial,
+      belowMin: sz.belowMin, minAtoms: sz.minAtoms, minBtc: sz.minBtc, capped: sz.capped,
+      overshoot: false, wholeOnly: false };
   } catch { return null; }
 }
 
 async function reviewBridged(route, bp){
   const { $ } = C;
-  if (!L || !L.swap){ $('swErr').textContent = 'The bridged (rail-crossing) route needs the Lightning service, which is unavailable in this build.'; return; }
+  if (!L || !L.swap){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   // IN-FLIGHT GUARD: block on BOTH a bridge AND a P2P subswap in flight — two concurrent rail-crossings can't
   // start (a p2p subswap in flight blocks a receiver-bridge sell, and vice-versa; each recovers via ONE key).
-  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = 'You already have a rail-crossing swap in progress · finish it first (Active trades) before starting another.'; return; }
+  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
   const am = C.assetMeta(route.seqAsset) || {};
   const aprec = am.precision || 0, tk = am.ticker || 'asset';
-  const d = bp.describe;
-  const legName = (u) => u === 'btc' ? 'Bitcoin' : tk;
-  const bridgedUnits = d.bridgeLegs.map((l) => legName(l.unit)).join(' + ');
-  const jitNote = d.jitLegs.length ? ` A Lightning channel is opened for you to receive ${d.jitLegs.map(legName).join(' + ')} (near-instant).` : '';
   // P3.1 — FORMATTED units, never raw atoms/sats, and the SIZED take (bp.takeAtoms/takeBtc), never the
   // whole resting offer. A partial fill of a larger offer is stated so the Review == what executes (§6).
   const takeAssetStr = C.fmtAtoms(BigInt(bp.takeAtoms || 0), aprec) + ' ' + tk;
@@ -3294,23 +3375,24 @@ async function reviewBridged(route, bp){
     ? `Pay ${takeBtcStr}, receive ${takeAssetStr}.`
     : `Sell ${takeAssetStr}, receive ${takeBtcStr}.`;
   const partialNote = bp.partial ? ` Partial fill of a larger resting offer (${offerAssetStr}).` : '';
+  // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
+  // the settlement machinery that carries the trade to completion.
   const kv = [
-    ['Route', `Rail-blind bridged swap · the service bridges the ${bridgedUnits} leg${d.bridgeLegs.length > 1 ? 's' : ''} between Lightning and on-chain, on ONE shared secret (both legs settle together or not at all).`],
     ['Direction', bp.side === 'buy' ? `Buy ${tk} with Bitcoin` : `Sell ${tk} for Bitcoin`],
-    ['You trade', `${pricing}${partialNote}${jitNote}`],
-    ['Bridge', `The service is a counterparty ONLY on the crossed leg${d.bridgeLegs.length > 1 ? 's' : ''}; a coincident leg settles directly. It secures its recoup BEFORE it fronts, so a stall can only refund with no loss.`],
-    ['Finality', 'Anchored to Bitcoin (reverts only if Bitcoin reverts), so not the instant finality of a pure-Lightning swap.'],
-    ['If it stalls', 'Nothing is lost · each leg refunds after its own timeout; the service never fronts value without its recoup already secured.'],
+    ['You trade', `${pricing}${partialNote}`],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ];
-  // §2.4 overshoot guard: the best offer can't be sliced to the requested size, so taking it would sign the
-  // user up for the WHOLE offer. Warn and BLOCK Place (fail closed) rather than silently overshoot.
-  if (bp.overshoot){
-    kv.splice(3, 0, ['⚠ Size mismatch', `You asked to ${bp.side === 'buy' ? 'buy' : 'sell'} ${C.fmtAtoms(BigInt(bp.want || 0), aprec)} ${tk}, but the best resting offer (${offerAssetStr}) can't be partially filled. Taking it would trade the whole offer — cancelled. Enter a size that matches an offer, or place a limit order.`]);
+  // Below-minimum guard (defense-in-depth; the composer already blocks Place): the request is under this
+  // offer's minimum fill, so show the true minimum plainly and BLOCK Place — never lift more than asked.
+  if (bp.belowMin){
+    const minStr = C.fmtAtoms(BigInt(bp.minAtoms || 0), aprec) + ' ' + tk;
+    const minBtcStr = C.fmtAtoms(BigInt(bp.minBtc || 0), 8) + ' BTC';
+    kv.splice(2, 0, ['Smallest amount', `The smallest amount you can ${bp.side === 'buy' ? 'buy' : 'sell'} here is ${minStr} (${minBtcStr}).`]);
   }
-  const { m: modal, ok, st } = C.modalRows({ title: 'Review bridged swap', kv });
-  if (bp.overshoot){
-    ok.disabled = true; ok.textContent = 'Size does not match an offer';
-    if (st) st.textContent = 'Adjust the amount to a size a resting offer can fill.';
+  const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
+  if (bp.belowMin){
+    ok.disabled = true; ok.textContent = 'Enter at least the minimum';
+    if (st) st.textContent = 'Increase the amount to the minimum shown, then place the order.';
     return;
   }
   ok.onclick = async () => { modal.remove(); resetComposer(); await startBridged(route, bp); };
@@ -3319,7 +3401,7 @@ async function reviewBridged(route, bp){
 // Persist BEFORE the /swap POST (persist-before-broadcast): a lost 202 + retry (or a restart) re-POSTs
 // with the SAME swap_nonce, which the LSP dedupes to ONE job — never a second funded HTLC.
 async function startBridged(route, bp){
-  if (_bridgeStarting || hasBridgeInFlight() || hasSubswapInFlight()){ try { C.toast && C.toast('A rail-crossing swap is already in progress · finish it first under Active trades.'); } catch {} return; }
+  if (_bridgeStarting || hasBridgeInFlight() || hasSubswapInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   _bridgeStarting = true;
   try {
     const asset = route.seqAsset;
@@ -3343,12 +3425,13 @@ async function startBridged(route, bp){
     const r = await L.swap(bridgeSwapBody(BRIDGE));
     applyBridgeStatus(r || {}); saveBridge();
     if (!bridgeTerminal()) driveBridged();
-    else if (BRIDGE.state === 'settled'){ try { C.toast('Bridged swap settled · anchor-bound to Bitcoin.'); } catch {} try { await C.sync(); } catch {} }
+    else if (BRIDGE.state === 'settled'){ try { C.toast('Swap settled.'); } catch {} try { await C.sync(); } catch {} }
   } catch (e){
+    console.warn('[bridge] start error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
     // A thrown /swap that already handed back a job handle stays drivable (each leg is refundable at its
     // timeout); with no handle it is a clean failure (nothing funded).
-    if (BRIDGE && (BRIDGE.poll || BRIDGE.job_id)){ BRIDGE.detail = C.prettyErr(e); saveBridge(); driveBridged(); }
-    else { BRIDGE = { ...(BRIDGE || {}), state: 'failed', detail: C.prettyErr(e) }; saveBridge(); }
+    if (BRIDGE && (BRIDGE.poll || BRIDGE.job_id)){ BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); driveBridged(); }
+    else { BRIDGE = { ...(BRIDGE || {}), state: 'failed', detail: 'This trade could not be completed - your funds are safe.' }; saveBridge(); }
   } finally { _bridgeStarting = false; }
 }
 
@@ -3369,7 +3452,7 @@ function applyBridgeStatus(r){
   if (r.poll) BRIDGE.poll = r.poll;
   if (r.settlement_plan) BRIDGE.settlement_plan = r.settlement_plan;
   if (r.status === 'settled' || r.settled) BRIDGE.state = 'settled';
-  else if (r.status === 'failed' || (r.ok === false && !(r.poll || r.job_id))){ BRIDGE.state = 'failed'; BRIDGE.detail = r.error || r.reason || BRIDGE.detail; }
+  else if (r.status === 'failed' || (r.ok === false && !(r.poll || r.job_id))){ BRIDGE.state = 'failed'; if (r.error || r.reason){ try { console.warn('[bridge] failure detail:', r.error || r.reason); } catch {} } BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; }
   else if (BRIDGE.state === 'starting') BRIDGE.state = 'confirming';
 }
 
@@ -3402,10 +3485,10 @@ async function driveBridged(){
   if (!(L && L.swap && L.swapStatus)){ clearTimeout(_bridgePoll); _bridgePoll = setTimeout(driveBridged, 15000); return; }
   _bridgeDriving = true;
   try { await bridgedSteps(); }
-  catch (e){ if (BRIDGE && !bridgeTerminal()){ BRIDGE.detail = C.prettyErr(e); saveBridge(); } }
+  catch (e){ console.warn('[bridge] drive error:', e); if (BRIDGE && !bridgeTerminal()){ BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); } }
   finally { _bridgeDriving = false; }
   if (BRIDGE && bridgeTerminal()){
-    if (BRIDGE.state === 'settled'){ try { C.toast('Bridged swap settled · you received BTC over Lightning.'); } catch {} try { await C.sync(); } catch {} }
+    if (BRIDGE.state === 'settled'){ try { C.toast('Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
   } else if (BRIDGE){
     clearTimeout(_bridgePoll); _bridgePoll = setTimeout(driveBridged, 8000);   // self-heal a transient gap / advance a long wait
   }
@@ -3440,7 +3523,8 @@ async function bridgedSteps(){
         b.state = 'confirming'; saveBridge(); break;
       }
       if (j && (j.status === 'failed' || (j.bridgeHandshake && j.bridgeHandshake.ok === false))){
-        b.state = 'failed'; b.detail = (j.bridgeHandshake && j.bridgeHandshake.error) || j.error || 'the maker handshake failed'; saveBridge(); return;
+        console.warn('[bridge] handshake failed:', (j.bridgeHandshake && j.bridgeHandshake.error) || j.error);
+        b.state = 'failed'; b.detail = 'This trade could not be placed right now - try again shortly.'; saveBridge(); return;
       }
       await bsleep(3000);
     }
@@ -3456,11 +3540,11 @@ async function bridgedSteps(){
     // from T_seq at handshake (bridge_terms.hold_expiry_secs). If it is absent or non-positive we have no safe
     // hold life -> FAIL CLOSED (nothing of ours is exposed yet: an under-sized hold would let the maker wait
     // for it to lapse, then reveal P and take the asset while our dead hold collects nothing).
-    if (!(Number(b.hold_expiry_secs) > 0)){ b.state = 'failed'; b.detail = 'The service did not size your Bitcoin hold to the swap timeout · your asset was NOT exposed and nothing was committed. Try again shortly.'; saveBridge(); return; }
-    if (L.connectBtcNode){ const prov = await L.connectBtcNode(); if (!(prov && prov.connected)) throw new Error('Could not bring your Bitcoin Lightning node online · reopen the wallet and try again.'); }
+    if (!(Number(b.hold_expiry_secs) > 0)){ b.state = 'failed'; b.detail = 'This trade could not be placed right now - try again shortly.'; saveBridge(); return; }
+    if (L.connectBtcNode){ const prov = await L.connectBtcNode(); if (!(prov && prov.connected)) throw new Error('This trade could not be placed right now - try again shortly.'); }
     if (L.channelInbound){ try { await L.channelInbound({ node_key: b.btc_node_key, amount: Number(b.btc_amount) }); } catch {} }
     const inv = await L.nodeInvoice({ node_key: b.btc_node_key, amount: Number(b.btc_amount), payment_hash: b.hash_h, expiry: Math.ceil(Number(b.hold_expiry_secs)) });
-    if (!(inv && inv.node_id)) throw new Error('Could not register the Bitcoin Lightning hold invoice on your node.');
+    if (!(inv && inv.node_id)) throw new Error('This trade could not be placed right now - try again shortly.');
     b.recv_node_id = inv.node_id; saveBridge();
   }
 
@@ -3468,7 +3552,7 @@ async function bridgedSteps(){
   //    min-final-CLTV so the CLTV carrying the LSP's payment also spans the hold life to T_seq (FIX 1/3).
   if (!b.front_armed){
     const r = await L.bridgeFront({ job_id: b.job_id, recv_node_id: b.recv_node_id, recv_min_final_cltv: Number(b.hold_min_final_cltv) || undefined });
-    if (!(r && r.ok)) throw new Error('The service refused to arm the front: ' + ((r && r.error) || 'unknown'));
+    if (!(r && r.ok)){ console.warn('[bridge] front-arm refused:', (r && r.error) || 'unknown'); throw new Error('This trade could not be placed right now - try again shortly.'); }
     b.front_armed = true; saveBridge();
   }
 
@@ -3479,12 +3563,12 @@ async function bridgedSteps(){
     for (let i = 0; i < 40 && !b.fronted; i++){
       const j = await status();
       if (j && (j.status === 'settled' || j.settled)){ b.fronted = true; b.state = 'fronted'; saveBridge(); break; }
-      if (j && j.status === 'failed'){ b.state = 'failed'; b.detail = j.error || 'the front failed'; saveBridge(); return; }
+      if (j && j.status === 'failed'){ console.warn('[bridge] front failed:', j.error); b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); return; }
       const fronted = j && (j.status === 'fronted');
       let held = false;
       try { const s = await L.invoiceStatus({ node_key: b.btc_node_key, payment_hash: b.hash_h }); held = !!(s && (s.held || s.settled)); } catch {}
       if (fronted && held){ b.fronted = true; b.state = 'fronted'; saveBridge(); break; }
-      if (Date.now() - (b.started_ms || 0) > BRIDGE_FRONT_TIMEOUT_MS){ b.state = 'failed'; b.detail = 'the service did not front your Bitcoin in time · nothing was committed, nothing lost. Try again shortly.'; saveBridge(); return; }
+      if (Date.now() - (b.started_ms || 0) > BRIDGE_FRONT_TIMEOUT_MS){ b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); return; }
       await bsleep(3000);
     }
     if (!b.fronted) return;   // not fronted yet -> the scheduler re-enters (still within budget)
@@ -3504,7 +3588,7 @@ async function bridgedSteps(){
     let s = null; try { s = await L.invoiceStatus({ node_key: b.btc_node_key, payment_hash: b.hash_h }); } catch {}
     const inCltv = Number(s && s.htlc_expiry), btcTip = Number(s && s.btc_tip);
     if (!(Number.isFinite(inCltv) && Number.isFinite(btcTip))){
-      b.state = 'failed'; b.detail = 'Could not read the committed Bitcoin front runway on your node · your asset was NOT exposed and nothing was committed. Try again shortly.'; saveBridge(); return;
+      b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); return;
     }
     const actualCltvBlocks = inCltv - btcTip;
     // Independent requirement from T_seq (a stale handshake tip only makes the window LARGER = more conservative);
@@ -3515,7 +3599,7 @@ async function bridgedSteps(){
     const requiredSecs = seqBlocks * 90 + 7200 + 1800;   // HOLD_LIFE_DEFAULTS: seq 90s/block, reorg 2h, settle 30m
     const requiredBlocks = Math.max(haveTip ? Math.ceil(requiredSecs / 150) + 6 : 0, Number(b.hold_min_final_cltv) || 0);
     if (!(requiredBlocks > 0) || !(actualCltvBlocks >= requiredBlocks)){
-      b.state = 'failed'; b.detail = 'The Bitcoin the service fronted expires too soon to cover the swap timeout · your asset was NOT exposed and nothing was committed. Try again shortly.'; saveBridge(); return;
+      b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); return;
     }
     b.front_cltv_ok = true; saveBridge();
   }
@@ -3532,7 +3616,7 @@ async function bridgedSteps(){
     const r = await L.bridgeAsset({ job_id: b.job_id, recv_node_id: b.recv_node_id,
       taker_seq_leg: { txid: b.seq_leg.txid, vout: b.seq_leg.vout, amount: b.seq_leg.amount,
         redeem_script: b.seq_leg.redeem_script, locktime: b.seq_locktime, asset, block_hash: b.seq_leg.block_hash || null } });
-    if (!(r && r.ok)) throw new Error('The service refused to relay your asset: ' + ((r && r.error) || 'unknown'));
+    if (!(r && r.ok)){ try { console.warn('[bridge] relay refused:', (r && r.error) || 'unknown'); } catch {} throw new Error('This trade could not be completed - your funds are safe.'); }
     b.relayed = true; b.state = 'relaying'; saveBridge();
   }
 
@@ -3548,7 +3632,7 @@ async function bridgedSteps(){
 async function fundBridgedAssetLeg(){
   const b = BRIDGE;
   if (!(C.seqLeg && C.seqLeg.fund && C.seqLeg.waitConf && C.seqLeg.findFundingByAddress && C.wasm && C.wasm.buildSeqHtlcRedeemScript))
-    throw new Error('The Sequentia HTLC service is unavailable in this build.');
+    throw new Error('This trade isn’t available in this build.');
   if (!b.taker_seq_refund_pub){ const rk = C.seqLeg.refundKey(); b.taker_seq_refund_pub = rk.public_key; b.taker_seq_refund_secret = rk.secret_hex; saveBridge(); }
   const redeem = C.wasm.buildSeqHtlcRedeemScript(b.hash_h, b.maker_seq_claim_pub, b.taker_seq_refund_pub, b.seq_locktime);
   b.seq_redeem = redeem; b.state = 'funding_asset'; saveBridge();   // persist reclaim material BEFORE broadcasting
@@ -3647,9 +3731,10 @@ function settlementDispatch(route){
 // ZERO exposure if ever reached). Until that node capability lands this shape must NEVER reach an enabled
 // Place (offer-then-refuse), so EVERY entry point (requoteMixed, onReview, reviewMixed) surfaces THIS note and
 // disables Review — one message, one gate, no path where a priced+enabled "Bridged buy" is offered then refused.
-function payerBridgeDisabledNote(tk){
-  const t = tk || 'asset';
-  return `This ${t} maker settles Bitcoin on-chain; paying Bitcoin over Lightning to it needs the hold-invoice node update · use an interactive maker for now, or set the pay leg to on-chain to post a durable limit order.`;
+function payerBridgeDisabledNote(){
+  // A genuine cannot-execute (this build lacks the capability to place this trade). Plain human reason — NO rail,
+  // NO bridge/counterparty machinery, NO rail advice (the user must never be shown any of that).
+  return 'This trade could not be placed right now - try again shortly.';
 }
 
 // --- chain read helpers (anchor depth + tips), same endpoints the wallet's watchers use ------------------
@@ -3711,8 +3796,8 @@ let _subswapDriving = false;
 // directions. The Review states the EXACT whole-HTLC amounts + the single-T_seq fund-safety story.
 async function reviewSubmarineP2P(route, disp){
   const { $ } = C;
-  if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a rail-crossing swap in progress · finish it first (Active trades) before starting another.'; return; }
-  if (!(L && L.btcNodeKey && L.nodePay)){ $('swErr').textContent = 'The peer-to-peer submarine route needs your Bitcoin Lightning node, which is unavailable in this build.'; return; }
+  if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
+  if (!(L && L.btcNodeKey && L.nodePay)){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
   const buy = disp.ln_direction === 1;
   // BUY BTC-LN OUTBOUND CHECK: a P2P submarine BUY pays BTC over the taker's OWN Lightning and does NOT
@@ -3721,7 +3806,7 @@ async function reviewSubmarineP2P(route, disp){
   if (buy){
     const pv = railAvail('BTC', route.seqAsset).payLn;
     if (!pv.ok){
-      $('swErr').textContent = 'Paying Bitcoin over Lightning needs a funded Bitcoin Lightning channel · move Bitcoin to Lightning first (Balance tab), then take this offer. This peer-to-peer route does not open a channel for you.';
+      $('swErr').textContent = 'You will need Bitcoin in Lightning to pay this way · move it to Lightning first (Balance tab), then take this offer.';
       return;
     }
   }
@@ -3730,43 +3815,37 @@ async function reviewSubmarineP2P(route, disp){
   const btcStr = C.fmtAtoms(BigInt(disp.takeBtc || 0), 8) + ' BTC';
   const offerAssetStr = C.fmtAtoms(BigInt(disp.offer.assetAtoms || 0), aprec) + ' ' + tk;
   const partialNote = disp.partial ? ` Partial fill of a larger resting offer (${offerAssetStr}).` : '';
+  // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
+  // the settlement machinery that carries the trade to completion.
   const kv = buy ? [
-    ['Route', 'Peer-to-peer submarine · you pay Bitcoin over Lightning and the maker locks the ' + tk + ' in a single on-chain HTLC bound to the SAME secret. No bridge, no bridge fee — the service is not in the value path.'],
-    ['Direction', 'Buy ' + tk + ' with Bitcoin over Lightning · receive ' + tk + ' on-chain'],
+    ['Direction', 'Buy ' + tk + ' with Bitcoin over Lightning'],
     ['You trade', 'Pay ' + btcStr + ', receive ' + assetStr + '.' + partialNote],
-    ['Fund-safety', 'Your device VERIFIES the on-chain ' + tk + ' is locked to YOUR key on the secret hash (right asset, amount, timeout), that the invoice it is about to pay is bound to the SAME secret hash and price, and that the ' + tk + ' is anchor-buried under Bitcoin — ALL before it pays. The only way to learn the secret is to pay, and paying IS the maker receiving the Bitcoin.'],
-    ['Finality', 'Anchored to Bitcoin (reverts only if Bitcoin reverts), so not the instant finality of a pure-Lightning swap.'],
-    ['If it stalls', 'Nothing is lost · you never pay until the ' + tk + ' HTLC is verified + anchor-buried, and once paid you claim it before its timeout.'],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ] : [
-    ['Route', 'Peer-to-peer submarine · you fund the ' + tk + ' in a single on-chain HTLC and receive Bitcoin over Lightning on the SAME secret. No bridge, no bridge fee.'],
-    ['Direction', 'Sell ' + tk + ' on-chain · receive Bitcoin over Lightning'],
+    ['Direction', 'Sell ' + tk + ' for Bitcoin over Lightning'],
     ['You trade', 'Sell ' + assetStr + ', receive ' + btcStr + '.' + partialNote],
-    ['Fund-safety', 'You receive the Bitcoin the instant you settle your held Lightning invoice with the secret — which is also what reveals it to the maker. You never reveal the secret without capturing the Bitcoin.'],
-    ['Finality', 'The Bitcoin arrives over Lightning; the ' + tk + ' leg is a single on-chain HTLC.'],
-    ['If it stalls', 'Nothing is lost · if the maker never pays your invoice, you reclaim the ' + tk + ' after its on-chain timeout.'],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ];
-  // §2.4 overshoot guard: the best offer can't be sliced to the requested size, so taking it would sign the
-  // user up for the WHOLE offer. Warn and BLOCK Place (fail closed) rather than silently lift the whole offer.
-  // A SUBMARINE offer is whole-offer-only (wholeOnly): the makers lock the whole offer, so a size other than
-  // the whole offer can't be a partial (that's the covenant CLOB's job) — surface that honestly.
-  if (disp.overshoot){
-    const overMsg = disp.wholeOnly
-      ? `This peer-to-peer submarine offer settles as a WHOLE — a submarine take is the whole resting offer (${offerAssetStr}). You asked to ${buy ? 'buy' : 'sell'} ${C.fmtAtoms(BigInt(disp.want || 0), aprec)} ${tk}. Enter ${offerAssetStr} to take it, or place a limit order to trade a different size.`
-      : `You asked to ${buy ? 'buy' : 'sell'} ${C.fmtAtoms(BigInt(disp.want || 0), aprec)} ${tk}, but the best resting offer (${offerAssetStr}) can't be partially filled. Taking it would trade the whole offer — cancelled. Enter a size that matches an offer, or place a limit order.`;
-    kv.splice(2, 0, ['⚠ Size mismatch', overMsg]);
+  // Below-minimum guard (defense-in-depth; the composer already blocks Place): the request is under this
+  // offer's minimum fill. Show the true minimum plainly and BLOCK Place — every offer is partial-fillable
+  // down to its minimum, so this is a "too small", never a "whole-offer-only".
+  if (disp.belowMin){
+    const minStr = C.fmtAtoms(BigInt(disp.minAtoms || 0), aprec) + ' ' + tk;
+    const minBtcStr = C.fmtAtoms(BigInt(disp.minBtc || 0), 8) + ' BTC';
+    kv.splice(2, 0, ['Smallest amount', `The smallest amount you can ${buy ? 'buy' : 'sell'} here is ${minStr} (${minBtcStr}).`]);
   }
-  const { m: modal, ok, st } = C.modalRows({ title: 'Review peer-to-peer swap', kv });
-  if (disp.overshoot){
-    ok.disabled = true; ok.textContent = 'Size does not match an offer';
-    if (st) st.textContent = 'Adjust the amount to a size a resting offer can fill.';
+  const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
+  if (disp.belowMin){
+    ok.disabled = true; ok.textContent = 'Enter at least the minimum';
+    if (st) st.textContent = 'Increase the amount to the minimum shown, then place the order.';
     return;
   }
   ok.onclick = async () => { modal.remove(); resetComposer(); await startSubswapP2P(route, disp); };
 }
 
 async function startSubswapP2P(route, disp){
-  if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A rail-crossing swap is already in progress · finish it first under Active trades.'); } catch {} return; }
-  if (disp.overshoot){ try { C.toast && C.toast('That size does not match a resting offer · adjust the amount or place a limit order.'); } catch {} return; }   // fail closed — never lift the whole offer
+  if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
+  if (disp.belowMin){ try { C.toast && C.toast('That amount is below the smallest this offer can fill · increase it to the minimum shown.'); } catch {} return; }   // fail closed — never place a below-minimum take
   const buy = disp.ln_direction === 1;
   // P3.1 — persist the SIZED take (disp.takeAtoms/takeBtc), never the whole offer, so the courier bind, the
   // expect{atoms,msat} the driver gates on, and any resume all use the user's requested size (§2.4).
@@ -3796,7 +3875,7 @@ async function driveSubswap(){
           // (mirror the Go PayInvoice(bolt11,wantHash,amountMsat)) AND cap the route's total CLTV delay to the
           // hold-safe ceiling — so a masqueraded hold fails back (refunds us) early. Client-side gates stay primary.
           const r = await L.nodePay({ node_key, bolt11, wantHash: opts && opts.wantHash, amountMsat: opts && opts.amountMsat, maxCltv: opts && opts.maxCltv });
-          if (!(r && r.preimage)) throw new Error('The Bitcoin Lightning payment did not return a preimage.');
+          if (!(r && r.preimage)){ console.warn('[subswap] BTC-LN pay returned no preimage'); throw new Error('This trade could not be completed - your funds are safe.'); }
           return r.preimage;
         },
         onLocked: () => { b.state = 'verifying'; saveSubswap(); },
@@ -3829,7 +3908,7 @@ async function driveSubswap(){
           // Pass P so the node can mint a PLAIN bolt11 that auto-settles on payment (RunMakerSubmarine needs
           // Bolt11 != ''); the settle-with-P loop remains the HODL fallback if the node returns no bolt11.
           const inv = await L.nodeInvoice({ node_key, amount: sats, payment_hash: hashH, preimage, expiry: expirySecs });
-          if (!(inv && inv.node_id)) throw new Error('Could not register the Bitcoin Lightning invoice on your node.');
+          if (!(inv && inv.node_id)){ console.warn('[subswap] could not register the BTC-LN invoice'); throw new Error('This trade could not be completed - your funds are safe.'); }
           return { node_id: inv.node_id, bolt11: inv.bolt11 || null };
         },
         invoiceStatus: (p) => L.invoiceStatus({ node_key, payment_hash: p.hashH }).then((s) => ({ held: !!(s && (s.held || s.settled)), settled: !!(s && s.settled) })).catch(() => ({})),
@@ -3849,12 +3928,13 @@ async function driveSubswap(){
       if (r && !r.ok && r.refundable){ b.state = 'settling'; saveSubswap(); }   // unpaid -> keep the leg for a T_seq refund
     }
   } catch (e){
+    console.warn('[subswap] drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
     // A failure AFTER learning P (buy) or funding the asset (sell) stays RESUMABLE (the claim/refund off-ramp
     // is still live); a failure before anything is committed is a clean terminal failure (nothing lost).
-    if (SUBSWAP && (SUBSWAP.preimage || (SUBSWAP.leg && SUBSWAP.leg.txid))){ SUBSWAP.detail = C.prettyErr(e); if (SUBSWAP.state === 'starting' || SUBSWAP.state === 'verifying' || SUBSWAP.state === 'paying') SUBSWAP.state = SUBSWAP.preimage ? 'claiming' : SUBSWAP.state; saveSubswap(); }
-    else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = C.prettyErr(e); saveSubswap(); }
+    if (SUBSWAP && (SUBSWAP.preimage || (SUBSWAP.leg && SUBSWAP.leg.txid))){ SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; if (SUBSWAP.state === 'starting' || SUBSWAP.state === 'verifying' || SUBSWAP.state === 'paying') SUBSWAP.state = SUBSWAP.preimage ? 'claiming' : SUBSWAP.state; saveSubswap(); }
+    else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
   } finally { _subswapDriving = false; }
-  if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast(SUBSWAP.kind === 'p2p-buy' ? 'Swap settled · you bought the asset over Lightning, anchor-bound to Bitcoin.' : 'Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
+  if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast(SUBSWAP.kind === 'p2p-buy' ? 'Swap settled · the asset is yours.' : 'Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
 }
 
 // Review the LSP PAYER leg-bridge — the BUY fallback vs an on-chain-only maker. The taker mints H (holds P),
@@ -3862,25 +3942,31 @@ async function driveSubswap(){
 // maker's relayed asset leg (claim=my key on H, anchor-buried) then claims with P self-custody.
 async function reviewLspPayerBridge(route, disp){
   const { $ } = C;
-  if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a rail-crossing swap in progress · finish it first (Active trades) before starting another.'; return; }
-  if (!(L && L.swap && L.bridgeHold)){ $('swErr').textContent = 'The bridged buy route needs the Lightning service (LSP payer bridge), which is unavailable in this build.'; return; }
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
+  if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
+  // FAIL CLOSED (the ONLY surviving honest-disable): without the LSP payer-bridge hold + bare-hash pay this
+  // shape has no settlement path, so refuse rather than offer-then-refuse. payerBridgeDisabledNote is the note.
+  if (!(L && L.swap && L.bridgeHold && L.nodePayHash)){ $('swErr').textContent = payerBridgeDisabledNote(tk); return; }
+  // Paying BTC over the taker's OWN Lightning needs funded BTC-LN outbound: the bridge only JIT-provisions the
+  // maker's on-chain BTC HTLC, NOT a channel for the buyer. Honest-disable up front, never enable Place.
+  if (!railAvail('BTC', route.seqAsset).payLn.ok){ $('swErr').textContent = 'You will need Bitcoin in Lightning to pay this way · move it to Lightning first (Balance tab), then take this offer.'; return; }
+  // Below-minimum: the request is under this offer's minimum fill — fail closed, never place a below-min take.
+  if (disp.belowMin){ const minStr = C.fmtAtoms(BigInt(disp.minAtoms || 0), aprec) + ' ' + tk; const minBtcStr = C.fmtAtoms(BigInt(disp.minBtc || 0), 8) + ' BTC'; $('swErr').textContent = `The smallest amount you can buy here is ${minStr} (${minBtcStr}) · increase the amount to at least that.`; return; }
   const assetStr = C.fmtAtoms(BigInt(disp.takeAtoms || disp.offer.assetAtoms || 0), aprec) + ' ' + tk;
   const btcStr = C.fmtAtoms(BigInt(disp.takeBtc || disp.offer.btcSats || 0), 8) + ' BTC';
+  // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
+  // the settlement machinery that carries the trade to completion.
   const kv = [
-    ['Route', 'Rail-crossing buy · the service bridges the Bitcoin leg between Lightning and on-chain on ONE shared secret (both legs settle together or not at all). Used because the resting maker settles Bitcoin on-chain only.'],
-    ['Direction', 'Buy ' + tk + ' with Bitcoin over Lightning · receive ' + tk + ' on-chain'],
+    ['Direction', 'Buy ' + tk + ' with Bitcoin over Lightning'],
     ['You trade', 'Pay ' + btcStr + ', receive ' + assetStr + '.'],
-    ['Bridge', 'Your device mints the secret and holds it. The service HOLDS your Bitcoin (not captured) and only funds the maker after your hold is held; your device VERIFIES the maker locked the ' + tk + ' to YOUR key before it ever reveals the secret.'],
-    ['Finality', 'Anchored to Bitcoin (reverts only if Bitcoin reverts), so not the instant finality of a pure-Lightning swap.'],
-    ['If it stalls', 'Nothing is lost · your Bitcoin is only ever HELD until the ' + tk + ' is verified in your key; a stall lets the hold expire and nothing is committed.'],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ];
-  const { m: modal, ok } = C.modalRows({ title: 'Review bridged buy', kv });
+  const { m: modal, ok } = C.modalRows({ title: 'Review swap', kv });
   ok.onclick = async () => { modal.remove(); resetComposer(); await startLspPayerBridge(route, disp); };
 }
 
 async function startLspPayerBridge(route, disp){
-  if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A rail-crossing swap is already in progress · finish it first under Active trades.'); } catch {} return; }
+  if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   SUBSWAP = { kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
     offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
     asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
@@ -3901,14 +3987,29 @@ async function driveLspPayerBridge(){
       lspSwap: (body) => L.swap(body),
       lspSwapStatus: (jobId) => L.swapStatus(jobId),
       lspBridgeHold: (p) => L.bridgeHold(p),
-      payHold: async ({ node_id, bolt11, hashH, minFinalCltv, amountMsat }) => {
-        if (!bolt11) throw new Error('The service could not issue a payable Bitcoin Lightning hold invoice · try an interactive maker (peer-to-peer) instead.');
+      payHold: async ({ node_id, bolt11, hashH, minFinalCltv, maxCltv, amountMsat, connectHints }) => {
         const node_key = await ensureBtcNodeKey();
-        // Thread wantHash(H)+amountMsat+minFinalCltv into /node/pay so the node binds hash+amount+cltv (mirror
-        // the Go PayInvoice); the client-side hold-hash/overpay pre-pay gates remain the primary guard.
-        const r = await L.nodePay({ node_key, bolt11, wantHash: hashH, amountMsat, minFinalCltv });
-        if (!(r && (r.paid || r.preimage))) throw new Error('The Bitcoin Lightning hold payment did not go through.');
-        return r.preimage || null;
+        // Pay the LSP's hold BY BARE HASH: our OWN hosted BTC-LN node commits an HTLC to node_id on H with a
+        // final-hop CLTV >= minFinalCltv. It lands HELD at the LSP (never captured) and settles only when the LSP
+        // recoups with P read from our on-chain asset claim (which we reveal only after verifying the asset in
+        // our key). Mirror of the receiver-bridge / sub-asset bare-hash sendpay. The seqln holdinvoice mints no
+        // bolt11; if a future fork returns one, pay it (it encodes the destination). The client-side
+        // hold-hash/overpay/CLTV pre-pay gates in runLspPayerBridge are the primary guard.
+        if (node_id && L.nodePayHash){
+          const r = await L.nodePayHash({ node_key, node_id, hash: hashH, amount_msat: amountMsat, min_final_cltv: minFinalCltv, max_cltv: maxCltv, connect_hints: connectHints || undefined });
+          if (!(r && (r.committed || r.status === 'pending' || r.status === 'complete'))){
+            console.warn('[subswap] BTC-LN hold payment did not commit (nothing captured)');
+            throw new Error('This trade could not be completed - your funds are safe.');
+          }
+          return null;   // we hold P self-custody; this HELD payment yields no new secret
+        }
+        if (bolt11){
+          const r = await L.nodePay({ node_key, bolt11, wantHash: hashH, amountMsat, minFinalCltv, maxCltv });
+          if (!(r && (r.paid || r.preimage))){ console.warn('[subswap] BTC-LN hold payment did not go through'); throw new Error('This trade could not be completed - your funds are safe.'); }
+          return r.preimage || null;
+        }
+        console.warn('[subswap] no BTC-LN target returned for the hold payment');
+        throw new Error('This trade could not be completed - your funds are safe.');
       },
       persist: (rec) => { b.hash_h = rec.hash_h; b.preimage = rec.preimage; b.job_id = rec.job_id || b.job_id; b.poll = rec.poll || b.poll; if (rec.leg) b.leg = rec.leg; b.state = rec.state || b.state; saveSubswap(); },
       onPaid: (preimage, leg) => { b.preimage = preimage; b.leg = leg; b.state = 'claiming'; saveSubswap(); },
@@ -3916,10 +4017,11 @@ async function driveLspPayerBridge(){
     };
     await runLspPayerBridge(deps);
   } catch (e){
-    if (SUBSWAP && SUBSWAP.preimage && SUBSWAP.leg && SUBSWAP.leg.txid){ SUBSWAP.detail = C.prettyErr(e); SUBSWAP.state = 'claiming'; saveSubswap(); }
-    else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = C.prettyErr(e); saveSubswap(); }
+    console.warn('[subswap] payer-bridge drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
+    if (SUBSWAP && SUBSWAP.preimage && SUBSWAP.leg && SUBSWAP.leg.txid){ SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; SUBSWAP.state = 'claiming'; saveSubswap(); }
+    else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
   } finally { _subswapDriving = false; }
-  if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast('Bridged buy settled · you bought the asset, anchor-bound to Bitcoin.'); } catch {} try { await C.sync(); } catch {} }
+  if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast('Swap settled · the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
 }
 
 // Resume a persisted subswap on load. FUND-SAFETY: for a BUY that already learned P + verified the leg
@@ -3934,9 +4036,14 @@ export async function resumeSubswap(){
   // (A) A BUY that already learned P + verified the leg (state 'claiming'): re-claim idempotently (a crash
   //     between the irreversible act and the claim must never strand the asset — we hold P).
   if ((b.kind === 'p2p-buy' || b.kind === 'lsp-payer-buy') && b.preimage && b.leg && b.leg.txid){
-    try { await claimReverseSeqLeg({ preimage: b.preimage, leg: b.leg, asset: b.asset }, { seqClaimKey: C.seqLeg.refundKey(), claimSeq: (p) => C.seqLeg.claim(p) });
-      b.state = 'settled'; b.seq_claim_txid = b.seq_claim_txid || 'resumed'; saveSubswap(); try { C.toast('Rail-crossing buy claimed · the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
-    catch (e){ b.detail = C.prettyErr(e); saveSubswap(); }   // leave RESUMABLE; a retry re-claims (we hold P)
+    try { await claimReverseSeqLeg({ preimage: b.preimage, leg: b.leg, asset: b.asset },
+      // CLAIM-WINDOW GATE: an LSP-payer buy still holds the secret self-custody, so claiming is what FIRST reveals
+      // it — gate the window (never reveal it if the asset can no longer be claimed before its timeout). A p2p buy
+      // ALREADY revealed the secret by PAYING its invoice, so it must always re-claim to recover its asset (no gate).
+      { seqClaimKey: C.seqLeg.refundKey(), claimSeq: (p) => C.seqLeg.claim(p),
+        seqTip: () => seqTipHeight(), claimMargin: 120, claimWindowGate: (b.kind === 'lsp-payer-buy') });
+      b.state = 'settled'; b.seq_claim_txid = b.seq_claim_txid || 'resumed'; saveSubswap(); try { C.toast('Swap settled · the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
+    catch (e){ console.warn('[subswap] resume claim error:', e); b.detail = 'Completing your trade - your funds are safe.'; saveSubswap(); }   // leave RESUMABLE; a retry re-claims (we hold P)
     return;
   }
   // (B) CRASH GAP — a reverse-submarine BUY that persisted its leg + bolt11 + H BEFORE the (irreversible) pay
@@ -3952,9 +4059,9 @@ export async function resumeSubswap(){
         sha256Hex: (hex) => sha256HexHex(hex), seqClaimKey: C.seqLeg.refundKey(), claimSeq: (p) => C.seqLeg.claim(p),
         seqTip: () => seqTipHeight(), claimMargin: 120,
       });
-      if (r.ok && r.recovered){ b.preimage = r.preimage; b.seq_claim_txid = r.seqClaimTxid; b.state = 'settled'; saveSubswap(); try { C.toast('Rail-crossing buy recovered · the payment settled and the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
-      else { b.detail = r.reason || 'Recovering your rail-crossing buy · re-checking the Lightning payment.'; saveSubswap(); }   // NEVER dropped
-    } catch (e){ b.detail = C.prettyErr(e); saveSubswap(); }
+      if (r.ok && r.recovered){ b.preimage = r.preimage; b.seq_claim_txid = r.seqClaimTxid; b.state = 'settled'; saveSubswap(); try { C.toast('Swap settled · your payment settled and the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
+      else { console.warn('[subswap] resume reverse-pay:', r.reason); b.detail = 'Completing your trade · re-checking your Lightning payment.'; saveSubswap(); }   // NEVER dropped
+    } catch (e){ console.warn('[subswap] resume error:', e); b.detail = 'Completing your trade - your funds are safe.'; saveSubswap(); }
     return;
   }
   // (C) An LSP PAYER-bridge BUY whose hold is HELD (P self-custody, persisted early) but the maker's asset leg
@@ -3977,12 +4084,15 @@ export async function resumeSubswap(){
         if (v.ok){
           const leg = { txid: ml.txid, vout: ml.vout, amount: String(ml.amount), asset: b.asset, redeem_script: v.redeem, locktime: Number(terms.seq_locktime) || ml.locktime };
           b.leg = leg; b.state = 'claiming'; saveSubswap();
-          await claimReverseSeqLeg({ preimage: b.preimage, leg, asset: b.asset }, { seqClaimKey: claimKey, claimSeq: (p) => C.seqLeg.claim(p) });
-          b.state = 'settled'; b.seq_claim_txid = b.seq_claim_txid || 'resumed'; saveSubswap(); try { C.toast('Rail-crossing buy claimed · the asset is yours.'); } catch {} try { await C.sync(); } catch {}
+          // CLAIM-WINDOW GATE (bare-P LSP-payer resume): never reveal the secret if the asset can no longer be
+          // claimed strictly before its timeout — else the LSP could settle its HELD Bitcoin while the maker refunds.
+          await claimReverseSeqLeg({ preimage: b.preimage, leg, asset: b.asset },
+            { seqClaimKey: claimKey, claimSeq: (p) => C.seqLeg.claim(p), seqTip: () => seqTipHeight(), claimMargin: 120, claimWindowGate: true });
+          b.state = 'settled'; b.seq_claim_txid = b.seq_claim_txid || 'resumed'; saveSubswap(); try { C.toast('Swap settled · the asset is yours.'); } catch {} try { await C.sync(); } catch {}
         }
       }
       // else: the maker's asset leg has not locked yet -> keep resumable (NEVER dropped).
-    } catch (e){ b.detail = C.prettyErr(e); saveSubswap(); }
+    } catch (e){ console.warn('[subswap] resume error:', e); b.detail = 'Completing your trade - your funds are safe.'; saveSubswap(); }
     return;
   }
   // (D0) CRASH GAP (SELL fund-loss) — a p2p-sell that PERSISTED P/H/redeem + the intended leg BEFORE it
@@ -4016,8 +4126,8 @@ export async function resumeSubswap(){
       // double-fund (nothing to fund; fundSeq is idempotent regardless). A transient/unreadable state is NOT
       // definitive -> keep it resumable and retry next boot (never a false drop of a real funded leg).
       if (definitivelyEmpty){ clearSubswap(); return; }
-      b.detail = 'Recovering your rail-crossing sell · waiting for the asset HTLC to appear on-chain.'; saveSubswap();   // NEVER dropped on an unreadable/transient read
-    } catch (e){ b.detail = C.prettyErr(e); saveSubswap(); }
+      b.detail = 'Completing your trade · waiting for the asset to appear on-chain.'; saveSubswap();   // NEVER dropped on an unreadable/transient read
+    } catch (e){ console.warn('[subswap] resume error:', e); b.detail = 'Completing your trade - your funds are safe.'; saveSubswap(); }
     return;
   }
   // (D) A SELL whose asset HTLC is funded (state 'settling'): FIRST re-check the invoice — if the maker's
@@ -4027,10 +4137,10 @@ export async function resumeSubswap(){
     try {
       const node_key = b.btc_node_key || await ensureBtcNodeKey();
       let s = null; try { s = await L.invoiceStatus({ node_key, payment_hash: b.hash_h }); } catch {}
-      if (s && s.settled){ b.state = 'settled'; saveSubswap(); try { C.toast('Rail-crossing sell settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} return; }
+      if (s && s.settled){ b.state = 'settled'; saveSubswap(); try { C.toast('Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} return; }
       if (s && s.held && b.preimage){
         await L.nodeSettle({ node_key, payment_hash: b.hash_h, preimage: b.preimage });   // capture BTC + reveal P
-        b.state = 'settled'; saveSubswap(); try { C.toast('Rail-crossing sell settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} return;
+        b.state = 'settled'; saveSubswap(); try { C.toast('Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} return;
       }
       // Not paid: reclaim the asset via its CLTV branch after T_seq (idempotent — a pre-timeout attempt just
       // fails and stays resumable). Nothing else of ours was ever committed.
@@ -4042,9 +4152,9 @@ export async function resumeSubswap(){
         await C.seqLeg.refund({ txid: b.leg.txid, vout: b.leg.vout, amount: b.leg.amount, asset_id: b.asset,
           redeem_script: b.leg.redeem_script, locktime: b.seq_locktime, refund_secret: b.refund_secret,
           dest_spk: (C.seqLeg.ownDestSpk ? C.seqLeg.ownDestSpk() : undefined), fee: 0 });
-        b.state = 'refunded'; saveSubswap(); try { C.toast('Rail-crossing sell refunded · your asset is back.'); } catch {} try { await C.sync(); } catch {}
+        b.state = 'refunded'; saveSubswap(); try { C.toast('Swap refunded · your asset is back.'); } catch {} try { await C.sync(); } catch {}
       }
-    } catch (e){ b.detail = C.prettyErr(e); saveSubswap(); }
+    } catch (e){ console.warn('[subswap] resume error:', e); b.detail = 'Completing your trade - your funds are safe.'; saveSubswap(); }
     return;
   }
   // Pre-commitment (no P, no funded leg, no in-flight payment): the live session cannot be resumed and nothing
@@ -4078,40 +4188,32 @@ async function onReview(){
     // Route EVERY such shape here and RETURN in every branch: it must NEVER fall through to reviewMixed/
     // startMixed (a doomed inline-channel submarine / 422) or offer-then-refuse.
     if (buySubShape || sellSubShape){
-      const tk = (C.assetMeta(q.seqAsset) || {}).ticker || 'asset';
-      // No routable resting maker at all -> honest-disable (this rail needs a resting maker).
+      // Empty rail-blind book -> the ONLY empty-liquidity message (no rail / counterparty vocab).
       if (!disp || !disp.offer){
-        $('swErr').textContent = buySubShape
-          ? `No resting BTC→${tk} offer that settles over Lightning right now · this rail needs a resting maker. Try again shortly, or set the pay leg to on-chain to post a durable limit order.`
-          : `No resting ${tk}→BTC offer that settles over Lightning right now · this rail needs a resting maker. Try again shortly, or set the receive leg to on-chain.`;
+        $('swErr').textContent = 'No offers resting here yet.';
         return;
       }
       // The best offer rests its ASSET over Lightning, so this crossing has no on-chain asset leg to settle
       // (dispatch -> 'unsupported'). Honest-disable, never misroute into a doomed submarine.
       if (disp.path === 'unsupported'){
-        $('swErr').textContent = `The best ${tk} offer rests over Lightning, so this rail crossing has no on-chain ${tk} leg to settle against right now · try again shortly, or switch the ${tk} leg to on-chain.`;
+        $('swErr').textContent = `This trade could not be placed right now - try again shortly.`;
         return;
       }
       if (disp.path === 'p2p-submarine') return reviewSubmarineP2P(route, disp);   // DIRECT peer-to-peer (both directions)
       if (disp.path === 'lsp-bridge'){
-        // BUY fallback vs an on-chain-only maker: paying BTC over Lightning to it needs the LSP hold-invoice,
-        // which the seqln node does not yet mint. Honest-disable via the SHARED payerBridgeDisabledNote
-        // (identical across requoteMixed / onReview / reviewMixed) rather than a broken Place (runLspPayerBridge
-        // also fails closed with zero exposure if ever reached).
-        if (disp.lnSide === 'payer' && buySubShape){
-          $('swErr').textContent = payerBridgeDisabledNote(tk);
-          return;
-        }
+        // BUY fallback vs an on-chain-only / passive maker: the LSP bridges the taker's BTC-LN <-> the maker's
+        // on-chain BTC HTLC on ONE shared secret. ENABLED now the taker pays the LSP's hold by BARE HASH (the
+        // seqln holdinvoice mints no bolt11) — reviewLspPayerBridge -> startLspPayerBridge -> the bare-hash
+        // driver. reviewLspPayerBridge fails closed (payerBridgeDisabledNote) if the LSP returns no usable target.
+        if (disp.lnSide === 'payer' && buySubShape && disp.bridged && disp.supported) return reviewLspPayerBridge(route, disp);
         // SELL via the existing receiver leg-bridge — ONLY when the LSP actually settles this crossing shape.
         if (disp.lnSide === 'receiver' && sellSubShape && disp.bridged && disp.supported) return reviewBridged(route, disp);
         // Any other lsp-bridge shape here (e.g. no supported receiver bridge) -> honest-disable, never startMixed.
-        $('swErr').textContent = `No resting ${tk} offer that settles this Lightning crossing right now · try again shortly, or set the crossed leg to on-chain.`;
+        $('swErr').textContent = `This trade could not be placed right now - try again shortly.`;
         return;
       }
-      // path === 'native' for a declared sub-shape means no crossing maker was routable -> honest-disable.
-      $('swErr').textContent = buySubShape
-        ? `No resting BTC→${tk} offer that settles over Lightning right now · this rail needs a resting maker. Try again shortly.`
-        : `No resting ${tk}→BTC offer that settles over Lightning right now · this rail needs a resting maker. Try again shortly.`;
+      // path === 'native' for a declared sub-shape means no routable settlement -> genuine fail-closed.
+      $('swErr').textContent = 'This trade could not be placed right now - try again shortly.';
       return;
     }
   }
@@ -4296,7 +4398,7 @@ async function awaitSbtcCredit(sbtcHex, before, amount, timeoutMs){
     if (balAtoms(sbtcHex) - before >= amount) return true;
     await new Promise((r) => setTimeout(r, 15000));
   }
-  throw new Error('The peg-in hasn’t been credited yet. Your BTC is safe at the bridge and your SBTC will arrive; re-open the order once it does.');
+  throw new Error('Your Bitcoin is safe; your balance will update shortly. Re-open the order once it does.');
 }
 
 // Maker flow: peg the maker's real BTC IN to SBTC, then rest that SBTC in a covenant ADVERTISED as a
@@ -4304,7 +4406,7 @@ async function awaitSbtcCredit(sbtcHex, before, amount, timeoutMs){
 // peg out to real BTC). btcSats = BTC paid; assetHex/assetAtoms = the asset + amount wanted.
 async function placePeggedBtcCovenant(assetHex, btcSats, assetAtoms, onStatus){
   const sbtcHex = sbtcAssetId();
-  if (!sbtcHex) throw new Error('SBTC (the pegged-BTC asset) isn’t available on this network, so an offline-resting BTC order can’t be placed. Turn off “keep resting while offline” to rest as native BTC.');
+  if (!sbtcHex) throw new Error('Offline-resting BTC orders aren’t available on this network. Turn off “keep resting while offline” to place this order.');
   if (BigInt(btcSats) <= 0n || BigInt(assetAtoms) <= 0n) throw new Error('Enter both the BTC you pay and the amount you want.');
   const haveBtc = balAtoms('BTC');
   if (BigInt(btcSats) > haveBtc) throw new Error(`You only hold ${C.fmtAtoms(haveBtc, 8)} BTC.`);
@@ -4313,7 +4415,7 @@ async function placePeggedBtcCovenant(assetHex, btcSats, assetAtoms, onStatus){
   const seqAddrRaw = C.wollet.address(C.addrIndex == null ? undefined : C.addrIndex).address();
   const seqAddr = (seqAddrRaw.toUnconfidential ? seqAddrRaw.toUnconfidential() : seqAddrRaw).toString();
 
-  onStatus && onStatus('Preparing the peg-in…');
+  onStatus && onStatus('Setting up your order …');
   const depositAddr = await sbtc.requestPegIn(seqAddr);
 
   // Persist the intent BEFORE broadcasting the BTC deposit, so a crash after broadcast can resume.
@@ -4322,12 +4424,12 @@ async function placePeggedBtcCovenant(assetHex, btcSats, assetAtoms, onStatus){
                 beforeSbtc: String(balAtoms(sbtcHex)), phase: 'depositing', created: Date.now() };
   upsertPegPending(rec);
 
-  onStatus && onStatus('Sending your BTC to the peg…');
+  onStatus && onStatus('Sending your Bitcoin …');
   await C.btcLeg.payAddress(depositAddr, Number(btcSats), (txid) => {
     rec.btcTxid = txid; rec.phase = 'minting'; upsertPegPending(rec);
   });
 
-  onStatus && onStatus('Waiting for the bridge to mint SBTC (this can take a few blocks)…');
+  onStatus && onStatus('Setting up your order …');
   await awaitSbtcCredit(sbtcHex, BigInt(rec.beforeSbtc), BigInt(btcSats));
 
   onStatus && onStatus('Resting your order…');
@@ -4433,7 +4535,7 @@ async function pegOutReceivedSbtc(atoms){
   if (!btcDest) throw new Error('no BTC address to redeem to');
   const sbtcAddr = await sbtc.requestPegOut(btcDest);
   await sendSeqAsset(sbtcAddr, sbtcAssetId(), BigInt(atoms));
-  try { C.toast && C.toast('Redeeming your SBTC to BTC at the bridge…'); } catch {}
+  try { C.toast && C.toast('Returning your Bitcoin …'); } catch {}
 }
 
 // TRUE if an inbound covenant match paid us in SBTC for what we were buying as BTC — i.e. we lifted a
@@ -4596,7 +4698,7 @@ async function onCovMatched(m){
   try {
     C.toast && C.toast('Order matched · settling the fill on-chain…');
     const { txid } = await covSettleFill(m, fillHooksFor(m));
-    C.toast && C.toast('Fill settled · anchor-bound to Bitcoin.',
+    C.toast && C.toast('Fill settled.',
       txid ? { href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…' } : undefined);
     await C.sync(); await scanCompanion(); try { renderSwap(); } catch {}
     // SBTC silent peg (taker side): if this fill paid us SBTC on a BTC-advertised market, we were
@@ -4605,7 +4707,7 @@ async function onCovMatched(m){
     if (isPeggedFillToRedeem(m)){
       const got = BigInt(m.fill_base_amount || m.fillBaseAmount || m.covenant_locked || m.covenantLocked || 0);
       try { await pegOutReceivedSbtc(got); await C.sync(); try { renderSwap(); } catch {} }
-      catch (e){ recordPendingPegOut(got); try { C.toast && C.toast('Received SBTC · redeeming it to BTC didn\'t go through. It\'s safe and redeemable from the Balance tab, and we\'ll retry automatically next time you open the wallet.'); } catch {} }
+      catch (e){ recordPendingPegOut(got); try { C.toast && C.toast('Your Bitcoin is safe · we couldn\'t finish returning it just now, and we\'ll retry automatically next time you open the wallet.'); } catch {} }
     }
   } catch (e){ try { C.toast && C.toast('Fill could not settle: ' + C.prettyErr(e)); } catch {} }
 }
@@ -4755,8 +4857,8 @@ async function takeCovenantWalkReview(q){
     ['Price', payAtoms > 0n ? 'Market · ' + ratePerPayToLine(pay, receive, Number(recvAtoms) / Number(payAtoms)).str : '-'],
     ['Network fee', amtRow(feeAsset, covFeeAtoms(feeAsset)) + '  (estimate, per fill)'],
     ['How it fills', `Walks the order book now and fills what crosses your price, best price first. Any part that can't fill is NOT rested — a market order never leaves a resting order behind (switch to Limit for that). Each fill settles on-chain; consensus rejects any underpay or redirect.`],
-    ['Finality', 'Each fill settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
-    ['Settlement', 'Atomic per fill - each settles in full or not at all.'],
+    ['Finality', 'Each fill settles in ~1 block · reverts only if Bitcoin reverts.'],
+    ['Settlement', 'Each fill settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review market order', kv });
   if (ok) ok.textContent = 'Place market order';
@@ -4807,7 +4909,7 @@ async function placeCovenantReview(q){
       : `Rests on-chain at your price and fills · fully or partially · whenever someone crosses it, even while this wallet is closed. A partial fill settles that part and leaves the rest resting. Consensus rejects any underpay or redirect.`],
     ['You can close the wallet', `The order rests on-chain; when it fills you are credited to a payout address only this wallet controls. Reopen any time to see it.`],
     ['If it does not fill', `Cancel any time to delist it. After the order expires the locked ${pm.ticker} is reclaimable on-chain.`],
-    ['Finality', 'Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+    ['Finality', 'Settles in ~1 block · reverts only if Bitcoin reverts.'],
   ];
   // Market order bigger than the resting book at this price: show the fill-now / rest split honestly.
   const split = isMarket ? marketFillSplit(payAtoms, recvAtoms) : null;
@@ -4841,7 +4943,7 @@ async function placeCovenantReview(q){
 // (that is the pure-LN rail) — it settles once the on-chain leg buries under Bitcoin.
 async function reviewMixed(q){
   const { $ } = C;
-  if (!L || !L.swap){ $('swErr').textContent = 'The mixed (Lightning + on-chain) route needs the Lightning service, which is unavailable in this build.'; return; }
+  if (!L || !L.swap){ $('swErr').textContent = 'This way of trading is unavailable in this build.'; return; }
   // FUND-SAFETY (see reviewCross): the submarine (MIXED), the sub-asset BUY (BUY) and the sub-asset
   // SELL (SELL) each persist their on-chain HTLC leg under a SINGLE localStorage key, recoverable only
   // via Refund — so starting a second of the SAME kind overwrites and strands it. The per-kind guard is
@@ -4860,15 +4962,11 @@ async function reviewMixed(q){
     const route = q.route || { seqAsset: q.seqAsset, payIsBtc: true, payRail: 'ln', recvRail: 'chain' };
     const disp = settlementDispatch(route);
     if (disp && disp.path === 'p2p-submarine') return reviewSubmarineP2P(route, disp);
-    // PAYER leg-bridge (on-chain-only maker): honest-DISABLE via the SHARED payerBridgeDisabledNote — the SAME
-    // gate requoteMixed + onReview apply. It must NEVER reach reviewLspPayerBridge's enabled Place until the
-    // seqln hold-invoice capability lands (offer-then-refuse); runLspPayerBridge also fails closed with zero
-    // exposure. (This was the last entry point that still routed the payer bridge into an enabled Review.)
-    if (disp && disp.path === 'lsp-bridge' && disp.lnSide === 'payer'){
-      $('swErr').textContent = payerBridgeDisabledNote(am.ticker);
-      return;
-    }
-    $('swErr').textContent = `This buy needs a resting maker that settles over Lightning · none right now. Try again shortly, or set the pay leg to on-chain to post a durable limit order.`;
+    // PAYER leg-bridge (on-chain-only / passive maker): the LSP bridges the taker's BTC-LN <-> the maker's
+    // on-chain BTC HTLC on ONE shared secret. ENABLED now the taker pays the LSP's hold by BARE HASH — route to
+    // reviewLspPayerBridge (which fails closed with payerBridgeDisabledNote if the LSP returns no usable target).
+    if (disp && disp.path === 'lsp-bridge' && disp.lnSide === 'payer' && disp.bridged && disp.supported) return reviewLspPayerBridge(route, disp);
+    $('swErr').textContent = (!disp || !disp.offer) ? 'No offers resting here yet.' : 'This trade could not be placed right now - try again shortly.';
     return;
   }
   // Two mixed shapes settle: the submarine (asset on-chain + BTC-LN), and its MIRROR the
@@ -4889,7 +4987,7 @@ async function reviewMixed(q){
   // decides + bridges on Place-order and fails closed CLEANLY (refundable) if there's no
   // counterparty. Only a genuinely unrecognized combo (should not reach here) is refused.
   if (!(isSubmarine || isSubAsset || isSubAssetSell)){
-    $('swErr').textContent = `This rail combination isn't a recognized swap shape. Set both legs the same way, or one leg on-chain and one on Lightning.`;
+    $('swErr').textContent = `This trade could not be placed right now - try again shortly.`;
     return;
   }
   // Inline channel provisioning (mirrors reviewLn): if the user PAYS a leg over Lightning
@@ -4929,45 +5027,43 @@ async function reviewMixed(q){
     : (side === 'buy'
       ? `Buy ${am.ticker} with Bitcoin over Lightning · receive ${am.ticker} on-chain`
       : `Sell ${am.ticker} on-chain · receive Bitcoin over Lightning`);
-  const kv = isSubAssetSell ? [
-    ['Route', 'Mixed rails · you pay ' + am.ticker + ' over Lightning and receive Bitcoin into an on-chain lock your device claims. Both legs share one secret, so they settle together or not at all.'],
+  // The Review shows ONLY the user's own legs (what they pay / receive, via `dir`) + a plain reassurance —
+  // never any of the settlement machinery that carries the trade to completion. The Pricing row states the
+  // REAL (possibly partial) fill terms from the sized take the composer carried — never "the whole offer".
+  const aprec = am.precision || 0;
+  const takeA = q.takeAssetAtoms != null ? BigInt(q.takeAssetAtoms) : null;
+  const takeB = q.takeBtcSats != null ? BigInt(q.takeBtcSats) : null;
+  const pricingRow = (takeA != null && takeB != null)
+    ? `Best resting offer · ${C.fmtAtoms(takeA, aprec)} ${am.ticker} for ${C.fmtAtoms(takeB, 8)} BTC`
+    : 'Best resting offer at its posted price';
+  const kv = [
     ['Direction', dir],
-    ['Pricing', 'Best resting offer · you take a party who locks BTC on-chain for your ' + am.ticker + ' (a maker or any posted offer)'],
-    ['Timing', 'You pay ' + am.ticker + ' over Lightning; the counterparty reveals the shared secret to settle, and your device uses it to claim the BTC on-chain.'],
-    ['Finality', 'The BTC arrives in an on-chain Bitcoin lock your device claims (final to Bitcoin); the ' + am.ticker + ' leg is over Lightning.'],
-    ['If it stalls', 'Nothing is lost · if the counterparty never settles, your Lightning payment auto-returns.'],
-  ] : isSubAsset ? [
-    ['Route', 'Mixed rails · you pay Bitcoin into an on-chain lock and receive the asset over Lightning. Both legs share one secret, so they settle together or not at all.'],
-    ['Direction', dir],
-    ['Pricing', 'Best resting sub-asset offer · whole-swap lift (the LP\'s fixed terms)'],
-    ['Timing', 'The asset arrives over Lightning the moment the maker is paid; your BTC is released from its on-chain lock by the same shared secret.'],
-    ['Finality', 'The BTC leg is an on-chain Bitcoin lock (final to Bitcoin); the asset leg settles over Lightning.'],
-    ['If it stalls', 'Nothing is lost · you reclaim the BTC from its lock after the on-chain timeout if the asset never arrives.'],
-  ] : [
-    ['Route', 'Mixed rails · one leg on Lightning, one anchored on-chain (a submarine swap, with both legs sharing one secret)'],
-    ['Direction', dir],
-    ['Pricing', 'Best resting submarine offer · whole-swap lift (the LP\'s fixed terms)'],
-    ['Timing', 'Anchor-gated: the on-chain leg must bury under Bitcoin before the Lightning leg settles. A few minutes, not instant.'],
-    ['Finality', 'Anchored to Bitcoin (reverts only if Bitcoin reverts), so not the instant finality of the pure-Lightning rail.'],
-    ['If it stalls', 'Nothing is lost · each leg refunds after its own timeout.'],
+    ['Pricing', pricingRow],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ];
-  const { m: modal, ok, st } = C.modalRows({ title: 'Review mixed-rail swap', kv });
+  const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
   ok.onclick = async () => {
     modal.remove();
     resetComposer();
     if (isSubAssetSell){
       // Sub-asset SELL: pay the asset over LN, then CLAIM the maker's BTC HTLC on-chain with the
       // revealed preimage (device claim key via the wasm's xchainBtcClaim). Persisted/resumable —
-      // the claim is the fund step and must survive a reload.
-      await startSell({ asset: q.seqAsset, amount, offer: q.sellOffer || null });
+      // the claim is the fund step and must survive a reload. Carry the DISPLAYED fill (takeAssetAtoms/
+      // takeBtcSats) as authoritative so the economic gate + the defense-in-depth price check use exactly
+      // what the composer showed (never re-priced off a different offer's ratio).
+      await startSell({ asset: q.seqAsset, amount, offer: q.sellOffer || null,
+        expectedBtcSats: q.takeBtcSats, expectedAssetAtoms: q.takeAssetAtoms });
       return;
     }
     if (isSubAsset){
       // Sub-asset BUY: pay BTC in an on-chain HTLC, receive the asset over Lightning, bound by one
-      // preimage the DEVICE owns. Persisted/resumable — the BTC HTLC is funded BEFORE /swap. Source
-      // the best resting buy offer here (the composer's mixed-BUY quote doesn't attach one).
+      // preimage the DEVICE owns. Persisted/resumable — the BTC HTLC is funded BEFORE /swap. Lift the SAME
+      // offer whose fill was DISPLAYED (q.buyOffer, matched by id in requoteMixed) and carry the DISPLAYED
+      // fill (takeAssetAtoms/takeBtcSats) as authoritative — startBuy lifts exactly it, never re-deriving the
+      // fill off this offer's ratio (which showed 50 GOLD but delivered 25 when the offer differed).
       const buyOffer = q.buyOffer || subassetOffers(q.seqAsset, 'buy')[0] || null;
-      await startBuy({ asset: q.seqAsset, amount, offer: buyOffer });
+      await startBuy({ asset: q.seqAsset, amount, offer: buyOffer,
+        expectedAssetAtoms: q.takeAssetAtoms, expectedBtcSats: q.takeBtcSats });
       return;
     }
     // Hand off to the persisted, RESUMABLE submarine stepper. The on-chain HTLC leg
@@ -5014,7 +5110,7 @@ async function startSell(params){
   const { $ } = C;
   const asset = params.asset, am = C.assetMeta(asset);
   // FUND-SAFETY self-guard: a second sell would overwrite SELL (the single-key handle to the BTC claim).
-  if (hasSellInFlight()){ if (C.toast) C.toast('You already have a sub-asset sell in progress (claiming your BTC) · finish or refund it first under Active trades.'); return; }
+  if (hasSellInFlight()){ if (C.toast) C.toast('You already have a sell in progress · finish or refund it first under Active trades.'); return; }
   const modal = C.el('div','modal'); const card = C.el('div','card');
   card.appendChild(C.el('label','lbl','Selling ' + am.ticker + ' over Lightning'));
   const st = C.el('div','status'); card.appendChild(st);
@@ -5035,8 +5131,8 @@ async function startSell(params){
   let paidCallStarted = false;
   try {
     _sellStarting = true;   // block a concurrent second sell through the whole pre-claim prologue (TOCTOU)
-    if (!(L && L.swap && L.assetNodeKey)) throw new Error('The Lightning service is unavailable in this build.');
-    if (!(C.btcLeg && C.btcLeg.claim && C.btcLeg.claimKey && C.btcLeg.verifyClaimable)) throw new Error('The BTC claim service is unavailable in this build.');
+    if (!(L && L.swap && L.assetNodeKey)) throw new Error('Lightning isn’t available in this build.');
+    if (!(C.btcLeg && C.btcLeg.claim && C.btcLeg.claimKey && C.btcLeg.verifyClaimable)) throw new Error('This trade isn’t available in this build.');
     say('Preparing your sell…');
     const btc_claim_pub = C.btcLeg.claimKey().public_key;   // the device claim key; only we can claim
     const node_key = await L.assetNodeKey(asset);           // our own hosted asset node pays over LN
@@ -5047,14 +5143,30 @@ async function startSell(params){
     // claimSell is skipped entirely, and a maker handing back a dust HTLC goes completely unwarned. This
     // makes the economic gate reliable; verifying the BTC HTLC BEFORE paying needs a 2-phase LSP
     // handshake (the atomic flow reveals the preimage only after the pay), tracked as an LSP change.
-    const expectedBtc = Number((offer && offer.btc_sats) || 0);
+    // Price the economic gate against what actually FILLS: the composer's SIZED take (params.expectedBtcSats,
+    // the floor-proportional BTC a SELL receives for a partial), falling back to the whole offer's btc_sats.
+    // Using the whole offer for a partial would false-warn "shortfall" on a correct proportional fill.
+    const expectedBtc = Number((params.expectedBtcSats != null ? params.expectedBtcSats : (offer && offer.btc_sats)) || 0);
     if (!(expectedBtc > 0)) throw new Error('This sell has no resting Bitcoin offer to price against · refresh the order book and pick an offer, so the Bitcoin you will receive is known before you pay the asset.');
+    // DEFENSE-IN-DEPTH: the offer we are about to lift MUST be the SAME (price) as the one whose fill was
+    // DISPLAYED. A SELL RECEIVES BTC, so the maker's FLOOR-proportional BTC for the displayed asset fill must
+    // match the displayed BTC within 1 sat of rounding; a material disagreement means a different-priced offer
+    // than shown — refuse BEFORE paying the asset (never receive one price while shown another).
+    if (params.expectedAssetAtoms != null && offer && offer.asset_amount != null && offer.btc_sats != null){
+      const ea = BigInt(params.expectedAssetAtoms), oa = BigInt(offer.asset_amount), ob = BigInt(offer.btc_sats);
+      if (ea > 0n && oa > 0n){
+        const need = (ob * ea) / oa;   // floor: the maker's favour on a SELL (matches proportionalBtcFloor)
+        const eb = BigInt(expectedBtc);
+        const gap = eb > need ? eb - need : need - eb;
+        if (ea > oa || gap > 1n) throw new Error('This trade’s price changed · reopen the order book and try again.');
+      }
+    }
     // Bring our asset LN node's device signer ONLINE — a per-user node isn't auto-connected on
     // load, and the LSP needs it serving to command the pay. Idempotent (re-attaches, no re-fund).
     if (L.connectNode){
-      say('Bringing your ' + am.ticker + ' Lightning node online…');
+      say('Completing your trade …');
       const prov = await L.connectNode(asset);
-      if (!(prov && prov.connected)) throw new Error('Could not bring your ' + am.ticker + ' Lightning node online · reopen the wallet and try again.');
+      if (!(prov && prov.connected)) throw new Error('Could not reach Lightning right now · reopen the wallet and try again.');
     }
     // FUND-SAFETY: the asset is paid INSIDE L.swap. Persist a PENDING ('paying') record carrying a
     // fresh swap_nonce + everything needed to RE-CALL /swap, BEFORE that call. If the response is lost
@@ -5074,15 +5186,15 @@ async function startSell(params){
       payRail: 'ln', recvRail: 'chain',
       offer_id: offer && offer.offer_id, maker_pubkey: offer && offer.maker_pubkey,
       swap_nonce });
-    if (!(resp && resp.settled && resp.preimage && resp.btc_htlc)) throw new Error(resp && resp.error ? resp.error : 'The sell did not settle over Lightning.');
+    if (!(resp && resp.settled && resp.preimage && resp.btc_htlc)){ if (resp && resp.error){ try { console.warn('[sell] swap did not settle:', resp.error); } catch {} } throw new Error('This trade could not be completed - your funds are safe.'); }
     const H = resp.btc_htlc;
     // Persist BEFORE the on-chain claim: the asset is now paid, so the BTC claim is the fund step
     // and MUST survive a reload — resumeSell() re-attempts it from here.
     SELL = { state: 'claiming', asset, ticker: am.ticker, preimage: resp.preimage, hash_h: resp.hash_h, btc_htlc: H,
       expected_btc: expectedBtc, swap_nonce, ts: mixedTip() }; saveSell();
-    say('Preimage revealed · verifying and claiming your BTC on-chain…');
+    say('Completing your trade …');
     await claimSell();   // verify + claim; updates SELL + st
-    say('Done. You paid ' + am.ticker + ' over Lightning and claimed BTC on-chain (' + String(SELL.claim_txid || '').slice(0,16) + '…).', 'ok');
+    say('Done · you paid ' + am.ticker + ' over Lightning and received your BTC (' + String(SELL.claim_txid || '').slice(0,16) + '…).', 'ok');
     done();
     try { await C.sync(); } catch {}
     clearSell();
@@ -5118,7 +5230,7 @@ async function claimSell(){
     const got = BigInt(String(H.amount || 0)), want = BigInt(String(SELL.expected_btc || 0));
     if (want > 0n && got < want) {
       SELL.shortfall = { got: String(got), want: String(want) }; saveSell();
-      C.toast && C.toast(`Warning: the BTC HTLC is only ${C.fmtAtoms(got, 8)} BTC, less than the quoted ${C.fmtAtoms(want, 8)} BTC · claiming it anyway.`, { level: 'warn' });
+      C.toast && C.toast(`Warning: you are receiving only ${C.fmtAtoms(got, 8)} BTC, less than the quoted ${C.fmtAtoms(want, 8)} BTC · taking it anyway.`, { level: 'warn' });
     }
   } catch {}
   await C.btcLeg.verifyClaimable({ redeem_script: H.redeem_script, hash_h: SELL.hash_h,
@@ -5145,7 +5257,7 @@ export async function resumeSell(){
   if (SELL.state === 'claiming' && SELL.preimage && SELL.btc_htlc){
     try {
       await claimSell();
-      try { C.toast && C.toast('Recovered your sell · BTC claimed on-chain (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
+      try { C.toast && C.toast('Recovered your sell · you received your BTC (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
       try { await C.sync(); } catch {}
       clearSell();
     } catch (e){
@@ -5161,7 +5273,7 @@ export async function resumeSell(){
           const os = await C.btcLeg.outspend(H.txid, H.vout);
           if (os.known && os.spent){
             SELL.state = 'failed';
-            SELL.error = 'The Bitcoin HTLC was already resolved on-chain — either your claim confirmed, or the maker reclaimed it after the timeout. Your balance is up to date; you can clear this.';
+            SELL.error = 'This trade is already resolved · your balance is up to date, and you can clear this.';
             saveSell();
             try { await C.sync(); } catch {}
           }
@@ -5196,7 +5308,7 @@ export async function resumeSell(){
         // Confirmed NOT settled. Only now is a TTL clear safe: past the Lightning leg's own timeout
         // an unsettled asset payment has auto-returned, so this record can never complete. Within the
         // TTL, keep it for a later retry.
-        if (SELL.ts && (Date.now() - SELL.ts) > SELL_PAYING_TTL_MS){ clearSell(); try { C.toast && C.toast('A sub-asset sell that never completed has expired; any Lightning payment has auto-returned.'); } catch {} }
+        if (SELL.ts && (Date.now() - SELL.ts) > SELL_PAYING_TTL_MS){ clearSell(); try { C.toast && C.toast('A sell that never completed has expired · any Lightning payment has been returned.'); } catch {} }
         return;
       }
       SELL = { state: 'claiming', asset, ticker: SELL.ticker || ((C.assetMeta(asset)||{}).ticker || ''),
@@ -5204,7 +5316,7 @@ export async function resumeSell(){
         expected_btc: Number((offer && offer.btc_sats) || SELL.expected_btc || 0),
         swap_nonce: SELL.swap_nonce, ts: mixedTip() }; saveSell();
       await claimSell();
-      try { C.toast && C.toast('Recovered your sell · BTC claimed on-chain (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
+      try { C.toast && C.toast('Recovered your sell · you received your BTC (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
       try { await C.sync(); } catch {}
       clearSell();
     } catch (e){ /* leave the 'paying' record; its nonce keeps recovery idempotent on the next load */ }
@@ -5243,7 +5355,7 @@ async function startBuy(params){
   const asset = params.asset, am = C.assetMeta(asset);
   const offer = params.offer || null;
   // FUND-SAFETY self-guard: a second buy would overwrite BUY (the single-key handle to the locked BTC).
-  if (hasBuyInFlight()){ if (C.toast) C.toast('You already have a sub-asset buy in progress (Bitcoin locked) · finish or refund it first under Active trades.'); return; }
+  if (hasBuyInFlight()){ if (C.toast) C.toast('You already have a buy in progress (Bitcoin locked) · finish or refund it first under Active trades.'); return; }
   const modal = C.el('div','modal'); const card = C.el('div','card');
   card.appendChild(C.el('label','lbl','Buying ' + am.ticker + ' over Lightning'));
   const st = C.el('div','status'); card.appendChild(st);
@@ -5259,9 +5371,9 @@ async function startBuy(params){
   const done = () => { closeBtn.textContent = 'Close'; };
   try {
     _buyStarting = true;   // block a concurrent second buy through the whole pre-fund prologue (TOCTOU)
-    if (!(L && L.swap && L.assetNodeKey && L.nodeInvoice && L.invoiceStatus && L.nodeSettle)) throw new Error('The Lightning service is unavailable in this build.');
-    if (!(C.btcLeg && C.btcLeg.fund && C.btcLeg.refund && C.btcLeg.refundKey && C.btcLeg.tipHeight)) throw new Error('The BTC HTLC service is unavailable in this build.');
-    if (!(C.wasm && C.wasm.generateSwapSecret && C.wasm.buildSeqHtlcRedeemScript)) throw new Error('The HTLC builder is unavailable in this build.');
+    if (!(L && L.swap && L.assetNodeKey && L.nodeInvoice && L.invoiceStatus && L.nodeSettle)) throw new Error('Lightning isn’t available in this build.');
+    if (!(C.btcLeg && C.btcLeg.fund && C.btcLeg.refund && C.btcLeg.refundKey && C.btcLeg.tipHeight)) throw new Error('This trade isn’t available in this build.');
+    if (!(C.wasm && C.wasm.generateSwapSecret && C.wasm.buildSeqHtlcRedeemScript)) throw new Error('This trade isn’t available in this build.');
     const makerClaimPub = offer && (offer.maker_claim_pub || offer.maker_claim_pubkey);
     if (!offer || !makerClaimPub) throw new Error('No resting ' + am.ticker + ' buy offer right now · try again shortly.');
     say('Preparing your buy…');
@@ -5269,36 +5381,52 @@ async function startBuy(params){
     const sec = C.wasm.generateSwapSecret();            // { secret_hex, hash_hex }
     const H = sec.hash_hex, P = sec.secret_hex;
     const node_key = await L.assetNodeKey(asset);       // our OWN hosted asset node RECEIVES the asset over LN
-    // T8 partial fill: default to the whole offer, but if the user entered LESS BTC than the offer's
-    // full price, take a proportional slice — assetAtoms scaled by the BTC fraction, then btcSats
-    // recomputed as the ceil-proportional price (matching the maker's ProportionalBtc, so it never
-    // rejects us). The maker re-rests the remainder. params.amount is the pay (BTC) field, in BTC.
     const wholeAsset = Number(offer.asset_amount), wholeBtc = Number(offer.btc_sats);
     let assetAtoms = wholeAsset, btcSats = wholeBtc;
-    const reqBtcSats = (params.amount != null && Number(params.amount) > 0) ? Math.round(Number(params.amount) * 1e8) : 0;
-    if (reqBtcSats > 0 && reqBtcSats < wholeBtc){
-      // BigInt, NOT float: the price must EXACTLY equal the maker's integer ProportionalBtc(ceil). A
-      // float multiply overflows 2^53 for large offers and diverged by +1 in ~0.6% of cases, so the
-      // maker would reject AFTER the BTC HTLC is funded → stranded until the CLTV refund. assetAtoms =
-      // floor slice of the entered BTC; btcSats = ceil(wholeBtc*assetAtoms/wholeAsset) = the maker's need.
+    // AUTHORITATIVE FILL (fund-safety): the composer carries the EXACT sized take it DISPLAYED
+    // (expectedAssetAtoms / expectedBtcSats). Lift PRECISELY that — never re-derive the fill from this offer's
+    // ratio. Re-deriving against a DIFFERENT offer than displayed showed "50 GOLD for 500000 sats" but delivered
+    // 25 GOLD; carrying the shown fill makes settlement == what the user saw.
+    const wantAtoms = (params.expectedAssetAtoms != null && Number(params.expectedAssetAtoms) > 0) ? BigInt(params.expectedAssetAtoms) : 0n;
+    const wantBtc   = (params.expectedBtcSats   != null && Number(params.expectedBtcSats)   > 0) ? BigInt(params.expectedBtcSats)   : 0n;
+    if (wantAtoms > 0n && wantBtc > 0n){
+      assetAtoms = Number(wantAtoms); btcSats = Number(wantBtc);
+      // DEFENSE-IN-DEPTH: the offer we are about to lift MUST be the SAME (price) as the one displayed. Re-derive
+      // the maker's ceil-proportional BTC need for the authoritative asset fill from THIS offer's ratio; if it
+      // disagrees with the carried BTC by more than 1 sat of rounding (or the fill exceeds the offer), we would
+      // be paying against a DIFFERENT-priced offer than shown — refuse before locking any Bitcoin.
       const bW = BigInt(wholeAsset), bB = BigInt(wholeBtc);
-      let a = (bW * BigInt(reqBtcSats)) / bB;   // floor
-      if (a < 1n) a = 1n;
-      assetAtoms = Number(a);
-      btcSats = Number(ceilDiv(bB * a, bW));
+      const need = bW > 0n ? ceilDiv(bB * wantAtoms, bW) : 0n;
+      const gap = wantBtc > need ? wantBtc - need : need - wantBtc;
+      if (bW <= 0n || wantAtoms > bW || gap > 1n)
+        throw new Error('This trade’s price changed · reopen the order book and try again.');
+    } else {
+      // Legacy fallback (no carried fill): T8 partial — if the user entered LESS BTC than the offer's full
+      // price, take a proportional slice. BigInt, NOT float: the price must EXACTLY equal the maker's integer
+      // ProportionalBtc(ceil). A float multiply overflows 2^53 for large offers and diverged by +1 in ~0.6% of
+      // cases, so the maker would reject AFTER the BTC HTLC is funded → stranded until the CLTV refund.
+      // assetAtoms = floor slice of the entered BTC; btcSats = ceil(wholeBtc*assetAtoms/wholeAsset).
+      const reqBtcSats = (params.amount != null && Number(params.amount) > 0) ? Math.round(Number(params.amount) * 1e8) : 0;
+      if (reqBtcSats > 0 && reqBtcSats < wholeBtc){
+        const bW = BigInt(wholeAsset), bB = BigInt(wholeBtc);
+        let a = (bW * BigInt(reqBtcSats)) / bB;   // floor
+        if (a < 1n) a = 1n;
+        assetAtoms = Number(a);
+        btcSats = Number(ceilDiv(bB * a, bW));
+      }
     }
     // Bring our asset LN node's device signer ONLINE so it can register + settle the HODL invoice.
     if (L.connectNode){
-      say('Bringing your ' + am.ticker + ' Lightning node online…');
+      say('Completing your trade …');
       const prov = await L.connectNode(asset);
-      if (!(prov && prov.connected)) throw new Error('Could not bring your ' + am.ticker + ' Lightning node online · reopen the wallet and try again.');
+      if (!(prov && prov.connected)) throw new Error('Could not reach Lightning right now · reopen the wallet and try again.');
     }
     // Ensure inbound asset liquidity so the maker can pay us over LN (JIT 0-conf; idempotent, best-effort).
-    if (L.channelInbound){ say('Preparing inbound Lightning liquidity…'); try { await L.channelInbound({ node_key, asset, amount: assetAtoms }); } catch {} }
+    if (L.channelInbound){ say('Completing your trade …'); try { await L.channelInbound({ node_key, asset, amount: assetAtoms }); } catch {} }
     // 2. Register a HODL invoice on H at our OWN node (NO bolt11; the maker pays H BY HASH). Device keeps P.
-    say('Registering the Lightning invoice on your node…');
+    say('Completing your trade …');
     const inv = await L.nodeInvoice({ node_key, asset, amount: assetAtoms, payment_hash: H });
-    if (!(inv && (inv.payment_hash || inv.hodl))) throw new Error('Could not register the Lightning invoice on your node.');
+    if (!(inv && (inv.payment_hash || inv.hodl))) throw new Error('This trade could not be completed - your funds are safe.');
     // 3. Build + FUND the BTC HTLC on H: maker claims with P, device refunds after T_btc (the PROVEN
     //    xswap.js:689-695 engine, roles flipped). T_btc = max(offer.onchain_cltv, tip + delta).
     const refund = C.btcLeg.refundKey();                // device refund key; only we can refund
@@ -5314,21 +5442,21 @@ async function startBuy(params){
       btc_htlc: { redeem_script: redeem, cltv: T_btc, amount: btcSats, maker_claim_pub: makerClaimPub, taker_refund_pub: refund.public_key },
       t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() };
     saveBuy();
-    say('Locking your Bitcoin in the on-chain HTLC…');
+    say('Completing your trade …');
     const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (BUY && BUY.btc_htlc){ BUY.btc_htlc.txid = String(txid); saveBuy(); } });
     BUY.btc_htlc.txid = String(funded.txid); BUY.btc_htlc.vout = funded.vout; BUY.state = 'funded'; saveBuy();
     const btc_htlc = BUY.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
     logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with BTC', status: 'BTC locked' });
     // 4. Command the LSP to drive the maker's pay-by-hash (ASYNC job -> 202 { job_id, poll, held:false }).
-    say('Asking the maker to pay you ' + am.ticker + ' over Lightning…');
+    say('Waiting for your trade to settle …');
     const job = await L.swap({ side: 'buy', hodl: true, asset, node_key, payment_hash: H, asset_amount: assetAtoms,
       payRail: 'chain', recvRail: 'ln', btc_htlc, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey });
     BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
     // 5. Wait for the maker's asset payment to arrive HELD, then DEVICE-SETTLE with P (or refund after T_btc).
-    say('Waiting for the maker’s ' + am.ticker + ' payment to arrive…');
+    say('Waiting for your trade to settle …');
     await driveBuy(say);
-    if (BUY && BUY.state === 'settled'){ say('Done. Your BTC bought ' + am.ticker + ' · received over Lightning.', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(); }
-    else if (BUY && BUY.state === 'refunded'){ say('The maker didn’t pay in time · your Bitcoin was refunded on-chain (' + String(BUY.refund_txid||'').slice(0,16) + '…).', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(); }
+    if (BUY && BUY.state === 'settled'){ say('Done · your BTC bought ' + am.ticker + ', received over Lightning.', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(); }
+    else if (BUY && BUY.state === 'refunded'){ say('This trade didn’t complete in time · your Bitcoin has been returned (' + String(BUY.refund_txid||'').slice(0,16) + '…).', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(); }
     else { done(); }
   } catch (e){
     // If the BTC HTLC was already funded (BUY persisted), keep it for settle/refund on reload — never lose it.
@@ -5372,7 +5500,7 @@ async function driveBuy(say){
     if (status && status.settled){ BUY.state = 'settled'; saveBuy(); return; }   // already settled (resume)
     if (status && status.held){
       BUY.state = 'holding'; saveBuy();
-      say('Payment received · releasing your ' + BUY.ticker + ' and revealing the preimage…');
+      say('Payment received · completing your trade …');
       await L.nodeSettle({ node_key, payment_hash: H, preimage: BUY.preimage });   // 5. device-settle
       BUY.state = 'settled'; saveBuy();
       // Enriched receipt (P5.1): sub-asset BUY = BTC paid on-chain, asset received over LN. base = asset,
@@ -5387,7 +5515,7 @@ async function driveBuy(say){
       if (L.jobStatus && (BUY.poll || BUY.job_id)){ try { const j = await L.jobStatus(BUY.poll || ('/swap/' + BUY.job_id)); if (j && j.status) { BUY.detail = j.status; saveBuy(); } } catch {} }
       return;
     }
-    if (tip && BUY.t_btc && tip >= BUY.t_btc){ say('The maker didn’t pay in time · refunding your Bitcoin on-chain…'); await refundBuy(); return; }   // 7. refund branch
+    if (tip && BUY.t_btc && tip >= BUY.t_btc){ say('This trade didn’t complete in time · returning your Bitcoin …'); await refundBuy(); return; }   // 7. refund branch
     await new Promise(r => setTimeout(r, 6000));
   }
 }
@@ -5447,7 +5575,7 @@ async function startMixed(params){
   // first awaits) would each overwrite MIXED — the single-key handle to a funded submarine HTLC leg —
   // stranding the first. hasMixedInFlight covers a persisted swap; _mixedStarting covers the window
   // before the first newSwap persists.
-  if (_mixedStarting || hasMixedInFlight()){ try { C.toast && C.toast('A submarine swap is already in progress · finish or refund it first under Active trades.'); } catch {} return; }
+  if (_mixedStarting || hasMixedInFlight()){ try { C.toast && C.toast('A swap is already in progress · finish or refund it first under Active trades.'); } catch {} return; }
   _mixedStarting = true;
   try {
     MIXED = sub.newSwap(params);
@@ -5463,14 +5591,15 @@ async function startMixed(params){
     renderMixedSwap();
     if (!sub.isTerminal(MIXED)) pollMixed();
     else if (MIXED.state === sub.ST.SETTLED){
-      try { C.toast(`Mixed swap settled · anchor-bound to Bitcoin${MIXED.preimage ? ` · preimage ${String(MIXED.preimage).slice(0, 16)}…` : ''}`); } catch {}
+      try { C.toast('Swap settled.'); } catch {}
       try { await C.sync(); } catch {}
     }
   } catch (e){
+    console.warn('[swap] mixed start error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
     // A thrown swap: if an on-chain HTLC leg exists it stays SETTLING (refundable at its
     // timeout); with no leg to reclaim it is a clean failure.
-    if (MIXED && MIXED.htlc){ MIXED = { ...MIXED, detail: C.prettyErr(e) }; saveMixed(); pollMixed(); }
-    else { MIXED = sub.markFailed(MIXED, C.prettyErr(e)); saveMixed(); }
+    if (MIXED && MIXED.htlc){ MIXED = { ...MIXED, detail: 'Completing your trade - your funds are safe.' }; saveMixed(); pollMixed(); }
+    else { MIXED = sub.markFailed(MIXED, 'This trade could not be completed - your funds are safe.'); saveMixed(); }
     renderMixedSwap();
   } finally {
     _mixedStarting = false;
@@ -5516,17 +5645,17 @@ function renderMixedSwap(){
   const tip = mixedTip();
   const refundable = sub.isRefundable(MIXED, tip);
   if (terminal) logTrade({ id: 'mx:' + (MIXED.id || MIXED.ts || (MIXED.htlc && MIXED.htlc.refund_locktime) || ''),
-    title: (MIXED.side === 'buy' ? 'Bought ' : 'Sold ') + metaOf(MIXED.asset).ticker + ' · submarine', status: MIXED.state,
+    title: (MIXED.side === 'buy' ? 'Bought ' : 'Sold ') + metaOf(MIXED.asset).ticker, status: MIXED.state,
     rail: 'submarine', pair: metaOf(MIXED.asset).ticker + '/BTC', side: MIXED.side === 'buy' ? 'buy' : 'sell',
     preimage: (MIXED.state === sub.ST.SETTLED ? (MIXED.preimage || null) : null),
     size: (MIXED.amount != null ? Number(MIXED.amount) / Math.pow(10, metaOf(MIXED.asset).precision || 0) : null),
     sizeTicker: metaOf(MIXED.asset).ticker });
   const phase = {
-    [sub.ST.SETTLING]:  'Settling · the on-chain HTLC leg is burying under Bitcoin (anchor-gated).',
-    [sub.ST.REFUNDING]: 'Refunding the on-chain HTLC leg…',
-    [sub.ST.REFUNDED]:  'Refund broadcast · the on-chain leg is being reclaimed; your funds return once it confirms.',
-    [sub.ST.SETTLED]:   'Settled · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).',
-    [sub.ST.FAILED]:    MIXED.htlc ? 'Failed · reclaim the on-chain leg below.' : 'Failed · nothing was spent.',
+    [sub.ST.SETTLING]:  'Completing your trade · confirming on Bitcoin.',
+    [sub.ST.REFUNDING]: 'Refunding your trade…',
+    [sub.ST.REFUNDED]:  'Refund sent · your funds return once it confirms.',
+    [sub.ST.SETTLED]:   'Settled · reverts only if Bitcoin reverts.',
+    [sub.ST.FAILED]:    MIXED.htlc ? 'Could not complete · refund below to get your funds back.' : 'Could not complete · nothing was spent.',
   }[MIXED.state] || MIXED.state;
   const dir = MIXED.side === 'buy'
     ? `Buy ${esc(am.ticker)} with BTC over Lightning · receive ${esc(am.ticker)} on-chain`
@@ -5534,11 +5663,11 @@ function renderMixedSwap(){
   const lock = MIXED.htlc && MIXED.htlc.refund_locktime;
   const legLine = MIXED.htlc
     ? (refundable
-        ? `On-chain HTLC leg is past its refund timeout (block ${lock}) · reclaimable now.`
-        : `On-chain HTLC leg refundable after block ${lock}${tip ? ` (tip ${tip})` : ''}.`)
+        ? `Your funds are past their refund time (block ${lock}) · you can get them back now.`
+        : `Your funds can be refunded after block ${lock}${tip ? ` (currently at ${tip})` : ''}.`)
     : (MIXED.state === sub.ST.FAILED
-        ? 'The swap did not start: no on-chain leg was ever funded, so there is nothing to reclaim.'
-        : 'The LSP is driving both legs; no separate on-chain leg to reclaim.');
+        ? 'The trade did not start · nothing was funded, so there is nothing to get back.'
+        : 'This trade completes on its own · nothing for you to do here.');
   // ALWAYS show the failure/progress detail — hiding it on terminal states left users
   // staring at a bare "Failed" with the actual reason discarded.
   const detail = MIXED.detail ? ' · ' + esc(MIXED.detail) : '';
@@ -5555,14 +5684,14 @@ function renderMixedSwap(){
   const canRefund = !!(L && L.refund);
   if (MIXED.htlc && !terminal && MIXED.state !== sub.ST.REFUNDING){
     if (canRefund){
-      const rb = C.el('button', 'danger', 'Refund BTC leg'); rb.id = 'swMixedRefund';
+      const rb = C.el('button', 'danger', 'Reclaim your funds'); rb.id = 'swMixedRefund';
       rb.disabled = !refundable;
-      if (!refundable) rb.title = `The on-chain HTLC leg is only refundable after its CLTV timeout (block ${lock}).`;
+      if (!refundable) rb.title = `These funds can only be refunded after block ${lock}.`;
       rb.onclick = onRefundMixed;
       btns.appendChild(rb);
     } else {
       const note = C.el('span', 'sub');
-      note.textContent = `The on-chain HTLC leg is refundable after its timeout (block ${lock}); the swap service reclaims it automatically — nothing to do here.`;
+      note.textContent = `Your funds are refunded automatically after block ${lock} - nothing to do here.`;
       btns.appendChild(note);
     }
   }
@@ -5583,37 +5712,38 @@ function renderMixedSwap(){
 async function onRefundMixed(){
   if (!MIXED || !MIXED.htlc){ return; }
   if (!sub.isRefundable(MIXED, mixedTip())){
-    try { C.toast('The on-chain HTLC leg is not refundable until its CLTV timeout is buried.'); } catch {}
+    try { C.toast('This trade can’t be refunded yet · its timeout has not passed.'); } catch {}
     return;
   }
   const kv = [
-    ['Network', '⚠ Refunding the on-chain HTLC leg via its CLTV branch (anchor-bound).'],
-    ['Refund amount', (MIXED.htlc.amount != null ? MIXED.htlc.amount + ' base units' : 'the locked HTLC amount') + ' (minus the refund tx fee)'],
-    ['After this', 'The swap is terminal (refunded); the Lightning leg unwinds on its own hold timeout.'],
+    ['Refunding', '⚠ Refunding your Bitcoin back to your wallet.'],
+    ['Refund amount', (MIXED.htlc.amount != null ? MIXED.htlc.amount + ' base units' : 'the locked amount') + ' (minus the refund fee)'],
+    ['After this', 'Your trade ends here (refunded).'],
   ];
-  const { m: modal, ok, st } = C.modalRows({ title: 'Refund the on-chain leg', kv });
+  const { m: modal, ok, st } = C.modalRows({ title: 'Refund your trade', kv });
   ok.onclick = async () => {
     // NEVER fake a refund: without a real broadcast mechanism, a "refund" that returns no txid must
     // NOT mark the swap REFUNDED (that told the user their BTC was reclaimed while it stayed locked).
     if (!(L && L.refund)){
       st.className = 'status err';
-      st.textContent = 'This build cannot broadcast the reclaim from the wallet; the swap service reclaims the on-chain leg automatically after its timeout.';
+      st.textContent = 'This build can’t refund from the wallet · your funds are refunded automatically after their timeout.';
       return;
     }
-    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Refunding the on-chain HTLC leg…';
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Refunding your trade…';
     MIXED = sub.markRefunding(MIXED); saveMixed(); renderMixedSwap();
     try {
       const txid = await L.refund({ id: MIXED.id, htlc: MIXED.htlc });
       if (!txid) throw new Error('the refund did not return a transaction id (nothing was broadcast)');
       MIXED = sub.markRefunded(MIXED, txid); saveMixed();
       modal.remove();
-      C.toast(`On-chain HTLC leg refunded: ${String(txid).slice(0, 18)}…`);
+      C.toast(`Refunded: ${String(txid).slice(0, 18)}…`);
       try { await C.sync(); } catch {}
       renderMixedSwap();
     } catch (e){
+      console.warn('[swap] mixed refund error:', e);   // technical detail stays in the console
       // Refund failed: revert to SETTLING so the off-ramp stays available to retry.
       MIXED = { ...MIXED, state: sub.ST.SETTLING }; saveMixed();
-      st.className = 'status err'; st.textContent = 'Refund failed: ' + C.prettyErr(e); ok.disabled = false;
+      st.className = 'status err'; st.textContent = 'Could not refund right now · please try again.'; ok.disabled = false;
       renderMixedSwap();
     }
   };
@@ -5626,7 +5756,7 @@ export function resumeMixedSwap(){
   if (!MIXED) return;
   try { showMixed(true); renderMixedSwap(); } catch {}
   if (!sub.isTerminal(MIXED)) pollMixed();
-  if (C.toast) try { C.toast('Resuming an interrupted Lightning+on-chain swap · refund the on-chain leg here if it stalls.'); } catch {}
+  if (C.toast) try { C.toast('Resuming an interrupted swap · you can refund it here if it stalls.'); } catch {}
 }
 
 // Start a CROSS market from the wallet: post a signed forward cross offer (SELL
@@ -5638,7 +5768,7 @@ async function postCrossOfferReview(q){
   const { $ } = C;
   const reverse = !!q.reverse;   // reverse = BUY the asset with BTC; else SELL the asset for BTC
   const start = reverse ? (X && X.makerStartReverse) : (X && X.makerStart);
-  if (!X || !start){ $('swErr').textContent = 'Cross-chain making is unavailable in this build.'; return; }
+  if (!X || !start){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   const assetHex = q.assetHex;
   const am = C.assetMeta(assetHex);
   // SELL: pay = asset, receive = BTC.  BUY: pay = BTC, receive = asset.
@@ -5663,28 +5793,26 @@ async function postCrossOfferReview(q){
       // only reason for the shortfall is that the asset sits in Lightning, say that plainly rather than
       // a bare "you only hold" that reads wrong when a Lightning balance is visible.
       $('swErr').textContent = (lnHeld > 0n && (onc + lnHeld) >= assetAtoms)
-        ? `Posting a resting cross-chain offer locks ${am.ticker} in an on-chain HTLC, but ${C.fmtAtoms(lnHeld, am.precision)} ${am.ticker} of yours is in Lightning and only ${C.fmtAtoms(onc, am.precision)} is on-chain. Move some ${am.ticker} back on-chain to post this on-chain, or use a Lightning rail (coming soon for this direction).`
+        ? `You’ll need this ${am.ticker} on-chain to post this order · ${C.fmtAtoms(lnHeld, am.precision)} ${am.ticker} of yours is in Lightning and only ${C.fmtAtoms(onc, am.precision)} is on-chain. Move some ${am.ticker} back on-chain to post it.`
         : `You only hold ${C.fmtAtoms(onc, am.precision)} ${am.ticker}.`;
       return;
     }
   }
   const assetU = Number(assetAtoms)/Math.pow(10, am.precision||0), btcU = Number(btcSats)/1e8;
   const kv = reverse ? [
-    ['Posting', `A resting CROSS bid - you become the maker of the ${am.ticker}/BTC market`],
+    ['Posting', `A resting CROSS bid · you post an offer others can take in the ${am.ticker}/BTC market`],
     ['You pay', C.fmtAtoms(btcSats, 8) + ' BTC'],
     ['You buy', amtRow(assetHex, assetAtoms) + refSuffix(assetHex, assetAtoms)],
     ['Price', assetU>0 ? `1 ${am.ticker} = ${trim(btcU/assetU)} BTC` : '-'],
-    ['How it settles', 'You lock BTC in an HTLC; a taker locks the asset; you verify anchoring, claim the asset (revealing the secret); the taker claims your BTC. Atomic - anchor-bound.'],
-    ['Keep this tab open', 'Cross-chain settlement is interactive: your wallet must be open to settle a lift. Closing it un-rests the offer; nothing is at risk (a stalled lock refunds after its timeout).'],
-    ['Finality', 'Anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+    ['Keep this tab open', 'Your wallet must stay open for this offer to stay active · closing it takes the offer down. Nothing is at risk (anything pending is returned automatically).'],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ] : [
-    ['Posting', `A resting CROSS offer - you become the maker of the ${am.ticker}/BTC market`],
+    ['Posting', `A resting CROSS offer · you post an offer others can take in the ${am.ticker}/BTC market`],
     ['You sell', amtRow(assetHex, assetAtoms) + refSuffix(assetHex, assetAtoms)],
     ['You want', C.fmtAtoms(btcSats, 8) + ' BTC'],
     ['Price', assetU>0 ? `1 ${am.ticker} = ${trim(btcU/assetU)} BTC` : '-'],
-    ['How it settles', 'A taker pays BTC; you lock the asset in an HTLC; they claim it revealing the secret; you claim the BTC. Atomic - anchor-bound.'],
-    ['Keep this tab open', 'Cross-chain settlement is interactive: your wallet must be open to settle a lift. Closing it un-rests the offer; nothing is at risk.'],
-    ['Finality', 'Anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+    ['Keep this tab open', 'Your wallet must stay open for this offer to stay active · closing it takes the offer down. Nothing is at risk.'],
+    ['Your funds', 'Your funds stay in your control until this completes.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: reverse ? 'Buy with BTC - start this market' : 'Sell for BTC - start this market', kv });
   if (ok) ok.textContent = reverse ? 'Post cross bid' : 'Post cross offer';
@@ -5723,19 +5851,22 @@ async function postPeggedBtcReview(q){
   if (btcSats > haveBtc){ $('swErr').textContent = `You only hold ${C.fmtAtoms(haveBtc, 8)} BTC.`; return; }
   const assetU = Number(assetAtoms)/Math.pow(10, am.precision||0), btcU = Number(btcSats)/1e8;
   const kv = [
-    ['Posting', `A resting BID that stays live while you're offline — you become a maker of the ${am.ticker}/BTC market`],
+    ['Posting', `A resting BID that stays live while you're offline · you post an offer others can take in the ${am.ticker}/BTC market`],
     ['You pay', C.fmtAtoms(btcSats, 8) + ' BTC'],
     ['You buy', amtRow(assetHex, assetAtoms) + refSuffix(assetHex, assetAtoms)],
     ['Price', assetU>0 ? `1 ${am.ticker} = ${trim(btcU/assetU)} BTC` : '-'],
-    ['How it rests', `Your BTC is pegged to SBTC and locked in a covenant that fills even while your wallet is closed. On a fill the taker receives real BTC and you receive the ${am.ticker}.`],
+    ['How it rests', `Your Bitcoin rests as an offer that stays live even while your wallet is closed. When it fills, you receive the ${am.ticker}.`],
+    // CONSCIOUS OPT-IN (spec §5): keeping an order working while you are offline needs the peg — surface its
+    // custody risk plainly, right here, as the ONE place SBTC appears (nowhere else in the composer).
+    ['⚠ Custody risk', 'To keep this order working while you are offline, your Bitcoin is held as pegged Bitcoin by an operator group, which adds custody risk a normal order does not have. Continue?'],
     ['If it cancels', 'Cancel anytime — your funds return to you as regular BTC.'],
-    ['Heads up', 'Pegging in needs a few Bitcoin confirmations before the bid goes live; you can close the wallet and it resumes.'],
-    ['Finality', 'Anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+    ['Heads up', 'This needs a few Bitcoin confirmations before the bid goes live; you can close the wallet and it resumes.'],
+    ['Finality', 'Reverts only if Bitcoin reverts.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Buy with BTC — rest this bid offline', kv });
-  if (ok) ok.textContent = 'Peg in & rest bid';
+  if (ok) ok.textContent = 'Rest this bid';
   ok.onclick = async () => {
-    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Pegging in…';
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Resting your bid…';
     try {
       await placePeggedBtcCovenant(assetHex, btcSats, assetAtoms, (m) => { st.innerHTML = '<span class="spin"></span>' + esc(m); });
       modal.remove();
@@ -5758,7 +5889,7 @@ async function takePeggedCovenantReview(q, offer){
   // SBTC — otherwise the taker pays a real asset and receives a worthless one advertised as BTC. Fail
   // closed even if a caller reached here without the selection-point check.
   if (!peggedCovenantLocksSbtc(offer)){
-    $('swErr').textContent = 'This BTC bid’s covenant does not lock pegged BTC (SBTC) — refusing to fill it (you could pay a real asset and receive junk).';
+    $('swErr').textContent = 'This BTC order can’t be filled safely · refusing to fill it (you could pay a real asset and receive nothing of value).';
     return;
   }
   const assetHex = q.seqAsset;
@@ -5775,8 +5906,8 @@ async function takePeggedCovenantReview(q, offer){
     ['You pay', amtRow(assetHex, assetAtoms) + refSuffix(assetHex, assetAtoms)],
     ['You receive', C.fmtAtoms(btcSats, 8) + ' BTC'],
     ['Price', assetU>0 ? `1 ${am.ticker} = ${trim(btcU/assetU)} BTC` : '-'],
-    ['How it settles', 'You fill the covenant on-chain (permissionless) and receive SBTC, which is automatically redeemed to real BTC at the bridge.'],
-    ['Finality', 'Anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+    ['How it settles', 'You fill this on-chain and receive Bitcoin.'],
+    ['Finality', 'Reverts only if Bitcoin reverts.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: `Sell ${am.ticker} for BTC`, kv });
   if (ok) ok.textContent = 'Fill bid';
@@ -5808,13 +5939,13 @@ function renderXMake(){
   if (!XMAKE){ return; }   // leave same-chain "your orders" render intact when no cross make
   const am = C.assetMeta(XMAKE.assetHex);
   const phases = XMAKE.reverse ? {
-    resting:'Resting - waiting for a taker', terms:'A taker is lifting…', btc_locked:'You locked BTC - waiting for the taker to lock the asset…',
-    seq_verified:'Asset locked - verifying anchoring…', settled:'Settled - you bought the asset for BTC',
-    refunding:'Stalled - refunding your BTC…', refunded:'Refunded - the swap stalled; your BTC is back',
+    resting:'Resting - waiting to be filled', terms:'Someone is filling your order…', btc_locked:'Waiting for your trade to settle…',
+    seq_verified:'Completing your trade…', settled:'Settled - you bought the asset for BTC',
+    refunding:'Returning your BTC…', refunded:'Refunded - your BTC is back',
   } : {
-    resting:'Resting - waiting for a taker', terms:'A taker is lifting…', btc_verified:'Taker funded BTC - locking your asset…',
-    seq_locked:'Asset locked - waiting for the taker to claim…', secret_learned:'Taker claimed; claiming your BTC…',
-    settled:'Settled - you sold the asset for BTC', refunded:'Refunded - the swap stalled; your asset is back',
+    resting:'Resting - waiting to be filled', terms:'Someone is filling your order…', btc_verified:'Completing your trade…',
+    seq_locked:'Waiting for your trade to settle…', secret_learned:'Completing your trade…',
+    settled:'Settled - you sold the asset for BTC', refunded:'Refunded - your asset is back',
   };
   const label = phases[XMAKE.state] || XMAKE.state;
   const done = XMAKE.state === 'settled' || XMAKE.state === 'refunded';
@@ -5824,7 +5955,7 @@ function renderXMake(){
     const xmAssetU = (() => { try { return Number(big(XMAKE.assetAtoms || 0)) / Math.pow(10, am.precision || 0); } catch { return null; } })();
     const xmBtcU = (() => { try { return Number(big(XMAKE.btcSats || 0)) / 1e8; } catch { return null; } })();
     logTrade({ id: 'xm:' + (XMAKE.offerId || ''),
-      title: (XMAKE.reverse ? 'Sold ' : 'Bought ') + (C.assetMeta(XMAKE.assetHex).ticker || 'asset') + ' · cross-chain', status: XMAKE.state,
+      title: (XMAKE.reverse ? 'Sold ' : 'Bought ') + (C.assetMeta(XMAKE.assetHex).ticker || 'asset'), status: XMAKE.state,
       rail: 'cross', pair: (am.ticker || 'asset') + '/BTC', side: XMAKE.reverse ? 'buy' : 'sell',
       size: xmAssetU, sizeTicker: am.ticker || null,
       price: (XMAKE.state === 'settled' && xmBtcU != null && xmAssetU > 0) ? xmBtcU / xmAssetU : null });
@@ -5869,7 +6000,7 @@ export function resumeCrossMakers(){
   };
   Promise.resolve(X.resumeMakers(onState)).then((list) => {
     if (Array.isArray(list) && list.length && C.toast)
-      C.toast('Recovering ' + list.length + ' interrupted cross-chain swap' + (list.length>1?'s':'') + ' - keep this tab open until it settles or refunds.');
+      C.toast('Recovering ' + list.length + ' interrupted trade' + (list.length>1?'s':'') + ' - keep this tab open until it settles or refunds.');
   }).catch(() => {});
 }
 
@@ -5878,15 +6009,14 @@ async function reviewSame(q){
   if (q.startMarket) return postOfferReview(q);   // no resting liquidity -> start the market
   const fm = C.assetMeta(q.feeAsset);
   const kv = [
-    ['Network', 'Sequentia (testnet) atomic swap via the order book; not parent-chain BTC'],
-    ...(q.confidential ? [['Privacy', 'Blinded book · both legs settle confidentially; amounts and assets are hidden on-chain (Confidential Transactions).']] : []),
+    ['Network', 'Sequentia (testnet) · a trade on the order book, not a Bitcoin payment'],
+    ...(q.confidential ? [['Privacy', 'Blinded book · your trade settles confidentially; amounts and assets are hidden on-chain.']] : []),
     ['You pay', amtRow(q.assetP, q.amountP) + refSuffix(q.assetP, q.amountP)],
     ['You receive', amtRow(q.assetR, q.amountR) + refSuffix(q.assetR, q.amountR)],
     ['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'],
     ['Fee paid in', fm.ticker],
-    ['Maker', short(q.offer && (q.offer.maker_pubkey || q.offer.makerPubkey))],
-    ['Finality', 'Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
-    ['Settlement', 'Atomic - settles in full or not at all.'],
+    ['Finality', 'Settles in ~1 block · reverts only if Bitcoin reverts.'],
+    ['Settlement', 'Settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
   ok.onclick = async () => {
@@ -5902,7 +6032,7 @@ async function reviewSame(q){
         fee: (q.feeAmount != null ? Number(big(q.feeAmount)) / Math.pow(10, C.assetMeta(q.feeAsset).precision || 0) : null),
         feeTicker: q.feeAsset ? C.assetMeta(q.feeAsset).ticker : null,
         ...tradeMeta(q.assetP, q.assetR, q.amountP, q.amountR) });
-      C.toast('Swap settled (anchor-bound; reverts only if Bitcoin reverts):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast('Swap settled (reverts only if Bitcoin reverts):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
       resetComposer();
       await C.sync();
       renderSwap();
@@ -5915,7 +6045,7 @@ async function reviewSame(q){
 // Cross-chain: hand the priced quote to the right wizard and show its stepper.
 async function reviewCross(q){
   const { $ } = C;
-  if (!X){ $('swErr').textContent = 'Cross-chain route unavailable in this build.'; return; }
+  if (!X){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   // FUND-SAFETY: one cross swap per direction at a time. An in-flight swap — even one dismissed to the
   // Active-trades tray — holds a locked BTC leg / HTLC persisted under a single localStorage key;
   // starting another would OVERWRITE it and strand those funds (no way left to claim or refund). Require
@@ -5923,7 +6053,7 @@ async function reviewCross(q){
   // persistence store + independent resume — a separate, carefully-verified change; this guard closes
   // the strand hole safely in the meantime.)
   if (q.reverse ? (X.hasReverseInFlight && X.hasReverseInFlight()) : (X.hasInFlight && X.hasInFlight())){
-    $('swErr').textContent = 'You already have a cross-chain swap in progress. Finish or refund it first (open it under Active trades) before starting another.';
+    $('swErr').textContent = 'You already have a trade in progress. Finish or refund it first (open it under Active trades) before starting another.';
     return;
   }
   // Market order bigger than the best maker's depth: a MARKET order on a cross/BTC pair is IOC (spec
@@ -5939,14 +6069,15 @@ async function reviewCross(q){
   if (q.reverse){
     // A pegged-BTC covenant bid (advertised as BTC, locking SBTC) among the reverse offers settles as
     // a COVENANT, not an HTLC — cross it and peg out (spec §5) rather than the xrswap wizard. Detected
-    // by the presence of covenant settlement terms on the best takeable reverse offer.
-    const best = (XBOOK.offers || [])[0];
+    // by the presence of covenant settlement terms on the best takeable reverse offer. On the unified path
+    // that is the matched offer's raw payload; on the XBOOK fallback it is the best on-chain reverse offer.
+    const best = (q.unified && q.offer && q.offer.raw) || (XBOOK.offers || [])[0];
     if (best && (best.covenant || best.Covenant)){
       // W5: only a covenant that genuinely LOCKS SBTC is a pegged-BTC bid we can fill safely (and
       // auto-redeem to BTC). A BTC-advertised covenant locking any OTHER asset is a mis-sell trap — you
       // would pay a real asset and receive junk. Refuse the row (do not quote/take it).
       if (!peggedCovenantLocksSbtc(best)){
-        $('swErr').textContent = 'This resting BTC bid can’t be filled safely: its covenant locks an unexpected asset, not pegged BTC (SBTC). Refusing to fill it.';
+        $('swErr').textContent = 'This resting BTC order can’t be filled safely · it does not lock what it should. Refusing to fill it.';
         return;
       }
       return takePeggedCovenantReview(q, best);
@@ -5959,7 +6090,7 @@ async function reviewCross(q){
     return;
   }
   // Forward (pay BTC, receive asset): the xswap.js wizard takes over.
-  if (!X.openFromComposer){ $('swErr').textContent = 'Cross-chain route unavailable in this build.'; return; }
+  if (!X.openFromComposer){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   showCross(true);
   X.openFromComposer(q.xq);   // seeds LAST_XQUOTE in xswap.js + renders the lock step (the FILLABLE portion)
 }
@@ -5981,7 +6112,7 @@ async function requoteLn(route, amtStr){
   const side = route.payIsBtc ? 'buy' : 'sell';
   const am = C.assetMeta(route.seqAsset);
   const aprec = am.precision || 0;
-  $('swRoute').textContent = route.payIsBtc ? `Lightning · buy with ${qtk}` : `Lightning · sell for ${qtk}`;
+  $('swRoute').textContent = route.payIsBtc ? `Buy ${am.ticker} with ${qtk}` : `Sell ${am.ticker} for ${qtk}`;
   $('swStatus').textContent = ''; $('swErr').textContent = '';
   renderTiming(route);
   // P2.5: LIMIT on the Lightning rail. A pure-LN offer cannot rest durably while the maker is offline,
@@ -5992,7 +6123,7 @@ async function requoteLn(route, amtStr){
   if (S.mode === 'post'){
     LAST_QUOTE = null; setReviewEnabled(false);
     paintFee(route.quoteAsset || 'BTC', null, null);
-    $('swRate').textContent = `Limit orders can’t rest on the Lightning rail (a resting offer needs the maker online) · switch a rail to on-chain to rest a durable ${am.ticker}/${qtk} limit at your price.`;
+    $('swRate').textContent = `To keep an order resting at your price while your wallet is closed, set both sides on-chain.`;
     return;
   }
   // The pure-LN CLI (xpln) has NO partial fill: it lifts the best resting offer IN FULL, so the size
@@ -6015,16 +6146,16 @@ async function requoteLn(route, amtStr){
   if (!lnOffer){
     LAST_QUOTE = null; setReviewEnabled(false);
     paintFee(route.quoteAsset || 'BTC', null, null);
-    $('swRate').textContent = `No resting Lightning offer for ${am.ticker}/${qtk} yet · switch to the on-chain rail to trade the book above.`;
+    $('swRate').textContent = `No offers resting here yet.`;
     return;
   }
   LAST_QUOTE = { kind: 'ln', side, seqAsset: route.seqAsset, payIsBtc: route.payIsBtc,
     assetAsset: route.assetAsset, quoteAsset: route.quoteAsset,
     amount: amtStr ? parseFloat(amtStr) : null, lnOffer };
-  paintFee(route.quoteAsset || 'BTC', null, 'This rail lifts the best resting offer in full · the rate includes the LP spread (no separate network fee).');
+  paintFee(route.quoteAsset || 'BTC', null, 'You trade at the price shown · the rate already includes the fee.');
   const qprec = qm.precision || 0;
   const assetStr = C.fmtAtoms(big(lnOffer.assetAtoms), aprec), btcStr = C.fmtAtoms(big(lnOffer.btcAtoms), qprec);
-  $('swRate').innerHTML = `Instant over Lightning · lifts the best offer <b>in full</b>: ${assetStr} ${am.ticker} for ${btcStr} ${qtk}`;
+  $('swRate').innerHTML = `${assetStr} ${am.ticker} for ${btcStr} ${qtk} · best resting offer`;
   setReviewEnabled(true);   // LP fixed terms (proven path) — Review is offerable
 }
 
@@ -6110,21 +6241,21 @@ async function reviewLn(q){
   const payStr = off ? (q.side === 'buy' ? btcStr : assetStr) : null;
   const recvStr = off ? (q.side === 'buy' ? assetStr : btcStr) : null;
   const kv = [
-    ['Route', 'Instant Lightning (pure-LN) · non-custodial, your keys stay on this device'],
+    ['Route', 'Instant over Lightning · non-custodial, your keys stay on this device'],
     ['Direction', dir],
   ];
   if (payStr){ kv.push(['You pay', payStr], ['You receive', recvStr]); }
   kv.push(
-    ['Pricing', 'Lifts the best resting Lightning offer IN FULL · rate includes the LP spread (no separate network fee)'],
-    ['Finality', L.finalityCopy ? L.finalityCopy() : 'Instant and final · pure Lightning, nothing on-chain, no Bitcoin-reorg risk.'],
-    ['If it stalls', 'Nothing moves · the swap unwinds atomically via the Lightning hold timeout.'],
+    ['Pricing', 'Fills the best resting Lightning offer in full · the rate includes the spread (no separate network fee)'],
+    ['Finality', L.finalityCopy ? L.finalityCopy() : 'Instant and final · pure Lightning, nothing on-chain to revert.'],
+    ['If it stalls', 'Nothing moves · if it stalls, your funds are returned automatically.'],
   );
   // Loud mismatch warning: the executed size is the offer's, so if the user typed something ~different,
   // say so before they commit (this rail cannot fill a partial amount).
   if (off && q.amount > 0){
     const execUnits = q.side === 'buy' ? (Number(big(off.btcAtoms)) / Math.pow(10, qprec)) : (Number(big(off.assetAtoms)) / Math.pow(10, aprec));
     if (execUnits > 0 && Math.abs(execUnits - q.amount) / execUnits > 0.05)
-      kv.push(['⚠ Note', `This lifts the whole offer (${q.side === 'buy' ? btcStr : assetStr}), which differs from the ${C.fmtAtoms(BigInt(Math.round(q.amount * Math.pow(10, q.side === 'buy' ? qprec : aprec))), q.side === 'buy' ? qprec : aprec)} ${q.side === 'buy' ? qtk : am.ticker} you entered. Partial fills are not possible on this rail.`]);
+      kv.push(['⚠ Note', `This fills ${q.side === 'buy' ? btcStr : assetStr} (the resting offer's size), which differs from the ${C.fmtAtoms(BigInt(Math.round(q.amount * Math.pow(10, q.side === 'buy' ? qprec : aprec))), q.side === 'buy' ? qprec : aprec)} ${q.side === 'buy' ? qtk : am.ticker} you entered.`]);
   }
   const { m: modal, ok, st } = C.modalRows({ title: 'Review Lightning swap', kv });
   ok.onclick = async () => {
@@ -6267,14 +6398,14 @@ async function postOfferReview(q){
   const pm = C.assetMeta(pay), rm = C.assetMeta(receive);
   const payU = Number(payAtoms)/Math.pow(10, pm.precision||0), recvU = Number(recvAtoms)/Math.pow(10, rm.precision||0);
   const kv = [
-    ['Posting', 'A resting offer - you become the maker of this market'],
-    ...((q.confidential || isConfBook()) ? [['Privacy', 'Blinded book · your offer rests confidentially and fills confidentially; a blinded receive address and blinding pubkey are published so the counterparty can blind their leg too.']] : []),
+    ['Posting', 'A resting offer · you post an offer others can take in this market'],
+    ...((q.confidential || isConfBook()) ? [['Privacy', 'Blinded book · your offer rests and fills confidentially; amounts and assets are hidden on-chain.']] : []),
     ['You give', amtRow(pay, payAtoms) + refSuffix(pay, payAtoms)],
     ['You want', amtRow(receive, recvAtoms) + refSuffix(receive, recvAtoms)],
     ['Price', payU>0 ? ratePerPayToLine(pay, receive, recvU/payU).str : '-'],
-    ['Filling', 'A taker fills it from the other side. Filling needs you (the maker) online to co-sign; in-wallet co-sign is coming, so for now the offer rests publicly and you can cancel it anytime.'],
+    ['Filling', 'Someone can fill it from the other side. This needs your wallet open to complete; for now the offer rests publicly and you can cancel it anytime.'],
     ['Expires', 'In 1 hour (re-post to refresh).'],
-    ['Finality', 'Settles in ~1 block · anchor-bound to Bitcoin (reverts only if Bitcoin reverts).'],
+    ['Finality', 'Settles in ~1 block · reverts only if Bitcoin reverts.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Start this market', kv });
   if (ok) ok.textContent = 'Post offer';
@@ -6535,7 +6666,7 @@ function checkRefundWindows(){
     if (MIXED && !sub.isTerminal(MIXED) && sub.isRefundable(MIXED, mixedTip())){
       const am = metaOf(MIXED.asset);
       _notifiedOnce('refund:mx:' + (MIXED.id || MIXED.ts || (MIXED.htlc && MIXED.htlc.refund_locktime) || ''),
-        `A ${am.ticker} submarine swap stalled · its on-chain refund is now available. Open Active trades to reclaim.`, undefined, { tag: 'refund-mx' });
+        `A ${am.ticker} trade didn’t complete - you can reclaim your funds in Active trades.`, undefined, { tag: 'refund-mx' });
     }
   } catch {}
   try {
@@ -6577,7 +6708,7 @@ async function repostCovenantOrder(rec){
     rateNum, rateDen, minLot, expiryLocktime: Number(rec.expiry),
     makerProg: payout.program, makerX: payout.internalKey,
   });
-  if (rec.spkHex && plan.spkHex !== rec.spkHex) throw new Error('re-derived covenant does not match the funded order');
+  if (rec.spkHex && plan.spkHex !== rec.spkHex) throw new Error('This order could not be re-posted - please try again.');
   const covenant = buildCovenantTerms(plan.order, rec.covTxid, rec.covVout, plan.tap);
   const offer = buildCovenantOffer({
     assetA: rec.pay, assetB: rec.receive, sellAtoms: BigInt(rec.sellAtoms), recvAtoms: BigInt(rec.recvAtoms),
@@ -6612,7 +6743,11 @@ function notifyNewCredits(){
 
 // P5.1 — "Your trades" history view. Collapsed to the latest few; expandable to the full durable log.
 let _histExpanded = false;
-const _RAIL_LABEL = { chain: 'on-chain', ln: 'Lightning', cross: 'cross-chain', submarine: 'submarine', 'sub-asset': 'sub-asset', bridged: 'bridged' };
+// Plain, user-facing settlement label for a trade record — the user never sees the internal rail
+// name (submarine/sub-asset/bridged/cross). Every value maps to one of three plain phrases; an
+// unknown value falls back to the safe generic rather than leaking a raw rail token.
+const _RAIL_LABEL = { chain: 'On-chain', ln: 'Lightning', cross: 'On-chain', submarine: 'Lightning + on-chain', 'sub-asset': 'Lightning + on-chain', bridged: 'Lightning + on-chain' };
+function railLabel(r){ return (r && _RAIL_LABEL[r]) || 'On-chain'; }
 // One history row: the structured pair/side/price/size line when the receipt carries it, else the
 // legacy title. Escapes every field (receipts hold user/relay strings). No secrets beyond the user's own.
 function fmtHistRow(e){
@@ -6622,13 +6757,13 @@ function fmtHistRow(e){
     const side = e.side ? `<b class="${e.side === 'buy' ? 'hist-buy' : 'hist-sell'}">${esc(e.side.toUpperCase())}</b> ` : '';
     const px = (e.price != null && isFinite(e.price)) ? ` @ ${esc(trim(e.price))}` : '';
     const sz = (e.size != null) ? ` · ${esc(trim(Number(e.size)))}${e.sizeTicker ? ' ' + esc(e.sizeTicker) : ''}` : '';
-    const rail = e.rail ? ` · ${esc(_RAIL_LABEL[e.rail] || e.rail)}` : '';
+    const rail = e.rail ? ` · ${esc(railLabel(e.rail))}` : '';
     main = `${side}${esc(e.pair)}${px}${sz}${rail} · ${esc(e.status || '')}`;
   } else {
     main = `${esc(e.title || '')} · ${esc(e.status || '')}`;
   }
   const ref = e.txid ? `<span class="sub mono" title="${esc(String(e.txid))}">${esc(String(e.txid).slice(0, 12))}…</span>`
-    : (e.preimage ? `<span class="sub" title="preimage ${esc(String(e.preimage))}">Lightning</span>` : '');
+    : (e.preimage ? `<span class="sub">Lightning</span>` : '');
   return `<div class="swbook-row myorder"><span class="mono">${main}</span>`
     + `<span class="sub" style="min-width:90px;text-align:right">${esc(when)}</span>${ref}</div>`;
 }
@@ -6644,8 +6779,8 @@ function renderInFlightCard(){
     const am = metaOf(MIXED.asset);
     const need = sub.isRefundable(MIXED, mixedTip());
     rows.push({ view: 'mixed', need,
-      title: (MIXED.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker) + ' · submarine',
-      status: need ? 'on-chain HTLC refundable now' : String(MIXED.state) });
+      title: (MIXED.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker),
+      status: need ? 'refundable now' : String(MIXED.state) });
   }
   // Gate on the OBJECT, not just the predicate: hasSell/BuyInFlight() also returns true off the
   // synchronous _sellStarting/_buyStarting sentinel DURING the pre-fund prologue, before SELL/BUY is
@@ -6666,13 +6801,13 @@ function renderInFlightCard(){
   }
   if (BUY && hasBuyInFlight()){
     rows.push({ view: null, need: true, title: 'Buy ' + esc(BUY.ticker || 'asset') + ' with BTC',
-      status: BUY.state === 'holding' ? 'held · settle from your wallet to receive' : 'BTC HTLC funded; awaiting the asset over Lightning' });
+      status: BUY.state === 'holding' ? 'ready · confirm from your wallet to receive' : 'paid with Bitcoin · receiving the asset over Lightning' });
   }
   if (X && X.hasInFlight && X.hasInFlight()){
-    rows.push({ view: 'cross', need: true, title: 'Buy asset with BTC · cross-chain', status: 'in progress' });
+    rows.push({ view: 'cross', need: true, title: 'Buy asset with BTC', status: 'in progress' });
   }
   if (X && X.hasReverseInFlight && X.hasReverseInFlight()){
-    rows.push({ view: 'reverse', need: true, title: 'Sell asset for BTC · cross-chain', status: 'in progress' });
+    rows.push({ view: 'reverse', need: true, title: 'Sell asset for BTC', status: 'in progress' });
   }
   const hist = loadHist();
   if (!rows.length && !hist.length){ host.innerHTML = ''; return; }
@@ -6921,5 +7056,17 @@ export const __test__ = { stripBip32, dexPost,
   postSupported, railSupported, applyAutoMode,
   // W5 — the SBTC mis-sell binding: a BTC-advertised covenant is only fillable as pegged BTC if it LOCKS SBTC.
   covenantLocksAsset,
+  // RAIL-BLIND take + markets overview, for headless verification of the composer's rail-blindness.
+  bridgedTakePlan, overviewPairs, renderMixedTake,
+  setUnifiedBook: (seqAsset, book) => { UBOOK = book ? { seqAsset, asks: book.asks || [], bids: book.bids || [] } : null; },
+  // Drive the FULL composer requote for the cross (chain/chain) + mixed (sub-asset) branches, so a headless
+  // test can prove they render the SAME rail-blind preview (both source the offer/fill from bridgedTakePlan).
+  requoteMixed, requoteCross,
+  setSubassetBook: (hex, entry) => { const k = String(hex).toLowerCase(); if (entry == null) delete SUBASSET_BOOK[k]; else SUBASSET_BOOK[k] = entry; },
+  // The priced/oriented quote the composer carries into Review -> startBuy/startSell. A headless test reads it to
+  // prove the settlement handle (buyOffer/sellOffer) + the authoritative fill (takeAssetAtoms/takeBtcSats) are
+  // exactly what the composer DISPLAYED (the sub-asset settle-offer must be the SAME id it showed).
+  lastQuote: () => LAST_QUOTE,
+  subassetOffers, payerBridgeDisabledNote,
   state: S,
 };

@@ -685,7 +685,7 @@
                    Toggled by paintOfflineToggle(); the placement path reads S.keepResting. -->
               <label class="swconf hide" id="swOfflineWrap" style="align-items:center;gap:9px;margin-top:2px;font-size:12.5px;color:var(--dim);cursor:pointer">
                 <input type="checkbox" id="swOfflineChk" checked style="width:16px;height:16px;flex:0 0 auto">
-                <span id="swOfflineTx">Keep this order <b style="color:var(--txt);font-weight:650">resting while you're offline</b>. It rests as pegged BTC (SBTC) so it stays live without your wallet open; your funds return as regular BTC if it fills or is cancelled. Turn off to rest as native BTC (keeps your wallet online for the trade).</span>
+                <span id="swOfflineTx">Keep this order <b style="color:var(--txt);font-weight:650">resting while you're offline</b>. To do this, your Bitcoin is held as <b style="color:var(--txt);font-weight:650">pegged Bitcoin by an operator group</b>, which adds custody risk a normal order does not have. Your funds return as regular BTC if it fills or is cancelled. Turn this off to keep full self-custody (your wallet must stay open for the trade).</span>
               </label>
 
               <!-- FEE: pay the network fee in any asset a producer prices (open fee market). -->
@@ -956,7 +956,7 @@ import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasRev
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
-  seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnJobStatus, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
+  seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
@@ -3029,6 +3029,9 @@ function initSwapTab(){
       nodeSettle: (p) => seqlnNodeSettle(p),
       nodeReceive: (p) => seqlnNodeReceive(p),
       nodePay: (p) => seqlnNodePay(p),
+      // BARE-HASH pay — the taker's OWN hosted BTC-LN node commits an HTLC to node_id on H (no bolt11), the
+      // LSP PAYER leg-bridge hold primitive (see subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
+      nodePayHash: (p) => seqlnNodePayHash(p),
       // W2 FRONT-BEFORE-FUND bridged SELL: arm the LSP front (hold-ready) and, once fronted, hand it the
       // funded asset leg to relay. The LSP fronts BEFORE the taker exposes any asset (see swap.js driveBridged).
       bridgeFront: (p) => seqlnBridgeFront(p),
@@ -3442,12 +3445,31 @@ function isBtcSend(){
   return [...box.children].some(r=>{ const s=r.querySelector('.rasset'); return s && s.value==='BTC'; });
 }
 // Map cryptic node rejections to actionable messages (shared by the send/bump/CPFP broadcast).
+// Settlement machinery the user must never see, even in a raw error tail. Any error message
+// carrying one of these is suppressed to a plain default (the raw goes to the console).
+const PRETTY_MACHINERY=/\b(makers?|counterpart(?:y|ies)|takers?|LSPs?|bridg(?:e|es|ed|ing)|submarines?|sub-?assets?|HTLCs?|CLTVs?|min-?final-?cltv|anchor(?:s|ed|ing)?|preimages?|hold-?invoices?|covenants?|peg(?:s|ged|ging)?|rail-?crossing|atomic(?:ally)?)\b|T_?seq/i;
+// A message is "known-plain" only when it reads like an English sentence: raw node/RPC codes,
+// JSON, stack frames, hex blobs and single-token gibberish are NOT plain and get suppressed.
+function looksPlain(m){
+  const s=String(m||'').trim();
+  if(!s || s.length>300) return false;
+  if(/[{}\[\]]|::|\bat \w+[.(]|\n|0x[0-9a-f]{6,}|[0-9a-f]{32,}/i.test(s)) return false;   // JSON / stack / hex blob
+  if(/^[a-z0-9]+(?:-[a-z0-9]+){2,}$/i.test(s)) return false;   // bad-txns-inputs-missingorspent style code
+  if(!/\s/.test(s)) return false;   // a single token is not a sentence
+  return true;
+}
 function prettyErr(e){
   const m=(e?.message??String(e));
   if(/conflicting|already known|txn-already|already in (block|the mempool)|already.?confirmed/i.test(m))
     return 'This transaction conflicts with one already in the mempool or a block; it may have already confirmed. Refresh to check; a confirmed transaction needs no bump.';
   if(/insufficient fee|min relay|fee too low|rejecting replacement/i.test(m))
     return 'The fee is too low for the network to accept; raise the fee rate and try again.';
+  // Anything not recognized as a plain, machinery-free sentence collapses to a safe default, so
+  // no catch site can leak settlement internals even for an error we never anticipated.
+  if(PRETTY_MACHINERY.test(m) || !looksPlain(m)){
+    try{ console.warn('[prettyErr] suppressed raw error:', m); }catch{}
+    return 'Something went wrong - please try again.';
+  }
   return m;
 }
 // The fee is paid in the chosen asset (BTC for a parent-chain send), so the rate is in that
