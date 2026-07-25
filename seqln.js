@@ -432,6 +432,17 @@ export function seqlnNodePay({ node_key, bolt11, wantHash, amountMsat, minFinalC
   if (maxCltv != null) body.max_cltv = Number(maxCltv);
   return lspFetch('/node/pay', { method: 'POST', body: JSON.stringify(body) });
 }
+// BARE-HASH Lightning SEND — the user's own hosted node commits an HTLC to `node_id` keyed on `hash`
+// (NO bolt11) with a final-hop CLTV of min_final_cltv blocks. This is the LSP PAYER leg-bridge primitive:
+// the seqln holdinvoice mints no bolt11, so the taker pays the LSP's hold by hash (mirror of the receiver
+// bridge / sub-asset bare-hash sendpay). Returns { committed, status } — the HTLC lands HELD at the LSP and
+// settles only when the LSP recoups with P; the client does NOT block on completion (see runLspPayerBridge).
+export function seqlnNodePayHash({ node_key, node_id, hash, amount_msat, min_final_cltv, connect_hints }) {
+  const body = { node_key, node_id: String(node_id).toLowerCase(), hash: String(hash).toLowerCase(), amount_msat: Number(amount_msat) };
+  if (min_final_cltv != null) body.min_final_cltv = Number(min_final_cltv);
+  if (Array.isArray(connect_hints) && connect_hints.length) body.connect_hints = connect_hints;
+  return lspFetch('/node/payhash', { method: 'POST', body: JSON.stringify(body) });
+}
 // Advisory status of an async LSP job (e.g. the sub-asset HODL BUY /swap job). Takes the poll path
 // ('/swap/<id>') the /swap 202 returned, or a bare id. The wallet drives its own settle; this is only
 // a display hint (pending|held|settled|failed).

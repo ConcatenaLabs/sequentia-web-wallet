@@ -39,8 +39,9 @@ const C = {
 };
 
 const { initSwap, resumeMixedSwap, hasMixedInFlight } = await import('./swap.js');
-// No L.swapStatus -> pollMixed early-returns, so no lingering timer keeps the test alive.
-initSwap({ ...C, ln: { available: () => true, status: async () => ({ channels: [] }), swap: async () => ({}) } });
+// No L.swapStatus -> pollMixed early-returns, so no lingering timer keeps the test alive. L.refund
+// is present so renderMixedSwap offers the on-chain reclaim off-ramp (canRefund gate).
+initSwap({ ...C, ln: { available: () => true, status: async () => ({ channels: [] }), swap: async () => ({}), refund: async () => ({}) } });
 
 // --- seed a MOCK stored in-flight submarine swap with a refundable on-chain leg -----
 const stored = {
@@ -59,13 +60,13 @@ assert.ok(!REG.swapMixedWrap.classList.contains('hide'), 'the mixed-swap trade-p
 assert.ok(REG.swComposer.classList.contains('hide'), 'the composer is hidden while the swap owns the tab');
 const html = REG.swMixedStepper.innerHTML;
 assert.ok(/Sell GOLD on-chain/.test(html), 'the stepper shows the swap direction');
-assert.ok(/HTLC leg/.test(html), 'the stepper surfaces the on-chain HTLC leg');
-// The Refund button was appended and is ENABLED (tip 300 >= locktime 250).
+assert.ok(/refund/i.test(html), 'the stepper surfaces the reclaimable-funds status in plain words');
+// The Reclaim button was appended and is ENABLED (tip 300 >= locktime 250).
 const btns = REG.swMixedBtns.children;
-const refund = btns.find((b) => b.textContent === 'Refund BTC leg');
-assert.ok(refund, 'a "Refund BTC leg" off-ramp is offered for the on-chain HTLC leg');
-assert.equal(refund.disabled, false, 'the refund button is ENABLED once the CLTV timeout is buried (tip>=locktime)');
-console.log('ok: resumeMixedSwap rehydrates the stepper + enabled Refund off-ramp from a mock stored state');
+const refund = btns.find((b) => b.textContent === 'Reclaim your funds');
+assert.ok(refund, 'a "Reclaim your funds" off-ramp is offered once the refund window is open');
+assert.equal(refund.disabled, false, 'the reclaim button is ENABLED once the refund window is buried (tip>=locktime)');
+console.log('ok: resumeMixedSwap rehydrates the stepper + enabled Reclaim off-ramp from a mock stored state');
 
 // --- a terminal stored swap is DROPPED on resume (never re-shows) -------------------
 localStorage.setItem('swk.sequentia.submarine', JSON.stringify({ ...stored, state: 'refunded' }));
@@ -81,8 +82,8 @@ REG.swMixedBtns = mkEl('div');
 C.wollet.tip = () => ({ height: () => 100 });   // tip below the locktime (250)
 localStorage.setItem('swk.sequentia.submarine', JSON.stringify(stored));
 resumeMixedSwap();
-const refund2 = REG.swMixedBtns.children.find((b) => b.textContent === 'Refund BTC leg');
-assert.ok(refund2 && refund2.disabled === true, 'the refund button is DISABLED until the on-chain HTLC CLTV timeout is buried');
-console.log('ok: the Refund off-ramp is gated on the on-chain HTLC CLTV timeout');
+const refund2 = REG.swMixedBtns.children.find((b) => b.textContent === 'Reclaim your funds');
+assert.ok(refund2 && refund2.disabled === true, 'the reclaim button is DISABLED until the refund window is buried');
+console.log('ok: the Reclaim off-ramp is gated on the on-chain refund window');
 
 console.log('\nALL PASS');

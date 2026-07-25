@@ -8,7 +8,7 @@
 import assert from 'node:assert';
 import {
   rebuildAndCheckRedeem, checkLegBinding, checkFundingOutput, anchorDepthVerdict, verifySeqLeg,
-  dispatchSubswap, runTakerReverseSubmarine, runTakerSubmarine, claimReverseSeqLeg, resumeReversePay,
+  dispatchSubswap, runTakerReverseSubmarine, runTakerSubmarine, runLspPayerBridge, claimReverseSeqLeg, resumeReversePay,
   bolt11AmountMsat, bolt11PaymentHash, bolt11MinFinalCltv, holdCltvSafeVsTseq, sizeSubswapTake, waitAnchorBuried,
 } from './subswap.js';
 
@@ -244,31 +244,56 @@ console.log("ok: bolt11MinFinalCltv decodes the 'c' field (default 18 absent, nu
 // sizeSubswapTake — SIZE the take to the user's amount; OVERSHOOT blocked when it can't be sliced.
 // ===========================================================================
 {
-  const whole = sizeSubswapTake({ want: 0n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 0n });
-  assert.deepEqual([whole.takeAtoms, whole.takeBtc, whole.partial, whole.overshoot], [1000n, 500n, false, false], 'no requested size -> take the whole offer');
-  const part = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 100n });
-  assert.deepEqual([part.takeAtoms, part.takeBtc, part.partial, part.overshoot], [400n, 200n, true, false], 'a partial-fillable offer slices to the requested size (BTC floored proportionally)');
-  const over = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: false, minFill: 0n });
-  assert.deepEqual([over.takeAtoms, over.overshoot], [1000n, true], 'an un-sliceable offer flags OVERSHOOT (composer blocks Place, never lifts the whole offer)');
-  const underMin = sizeSubswapTake({ want: 50n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 100n });
-  assert.equal(underMin.overshoot, true, 'a slice under the offer min_fill flags overshoot');
-  const exact = sizeSubswapTake({ want: 1000n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: false, minFill: 0n });
-  assert.deepEqual([exact.takeAtoms, exact.overshoot], [1000n, false], 'a want == offer takes the whole offer (no overshoot)');
-  console.log('ok: sizeSubswapTake sizes to the user amount and BLOCKS overshoot (Review == what executes)');
+  // SPEC §2: EVERY resting offer is partial-fillable down to its min_fill — there is NO indivisible offer.
+  const whole = sizeSubswapTake({ want: 0n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
+  assert.deepEqual([whole.takeAtoms, whole.takeBtc, whole.partial, whole.belowMin], [1000n, 500n, false, false], 'no requested size -> take the whole offer');
+  const part = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, minFill: 100n });
+  assert.deepEqual([part.takeAtoms, part.takeBtc, part.partial, part.belowMin], [400n, 200n, true, false], 'a request in [min_fill, offer] slices to the requested size (BTC ceil-proportional)');
+  // BTC is CEIL'd so the maker is never underpaid: 3 atoms of a 1000/500 offer = 1.5 sats -> 2 sats.
+  const ceilBtc = sizeSubswapTake({ want: 3n, offerAtoms: 1000n, offerBtc: 500n, minFill: 1n });
+  assert.deepEqual([ceilBtc.takeAtoms, ceilBtc.takeBtc], [3n, 2n], 'the proportional BTC is CEIL (maker never underpaid)');
+  // request > offer -> fill the whole offer + flag `capped` (the remainder walks/rests), never overshoot.
+  const capped = sizeSubswapTake({ want: 4000n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
+  assert.deepEqual([capped.takeAtoms, capped.takeBtc, capped.capped, capped.belowMin], [1000n, 500n, true, false], 'a request larger than the offer fills the whole offer (capped), never blocked');
+  const exact = sizeSubswapTake({ want: 1000n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
+  assert.deepEqual([exact.takeAtoms, exact.belowMin, exact.capped], [1000n, false, false], 'want == offer takes the whole offer (no belowMin, no capped)');
+  console.log('ok: sizeSubswapTake — every offer partial-fillable down to min_fill, BTC ceil, capped above the offer');
 }
 {
-  // SUBMARINE = WHOLE-OFFER-ONLY: the makers (RunMaker[Reverse]Submarine) lock the whole offer, so a submarine
-  // take is ALWAYS the whole resting offer — never sliced (partial fill is the covenant CLOB's job).
-  const whole = sizeSubswapTake({ want: 0n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 0n, submarine: true });
-  assert.deepEqual([whole.takeAtoms, whole.takeBtc, whole.partial, whole.overshoot], [1000n, 500n, false, false], 'no requested size -> take the whole submarine offer');
-  const exact = sizeSubswapTake({ want: 1000n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 0n, submarine: true });
-  assert.deepEqual([exact.takeAtoms, exact.overshoot], [1000n, false], 'want == the whole submarine offer -> take it (no overshoot)');
-  const noPart = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 0n, submarine: true });
-  assert.deepEqual([noPart.takeAtoms, noPart.partial, noPart.overshoot, noPart.wholeOnly], [1000n, false, true, true], 'a submarine offer is NEVER sliced (want<whole even with allowPartial -> wholeOnly overshoot, never a partial)');
-  // Control: the SAME want on a NON-submarine partial-fillable offer DOES slice — proving `submarine` is the gate.
-  const sliced = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, allowPartial: true, minFill: 0n, submarine: false });
-  assert.deepEqual([sliced.partial, sliced.takeAtoms], [true, 400n], 'the same want on a non-submarine partial offer slices (submarine is the whole-only gate)');
-  console.log("ok: sizeSubswapTake never slices a submarine offer (whole-offer-only; partial is the covenant CLOB's job)");
+  // BELOW min_fill (spec §2c): do NOT force the whole offer. Return the MINIMUM (min_fill atoms + its
+  // ceil-proportional BTC) so pay & receive stay CONSISTENT, and flag belowMin so the composer blocks Place.
+  const underMin = sizeSubswapTake({ want: 50n, offerAtoms: 1000n, offerBtc: 500n, minFill: 100n });
+  assert.equal(underMin.belowMin, true, 'a request under the offer min_fill flags belowMin');
+  assert.equal(underMin.capped, false, 'a below-min request is NOT capped (it never lifts more than asked)');
+  // takeAtoms/takeBtc reflect the MINIMUM placeable take (both consistent), NOT the whole offer, NOT the request.
+  assert.deepEqual([underMin.takeAtoms, underMin.takeBtc], [100n, 50n], 'below-min take = the minimum (100 atoms -> 50 sats), a real placeable take — pay & receive consistent');
+  assert.deepEqual([underMin.minAtoms, underMin.minBtc], [100n, 50n], 'the minimum is surfaced for the composer to show + a one-tap "use minimum"');
+  // No min_fill set -> the floor is 1 atom, so any positive request is placeable (never belowMin at want>=1).
+  const tiny = sizeSubswapTake({ want: 1n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
+  assert.deepEqual([tiny.belowMin, tiny.takeAtoms, tiny.takeBtc], [false, 1n, 1n], 'with no min_fill the floor is 1 atom (BTC ceil = 1 sat)');
+  // A `submarine` flag no longer changes sizing (spec: treat a matched p2p-submarine partial like any other).
+  const sub = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n, submarine: true });
+  assert.deepEqual([sub.partial, sub.takeAtoms, sub.belowMin], [true, 400n, false], 'a submarine offer is partial-fillable like any other (no whole-offer-only special case)');
+  console.log('ok: sizeSubswapTake — below min_fill returns the minimum (consistent pay/receive), never the whole offer');
+}
+{
+  // DIRECTION-AWARE proportional BTC (matches Go ProportionalBtc/ProportionalBtcFloor): a BUY PAYS the BTC leg
+  // -> CEIL (maker never underpaid); a SELL RECEIVES it -> FLOOR (maker's favour, never overstate the receive).
+  // 3 atoms of a 1000/500 offer = 1.5 sats: a BUY rounds UP to 2, a SELL rounds DOWN to 1.
+  const buy  = sizeSubswapTake({ want: 3n, offerAtoms: 1000n, offerBtc: 500n, minFill: 1n, side: 'buy' });
+  const sell = sizeSubswapTake({ want: 3n, offerAtoms: 1000n, offerBtc: 500n, minFill: 1n, side: 'sell' });
+  assert.deepEqual([buy.takeAtoms, buy.takeBtc], [3n, 2n], 'a BUY pays the CEIL proportional BTC (2 sats)');
+  assert.deepEqual([sell.takeAtoms, sell.takeBtc], [3n, 1n], 'a SELL receives the FLOOR proportional BTC (1 sat, never overstated)');
+  // Omitting `side` keeps the legacy CEIL (BUY) default, so existing call sites are unchanged.
+  const dflt = sizeSubswapTake({ want: 3n, offerAtoms: 1000n, offerBtc: 500n, minFill: 1n });
+  assert.equal(dflt.takeBtc, 2n, 'no side -> CEIL default (BUY), unchanged for existing callers');
+  // The below-min MINIMUM BTC is direction-aware too: min_fill 3 -> 1.5 sats floors to 1 on a SELL, ceils to 2 on a BUY.
+  const sellMin = sizeSubswapTake({ want: 1n, offerAtoms: 1000n, offerBtc: 500n, minFill: 3n, side: 'sell' });
+  assert.deepEqual([sellMin.belowMin, sellMin.takeAtoms, sellMin.takeBtc, sellMin.minBtc], [true, 3n, 1n, 1n], 'a SELL below-min surfaces the FLOOR minimum BTC (1 sat)');
+  // A WHOLE take returns the offer BTC exactly on BOTH directions (no rounding either way).
+  const wholeSell = sizeSubswapTake({ want: 1000n, offerAtoms: 1000n, offerBtc: 501n, minFill: 0n, side: 'sell' });
+  assert.equal(wholeSell.takeBtc, 501n, 'a whole SELL take returns the offer BTC exactly (identity, no floor loss)');
+  console.log('ok: sizeSubswapTake — direction-aware proportional BTC (BUY ceil / SELL floor); Review == execution both ways');
 }
 
 // ===========================================================================
@@ -467,6 +492,109 @@ function advancingTip(lockTip, postBury){ let n = 0; return async () => (n++ ===
 }
 
 // ===========================================================================
+// DRIVER (LSP PAYER BRIDGE / buy): the taker mints H (holds P), pays the LSP's hold BY BARE HASH (HELD, not
+// captured), the LSP funds the maker's on-chain BTC HTLC, the taker VERIFIES the relayed asset leg (its key on
+// H, right asset/amount/locktime, anchor-buried) then CLAIMS with P. FUND-SAFETY: the hold is HELD BEFORE the
+// claim; P is revealed (the claim) ONLY after the leg verifies; a no-usable-target / hash-mismatch / overpay /
+// no-CLTV hold is refused BEFORE the bare-hash pay (zero exposure). The seqln holdinvoice mints no bolt11, so
+// the hold target is BARE HASH { node_id, payment_hash:H, amount_msat, hold_min_final_cltv }.
+// ===========================================================================
+const LSPNODE = '02' + 'd'.repeat(64);   // the LSP BTC-LN node id (66-hex) the taker pays the hold to by hash
+function payerDeps(over = {}) {
+  const order = [];
+  const hh = over._hashH || H;
+  const leg = over._leg || legOK;
+  const holdResp = ('_holdResp' in over) ? over._holdResp
+    : { ok: true, node_id: LSPNODE, payment_hash: hh, amount_msat: 500000, hold_min_final_cltv: 210 };
+  const deps = { order,
+    asset: GOLD, assetAtoms: 1000, btcSats: 500n,
+    offer: { id: 'offer-1', maker: MAKERREFUND },
+    seqClaimKey: { public_key: MYCLAIM, secret_hex: 'ff'.repeat(32) },
+    randomSecret: async () => P, sha256Hex: async (hex) => (hex === P ? hh : 'ee'.repeat(32)),
+    buildRedeem, htlcSpkHex,
+    readOutput: async () => ({ value: 1000n, asset: GOLD, spk: htlcSpkHex(leg.redeem_script) }),
+    txStatus: async () => ({ confirmed: true, block_hash: leg.block_hash, block_height: 100 }),
+    anchorHeightOf: async () => 100, btcTip: async () => 106, seqTip: async () => 100,
+    minAnchorDepth: 3, max0ConfAtoms: 0,
+    lspSwap: async () => { order.push('swap'); return { job_id: 'job-1', poll: '/swap/job-1' }; },
+    lspSwapStatus: async () => ({ bridge_terms: { hash_h: hh, maker_seq_refund_pub: MAKERREFUND, seq_locktime: LOCK }, maker_seq_leg: leg }),
+    lspBridgeHold: async () => { order.push('hold'); return holdResp; },
+    payHold: async (p) => { order.push('payHold:' + p.node_id + ':' + p.hashH + ':' + p.minFinalCltv); return null; },
+    claimSeq: async (rec) => { order.push('claim:' + rec.secret_hex); return 'payerclaim00'; },
+    onPaid: () => { order.push('persist'); }, onClaimed: () => {},
+    pollMs: 1, handshakeWaitMs: 50, legWaitMs: 50, log: () => {} };
+  for (const k of Object.keys(over)) if (!k.startsWith('_')) deps[k] = over[k];
+  return deps;
+}
+{
+  const deps = payerDeps();
+  const r = await runLspPayerBridge(deps);
+  assert.ok(r.ok && r.preimage === P && r.seqClaimTxid === 'payerclaim00', 'the LSP payer bridge pays the hold by bare hash, verifies the asset leg, then claims with P');
+  assert.deepEqual(deps.order, ['swap', 'hold', 'payHold:' + LSPNODE + ':' + H + ':210', 'persist', 'claim:' + P],
+    'order is POST /swap -> issue hold -> pay-by-hash (HELD) -> persist P+leg -> claim (P revealed AFTER the hold is HELD + the leg verifies + the anchor buries + the claim window holds)');
+  console.log('ok: runLspPayerBridge — bare-hash hold paid HELD before the claim; asset leg verified + anchor-buried + claim-window-gated before P is revealed');
+}
+{
+  // FUND-SAFETY: the LSP returns NO usable hold target (no node_id, no bolt11) — the ONLY surviving honest-disable.
+  const deps = payerDeps({ _holdResp: { ok: true } });
+  await assert.rejects(runLspPayerBridge(deps), /could not be placed/i, 'a hold with no node_id/bolt11 is refused (plain message, no rail/bridge/LSP leak)');
+  assert.ok(deps.order.indexOf('hold') >= 0 && !deps.order.some((o) => o.startsWith('payHold')), 'the bare-hash pay NEVER fired against an unusable target (zero exposure)');
+  assert.ok(!deps.order.some((o) => o.startsWith('claim')), 'no claim (P never revealed)');
+  console.log('ok: runLspPayerBridge fails closed (no bare-hash pay) when the LSP returns no usable hold target');
+}
+{
+  // FUND-SAFETY (the worst confusion): the hold binds a DIFFERENT hash than our H — refuse before paying.
+  const deps = payerDeps({ _holdResp: { ok: true, node_id: LSPNODE, payment_hash: 'ee'.repeat(32), amount_msat: 500000, hold_min_final_cltv: 500 } });
+  await assert.rejects(runLspPayerBridge(deps), /payment_hash != our H/i, 'a hold whose payment_hash != our H is refused');
+  assert.ok(!deps.order.some((o) => o.startsWith('payHold')), 'the bare-hash pay NEVER fired against a mismatched hold hash');
+  console.log('ok: runLspPayerBridge refuses to pay a hold bound to a hash other than our H');
+}
+{
+  // FUND-SAFETY (overpay): a hold demanding more than the offer BTC price is refused before paying.
+  const deps = payerDeps({ _holdResp: { ok: true, node_id: LSPNODE, payment_hash: H, amount_msat: 500001, hold_min_final_cltv: 500 } });
+  await assert.rejects(runLspPayerBridge(deps), /demands|msat/i, 'a hold demanding > the offer price is refused');
+  assert.ok(!deps.order.some((o) => o.startsWith('payHold')), 'the bare-hash pay NEVER fired against an over-priced hold');
+  console.log('ok: runLspPayerBridge refuses to pay a hold demanding more than the offer BTC price');
+}
+{
+  // FUND-SAFETY (CLTV floor): a hold with no min-final-CLTV covering T_seq is refused (never a needless capital lock).
+  const deps = payerDeps({ _holdResp: { ok: true, node_id: LSPNODE, payment_hash: H, amount_msat: 500000 } });
+  await assert.rejects(runLspPayerBridge(deps), /min-final-CLTV/i, 'a hold with no min-final-CLTV covering T_seq is refused');
+  assert.ok(!deps.order.some((o) => o.startsWith('payHold')), 'the bare-hash pay NEVER fired without a hold-CLTV floor');
+  console.log('ok: runLspPayerBridge refuses to pay a hold with no min-final-CLTV covering T_seq');
+}
+{
+  // FUND-SAFETY (the load-bearing one): the LSP-relayed asset leg is NOT locked to my key on H. The hold is paid
+  // (HELD, refundable), but the taker NEVER claims — so P is NEVER revealed and the held BTC refunds at its CLTV.
+  const badLeg = { ...legOK, redeem_script: buildRedeem(H, OTHERPUB, MAKERREFUND, LOCK) };
+  const deps = payerDeps({ _leg: badLeg });
+  await assert.rejects(runLspPayerBridge(deps), /failed verification|not locked|redeem/i, 'a maker asset leg not locked to my key is refused (no claim)');
+  assert.ok(deps.order.some((o) => o.startsWith('payHold')), 'the hold WAS paid (HELD) — no-loss; it refunds at its CLTV');
+  assert.ok(!deps.order.some((o) => o.startsWith('claim')), 'P is NEVER revealed (no claim) against an unverified asset leg — the core fund-safety invariant');
+  console.log('ok: runLspPayerBridge never reveals P (never claims) against an asset leg not verified to my key on H');
+}
+{
+  // FUND-SAFETY (CLTV cap, item 3): a hold demanding a min-final-CLTV far above the widest honest T_seq need is
+  // refused BEFORE the bare-hash pay — it would lock the taker's Bitcoin far past the asset timeout. Not >0-only.
+  const deps = payerDeps({ _holdResp: { ok: true, node_id: LSPNODE, payment_hash: H, amount_msat: 500000, hold_min_final_cltv: 5000 } });
+  await assert.rejects(runLspPayerBridge(deps), /safe maximum|min-final-CLTV/i, 'a hold demanding an absurd min-final-CLTV is refused');
+  assert.ok(!deps.order.some((o) => o.startsWith('payHold')), 'the bare-hash pay NEVER fired against an over-long hold CLTV (zero exposure)');
+  assert.ok(!deps.order.some((o) => o.startsWith('claim')), 'no claim (P never revealed)');
+  console.log('ok: runLspPayerBridge caps the hold min-final-CLTV (refuses an absurd value; not >0-only)');
+}
+{
+  // FUND-SAFETY (claim-window gate, item 1 — CRITICAL): the maker asset leg is valid + anchor-buried, but T_seq
+  // leaves too small a claim window (seq_locktime <= seqTip + claimMargin). The taker must NEVER reveal P (never
+  // claim) — else it lets the LSP settle its HELD BTC-LN while the maker could refund the asset (no-asset loss).
+  // The hold WAS paid (HELD, refundable); P is NEVER revealed.
+  const deps = payerDeps({ seqTip: async () => LOCK - 10 });   // 4990; 5000 !> 4990 + 120 -> window closed
+  await assert.rejects(runLspPayerBridge(deps), /claim window/i, 'a leg whose T_seq leaves too small a claim window is refused (no claim)');
+  assert.ok(deps.order.some((o) => o.startsWith('payHold')), 'the hold WAS paid (HELD) — no-loss; it refunds at its CLTV');
+  assert.ok(!deps.order.some((o) => o.startsWith('claim')), 'P is NEVER revealed (no claim) when the claim window has closed — the core fund-safety invariant');
+  console.log('ok: runLspPayerBridge REFUSES (no claim, P never revealed) when seq_locktime <= seqTip + claimMargin');
+}
+
+// ===========================================================================
 // DRIVER (RECEIVER/sell): mint P/H, fund the asset HTLC, settle the held invoice with P (receive BTC + reveal P).
 // ===========================================================================
 {
@@ -546,6 +674,39 @@ function advancingTip(lockTip, postBury){ let n = 0; return async () => (n++ ===
   assert.ok(r.ok && r.seqClaimTxid === 'resumeclaim', 'a persisted P + leg re-claims on resume');
   assert.equal(claimed.secret_hex, P, 'the resume claim spends with the persisted preimage P');
   console.log('ok: claimReverseSeqLeg resumes the claim from a persisted P + verified leg (fund-safety on reload)');
+}
+{
+  // CLAIM-WINDOW GATE on the RESUME claim (item 1). A BARE-P resume (the LSP payer bridge — P still self-custody,
+  // claiming FIRST reveals it) MUST refuse once the claim window has closed: claimWindowGate opts IN.
+  let revealed = false;
+  await assert.rejects(
+    claimReverseSeqLeg({ preimage: P, leg: { ...legOK, redeem_script: goodRedeem }, asset: GOLD },
+      { seqClaimKey: { secret_hex: 'ff'.repeat(32) }, claimSeq: async () => { revealed = true; return 'x'; },
+        seqTip: async () => LOCK, claimMargin: 120, claimWindowGate: true }),   // tip == T_seq -> window closed
+    /claim window/i, 'a closed claim window refuses the bare-P resume claim (never reveals the secret)');
+  assert.ok(!revealed, 'the secret is NEVER revealed (claimSeq never called) once the window has closed');
+  // The SAME record WITHOUT the gate flag (a p2p buy that already revealed P by PAYING) still claims to recover
+  // the asset it already paid for — the gate must NOT strand a paid p2p buy.
+  let revealed2 = false;
+  const ok = await claimReverseSeqLeg({ preimage: P, leg: { ...legOK, redeem_script: goodRedeem }, asset: GOLD },
+    { seqClaimKey: { secret_hex: 'ff'.repeat(32) }, claimSeq: async () => { revealed2 = true; return 'y'; },
+      seqTip: async () => LOCK, claimMargin: 120 });
+  assert.ok(ok.ok && revealed2, 'without claimWindowGate the resume claim always proceeds (a paid p2p buy recovers its asset)');
+  console.log('ok: claimReverseSeqLeg gates the claim window ONLY for a bare-P resume; a paid p2p buy always re-claims');
+}
+{
+  // FAIL CLOSED (fund-loss) — a gate-requested resume whose leg is MISSING a locktime must REFUSE, never fall
+  // through to an ungated claim. A null/unreadable timeout has no provable claim window, so revealing the secret
+  // would risk a T_seq refund-race with zero margin. (Regression guard for the gate-skip hole.)
+  let revealed3 = false;
+  const { locktime: _dropLock, ...legNoLock } = { ...legOK, redeem_script: goodRedeem };
+  await assert.rejects(
+    claimReverseSeqLeg({ preimage: P, leg: legNoLock, asset: GOLD },
+      { seqClaimKey: { secret_hex: 'ff'.repeat(32) }, claimSeq: async () => { revealed3 = true; return 'x'; },
+        seqTip: async () => 100, claimMargin: 120, claimWindowGate: true }),
+    /timeout|claim window/i, 'a gate-requested resume with NO leg locktime fails closed (never claims ungated)');
+  assert.ok(!revealed3, 'the secret is NEVER revealed when the gate is requested but the leg has no locktime');
+  console.log('ok: claimReverseSeqLeg fails closed (never skips the gate) when claimWindowGate is set but leg.locktime is missing');
 }
 
 // ===========================================================================
