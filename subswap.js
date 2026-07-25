@@ -50,6 +50,12 @@
 import { openCourierSession } from './xcourier.js';
 import { chooseSettlementPath, planSettlement } from './tooling/lsp/settlement-router.mjs';
 import { matchFromTake, makerRailsFromOffer, crossingShapeSupported } from './tooling/lsp/bridge-driver.mjs';
+import { requiredTakerHold, HOLD_LIFE_DEFAULTS } from './tooling/lsp/leg-bridge.mjs';
+
+// DEFAULT_NODE_MAX_CLTV — the CLN default --max-cltv-expiry (blocks). Our OWN hosted BTC-LN node cannot route a
+// payment whose final-hop CLTV exceeds this, so it is the hard ceiling on any hold CLTV we could ever commit;
+// the payer-bridge CLTV cap is min(this, the widest honest T_seq need). Overridable via deps.nodeMaxCltvDelay.
+const DEFAULT_NODE_MAX_CLTV = 2016;
 // REVERSE-SUBMARINE HOLD-CLTV BLOCK-TIME MODEL. The reverse-submarine taker's hold-invoice CLTV gate
 // (holdCltvSafeVsTseq) does the INVERSE (a BTC-block window `fc` -> a SEQ settle-deadline) of the forward
 // leg-bridge, so it needs the OPPOSITE conservative ends. It is NOT the forward model (HOLD_LIFE_DEFAULTS
@@ -92,6 +98,9 @@ const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const _hex66 = (s) => /^[0-9a-fA-F]{66}$/.test(String(s || ''));
 const _hex64 = (s) => /^[0-9a-fA-F]{64}$/.test(String(s || ''));
 function _big(v) { try { return BigInt(v == null ? 0 : v); } catch { return 0n; } }
+// Ceil-division for BigInts (n/d rounded UP). Used to size the proportional BTC of a partial take so the
+// maker is NEVER underpaid (a floored BTC would demand less than the maker's own ceil-proportional need).
+function _ceilDiv(n, d) { n = _big(n); d = _big(d); return d > 0n ? (n + d - 1n) / d : 0n; }
 
 // bolt11AmountMsat — the invoice amount in msat from a bolt11's human-readable part, or null when the
 // amount is absent / not confidently parseable (an amountless invoice, an unknown currency prefix, or a
@@ -231,34 +240,46 @@ export function holdCltvSafeVsTseq({ finalCltv, seqTip, seqLocktime, claimMargin
     reason: `the invoice min_final_cltv ${fc} BTC blocks fails back by ~SEQ height ${settleDeadlineSeq}, leaving >= ${cm} blocks before T_seq ${lt} — the taker can still claim after the latest possible reveal (safe)` };
 }
 
-// sizeSubswapTake — SIZE a rail-crossing take to the USER's requested amount, never the whole resting offer
-// (spec §2.4: asking to buy/sell 10 must not sign you up for 43). Partial-fill the offer when it allows it and
-// the slice clears its min_fill; otherwise flag an OVERSHOOT so the composer BLOCKS Place (fail closed) rather
-// than silently lifting the whole offer. The BTC is FLOORED for the slice (never demand more than the
-// proportional amount). PURE — the ONE sizing authority the wallet's bridgedTakePlan + the P2P submarine
-// review both consume, so Review == what executes. Returns BigInt takeAtoms/takeBtc.
+// sizeSubswapTake — SIZE a rail-crossing take to the USER's requested amount (spec §2: EVERY resting offer is
+// PARTIALLY FILLABLE down to its min_fill — there is NO indivisible / whole-offer-only offer). PURE — the ONE
+// sizing authority the wallet's bridgedTakePlan + the P2P submarine review both consume, so Review == what
+// executes. Returns BigInt takeAtoms/takeBtc that ALWAYS describe a real placeable take, so the composer's
+// pay/receive can never disagree.
 //
-// SUBMARINE offers are WHOLE-OFFER-ONLY. The submarine makers (RunMakerReverseSubmarine / RunMakerSubmarine)
-// lock the WHOLE offer amount in a single on-chain HTLC — there is NO partial fill on the submarine path
-// (partial fill is the covenant CLOB's job). So a submarine take is ALWAYS the whole resting offer: NEVER
-// slice it. A `submarine` offer whose requested size differs from the whole offer is flagged
-// { overshoot:true, wholeOnly:true } so the composer blocks Place with a "takes the whole resting offer"
-// note — never a partial the maker would reject. (Overshoot was already blocked; now PARTIAL is too.)
-export function sizeSubswapTake({ want, offerAtoms, offerBtc, allowPartial, minFill, submarine }) {
+// DIRECTION-AWARE proportional BTC (matches the Go daemon, xdriver_subasset.go): on a BUY the taker PAYS the
+// BTC leg, so it is CEIL'd (ProportionalBtc — the maker is never underpaid); on a SELL the taker RECEIVES the
+// BTC leg, so it is FLOOR'd (ProportionalBtcFloor — the maker's favour, never overstating what the taker gets).
+// A direction-blind CEIL overstated a partial SELL's receive by <= 1 sat. `side` defaults to a BUY (ceil), so
+// existing call sites that omit it are unchanged. Whole/capped takes return the whole offer BTC exactly (no
+// rounding either way).
+//
+// Cases (minFloor = max(min_fill, 1)):
+//   • want <= 0 (nothing typed yet)      -> the whole offer.
+//   • want >= offer                      -> the whole offer; `capped` when the user asked for MORE (the
+//                                           remainder walks to the next offer / rests — a note, not a block).
+//   • minFloor <= want < offer           -> a genuine PARTIAL at the requested size.
+//   • 0 < want < minFloor                -> BELOW the offer's minimum: take the MINIMUM (min_fill atoms + its
+//                                           proportional BTC) so pay & receive stay consistent, and set
+//                                           `belowMin` so the composer shows the true minimum and blocks Place.
+// `submarine`/`allowPartial` are accepted for call-site compatibility but no longer gate: partial fill is
+// universal (submarine partial support ships in the settlement track; a matched p2p-submarine partial is
+// treated like any other partial — never reintroduce an indivisible/whole-only offer here).
+export function sizeSubswapTake({ want, offerAtoms, offerBtc, minFill, side } = {}) {
   const wa = _big(want), oa = _big(offerAtoms), ob = _big(offerBtc);
-  let takeAtoms = oa, takeBtc = ob, partial = false, overshoot = false, wholeOnly = false;
-  if (submarine) {
-    // Whole-offer-only: never slice. A requested size below the whole offer can't be filled by the submarine
-    // (it locks the whole thing) -> overshoot + wholeOnly (block Place). want >= whole (or none) -> take whole.
-    if (wa > 0n && oa > 0n && wa < oa) { overshoot = true; wholeOnly = true; }
-    return { takeAtoms: oa, takeBtc: ob, partial: false, overshoot, wholeOnly };
-  }
-  if (wa > 0n && oa > 0n && wa < oa) {
-    const mf = _big(minFill);
-    if (allowPartial && wa >= (mf > 0n ? mf : 1n)) { takeAtoms = wa; takeBtc = (wa * ob) / oa; partial = true; }
-    else overshoot = true;                              // this offer can't be sliced to the requested size
-  }
-  return { takeAtoms, takeBtc, partial, overshoot, wholeOnly };
+  const mf = _big(minFill);
+  // A SELL RECEIVES the BTC leg -> FLOOR (maker's favour); a BUY PAYS it -> CEIL (never underpay the maker).
+  const propBtc = (side === 'sell') ? ((n, d) => (d > 0n ? n / d : 0n)) : _ceilDiv;
+  const minFloor = oa > 0n ? (mf > 0n ? (mf < oa ? mf : oa) : 1n) : 0n;
+  const minAtoms = minFloor;
+  const minBtc = (oa > 0n) ? propBtc(minFloor * ob, oa) : 0n;
+  const base = { minAtoms, minBtc, overshoot: false, wholeOnly: false };
+  if (wa <= 0n || oa <= 0n)
+    return { ...base, takeAtoms: oa, takeBtc: ob, partial: false, belowMin: false, capped: false };
+  if (wa >= oa)
+    return { ...base, takeAtoms: oa, takeBtc: ob, partial: false, belowMin: false, capped: wa > oa };
+  if (wa < minFloor)
+    return { ...base, takeAtoms: minAtoms, takeBtc: minBtc, partial: true, belowMin: true, capped: false };
+  return { ...base, takeAtoms: wa, takeBtc: propBtc(wa * ob, oa), partial: true, belowMin: false, capped: false };
 }
 
 // resolveConfirmedBlock — bind a funding tx to its CONFIRMED block via the ACTUAL txid's status
@@ -629,6 +650,25 @@ export async function claimReverseSeqLeg(rec, deps) {
   const claimSecret = deps.seqClaimKey && deps.seqClaimKey.secret_hex;
   if (!claimSecret) throw new Error('claimReverseSeqLeg: the seq claim secret is required');
   const leg = rec.leg;
+  // CLAIM-WINDOW GATE (fund-loss) — ACTIVE only when the caller sets deps.claimWindowGate, i.e. when P is still
+  // SELF-CUSTODY and claiming is what FIRST reveals it (the LSP payer bridge / any bare-P buy resume): revealing
+  // P lets the counterparty settle its HELD BTC-LN, so NEVER claim unless the asset is still ours to claim
+  // strictly before its timeout T_seq. Mirror runTakerReverseSubmarine steps 3 & 7 (fail closed on an unreadable
+  // tip). A P2P reverse-submarine buy has ALREADY revealed P by PAYING its invoice, so it MUST always attempt its
+  // resume claim to recover the asset (its BTC-LN is already gone) — it does NOT pass deps.claimWindowGate.
+  if (deps.claimWindowGate) {
+    if (typeof deps.seqTip !== 'function') throw new Error('claimReverseSeqLeg: a Sequentia tip reader is required to gate the claim window (failing closed - will not reveal the secret)');
+    // FAIL CLOSED on a missing/unreadable locktime (do NOT skip the gate). When the gate is requested P is still
+    // self-custody and claiming is what FIRST reveals it, so a leg with no known timeout has NO provable claim
+    // window — claiming it ungated would reveal the secret with zero margin against a T_seq refund-race. A null
+    // locktime must therefore REFUSE, never fall through to an ungated claim.
+    const lt = Number(leg.locktime);
+    if (leg.locktime == null || !Number.isFinite(lt)) throw new Error('claimReverseSeqLeg: the leg has no readable timeout - failing closed on the claim window (never reveal the secret without a known claim window)');
+    let tip = null; try { tip = Number(await deps.seqTip()); } catch { tip = null; }
+    const margin = Number(deps.claimMargin || 120);
+    if (tip == null || !Number.isFinite(tip)) throw new Error('claimReverseSeqLeg: the Sequentia tip is unreadable - failing closed on the claim window (never reveal the secret without time to claim)');
+    if (!(lt > tip + margin)) throw new Error(`claimReverseSeqLeg: seq_locktime ${leg.locktime} vs tip ${tip} leaves < ${margin}-block claim window - NOT claiming (revealing the secret now risks a refund-race loss)`);
+  }
   const txid = await deps.claimSeq({ txid: leg.txid, vout: leg.vout, amount: String(leg.amount), asset_id: rec.asset || leg.asset,
     redeem_script: leg.redeem_script, claim_secret: claimSecret, secret_hex: rec.preimage });
   if (deps.onClaimed) { try { deps.onClaimed(txid); } catch {} }
@@ -784,18 +824,23 @@ export async function runTakerSubmarine(deps) {
 //   0. mint H (hold P self-custody); POST /swap {side:'buy', bridge:true, payRail:'ln', recvRail:'chain',
 //      hash_h:H, taker_seq_claim_pub, offer_id, maker_pubkey, btc_sats, asset_atoms, ...} -> job
 //   1. poll GET /swap/<id> for bridge_terms (the forward-maker terms secured)
-//   2. POST /bridge/hold {job_id} -> the LSP issues a BTC-LN HOLD on H at its node -> pay it (HELD)
+//   2. POST /bridge/hold {job_id} -> the LSP issues a BTC-LN HOLD on H at its node. FLOOR+CAP the hold's
+//      min-final-CLTV (positive, yet <= the widest honest T_seq need AND our node max-cltv-delay), then pay it
+//      by bare hash (HELD), capping our OWN outgoing max-cltv AT that ceiling (payMaxCltv discipline).
 //   3. the LSP funds the on-chain BTC HTLC to the maker; the maker locks the asset to OUR key on H and
 //      the LSP relays it -> job.maker_seq_leg
-//   4. VERIFY the maker asset leg (claim=my key on H, asset/amount/locktime, anchor) then ClaimSEQLeg(P)
-//      self-custody. Claiming reveals P -> the LSP recoups its front (settles our hold) — WE already have
-//      the asset. We never expose P until we hold the verified, anchor-buried asset locked to our key.
+//   4. VERIFY the maker asset leg (claim=my key on H, asset/amount/locktime) -> POLL until anchor-buried -> gate
+//      the SEQ CLAIM WINDOW (T_seq > tip + claimMargin, re-checked immediately before the claim) -> ClaimSEQLeg(P)
+//      self-custody. Claiming reveals P -> the LSP recoups its front (settles our hold) — WE already have the
+//      asset. We never expose P until we hold the verified, anchor-buried asset locked to our key AND can still
+//      claim it strictly before T_seq (else revealing P would let the LSP capture our BTC with no asset for us).
 //
 // deps (payer bridge): { lspSwap(body)->resp, lspSwapStatus(jobId)->resp, lspBridgeHold({job_id})->resp,
-//   payHold({node_id,bolt11,hashH,minFinalCltv})->preimageHex|any, randomSecret()->hex, sha256Hex,
-//   seqClaimKey, buildRedeem, htlcSpkHex, readOutput, anchorHeightOf, btcTip, claimSeq, persist?(rec),
-//   onPaid?(P,leg), onClaimed?(txid), asset, assetAtoms, btcSats, offer, minAnchorDepth, max0ConfAtoms,
-//   log?, sleep?, pollMs?, handshakeWaitMs?, legWaitMs? }
+//   payHold({node_id,bolt11,hashH,minFinalCltv,maxCltv})->preimageHex|any, randomSecret()->hex, sha256Hex,
+//   seqClaimKey, buildRedeem, htlcSpkHex, readOutput, txStatus, anchorHeightOf, btcTip, seqTip()->number, claimSeq,
+//   persist?(rec), onPaid?(P,leg), onClaimed?(txid), asset, assetAtoms, btcSats, offer, minAnchorDepth,
+//   max0ConfAtoms, claimMargin?, nodeMaxCltvDelay?, anchorWaitMs?, anchorPollMs?, log?, sleep?, pollMs?,
+//   handshakeWaitMs?, legWaitMs? }
 // ===========================================================================
 export async function runLspPayerBridge(deps) {
   const log = deps.log || (() => {});
@@ -843,30 +888,53 @@ export async function runLspPayerBridge(deps) {
     await nap(pollMs);
   }
 
-  // 2. Ask the LSP to issue the BTC-LN hold on H, then PAY it (HELD, not captured). ALL fail-closed BEFORE the
-  //    single irreversible act (paying the hold) — zero exposure on any failure.
+  // 2. Ask the LSP to issue the BTC-LN hold on H, then PAY it BY BARE HASH (HELD, not captured). ALL fail-closed
+  //    BEFORE the single irreversible act (committing the hold HTLC) — zero exposure on any failure.
   const holdResp = await deps.lspBridgeHold({ job_id: jobId });
   if (!(holdResp && holdResp.ok !== false)) throw new Error('payer bridge: the LSP refused to issue the hold: ' + ((holdResp && holdResp.error) || 'unknown'));
-  // FAIL CLOSED with ZERO exposure when the LSP cannot issue a PAYABLE hold bolt11 (the seqln node's
-  // hold-invoice minting is not yet lit up). Never pay-by-hash blindly here — without a decodable invoice we
-  // cannot prove the hold binds our H before paying.
-  if (!holdResp.bolt11) throw new Error('payer bridge: the LSP issued no payable BTC-LN hold invoice (bolt11) — the hold-invoice node update is needed; use an interactive maker for now (zero exposure)');
-  // PAYMENT-HASH assert (both the stated field AND the decoded bolt11): the hold MUST bind OUR H, or paying it
-  // hands the LSP a preimage that opens nothing of ours.
+  // BARE-HASH hold target: the seqln holdinvoice mints NO bolt11, so the LSP registered a hold on OUR H at its
+  // OWN node and returns { node_id, payment_hash:H, amount_msat, hold_min_final_cltv, connect_hints }. We pay it
+  // by hash (mirror of the receiver-bridge / sub-asset bare-hash sendpay). FAIL CLOSED with ZERO exposure — the
+  // ONLY surviving honest-disable — when the LSP returns NO usable target (neither a node_id to route to nor a
+  // bolt11 that encodes one).
+  if (!holdResp.node_id && !holdResp.bolt11) throw new Error('This trade could not be placed right now - try again shortly.');
+  // PAYMENT-HASH assert: the LSP's stated hold hash MUST be OUR H. We pay an HTLC keyed on our OWN H regardless,
+  // so a wrong node/hold could never open anything of ours (only P — held self-custody — settles it); this
+  // rejects a confused LSP up front rather than committing an HTLC that could only ever stall.
   if (holdResp.payment_hash && String(holdResp.payment_hash).toLowerCase() !== hashH) throw new Error('payer bridge: the LSP hold payment_hash != our H — NOT paying');
-  const holdHash = bolt11PaymentHash(holdResp.bolt11);
-  if (!holdHash || holdHash !== hashH) throw new Error('payer bridge: the hold bolt11 payment_hash != our H — NOT paying (it would open nothing of ours)');
+  // If the LSP DID mint a bolt11 (a future fork that can), it too MUST bind our H — decode-and-check as before.
+  if (holdResp.bolt11) { const hh = bolt11PaymentHash(holdResp.bolt11); if (!hh || hh !== hashH) throw new Error('payer bridge: the hold bolt11 payment_hash != our H - NOT paying (it would open nothing of ours)'); }
   // OVERPAY guard: never HOLD-pay more BTC than the offer's price (btc_sats). amount_msat is authoritative when
-  // present, else the decoded invoice amount; an amountless hold is fine (we pay exactly the offer amount).
-  const holdMsat = (holdResp.amount_msat != null) ? _big(holdResp.amount_msat) : bolt11AmountMsat(holdResp.bolt11);
+  // present, else the decoded invoice amount, else exactly the offer amount (an amountless bare-hash hold).
+  const holdMsat = (holdResp.amount_msat != null) ? _big(holdResp.amount_msat)
+    : (holdResp.bolt11 ? bolt11AmountMsat(holdResp.bolt11) : _big(deps.btcSats) * 1000n);
   const maxMsat = _big(deps.btcSats) * 1000n;
   if (holdMsat != null && holdMsat > maxMsat) throw new Error(`payer bridge: the hold demands ${String(holdMsat)} msat > the offer's ${String(maxMsat)} msat — NOT paying`);
-  // Thread the min-final-CLTV (>= the LSP-committed hold_min_final_cltv) into the hold payment so its incoming
-  // HTLC stays settleable past T_seq.
-  await deps.payHold({ node_id: holdResp.node_id, bolt11: holdResp.bolt11, hashH,
-    minFinalCltv: Number(holdResp.hold_min_final_cltv) || undefined, amountMsat: Number(holdResp.amount_msat) || undefined });
+  // CLTV FLOOR + CAP (fund-loss / capital-safety). FLOOR: the incoming hold HTLC must stay settleable until
+  // strictly after the asset timeout T_seq, so require a positive min-final-CLTV (a zero/absent one would commit
+  // an HTLC that lapses before the asset can be delivered — no-loss, but a needless capital lock). CAP: it must
+  // NOT exceed what the WIDEST honest T_seq could require (requiredTakerHold at the max in-bound window — this is
+  // skew-immune, independent of our fresh tip) NOR our OWN node's max-cltv-delay; a masqueraded hold demanding an
+  // absurd min-final-CLTV would lock our Bitcoin far past T_seq. Mirror the reverse-submarine payMaxCltv
+  // discipline: validate the CLTV here, then cap our OWN outgoing pay AT it (threaded to payHold below) so a HELD
+  // payment fails back as early as allowed. NOT >0-only. (The LSP's listhtlcs re-verify remains the past-T_seq backstop.)
+  const minFinalCltv = Number(holdResp.hold_min_final_cltv);
+  if (!(minFinalCltv > 0)) throw new Error('payer bridge: the hold has no min-final-CLTV covering the asset timeout - NOT paying (fail closed, zero exposure)');
+  const nodeMaxCltv = Number(deps.nodeMaxCltvDelay) > 0 ? Number(deps.nodeMaxCltvDelay) : DEFAULT_NODE_MAX_CLTV;
+  // The largest min-final-CLTV any HONEST in-bound swap could ever require: requiredTakerHold at the max T_seq
+  // window. Constant for the fixed leg-bridge bound, so an LSP that read a slightly-earlier tip than us is never
+  // wrongly rejected (skew-immune), while an absurd value still is. Fall back to the node ceiling if unavailable.
+  const honestHoldReq = requiredTakerHold({ seqTip: 0, seqRefundHeight: HOLD_LIFE_DEFAULTS.maxTseqBlocks });
+  const tseqDerivedCap = (honestHoldReq.ok && Number.isFinite(honestHoldReq.minFinalCltvBlocks)) ? honestHoldReq.minFinalCltvBlocks : nodeMaxCltv;
+  const holdCltvCap = Math.min(nodeMaxCltv, tseqDerivedCap);
+  if (minFinalCltv > holdCltvCap) throw new Error(`payer bridge: the hold demands a min-final-CLTV ${minFinalCltv} blocks > the safe maximum ${holdCltvCap} for this trade - NOT paying (it would lock your Bitcoin far past the asset timeout; fail closed, zero exposure)`);
+  // Pay the hold BY BARE HASH: our OWN hosted BTC-LN node commits an HTLC to node_id on our H with a final-hop
+  // CLTV >= min_final_cltv. HELD at the LSP (never captured) until it recoups with P read from our on-chain
+  // asset claim — which we reveal ONLY AFTER verifying the asset is locked to our key + anchor-buried (step 4).
+  await deps.payHold({ node_id: holdResp.node_id, bolt11: holdResp.bolt11 || null, hashH,
+    minFinalCltv, maxCltv: holdCltvCap, amountMsat: (holdMsat != null ? Number(holdMsat) : undefined), connectHints: holdResp.connect_hints || null });
   rec.state = 'held'; if (deps.persist) { try { deps.persist(rec); } catch {} }
-  log('[subswap/payer-bridge] BTC-LN hold on H paid (HELD); the LSP funds the maker BTC leg');
+  log('[subswap/payer-bridge] BTC-LN hold on H paid by bare hash (HELD); the LSP funds the maker BTC leg');
 
   // 3. Wait for the maker's asset leg (the LSP relays it to us after funding + verify).
   let leg = null;
@@ -880,20 +948,48 @@ export async function runLspPayerBridge(deps) {
     await nap(pollMs);
   }
 
-  // 4. VERIFY the maker asset leg binds MY claim key on H + anchor-buried, THEN claim with P (reveals P;
-  //    the LSP recoups by settling our hold — we already hold the asset).
+  // 4. VERIFY the maker asset leg binds MY claim key on H (redeem + binding + P2SH). skipAnchor here — the anchor
+  //    gate is a POLL below (mirror runTakerReverseSubmarine step 4), so a FRESH-but-honest maker leg is WAITED
+  //    OUT rather than aborting after the hold is already committed (a needless capital-lock abort on the honest
+  //    path). P is revealed (the claim) ONLY after the leg verifies, buries, AND the claim window still holds.
+  const seqLt = Number(terms.seq_locktime) || Number(leg.locktime);
   const v = await verifySeqLeg({
     hashH, myClaimPub: claimPub, makerRefundPub: terms.maker_seq_refund_pub, leg: {
       txid: leg.txid, vout: leg.vout, amount: leg.amount, asset: leg.asset || deps.asset,
       redeem_script: leg.redeem_script, locktime: leg.locktime },
-    expectAsset: deps.asset, expectAtoms: deps.assetAtoms, expectLocktime: Number(terms.seq_locktime) || leg.locktime,
-    minAnchorDepth: deps.minAnchorDepth, max0ConfAtoms: deps.max0ConfAtoms,
+    expectAsset: deps.asset, expectAtoms: deps.assetAtoms, expectLocktime: seqLt,
+    minAnchorDepth: deps.minAnchorDepth, max0ConfAtoms: deps.max0ConfAtoms, skipAnchor: true,
   }, { ...deps, readOutput: deps.readOutput, anchorHeightOf: (bh) => deps.anchorHeightOf(bh || leg.block_hash) });
   if (!v.ok) throw new Error('payer bridge: the maker asset leg failed verification (NOT claiming; the hold expires no-loss): ' + v.reason);
 
-  const legFull = { txid: leg.txid, vout: leg.vout, amount: String(leg.amount), asset: deps.asset, redeem_script: v.redeem, locktime: Number(terms.seq_locktime) || leg.locktime };
+  // ANCHOR GATE (POLL, mirror runTakerReverseSubmarine step 4): WAIT until the asset HTLC funding block is
+  // Bitcoin-anchor-buried >= min_anchor_depth (a fresh 0–2 conf leg is WAITED OUT, not aborted after the hold is
+  // committed) — never reveal P against a reorg-able asset HTLC. Fails closed on timeout (the hold refunds no-loss).
+  const anchor = await waitAnchorBuried({ txid: leg.txid, blockHash: leg.block_hash, minAnchorDepth: deps.minAnchorDepth,
+    legAtoms: leg.amount, max0ConfAtoms: deps.max0ConfAtoms, deadlineMs: deps.anchorWaitMs, pollMs: deps.anchorPollMs },
+    { ...deps, anchorHeightOf: (bh) => deps.anchorHeightOf(bh || leg.block_hash) }, nap);
+  if (!anchor.ok) throw new Error('payer bridge: ' + anchor.reason + ' (NOT claiming; the hold expires no-loss)');
+
+  // CLAIM-WINDOW GATE (fund-loss, critical — mirror runTakerReverseSubmarine steps 3 & 7). NEVER reveal P (the
+  // claim) unless the asset is still ours to claim strictly before its timeout T_seq: revealing P lets the LSP
+  // settle its HELD BTC-LN, so if the window has already closed the maker could refund the asset while the LSP
+  // still captures our Bitcoin (no asset for us). Gate on a fresh seqTip; deps.seqTip is the same reader the
+  // reverse submarine uses (in subCommonDeps). Fail closed on an unreadable tip.
+  const claimMargin = Number(deps.claimMargin || 120);
+  let seqTip1 = null; try { seqTip1 = Number(await deps.seqTip()); } catch { seqTip1 = null; }
+  if (seqTip1 == null || !Number.isFinite(seqTip1)) throw new Error('payer bridge: the Sequentia tip is unreadable - failing closed on the claim window (NOT revealing P)');
+  if (!(seqLt > seqTip1 + claimMargin)) throw new Error(`payer bridge: seq_locktime ${seqLt} vs tip ${seqTip1} leaves < ${claimMargin}-block claim window - NOT claiming (revealing P now risks a refund-race loss)`);
+
+  const legFull = { txid: leg.txid, vout: leg.vout, amount: String(leg.amount), asset: deps.asset, redeem_script: v.redeem, locktime: seqLt };
   rec.leg = legFull; rec.state = 'claiming'; if (deps.persist) { try { deps.persist(rec); } catch {} }
   if (deps.onPaid) { try { deps.onPaid(preimage, legFull); } catch {} }
+
+  // RE-CHECK the claim window with a FRESH seqTip immediately before the irreversible claim (the tip may have
+  // advanced during the anchor poll / persist; never reveal P into a window that has since closed).
+  let seqTip2 = null; try { seqTip2 = Number(await deps.seqTip()); } catch { seqTip2 = null; }
+  if (seqTip2 == null || !Number.isFinite(seqTip2) || !(seqLt > seqTip2 + claimMargin))
+    throw new Error(`payer bridge: the claim window closed before the claim (seq_locktime ${seqLt} vs tip ${seqTip2}) - NOT revealing P`);
+
   const claimTxid = await deps.claimSeq({ txid: leg.txid, vout: leg.vout, amount: String(leg.amount), asset_id: deps.asset,
     redeem_script: v.redeem, claim_secret: claimSecret, secret_hex: preimage });
   rec.state = 'settled'; rec.seq_claim_txid = claimTxid; if (deps.persist) { try { deps.persist(rec); } catch {} }

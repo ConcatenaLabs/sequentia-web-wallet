@@ -113,6 +113,70 @@ function pick(obj, ...names){
 const big = v => BigInt(v == null ? 0 : v);
 const num = v => (v == null ? 0 : Number(v));
 
+// ProportionalBtc (CEIL) — the BTC (sats) a partial FORWARD taker locks for `take` asset atoms out of a
+// whole offer of `whole` atoms priced at `wholeBtc` sats. Mirrors the Go ProportionalBtc
+// (daemon xdriver_subasset.go): CEIL, so a partial NEVER underpays the maker's advertised ratio, and a
+// WHOLE take (take >= whole) returns wholeBtc EXACTLY — byte-identical to the pre-partial whole-HTLC lift.
+// The Go maker recomputes the SAME value and binds our funded BTC leg to it (xdriver.go:790-791), so both
+// sides agree bit-for-bit. BigInt is arbitrary-precision, so this matches the daemon's 128-bit mulDiv64.
+function proportionalBtcCeil(wholeBtc, take, whole){
+  wholeBtc = big(wholeBtc); take = big(take); whole = big(whole);
+  if (whole <= 0n || take >= whole) return wholeBtc;
+  const prod = wholeBtc * take;
+  const q = prod / whole;
+  return (prod % whole !== 0n) ? q + 1n : q;
+}
+
+// --- Minimum-slice DUST GUARD (byte-for-byte mirror of the Go daemon xminslice.go) --------------------
+// A PARTIAL take prices a slice of a resting offer down to a proportional BTC leg + an asset leg of the
+// taken atoms. A slice that prices to a FEW sats (or a few atoms) is unsettleable: after the HTLC spend
+// fee, the (Amount - Fee) claim/refund output is sub-dust and cannot relay or be economically claimed, so
+// the leg strands and atomicity breaks. The Go drivers fail CLOSED below a safe minimum on BOTH sides,
+// BEFORE any coin moves (xdriver.go:390-397). We mirror the SAME thresholds + fee basis here so a sub-dust
+// slice is refused PRE-LOCK — the only thing standing between an honest maker's post-lock 'amount_too_small'
+// reject and an unrefundable sub-dust HTLC. Constants are identical to xminslice.go.
+const BTC_DUST_LIMIT = 546n;          // Bitcoin's canonical P2SH dust value (btcDustLimit)
+const LEG_SPEND_FEE_FLOOR = 1000n;    // the drivers' SpendFeeSats default; a smaller fee floors up to it
+const DEFAULT_SPEND_FEE_SATS = 1000n; // the driver default the maker/CLI use (xdriver.go:342-343)
+// MinSafeBtcLegSats: the smallest BTC leg (sats) a partial may create = dust + 2x the per-spend fee, so the
+// (Amount - Fee) output of BOTH a claim AND a refund still clears dust. At the 1000-sat default: 546+2000=2546.
+function minSafeBtcLegSats(spendFeeSats){
+  let fee = big(spendFeeSats); if (fee < LEG_SPEND_FEE_FLOOR) fee = LEG_SPEND_FEE_FLOOR;
+  return BTC_DUST_LIMIT + 2n * fee;
+}
+// minSafeAssetLeg: the smallest asset leg (atoms) a partial may create. The native spend fee is converted to
+// the asset's OWN atoms through the open-fee-market exchange rate (ceil(fee*1e8/rate), exactly as the SEQ-leg
+// claim fee — a valuable asset pays fewer atoms), then 1 atom of dust + 2x that fee. Without a published rate
+// it falls back to the flat native target (mirrors xminslice.go's SeqFeeRate `ok` fallback). C.feeRateFor
+// THROWS when the asset is unpriced, so a throw is treated exactly as "no rate".
+function minSafeAssetLeg(assetHex, spendFeeSats){
+  let fee = big(spendFeeSats); if (fee < LEG_SPEND_FEE_FLOOR) fee = LEG_SPEND_FEE_FLOOR;
+  let rate = 0n;
+  try { if (C && C.feeRateFor) rate = big(C.feeRateFor(assetHex)); } catch { rate = 0n; }
+  if (rate > 0n){
+    const scale = big((C && C.EXCHANGE_RATE_SCALE) || 100000000);
+    fee = (fee * scale + rate - 1n) / rate;   // ceil(fee*1e8/rate)
+    if (fee === 0n) fee = 1n;
+  }
+  return 1n + 2n * fee;
+}
+// A reason string when a PARTIAL slice's BTC leg is sub-dust-after-fee (null when safe OR a whole take, which
+// locks the whole offer and is never a partial dust slice). Mirrors minSafeBtcErr.
+function minSafeBtcReason(takeSeq, whole, btcLeg, spendFeeSats){
+  if (big(takeSeq) >= big(whole)) return null;
+  const m = minSafeBtcLegSats(spendFeeSats);
+  if (big(btcLeg) < m) return `this amount prices to a ${btcLeg}-sat Bitcoin leg, below the safe minimum ${m} (dust + fee) - take a larger amount`;
+  return null;
+}
+// A reason string when a PARTIAL slice's asset leg is sub-dust-after-fee (null when safe OR a whole take).
+// Mirrors minSafeAssetErr.
+function minSafeAssetReason(assetHex, takeSeq, whole, assetLeg, spendFeeSats){
+  if (big(takeSeq) >= big(whole)) return null;
+  const m = minSafeAssetLeg(assetHex, spendFeeSats);
+  if (big(assetLeg) < m) return `this amount leaves a ${assetLeg}-atom asset leg, below the safe minimum ${m} (dust + fee) - take a larger amount`;
+  return null;
+}
+
 // Normalize a market entry (camel or snake) to the snake_case the module uses.
 function normMarket(m){
   return {
@@ -442,21 +506,38 @@ async function runForwardCourier(q){
     // fund-safe (there is no path that retries after a lock). Each fallback is taken whole (its own size),
     // and confirmLockModal below shows the ACTUAL chosen terms before any BTC moves.
     const PRELOCK_TERMS_MS = 30000;   // a co-sign-ready maker answers in seconds; 30s ⇒ move on, don't hang 2 min
-    const attempts = [{ offer, seq_amount: big(q.seq_amount), btc_amount: big(q.btc_amount) }].concat(
-      (q.candidates || []).map(c => ({ offer: c.offer, seq_amount: big(c.seq_amount), btc_amount: big(c.btc_amount) })));
+    // The size the composer asked to take: the primary quote is already capped to it (requoteCross's courier
+    // cap). Each PRE-LOCK fallback is a DIFFERENT resting offer, so CLAMP its take to the SAME requested slice
+    // (min(requestedSlice, candidate.base)) — never the whole candidate offer. Without this, a fallback taken
+    // whole overshoots the user's request when the primary maker times out. fundBtc is recomputed in-loop from
+    // the maker's verified whole-offer terms (ceil-proportional to this take), so we carry it here for parity.
+    const reqSlice = big(q.seq_amount);
+    const attempts = [{ offer, seq_amount: reqSlice, btc_amount: big(q.btc_amount) }].concat(
+      (q.candidates || []).map(c => {
+        const cBase = big(pick(c.offer, 'base_amount', 'baseAmount')) || big(c.seq_amount);
+        const cWant = big(pick(c.offer, 'want_amount', 'wantAmount')) || big(c.btc_amount);
+        const take = (reqSlice > 0n && reqSlice < cBase) ? reqSlice : cBase;   // min(requestedSlice, candidate.base)
+        return { offer: c.offer, seq_amount: take, btc_amount: proportionalBtcCeil(cWant, take, cBase) };
+      }));
     let fq = null, lastErr = null;
     for (let i = 0; i < attempts.length; i++){
-      const at = attempts[i], atOffer = at.offer, atSeq = at.seq_amount, atBtc = at.btc_amount;
+      const at = attempts[i], atOffer = at.offer, atSeq = big(at.seq_amount);
+      // The maker's Terms carry the WHOLE offer's ratio; `atSeq` is the SLICE the composer asked us to
+      // take (== the whole offer for a whole-HTLC lift). Read the whole-offer amounts from the SIGNED
+      // offer we chose (a forward offer sells the asset for BTC: base = whole asset atoms, want = whole
+      // BTC sats) so we can validate the maker quoted its ADVERTISED ratio, then price OUR slice against it.
+      const oSeq = big(pick(atOffer, 'base_amount', 'baseAmount'));
+      const oBtc = big(pick(atOffer, 'want_amount', 'wantAmount'));
       let s = null;
       try {
         if (i > 0) setStepStatus('terms', `That maker didn’t respond; trying the next resting offer (${i}/${attempts.length - 1})…`, true);
-        s = await xc.openCourierSession(atOffer, atSeq, '');
+        s = await (C.openCourierSession || xc.openCourierSession)(atOffer, atSeq, '');
         XSESSION = s;
         await s.send({ type: xc.XcType.TermsRequest });
         setStepStatus('terms', i > 0 ? 'Waiting for the next maker’s terms…' : 'Waiting for the maker’s terms…', true);
         const terms = await s.recv(xc.XcType.Terms, PRELOCK_TERMS_MS);
 
-        // Bind the maker's terms to THIS attempt's offer + amounts (never fund on a mismatch).
+        // The maker quotes the WHOLE offer in its terms (mirrors the Go maker, xdriver.go:739-748).
         const tSeq = big(pick(terms, 'seq_amount', 'seqAmount'));
         const tBtc = big(pick(terms, 'btc_amount', 'btcAmount'));
         const tFee = big(pick(terms, 'fee_btc', 'feeBtc') || 0);
@@ -464,27 +545,54 @@ async function runForwardCourier(q){
         const sl = Number(pick(terms, 'seq_locktime', 'seqLocktime'));
         const makerBtcClaimPub = pick(terms, 'maker_btc_claim_pub', 'makerBtcClaimPub');
         const makerSeqRefundPub = pick(terms, 'maker_refund_pub', 'makerRefundPub');
-        if (tBtc !== atBtc)
-          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the offered ${C.fmtAtoms(atBtc,8)} BTC`);
-        if (tSeq !== atSeq)
-          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}, not the offered ${C.fmtAtoms(atSeq, sm.precision)} ${sm.ticker}`);
+        // 1) Validate the OFFER'S ratio (whole-vs-whole), NOT the slice: the maker must quote its
+        //    advertised offer, and a partial is a slice of THAT ratio — so a partial must NOT abort here.
+        //    Mirrors the Go taker's whole-vs-whole terms guard (xdriver.go:360-367).
+        if (oSeq <= 0n || oBtc <= 0n)
+          throw abortTerms(s, 'the offer is missing its advertised amounts');
+        if (tBtc !== oBtc)
+          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the offered ${C.fmtAtoms(oBtc,8)} BTC`);
+        if (tSeq !== oSeq)
+          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}, not the offered ${C.fmtAtoms(oSeq, sm.precision)} ${sm.ticker}`);
         if (!makerBtcClaimPub || !makerSeqRefundPub)
           throw abortTerms(s, 'the maker’s terms were missing a key');
         if (!(bl > sl))
           throw abortTerms(s, `bad locktime ordering (T_btc ${bl} must exceed T_seq ${sl})`);
-        // Fee sanity: never accept a maker fee above ~1% of the trade (defends against
-        // a maker quoting a punitive fee once the session is open).
-        if (tFee > (atBtc / 100n) + 1000n)
+        // 2) The slice we take: takeSeq = the composer-requested amount (== the whole offer for a whole
+        //    take). Refuse an over-ask (> the offer) or a non-positive slice BEFORE any BTC moves. Price the
+        //    slice at the SIGNED offer's OWN ratio, CEIL (the maker never underpaid) — the SAME value the
+        //    maker recomputes and binds our BTC leg against (xdriver.go:373-381, 790-791). A whole take
+        //    (takeSeq == tSeq) reduces to fundBtc == tBtc, byte-identical to the pre-partial lift.
+        const takeSeq = atSeq;
+        if (takeSeq <= 0n)
+          throw abortTerms(s, 'nothing to take (zero amount)');
+        if (takeSeq > tSeq)
+          throw abortTerms(s, `you asked for ${C.fmtAtoms(takeSeq, sm.precision)} ${sm.ticker}, more than the offer's ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}`);
+        const fundBtc = proportionalBtcCeil(tBtc, takeSeq, tSeq);
+        if (fundBtc <= 0n)
+          throw abortTerms(s, 'the slice prices to zero BTC (too small to take)');
+        // MIN-SLICE DUST GUARD (mirror xminslice.go / xdriver.go:390-397): fail CLOSED, PRE-LOCK, when this
+        // partial's BTC leg (fundBtc, ours to fund) or the asset it will CLAIM (takeSeq atoms) is sub-dust
+        // AFTER the HTLC spend fee — an honest maker rejects it post-lock with 'amount_too_small', but by then
+        // our BTC HTLC is an unrefundable sub-dust output. Nothing is spent until lockBtcLeg below, so aborting
+        // here (session.fail + move on / bounce to the composer) strands nothing. A whole take is exempt.
+        const _dustBtc = minSafeBtcReason(takeSeq, tSeq, fundBtc, DEFAULT_SPEND_FEE_SATS);
+        if (_dustBtc) throw abortAmountTooSmall(s, _dustBtc);
+        const _dustAsset = minSafeAssetReason(q.market.seq_asset, takeSeq, tSeq, takeSeq, DEFAULT_SPEND_FEE_SATS);
+        if (_dustAsset) throw abortAmountTooSmall(s, _dustAsset);
+        // Fee sanity vs the ACTUAL BTC we lock (the slice), never the whole offer: reject a maker fee
+        // above ~1% of the slice + 1000 sats (defends against a punitive fee once the session is open).
+        if (tFee > (fundBtc / 100n) + 1000n)
           throw abortTerms(s, `the maker fee ${C.fmtAtoms(tFee,8)} BTC is too high`);
 
-        // Pre-lock handshake succeeded: bind the wizard to THIS offer + amounts and proceed to the lock.
+        // Pre-lock handshake succeeded: bind the wizard to THIS offer + the priced SLICE, then lock.
         session = s; offer = atOffer;
         SWAP.offer_id = atOffer.offer_id || atOffer.offerId;
         SWAP.maker_pubkey = atOffer.maker_pubkey || atOffer.makerPubkey;
-        SWAP.seq_amount = atSeq; SWAP.btc_amount = atBtc;
+        SWAP.seq_amount = takeSeq; SWAP.btc_amount = fundBtc;
         fq = {
           market: q.market, quote_id: 'courier',
-          seq_amount: atSeq, btc_amount: atBtc, fee_btc: tFee,
+          seq_amount: takeSeq, btc_amount: fundBtc, fee_btc: tFee,
           maker_btc_claim_pub: makerBtcClaimPub, maker_seq_refund_pub: makerSeqRefundPub,
           btc_locktime: bl, seq_locktime: sl,
         };
@@ -525,6 +633,12 @@ async function runForwardCourier(q){
       hash_h: SWAP.hash_hex,
       taker_seq_claim_pub: SWAP.seq_claim_pub,
       taker_btc_refund_pub: SWAP.btc_refund_pub,
+      // The slice we're taking (the maker reads seq_amount to lock EXACTLY this, and binds our funded leg
+      // to ProportionalBtc(offer, seq_amount) — xdriver.go:782-791). Sent as JSON NUMBERS to match the Go
+      // uint64 fields: json.Unmarshal REJECTS a quoted string into uint64, so a String() here would make
+      // the maker skip the frame and time out. This is the same Number() convention as leg.amount below.
+      seq_amount: Number(SWAP.seq_amount),   // == takeSeq
+      btc_amount: Number(SWAP.btc_amount),   // == fundBtc (the proportional BTC we locked = the funded leg amount)
       leg: {
         txid: SWAP.btc_leg.txid, vout: SWAP.btc_leg.vout, amount: Number(SWAP.btc_leg.amount),
         redeem_script: SWAP.btc_redeem_script, locktime: SWAP.btc_locktime, height: Number(SWAP.btc_leg.height),
@@ -536,6 +650,20 @@ async function runForwardCourier(q){
     if (!locked.leg) throw new Error('the maker sent no Sequentia leg');
     SWAP.seq_leg = normCourierSeqLeg(locked.leg);
     SWAP.state = ST.SEQ_LOCKED; saveSwap(); renderStepper();
+
+    // SLICE-vs-SLICE bind (mirrors the Go taker, xdriver.go:499): the maker must lock EXACTLY the slice we
+    // funded (takeSeq = SWAP.seq_amount). verifyLeg below is the fund-safety FLOOR (asset + amount >=
+    // takeSeq + HTLC-script match); this strict equality is the protocol bind, refusing an over- OR
+    // under-delivery BEFORE the irreversible secret reveal. A whole take is unchanged (the maker locks the
+    // whole offer, which equals takeSeq). Never reveal the secret on a mismatch — the BTC stays refundable.
+    if (big(SWAP.seq_leg.amount) !== big(SWAP.seq_amount)){
+      SWAP.state = ST.FAILED;
+      SWAP.detail = `the maker locked ${C.fmtAtoms(SWAP.seq_leg.amount, sm.precision)} ${sm.ticker}, not the ${C.fmtAtoms(SWAP.seq_amount, sm.precision)} ${sm.ticker} you funded`;
+      saveSwap();
+      await session.fail('seq_leg_mismatch', 'amount differs from the taken slice'); renderStepper();
+      if ($('xswapErr')) $('xswapErr').textContent = 'Stopped before revealing your secret: ' + SWAP.detail + '. Your BTC is refundable after block ' + SWAP.btc_locktime + '.';
+      return;
+    }
 
     // Value gate + anchor gate (reused). Never reveal the secret on a bad leg.
     const lg = verifyLeg();
@@ -587,6 +715,12 @@ async function runForwardCourier(q){
 function abortTerms(session, why){
   try { session.fail('terms_mismatch', why); } catch {}
   return new Error('Terms didn’t match the offer: ' + why + ' - nothing was spent.');
+}
+// Seal an amount-too-small (min-slice dust) abort — the SAME code the Go maker uses (xdriver.go:391),
+// so a sub-dust slice is refused pre-lock exactly as the daemon would post-lock, but with nothing spent.
+function abortAmountTooSmall(session, why){
+  try { session.fail('amount_too_small', why); } catch {}
+  return new Error(why + ' - nothing was spent.');
 }
 function normCourierSeqLeg(l){
   if (!l) return null;
@@ -1672,6 +1806,7 @@ export const __test__ = {
   takerDestSpkHex, broadcastSeqTx, startCountdown: () => {},
   // courier internals
   isForwardCrossOffer, bestForwardOffer, normCourierSeqLeg, fetchXquoteCourier, fetchXmarketsCourier,
+  proportionalBtcCeil, runForwardCourier,
   setUseCourier: (v) => { USE_COURIER = !!v; }, getUseCourier: () => USE_COURIER,
   // state accessors for the harness
   getSwap: () => SWAP, setSwap: (s) => { SWAP = s; saveSwap(); },
