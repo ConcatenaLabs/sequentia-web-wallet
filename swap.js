@@ -715,7 +715,7 @@ function seedFromLevel(price, sizeAtoms){
   const bm = metaOf(base);
   S.edited = baseIsPay ? 'pay' : 'receive';
   const atoms = (() => { try { return BigInt(sizeAtoms); } catch { return 0n; } })();
-  if (atoms > 0n){ setNativeField(baseEl, C.fmtAtoms(atoms, bm.precision || 0)); baseEl._userTyped = true; }
+  if (atoms > 0n){ setNativeField(baseEl, C.fmtAtoms(atoms, bm.precision || 0), base); baseEl._userTyped = true; }
   // In LIMIT the clicked price is HELD (adjusting size later keeps it); in MARKET the price field is a
   // read-only sweep readout, so requote/paintPriceField overwrites it regardless of this flag.
   if (price > 0) setPriceFieldValue(price, S.mode === 'post');
@@ -1696,10 +1696,12 @@ function onMax(){
   // "Max" spends the whole balance and leaves nothing to cover the fee, so the order fails (C4).
   const feeAsset = feeAssetPolicy().asset;
   if (feeAsset === S.payAsset){ const fee = covFeeAtoms(feeAsset); if (maxAtoms > fee) maxAtoms -= fee; }
-  C.$('swPayAmt').value = C.fmtAtoms(maxAtoms, m.precision);
-  C.$('swPayAmt')._userTyped = true;   // Max is an explicit user amount
-  // exit ⇄ ref-input mode if active so the literal asset amount is used
-  if (C.$('swPayAmt')._refMode) C.$('swPayAmt')._refMode = false;
+  // Max is an explicit user amount, and it HONOURS the field's entry mode: a field
+  // showing USD gets the USD equivalent of the max, not a raw asset number relabelled
+  // as dollars. Kicking the field out of ref mode here was the same override that
+  // made the toggle feel like it would not stay put.
+  setNativeField(C.$('swPayAmt'), C.fmtAtoms(maxAtoms, m.precision), S.payAsset);
+  C.$('swPayAmt')._userTyped = true;
   S.edited = 'pay'; LAST_QUOTE = null; setReviewEnabled(false);
   paintRefHints();
   requote().catch(()=>{});
@@ -2111,15 +2113,42 @@ function fieldAtoms(el, hex){
 // display / >0 checks). In USD mode the raw number is meaningless as an asset amount.
 function fieldUnits(el, hex){ const a = fieldAtoms(el, hex); const prec = C.assetMeta(hex).precision || 0; return Number(a) / Math.pow(10, prec); }
 
-// Write a fixed NATIVE amount into a field for a whole-offer lift (the amount the user can't
-// change — it's the maker's exact terms). Force the field OUT of ⇄ reference-currency mode so
-// the native number is never mislabeled as USD (and a later fieldAtoms read doesn't try to
-// convert a native number as if it were USD). Marks it derived, not user-typed.
-function setNativeField(el, str){
+// Write a fixed amount into a field the user cannot change (the maker's exact terms).
+//
+// It must NOT drag the field out of ⇄ reference-currency mode. It used to, and that
+// was the bug where switching the pay field to USD and typing flipped it straight
+// back to BTC: renderMixedTake pins both legs on EVERY requote, so each keystroke
+// re-entered this and cleared _refMode under the user's cursor. The entry mode is
+// the user's choice and persists until they change it.
+//
+// What the old code was right to worry about is the LABEL: writing a native number
+// into a field displaying USD would mislabel it, and a later fieldAtoms read would
+// convert it a second time. So instead of leaving ref mode, CONVERT into it — the
+// same thing applyComposeDerivation does — and only fall back to clearing the mode
+// when the conversion is genuinely unavailable (no reference price for the asset).
+function setNativeField(el, str, hex){
   if (!el) return;
-  if (el._refMode){ el._refMode = false; try { paintRefHints(); } catch {} }
   el._userTyped = false;
+  if (el._refMode){
+    const rv = refOfNativeStr(hex, str);
+    if (rv != null){ el.value = rv; return; }        // stays in USD, shows the USD equivalent
+    el._refMode = false;                             // unpriced: the mode cannot be honoured
+    try { paintRefHints(); } catch {}
+  }
   el.value = str;
+}
+
+// A native amount string -> its reference-currency (USD) number, or null when the
+// asset has no reference price. Used to honour a field's display mode instead of
+// overriding it.
+function refOfNativeStr(hex, str){
+  try {
+    if (!hex || !C.refValue || !C.parseAtoms) return null;
+    const prec = C.assetMeta(hex).precision || 0;
+    const atoms = C.parseAtoms(String(str), prec);
+    const rv = C.refValue(hex, atoms);
+    return (rv && rv.v != null) ? String(trim(rv.v)) : null;
+  } catch { return null; }
 }
 
 // PAY-atoms of resting book depth that meets the order's price right now — the amount a Market
@@ -2371,7 +2400,7 @@ function useMinimumFill(route, sz){
   const buy = route.payIsBtc;
   const assetEl = buy ? C.$('swRecvAmt') : C.$('swPayAmt');
   const am = C.assetMeta(route.seqAsset) || {};
-  setNativeField(assetEl, C.fmtAtoms(BigInt(sz.minAtoms || 0), am.precision || 0));
+  setNativeField(assetEl, C.fmtAtoms(BigInt(sz.minAtoms || 0), am.precision || 0), route.seqAsset);
   assetEl._userTyped = true;
   S.edited = buy ? 'receive' : 'pay';
   requote().catch(()=>{});
@@ -2400,7 +2429,9 @@ function renderMixedTake(route, plan){
     return { ...sz, hasAmount: false };
   }
   // Paint BOTH legs to the sized take so pay & receive can NEVER disagree.
-  setNativeField(payEl, payStr); setNativeField(recvEl, recvStr);
+  // Pass each leg's ASSET so a field showing USD keeps showing USD (see setNativeField).
+  const payHex = buy ? 'BTC' : route.seqAsset, recvHex = buy ? route.seqAsset : 'BTC';
+  setNativeField(payEl, payStr, payHex); setNativeField(recvEl, recvStr, recvHex);
   if (sz.belowMin){
     // Below this offer's minimum: show the true minimum plainly + a one-tap to use it, and BLOCK Place right
     // here (the caller also fails closed). Pay & receive were painted to the minimum above, so they agree.
@@ -3339,8 +3370,11 @@ function closePopover(){
 const BRIDGE_KEY = 'swk.sequentia.bridge';
 let BRIDGE = null;
 try { BRIDGE = JSON.parse(localStorage.getItem(BRIDGE_KEY) || 'null'); } catch { BRIDGE = null; }
-function saveBridge(){ try { localStorage.setItem(BRIDGE_KEY, JSON.stringify(BRIDGE)); } catch {} }
-function clearBridge(){ BRIDGE = null; try { localStorage.removeItem(BRIDGE_KEY); } catch {} }
+function saveBridge(){
+  try { localStorage.setItem(BRIDGE_KEY, JSON.stringify(BRIDGE)); } catch {}
+  try { renderInFlightCard(); } catch {}   // see saveSubswap: every transition must be visible
+}
+function clearBridge(){ BRIDGE = null; try { localStorage.removeItem(BRIDGE_KEY); } catch {} try { renderInFlightCard(); } catch {} }
 function bridgeTerminal(){ return !BRIDGE || BRIDGE.state === 'settled' || BRIDGE.state === 'failed'; }
 export function hasBridgeInFlight(){ return !!BRIDGE && !bridgeTerminal(); }
 let _bridgeStarting = false;
@@ -3396,6 +3430,7 @@ async function reviewBridged(route, bp){
   if (!L || !L.swap){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   // IN-FLIGHT GUARD: block on BOTH a bridge AND a P2P subswap in flight — two concurrent rail-crossings can't
   // start (a p2p subswap in flight blocks a receiver-bridge sell, and vice-versa; each recovers via ONE key).
+  try { reapStalledCrossings(); } catch {}
   if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
   const am = C.assetMeta(route.seqAsset) || {};
   const aprec = am.precision || 0, tk = am.ticker || 'asset';
@@ -3819,16 +3854,94 @@ async function ensureBtcNodeKey(){
 const SUBSWAP_KEY = 'swk.sequentia.subswap';
 let SUBSWAP = null;
 try { SUBSWAP = JSON.parse(localStorage.getItem(SUBSWAP_KEY) || 'null'); } catch { SUBSWAP = null; }
-function saveSubswap(){ try { localStorage.setItem(SUBSWAP_KEY, JSON.stringify(SUBSWAP)); } catch {} }
-function clearSubswap(){ SUBSWAP = null; try { localStorage.removeItem(SUBSWAP_KEY); } catch {} }
+function saveSubswap(){
+  try { localStorage.setItem(SUBSWAP_KEY, JSON.stringify(SUBSWAP)); } catch {}
+  // Surface EVERY transition. These rails have no process view of their own, so
+  // without this the trade ran invisibly and a stall was indistinguishable from the
+  // app having ignored the button press. renderInFlightCard no-ops when its host is
+  // absent, so this is safe from any context.
+  try { renderInFlightCard(); } catch {}
+}
+function clearSubswap(){ SUBSWAP = null; try { localStorage.removeItem(SUBSWAP_KEY); } catch {} try { renderInFlightCard(); } catch {} }
 function subswapTerminal(){ return !SUBSWAP || SUBSWAP.state === 'settled' || SUBSWAP.state === 'failed' || SUBSWAP.state === 'refunded'; }
 export function hasSubswapInFlight(){ return !!SUBSWAP && !subswapTerminal(); }
+
+// A plain-English status for the Active trades row. These records used to surface
+// nothing at all, so a stall was indistinguishable from an app that had ignored the
+// button press.
+function subswapStatusLine(b){
+  switch (b && b.state){
+    case 'starting':   return 'starting · contacting the other side';
+    case 'held':       return 'your Bitcoin is committed over Lightning · waiting for the asset';
+    case 'confirming': return 'waiting for the asset leg to confirm on-chain';
+    case 'claiming':   return 'claiming your asset on-chain (automatic)';
+    case 'funding':    return 'funding your asset leg';
+    case 'failed':     return 'this trade could not be completed · your funds are safe';
+    default:           return String((b && b.state) || 'in progress');
+  }
+}
+
+// Whether the local record may be FORGOTTEN. Safe exactly while nothing of the
+// user's is both committed and dependent on this record to recover:
+//   - a terminal 'failed' record is always clearable (nothing is outstanding);
+//   - a record that has not reached the point of committing value is clearable;
+//   - a record holding a preimage AND a funded leg is NOT — that material is what
+//     claims or refunds the position, so forgetting it could strand funds.
+function subswapClearable(b){
+  if (!b) return false;
+  if (b.state === 'failed') return true;
+  if (b.preimage && b.leg && b.leg.txid) return false;      // recovery material: keep it
+  if (b.state === 'held') return false;                      // BTC committed; the driver must resolve it
+  return b.state === 'starting';
+}
+function bridgeClearable(b){
+  if (!b) return false;
+  if (b.state === 'failed') return true;
+  if (b.job_id || b.poll) return false;                      // the LSP holds a job; let the driver finish
+  return b.state === 'starting';
+}
 let _subswapDriving = false;
+// How long a rail-crossing take may sit in 'starting' before it is treated as failed.
+// Generous enough for a slow LSP round-trip and a JIT channel, short enough that a
+// wedged record does not outlive the user's patience.
+const SUBSWAP_START_STALL_MS = 3 * 60 * 1000;
+
+// Reap a rail-crossing record wedged in 'starting'.
+//
+// This is the fix for the reported "even a few minutes later" symptom: a start that
+// died before committing anything left the record non-terminal forever, and because
+// hasSubswapInFlight/hasBridgeInFlight are what gate every new trade, the user was
+// locked out with nothing on screen to explain it or clear it.
+//
+// Called from the composer render AND from the in-flight guards, so it resolves both
+// when the user comes back to look and when they try again. Only ever touches a
+// record with nothing committed — see subswapClearable/bridgeClearable for the same
+// reasoning applied to the Clear button.
+function reapStalledCrossings(){
+  const now = Date.now();
+  try {
+    if (SUBSWAP && SUBSWAP.state === 'starting' && SUBSWAP.started_ms &&
+        now - SUBSWAP.started_ms > SUBSWAP_START_STALL_MS && !SUBSWAP.preimage && !SUBSWAP.job_id){
+      SUBSWAP.state = 'failed';
+      SUBSWAP.detail = 'This trade never got started · nothing of yours was committed. You can try again.';
+      saveSubswap();
+    }
+  } catch {}
+  try {
+    if (BRIDGE && BRIDGE.state === 'starting' && BRIDGE.started_ms &&
+        now - BRIDGE.started_ms > SUBSWAP_START_STALL_MS && !BRIDGE.job_id && !BRIDGE.poll){
+      BRIDGE = { ...BRIDGE, state: 'failed',
+        detail: 'This trade never got started · nothing of yours was committed. You can try again.' };
+      saveBridge();
+    }
+  } catch {}
+}
 
 // Review a rail-crossing take that settles PEER-TO-PEER (no LSP in the value path, so no bridge fee). Both
 // directions. The Review states the EXACT whole-HTLC amounts + the single-T_seq fund-safety story.
 async function reviewSubmarineP2P(route, disp){
   const { $ } = C;
+  try { reapStalledCrossings(); } catch {}
   if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
   if (!(L && L.btcNodeKey && L.nodePay)){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
@@ -3976,6 +4089,7 @@ async function driveSubswap(){
 async function reviewLspPayerBridge(route, disp){
   const { $ } = C;
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
+  try { reapStalledCrossings(); } catch {}
   if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
   // FAIL CLOSED (the ONLY surviving honest-disable): without the LSP payer-bridge hold + bare-hash pay this
   // shape has no settlement path, so refuse rather than offer-then-refuse. payerBridgeDisabledNote is the note.
@@ -4005,11 +4119,27 @@ async function startLspPayerBridge(route, disp){
     asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
     started_ms: Date.now() };
   saveSubswap();
+  // Say something IMMEDIATELY. resetComposer() has just cleared the form, so without
+  // this the press produced no feedback whatsoever and the trade began invisibly.
+  try { C.toast && C.toast('Trade started · follow it under Active trades.'); } catch {}
   driveLspPayerBridge();
 }
 
 async function driveLspPayerBridge(){
   if (!SUBSWAP || subswapTerminal() || _subswapDriving) return;
+  // STALL WATCHDOG. Nothing here is committed while the record is still 'starting',
+  // so a start that never got past it is a failure, not a position — and leaving it
+  // non-terminal wedged every future trade behind the in-flight guard with no way to
+  // see or clear it. Fail it honestly instead, which also makes it clearable.
+  try {
+    if (SUBSWAP.state === 'starting' && SUBSWAP.started_ms &&
+        Date.now() - SUBSWAP.started_ms > SUBSWAP_START_STALL_MS){
+      SUBSWAP.state = 'failed';
+      SUBSWAP.detail = 'This trade never got started · nothing of yours was committed. You can try again.';
+      saveSubswap();
+      return;
+    }
+  } catch {}
   _subswapDriving = true;
   const b = SUBSWAP, asset = b.asset;
   try {
@@ -6807,6 +6937,7 @@ function fmtHistRow(e){
 function renderInFlightCard(){
   const host = C.$('swInFlight'); if (!host) return;
   try { checkRefundWindows(); } catch {}   // P5.3 — nag once when a refund/reclaim window opens
+  try { reapStalledCrossings(); } catch {}   // a wedged record self-heals when you come back to look
   const rows = [];
   if (hasMixedInFlight()){
     const am = metaOf(MIXED.asset);
@@ -6836,6 +6967,33 @@ function renderInFlightCard(){
     rows.push({ view: null, need: true, title: 'Buy ' + esc(BUY.ticker || 'asset') + ' with BTC',
       status: BUY.state === 'holding' ? 'ready · confirm from your wallet to receive' : 'paid with Bitcoin · receiving the asset over Lightning' });
   }
+  // RAIL-CROSSING records (SUBSWAP: peer-to-peer submarine + the LSP payer bridge;
+  // BRIDGE: the LSP receiver bridge). These were MISSING from this card, which is
+  // the bug behind "nothing appeared to have happened": they are the ONLY two
+  // record types that block a new trade (hasSubswapInFlight / hasBridgeInFlight),
+  // they have no process view of their own, and with no row here they ran — or
+  // stalled — completely invisibly. A user could then neither see the trade nor
+  // start another, and the error pointed them at a card that never showed it.
+  //
+  // A stalled one offers Clear. That is safe by construction on these rails: every
+  // leg is refundable at its own timelock, and clearing only forgets the wallet's
+  // local record. It is offered ONLY while nothing of the user's is committed and
+  // unrecoverable — see subswapClearable — so the button can never strand funds.
+  if (SUBSWAP && (hasSubswapInFlight() || SUBSWAP.state === 'failed')){
+    const am = metaOf(SUBSWAP.asset);
+    const buying = SUBSWAP.kind === 'p2p-buy' || SUBSWAP.kind === 'lsp-payer-buy';
+    rows.push({ view: null, need: SUBSWAP.state !== 'failed',
+      title: (buying ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset') + (buying ? ' with Bitcoin' : ' for Bitcoin'),
+      status: SUBSWAP.detail || subswapStatusLine(SUBSWAP),
+      action: subswapClearable(SUBSWAP) ? 'clear-subswap' : null });
+  }
+  if (BRIDGE && (hasBridgeInFlight() || BRIDGE.state === 'failed')){
+    const am = metaOf(BRIDGE.asset);
+    rows.push({ view: null, need: BRIDGE.state !== 'failed',
+      title: (BRIDGE.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset'),
+      status: BRIDGE.detail || ('' + (BRIDGE.state || 'in progress')),
+      action: bridgeClearable(BRIDGE) ? 'clear-bridge' : null });
+  }
   if (X && X.hasInFlight && X.hasInFlight()){
     rows.push({ view: 'cross', need: true, title: 'Buy asset with BTC', status: 'in progress' });
   }
@@ -6853,6 +7011,8 @@ function renderInFlightCard(){
           ${r.view ? `<button type="button" class="ghost swviewtrade" data-view="${r.view}">View</button>`
             : r.action === 'clear-sell' ? `<button type="button" class="ghost swclearsell">Clear</button>`
             : r.action === 'retry-sell' ? `<button type="button" class="ghost swretrysell">Retry</button>`
+            : r.action === 'clear-subswap' ? `<button type="button" class="ghost swclearsub" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
+            : r.action === 'clear-bridge' ? `<button type="button" class="ghost swclearbridge" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
             : '<span class="sub">automatic</span>'}
         </div>`).join('')
       + `</div>`;
@@ -6881,6 +7041,14 @@ function renderInFlightCard(){
   // the record loses no funds and unblocks the sell rail. Retry re-drives resumeSell for a transient one.
   host.querySelectorAll('.swclearsell').forEach(b => b.onclick = () => {
     clearSell(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
+  });
+  host.querySelectorAll('.swclearsub').forEach(b => b.onclick = () => {
+    clearSubswap(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
+    try { setReviewEnabled(false); requote().catch(()=>{}); } catch {}
+  });
+  host.querySelectorAll('.swclearbridge').forEach(b => b.onclick = () => {
+    clearBridge(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
+    try { setReviewEnabled(false); requote().catch(()=>{}); } catch {}
   });
   host.querySelectorAll('.swretrysell').forEach(b => b.onclick = async () => {
     b.disabled = true; b.textContent = 'Retrying…';
