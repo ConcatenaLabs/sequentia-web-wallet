@@ -4039,18 +4039,143 @@ async function reviewSubmarineP2P(route, disp){
   ok.onclick = async () => { modal.remove(); resetComposer(); await startSubswapP2P(route, disp); };
 }
 
+// ===========================================================================
+// SEQUENTIAL WALK EXECUTION
+// ---------------------------------------------------------------------------
+// A walked take fills across several offers. Each rail-crossing leg is an
+// INTERACTIVE HTLC session with its own preimage, refund key and funded leg, so
+// the legs are run ONE AT A TIME: leg N settles (or fails) before leg N+1 starts.
+//
+// Why sequential rather than parallel. Only one leg's recovery material is ever
+// live, so a crash or a stall leaves exactly one position to resolve rather than
+// several; the existing in-flight guard and Active trades row keep working
+// unchanged; and the per-leg settlement code — the proven part — is reused
+// verbatim rather than being threaded with a leg index. This orchestrator adds
+// ordering and accounting, nothing else.
+//
+// A leg that FAILS stops the walk. It never silently continues to the next offer:
+// the user agreed to a fill at a stated aggregate, and quietly re-routing the
+// remainder at a worse price would be a different trade. The partial that did fill
+// is reported as what it is.
+const WALK_KEY = 'swk.sequentia.walk';
+let WALK = null;
+try { WALK = JSON.parse(localStorage.getItem(WALK_KEY) || 'null'); } catch { WALK = null; }
+function saveWalk(){
+  try { localStorage.setItem(WALK_KEY, JSON.stringify(WALK)); } catch {}
+  try { renderInFlightCard(); } catch {}
+}
+function clearWalk(){ WALK = null; try { localStorage.removeItem(WALK_KEY); } catch {} try { renderInFlightCard(); } catch {} }
+function walkTerminal(){ return !WALK || WALK.state === 'done' || WALK.state === 'stopped'; }
+export function hasWalkInFlight(){ return !!WALK && !walkTerminal(); }
+
+// Begin a multi-leg walk. `legs` are the planner's, in price order.
+function beginWalk(route, bp){
+  const w = bp && bp.walk;
+  if (!w || w.offersUsed <= 1 || !(w.filledAtoms > 0n)) return false;   // a single leg needs no orchestration
+  WALK = {
+    asset: route.seqAsset, side: bp.side,
+    legs: w.legs.map(l => ({
+      offer_id: (l.offer && l.offer.id) || null,
+      maker_pubkey: (l.offer && l.offer.maker) || null,
+      rail: (l.offer && l.offer.rail) || null,
+      takeAtoms: String(l.takeAtoms), takeBtc: String(l.takeBtc),
+    })),
+    legIndex: 0, filledAtoms: '0', filledBtc: '0',
+    plannedAtoms: String(w.filledAtoms), plannedBtc: String(w.filledBtc),
+    remainderAtoms: String(w.remainderAtoms || 0n),
+    state: 'running', started_ms: Date.now(),
+  };
+  saveWalk();
+  return true;
+}
+
+// Record a settled leg and report whether another remains.
+function advanceWalk(){
+  if (!WALK || walkTerminal()) return false;
+  const leg = WALK.legs[WALK.legIndex];
+  if (leg){
+    WALK.filledAtoms = String(BigInt(WALK.filledAtoms || 0) + BigInt(leg.takeAtoms || 0));
+    WALK.filledBtc = String(BigInt(WALK.filledBtc || 0) + BigInt(leg.takeBtc || 0));
+  }
+  WALK.legIndex += 1;
+  if (WALK.legIndex >= WALK.legs.length){ WALK.state = 'done'; saveWalk(); return false; }
+  saveWalk();
+  return true;
+}
+
+// Stop the walk without pretending the rest filled.
+function stopWalk(reason){
+  if (!WALK) return;
+  WALK.state = 'stopped';
+  WALK.detail = reason || 'This trade stopped part-way · the part that filled is yours.';
+  saveWalk();
+}
+
+// A one-line account of a walk, for the Active trades row.
+function walkStatusLine(w){
+  if (!w) return '';
+  const am = metaOf(w.asset); const prec = am.precision || 0;
+  const filled = C.fmtAtoms(BigInt(w.filledAtoms || 0), prec);
+  const planned = C.fmtAtoms(BigInt(w.plannedAtoms || 0), prec);
+  const n = w.legs ? w.legs.length : 0;
+  if (w.state === 'done') return `filled ${filled} of ${planned} ${am.ticker || ''} across ${n} offers`;
+  if (w.state === 'stopped') return w.detail || `stopped after ${filled} ${am.ticker || ''}`;
+  return `offer ${Math.min(w.legIndex + 1, n)} of ${n} · ${filled} ${am.ticker || ''} filled so far`;
+}
+
 async function startSubswapP2P(route, disp){
   if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   if (disp.belowMin){ try { C.toast && C.toast('That amount is below the smallest this offer can fill · increase it to the minimum shown.'); } catch {} return; }   // fail closed — never place a below-minimum take
   const buy = disp.ln_direction === 1;
+  // A multi-offer request becomes a WALK: the legs run one at a time through this
+  // very function, so the settlement path below is unchanged and only the ordering
+  // is new. beginWalk returns false for a single-leg take, which then behaves
+  // exactly as before.
+  const walking = beginWalk(route, disp);
+  const leg = walking ? WALK.legs[0] : null;
   // P3.1 — persist the SIZED take (disp.takeAtoms/takeBtc), never the whole offer, so the courier bind, the
   // expect{atoms,msat} the driver gates on, and any resume all use the user's requested size (§2.4).
   SUBSWAP = { kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: route.seqAsset,
-    offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
-    asset_atoms: String(disp.takeAtoms || 0), btc_sats: String(disp.takeBtc || 0), partial: !!disp.partial,
+    offer_id: (leg ? leg.offer_id : disp.offer.id) || null,
+    maker_pubkey: (leg ? leg.maker_pubkey : disp.offer.maker) || null,
+    asset_atoms: String(leg ? leg.takeAtoms : (disp.takeAtoms || 0)),
+    btc_sats: String(leg ? leg.takeBtc : (disp.takeBtc || 0)),
+    partial: !!disp.partial, walk: !!walking,
     ln_direction: disp.ln_direction, started_ms: Date.now() };
   saveSubswap();
+  if (walking) try { C.toast && C.toast(`Filling across ${WALK.legs.length} offers · follow it under Active trades.`); } catch {}
   driveSubswap();
+}
+
+// Start the walk's NEXT leg through the same per-leg path that settled the last one.
+// Called only after a leg reaches 'settled', so at most one leg is ever live.
+async function runNextWalkLeg(){
+  if (!WALK || walkTerminal()) return;
+  const leg = WALK.legs[WALK.legIndex];
+  if (!leg){ WALK.state = 'done'; saveWalk(); return; }
+  const buy = WALK.side === 'buy';
+  SUBSWAP = { kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: WALK.asset,
+    offer_id: leg.offer_id, maker_pubkey: leg.maker_pubkey,
+    asset_atoms: String(leg.takeAtoms), btc_sats: String(leg.takeBtc),
+    partial: true, walk: true,
+    ln_direction: buy ? 1 : 0, started_ms: Date.now() };
+  saveSubswap();
+  await driveSubswap();
+}
+
+// After a leg finishes, either run the next one or close the walk out honestly.
+async function onWalkLegFinished(settled){
+  if (!WALK || walkTerminal()) return;
+  if (!settled){
+    stopWalk('This trade stopped part-way · the part that filled is yours, and the rest was not started.');
+    try { C.toast && C.toast('Trade stopped part-way · see Active trades.'); } catch {}
+    return;
+  }
+  if (advanceWalk()) await runNextWalkLeg();
+  else {
+    try { C.toast && C.toast(walkStatusLine(WALK)); } catch {}
+    try { await C.sync(); } catch {}
+  }
 }
 
 // Drive the persisted subswap to completion (self-heals a transient gap; toasts on settle). Whole flow runs
@@ -4130,7 +4255,17 @@ async function driveSubswap(){
     if (SUBSWAP && (SUBSWAP.preimage || (SUBSWAP.leg && SUBSWAP.leg.txid))){ SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; if (SUBSWAP.state === 'starting' || SUBSWAP.state === 'verifying' || SUBSWAP.state === 'paying') SUBSWAP.state = SUBSWAP.preimage ? 'claiming' : SUBSWAP.state; saveSubswap(); }
     else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
   } finally { _subswapDriving = false; }
-  if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast(SUBSWAP.kind === 'p2p-buy' ? 'Swap settled · the asset is yours.' : 'Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
+  const settled = !!(SUBSWAP && SUBSWAP.state === 'settled');
+  // A WALK leg reports to the orchestrator instead of announcing itself: the user
+  // agreed to one aggregate fill, so N per-leg "swap settled" toasts would misstate
+  // what happened. A failed leg STOPS the walk — the remainder is never silently
+  // re-routed to another offer at a price the user did not agree to.
+  if (SUBSWAP && SUBSWAP.walk && hasWalkInFlight()){
+    try { await C.sync(); } catch {}
+    await onWalkLegFinished(settled);
+    return;
+  }
+  if (settled){ try { C.toast(SUBSWAP.kind === 'p2p-buy' ? 'Swap settled · the asset is yours.' : 'Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
 }
 
 // Review the LSP PAYER leg-bridge — the BUY fallback vs an on-chain-only maker. The taker mints H (holds P),
@@ -7075,6 +7210,17 @@ function renderInFlightCard(){
   // leg is refundable at its own timelock, and clearing only forgets the wallet's
   // local record. It is offered ONLY while nothing of the user's is committed and
   // unrecoverable — see subswapClearable — so the button can never strand funds.
+  if (WALK && !walkTerminal()){
+    const am = metaOf(WALK.asset);
+    rows.push({ view: null, need: true,
+      title: (WALK.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset') + ' across several offers',
+      status: walkStatusLine(WALK) });
+  }
+  if (WALK && WALK.state === 'stopped'){
+    rows.push({ view: null, need: false,
+      title: (WALK.side === 'buy' ? 'Buy ' : 'Sell ') + esc(metaOf(WALK.asset).ticker || 'asset'),
+      status: walkStatusLine(WALK), action: 'clear-walk' });
+  }
   if (SUBSWAP && (hasSubswapInFlight() || SUBSWAP.state === 'failed')){
     const am = metaOf(SUBSWAP.asset);
     const buying = SUBSWAP.kind === 'p2p-buy' || SUBSWAP.kind === 'lsp-payer-buy';
@@ -7107,6 +7253,7 @@ function renderInFlightCard(){
           ${r.view ? `<button type="button" class="ghost swviewtrade" data-view="${r.view}">View</button>`
             : r.action === 'clear-sell' ? `<button type="button" class="ghost swclearsell">Clear</button>`
             : r.action === 'retry-sell' ? `<button type="button" class="ghost swretrysell">Retry</button>`
+            : r.action === 'clear-walk' ? `<button type="button" class="ghost swclearwalk" title="Dismiss this finished walk. The part that filled is already yours.">Clear</button>`
             : r.action === 'clear-subswap' ? `<button type="button" class="ghost swclearsub" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
             : r.action === 'clear-bridge' ? `<button type="button" class="ghost swclearbridge" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
             : '<span class="sub">automatic</span>'}
@@ -7137,6 +7284,9 @@ function renderInFlightCard(){
   // the record loses no funds and unblocks the sell rail. Retry re-drives resumeSell for a transient one.
   host.querySelectorAll('.swclearsell').forEach(b => b.onclick = () => {
     clearSell(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
+  });
+  host.querySelectorAll('.swclearwalk').forEach(b => b.onclick = () => {
+    clearWalk(); try { renderInFlightCard(); } catch {}
   });
   host.querySelectorAll('.swclearsub').forEach(b => b.onclick = () => {
     clearSubswap(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
@@ -7334,6 +7484,12 @@ function stripBip32(b64){
 // Test-only exports: drive the REAL same-chain pipeline + the composer mapping
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
 export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
+  // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,
+  // an LSP or a chain: these are the ordering + accounting rules, and they are what
+  // decide how much of a user's order actually fills.
+  walkState: () => WALK,
+  setWalkState: (w) => { WALK = w; },
+  beginWalk, advanceWalk, stopWalk, walkStatusLine, walkTerminal, hasWalkInFlight, clearWalk,
   setMarkets: (m) => { MARKETS = m; },
   // XMARKETS in the composer are the snake_case shape xswap.js's normMarket emits
   // (and that C.xroute.markets() returns). Normalize camelCase test fixtures to match.
