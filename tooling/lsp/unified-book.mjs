@@ -13,7 +13,8 @@
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
 // side: 'ask' = an offer SELLING the asset (a taker BUYS it); 'bid' = an offer BUYING the asset (a
-// taker SELLS into it). rail: 'ln' | 'onchain'. price is BTC sats per asset atom (null if sizeless).
+// taker SELLS into it). rail: 'ln' | 'pureln' | 'submarine' | 'onchain'. price is BTC sats per
+// asset atom (null if sizeless).
 function mk(side, rail, assetAtoms, btcSats, raw, meta) {
   // Require BOTH legs positive: a zero/negative btcSats yields price <= 0, which would survive the
   // `price == null` drop in mergeBook, sort to the TOP of asks, and get auto-selected by bestFor as
@@ -69,6 +70,28 @@ export function classifyRelayOffer(o) {
     { ln_direction: 1, interactive: true, caps: { btc_ln: true, interactive: true, asset_onchain: true, maker_ln_node_pubkey: nodePub } });
   if (dirIsNum && dir === 0) return mk('bid', 'submarine', baseAtoms || num(o.want_amount), num(o.offer_amount), o,
     { ln_direction: 0, interactive: true, caps: { btc_ln: true, interactive: true, asset_onchain: true, maker_ln_node_pubkey: nodePub } });
+  // PURE-LN (ln_direction 2/3): BOTH legs off-chain — a Sequentia asset-LN leg and a
+  // BTC-LN leg stitched by one shared secret, with no on-chain leg and no anchor gate.
+  //
+  // These were the LAST rail still reading its own book. classifyRelayOffer handled
+  // 0/1 and 4/5 but not 2/3, so pure-LN offers never entered the unified book at all,
+  // and the ln/ln composer had to fall back to the pure-LN relay's own /lnbook. For
+  // the SAME market and size that showed a DIFFERENT matched offer than chain/chain,
+  // ln/chain and chain/ln — which all share this book — so the price a user saw
+  // depended on which rails they had selected. Rail-agnostic matching means the book
+  // is one book; the rail is metadata the settlement router reads on take.
+  //
+  //   LnAssetLNForBTCLN (2): asset-LN for BTC-LN; the maker ACQUIRES the asset -> BUY
+  //     -> a bid (the taker sells into it).
+  //   LnBTCLNForAssetLN (3): BTC-LN for asset-LN; the maker GIVES the asset -> SELL
+  //     -> an ask (the taker buys from it).
+  //
+  // Both legs are Lightning, so btc_ln AND asset_ln are true and asset_onchain is
+  // false. Both need an online maker, so both are interactive.
+  if (dir === 3) return mk('ask', 'pureln', num(o.offer_amount), num(o.want_amount), o,
+    { ln_direction: 3, interactive: true, caps: { btc_ln: true, asset_ln: true, interactive: true, asset_onchain: false, maker_ln_node_pubkey: nodePub } });
+  if (dir === 2) return mk('bid', 'pureln', num(o.want_amount), num(o.offer_amount), o,
+    { ln_direction: 2, interactive: true, caps: { btc_ln: true, asset_ln: true, interactive: true, asset_onchain: false, maker_ln_node_pubkey: nodePub } });
   // SUB-ASSET LN (asset over LN + BTC on-chain HTLC): the BTC leg cannot go over Lightning (btc_ln:false).
   if (dir === 4) return mk('ask', 'ln', num(o.offer_amount), num(o.want_amount), o,
     { ln_direction: 4, interactive: true, caps: { btc_ln: false, interactive: true, asset_onchain: false, maker_ln_node_pubkey: nodePub } });

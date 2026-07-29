@@ -188,6 +188,10 @@ const CFG = {
   // an asset invoice on H; the LSP commands the USER's node to pay the held asset, learns P,
   // and RETURNS P + the BTC HTLC terms for the WALLET to claim on-chain (LSP never claims).
   subasSellRelay: process.env.SUBAS_SELL_RELAY || '',
+  // The PURE-LN maker relay (both legs Lightning, ln_direction 2/3). It rests real
+  // liquidity for the same markets as the others, so it belongs in the unified book;
+  // see classifyRelayOffer. Defaults to the box's :9965.
+  plnRelay: process.env.PLN_RELAY || 'http://127.0.0.1:9965',
   // --- "Move to Lightning" channel funding (GET /channel/deposit, POST /channel/open) ---
   // The routing peer each hosted node opens its channel TO (id@host:port). The channel
   // is funded from the hosted node's OWN on-chain wallet, whose only signer is the user's
@@ -2906,7 +2910,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/book/unified') {
       const assetId = resolveAsset(url.searchParams.get('asset'));
       if (!assetId || assetId === CFG.btcx) return send(res, 400, { ok: false, error: '?asset=<sequentia asset id> is required (not BTC)' });
-      const relays = [...new Set([CFG.crossRelay, CFG.subasRelay, CFG.subasSellRelay].filter(Boolean))];
+      // Every relay that rests liquidity for this pair, the PURE-LN one included:
+      // leaving it out is what forced the ln/ln composer onto a separate book and let
+      // it show a different matched offer than every other rail for the same market.
+      const relays = [...new Set([CFG.crossRelay, CFG.subasRelay, CFG.subasSellRelay, CFG.plnRelay].filter(Boolean))];
       const seen = new Set(), raw = [];
       for (const relay of relays) {
         try {

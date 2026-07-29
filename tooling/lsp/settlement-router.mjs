@@ -175,6 +175,17 @@ export function settlementPlanForSide(side, payRail, recvRail) {
                     seller: { assetRail: payRail, btcRail: recvRail } };
   return planSettlement(match);
 }
+// The MIXED-rail (submarine) dispatch only: which xsub* binary settles a take
+// whose two legs sit on DIFFERENT rails. Its callers build submarine argv from
+// the name, so a same-rail shape must stay null here rather than be answered with
+// a binary of a different shape.
+//
+// PURE-LN (both legs Lightning) is therefore deliberately absent, and adding
+// 'ln:ln' -> 'xpln' here would mis-dispatch. Routing an ln/ln take is the
+// caller's job, through the same bridgedTakePlan/renderMixedTake path the other
+// rails use — and it is gated on a real protocol gap first: xpln has no
+// take-amount flag, so it lifts the best resting offer IN FULL and cannot do the
+// partial fills every other rail now does.
 export function planExecutionName(side, plan) {
   if (plan.btcLeg.bridge || plan.assetLeg.bridge) return null;   // rail crossing -> Stage-2 bridge
   return {
