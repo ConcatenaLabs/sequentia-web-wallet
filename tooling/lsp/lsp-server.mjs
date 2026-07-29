@@ -2910,6 +2910,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/book/unified') {
       const assetId = resolveAsset(url.searchParams.get('asset'));
       if (!assetId || assetId === CFG.btcx) return send(res, 400, { ok: false, error: '?asset=<sequentia asset id> is required (not BTC)' });
+      // THE QUOTE SIDE. This endpoint used to hardcode BTC, so asset<->asset markets
+      // (EURX/OILX) had no unified book AT ALL — they were quoted from the same-chain
+      // covenant book on-chain or from /lnbook over Lightning, which really is two
+      // books for one pair chosen by rail. The split was never by rail; it was by
+      // PAIR TYPE, and this is where it lived.
+      //
+      // Same convention as /lnbook: a real Sequentia asset id for an asset-paired
+      // market, else the BTC sentinel. Offer identity is unchanged and the entries'
+      // `btcSats` simply carries the quote asset's atoms, so classifyRelayOffer,
+      // mergeBook and every consumer work unmodified.
+      const quoteParam = url.searchParams.get('quote');
+      const quoteId = quoteParam && String(quoteParam).toUpperCase() !== 'BTC' ? resolveAsset(quoteParam) : null;
+      if (quoteParam && !quoteId && String(quoteParam).toUpperCase() !== 'BTC')
+        return send(res, 400, { ok: false, error: 'unknown ?quote asset' });
+      if (quoteId && quoteId === assetId)
+        return send(res, 400, { ok: false, error: '?quote must differ from ?asset' });
+      const quoteKey = quoteId || 'BTC';
       // Every relay that rests liquidity for this pair, the PURE-LN one included:
       // leaving it out is what forced the ln/ln composer onto a separate book and let
       // it show a different matched offer than every other rail for the same market.
@@ -2917,7 +2934,7 @@ const server = http.createServer(async (req, res) => {
       const seen = new Set(), raw = [];
       for (const relay of relays) {
         try {
-          const rr = await fetch(`${relay}/v1/market/${assetId}/BTC/orderbook`, { signal: AbortSignal.timeout(5000) });
+          const rr = await fetch(`${relay}/v1/market/${assetId}/${quoteKey}/orderbook`, { signal: AbortSignal.timeout(5000) });
           if (!rr.ok) continue;
           for (const o of ((await rr.json()).offers || [])) {
             const key = (o.maker_pubkey || '') + ':' + (o.offer_id || '');
@@ -2927,7 +2944,7 @@ const server = http.createServer(async (req, res) => {
         } catch { /* a down relay just contributes no liquidity */ }
       }
       const book = buildUnifiedBook(raw);
-      return send(res, 200, { ok: true, asset: assetId,
+      return send(res, 200, { ok: true, asset: assetId, quote: quoteKey,
         asks: book.asks, bids: book.bids,
         best_ask: book.asks[0] || null, best_bid: book.bids[0] || null,
         counts: { asks: book.asks.length, bids: book.bids.length } });

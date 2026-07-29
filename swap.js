@@ -2313,12 +2313,16 @@ function paintQuoteSame(){
 // rail auto-selection (requote) and the book render (loadBtcBook) read it. Returns the raw LSP
 // payload ({ asks, bids, best_ask, best_bid, ... }) or null.
 let _ubookCache = { key: null, ts: 0, book: null };
-async function getUnifiedBook(seqAsset){
+async function getUnifiedBook(seqAsset, quoteAsset){
   if (!seqAsset || seqAsset === 'BTC') return null;
-  if (_ubookCache.key === seqAsset && (Date.now() - _ubookCache.ts) < 12000) return _ubookCache.book;
+  // Key the cache by the PAIR, not the base asset: EURX/BTC and EURX/OILX are
+  // different markets and must not share a cached book.
+  const qk = (quoteAsset && quoteAsset !== 'BTC') ? quoteAsset : 'BTC';
+  const key = seqAsset + '/' + qk;
+  if (_ubookCache.key === key && (Date.now() - _ubookCache.ts) < 12000) return _ubookCache.book;
   let book = null;
-  try { if (L && L.unifiedBook){ const u = await L.unifiedBook(seqAsset); if (u && u.ok) book = u; } } catch {}
-  _ubookCache = { key: seqAsset, ts: Date.now(), book };
+  try { if (L && L.unifiedBook){ const u = await L.unifiedBook(seqAsset, qk === 'BTC' ? undefined : qk); if (u && u.ok) book = u; } } catch {}
+  _ubookCache = { key, ts: Date.now(), book };
   return book;
 }
 async function loadBtcBook(route){
@@ -2333,9 +2337,9 @@ async function loadBtcBook(route){
   // never "no maker for your rail". Falls back to the on-chain-only cross book if the LSP is
   // unreachable. The proven on-chain take path (XBOOK) is unchanged; an LN row seeds the amount and
   // the composer requotes on the user's rail (the LSP bridges / fails closed cleanly on take).
-  const ub = await getUnifiedBook(seqAsset);
+  const ub = await getUnifiedBook(seqAsset, route.assetAsset ? route.quoteAsset : 'BTC');
   const unified = ub ? { asks: ub.asks || [], bids: ub.bids || [] } : null;
-  UBOOK = unified ? { seqAsset, ...unified } : null;
+  UBOOK = unified ? { seqAsset, quote: (ub && ub.quote) || 'BTC', ...unified } : null;
   renderXBook(seqAsset, route.payIsBtc, forward, reverse, unified);
   return { offers, unreachable: book.unreachable };
 }
@@ -3412,9 +3416,14 @@ let _bridgeStarting = false;
 // returns null so the take falls back to the proven native path, never dead-ends or throws.
 function bridgedTakePlan(route){
   try {
-    if (!route || !route.seqAsset || route.assetAsset) return null;   // BTC<->asset only (the unified book's domain)
+    if (!route || !route.seqAsset) return null;
     if (!S.payRail || !S.recvRail) return null;
-    const book = (UBOOK && UBOOK.seqAsset === route.seqAsset) ? UBOOK : null;
+    // Asset-paired markets are served now: /book/unified takes a ?quote asset, so
+    // EURX/OILX has a unified book like every BTC pair. The cached book must be for
+    // the SAME pair — matching only on the base asset would hand an EURX/OILX route
+    // the EURX/BTC book.
+    const wantQuote = (route.assetAsset && route.quoteAsset) ? route.quoteAsset : 'BTC';
+    const book = (UBOOK && UBOOK.seqAsset === route.seqAsset && (UBOOK.quote || 'BTC') === wantQuote) ? UBOOK : null;
     if (!book) return null;
     const side = route.payIsBtc ? 'buy' : 'sell';                     // buy = pay BTC / receive asset; sell = pay asset / receive BTC
     const offer = bestFor({ asks: book.asks || [], bids: book.bids || [] }, side);
@@ -6457,6 +6466,14 @@ async function requoteLn(route, amtStr){
   // book UI. For asset<->BTC that's the cross (XBOOK) book; asset<->asset has no BTC leg, so skip it (the
   // same-chain covenant book already rendered when the pair was picked).
   if (!route.assetAsset){ await loadBtcBook(route); deriveXOpposite(route); }
+  else {
+    // Asset-paired markets have a unified book now (?quote=<asset>), so load it here
+    // too — previously this branch loaded nothing and the composer had only the
+    // rail-specific books to fall back on.
+    const ub = await getUnifiedBook(route.seqAsset, route.quoteAsset);
+    UBOOK = ub ? { seqAsset: route.seqAsset, quote: ub.quote || route.quoteAsset,
+                   asks: ub.asks || [], bids: ub.bids || [] } : null;
+  }
   const side = route.payIsBtc ? 'buy' : 'sell';
   const am = C.assetMeta(route.seqAsset);
   const aprec = am.precision || 0;
