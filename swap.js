@@ -2444,7 +2444,13 @@ function renderMixedTake(route, plan){
   }
   // IOC truth: a market take reads only this single best-price offer, so a request larger than it fills THIS
   // offer and the remainder does NOT walk to further offers right now (multi-offer walk is a separate follow-up).
-  const capNote = sz.capped ? ' · this fills the best resting offer; the rest of your order will not fill right now' : '';
+  // Say plainly that the amount was LIMITED, and by how much. The old note explained
+  // the mechanism ("fills the best resting offer") without naming the number, so a
+  // request cut down by orders of magnitude read as the app quietly overwriting the
+  // field — which is exactly how it was reported.
+  const capNote = sz.capped
+    ? ` · limited to ${buy ? btcStr + ' BTC' : assetStr + ' ' + tk} — that is all this offer has right now`
+    : '';
   $('swRate').textContent = buy
     ? `${btcStr} BTC → ${assetStr} ${tk}${capNote}`
     : `${assetStr} ${tk} → ${btcStr} BTC${capNote}`;
