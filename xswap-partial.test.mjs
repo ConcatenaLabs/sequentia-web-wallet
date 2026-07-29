@@ -31,13 +31,16 @@ function installEnv(){
     removeItem: (k) => { store.delete(k); },
   };
   globalThis.document = { getElementById: () => null };
-  // The forward claim path reads the leg's own anchor (/lsp/anchor?tx=...) and the Sequentia tip
-  // (/lsp/anchor). Return an anchor at/above the BTC-leg height (gate passes) and a low tip (far from
-  // T_seq), so the happy path claims without waiting.
+  // The forward claim path reads the leg's own anchor + the node's anchor health +
+  // the leg block's quorum certification (/lsp/anchor?tx=...), and the Sequentia
+  // tip (/lsp/anchor). ALL THREE conjuncts of the claim gate must hold for the
+  // happy path to claim without waiting: anchor at/above the BTC-leg height,
+  // anchorstatus "ok", and the block certified. (A MISSING anchor_status counts as
+  // NOT ok: the gate fails closed and waits rather than assume a healthy anchor.)
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.includes('/anchor?')) return { ok: true, json: async () => ({ ok: true, anchor_height: 142600 }) };
-    if (u.endsWith('/anchor'))   return { ok: true, json: async () => ({ ok: true, height: 16500 }) };
+    if (u.includes('/anchor?')) return { ok: true, json: async () => ({ ok: true, anchor_height: 142600, anchor_status: 'ok', poscertified: true }) };
+    if (u.endsWith('/anchor'))   return { ok: true, json: async () => ({ ok: true, height: 16500, anchor_status: 'ok' }) };
     return { ok: false, status: 404, text: async () => '', json: async () => ({}) };
   };
 }
@@ -228,6 +231,14 @@ function reverseCtx(session){
   const rFundCalls = [], failNote = [];
   const C = {
     SEQOB: '/seqob', addrIndex: undefined,
+    // The asset FUNDER's anchor precondition reads these. A caught-up, healthy
+    // anchor (above the maker's BTC-leg height, which is what the funder aims at)
+    // lets these partial-fill tests exercise the sizing they are about; the
+    // precondition itself is pinned separately in xcross-fundsafety.test.mjs.
+    anchorTipStatus: async () => ({ height: CONF_H + 8, ok: true }),
+    anchorHeightOf: async () => CONF_H + 8,
+    seqTip: async () => T_SEQ - 400,
+    btcTip: async () => CONF_H,
     $: () => null, el: () => ({}),
     assetMeta: () => ({ ticker: 'GOLD', precision: 8 }),
     fmtAtoms: (v) => String(v),

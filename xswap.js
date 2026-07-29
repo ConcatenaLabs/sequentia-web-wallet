@@ -3,10 +3,13 @@
 //
 // A self-contained module — a sibling of swap.js (same-chain) and btc.js (the
 // Bitcoin testnet4 layer) — wired once by the main wallet via initXswap(ctx).
-// It drives the daemon's stateful cross-chain swap maker (seqdex.v1
-// XchainService, served as REST `/v1/xchain/*` on the one-port daemon).
+// It lifts a resting cross offer over the SeqOB order-book COURIER: a sealed,
+// relay-opaque message channel to the maker (xcourier.js). Every value transfer
+// is a client-side HTLC settlement here, so no courier message is ever trusted
+// with funds. (An earlier build could also drive a stateful RFQ daemon over REST
+// `/v1/xchain/*`; that rail is retired and its client code is gone.)
 //
-// MVP direction (the only one the daemon offers): the taker BUYS a SEQ asset,
+// Direction: the taker BUYS a SEQ asset,
 // paying BTC. The taker is the INITIATOR and locks the BTC leg first, so the
 // BTC-leg-first ordering rule and the anchor-shortened SEQ confirmation hold.
 //
@@ -20,17 +23,19 @@
 //                 BTC-refund key; build the BTC-leg HTLC redeemScript via the
 //                 binding (claim=maker w/ s, refund=taker after T_btc); fund the
 //                 P2SH on the Bitcoin chain via btc.js; confirm.
-//   3. Propose    ProposeXchainSwap{quote_id,hash,btc_leg,taker pubkeys} ->
-//                 XchainSwapAccepted{swap_id, seq_leg{...}} | XchainSwapFail.
-//   4. Anchor     MANDATORY gate: verify seq_leg.anchor_height >= btc_leg.height
-//                 (and surface the node's anchorstatus). No auto-advance.
+//   3. Announce   the funded BTC leg goes to the maker over the courier session;
+//                 the maker verifies it, waits for its own anchor to reach that
+//                 leg's height, locks the asset leg and announces it back.
+//   4. Anchor     MANDATORY gate: the asset leg's OWN block must anchor >= the
+//                 BTC-leg height, with a healthy anchorstatus. No auto-advance.
 //   5. Claim SEQ  buildSeqHtlcClaimTx(spend, redeem_script, claim_secret, s) ->
 //                 broadcast via the wallet's Sequentia esplora. Reveals s.
-//   6. Done/poll  GetXchainSwap{swap_id} on a setInterval until BTC_CLAIMED.
+//   6. Done       the maker reads s off that claim ON-CHAIN and sweeps the BTC
+//                 itself; there is no daemon and nothing left to poll.
 //   7. Refund     off-ramp: after T_btc, refund the BTC leg via btc.js (the
 //                 ELSE/CLTV branch) — a Bitcoin tx, not the SEQ binding.
 //
-// Swap state (secret, swap_id, legs, timeouts) is persisted to localStorage so
+// Swap state (secret, legs, timeouts) is persisted to localStorage so
 // a page reload can still claim or refund — essential for a time-sensitive
 // cross-chain swap.
 //
@@ -59,16 +64,13 @@ let C = null;            // the injected app context (see index.html initXswapTa
 let XMARKETS = [];       // [{ btc_asset, seq_asset, name, seq_reserve, btc_reserve, price_seq_per_btc }]
 let LAST_XQUOTE = null;  // the live quote for the selected market+amount
 let SWAP = null;         // the persisted in-flight swap (see loadSwap/saveSwap)
-let POLL = null;         // setInterval handle for the GetXchainSwap poll
 let COUNTDOWN = null;    // setInterval handle for the quote-expiry countdown
 let XSESSION = null;     // live courier CourierSession while a swap auto-drives (null after reload)
 
-// Transport: the order-book COURIER (SeqOB relay) by default; flip to false to
-// fall back to the legacy RFQ daemon (/v1/xchain/*) without losing that path.
-// The courier discovers resting cross offers and carries the HTLC handshake as
-// opaque sealed messages; the client-side settlement (lock/verify/anchor/claim)
-// is identical to the RFQ path — only the transport differs.
-let USE_COURIER = true;
+// Transport: the order-book COURIER (SeqOB relay), and nothing else. It discovers
+// resting cross offers and carries the HTLC handshake as opaque sealed messages;
+// every value transfer is a client-side HTLC settlement, so no courier message is
+// ever trusted with funds.
 
 const LS_KEY = 'swk.sequentia.xswap';   // localStorage key for the in-flight swap
 
@@ -83,24 +85,13 @@ const ST = {
   FAILED:     'XCHAIN_SWAP_STATE_FAILED',
 };
 
-// POST <DEX>/v1/xchain/... as JSON; returns parsed JSON (or throws a useful
-// message). Identical contract to swap.js's dexPost, against the cross-chain
-// base (which may differ from the same-chain one — see ctx.XDEX).
-async function dexPost(path, body){
-  const r = await fetch(C.XDEX + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  const txt = await r.text();
-  let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { _raw: txt }; }
-  if (!r.ok) {
-    // grpc-gateway errors (incl. quote/swap NotFound) come back as {code,message}.
-    const msg = (j && (j.message || j.error)) || j._raw || ('HTTP ' + r.status);
-    throw new Error(msg);
-  }
-  return j;
-}
+// NOTE: there is no HTTP transport here any more. This wizard used to be able to
+// fall back to the legacy RFQ daemon (`/v1/xchain/*`), which is RETIRED: the
+// daemon still binds :9945 but nothing routes to it, so every one of those calls
+// was a request that could only hang or 404 — a rail a trade could enter and
+// never leave. The order-book COURIER (SeqOB relay, opaque sealed messages) is
+// the only transport, and when it is unreachable the wizard says so and disables
+// Place rather than routing onto a dead rail.
 
 // The gateway emits camelCase but accepts snake_case on input; read a field by
 // EITHER form so the wizard is robust to the marshaler. uint64/int64 come back
@@ -242,19 +233,15 @@ export function initXswap(ctx){
   // Point the order-book client at the relay (same base swap.js uses; both import
   // the one seqob.js module instance, so this is idempotent).
   if (C.SEQOB && seqob.setSeqobBase) seqob.setSeqobBase(C.SEQOB);
-  if (typeof C.useCourier === 'boolean') USE_COURIER = C.useCourier;
   const { $ } = C;
-  if ($ && $('btnXswapQuote') && !$('btnXswapQuote')._wired){
-    $('btnXswapQuote')._wired = true;
-    $('btnXswapQuote').onclick = onQuote;
-    $('btnXLockBtc') && ($('btnXLockBtc').onclick = onLockBtc);
-    $('btnXPropose') && ($('btnXPropose').onclick = onPropose);
-    $('btnXClaim')   && ($('btnXClaim').onclick   = onClaimSeq);
+  // Only the in-flight-swap controls are wired: the quote FORM is gone with the
+  // RFQ rail (the composer is the single entry point), so there is no quote or
+  // propose button left to bind.
+  if ($ && $('btnXClaim') && !$('btnXClaim')._wired){
+    $('btnXClaim')._wired = true;
+    $('btnXClaim').onclick   = onClaimSeq;
     $('btnXRefund')  && ($('btnXRefund').onclick  = onRefundBtc);
     $('btnXAbandon') && ($('btnXAbandon').onclick = onAbandon);
-    $('xMarket') && ($('xMarket').onchange = () => { resetQuote(); updateAmtLabel(); });
-    // Reference-currency hint under the amount (denominated in the SEQ asset bought).
-    if (C.attachRefHint && $('xAmount')) C.attachRefHint($('xAmount'), () => amountAsset());
   }
 }
 
@@ -266,21 +253,10 @@ export function initXswap(ctx){
 // internals (lock/propose/anchor gate/claim/poll, localStorage resume) are reused
 // untouched — only the quote FORM is bypassed (the composer replaces it).
 // ---------------------------------------------------------------------------
-// Composer market/quote entrypoints. Dispatch to the courier (order book) or the
-// legacy RFQ by USE_COURIER; the exported names are stable (swap.js/index.html
-// call them).
-export async function fetchXmarkets(){
-  return USE_COURIER ? fetchXmarketsCourier() : fetchXmarketsRFQ();
-}
-export async function fetchXquote(seqAsset, seqAtoms){
-  return USE_COURIER ? fetchXquoteCourier(seqAsset, seqAtoms) : fetchXquoteRFQ(seqAsset, seqAtoms);
-}
-
-async function fetchXmarketsRFQ(){
-  const resp = await dexPost('/v1/xchain/markets', {});
-  XMARKETS = (Array.isArray(pick(resp, 'markets')) ? pick(resp, 'markets') : []).map(normMarket);
-  return XMARKETS;
-}
+// Composer market/quote entrypoints — courier (order book) only; the exported
+// names are stable (swap.js/index.html call them).
+export async function fetchXmarkets(){ return fetchXmarketsCourier(); }
+export async function fetchXquote(seqAsset, seqAtoms){ return fetchXquoteCourier(seqAsset, seqAtoms); }
 
 // ---- courier (order-book) discovery ----
 // A forward cross offer: a resting CrossChainTerms offer to SELL a Sequentia
@@ -430,44 +406,21 @@ async function fetchXquoteCourier(seqAsset, seqAtoms){
   };
 }
 
-// Get a cross-chain quote for `seqAtoms` of `seqAsset` (RFQ). Returns the SAME
-// normalized quote object the form's onQuote builds (incl. the T_btc>T_seq check),
-// so openFromComposer can drive the rest of the wizard identically.
-async function fetchXquoteRFQ(seqAsset, seqAtoms){
-  const market = XMARKETS.find(m => m.seq_asset === seqAsset);
-  const resp = await dexPost('/v1/xchain/quote', { seq_asset: seqAsset, seq_amount: String(seqAtoms) });
-  const q = {
-    market: market || { btc_asset:'', seq_asset:seqAsset, name:'BTC / Sequentia asset', price_seq_per_btc:0 },
-    quote_id:            pick(resp, 'quote_id', 'quoteId'),
-    seq_amount:          big(pick(resp, 'seq_amount', 'seqAmount')),
-    btc_amount:          big(pick(resp, 'btc_amount', 'btcAmount')),
-    price_seq_per_btc:   num(pick(resp, 'price_seq_per_btc', 'priceSeqPerBtc')),
-    fee_btc:             big(pick(resp, 'fee_btc', 'feeBtc')),
-    maker_btc_claim_pub: pick(resp, 'maker_btc_claim_pub', 'makerBtcClaimPub'),
-    maker_seq_refund_pub:pick(resp, 'maker_seq_refund_pub', 'makerSeqRefundPub'),
-    btc_locktime:        num(pick(resp, 'btc_locktime', 'btcLocktime')),
-    seq_locktime:        num(pick(resp, 'seq_locktime', 'seqLocktime')),
-    expires_at_unix:     Number(pick(resp, 'expires_at_unix', 'expiresAtUnix') || 0),
-  };
-  if (!(q.btc_locktime > q.seq_locktime))
-    throw new Error(`maker returned a bad ordering: T_btc(${q.btc_locktime}) must exceed T_seq(${q.seq_locktime})`);
-  return q;
-}
 // Seed the wizard with a composer-supplied quote and show the lock step. The
 // stepper host (#xStepper) + the lock review modal (onLockBtc) take over from here.
 export function openFromComposer(q){
   LAST_XQUOTE = q;
   if (!XMARKETS.length && q && q.market) XMARKETS = [q.market];
-  if (USE_COURIER && q && (q.courier || q.offer)){
-    // Order-book courier: open a session, confirm the maker's terms once, then
-    // auto-drive lock -> announce -> anchor gate -> claim.
-    runForwardCourier(q);
+  if (!q || !(q.courier || q.offer)){
+    // No resting offer behind this quote means there is nothing to lift. The RFQ
+    // rail that used to accept a quote-only object is retired, so say so plainly
+    // rather than opening a wizard that can never complete.
+    const e = C.$('xswapErr'); if (e) e.textContent = 'Could not load the order book right now - nothing was spent. Try again shortly.';
     return;
   }
-  // Legacy RFQ: the composer already showed the quote, so go straight to "lock".
-  renderStepper();
-  startCountdown();
-  onLockBtc();
+  // Order-book courier: open a session, confirm the maker's terms once, then
+  // auto-drive lock -> announce -> anchor gate -> claim.
+  runForwardCourier(q);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +626,7 @@ async function runForwardCourier(q){
       return;
     }
     setStepStatus('anchor', 'Checking the asset leg is anchored to a Bitcoin block at or above your lock…', true);
-    let gate = verifyAnchor(await fetchLegAnchor());
+    let gate = await verifyAnchorFull();
     if (!gate.ok && gate.unconfirmed){
       // The leg's block hasn't confirmed/anchored yet — wait for it to confirm (NOT for the tip).
       // Bails to refund near T_btc, or immediately if the leg confirms anchored-before-your-lock.
@@ -791,7 +744,6 @@ function updateAmtLabel(){
 function resetQuote(){
   LAST_XQUOTE = null;
   if (COUNTDOWN){ clearInterval(COUNTDOWN); COUNTDOWN = null; }
-  const q = C.$('xQuoteBox'); if (q) q.classList.add('hide');
   const e = C.$('xswapErr'); if (e) e.textContent = '';
 }
 
@@ -811,7 +763,7 @@ async function resumeAnchorClaim(){
   const lg = verifyLeg(); if (!lg.ok) return;
   _resumeClaiming = true;
   try {
-    let gate = verifyAnchor(await fetchLegAnchor());
+    let gate = await verifyAnchorFull();
     if (!gate.ok && gate.unconfirmed) gate = await awaitAnchor();
     if (!gate.ok) { renderStepper(); return; }   // unsafe (anchored before lock) or timed out near T_btc; stepper shows refund guidance
     const txid = await claimSeq();
@@ -888,7 +840,7 @@ export async function renderXswap(){
   const status = $('xswapStatus');
   if (status){ status.className = 'status'; status.innerHTML = '<span class="spin"></span>Loading cross-chain markets…'; }
   try {
-    await fetchXmarkets();               // courier or RFQ per USE_COURIER
+    await fetchXmarkets();               // order-book courier discovery
     if (status) status.textContent = '';
     populateMarketSelect();
     renderMarketList();
@@ -943,72 +895,9 @@ function renderMarketList(){
   }
 }
 
-// ---- step 1: quote ----
-async function onQuote(){
-  const { $ } = C;
-  $('xswapErr').textContent = '';
-  const m = selMarket();
-  if (!m){ $('xswapErr').textContent = 'select a market'; return; }
-  let amtAtoms;
-  try {
-    const amtStr = ($('xAmount').value || '').trim();
-    amtAtoms = C.parseAtoms(amtStr, C.assetMeta(m.seq_asset).precision || 0);
-    if (amtAtoms <= 0n) throw new Error('enter an amount greater than zero');
-  } catch (e){ $('xswapErr').textContent = e?.message ?? String(e); return; }
-
-  const status = $('xswapStatus');
-  status.className = 'status'; status.innerHTML = '<span class="spin"></span>Quoting…';
-  try {
-    const resp = await dexPost('/v1/xchain/quote', { seq_asset: m.seq_asset, seq_amount: amtAtoms.toString() });
-    LAST_XQUOTE = {
-      market: m,
-      quote_id:            pick(resp, 'quote_id', 'quoteId'),
-      seq_amount:          big(pick(resp, 'seq_amount', 'seqAmount')),
-      btc_amount:          big(pick(resp, 'btc_amount', 'btcAmount')),
-      price_seq_per_btc:   num(pick(resp, 'price_seq_per_btc', 'priceSeqPerBtc')),
-      fee_btc:             big(pick(resp, 'fee_btc', 'feeBtc')),
-      maker_btc_claim_pub: pick(resp, 'maker_btc_claim_pub', 'makerBtcClaimPub'),
-      maker_seq_refund_pub:pick(resp, 'maker_seq_refund_pub', 'makerSeqRefundPub'),
-      btc_locktime:        num(pick(resp, 'btc_locktime', 'btcLocktime')),
-      seq_locktime:        num(pick(resp, 'seq_locktime', 'seqLocktime')),
-      expires_at_unix:     Number(pick(resp, 'expires_at_unix', 'expiresAtUnix') || 0),
-    };
-    // The ordering invariant the whole mechanism rests on: T_btc > T_seq.
-    if (!(LAST_XQUOTE.btc_locktime > LAST_XQUOTE.seq_locktime))
-      throw new Error(`maker returned a bad ordering: T_btc(${LAST_XQUOTE.btc_locktime}) must exceed T_seq(${LAST_XQUOTE.seq_locktime})`);
-    status.textContent = '';
-    showQuote();
-  } catch (e){
-    status.textContent = '';
-    $('xswapErr').textContent = 'Quote failed: ' + (e?.message ?? e);
-  }
-}
-
-function showQuote(){
-  const { $ } = C; const q = LAST_XQUOTE; if (!$('xQuoteBox')) return;
-  const sm = C.assetMeta(q.market.seq_asset);
-  $('xQuoteBox').classList.remove('hide');
-  $('xQBuy').textContent = C.fmtAtoms(q.seq_amount, sm.precision) + ' ' + sm.ticker;
-  $('xQBuyRef').textContent = (C.refValueStr && C.refValueStr(q.market.seq_asset, q.seq_amount)) || '';
-  $('xQPay').textContent = C.fmtAtoms(q.btc_amount, 8) + ' BTC';
-  $('xQPayRef').textContent = (C.refValueStr && C.refValueStr('BTC', q.btc_amount)) || '';
-  $('xQFee').textContent = C.fmtAtoms(q.fee_btc, 8) + ' BTC';
-  $('xQTimeouts').textContent = `T_btc=${q.btc_locktime} (you refund BTC) · T_seq=${q.seq_locktime} (maker refunds on Sequentia)`;
-  startCountdown();
-  $('btnXLockBtc') && $('btnXLockBtc').classList.remove('hide');
-}
-function startCountdown(){
-  const { $ } = C; const el = $('xQExpiry'); if (!el) return;
-  if (COUNTDOWN){ clearInterval(COUNTDOWN); COUNTDOWN = null; }
-  const tick = () => {
-    if (!LAST_XQUOTE || !LAST_XQUOTE.expires_at_unix){ el.textContent = ''; return; }
-    const secs = LAST_XQUOTE.expires_at_unix - Math.floor(Date.now()/1000);
-    if (secs <= 0){ el.textContent = 'Quote expired - get a fresh quote.'; el.className = 'sub err';
-      if (COUNTDOWN){ clearInterval(COUNTDOWN); COUNTDOWN = null; } return; }
-    el.className = 'sub'; el.textContent = `Quote valid for ${secs}s`;
-  };
-  tick(); COUNTDOWN = setInterval(tick, 1000);
-}
+// (The old RFQ quote FORM lived here: onQuote/showQuote/startCountdown, all of
+// which POSTed to the retired /v1/xchain/quote. The composer is the single entry
+// point now, and its quote comes from the order book.)
 
 // ---- step 2: lock the BTC leg ----
 // Build the swap secret + the taker's two keys, the BTC-leg HTLC redeemScript
@@ -1108,67 +997,16 @@ async function onLockBtc(){
   };
 }
 
-// ---- step 3: propose (maker verifies BTC leg + locks Sequentia leg) ----
-async function propose(){
-  if (!SWAP) throw new Error('no in-flight swap');
-  const resp = await dexPost('/v1/xchain/propose', {
-    quote_id: SWAP.quote_id,
-    hash: SWAP.hash_hex,
-    btc_leg: {
-      txid: SWAP.btc_leg.txid, vout: SWAP.btc_leg.vout, height: SWAP.btc_leg.height,
-      redeem_script: SWAP.btc_redeem_script, amount: SWAP.btc_leg.amount.toString(),
-      asset_id: SWAP.btc_leg.asset_id || '',
-    },
-    taker_seq_claim_pub: SWAP.seq_claim_pub,
-    taker_btc_refund_pub: SWAP.btc_refund_pub,
-  });
-  // The propose oneof flattens to either `accepted` or `fail`.
-  const fail = pick(resp, 'fail', 'swap_fail', 'swapFail');
-  if (fail) {
-    const code = pick(fail, 'code') || 'FAIL';
-    const msg = pick(fail, 'message') || 'maker rejected the swap';
-    SWAP.state = ST.FAILED; SWAP.detail = code + ': ' + msg; saveSwap();
-    throw new Error(`${code}: ${msg}`);
-  }
-  const accepted = pick(resp, 'accepted', 'swap_accept', 'swapAccept');
-  if (!accepted) throw new Error('no XchainSwapAccepted in propose response');
-  SWAP.swap_id = pick(accepted, 'swap_id', 'swapId');
-  SWAP.seq_leg = normSeqLeg(pick(accepted, 'seq_leg', 'seqLeg'));
-  { const lg = verifyLeg(); if (!lg.ok){ SWAP.state = ST.FAILED; SWAP.detail = lg.reason; saveSwap(); throw new Error('swap aborted: ' + lg.reason); } }
-  SWAP.state = ST.SEQ_LOCKED;
-  saveSwap();
-  return SWAP;
-}
-// The cross-chain quote is SINGLE-USE: the first propose consumes it on the maker.
-// The propose then blocks ~1-2 min while the maker locks AND confirms the Sequentia
-// leg, so a double-click in that window would hit the maker with an already-consumed
-// quote and fail "unknown or expired quote_id". Guard against it and disable the button.
-let PROPOSING = false;
-async function onPropose(){
-  const { $ } = C;
-  if (PROPOSING) return;
-  PROPOSING = true;
-  const btn = $('btnXPropose'); if (btn) btn.disabled = true;
-  $('xswapErr').textContent = '';
-  setStepStatus('propose', 'Proposing to the maker; locking and confirming the Sequentia leg (can take 1-2 min on testnet). Please wait, do not re-click.', true);
-  try {
-    await propose();
-    renderStepper();
-    C.toast && C.toast('Sequentia leg locked by the maker; verify the anchor next.');
-  } catch (e){
-    $('xswapErr').textContent = 'Propose failed: ' + C.prettyErr(e);
-    renderStepper();
-  } finally {
-    PROPOSING = false;
-  }
-}
+// (The old RFQ "propose" step lived here. On the courier the maker locks its
+// asset leg by itself and announces it over the session, so there is nothing to
+// POST and nothing to click.)
 
 // ---- step 4: anchor-ordering verification (FIRST-CLASS, MANDATORY GATE) ----
 // The Sequentia value-add. We REQUIRE the asset leg's OWN Bitcoin anchor >= btc_leg.height
 // before allowing the SEQ claim: the Sequentia leg is bound to a Bitcoin block at or
 // after the one your BTC lock confirmed in, so it can't outlive your BTC — if
 // Bitcoin reorgs your lock away, the Sequentia leg reorgs with it. We read the anchor of
-// the leg's OWN block (seq_leg.block_hash) from a full node (fetchLegAnchor) — the FIXED
+// the leg's OWN block (seq_leg.block_hash) from a full node (fetchLegAnchorEvidence) — the FIXED
 // safety quantity, not the rising chain tip and not the maker's self-reported number.
 // Value-binding gate: the maker's locked Sequentia leg must match what we agreed to
 // buy (asset + at least the agreed amount). Without it, a malicious maker locks dust
@@ -1224,22 +1062,63 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // The SWAP LEG'S own Bitcoin-anchor height: the anchor of the Sequentia block that holds the maker's
 // HTLC (seq_leg.block_hash), read from a full node via the LSP's /anchor?block=<hash>. This is the
 // FIXED safety quantity (a block's anchor never rises) and it is keyed to the leg's OWN block, so the
-// maker cannot inflate it by self-reporting a higher number. Returns -1 while the leg's block is not
-// yet confirmed (or on any read error), so the caller WAITS for confirmation rather than proceeding.
-async function fetchLegAnchor(){
+// maker cannot inflate it by self-reporting a higher number. Returned alongside it are the node's
+// live anchorstatus and the leg block's quorum certification, the other two conjuncts of the claim
+// gate. anchor is -1 while the leg's block is not yet confirmed (or on any read error), so the
+// caller WAITS for confirmation rather than proceeding on an unknown anchor.
+async function fetchLegAnchorEvidence(){
   try {
     const leg = SWAP && SWAP.seq_leg;
     // Prefer the leg's own txid (always present) so the lookup works even if the maker sent the leg
     // before it confirmed into a block; fall back to a known block_hash.
     const q = leg && leg.txid ? ('tx=' + encodeURIComponent(leg.txid))
             : (leg && leg.block_hash ? ('block=' + encodeURIComponent(leg.block_hash)) : null);
-    if (!q) return -1;
+    if (!q) return { anchor: -1, statusOk: false, certified: null };
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/lsp';
     const r = await fetch(base + '/anchor?' + q, { signal: AbortSignal.timeout(6000) });
     const j = await r.json();
-    if (j && j.ok && Number.isFinite(Number(j.anchor_height))) return Number(j.anchor_height);
+    // anchor_height comes back NULL while the node does not know the leg's tx yet
+    // (the LSP answers {ok:true, anchor_height:null} for an unknown/unconfirmed
+    // one). Number(null) is 0 — and 0 IS finite, so the old guard let a null
+    // through as anchor 0. Anchor 0 reads as "confirmed, but anchored BELOW your
+    // BTC lock", which is the TERMINAL unsafe verdict: a leg that had simply not
+    // confirmed yet was condemned, and awaitAnchor gave up on the spot instead of
+    // waiting one more block. An absent anchor means UNKNOWN, so map it to -1 and
+    // take the WAIT path.
+    const rawAnchor = (j && j.anchor_height != null) ? Number(j.anchor_height) : NaN;
+    if (j && j.ok && Number.isFinite(rawAnchor))
+      return {
+        anchor: rawAnchor,
+        // anchorstatus of the node's own tip. Missing (an endpoint predating the
+        // field) counts as NOT ok: we never assume a healthy anchor we cannot see.
+        statusOk: j.anchor_status === 'ok',
+        // Quorum certification of the LEG'S block. null = the node predates the
+        // poscertified field, in which case we stay anchor-only, matching the
+        // daemon's VerifySeqLegSafe feature detection.
+        certified: (j.poscertified != null) ? !!j.poscertified : null,
+      };
   } catch {}
-  return -1;   // unconfirmed or unreadable -> caller waits (never proceeds on an unknown anchor)
+  return { anchor: -1, statusOk: false, certified: null };   // unconfirmed/unreadable -> caller waits
+}
+
+// verifyAnchorFull is the CLAIM gate, and it is the JS twin of the daemon's
+// VerifySeqLegSafe — all THREE conjuncts, not just the ordering one:
+//   1. the leg block's own anchor >= our BTC-leg height   (verifyAnchor; TERMINAL when it fails)
+//   2. the node's anchorstatus is "ok"                    (transient; wait it out)
+//   3. the leg's block is quorum-certified                (transient; countersignatures accrue)
+// Before this, the wallet checked only (1) — weaker than both the Go taker and
+// the wallet's own reverse-direction maker gate in xmaker.js.
+async function verifyAnchorFull(){
+  const ev = await fetchLegAnchorEvidence();
+  const gate = verifyAnchor(ev.anchor);
+  if (!gate.ok) return gate;   // ordering/unconfirmed verdicts are unchanged
+  if (!ev.statusOk)
+    return { ok: false, anchor_height: ev.anchor, btc_height: gate.btc_height, unconfirmed: true,
+      reason: 'your Sequentia node’s Bitcoin-anchor status is not healthy right now, so the leg’s anchoring cannot be trusted yet' };
+  if (ev.certified === false)
+    return { ok: false, anchor_height: ev.anchor, btc_height: gate.btc_height, unconfirmed: true,
+      reason: 'the block holding the asset leg is not yet quorum-certified by the Sequentia committee' };
+  return gate;
 }
 
 // The Bitcoin (testnet4) tip height — used only to decide when the refund window is close.
@@ -1281,7 +1160,7 @@ async function awaitAnchor(){
   for (;;){
     if (!SWAP || SWAP.state === ST.FAILED || SWAP.state === ST.REFUNDED)
       return { ok: false, reason: 'swap no longer active' };
-    const gate = verifyAnchor(await fetchLegAnchor());
+    const gate = await verifyAnchorFull();
     if (gate.ok) return gate;
     if (gate.unsafe) return gate;   // confirmed but anchored BEFORE your lock — fixed; refund, don't wait
     const btcTip = await btcTipHeight();
@@ -1309,7 +1188,7 @@ async function awaitAnchor(){
 // ClaimSEQLeg fee).
 async function claimSeq(){
   if (!SWAP || !SWAP.seq_leg) throw new Error('no Sequentia leg to claim');
-  const gate = verifyAnchor(await fetchLegAnchor());   // re-read the LEG'S OWN anchor from the node at the moment of claim
+  const gate = await verifyAnchorFull();   // re-read the LEG'S OWN anchor + node health from the node at the moment of claim
   if (!gate.ok) throw new Error('anchor gate not satisfied: ' + gate.reason);   // belt-and-suspenders; the UI also gates the button
   const lg = verifyLeg();
   if (!lg.ok) throw new Error('leg mismatch: ' + lg.reason);   // never reveal the preimage on a mismatched leg
@@ -1393,7 +1272,7 @@ async function broadcastSeqTx(rawHex){
 async function onClaimSeq(){
   const { $ } = C;
   $('xswapErr').textContent = '';
-  const gate = verifyAnchor(await fetchLegAnchor());
+  const gate = await verifyAnchorFull();
   if (!gate.ok){ $('xswapErr').textContent = gate.unconfirmed
     ? 'not yet claimable: ' + gate.reason + ' (this clears once the maker’s asset block confirms · the wallet retries automatically).'
     : 'cannot claim: ' + gate.reason; return; }
@@ -1414,37 +1293,15 @@ async function onClaimSeq(){
       const txid = await claimSeq();
       modal.remove();
       renderStepper();
-      if (!SWAP.courier) startPoll();   // courier: no RFQ poll; the maker claims BTC off-chain
       C.toast && C.toast('Sequentia leg claimed (anchor-bounded):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
     } catch (e){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
   };
 }
 
-// ---- step 6: poll until the maker claims the BTC leg ----
-async function pollOnce(){
-  if (!SWAP || !SWAP.swap_id) return null;
-  const resp = await dexPost('/v1/xchain/swap', { swap_id: SWAP.swap_id });
-  const state = pick(resp, 'state');
-  if (state) SWAP.state = state;
-  const sc = pick(resp, 'seq_claim_txid', 'seqClaimTxid'); if (sc) SWAP.seq_claim_txid = sc;
-  const bc = pick(resp, 'btc_claim_txid', 'btcClaimTxid'); if (bc) SWAP.btc_claim_txid = bc;
-  const pre = pick(resp, 'preimage'); if (pre) SWAP.preimage = pre;
-  const det = pick(resp, 'detail'); if (det) SWAP.detail = det;
-  const sl = normSeqLeg(pick(resp, 'seq_leg', 'seqLeg')); if (sl && sl.txid) SWAP.seq_leg = sl;
-  saveSwap();
-  return SWAP;
-}
-function startPoll(){
-  if (POLL) return;
-  POLL = setInterval(async () => {
-    try {
-      await pollOnce();
-      renderStepper();
-      if (SWAP && (SWAP.state === ST.BTC_CLAIMED || SWAP.state === ST.REFUNDED || SWAP.state === ST.FAILED)) stopPoll();
-    } catch (e){ /* transient; keep polling */ }
-  }, 2000);
-}
-function stopPoll(){ if (POLL){ clearInterval(POLL); POLL = null; } }
+// (The old RFQ poll lived here — GetXchainSwap on a setInterval. On the courier
+// the taker is done the moment it claims the asset leg: the maker reads the
+// preimage off that claim on-chain and sweeps the BTC itself, with no daemon in
+// between and nothing left to poll for.)
 
 // ---- step 7: refund off-ramp (BTC leg, after T_btc — a Bitcoin tx via btc.js) ----
 async function onRefundBtc(){
@@ -1548,7 +1405,7 @@ function onAbandon(){
     try { C.toast && C.toast('Your Bitcoin is still locked. Use “Refund BTC leg” (available after the timeout) before clearing — otherwise the reclaim keys are lost.'); } catch {}
     return;
   }
-  stopPoll(); clearSwap(); renderStepper();
+  clearSwap(); renderStepper();
   if (C.onExit) C.onExit();
 }
 
@@ -1652,10 +1509,6 @@ function renderStepper(){
   ctl.appendChild(row);
   wrap.appendChild(ctl);
 
-  // Keep polling alive across a re-render if we're past propose and not terminal.
-  // Courier swaps have no RFQ poll endpoint — the maker claims BTC off-chain and
-  // the taker is done after its own SEQ claim — so never poll for them.
-  if (!SWAP.courier && SWAP.swap_id && (SWAP.state === ST.SEQ_LOCKED || SWAP.state === ST.SEQ_CLAIMED)) startPoll();
 }
 
 function kvRow(k, v){
@@ -1711,31 +1564,25 @@ function stepLockCard(){
   return stepCard(1, 'Lock BTC leg', done, !done, body);
 }
 function stepProposeCard(){
-  const done = !!(SWAP.swap_id);
+  const done = !!(SWAP.seq_leg && SWAP.seq_leg.txid);
   // A stranded courier swap (BTC locked, maker session gone, no asset leg, no re-announce path) is NOT
   // "active" — showing "Now" implied the maker was still locking. It is refund-only; render it as such.
   const active = !done && !SWAP.stranded && !!(SWAP.btc_leg && SWAP.btc_leg.txid && SWAP.btc_leg.vout != null) && SWAP.state !== ST.FAILED;
   const body = SWAP.stranded
     ? [ C.el('div','sub','This swap was interrupted after your Bitcoin lock and can no longer complete with the maker.') ]
     : [ C.el('div','sub','The maker verifies your BTC leg, then locks the Sequentia leg in an anchored Sequentia block.') ];
-  if (done && SWAP.swap_id && !SWAP.courier) body.push(kvRowCopy('Swap id', SWAP.swap_id));
   if (SWAP.seq_leg && SWAP.seq_leg.txid) body.push(kvRowHtml('Sequentia lock tx', txLink(SWAP.seq_leg.txid, false)));
   if (SWAP.stranded) body.push(errLine('Your BTC is safe and refunds at block ' + SWAP.btc_locktime + '.'));
   if (SWAP.state === ST.FAILED) body.push(errLine(SWAP.detail || 'propose failed'));
-  const c = stepCard(2, SWAP.courier ? 'Maker locks the asset' : 'Propose to maker', done, active, body);
-  // Courier swaps advance automatically (no manual propose); the RFQ path keeps
-  // the explicit button.
-  if (active && !SWAP.courier){
-    const btn = C.el('button','primary','Propose swap'); btn.id = 'btnXPropose'; btn.onclick = onPropose;
-    btn.style.marginTop = '10px'; c.appendChild(btn);
-  }
-  return c;
+  // The maker locks its asset leg by itself and announces it over the session, so
+  // this step advances on its own — there is nothing for the user to press.
+  return stepCard(2, 'Maker locks the asset', done, active, body);
 }
 function stepAnchorCard(){
   const have = !!(SWAP.seq_leg && SWAP.seq_leg.txid);
   // Display-only gate: use the maker's reported leg anchor so the card/button aren't dead (verifyAnchor
   // now needs an explicit anchor; a no-arg call is NaN -> always "unconfirmed"). The REAL safety gate
-  // re-reads the leg's own on-chain anchor via fetchLegAnchor() at claim time (claimSeq/onClaimSeq).
+  // re-reads the leg's own on-chain anchor + the node's anchor health via verifyAnchorFull() at claim time (claimSeq/onClaimSeq).
   const gate = have ? verifyAnchor(Number(SWAP && SWAP.seq_leg && SWAP.seq_leg.anchor_height)) : { ok:false };
   const done = have && gate.ok;
   const body = [
@@ -1756,7 +1603,7 @@ function stepClaimCard(){
   const have = !!(SWAP.seq_leg && SWAP.seq_leg.txid);
   // Display-only gate: use the maker's reported leg anchor so the card/button aren't dead (verifyAnchor
   // now needs an explicit anchor; a no-arg call is NaN -> always "unconfirmed"). The REAL safety gate
-  // re-reads the leg's own on-chain anchor via fetchLegAnchor() at claim time (claimSeq/onClaimSeq).
+  // re-reads the leg's own on-chain anchor + the node's anchor health via verifyAnchorFull() at claim time (claimSeq/onClaimSeq).
   const gate = have ? verifyAnchor(Number(SWAP && SWAP.seq_leg && SWAP.seq_leg.anchor_height)) : { ok:false };
   const claimed = !!(SWAP.seq_claim_txid) || SWAP.state === ST.SEQ_CLAIMED || SWAP.state === ST.BTC_CLAIMED;
   const active = have && gate.ok && !claimed;
@@ -1801,13 +1648,12 @@ function errLine(t){ const d = C.el('div','status err'); d.textContent = t; retu
 // (quote -> lockBTC -> propose -> verifyAnchor -> claimSEQ -> poll) without a
 // browser/DOM. Unused by the browser app (which imports initXswap/renderXswap).
 export const __test__ = {
-  dexPost, pick, normMarket, normSeqLeg,
-  lockBtcLeg, propose, verifyAnchor, verifyLeg, claimSeq, pollOnce,
+  pick, normMarket, normSeqLeg,
+  lockBtcLeg, verifyAnchor, verifyAnchorFull, fetchLegAnchorEvidence, verifyLeg, claimSeq,
   takerDestSpkHex, broadcastSeqTx, startCountdown: () => {},
   // courier internals
   isForwardCrossOffer, bestForwardOffer, normCourierSeqLeg, fetchXquoteCourier, fetchXmarketsCourier,
   proportionalBtcCeil, runForwardCourier,
-  setUseCourier: (v) => { USE_COURIER = !!v; }, getUseCourier: () => USE_COURIER,
   // state accessors for the harness
   getSwap: () => SWAP, setSwap: (s) => { SWAP = s; saveSwap(); },
   setQuote: (q) => { LAST_XQUOTE = q; }, getQuote: () => LAST_XQUOTE,
