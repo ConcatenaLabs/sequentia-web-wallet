@@ -313,10 +313,35 @@ export function disconnectProvisioned(assetId) {
 }
 
 // -- 2. LSP HTTP client (plain fetch; Node-testable) ---------------------------
+// How long an LSP call may take before it is a failure rather than a wait.
+//
+// ⚠ THIS USED TO BE UNBOUNDED, and that is why a rail-crossing trade could look like
+// the app had ignored the button press: a bare fetch that never resolves leaves the
+// caller awaiting forever, so the swap record stayed in 'starting', its driver lock
+// stayed held, and the in-flight guard blocked every future trade with nothing on
+// screen to explain it. A hung request must fail so the record can reach a terminal
+// state and the user can retry.
+//
+// Settlement calls are the slow ones (a JIT channel, a maker handshake), so the
+// budget is generous rather than tight; anything past it is a broken request, not a
+// slow one. Callers that genuinely wait on a counterparty poll do so by REPEATING a
+// bounded call, never by holding one open.
+const LSP_TIMEOUT_MS = 90_000;
+
 async function lspFetch(path, opts = {}) {
   const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   if (CFG.token) headers.authorization = `Bearer ${CFG.token}`;
-  const r = await fetch(CFG.lspUrl + path, { ...opts, headers });
+  const signal = opts.signal || AbortSignal.timeout(opts.timeoutMs || LSP_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch(CFG.lspUrl + path, { ...opts, headers, signal });
+  } catch (e) {
+    // Name the timeout for what it is. "The request timed out" is actionable; a bare
+    // AbortError surfaced as an unexplained stall.
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError'))
+      throw new Error('the request timed out - nothing of yours was committed');
+    throw e;
+  }
   const txt = await r.text();
   let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { ok: false, error: txt || 'bad json' }; }
   if (!r.ok || j.ok === false) {
