@@ -2582,7 +2582,9 @@ function postModeCross(route){
 
 async function requoteCross(route, amtStr){
   const { $ } = C;
-  if (!X || !X.quote){ $('swErr').textContent = 'This trade isn’t available right now - try again shortly.'; setReviewEnabled(false); return; }
+  // What this function actually needs is the cross BOOK. (It used to probe X.quote,
+  // which no longer exists as a separate capability now the RFQ rail is gone.)
+  if (!X || !X.book){ $('swErr').textContent = 'This trade isn’t available right now - try again shortly.'; setReviewEnabled(false); return; }
   const seqAsset = route.seqAsset;
   const am = C.assetMeta(seqAsset);
   const seqPrec = am.precision || 0;
@@ -2680,13 +2682,20 @@ async function requoteCross(route, amtStr){
       return;
     }
 
-    // === FALLBACK: the unified feed is genuinely UNREACHABLE (!haveUnified) -> the proven on-chain cross book
-    // (X.quote). One book is the goal; this keeps chain/chain working (never empty) ONLY when the LSP's unified
-    // feed is down. A best offer that rests its asset over Lightning (bp.crosses) no longer falls here — it
-    // showed the same fill and blocked Place above, never a silent rail-siloed re-match. Log ONLY a genuine
-    // divergence (on-chain offers exist but the unified feed gave nothing), so empty pairs stay quiet.
-    if (offers.length) console.warn('[cross] unified feed unreachable for this pair; using the on-chain cross book instead');
-
+    // === NO UNIFIED MATCH ===================================================
+    // There used to be a FALLBACK here: re-quote against the on-chain cross book
+    // via X.quote. It is gone, and deliberately.
+    //
+    // Two reasons. First, it could route a trade onto a rail that cannot complete:
+    // X.quote's non-courier branch spoke to the retired RFQ daemon, which still
+    // binds :9945 but has no route to it. Second, it carried the whole-offer
+    // OVERSHOOT branch (wholeOffer / "more than you entered"), which contradicts
+    // the rule that every resting offer is partially fillable — a user asking for
+    // 1 GOLD could be shown, and then charged for, the maker's whole 50.
+    //
+    // So: a genuinely unreachable book says so plainly and disables Place. What
+    // remains below is the honest EMPTY case — no offers on either feed — where
+    // posting your own price is a real capability, not a dead end.
     if (!offers.length){
       status.textContent = ''; clearOpposite(); setFinality('cross');
       if (!route.payIsBtc && X && X.makerStart){
@@ -2711,84 +2720,17 @@ async function requoteCross(route, amtStr){
       return;
     }
 
-    if (!amtStr || !amtStr.trim()){
-      status.textContent = ''; clearOpposite(); setReviewEnabled(false);
-      const n = offers.length;
-      $('swRate').textContent = `${n} resting offer${n>1?'s':''} · enter an amount.`;
-      $('swRoute').textContent = dirLabel;
-      setFinality('cross');
-      return;
-    }
-
-    // The user's FULL requested amount, priced at the best resting offer. We quote the full amount;
-    // the cross daemon returns what the best maker can fill NOW (its liquidity) — the immediate-fill
-    // portion. The unfilled remainder rests as a limit order at the same price (posted on Review).
-    const { asset: bestAsset, btc: bestBtc } = xOfferAmts(offers[0], route.payIsBtc);
-    if (!(bestAsset > 0n && bestBtc > 0n)) throw new Error('Could not load the order book right now.');
-    const editedIsSeq = (S.edited === 'pay' ? S.payAsset : S.receiveAsset) === seqAsset;
-    let reqSeqAtoms, reqBtcAtoms;
-    if (editedIsSeq){
-      reqSeqAtoms = C.parseAtoms(amtStr, seqPrec);
-      reqBtcAtoms = (reqSeqAtoms * bestBtc) / bestAsset;      // BTC at the best price
-    } else {
-      reqBtcAtoms = C.parseAtoms(amtStr, 8);
-      reqSeqAtoms = (reqBtcAtoms * bestAsset) / bestBtc;
-    }
-    if (reqSeqAtoms <= 0n) throw new Error('enter an amount greater than zero');
-    const rawXq = route.payIsBtc
-      ? await X.quote(seqAsset, reqSeqAtoms)                  // { seq_amount, btc_amount, fee_btc } — capped to the maker's fillable
-      : (X.reverseQuote ? await X.reverseQuote(seqAsset, reqSeqAtoms)
-                        : (() => { throw new Error('selling an asset for BTC is unavailable in this build'); })());
-    // A whole-HTLC courier lift: the FORWARD courier quote (fetchXquoteCourier) marks itself `courier:true`;
-    // the REVERSE courier quote (fetchRQuote) carries the resting `offer` with no `quote_id` (an RFQ quote
-    // instead carries a `quote_id` and is already daemon-capped to the fillable). Detect BOTH so the cap +
-    // fee note apply symmetrically on buy and sell.
-    const wholeOffer = !!rawXq.courier || (!!rawXq.offer && !rawXq.quote_id);
-    // COURIER CAP (spec §2 — every resting offer is partial-fillable, never whole-only): a courier quote
-    // returns the chosen offer's WHOLE size. When that exceeds the request, cap the lift to exactly the
-    // requested size (BTC recomputed ceil-proportional so pay==receive) instead of overshooting to the whole
-    // offer. openFromComposer opens the courier session for exactly this seq_amount; the maker locks exactly
-    // it, or the pre-lock terms-binding check aborts BEFORE any funds move — so a capped take NEVER overshoots.
-    if (wholeOffer && big(rawXq.seq_amount) > reqSeqAtoms){
-      const _oSeq = big(rawXq.seq_amount), _oBtc = big(rawXq.btc_amount);
-      rawXq.seq_amount = reqSeqAtoms;
-      rawXq.btc_amount = ceilDiv(reqSeqAtoms * _oBtc, _oSeq);
-    }
-    // fill-now = what the maker can fill (the quote); remainder = requested − fill, rested at the
-    // same price. A <0.5% sliver is treated as rounding (full fill, no remainder).
-    const fillSeq = big(rawXq.seq_amount);
-    const canRest = route.payIsBtc ? !!(X && X.makerStartReverse) : !!(X && X.makerStart);
-    const split = canRest ? fillRestSplit(reqSeqAtoms, fillSeq) : null;   // { fill, rest } or null (full fill)
-    const remSeq = split ? split.rest : 0n;
-    const hasRemainder = remSeq > 0n;
-    const remBtc = hasRemainder ? (remSeq * bestBtc) / bestAsset : 0n;
-    // The courier take is capped to the request above, so it NEVER overshoots the whole offer (there is no
-    // overshoot state to carry). wholeOffer stays a flag only for the fee note — the maker sets the BTC lift
-    // fee at claim time, so fee_btc is 0 here (not a genuine zero; paintQuoteCross shows the honest note).
-    LAST_QUOTE = { kind:'cross', reverse: !route.payIsBtc, route, xq: rawXq, seqAsset,
-      requestedSeqAtoms: reqSeqAtoms, requestedBtcAtoms: reqBtcAtoms, fillSeqAtoms: fillSeq,
-      remainderSeqAtoms: hasRemainder ? remSeq : 0n, remainderBtcAtoms: remBtc,
-      wholeOffer };
-    status.textContent = '';
-    paintQuoteCross();
-    // AFFORDABILITY (C4): a MARKET cross order is IOC — it funds only the FILLABLE portion now and
-    // CANCELS (never rests) the rest, so only the fill is committed. Gate Review on the committed amount
-    // (the courier take is capped to the request, so the fill IS the committed amount — never a larger whole
-    // offer), so a user who can afford what actually fills isn't blocked by a remainder that is never funded.
-    const fillBtcAtoms = big(rawXq.btc_amount);
-    const _payAtoms = route.payIsBtc ? fillBtcAtoms : fillSeq;
-    const _payBal   = balAtoms(route.payIsBtc ? 'BTC' : seqAsset);
-    // Paying BTC funds an on-chain HTLC whose funding tx also needs a Bitcoin miner fee on top of the
-    // locked amount, so reserve a little headroom (the exact fee is computed at btcBuildTx). Without it a
-    // near-max BTC buy passes Review and then fails when the funding tx is built. Same class as onMax's
-    // same-asset fee headroom; BTC side only.
-    const _payNeed = route.payIsBtc ? (_payAtoms + 1000n) : _payAtoms;
-    if (_payNeed > _payBal){
-      $('swErr').textContent = `You only hold ${C.fmtAtoms(_payBal, route.payIsBtc ? 8 : seqPrec)} ${route.payIsBtc ? 'BTC' : am.ticker}${route.payIsBtc ? ' (an on-chain fee is also needed)' : ''} · reduce the amount.`;
-      setReviewEnabled(false);
-      return;
-    }
-    setReviewEnabled(true);
+    // Offers rest on the on-chain cross book but the UNIFIED feed gave us no match:
+    // the one book we match against is unreachable. Say so and stop. We do NOT
+    // re-match against the raw cross book here — that was the old fallback, and it
+    // both routed to a retired rail and overshot the user's amount to the maker's
+    // whole offer. A trade we cannot price honestly is a trade we do not offer.
+    status.textContent = ''; clearOpposite(); LAST_QUOTE = null; setReviewEnabled(false);
+    $('swRate').textContent = 'Could not load the order book · retry.';
+    $('swRoute').textContent = dirLabel;
+    $('swErr').textContent = 'Could not reach the order book right now. Check your connection and try again (re-enter the amount to retry).';
+    setFinality('cross');
+    return;
   } catch (e){
     status.textContent = '';
     // Route the message through prettyErr as a plain literal; don't double-prefix a message that already
@@ -2944,7 +2886,7 @@ function paintQuoteCross(){
   $('swRate').textContent = line;
   // The trading fee is set in BTC by the maker at lift time (no open fee-asset market on the BTC leg). The
   // courier quote does not know it up front, so never show a misleading "0 BTC".
-  if (q.wholeOffer && (!q.xq.fee_btc || big(q.xq.fee_btc) === 0n))
+  if (!q.xq.fee_btc || big(q.xq.fee_btc) === 0n)
     paintFee('BTC', null, 'Trading fee set when the trade is placed · added to the Bitcoin you lock.');
   else
     paintFee('BTC', q.xq.fee_btc, 'Trading fee, paid in Bitcoin.');
