@@ -56,7 +56,7 @@ import { matchFromTake, makerRailsFromOffer, describeBridge, bridgedTakeSupporte
 // P2P SUBMARINE taker client (both directions) + the LSP payer leg-bridge client (the buy fallback). The
 // rail-crossing matrix settles PEER-TO-PEER whenever the maker is interactive + can accept BTC-LN, and the
 // LSP leg-bridge ONLY on a genuine mismatch (an on-chain-only / passive maker). See subswap.js.
-import { runTakerReverseSubmarine, runTakerSubmarine, runLspPayerBridge, claimReverseSeqLeg, resumeReversePay, dispatchSubswap, sizeSubswapTake, verifySeqLeg as verifySubswapSeqLeg } from './subswap.js';
+import { runTakerReverseSubmarine, runTakerSubmarine, runLspPayerBridge, claimReverseSeqLeg, resumeReversePay, dispatchSubswap, sizeSubswapTake, walkBook, verifySeqLeg as verifySubswapSeqLeg } from './subswap.js';
 
 let C = null;            // injected app context (see index.html initSwapTab)
 let X = null;            // the cross-chain route handle ({ openFromComposer, renderXswap, hasInFlight })
@@ -2444,6 +2444,27 @@ function renderMixedTake(route, plan){
   }
   // IOC truth: a market take reads only this single best-price offer, so a request larger than it fills THIS
   // offer and the remainder does NOT walk to further offers right now (multi-offer walk is a separate follow-up).
+  // THE AGGREGATE WALK, when the plan carries one. Showing a single offer's size for a
+  // request that spans several is what made a large order look silently truncated: the
+  // number in the field was real, it just was not the whole fill. State what actually
+  // executes — the total, the price across all of it, and any genuine remainder.
+  const w = plan.walk;
+  if (w && w.offersUsed > 1 && w.filledAtoms > 0n){
+    const wAsset = C.fmtAtoms(w.filledAtoms, aprec), wBtc = C.fmtAtoms(w.filledBtc, 8);
+    const [wPay, wRecv] = buy ? [wBtc, wAsset] : [wAsset, wBtc];
+    setNativeField(payEl, wPay, payHex); setNativeField(recvEl, wRecv, recvHex);
+    const across = ` · across ${w.offersUsed} offers`;
+    // The remainder is what the book cannot fill at any price right now, which is a
+    // different statement from "we capped you at one offer" and must not read the same.
+    const restNote = w.remainderAtoms > 0n
+      ? ` · ${C.fmtAtoms(w.remainderAtoms, aprec)} ${tk} of your order cannot fill right now`
+      : '';
+    $('swRate').textContent = buy
+      ? `${wBtc} BTC → ${wAsset} ${tk}${across}${restNote}`
+      : `${wAsset} ${tk} → ${wBtc} BTC${across}${restNote}`;
+    return { ...sz, takeAtoms: w.filledAtoms, takeBtc: w.filledBtc,
+             walk: w, hasAmount: true, capped: false, partial: w.partial };
+  }
   // Say plainly that the amount was LIMITED, and by how much. The old note explained
   // the mechanism ("fills the best resting offer") without naming the number, so a
   // request cut down by orders of magnitude read as the app quietly overwriting the
@@ -3423,10 +3444,24 @@ function bridgedTakePlan(route){
     const want = assetLegAtoms(route);
     const raw = offer.raw || {};
     const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: BigInt(raw.min_fill || raw.minFill || 0), side });
+    // THE WALK. The single-offer sizing above stays as the per-leg authority and the
+    // fallback; this plans the FULL fill across the book in price order, so a request
+    // larger than the best offer reaches the depth behind it instead of being capped
+    // at the top of the book.
+    //
+    // Only offers this shape can actually settle are walked: matching is price-first
+    // across the whole book, but a leg still has to be settleable, and promising a
+    // fill we cannot execute is the offer-then-refuse failure. Same-rail-as-best is
+    // the honest filter today — a walk that silently changed settlement path halfway
+    // would be a different trade than the one reviewed.
+    const sideOffers = (side === 'buy' ? (book.asks || []) : (book.bids || []))
+      .filter(o => o && o.price > 0 && o.rail === offer.rail);
+    const walk = walkBook({ offers: sideOffers, want, side });
     return { side, offer, match, plan, describe: describeBridge(match), bridged: crosses && supported,
       crosses, supported, makerBtcRail, makerAssetRail, submarine,
       takeAtoms: sz.takeAtoms, takeBtc: sz.takeBtc, want, partial: sz.partial,
       belowMin: sz.belowMin, minAtoms: sz.minAtoms, minBtc: sz.minBtc, capped: sz.capped,
+      walk, offers: sideOffers,
       overshoot: false, wholeOnly: false };
   } catch { return null; }
 }
@@ -3442,13 +3477,22 @@ async function reviewBridged(route, bp){
   const aprec = am.precision || 0, tk = am.ticker || 'asset';
   // P3.1 — FORMATTED units, never raw atoms/sats, and the SIZED take (bp.takeAtoms/takeBtc), never the
   // whole resting offer. A partial fill of a larger offer is stated so the Review == what executes (§6).
-  const takeAssetStr = C.fmtAtoms(BigInt(bp.takeAtoms || 0), aprec) + ' ' + tk;
-  const takeBtcStr = C.fmtAtoms(BigInt(bp.takeBtc || 0), 8) + ' BTC';
+  // Review states what EXECUTES. With a walk that is the aggregate across legs, not
+  // the best offer's numbers — a Review that names one offer for a fill spanning
+  // several would not match what happens.
+  const w = bp.walk && bp.walk.offersUsed > 1 && bp.walk.filledAtoms > 0n ? bp.walk : null;
+  const takeAtoms = BigInt((w ? w.filledAtoms : bp.takeAtoms) || 0);
+  const takeBtcAtoms = BigInt((w ? w.filledBtc : bp.takeBtc) || 0);
+  const takeAssetStr = C.fmtAtoms(takeAtoms, aprec) + ' ' + tk;
+  const takeBtcStr = C.fmtAtoms(takeBtcAtoms, 8) + ' BTC';
   const offerAssetStr = C.fmtAtoms(BigInt(bp.offer.assetAtoms || 0), aprec) + ' ' + tk;
   const pricing = bp.side === 'buy'
     ? `Pay ${takeBtcStr}, receive ${takeAssetStr}.`
     : `Sell ${takeAssetStr}, receive ${takeBtcStr}.`;
-  const partialNote = bp.partial ? ` Partial fill of a larger resting offer (${offerAssetStr}).` : '';
+  const partialNote = w
+    ? ` Filled across ${w.offersUsed} resting offers, best price first.` +
+      (w.remainderAtoms > 0n ? ` ${C.fmtAtoms(w.remainderAtoms, aprec)} ${tk} cannot fill right now and will not be rested.` : '')
+    : (bp.partial ? ` Partial fill of a larger resting offer (${offerAssetStr}).` : '');
   // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
   // the settlement machinery that carries the trade to completion.
   const kv = [
