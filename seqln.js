@@ -589,8 +589,12 @@ export function seqlnBook(asset) {
 // { ok, asks[], bids[], best_ask, best_bid, counts } — each entry has { price, assetAtoms, btcSats,
 // rail:'ln'|'onchain', id, raw }. The composer shows all resting liquidity and prices off the best,
 // whichever rail carries it; the settlement router bridges the rails on take.
-export function seqlnUnifiedBook(asset) {
-  return lspFetch('/book/unified?asset=' + encodeURIComponent(asset));
+// The unified book for a pair. `quote` is a real Sequentia asset id for an
+// asset<->asset market, or omitted/'BTC' for a BTC-paired one — the split that used
+// to leave asset-paired markets with no unified book at all.
+export function seqlnUnifiedBook(asset, quote) {
+  const q = quote && String(quote).toUpperCase() !== 'BTC' ? '&quote=' + encodeURIComponent(quote) : '';
+  return lspFetch('/book/unified?asset=' + encodeURIComponent(asset) + q);
 }
 
 // Post a resting sub-asset offer the wallet signed itself (the LSP never signs). `offer` is
