@@ -2790,11 +2790,34 @@ const server = http.createServer(async (req, res) => {
     try {
       const txParam = url.searchParams.get('tx');
       const blockParam = txParam ? null : url.searchParams.get('block');
+      // The node's LIVE anchor health (getanchorstatus). The cross-chain claim gate
+      // needs all THREE of the daemon's conjuncts — the leg block's own anchor, the
+      // node's anchorstatus, and the block's quorum certification — so serve the
+      // latter two alongside the anchor height instead of leaving the wallet to
+      // check only the first. Never fatal: a null anchor_status makes the wallet
+      // WAIT (fail closed), it never makes it proceed.
+      const anchorStatus = async () => {
+        try { const s = await seqRpcCall('getanchorstatus'); return (s && s.anchorstatus) ?? null; }
+        catch { return null; }
+      };
       const anchorOfBlock = async (hash) => {
         let blk; try { blk = await seqRpcCall('getblock', [hash]); }
         catch { return { ok: true, anchor_height: null }; }   // not yet confirmed/known
+        // ORPHAN GUARD. getblock answers for blocks that are no longer part of
+        // anything: it reads the block index, not the chain, so a header from an
+        // orphaned block still returns a perfectly well-formed anchorheight. A
+        // caller that trusts it is reading a verdict about a block the network has
+        // abandoned — the exact defect the Go gate fixed with BlockOnActiveChain.
+        // Core reports confirmations = -1 for a block off the active chain, so that
+        // is the authoritative answer and it is published rather than inferred.
+        const onActiveChain = (blk.confirmations ?? -1) >= 0;
         return { ok: true, block: hash, height: (blk.height ?? null),
-          anchor_height: (blk.anchorheight ?? null), anchor_hash: (blk.anchorhash ?? null) };
+          anchor_height: (blk.anchorheight ?? null), anchor_hash: (blk.anchorhash ?? null),
+          on_active_chain: onActiveChain,
+          // Quorum certification of THIS block (absent on a node predating the field;
+          // the wallet then stays anchor-only, exactly like VerifySeqLegSafe).
+          poscertified: (blk.poscertified ?? null),
+          anchor_status: await anchorStatus() };
       };
       if (txParam) {
         if (!/^[0-9a-fA-F]{64}$/.test(txParam)) return send(res, 400, { ok: false, error: 'bad txid' });
@@ -2812,8 +2835,12 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, _anchorTip.body);
       const info = await seqRpcCall('getblockchaininfo');
       const blk = await seqRpcCall('getblock', [info.bestblockhash]);
+      // The no-param tip reading is what an asset FUNDER waits on before it funds
+      // (its anchor must reach the BTC-leg height first), so it carries the health
+      // flag too — an unhealthy anchor must never be mistaken for a caught-up one.
       const body = { ok: true, height: info.blocks,
-        anchor_height: (blk.anchorheight ?? null), anchor_hash: (blk.anchorhash ?? null) };
+        anchor_height: (blk.anchorheight ?? null), anchor_hash: (blk.anchorhash ?? null),
+        anchor_status: await anchorStatus() };
       _anchorTip = { at: now, body };
       return send(res, 200, body);
     } catch {

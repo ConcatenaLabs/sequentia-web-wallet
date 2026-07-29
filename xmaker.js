@@ -54,10 +54,22 @@ const sha256Hex = (hex) => bytesToHex(sha256(hexToBytes(hex)));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const big = (v) => BigInt(v == null ? 0 : v);
 
-// Timing knobs (mirror the Go XcTiming, cmd/seqob-maker). Poll 5s; the taker has
-// 2h to fund; give the SEQ lock/anchor gate their own windows.
-const T = { poll: 5000, termsReqWait: 120000, btcFundWait: 2*60*60*1000, seqLockWait: 15*60*1000,
-            anchorWait: 20*60*1000, minBtcConf: 1, seqClaimMargin: 10 };
+// Timing knobs (mirror the Go XcTiming, cmd/seqob-maker). These are per-STEP
+// courier/RPC budgets, NOT swap deadlines.
+//
+// There is deliberately no `anchorWait`. The asset funder's anchor precondition
+// below is bounded by the TIMELOCK — the point past which a leg funded now could
+// no longer be claimed — and by the user, never by a wall clock. Owner ruling
+// (Andreas, 2026-07-25): "we should let users decide if the wait is intolerable
+// and they want to cancel the trade (putting the makers order back to rest),
+// rather than cancel it automatically. We cannot really predict how long
+// contested blocks will take to clear anyway."
+const T = { poll: 5000, termsReqWait: 120000, btcFundWait: 2*60*60*1000, seqLockWait: 60*60*1000,
+            minBtcConf: 1, seqClaimMargin: 10,
+            // SEQ blocks that must still remain before T_seq for a leg funded now
+            // to be claimable in time (mirrors the Go MinSeqClaimWindow), and the
+            // parent-chain equivalent before T_btc for our own BTC claim.
+            minSeqClaimWindow: 120, minBtcClaimWindow: 12 };
 
 const ANCHOR_BASE = () => (typeof location !== 'undefined' ? location.origin : '');
 
@@ -79,10 +91,158 @@ async function anchorHeightOf(blockHash){
   const a = await fetch(ANCHOR_BASE() + '/anchor/' + blockHash).then(r => r.ok ? r.json() : null);
   return a && a.anchorheight != null ? Number(a.anchorheight) : null;
 }
+
+// How many times a single anchor read is retried before the caller treats it as
+// UNKNOWN. The endpoint shells out to the node per request and 502s on any
+// hiccup; one transient failure used to make the anchor null, and the wallet then
+// withheld a leg that was perfectly fine. Unknown must cost a retry, not a trade.
+const ANCHOR_READ_TRIES = 3;
+
+// legAnchorEvidence is the CLAIMANT's read of the block that confirms an asset
+// leg. It exists because reading by CACHED BLOCK HASH is unsafe in two directions
+// at once — the same defect the Go gate fixed:
+//
+//   - the anchor endpoint answers for ORPHANED blocks too (it reads the block
+//     index, not the chain), so a cached hash keeps returning a verdict about a
+//     block the network has abandoned;
+//   - a Sequentia reorg that re-mines the leg into a BETTER-anchored block stays
+//     invisible, so we would refuse a leg that is now perfectly fine.
+//
+// So the lookup is by TXID — "which block confirms this leg NOW" — and its answer
+// counts only when the server confirms that block is on the ACTIVE chain. The
+// block hash is a fallback for the pre-confirmation window alone.
+//
+// Returns { anchor, statusOk, certified, onActiveChain }. anchor is -1 for
+// UNKNOWN (unconfirmed, unreadable, or off-chain), never 0: anchor 0 reads as
+// "confirmed but anchored BELOW your BTC lock", the TERMINAL unsafe verdict, and
+// mapping an absent value onto it condemns a leg that had merely not confirmed
+// yet. Number(null) === 0 is exactly how that bug arises, so null is caught first.
+async function legAnchorEvidence(txid, blockHashFallback){
+  if (C && C.legAnchorEvidence) return C.legAnchorEvidence(txid, blockHashFallback);
+  // A context that already supplies the individual readers (tests, and any
+  // embedder that wired them before this function existed) composes into the same
+  // shape. Such a context owns its own freshness policy, so the txid-first
+  // re-derivation below is a property of the HTTP path only; an absent anchor is
+  // still UNKNOWN (-1) rather than 0, which is the distinction that matters.
+  if (C && C.anchorHeightOf){
+    const a = await C.anchorHeightOf(blockHashFallback);
+    const okStatus = C.anchorStatusOk ? await C.anchorStatusOk() : false;
+    const cert = C.posCertifiedOf ? await C.posCertifiedOf(blockHashFallback) : null;
+    return { anchor: (a == null ? -1 : Number(a)), statusOk: !!okStatus,
+             certified: cert, onActiveChain: a != null };
+  }
+  const q = txid ? ('tx=' + encodeURIComponent(txid))
+          : (blockHashFallback ? ('block=' + encodeURIComponent(blockHashFallback)) : null);
+  if (!q) return { anchor: -1, statusOk: false, certified: null, onActiveChain: false };
+  for (let i = 0; i < ANCHOR_READ_TRIES; i++){
+    try {
+      const j = await fetch(ANCHOR_BASE() + '/anchor?' + q, { signal: AbortSignal.timeout(6000) })
+        .then(r => r.ok ? r.json() : null);
+      const raw = (j && j.anchor_height != null) ? Number(j.anchor_height) : NaN;
+      if (j && j.ok && Number.isFinite(raw)){
+        return {
+          anchor: raw,
+          statusOk: j.anchor_status === 'ok',   // absent counts as NOT ok: never assume health we cannot see
+          certified: (j.poscertified != null) ? !!j.poscertified : null,   // null = node predates the field
+          // Absent on an older LSP. Treat that as unproven only when we asked by
+          // BLOCK; a tx lookup already resolves through the node's own view of
+          // which block confirms it.
+          onActiveChain: (j.on_active_chain != null) ? !!j.on_active_chain : !!txid,
+        };
+      }
+      // A well-formed "not confirmed yet" is not a transport failure: it is the
+      // truth, and the caller must wait rather than burn retries on it.
+      if (j && j.ok) return { anchor: -1, statusOk: false, certified: null, onActiveChain: false };
+    } catch {}
+    if (i < ANCHOR_READ_TRIES - 1) await sleep(500);
+  }
+  return { anchor: -1, statusOk: false, certified: null, onActiveChain: false };
+}
+
+// claimWindowClosed is fundWindowClosed's counterpart for the CLAIMANT: it reports
+// why a claim can no longer land, or null while it still can. Same rule — a chain
+// read that FAILS is not a verdict, so it returns null and we keep waiting. Past
+// this point claiming would race the counterparty's refund, so waiting longer
+// cannot produce a usable result and this is where the gate stops.
+async function claimWindowClosed(seqLocktime){
+  try {
+    const s = await seqTip();
+    if (Number.isFinite(s) && seqLocktime && s + T.seqClaimMargin >= Number(seqLocktime))
+      return `the Sequentia chain reached block ${s}, within ${T.seqClaimMargin} blocks of the asset refund at ${seqLocktime}; a claim made now could race that refund`;
+  } catch {}
+  return null;
+}
+
+// canceled reports whether the user asked to stop. Every wait in this module that
+// holds nothing of ours — or holds only refundable positions — polls it, so the UI
+// can wire a cancel button with no further refactor. Owner ruling: the USER decides
+// a wait is intolerable, never a wall clock.
+function canceled(signal){ return !!(signal && signal.aborted); }
+
 async function anchorStatusOk(){
   if (C && C.anchorStatusOk) return C.anchorStatusOk();
   const s = await fetch(ANCHOR_BASE() + '/anchorstatus').then(r => r.ok ? r.json() : null);
   return !!(s && (s.anchorstatus === 'ok' || s.anchorStatus === 'ok'));
+}
+// The node's LIVE anchor view: the Bitcoin height the Sequentia TIP currently
+// anchors to. Unlike anchorHeightOf (a fixed per-block header commitment) this
+// ADVANCES, which is what makes it usable as a precondition to wait on before
+// funding an asset leg. Returns null when unreadable (the caller then WAITS).
+async function anchorTipHeight(){
+  if (C && C.anchorTipHeight) return C.anchorTipHeight();
+  const s = await fetch(ANCHOR_BASE() + '/anchorstatus').then(r => r.ok ? r.json() : null);
+  const h = s && (s.anchorheight != null ? s.anchorheight : s.anchorHeight);
+  return h != null ? Number(h) : null;
+}
+
+// ANCHOR PRECONDITION — run by whichever side FUNDS the asset leg, BEFORE it
+// funds. The claimant will refuse to claim unless the block that confirms our
+// funding commits anchorheight >= the BTC-leg height, and once that block exists
+// its anchor is immutable (a committed header field), so a wait AFTER funding can
+// never clear it. Waiting for our own anchor to reach the BTC-leg height first
+// makes the claimant's gate pass by construction: anchors are monotone
+// non-decreasing along a chain, so every block extending this tip qualifies.
+//
+// Waiting here is free (nothing is committed, aborting costs nothing). This does
+// NOT relax the claimant's gate, and must never be "replaced" by having the
+// claimant consult a later/burying block: reorg invalidation propagates to
+// descendants, never to ancestors, so a burying block's anchor says nothing about
+// whether the FUNDING output survives.
+//
+// HOW LONG IT WAITS: until the TIMELOCK says a leg funded now could no longer be
+// claimed (fundWindowClosed), or the caller cancels — never a wall-clock constant.
+// `target` already carries the +1 slack the caller adds; see the call site.
+// Returns null on success, or a reason string to abort with.
+async function awaitAnchorReachesBtcLeg(target, ctx, onWait){
+  let announced = false;
+  for (;;){
+    let ah = null, okStatus = false;
+    try { ah = await anchorTipHeight(); } catch {}
+    try { okStatus = await anchorStatusOk(); } catch {}
+    if (ah != null && okStatus && ah >= target) return null;
+    const closed = await fundWindowClosed(ctx);
+    if (closed) return closed;
+    if (!announced){ announced = true; try { onWait && onWait(ah, target); } catch {} }
+    await sleep(T.poll);
+  }
+}
+
+// fundWindowClosed reports why funding is no longer safe, or null while it still
+// is. This is the ONLY automatic stop the anchor wait has. A chain read that FAILS
+// is not a verdict — it returns null and we keep waiting, because a wait we cannot
+// measure is not a wait we may cancel on the user's behalf.
+async function fundWindowClosed({ seqLocktime, btcLocktime }){
+  try {
+    const s = await seqTip();
+    if (Number.isFinite(s) && seqLocktime && s + T.minSeqClaimWindow >= Number(seqLocktime))
+      return `the Sequentia chain reached block ${s}, leaving under ${T.minSeqClaimWindow} blocks before the asset refund at ${seqLocktime}; a leg locked now could not be claimed in time, so nothing was locked`;
+  } catch {}
+  try {
+    const b = await btcTip();
+    if (Number.isFinite(b) && btcLocktime && b + T.minBtcClaimWindow >= Number(btcLocktime))
+      return `Bitcoin reached block ${b}, too close to the taker's BTC refund at ${btcLocktime} for us to claim afterwards; nothing was locked`;
+  } catch {}
+  return null;
 }
 // Whether a Sequentia block is quorum-certified (immediately final). Returns
 // null when the node/endpoint predates the poscertified field (feature-detect:
@@ -207,7 +367,7 @@ export function buildForwardCrossOffer({ assetHex, assetAtoms, btcSats, expirySe
 // FORWARD maker settlement driver. Runs for ONE lift over an established
 // CourierSession. `offer` is the resting offer the taker lifted.
 // ---------------------------------------------------------------------------
-export async function RunMakerForward(session, lift, offer, onState){
+export async function RunMakerForward(session, lift, offer, onState, signal){
   const emit = (st) => { saveMakerSwap(st); try { onState && onState(st); } catch {} };
   const assetHex   = offer.pair.base_asset || offer.pair.baseAsset;
   const seqAmount  = big(offer.offer_amount || offer.offerAmount);   // asset atoms the maker gives
@@ -271,20 +431,110 @@ export async function RunMakerForward(session, lift, offer, onState){
   st.btc_leg = { txid: bleg.txid, vout: f.vout, amount: btcAmount.toString(), redeem_script: btcRedeem, locktime: btcLocktime, height: f.height };
   st.state = 'btc_verified'; emit(st);
 
+  // 5b. ANCHOR PRECONDITION — the taker's gate, honoured BEFORE our asset moves.
+  //     The taker refuses to claim unless the block confirming our funding anchors
+  //     at/above its BTC-leg height, and that value is frozen the moment the
+  //     funding confirms. So wait for OUR anchor to reach it first; every block
+  //     extending that tip then satisfies the taker's gate by construction.
+  //     Aborting here is clean: nothing of ours has moved and the taker refunds
+  //     its BTC after T_btc.
+  //
+  //     We aim ONE BLOCK ABOVE the leg height. The taker derives that height from
+  //     two separate reads (its tip, then the confirmation count), so a Bitcoin
+  //     block landing between them yields a height one HIGHER than we measured —
+  //     and its gate would then refuse a leg we had already locked. Waiting longer
+  //     is never unsafe, so we absorb the race rather than lose the asset to it.
+  //     The taker's own reported height can only RAISE the bar, never lower it.
+  const btcLegH = Math.max(Number(f.height), Number(bleg.height || 0));
+  {
+    const bad = await awaitAnchorReachesBtcLeg(btcLegH + 1, { seqLocktime, btcLocktime }, (ah, hp) => {
+      st.anchor_wait = `waiting for our Sequentia anchor (${ah}) to reach ${hp} before locking the asset - nothing is locked while we wait`;
+      emit(st);
+    });
+    if (bad){
+      await session.fail('anchor_not_caught_up', 'our anchor has not reached your BTC leg; asset leg not funded');
+      st.state = 'failed'; st.detail = bad; emit(st);
+      return;
+    }
+    if (st.anchor_wait){ delete st.anchor_wait; emit(st); }
+  }
+
+  // 5c. RE-VERIFY THE TAKER'S BTC LEG. The wait above is bounded by the timelock,
+  //     not by a clock, so it can run a long time — and a BTC HTLC that was
+  //     confirmed when we checked it can be GONE by the end: one parent-chain
+  //     reorg is all the taker needs to double-spend the input it funded with.
+  //     Locking our asset against a dead BTC leg buys us nothing and costs us the
+  //     asset until T_seq, so verify it again immediately before we lock. A leg
+  //     that moved to a different height also invalidates the precondition we just
+  //     satisfied, so that is a refusal too.
+  {
+    let f2 = null;
+    try { f2 = await C.btcLeg.findFunding(bleg.txid, btcRedeem); } catch { f2 = null; }
+    if (!f2 || !f2.confirmed || big(f2.value) !== btcAmount){
+      await session.fail('btc_leg_gone', 'your BTC leg no longer verifies; asset leg not funded');
+      st.state = 'failed';
+      st.detail = 'the taker’s BTC lock is no longer on chain with the agreed amount - the asset leg was NOT locked, nothing of ours was spent';
+      emit(st);
+      return;
+    }
+    if (Number(f2.height) !== Number(f.height)){
+      await session.fail('btc_leg_gone', 'your BTC leg moved to a different block; asset leg not funded');
+      st.state = 'failed';
+      st.detail = `the taker’s BTC lock moved from block ${f.height} to ${f2.height} (a Bitcoin reorg) - the asset leg was NOT locked`;
+      emit(st);
+      return;
+    }
+    const closed = await fundWindowClosed({ seqLocktime, btcLocktime });
+    if (closed){
+      await session.fail('seq_window_closed', 'the asset leg’s claim window has run down; asset leg not funded');
+      st.state = 'failed'; st.detail = closed; emit(st);
+      return;
+    }
+  }
+
   // 6. lock the SEQ asset leg (claim = taker, refund = maker, T_seq)
   const seqRedeem = C.wasm.buildSeqHtlcRedeemScript(hashH, takerSeqClaimPub, makerSeqRefund.public_key, seqLocktime);
   const funded = await C.seqLeg.fund(seqRedeem, assetHex, seqAmount);   // -> { txid }
   st.seq_fund_txid = funded.txid; emit(st);
   const conf = await C.seqLeg.waitConf(funded.txid, seqRedeem);         // -> { vout, height, block_hash }
+  // POST-FUNDING CHECK: read the anchor the confirming block actually committed.
+  // The precondition makes this hold by construction on the honest path, but a
+  // Sequentia reorg can still land the funding on a lower-anchored branch — the
+  // one case where our asset leg could outlive the taker's BTC leg — and then we
+  // must not invite the claim. We keep the leg and refund it after T_seq. (This is
+  // also the leg's REAL anchor height, which is what belongs on the wire; the
+  // Sequentia block height is a different number.)
+  //
+  // WHAT WITHHOLDING BUYS, AND WHAT IT DOES NOT. It is a COURTESY, not a
+  // guarantee: the taker minted the secret and holds our refund pubkey, so it can
+  // rebuild this exact redeem script and find its P2SH on chain without any
+  // message from us. Withholding only spares an HONEST taker a doomed claim, and
+  // tells it plainly (via the fail note) not to try. The ACTUAL defence is the
+  // PRE-FUNDING precondition in 5b — we do not commit the asset until our anchor
+  // has passed the BTC-leg height — plus the taker's own claim gate, which refuses
+  // the leg on its own node's reading. Never read this branch as "the taker cannot
+  // claim now".
+  let legAnchor = null;
+  try { legAnchor = await anchorHeightOf(conf.block_hash); } catch {}
   st.seq_leg = { txid: funded.txid, vout: conf.vout, amount: seqAmount.toString(), asset: assetHex,
-                 redeem_script: seqRedeem, locktime: seqLocktime, block_hash: conf.block_hash, anchor_height: conf.height };
+                 redeem_script: seqRedeem, locktime: seqLocktime, block_hash: conf.block_hash,
+                 anchor_height: legAnchor, seq_height: conf.height };
   st.state = 'seq_locked'; emit(st);
+  if (legAnchor == null || legAnchor < btcLegH){
+    try {
+      await session.fail('seq_leg_underanchored',
+        'our asset leg confirmed under-anchored; do NOT claim it (we refund it after T_seq) - refund your BTC after T_btc');
+    } catch {}
+    st.detail = `asset leg block ${conf.block_hash} anchors at ${legAnchor}, below the BTC-leg height ${btcLegH}; not announcing it - it will be refunded after T_seq`;
+    emit(st);
+    return await settleMakerForward(st, onState);   // watch/refund only; an honest taker will not claim it
+  }
 
   // 7. announce seq_leg_locked (courtesy; the leg is on-chain regardless)
   try {
     await session.send({ type: XcType.SeqLegLocked, leg: {
       txid: funded.txid, vout: conf.vout, amount: Number(seqAmount), asset: assetHex,
-      redeem_script: seqRedeem, locktime: seqLocktime, block_hash: conf.block_hash, anchor_height: conf.height,
+      redeem_script: seqRedeem, locktime: seqLocktime, block_hash: conf.block_hash, anchor_height: legAnchor,
     }});
   } catch {}
 
@@ -334,9 +584,15 @@ export async function settleMakerForward(st, onState){
 // ---------------------------------------------------------------------------
 export async function startForwardMaker({ assetHex, assetAtoms, btcSats, expirySecs, minAnchorDepth, recvAddr }, onState){
   const offer = buildForwardCrossOffer({ assetHex, assetAtoms, btcSats, expirySecs, minAnchorDepth, recvAddr });
-  const rec = { offer, listener: null };
+  // One controller per resting offer. Aborting it is the USER's exit from a wait
+  // that the protocol would otherwise let run to the timelock — the owner ruled
+  // out any automatic cancel, so this is the only thing that ends a healthy but
+  // slow gate early. Cancelling is safe wherever it is polled: those waits hold
+  // nothing of ours, or hold only refundable positions.
+  const ctl = new AbortController();
+  const rec = { offer, listener: null, ctl };
   const listener = await openMakerListener(offer, makerPriv(), async (session, lift) => {
-    try { await RunMakerForward(session, lift, offer, onState); }
+    try { await RunMakerForward(session, lift, offer, onState, ctl.signal); }
     catch (e){ try { await session.fail('maker_error', (e && e.message) || String(e)); } catch {} throw e; }
   });
   rec.listener = listener;
@@ -344,11 +600,25 @@ export async function startForwardMaker({ assetHex, assetAtoms, btcSats, expiryS
   return {
     offer,
     close: () => { try { listener.close(); } catch {} LIVE.delete(offer.offer_id); },
+    cancel: () => { try { ctl.abort(); } catch {} },
     activeCount: () => listener.activeCount(),
   };
 }
 
 export function liveMakerOffers(){ return [...LIVE.values()].map(r => r.offer); }
+
+// cancelMakerLift is the user's "stop this trade" for a resting maker. Owner
+// ruling (Andreas 2026-07-25): the USER decides a wait is intolerable, and
+// cancelling must put the maker's order BACK TO REST rather than retire it — so
+// the listener is deliberately left open and only the in-flight lift is aborted.
+// A fresh controller replaces the spent one so the next lift is cancellable too.
+export function cancelMakerLift(offerId){
+  const rec = LIVE.get(offerId);
+  if (!rec || !rec.ctl) return false;
+  try { rec.ctl.abort(); } catch {}
+  rec.ctl = new AbortController();
+  return true;
+}
 
 // ===========================================================================
 // REVERSE maker (offer side = BUY, cross direction 1 = ASSET_TO_BTC): the maker
@@ -379,7 +649,7 @@ export function buildReverseCrossOffer({ assetHex, assetAtoms, btcSats, expirySe
   return seqob.signOffer(offer, makerPriv());
 }
 
-export async function RunMakerReverse(session, lift, offer, onState){
+export async function RunMakerReverse(session, lift, offer, onState, signal){
   const emit = (st) => { saveMakerSwap(st); try { onState && onState(st); } catch {} };
   const assetHex   = offer.pair.base_asset || offer.pair.baseAsset;
   const seqAmount  = big(offer.want_amount  || offer.wantAmount);    // asset atoms the maker BUYS
@@ -459,14 +729,30 @@ export async function RunMakerReverse(session, lift, offer, onState){
   // anchor ordering), mirroring the daemon's VerifySeqLegSafe. Feature-detected:
   // certNull (field absent on an un-upgraded node) keeps anchor-only. This adds NO
   // min-anchor-DEPTH wait — the anchor axis stays 0-conf by design.
-  const deadline = nowMs() + T.anchorWait;
+  //
+  // HOW LONG IT WAITS. By the TIMELOCK and the user, never by a clock. This loop
+  // previously read `nowMs() + T.anchorWait`, but T has deliberately carried no
+  // anchorWait since the wall-clock ruling — so the deadline was NaN, every
+  // `nowMs() > NaN` was false, and this gate could never terminate: it polled
+  // every 5s forever and never reached its own failure branch. It now stops
+  // exactly where a claim stops being useful (the no-reveal margin below), or
+  // when the user cancels. Waiting costs nothing here: the secret is unrevealed
+  // and our BTC leg stays refundable at T_btc.
+  //
+  // The evidence is re-derived from the leg's TXID on every pass, and only counted
+  // when its confirming block is on the ACTIVE chain — a cached block hash would
+  // keep answering for an orphan (see legAnchorEvidence).
   for (;;){
-    let ah = null, okStatus = false, cert = null;
-    try { ah = await anchorHeightOf(conf.block_hash); } catch {}
-    try { okStatus = await anchorStatusOk(); } catch {}
-    try { cert = await posCertifiedOf(conf.block_hash); } catch {}
-    if (ah != null && ah >= hp && okStatus && cert !== false) break;   // cert===null (absent) or true passes; false blocks
-    if (nowMs() > deadline) return await refundReverseBtc(st, onState, `anchor gate failed (anchor ${ah} < BTC ${hp}, status ok=${okStatus}, quorum-certified=${cert}); not revealing`);
+    if (canceled(signal))
+      return await refundReverseBtc(st, onState, 'you cancelled while waiting for the anchor gate; nothing was revealed');
+    const ev = await legAnchorEvidence(sleg.txid, conf.block_hash);
+    // cert === null (field absent on an un-upgraded node) or true passes; false blocks.
+    if (ev.onActiveChain && ev.anchor >= hp && ev.statusOk && ev.certified !== false) break;
+    const closed = await claimWindowClosed(seqLocktime);
+    if (closed)
+      return await refundReverseBtc(st, onState,
+        `anchor gate never passed (anchor ${ev.anchor < 0 ? 'unknown' : ev.anchor} vs BTC ${hp}, status ok=${ev.statusOk}, ` +
+        `quorum-certified=${ev.certified}, on active chain=${ev.onActiveChain}); ${closed}; not revealing`);
     await sleep(T.poll);
   }
 
@@ -511,12 +797,15 @@ async function refundReverseBtc(st, onState, reason){
 
 export async function startReverseMaker({ assetHex, assetAtoms, btcSats, expirySecs, minAnchorDepth, recvAddr }, onState){
   const offer = buildReverseCrossOffer({ assetHex, assetAtoms, btcSats, expirySecs, minAnchorDepth, recvAddr });
+  const ctl = new AbortController();   // see startForwardMaker: the user's exit from a slow gate
   const listener = await openMakerListener(offer, makerPriv(), async (session, lift) => {
-    try { await RunMakerReverse(session, lift, offer, onState); }
+    try { await RunMakerReverse(session, lift, offer, onState, ctl.signal); }
     catch (e){ try { await session.fail('maker_error', (e && e.message) || String(e)); } catch {} throw e; }
   });
-  LIVE.set(offer.offer_id, { offer, listener });
-  return { offer, close: () => { try { listener.close(); } catch {} LIVE.delete(offer.offer_id); }, activeCount: () => listener.activeCount() };
+  LIVE.set(offer.offer_id, { offer, listener, ctl });
+  return { offer, close: () => { try { listener.close(); } catch {} LIVE.delete(offer.offer_id); },
+           cancel: () => { try { ctl.abort(); } catch {} },
+           activeCount: () => listener.activeCount() };
 }
 
 // --- small utils (no Date.now-in-tests concern; browser only) ---
@@ -524,5 +813,10 @@ function nowUnix(){ return Math.floor(Date.now() / 1000); }
 function nowMs(){ return Date.now(); }
 function randHex16(){ const a = new Uint8Array(8); (crypto || window.crypto).getRandomValues(a); return [...a].map(b => b.toString(16).padStart(2,'0')).join(''); }
 
+// Tests need the anchor precondition to time out in milliseconds rather than the
+// shipped 45 minutes; setTiming(null) restores the shipped values.
+const T_DEFAULTS = { ...T };
+function setTiming(o){ Object.assign(T, o ? o : T_DEFAULTS); }
+
 export const __test__ = { RunMakerForward, settleMakerForward, buildForwardCrossOffer, RunMakerReverse, buildReverseCrossOffer, readPreimageOnChain, sha256Hex, setC: (c) => { C = c; },
-  resumeMakerSwaps, loadState, saveMakerSwap, dropMakerSwap, _resetResume: () => { _resumed = false; } };
+  setTiming, resumeMakerSwaps, loadState, saveMakerSwap, dropMakerSwap, _resetResume: () => { _resumed = false; } };

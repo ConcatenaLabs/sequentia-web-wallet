@@ -4,9 +4,10 @@
 // The mirror of xswap.js: there the taker BUYS an asset paying BTC; here the
 // taker SELLS a Sequentia asset FOR BTC. Roles flip — the MAKER is the secret
 // holder and locks the BTC leg FIRST; the taker funds the asset leg second and
-// claims the BTC leg with the secret the maker reveals. It drives the daemon's
-// reverse RPCs (seqdex.v1 XchainService, REST `/v1/xchain/reverse/*` + the shared
-// `/v1/xchain/swap` poll).
+// claims the BTC leg with the secret the maker reveals. The negotiation runs over
+// the SeqOB order-book COURIER (xcourier.js); settlement is entirely client-side
+// HTLC work. (An earlier build could also drive a stateful RFQ daemon over REST
+// `/v1/xchain/reverse/*`; that rail is retired and its client code is gone.)
 //
 // Flow (taker = this wallet), matching XchainSwapState:
 //   1. Open      OpenReverseXchainSwap{quote_id, taker_btc_claim_pub,
@@ -14,15 +15,16 @@
 //                {btc_leg, H, maker_seq_claim_pub, maker_btc_refund_pub, T_btc>T_seq}.
 //                We REVERIFY the BTC-leg redeemScript (claim=us, refund=maker, T_btc)
 //                before trusting it. State BTC_LOCKED.
-//   2. Confirm   poll GetXchainSwap until btc_leg_height > 0 (the maker broadcasts
-//                its BTC leg at 0-conf on a live network; we wait for its conf so the
-//                Sequentia block can anchor at/above it).
+//   2. Confirm   wait on OUR OWN node for the maker's BTC leg to confirm (it
+//                broadcasts at 0-conf on a live network), then wait for our anchor
+//                to reach that height so our asset block anchors at/above it.
 //   3. Fund SEQ  buildSeqHtlcRedeemScript(H, maker_seq_claim_pub, taker_seq_refund_pub,
 //                T_seq) -> send the asset to that P2SH as an EXPLICIT output, confirm,
 //                capture {txid,vout}. (Real money moves here — a structured review.)
-//   4. Submit    SubmitReverseSeqLeg{swap_id, seq_leg} -> the maker admits it; its
-//                watcher runs the anchor gate then CLAIMS it, revealing the secret.
-//   5. Reveal    poll GetXchainSwap until `preimage` appears (state SEQ_CLAIMED).
+//   4. Announce  the funded asset leg goes to the maker over the courier session;
+//                the maker runs the anchor gate then CLAIMS it, revealing the secret.
+//   5. Reveal    read the secret OFF-CHAIN from the maker's claim (a courier
+//                `secret_revealed` is only a verified fast-path hint).
 //   6. Claim BTC btcLeg.claim(btc_leg, preimage) -> a testnet4 Bitcoin tx spending
 //                the maker's BTC leg via the IF branch. State BTC_CLAIMED (done).
 //   7. Refund    off-ramp: after T_seq, refund OUR asset leg (the ELSE/CLTV branch)
@@ -49,12 +51,12 @@ let SETTLING = false;    // re-entrancy guard for the on-chain settle driver
 
 const LS_KEY = 'swk.sequentia.xrswap';   // localStorage key (distinct from xswap.js)
 
-// Transport: the SeqOB order-book COURIER (true) or the legacy RFQ daemon (false).
-// The courier is the product direction; the RFQ path is kept as a fallback so the
-// transport can be reverted without losing it. Everything below the transport —
-// the client-side BTC/SEQ HTLC settlement (openSwap/verifyMakerBtcLeg/fundSeq/
-// claimBtc + the C.btcLeg/C.seqLeg bridges) — is identical either way.
-const USE_COURIER = true;
+// Transport: the SeqOB order-book COURIER, and nothing else. The legacy RFQ
+// daemon rail (`/v1/xchain/reverse/*` + `/v1/xchain/swap`) is RETIRED — the
+// daemon still binds :9945 but nothing routes to it, so those calls could only
+// hang or 404, i.e. a trade could enter that rail and never leave. Everything
+// below the transport — the client-side BTC/SEQ HTLC settlement + the
+// C.btcLeg/C.seqLeg bridges — is unchanged.
 
 // The Sequentia esplora base, same origin-relative path index.html uses (/api).
 // The reverse taker reads the maker's revealed preimage OFF-CHAIN from the maker's
@@ -76,20 +78,6 @@ const ST = {
   REFUNDED:    'XCHAIN_SWAP_STATE_REFUNDED',
   FAILED:      'XCHAIN_SWAP_STATE_FAILED',
 };
-
-async function dexPost(path, body){
-  const r = await fetch(C.XDEX + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  const txt = await r.text();
-  let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { _raw: txt }; }
-  if (!r.ok) {
-    const msg = (j && (j.message || j.error)) || j._raw || ('HTTP ' + r.status);
-    throw new Error(msg);
-  }
-  return j;
-}
 
 function pick(obj, ...names){
   if (!obj) return undefined;
@@ -167,18 +155,6 @@ function normMarket(m){
     price_seq_per_btc: num(pick(m, 'price_seq_per_btc', 'priceSeqPerBtc')),
   };
 }
-function normBtcLeg(l){
-  if (!l) return null;
-  return {
-    txid:          pick(l, 'txid'),
-    vout:          num(pick(l, 'vout')),
-    height:        Number(pick(l, 'height') ?? 0),
-    redeem_script: pick(l, 'redeem_script', 'redeemScript'),
-    amount:        big(pick(l, 'amount')),
-    asset_id:      pick(l, 'asset_id', 'assetId') || '',
-  };
-}
-
 // ---- localStorage persistence ----
 function saveSwap(){
   try {
@@ -210,7 +186,7 @@ export function initXrswap(ctx){
 }
 
 // ---------------------------------------------------------------------------
-// Courier offer discovery + settlement helpers (USE_COURIER path).
+// Courier offer discovery + settlement helpers.
 // ---------------------------------------------------------------------------
 
 // Direction constants mirror internal/seqob/offer/sentinel.go.
@@ -273,6 +249,173 @@ async function findReverseOffer(seqAsset, seqAtoms){
   return [...covering, ...below];
 }
 
+// ---- anchor precondition (asset FUNDER side) --------------------------------
+// The node's LIVE anchor view + its health, from the LSP's read-only /anchor.
+// This is the ADVANCING quantity (the tip's Bitcoin-anchor height), as opposed to
+// a block's own committed anchor, which never moves. Returns null when unreadable
+// so the caller waits rather than proceeding on an unknown anchor.
+// Poll cadence for the anchor precondition. A knob, not a deadline: nothing here
+// ever gives up on the clock (see fundWindowClosed). Tests shorten it.
+const T = { anchorPollMs: 15 * 1000 };
+// How many Sequentia blocks must still remain before T_seq for a leg funded NOW to
+// be claimable by the maker in time. Mirrors the Go MinSeqFundWindow (120 blocks,
+// ~1h at 30s slots) — the same window this wallet demands of the maker's terms.
+const MIN_SEQ_CLAIM_WINDOW = 120;
+// And on the parent chain: below this many blocks before T_btc we could no longer
+// claim the maker's BTC after it reveals, so funding would be one-sided.
+const MIN_BTC_CLAIM_WINDOW = 6;
+async function anchorTipStatus(){
+  if (C && C.anchorTipStatus) return C.anchorTipStatus();
+  try {
+    const base = (typeof location !== 'undefined' ? location.origin : '') + '/lsp';
+    const r = await fetch(base + '/anchor', { signal: AbortSignal.timeout(6000) });
+    const j = await r.json();
+    if (!j || !j.ok) return null;
+    const h = (j.anchor_height != null) ? Number(j.anchor_height) : null;
+    if (!Number.isFinite(h)) return null;
+    // anchor_status is absent on an LSP predating the field; treat that as NOT ok
+    // (fail closed) rather than assume a healthy anchor we cannot see.
+    return { height: h, ok: j.anchor_status === 'ok' };
+  } catch { return null; }
+}
+
+// fundWindowClosed reports why funding is no longer safe, or null while it still
+// is. This is the ONLY thing allowed to end the wait below automatically. A flat
+// wall-clock timeout is deliberately absent: contested blocks take as long as they
+// take, and it is the USER who decides when that is intolerable (owner ruling,
+// 2026-07-25) — the wallet surfaces the wait and offers to cancel the trade, it
+// does not cancel it for them. A chain read that FAILS is not a verdict; it
+// returns null and we keep waiting.
+async function fundWindowClosed(){
+  if (!SWAP) return null;
+  try {
+    const seqNow = await seqTipHeight();
+    if (Number.isFinite(seqNow) && SWAP.seq_locktime &&
+        seqNow + MIN_SEQ_CLAIM_WINDOW >= Number(SWAP.seq_locktime))
+      return `the Sequentia chain has moved to block ${seqNow}, leaving less than ${MIN_SEQ_CLAIM_WINDOW} blocks before your asset refund at ${SWAP.seq_locktime} - an asset leg funded now could not be taken in time, so nothing was spent`;
+  } catch {}
+  try {
+    const btcNow = await btcTipHeight();
+    if (Number.isFinite(btcNow) && SWAP.btc_locktime &&
+        btcNow + MIN_BTC_CLAIM_WINDOW >= Number(SWAP.btc_locktime))
+      return `Bitcoin has reached block ${btcNow}, too close to the maker's refund at ${SWAP.btc_locktime} for you to claim the BTC afterwards - nothing was spent`;
+  } catch {}
+  return null;
+}
+
+// awaitAnchorReachesBtcLeg blocks until our own node's anchor has reached `target`
+// with a healthy status. Returns null on success, or a reason string to abort with.
+// See the call site in driveReverse for why this must happen BEFORE the asset moves
+// and can never be substituted by a later re-check.
+//
+// `target` is the maker's BTC-leg height PLUS ONE. The maker derives that height
+// from two separate reads (its tip, then the confirmation count), so a Bitcoin
+// block landing between them yields a height one HIGHER than we measured — and its
+// gate would then refuse a leg we had already funded. Waiting longer is never
+// unsafe, so we absorb that race instead of letting it cost us the asset.
+// setWaitNote is the ONLY user-visible signal during the anchor precondition, and
+// it deliberately writes to THIS module's stepper. It used to call
+// C.setStepStatus, which is module-private to xswap.js and is NOT in the context
+// index.html passes to initXrswap — so the call was always a no-op guarded by
+// `C && C.setStepStatus`, and the user watched an unexplained stall through a wait
+// that is now bounded only by the timelock. The note is persisted with the swap so
+// it survives a re-render, and cleared the moment the wait resolves.
+function setWaitNote(msg){
+  try {
+    if (SWAP){ SWAP.wait_note = msg || ''; saveSwap(); }
+    const n = C && C.$ && C.$('xrStepStatus');
+    if (n) n.textContent = msg || '';
+  } catch {}
+}
+
+async function awaitAnchorReachesBtcLeg(target){
+  let last = null;
+  for (;;){
+    const st = await anchorTipStatus();
+    last = st;
+    if (st && st.ok && st.height >= target){ setWaitNote(''); return null; }
+    const closed = await fundWindowClosed();
+    if (closed){ setWaitNote(''); return closed; }
+    setWaitNote(`Waiting for your Sequentia node to anchor at or above the maker's BTC lock (${target})… nothing is spent while you wait; cancel the trade if it is taking too long.`);
+    await new Promise(r => setTimeout(r, T.anchorPollMs));
+  }
+}
+
+// The Sequentia / Bitcoin tip heights, via the context when it supplies them
+// (tests + a wallet that already caches them), else the explorers.
+async function seqTipHeight(){
+  if (C && C.seqTip) return Number(await C.seqTip());
+  const r = await fetch(SEQ_ESPLORA + '/blocks/tip/height', { signal: AbortSignal.timeout(6000) });
+  return parseInt((await r.text()).trim(), 10);
+}
+async function btcTipHeight(){
+  if (C && C.btcTip) return Number(await C.btcTip());
+  const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
+  const r = await fetch(base + '/blocks/tip/height', { signal: AbortSignal.timeout(6000) });
+  return parseInt((await r.text()).trim(), 10);
+}
+
+// A Sequentia block's COMMITTED Bitcoin-anchor height (a fixed header field, unlike
+// the advancing tip reading above), self-derived from the LSP's read-only /anchor.
+// Returns null when unknown — the caller then treats the leg as under-anchored and
+// withholds it, never as "fine".
+async function anchorHeightOfBlock(blockHash){
+  const ev = await legAnchorEvidence(null, blockHash);
+  return ev.anchor >= 0 ? ev.anchor : null;
+}
+
+// How many times a single anchor read is retried before it counts as UNKNOWN. The
+// endpoint shells out to the node per request and 502s on any hiccup; a SINGLE
+// failure used to make legAnchor null, and this wallet then withheld — and
+// declared under-anchored — a leg that was perfectly fine. A transient 502 must
+// cost a retry, not somebody's trade.
+const ANCHOR_READ_TRIES = 3;
+
+// legAnchorEvidence resolves the anchor of the block confirming an asset leg.
+//
+// It prefers a TXID lookup because reading by CACHED BLOCK HASH is wrong in both
+// directions, exactly as it was on the Go side: the endpoint answers for ORPHANED
+// blocks too (it reads the block index, not the chain), so a cached hash keeps
+// reporting a verdict about a block the network has abandoned, and a reorg that
+// re-mines the leg into a BETTER-anchored block stays invisible. Asking by txid
+// asks "which block confirms this leg NOW", and the answer counts only when the
+// server says that block is on the ACTIVE chain.
+//
+// anchor is -1 for UNKNOWN, never 0 — anchor 0 reads as "confirmed but anchored
+// below the BTC lock", the terminal unsafe verdict, and Number(null) === 0 is
+// precisely how an absent value used to become one.
+async function legAnchorEvidence(txid, blockHashFallback){
+  // A context that supplies its own reader (tests, and any embedder that wired one
+  // before this function existed) keeps ownership of its freshness policy, so the
+  // txid-first re-derivation below is a property of the HTTP path only. What holds
+  // either way: an absent anchor is UNKNOWN (-1), never 0.
+  if (C && C.anchorHeightOf){
+    const a = await C.anchorHeightOf(blockHashFallback);
+    return { anchor: (a == null ? -1 : Number(a)), onActiveChain: a != null };
+  }
+  const q = txid ? ('tx=' + encodeURIComponent(txid))
+          : (blockHashFallback ? ('block=' + encodeURIComponent(blockHashFallback)) : null);
+  if (!q) return { anchor: -1, onActiveChain: false };
+  const base = (typeof location !== 'undefined' ? location.origin : '') + '/lsp';
+  for (let i = 0; i < ANCHOR_READ_TRIES; i++){
+    try {
+      const r = await fetch(base + '/anchor?' + q, { signal: AbortSignal.timeout(6000) });
+      const j = await r.json();
+      if (j && j.ok){
+        const h = (j.anchor_height != null) ? Number(j.anchor_height) : NaN;
+        if (!Number.isFinite(h)) return { anchor: -1, onActiveChain: false };   // truthfully "not confirmed yet"
+        return { anchor: h,
+                 // Absent on an older LSP: only treat that as unproven when we asked
+                 // by BLOCK, since a tx lookup already resolves through the node's own
+                 // view of which block confirms it.
+                 onActiveChain: (j.on_active_chain != null) ? !!j.on_active_chain : !!txid };
+      }
+    } catch {}
+    if (i < ANCHOR_READ_TRIES - 1) await new Promise(r => setTimeout(r, 500));
+  }
+  return { anchor: -1, onActiveChain: false };
+}
+
 // Read the maker's revealed preimage OFF-CHAIN: find the tx that spent our funded
 // asset leg (the maker's claim) via the Sequentia esplora, then extract the push
 // whose sha256 equals the agreed hashlock H. Returns the preimage hex, or null if
@@ -310,40 +453,17 @@ async function readPreimageOnChain(seqLegTxid, vout, hashHex){
 // Composer bridge — the symmetric composer in swap.js gets a reverse quote
 // through these exports, then hands it to openReverseFromComposer().
 // ---------------------------------------------------------------------------
-export async function fetchRMarkets(){
-  if (!USE_COURIER){
-    const resp = await dexPost('/v1/xchain/markets', {});
-    return (Array.isArray(pick(resp, 'markets')) ? pick(resp, 'markets') : []).map(normMarket);
-  }
-  // The order book has no separate "markets" list; a market exists iff a verified
-  // reverse offer rests for the asset. The composer discovers per-asset at quote
-  // time (fetchRQuote), so this returns an empty seed — callers tolerate it.
-  return [];
-}
+// The order book has no separate "markets" list; a market exists iff a verified
+// reverse offer rests for the asset. The composer discovers per-asset at quote
+// time (fetchRQuote), so this returns an empty seed — callers tolerate it.
+export async function fetchRMarkets(){ return []; }
+
 // Quote SELLING `seqAtoms` of `seqAsset` for BTC. Over the courier there is no
 // pre-quote round-trip: the price lives in the resting offer, and the load-bearing
 // terms (maker keys, locktimes) are minted per-lift once the session opens. So the
 // "quote" here carries the chosen OFFER and its fixed whole-HTLC amounts; the real
 // terms arrive in the maker's btc_leg_locked during the lift.
 export async function fetchRQuote(seqAsset, seqAtoms){
-  if (!USE_COURIER){
-    const resp = await dexPost('/v1/xchain/reverse/quote', { seq_asset: seqAsset, seq_amount: String(seqAtoms) });
-    const q = {
-      reverse: true,
-      market: { btc_asset:'', seq_asset:seqAsset, name:'BTC / Sequentia asset' },
-      quote_id:          pick(resp, 'quote_id', 'quoteId'),
-      seq_amount:        big(pick(resp, 'seq_amount', 'seqAmount')),
-      btc_amount:        big(pick(resp, 'btc_amount', 'btcAmount')),
-      price_seq_per_btc: num(pick(resp, 'price_seq_per_btc', 'priceSeqPerBtc')),
-      fee_btc:           big(pick(resp, 'fee_btc', 'feeBtc')),
-      btc_locktime:      num(pick(resp, 'btc_locktime', 'btcLocktime')),
-      seq_locktime:      num(pick(resp, 'seq_locktime', 'seqLocktime')),
-      expires_at_unix:   Number(pick(resp, 'expires_at_unix', 'expiresAtUnix') || 0),
-    };
-    if (!(q.btc_locktime > q.seq_locktime))
-      throw new Error(`maker returned a bad ordering: T_btc(${q.btc_locktime}) must exceed T_seq(${q.seq_locktime})`);
-    return q;
-  }
   const ranked = await findReverseOffer(seqAsset, seqAtoms);
   if (!ranked) throw new Error('No one is buying this asset for BTC right now. Try again later, or place a same-chain order.');
   const best = ranked[0];
@@ -407,20 +527,19 @@ export function renderReverse(){
     } else if (SWAP.seq_fund_txid){
       // RESUME GAP: the asset HTLC was BROADCAST (seq_fund_txid persisted) but the app died during
       // waitConf, before seq_leg was set. renderReverse used to skip this (it only checked seq_leg),
-      // stranding the funded asset — the refund path also keys on seq_leg. Re-enter fundSeq: it is
-      // idempotent (reuses seq_fund_txid, never re-funds), waits for the confirmation, sets seq_leg,
-      // resubmits to the maker, then settles. Now the asset is always resumable AND refundable.
-      fundSeq().then(() => driveSettle()).catch(() => { /* surfaced on the stepper; the CLTV refund off-ramp appears once seq_leg is set */ });
+      // stranding the funded asset — the refund path also keys on seq_leg. resumeSeqLeg NEVER funds:
+      // it reuses the persisted seq_fund_txid, waits for the confirmation and records the leg, then
+      // settles. Now the asset is always resumable AND refundable.
+      resumeSeqLeg().then(() => driveSettle()).catch(() => { /* surfaced on the stepper; the CLTV refund off-ramp appears once seq_leg is set */ });
     } else if (SWAP.seq_redeem && SWAP.taker_seq_refund_secret){
       // STRAND RECOVERY: seq_redeem was persisted the same synchronous tick BEFORE seqLeg.fund
       // broadcasts, but fund() threw after the node accepted the tx (a lost response) — so neither
-      // seq_fund_txid nor seq_leg was ever set and both branches above miss it. NEVER call fundSeq
-      // here directly: with seq_fund_txid null it would RE-FUND (double-spend the asset). Instead scan
-      // the HTLC address for the already-broadcast funding output, ADOPT its txid, then resume via
-      // fundSeq (which now reuses seq_fund_txid). If nothing is found the fund never landed and the
-      // record is safely abandonable — until then onAbandon keeps the reclaim material.
+      // seq_fund_txid nor seq_leg was ever set and both branches above miss it. Scan the HTLC address
+      // for the already-broadcast funding output, ADOPT its txid, then resume. If nothing is found the
+      // fund never landed and the record is safely abandonable — until then onAbandon keeps the
+      // reclaim material. (resumeSeqLeg refuses to act without a txid, so it can never re-fund.)
       C.seqLeg.findFundingByAddress(SWAP.seq_redeem).then((f) => {
-        if (f && f.txid){ SWAP.seq_fund_txid = f.txid; saveSwap(); fundSeq().then(() => driveSettle()).catch(() => {}); }
+        if (f && f.txid){ SWAP.seq_fund_txid = f.txid; saveSwap(); resumeSeqLeg().then(() => driveSettle()).catch(() => {}); }
       }).catch(() => {});
     }
   }
@@ -443,7 +562,7 @@ function startCountdown(){
 // Recompute the BTC-leg redeemScript ourselves — it must be claimable by OUR claim
 // key with the preimage and refundable by the MAKER only after T_btc. If it does
 // not match, the maker's BTC leg is not the one we agreed to; never fund the asset.
-function verifyMakerBtcLeg(){
+async function verifyMakerBtcLeg(){
   if (!SWAP || !SWAP.btc_leg) return { ok:false, reason:'no BTC leg yet' };
   const recomputed = C.wasm.buildSeqHtlcRedeemScript(
     SWAP.hash_hex, SWAP.taker_btc_claim_pub, SWAP.maker_btc_refund_pub, SWAP.btc_locktime);
@@ -453,50 +572,31 @@ function verifyMakerBtcLeg(){
     return { ok:false, reason:`maker locked ${SWAP.btc_leg.amount} BTC atoms, less than the agreed ${SWAP.btc_amount}` };
   if (!(SWAP.btc_locktime > SWAP.seq_locktime))
     return { ok:false, reason:'bad timeout ordering (T_btc must exceed T_seq)' };
+
+  // T_seq FLOOR. Ordering alone is not enough: a maker can satisfy
+  // T_btc > T_seq while still minting a T_seq only a few blocks above the
+  // current tip. Fund into that and fundWindowClosed is true on the FIRST poll —
+  // the asset is locked and immediately inside its own refund margin, so the
+  // anchor precondition can never run and the trade is dead on arrival. This
+  // wallet already demands MIN_SEQ_CLAIM_WINDOW of the maker's terms elsewhere;
+  // it must demand it HERE too, before anything of ours is committed.
+  //
+  // A tip read that FAILS is not a verdict, so it does not veto the leg: the
+  // funder's own fundWindowClosed re-reads the chain immediately afterwards and
+  // stops there if the window really has closed.
+  try {
+    const tip = await seqTipHeight();
+    if (Number.isFinite(tip) && SWAP.seq_locktime &&
+        Number(SWAP.seq_locktime) < tip + MIN_SEQ_CLAIM_WINDOW)
+      return { ok:false, reason:`the maker's asset timeout T_seq=${SWAP.seq_locktime} is only ${Number(SWAP.seq_locktime) - tip} blocks above the current Sequentia tip ${tip}; this wallet needs at least ${MIN_SEQ_CLAIM_WINDOW} to settle safely - nothing was spent` };
+  } catch {}
   return { ok:true };
 }
 
-async function openSwap(q){
-  const btcClaim = C.btcLeg.claimKey();   // {public_key, secret_hex} — we claim the BTC leg with this
-  const seqRefund = C.seqLeg.refundKey(); // {public_key, secret_hex} — we refund the asset leg with this
-  const resp = await dexPost('/v1/xchain/reverse/open', {
-    quote_id: q.quote_id,
-    taker_btc_claim_pub: btcClaim.public_key,
-    taker_seq_refund_pub: seqRefund.public_key,
-  });
-  const fail = pick(resp, 'fail', 'swap_fail', 'swapFail');
-  if (fail) throw new Error((pick(fail,'code')||'FAIL') + ': ' + (pick(fail,'message')||'maker rejected the swap'));
-  const opened = pick(resp, 'opened', 'reverse_xchain_swap_opened', 'reverseXchainSwapOpened');
-  if (!opened) throw new Error('no ReverseXchainSwapOpened in open response');
+// (The old RFQ `openSwap` lived here: it POSTed /v1/xchain/reverse/open to the
+// retired daemon. On the courier the maker mints the terms and locks its BTC leg
+// inside the session — see driveReverse.)
 
-  const btcLeg = normBtcLeg(pick(opened, 'btc_leg', 'btcLeg'));   // height is 0 on a live network (0-conf at open)
-  SWAP = {
-    reverse: true,
-    state: ST.BTC_LOCKED,
-    created: Date.now(),
-    market: { btc_asset: q.market.btc_asset, seq_asset: q.market.seq_asset, name: q.market.name },
-    quote_id: q.quote_id,
-    swap_id: pick(opened, 'swap_id', 'swapId'),
-    hash_hex: pick(opened, 'hash'),
-    maker_seq_claim_pub: pick(opened, 'maker_seq_claim_pub', 'makerSeqClaimPub'),
-    maker_btc_refund_pub: pick(opened, 'maker_btc_refund_pub', 'makerBtcRefundPub'),
-    taker_btc_claim_pub: btcClaim.public_key,
-    taker_btc_claim_secret: btcClaim.secret_hex,
-    taker_seq_refund_pub: seqRefund.public_key,
-    taker_seq_refund_secret: seqRefund.secret_hex,
-    btc_locktime: num(pick(opened, 'btc_locktime', 'btcLocktime')) || q.btc_locktime,
-    seq_locktime: num(pick(opened, 'seq_locktime', 'seqLocktime')) || q.seq_locktime,
-    seq_amount: q.seq_amount,
-    btc_amount: q.btc_amount,
-    fee_btc: q.fee_btc,
-    btc_leg: btcLeg,
-    btc_leg_height: btcLeg ? btcLeg.height : 0,
-  };
-  const v = verifyMakerBtcLeg();
-  if (!v.ok){ SWAP.state = ST.FAILED; SWAP.detail = 'swap aborted: ' + v.reason; saveSwap(); throw new Error(SWAP.detail); }
-  saveSwap();
-  return SWAP;
-}
 async function onOpen(){
   const { $ } = C;
   if ($('xrswapErr')) $('xrswapErr').textContent = '';
@@ -507,7 +607,7 @@ async function onOpen(){
   // different whole-HTLC size, so consent is re-taken, never silently switched under the seller).
   const mkQuote = (c) => ({ reverse:true, offer:c.offer, market:q0.market, seq_amount:c.seq_amount,
     btc_amount:c.btc_amount, price_seq_per_btc:c.price_seq_per_btc, fee_btc:0n, expires_at_unix:c.expires_at_unix });
-  const attempts = USE_COURIER ? [q0, ...((q0.candidates || []).map(mkQuote))] : [q0];
+  const attempts = [q0, ...((q0.candidates || []).map(mkQuote))];
 
   for (let i = 0; i < attempts.length; i++){
     const q = attempts[i];
@@ -516,11 +616,11 @@ async function onOpen(){
     // the slice (proportionalBtcFloor), which is what the seller actually receives — NOT the composer's
     // ceil q.btc_amount (a partial can round them apart by up to 1 sat). Show the floor here so the confirm
     // matches settlement. (RFQ has no offer; its q.btc_amount is the daemon's authoritative quote — keep it.)
-    const recvBtc = (USE_COURIER && q.offer)
+    const recvBtc = q.offer
       ? proportionalBtcFloor(big(offerField(q.offer, 'offer_amount', 'offerAmount')), big(q.seq_amount),
                              big(offerField(q.offer, 'want_amount', 'wantAmount', 'base_amount', 'baseAmount')))
       : big(q.btc_amount);
-    const kv = USE_COURIER ? [
+    const kv = [
       ...(i > 0 ? [['Heads up', `the previous maker didn’t respond; this is the next best resting offer (${i} of ${attempts.length - 1})`]] : []),
       ['You sell', C.fmtAtoms(q.seq_amount, sm.precision) + ' ' + sm.ticker],
       ['You receive', C.fmtAtoms(recvBtc, 8) + ' BTC'],
@@ -528,13 +628,6 @@ async function onOpen(){
       ['You commit', 'your ' + sm.ticker + ' once the maker’s BTC lock confirms - until then nothing is spent'],
       ['If the maker stalls', 'your asset is refundable after the maker’s stated Sequentia timeout (the exact block is shown once the maker locks; the wizard offers the refund then, with a countdown)'],
       ['Settlement', 'the BTC you receive is anchor-bound to Bitcoin; it can revert only if Bitcoin itself reverts'],
-    ] : [
-      ['Network', 'Cross-chain: you SELL a Sequentia asset and receive BTC on the parent chain'],
-      ['You sell', C.fmtAtoms(q.seq_amount, sm.precision) + ' ' + sm.ticker],
-      ['You receive', C.fmtAtoms(recvBtc, 8) + ' BTC'],
-      ['Maker fee', C.fmtAtoms(q.fee_btc, 8) + ' BTC'],
-      ['How it works', 'The maker locks the BTC first; you then fund the asset, the maker reveals a secret to take the asset, and you use that secret to claim the BTC.'],
-      ['Sequentia refund after', 'block ' + q.seq_locktime + ' (if the maker stalls, you reclaim your asset)'],
     ];
     const { m: modal, ok, st } = C.modalRows({ title: 'Sell ' + sm.ticker + ' for BTC', kv });
 
@@ -546,28 +639,18 @@ async function onOpen(){
     if (!go) return;   // user cancelled — stop the whole flow
 
     try {
-      if (USE_COURIER){
-        modal.remove();
-        LAST_RQUOTE = null;
-        const r = await driveReverse(q);   // auto-drives; returns 'retry' iff no maker locked (pre-lock)
-        if (r === 'retry'){
-          if (i < attempts.length - 1){ C.toast && C.toast('That maker didn’t respond - showing the next best offer.'); continue; }
-          if (C.$('xrswapErr')) C.$('xrswapErr').textContent = `No maker responded${attempts.length > 1 ? ` (tried ${attempts.length} offers)` : ''}. Nothing was spent - try again shortly.`;
-        }
-        return;   // committed / settled / terminal — done
-      } else {
-        await openSwap(q);
-        modal.remove();
-        LAST_RQUOTE = null;
-        renderStepper();
-        startPoll();
-        C.toast && C.toast('Maker locked the BTC leg - waiting for it to confirm.');
-        return;
+      modal.remove();
+      LAST_RQUOTE = null;
+      const r = await driveReverse(q);   // auto-drives; returns 'retry' iff no maker locked (pre-lock)
+      if (r === 'retry'){
+        if (i < attempts.length - 1){ C.toast && C.toast('That maker didn’t respond - showing the next best offer.'); continue; }
+        if (C.$('xrswapErr')) C.$('xrswapErr').textContent = `No maker responded${attempts.length > 1 ? ` (tried ${attempts.length} offers)` : ''}. Nothing was spent - try again shortly.`;
       }
+      return;   // committed / settled / terminal — done
     } catch (e){
       if (modal.isConnected){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
       else { renderStepper(); if (C.$('xrswapErr')) C.$('xrswapErr').textContent = 'Swap failed: ' + C.prettyErr(e); }
-      return;   // a thrown error is terminal (post-lock, or RFQ path) — never auto-retry after a lock
+      return;   // a thrown error is terminal (post-lock) — never auto-retry after a lock
     }
   }
 }
@@ -675,7 +758,7 @@ async function driveReverse(q){
     // Then the script must recompute and the timelocks must be sane. Nothing is spent on abort.
     if (mBtcAmount !== wantBtc || big(leg.amount) !== wantBtc){ await failAbort(session, 'terms_mismatch', 'the maker did not lock the proportional BTC for your slice - nothing was spent'); return; }
     if (mSeqAmount !== takeSeq){ await failAbort(session, 'terms_mismatch', 'the maker sized the trade differently from your slice - nothing was spent'); return; }
-    const v = verifyMakerBtcLeg();
+    const v = await verifyMakerBtcLeg();
     if (!v.ok){ await failAbort(session, 'btc_leg_invalid', v.reason + ' - nothing was spent'); return; }
     setPhase('await_btc_conf');
     C.toast && C.toast('Maker locked the BTC leg - waiting for it to confirm.');
@@ -686,6 +769,44 @@ async function driveReverse(q){
     if (h == null) return;   // aborted (T_btc passed with no conf; nothing of ours spent)
     SWAP.btc_leg_height = h; SWAP.btc_leg.height = h; setPhase('funding');
 
+    // 4b. ANCHOR PRECONDITION — we are the asset GIVER, so the MAKER's gate is the
+    //     one our funding has to satisfy: the Sequentia block that confirms it must
+    //     anchor at or above the maker's BTC-leg height, and that number is frozen
+    //     the moment the funding confirms (it is a committed block-header field, so
+    //     a wait AFTERWARDS can never clear it). Wait for our own node's LIVE anchor
+    //     to get there first; anchors never go backwards along a chain, so every
+    //     block extending this tip qualifies and the maker's gate passes first time.
+    //     Waiting here is free — nothing of ours has moved, and if we stop the maker
+    //     simply refunds its BTC after T_btc. The wait ends only at the timelock (or
+    //     when the user cancels), never on a wall clock.
+    {
+      const bad = await awaitAnchorReachesBtcLeg(h + 1);
+      if (bad){ await failAbort(session, 'anchor_not_caught_up', bad); return; }
+    }
+
+    // 4c. RE-VERIFY THE MAKER'S BTC LEG. That wait is bounded by the timelock, not
+    //     by a clock, so it can run a long time — and a BTC HTLC that was confirmed
+    //     when we checked can be GONE by the end of it: one parent-chain reorg is
+    //     all the maker needs to double-spend the input it funded with. Funding our
+    //     asset against a dead BTC leg is the one-sided loss this whole gate exists
+    //     to prevent, so check it again immediately before we spend. A leg that
+    //     moved to a different height also invalidates the precondition we just
+    //     satisfied, so that is a refusal too.
+    {
+      let f2 = null;
+      try { f2 = await C.btcLeg.findFunding(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script); } catch { f2 = null; }
+      if (!f2 || !f2.confirmed || BigInt(f2.value) < BigInt(SWAP.btc_amount)){
+        await failAbort(session, 'btc_leg_gone', 'the maker’s BTC lock is no longer on chain with the agreed amount - your asset was NOT funded, nothing of yours was spent');
+        return;
+      }
+      if (Number(f2.height) !== h){
+        await failAbort(session, 'btc_leg_gone', `the maker’s BTC lock moved from block ${h} to ${f2.height} (a Bitcoin reorg) - your asset was NOT funded, nothing of yours was spent`);
+        return;
+      }
+      const closed = await fundWindowClosed();
+      if (closed){ await failAbort(session, 'seq_window_closed', closed); return; }
+    }
+
     // 5. Fund our asset leg (real money moves here — the single consent above
     //    covered it) and announce it to the maker over the courier.
     const redeem = C.wasm.buildSeqHtlcRedeemScript(SWAP.hash_hex, SWAP.maker_seq_claim_pub, SWAP.taker_seq_refund_pub, SWAP.seq_locktime);
@@ -695,10 +816,38 @@ async function driveReverse(q){
     const conf = await C.seqLeg.waitConf(fundTxid, redeem);
     SWAP.seq_leg = { txid: fundTxid, vout: conf.vout, redeem_script: redeem, amount: SWAP.seq_amount, asset_id: SWAP.market.seq_asset, block_hash: conf.block_hash, height: conf.height };
     SWAP.state = ST.SEQ_SUBMITTED; setPhase('await_reveal');
+    // POST-FUNDING CHECK, and an ASSERTION rather than a log line. The precondition
+    // above makes this hold by construction on the honest path, but a Sequentia
+    // reorg can still land our funding on a lower-anchored branch — and that is
+    // exactly the leg that could outlive the maker's BTC leg, i.e. our own money.
+    // If it did, do NOT invite the claim.
+    //
+    // What withholding buys, and what it does not: it is a COURTESY. The maker
+    // minted the secret and holds our refund pubkey, so it can rebuild this redeem
+    // script and find the P2SH on chain without any message from us. The real
+    // defences are the precondition above (we do not fund early) and the maker's
+    // own gate (it refuses on its own node's reading). What we get here is that an
+    // HONEST maker is told plainly not to claim, and our T_seq refund stays clean.
+    //
+    // Note this also puts the leg's REAL anchor height on the wire: the old code
+    // sent `anchor_height: conf.height`, which is the Sequentia block HEIGHT — a
+    // completely different number from its Bitcoin anchor.
+    // Re-derived from the leg's TXID (not the cached conf.block_hash) and counted
+    // only when the confirming block is on the ACTIVE chain — see legAnchorEvidence.
+    const ev = await legAnchorEvidence(SWAP.seq_leg ? SWAP.seq_leg.txid : null, conf.block_hash);
+    const legAnchor = (ev.anchor >= 0 && ev.onActiveChain) ? ev.anchor : null;
+    if (legAnchor == null || legAnchor < h){
+      SWAP.detail = `your asset leg landed in Sequentia block ${conf.block_hash}, which anchors at ${legAnchor == null ? 'an unreadable height' : legAnchor} - below the maker's BTC lock at ${h}. It was NOT offered to the maker; you reclaim it after block ${SWAP.seq_locktime}.`;
+      saveSwap();
+      try { await session.fail('seq_leg_underanchored', 'our asset leg confirmed under-anchored; do NOT claim it (we refund it after T_seq) - refund your BTC after T_btc'); } catch {}
+      renderStepper();
+      if (C.$('xrswapErr')) C.$('xrswapErr').textContent = SWAP.detail;
+      return;   // the refund off-ramp keys on seq_leg, which is set: the asset is recoverable
+    }
     await session.send({ type: xcourier.XcType.SeqLegFunded, leg: {
       txid: SWAP.seq_leg.txid, vout: SWAP.seq_leg.vout, amount: Number(SWAP.seq_amount),
       asset: SWAP.market.seq_asset, redeem_script: redeem, locktime: SWAP.seq_locktime,
-      block_hash: conf.block_hash, anchor_height: conf.height,
+      block_hash: conf.block_hash, anchor_height: legAnchor,
     }});
     C.toast && C.toast('Asset leg funded - waiting for the maker to reveal the secret.');
 
@@ -738,7 +887,7 @@ async function waitMakerBtcConf(txid, redeemHex, tBtc){
       if (f && f.confirmed && f.height > 0){
         // FUND-SAFETY: verify the ACTUAL on-chain output value meets the agreed amount before we
         // fund our asset leg. verifyMakerBtcLeg only checked the maker-REPORTED btc_leg.amount; a
-        // maker can report the agreed amount yet lock LESS on-chain. Since this runs BEFORE fundSeq,
+        // maker can report the agreed amount yet lock LESS on-chain. Since this runs BEFORE we fund,
         // an underfunded leg aborts with nothing of ours spent.
         if (BigInt(f.value) < BigInt(SWAP.btc_amount)){
           SWAP.state = ST.FAILED;
@@ -781,106 +930,36 @@ async function driveSettle(){
   }, 5000);
 }
 
-// ---- step 3: fund the Sequentia asset leg ----
-async function fundSeq(){
+// ---- resume: recover an asset leg that was broadcast before a reload ----
+// The COURIER funds the asset leg inline in driveReverse; this is only the
+// recovery path for a wallet that died between broadcasting the funding and
+// recording its confirmation. It never funds anything: it reuses the persisted
+// seq_fund_txid, waits for the confirmation, records the leg (which is what the
+// refund off-ramp keys on), and hands over to the on-chain settle driver.
+//
+// There is deliberately no re-announce: the courier session is gone and its keys
+// were per-session. The maker either already saw the leg, or it did not and we
+// refund after T_seq. Nothing here can be "submitted" to a daemon — that rail is
+// retired.
+async function resumeSeqLeg(){
   if (!SWAP) throw new Error('no in-flight swap');
-  // Idempotent recovery: NEVER re-broadcast the asset HTLC. If the leg is already
-  // funded + confirmed (e.g. a prior submit was rejected by the maker), just (re)submit.
-  if (SWAP.seq_leg && SWAP.seq_leg.txid){ await submitSeq(); return SWAP; }
-  if (SWAP.btc_leg_height <= 0) throw new Error('the maker BTC leg has not confirmed yet');
-  const v = verifyMakerBtcLeg();
-  if (!v.ok) throw new Error('BTC leg check failed: ' + v.reason);
-  // Independent on-chain check: the maker's BTC funding output exists with the agreed value.
-  const f = await C.btcLeg.findFunding(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script);
-  if (f.value < SWAP.btc_amount) throw new Error('maker BTC output value is below the agreed amount');
-  SWAP.btc_leg.vout = f.vout;   // trust our own lookup for the claim later
-
-  // Build the asset-leg HTLC (claim = maker, refund = us, T_seq) and fund its P2SH.
-  const redeem = C.wasm.buildSeqHtlcRedeemScript(
-    SWAP.hash_hex, SWAP.maker_seq_claim_pub, SWAP.taker_seq_refund_pub, SWAP.seq_locktime);
-  SWAP.seq_redeem = redeem;
-  saveSwap();
-  // Reuse a prior funding broadcast if one exists (don't double-fund); else fund now.
-  let txid = SWAP.seq_fund_txid;
-  if (!txid){
-    txid = (await C.seqLeg.fund(redeem, SWAP.market.seq_asset, SWAP.seq_amount)).txid;
-    SWAP.seq_fund_txid = txid;
-    saveSwap();
-  }
-  // Wait for the funding tx to confirm and capture the HTLC vout.
+  if (SWAP.seq_leg && SWAP.seq_leg.txid) return SWAP;
+  const txid = SWAP.seq_fund_txid;
+  if (!txid) throw new Error('nothing to resume: the asset leg was never broadcast');
+  const redeem = SWAP.seq_redeem;
+  if (!redeem) throw new Error('nothing to resume: the asset-leg script was not persisted');
   const conf = await C.seqLeg.waitConf(txid, redeem);
   SWAP.seq_leg = {
     txid, vout: conf.vout, redeem_script: redeem,
     amount: SWAP.seq_amount, asset_id: SWAP.market.seq_asset,
     block_hash: conf.block_hash, height: conf.height,
   };
-  saveSwap();
-  // Submit the funded leg to the maker.
-  await submitSeq();
-  return SWAP;
-}
-async function submitSeq(){
-  const resp = await dexPost('/v1/xchain/reverse/submit', {
-    swap_id: SWAP.swap_id,
-    seq_leg: {
-      txid: SWAP.seq_leg.txid, vout: SWAP.seq_leg.vout,
-      redeem_script: SWAP.seq_leg.redeem_script,
-      amount: SWAP.seq_leg.amount.toString(), asset_id: SWAP.seq_leg.asset_id,
-    },
-  });
-  const fail = pick(resp, 'fail', 'swap_fail', 'swapFail');
-  if (fail) throw new Error((pick(fail,'code')||'FAIL') + ': ' + (pick(fail,'message')||'maker rejected the asset leg'));
-  const accepted = pick(resp, 'accepted', 'swap_accept', 'swapAccept');
-  if (!accepted) throw new Error('no acceptance in submit response');
   SWAP.state = ST.SEQ_SUBMITTED;
-  SWAP.detail = '';
   saveSwap();
   return SWAP;
-}
-async function onFundSeq(){
-  const { $ } = C;
-  if ($('xrswapErr')) $('xrswapErr').textContent = '';
-  if (!SWAP){ return; }
-  const sm = C.assetMeta(SWAP.market.seq_asset);
-  const kv = [
-    ['Network', 'Sequentia (testnet): you fund the asset in an HTLC the maker can take only with its secret'],
-    ['You fund', C.fmtAtoms(SWAP.seq_amount, sm.precision) + ' ' + sm.ticker],
-    ['You will receive', C.fmtAtoms(SWAP.btc_amount, 8) + ' BTC (claimed once the maker reveals the secret)'],
-    ['Maker BTC lock', 'confirmed at parent height ' + SWAP.btc_leg_height + ' (verified)'],
-    ['Sequentia refund after', 'block ' + SWAP.seq_locktime + ' (reclaim your asset if the maker never takes it)'],
-    ['Atomicity', 'The maker can take your asset only by revealing the secret, which lets you claim the BTC.'],
-  ];
-  const { m: modal, ok, st } = C.modalRows({ title: 'Fund the Sequentia asset leg', kv });
-  ok.onclick = async () => {
-    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Funding the asset leg…';
-    try {
-      await fundSeq();
-      modal.remove();
-      renderStepper();
-      startPoll();
-      C.toast && C.toast('Asset leg funded and submitted - waiting for the maker to reveal the secret.');
-    } catch (e){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
-  };
 }
 
 // ---- step 5/6: poll for the revealed secret, then claim the BTC leg ----
-// Wallet-set terminal states the daemon CANNOT see (the asset-leg refund and the BTC claim
-// are off-daemon): once we're in one, polling the daemon would downgrade us back to
-// BTC_LOCKED/SEQ_CLAIMED ("open"). Treat them as final locally.
-function localTerminal(){ return SWAP && (SWAP.state === ST.REFUNDED || SWAP.state === ST.BTC_CLAIMED || SWAP.state === ST.FAILED); }
-async function pollOnce(){
-  if (!SWAP || !SWAP.swap_id) return;
-  if (localTerminal()){ stopPoll(); return; }
-  const resp = await dexPost('/v1/xchain/swap', { swap_id: SWAP.swap_id });
-  // Guard the assignment too, in case this poll was already in flight when we went terminal.
-  const state = pick(resp, 'state'); if (state && !localTerminal()) SWAP.state = state;
-  const blh = Number(pick(resp, 'btc_leg_height', 'btcLegHeight') ?? 0);
-  if (blh > 0 && (!SWAP.btc_leg_height || SWAP.btc_leg_height <= 0)) SWAP.btc_leg_height = blh;
-  const pre = pick(resp, 'preimage'); if (pre) SWAP.preimage = pre;
-  const sc = pick(resp, 'seq_claim_txid', 'seqClaimTxid'); if (sc) SWAP.seq_claim_txid = sc;
-  const det = pick(resp, 'detail'); if (det) SWAP.detail = det;
-  saveSwap();
-}
 async function claimBtc(){
   if (CLAIMING) return;
   if (!SWAP || !SWAP.preimage || !SWAP.btc_leg) return;
@@ -907,20 +986,6 @@ async function onClaimBtc(){
   catch (e){ if ($('xrswapErr')) $('xrswapErr').textContent = 'BTC claim failed: ' + C.prettyErr(e); }
 }
 
-function startPoll(){
-  if (POLL) return;
-  POLL = setInterval(async () => {
-    try {
-      await pollOnce();
-      // Auto-claim the BTC leg as soon as the maker reveals the secret (time-sensitive).
-      if (SWAP && SWAP.preimage && !SWAP.btc_claim_txid && SWAP.state !== ST.REFUNDED && SWAP.state !== ST.FAILED){
-        try { await claimBtc(); } catch (e){ if (C.$('xrswapErr')) C.$('xrswapErr').textContent = 'Auto BTC claim failed (retry from the button): ' + C.prettyErr(e); }
-      }
-      renderStepper();
-      if (SWAP && [ST.BTC_CLAIMED, ST.REFUNDED, ST.FAILED].includes(SWAP.state)) stopPoll();
-    } catch (e){ /* transient; keep polling */ }
-  }, 3000);
-}
 function stopPoll(){ if (POLL){ clearInterval(POLL); POLL = null; } }
 
 // CLTV-gate the asset-leg refund by the SEQUENTIA tip: the refund tx is non-final (rejected) until the
@@ -1064,7 +1129,7 @@ function renderStepper(){
 
   // Controls.
   const ctl = el('div','card');
-  const stat = el('div','status',''); stat.id = 'xrStepStatus'; ctl.appendChild(stat);
+  const stat = el('div','status', SWAP.wait_note || ''); stat.id = 'xrStepStatus'; ctl.appendChild(stat);
   const row = el('div','row'); row.style.marginTop = '6px';
   // Refund the asset leg: offered once it is funded and the swap isn't done.
   // Refund off-ramp: only while NOT complete/refunded AND before the maker has claimed the asset. At
@@ -1084,24 +1149,20 @@ function renderStepper(){
 
   // Keep the driver alive across a re-render if we're mid-flight and not terminal.
   const terminal = [ST.BTC_CLAIMED, ST.REFUNDED, ST.FAILED].includes(SWAP.state);
-  if (!terminal){
-    if (SWAP.courier){ if (SWAP.seq_leg) driveSettle(); }   // on-chain tail (courier needs no daemon poll)
-    else if (SWAP.swap_id) startPoll();                      // RFQ daemon poll
-  }
+  if (!terminal && SWAP.seq_leg) driveSettle();   // on-chain tail; there is no daemon to poll
 }
 
 function stepOpenCard(){
-  const done = !!SWAP.swap_id;
+  const done = !!(SWAP.btc_leg && SWAP.btc_leg.txid);
   const body = [
     C.el('div','sub','The maker locks BTC in an HTLC you can claim with the secret it will reveal, refundable by the maker only after T_btc.'),
   ];
-  if (done) body.push(kvRowCopy('Swap id', SWAP.swap_id));
   if (SWAP.btc_leg && SWAP.btc_leg.txid) body.push(kvRowHtml('Maker BTC lock tx', txLink(SWAP.btc_leg.txid, true)));
   if (SWAP.state === ST.FAILED) body.push(errLine(SWAP.detail || 'open failed'));
   return stepCard(1, 'Maker locks BTC', done, !done, body);
 }
 function stepConfirmCard(){
-  const locked = !!SWAP.swap_id;
+  const locked = !!(SWAP.btc_leg && SWAP.btc_leg.txid);
   const done = SWAP.btc_leg_height > 0;
   const body = [ C.el('div','sub','Wait for the maker’s BTC lock to confirm so your Sequentia leg can anchor at or above it.') ];
   if (done) body.push(okLine('BTC leg confirmed at parent height ' + SWAP.btc_leg_height + '.'));
@@ -1114,12 +1175,9 @@ function stepFundCard(){
   const active = ready && !funded && ![ST.FAILED, ST.REFUNDED].includes(SWAP.state);
   const body = [ C.el('div','sub','Fund your asset in an HTLC the maker can take only by revealing the secret - which lets you claim the BTC.') ];
   if (SWAP.seq_leg && SWAP.seq_leg.txid) body.push(kvRowHtml('Asset leg tx', txLink(SWAP.seq_leg.txid, false)));
-  const c = stepCard(3, 'Fund the asset leg', funded, active, body);
-  // Courier swaps fund automatically; only the RFQ path shows a manual button.
-  if (active && !SWAP.courier){
-    const btn = C.el('button','primary','Fund asset leg'); btn.onclick = onFundSeq; btn.style.marginTop = '10px'; c.appendChild(btn);
-  }
-  return c;
+  // The wallet funds this leg by itself inside the lift (one consent, taken up
+  // front), so there is no button here.
+  return stepCard(3, 'Fund the asset leg', funded, active, body);
 }
 function stepRevealCard(){
   const submitted = SWAP.state === ST.SEQ_SUBMITTED || !!SWAP.preimage || SWAP.state === ST.SEQ_CLAIMED || SWAP.state === ST.BTC_CLAIMED;
@@ -1156,25 +1214,6 @@ function stepCard(n, title, done, active, bodyNodes){
 }
 function kvRow(k, v){ const d = C.el('div','kv'); d.appendChild(C.el('span','k',k)); d.appendChild(C.el('span','v',v)); return d; }
 function kvRowHtml(k, html){ const d = C.el('div','kv'); d.appendChild(C.el('span','k',k)); const v = C.el('span','v'); v.innerHTML = html; d.appendChild(v); return d; }
-// Full-value, selectable, click-to-copy row (for ids the user must act on, e.g. swap_id).
-// Plain-HTTP is a non-secure context (no navigator.clipboard), so fall back to execCommand.
-function kvRowCopy(k, value){
-  const d = C.el('div','kv'); d.appendChild(C.el('span','k',k));
-  const v = C.el('span','v'); v.textContent = value || '-';
-  v.style.cssText = 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;cursor:pointer;user-select:all';
-  v.title = 'Click to copy';
-  const fb = C.el('span','',''); fb.style.cssText = 'margin-left:6px;color:#3fb950;font-size:.8em;opacity:0;transition:opacity .15s';
-  v.onclick = async () => {
-    if (!value) return; let ok = false;
-    try{ if (navigator.clipboard?.writeText){ await navigator.clipboard.writeText(value); ok = true; } }catch{}
-    if (!ok){ const ta = document.createElement('textarea'); ta.value = value;
-      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'; document.body.appendChild(ta);
-      ta.focus(); ta.select(); try{ ok = document.execCommand('copy'); }catch{} document.body.removeChild(ta); }
-    fb.textContent = ok ? 'Copied!' : 'Copy failed'; fb.style.opacity = '1';
-    setTimeout(()=>{ fb.style.opacity = '0'; }, 1200);
-  };
-  d.appendChild(v); d.appendChild(fb); return d;
-}
 function short(s){ return s ? (String(s).slice(0,10) + '…' + String(s).slice(-6)) : '-'; }
 function txLink(txid, parent){
   if (!txid) return '-';
@@ -1186,8 +1225,14 @@ function errLine(t){ const d = C.el('div','status err'); d.textContent = t; retu
 
 // Test-only exports: drive the reverse pipeline headlessly (no DOM).
 export const __test__ = {
-  dexPost, pick, normMarket, normBtcLeg, verifyMakerBtcLeg,
-  openSwap, fundSeq, submitSeq, pollOnce, claimBtc,
+  pick, normMarket, verifyMakerBtcLeg,
+  // Tests need the anchor precondition to poll in milliseconds; setTiming(null)
+  // restores the shipped cadence. It can never shorten the WAIT itself — only the
+  // timelock (or the user) ends that.
+  setTiming: (o) => { T.anchorPollMs = (o && o.anchorPollMs) || 15 * 1000; },
+  // Lets a test stop the on-chain settle driver's interval so the process can exit.
+  stopPoll,
+  resumeSeqLeg, claimBtc,
   proportionalBtcFloor, driveReverse, initXrswap,
   getSwap: () => SWAP, setSwap: (s) => { SWAP = s; saveSwap(); },
   setQuote: (q) => { LAST_RQUOTE = q; }, getQuote: () => LAST_RQUOTE,
