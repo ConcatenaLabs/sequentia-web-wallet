@@ -107,6 +107,26 @@ export function classifyRelayOffer(o) {
   return null;
 }
 
+// The smallest BTC side an offer may have and still carry a MEANINGFUL PRICE.
+//
+// An offer's BTC leg is an integer number of satoshis, so its implied price carries
+// an uncertainty of about ±1/btcSats. Below ~100 sats that rounding is more than 1%
+// of the price, and at a few sats it dominates it completely.
+//
+// This is not a theoretical concern — it broke the composer. Sub-asset LN makers
+// rested 50,000 atoms of USDX for 1 satoshi. At the real market price of
+// 1.5673e-05 sats/atom that leg is worth 0.78 sats, which cannot be expressed below
+// one satoshi, so the offer's implied price came out at 2e-05 — 1.276x the honest
+// price of every other bid in the book. Bids sort DESCENDING by price, so this dust
+// offer became the best bid, bestFor() selected it, and the composer then capped the
+// take at the offer's size: any amount a user typed was rewritten down to
+// 0.0005 USDX, with 30+ USDX of real liquidity sitting underneath it.
+//
+// So an offer this small is not a cheap trade, it is a NON-QUOTE: the number it
+// implies is an artifact of integer rounding rather than a price anyone offered. It
+// is excluded from the merged book rather than allowed to anchor it.
+export const MIN_PRICEABLE_BTC_SATS = 100;
+
 // Merge normalized offers (from any/all relays) into one book: asks ascending by price (cheapest
 // first), bids descending (highest first). Sizeless offers are dropped. A stable secondary sort by
 // id keeps output deterministic when prices tie (important for tests + caching).
@@ -114,6 +134,8 @@ export function mergeBook(offers) {
   const asks = [], bids = [];
   for (const e of offers || []) {
     if (!e || e.price == null) continue;
+    // Its price is rounding noise, not a quote — see MIN_PRICEABLE_BTC_SATS.
+    if (!(Number(e.btcSats) >= MIN_PRICEABLE_BTC_SATS)) continue;
     (e.side === 'ask' ? asks : bids).push(e);
   }
   const tie = (a, b) => String(a.id || '').localeCompare(String(b.id || ''));

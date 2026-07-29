@@ -1,5 +1,5 @@
 // Tests for the unified order book. Run: node unified-book.test.mjs
-import { classifyRelayOffer, mergeBook, buildUnifiedBook, bestFor } from './unified-book.mjs';
+import { classifyRelayOffer, mergeBook, buildUnifiedBook, bestFor, MIN_PRICEABLE_BTC_SATS } from './unified-book.mjs';
 
 let passed = 0, failed = 0;
 function eq(a, e, msg){ if (JSON.stringify(a) === JSON.stringify(e)) passed++; else { failed++; console.error(`FAIL ${msg}\n  exp ${JSON.stringify(e)}\n  got ${JSON.stringify(a)}`); } }
@@ -45,10 +45,10 @@ ok(classifyRelayOffer(null) === null, 'null rejected');
 
 // --- merge: asks ascending, bids descending, rails interleaved by PRICE ---
 const raws = [
-  { offer_id:'oc-ask', base_amount:1000, offer_amount:1000, want_amount:52, offer_asset:'GOLD', want_asset:'BTC' }, // ask 0.052 onchain
-  { offer_id:'ln-ask', offer_amount:1000, want_amount:50, lightning:{ ln_direction:4 } },                          // ask 0.050 ln (cheaper)
-  { offer_id:'oc-bid', base_amount:1000, offer_amount:58, want_amount:1000, offer_asset:'BTC', want_asset:'GOLD' }, // bid 0.058 onchain (higher)
-  { offer_id:'ln-bid', offer_amount:55, want_amount:1000, lightning:{ ln_direction:5 } },                          // bid 0.055 ln
+  { offer_id:'oc-ask', base_amount:1000, offer_amount:1000, want_amount:52000, offer_asset:'GOLD', want_asset:'BTC' }, // ask 52 onchain
+  { offer_id:'ln-ask', offer_amount:1000, want_amount:50000, lightning:{ ln_direction:4 } },                       // ask 50 ln (cheaper)
+  { offer_id:'oc-bid', base_amount:1000, offer_amount:58000, want_amount:1000, offer_asset:'BTC', want_asset:'GOLD' }, // bid 58 onchain (higher)
+  { offer_id:'ln-bid', offer_amount:55000, want_amount:1000, lightning:{ ln_direction:5 } },                       // bid 55 ln
 ];
 const book = buildUnifiedBook(raws);
 eq(book.asks.map(a => [a.id, a.rail]), [['ln-ask','ln'], ['oc-ask','onchain']], 'asks: cheaper LN ask ranks above the on-chain ask (rail-blind)');
@@ -82,34 +82,68 @@ eq({ side:realDir0.side, rail:realDir0.rail }, { side:'bid', rail:'submarine' },
 // entered the unified book and the ln/ln composer fell back to the pure-LN
 // relay's own /lnbook. For the same market and size that showed a DIFFERENT
 // matched offer than every other rail.
-const plnAsk = classifyRelayOffer({ offer_id:'p1', maker_pubkey:'mp', offer_amount:1000, want_amount:40,
+const plnAsk = classifyRelayOffer({ offer_id:'p1', maker_pubkey:'mp', offer_amount:1000, want_amount:40000,
   lightning:{ ln_direction:3 }, maker_ln_node_pubkey:'03node' });
 eq({ side:plnAsk.side, rail:plnAsk.rail, asset:plnAsk.assetAtoms, btc:plnAsk.btcSats, price:plnAsk.price },
-   { side:'ask', rail:'pureln', asset:1000, btc:40, price:0.04 },
+   { side:'ask', rail:'pureln', asset:1000, btc:40000, price:40 },
    'pure-LN dir3 (maker SELLS the asset) -> ask on the unified book');
 ok(plnAsk.meta.caps.btc_ln === true && plnAsk.meta.caps.asset_ln === true && plnAsk.meta.caps.asset_onchain === false,
    'pure-LN carries BOTH legs over Lightning and no on-chain leg');
 ok(plnAsk.meta.caps.interactive === true, 'pure-LN needs an online maker');
 
-const plnBid = classifyRelayOffer({ offer_id:'p2', offer_amount:35, want_amount:1000,
+const plnBid = classifyRelayOffer({ offer_id:'p2', offer_amount:35000, want_amount:1000,
   lightning:{ ln_direction:2 }, maker_ln_node_pubkey:'03node' });
 eq({ side:plnBid.side, rail:plnBid.rail, asset:plnBid.assetAtoms, btc:plnBid.btcSats },
-   { side:'bid', rail:'pureln', asset:1000, btc:35 },
+   { side:'bid', rail:'pureln', asset:1000, btc:35000 },
    'pure-LN dir2 (maker BUYS the asset) -> bid');
 
 // THE POINT OF THE UNIFICATION: a pure-LN offer competes on PRICE against every
 // other rail, and wins when it is cheapest. Matching is rail-blind; the rail is
 // metadata the settlement router reads on take.
 const mixed = buildUnifiedBook([
-  { offer_id:'x1', base_amount:1000, offer_amount:1000, want_amount:60, want_asset:'BTC' },              // on-chain cross ask @0.060
-  { offer_id:'x2', offer_amount:1000, want_amount:50, lightning:{ ln_direction:4 } },                    // sub-asset LN ask @0.050
-  { offer_id:'x3', base_amount:1000, offer_amount:1000, want_amount:45, lightning:{ ln_direction:1 } },  // submarine ask @0.045
-  { offer_id:'p1', offer_amount:1000, want_amount:40, lightning:{ ln_direction:3 } },                    // pure-LN ask @0.040
+  { offer_id:'x1', base_amount:1000, offer_amount:1000, want_amount:60000, want_asset:'BTC' },             // on-chain cross ask @60
+  { offer_id:'x2', offer_amount:1000, want_amount:50000, lightning:{ ln_direction:4 } },                   // sub-asset LN ask @50
+  { offer_id:'x3', base_amount:1000, offer_amount:1000, want_amount:45000, lightning:{ ln_direction:1 } }, // submarine ask @45
+  { offer_id:'p1', offer_amount:1000, want_amount:40000, lightning:{ ln_direction:3 } },                   // pure-LN ask @40
 ]);
 eq(mixed.asks.map(a => a.rail), ['pureln','submarine','ln','onchain'],
    'the cheapest ask wins regardless of rail, and pure-LN is now in the running');
 eq(bestFor(mixed, 'buy').id ?? bestFor(mixed, 'buy').raw.offer_id, 'p1',
    'a buyer takes the pure-LN offer when it is the best price');
+
+// --- A 1-SATOSHI OFFER IS A NON-QUOTE, NOT THE BEST PRICE --------------------
+//
+// The exact live case that broke the composer. Sub-asset LN makers rested 50,000
+// atoms of USDX for 1 satoshi. The honest market price was 1.5673e-05 sats/atom, so
+// that leg is worth 0.78 sats — which cannot be expressed below one satoshi. The
+// offer's implied price therefore came out at 1/50000 = 2e-05, i.e. 1.276x the true
+// price, and since bids sort DESCENDING it became the BEST BID. bestFor() picked it,
+// the composer capped the take at the offer size, and every amount a user typed was
+// rewritten down to 0.0005 USDX while 30 USDX of real liquidity sat underneath.
+const dustBook = buildUnifiedBook([
+  // the two real dust offers, verbatim from the live book
+  { offer_id:'dust1', offer_amount:1, want_amount:50000, lightning:{ ln_direction:5 } },
+  { offer_id:'dust2', offer_amount:1, want_amount:50000, lightning:{ ln_direction:5 } },
+  // the honest liquidity that should have been matched
+  { offer_id:'sub1', base_amount:3000000000, offer_amount:47020, want_amount:3000000000, lightning:{ ln_direction:0 } },
+  { offer_id:'oc1',  base_amount:5000000000, offer_amount:78365, want_amount:5000000000, offer_asset:'BTC' },
+]);
+ok(!dustBook.bids.some(b => b.id === 'dust1' || b.id === 'dust2'),
+   'a 1-satoshi offer is excluded: its price is integer rounding, not a quote');
+ok(dustBook.bids.length === 2, 'the real liquidity survives');
+const bestSell = bestFor(dustBook, 'sell');
+// sub1 at 1.56733e-05 edges out oc1 at 1.5673e-05 — both honest, and either gives a
+// seller real depth. What matters is that the 1-sat artifact no longer wins.
+ok(bestSell && bestSell.id === 'sub1',
+   'the best bid is now an honest offer, not the 1-sat artifact');
+ok(bestSell.assetAtoms === 3000000000,
+   'so a seller sizes against 30 USDX of depth instead of being capped at 0.0005');
+
+// The floor is about PRICE RESOLUTION, so it is indifferent to rail and side.
+ok(!buildUnifiedBook([{ offer_id:'d', offer_amount:1000, want_amount:5, lightning:{ ln_direction:4 } }]).asks.length,
+   'a 5-sat ASK is excluded on the same grounds');
+ok(buildUnifiedBook([{ offer_id:'k', offer_amount:1000, want_amount:MIN_PRICEABLE_BTC_SATS, lightning:{ ln_direction:4 } }]).asks.length === 1,
+   'exactly at the floor is priceable (1% resolution) and kept');
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
