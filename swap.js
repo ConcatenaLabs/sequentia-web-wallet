@@ -1615,6 +1615,10 @@ function setRail(leg, r){
   const sameChain = !!(S.payAsset && S.receiveAsset && S.payAsset !== 'BTC' && S.receiveAsset !== 'BTC');
   if (sameChain){ S.payRail = r; S.recvRail = r; }
   LAST_QUOTE = null; setReviewEnabled(false);
+  // A rail change can invalidate the fee asset outright (chain -> LN locks it to
+  // the pay asset; BTC on-chain locks it to BTC). Drop the manual pick so the
+  // policy re-decides from scratch rather than a stale choice surviving.
+  S.feeAsset = null; S.feeAssetTouched = false;
   const ra = lnDeployed() ? railAvail(S.payAsset, S.receiveAsset) : null;
   paintRailSegs(ra);
   try { renderRailNote(ra); } catch {}   // refresh/clear the LN-channel note for the newly-selected rail
@@ -1690,7 +1694,7 @@ function onMax(){
   let maxAtoms = balAtoms(S.payAsset);
   // Leave headroom for the network fee when it's paid in the SAME asset you're spending — otherwise
   // "Max" spends the whole balance and leaves nothing to cover the fee, so the order fails (C4).
-  const feeAsset = S.feeAsset || defaultFeeAsset();
+  const feeAsset = feeAssetPolicy().asset;
   if (feeAsset === S.payAsset){ const fee = covFeeAtoms(feeAsset); if (maxAtoms > fee) maxAtoms -= fee; }
   C.$('swPayAmt').value = C.fmtAtoms(maxAtoms, m.precision);
   C.$('swPayAmt')._userTyped = true;   // Max is an explicit user amount
@@ -1920,7 +1924,7 @@ async function requoteSame(route, amtStr){
   status.className = 'status'; status.innerHTML = '<span class="spin"></span>Loading the order book…';
   $('swErr').textContent = '';
   try {
-    if (!S.feeAsset) S.feeAsset = defaultFeeAsset();
+    S.feeAsset = feeAssetPolicy().asset;   // forced: the policy is the only authority
     // The relay keys markets by exact base/quote order, so fetch BOTH orientations. A 4xx means "no
     // such market yet" (genuinely empty); a network/5xx error means the relay is UNREACHABLE. T7:
     // never conflate the two, or an outage looks like an empty book and invites posting into the void.
@@ -1962,8 +1966,8 @@ async function requoteSame(route, amtStr){
     _composeBest = { pay, receive, best };   // cache for the instant per-keystroke auto-fill (wireAmount)
     if (S.mode === 'take') applyComposeDerivation(pay, receive, best);
     paintPlaceRate(pay, receive, best, liftable.length);
-    if (!S.feeAsset) S.feeAsset = defaultFeeAsset();
-    paintFee(S.feeAsset, covFeeAtoms(S.feeAsset));   // compose-time estimate in the chosen fee asset, not "-"
+    S.feeAsset = feeAssetPolicy().asset;   // forced, so a stale pick cannot survive a rail change
+    paintFee(S.feeAsset, S.feeAsset ? covFeeAtoms(S.feeAsset) : null);   // compose-time estimate in the chosen fee asset, not "-"
     setFinality('same');
 
     // Enable Place order once BOTH amounts are set and the pay leg is affordable.
@@ -1974,8 +1978,10 @@ async function requoteSame(route, amtStr){
     // Affordability: the pay leg AND the funding fee must both be covered. The covenant funding fee is
     // paid in the chosen fee asset (C-1), so when that's the pay asset the balance must cover BOTH; when
     // it's a different asset, that asset must separately cover the fee (C-2).
-    const _feeAsset = S.feeAsset || defaultFeeAsset();
-    const _feeAtoms = covFeeAtoms(_feeAsset);
+    // The fee asset comes from the ONE authority, so the gate can never test an
+    // asset the picker would not actually let the user pay in.
+    const _feeAsset = feeAssetPolicy().asset;
+    const _feeAtoms = _feeAsset ? covFeeAtoms(_feeAsset) : 0n;
     if (payAtoms + (_feeAsset === pay ? _feeAtoms : 0n) > balAtoms(pay)){
       LAST_QUOTE = null; setReviewEnabled(false);
       $('swErr').textContent = _feeAsset === pay
@@ -1983,7 +1989,7 @@ async function requoteSame(route, amtStr){
         : `You only hold ${C.fmtAtoms(balAtoms(pay), pm.precision)} ${pm.ticker}.`;
       return;
     }
-    if (_feeAsset !== pay && _feeAtoms > balAtoms(_feeAsset)){
+    if (_feeAsset && _feeAsset !== pay && _feeAtoms > balAtoms(_feeAsset)){
       LAST_QUOTE = null; setReviewEnabled(false);
       const _fm = C.assetMeta(_feeAsset);
       $('swErr').textContent = `You need about ${C.fmtAtoms(_feeAtoms, _fm.precision)} ${_fm.ticker} for the fee, but hold ${C.fmtAtoms(balAtoms(_feeAsset), _fm.precision)}.`;
@@ -2150,7 +2156,7 @@ function marketFillSplit(payAtoms, recvAtoms){
 // book (with any resting rows) still renders on the left; this rests a new order into it.
 function postModeSame(pay, receive){
   const { $ } = C;
-  if (!S.feeAsset) S.feeAsset = defaultFeeAsset();
+  S.feeAsset = feeAssetPolicy().asset;   // forced: the policy is the only authority
   const pm = C.assetMeta(pay), rm = C.assetMeta(receive);
   const pv = fieldUnits($('swPayAmt'), pay), rv = fieldUnits($('swRecvAmt'), receive);
   const hasBook = !!(BOOK.offers && BOOK.offers.length);
@@ -2212,7 +2218,7 @@ function executableQuote(o, payAsset, receiveAsset, editedAsset, typedAtoms){
   if (take > baseAmt) take = baseAmt;
   const recv = (offerAmt * take) / baseAmt;
   const pay  = ceilDiv(wantAmt * take, baseAmt);
-  const feeAsset = S.feeAsset || defaultFeeAsset();
+  const feeAsset = feeAssetPolicy().asset;
   // Open-fee-market fee: the native policy fee (in tSEQ-sats) converted into the chosen
   // fee asset via its published exchange rate — fee_atoms = ceil(native_fee_sats * SCALE / rate),
   // so a more valuable asset pays FEWER atoms. NOTE feeRateFor() is the exchange RATE, not a fee
@@ -2898,81 +2904,166 @@ function paintQuoteCross(){
 // ---------------------------------------------------------------------------
 function paintFee(feeAssetHex, feeAtoms, noteOverride){
   const { $ } = C;
-  // Paying FROM Lightning is a single-asset payment (you pay one asset over one route), so the fee
-  // is inherently in that same asset — freeze the fee asset to the pay asset and lock the picker.
-  const payFromLn = !!(S.payRail === 'ln' && S.payAsset);
-  // Paying WITH BTC (cross-chain buy) settles the BTC leg on the parent chain, whose fee is a
-  // Bitcoin network fee in BTC (sat/vB) — never an any-asset Sequentia fee. Lock the displayed
-  // fee asset to BTC so it isn't shown as a stale Sequentia pick.
-  const payIsBtc = S.payAsset === 'BTC';
-  if (payFromLn){ feeAssetHex = S.payAsset; if (S.payAsset !== 'BTC') S.feeAsset = S.payAsset; }
-  else if (payIsBtc){ feeAssetHex = 'BTC'; }
+  // ONE authority (feeAssetPolicy) decides both the asset and whether the user may
+  // change it. paintFee used to re-derive the lock rules here while the picker
+  // derived its own, which is how the display could say BTC while the picker still
+  // offered a Sequentia asset.
+  const pol = feeAssetPolicy();
+  if (pol.locked){
+    feeAssetHex = pol.asset;
+    S.feeAsset = pol.asset;          // FORCED: a stale pick must never outlive the lock
+    S.feeAssetTouched = false;
+  } else if (pol.asset){
+    // Unlocked, but the offered set may have changed under a stale pick.
+    feeAssetHex = pol.asset;
+    S.feeAsset = pol.asset;
+  }
   const fm = C.assetMeta(feeAssetHex);
   $('swFeeTk').textContent = fm.ticker;
   $('swFeeAmt').textContent = (feeAtoms != null) ? (C.fmtAtoms(feeAtoms, fm.precision) + ' ' + fm.ticker) : '-';
   const ref = (feeAtoms != null) ? (C.refValueStr(feeAssetHex, feeAtoms) || '') : '';
   $('swFeeRef').textContent = ref;
-  $('swFeeNote').textContent = noteOverride || (payFromLn
-    ? `In ${fm.ticker} · the asset you pay over Lightning.`
-    : payIsBtc
-    ? 'In BTC · the Bitcoin network fee.'
-    : 'Pay the fee in any asset the network prices.');
-  // The fee picker is disabled when paying from Lightning (fee frozen to the pay asset), and for
-  // the cross-chain (BTC-only) leg / LN leg / mixed rail (their cost is the LP spread / BTC-leg fee
-  // baked into the rate, not a taker-funded open-market network fee).
-  const noFee = payFromLn || (LAST_QUOTE && (LAST_QUOTE.kind === 'cross' || LAST_QUOTE.kind === 'ln' || LAST_QUOTE.kind === 'mixed'));
+  $('swFeeNote').textContent = noteOverride || pol.note;
+  // Also locked for the cross / LN / mixed quotes: their cost is the LP spread or
+  // the BTC-leg fee baked into the rate, not a taker-funded open-market fee.
+  const quoteLocked = !!(LAST_QUOTE && (LAST_QUOTE.kind === 'cross' || LAST_QUOTE.kind === 'ln' || LAST_QUOTE.kind === 'mixed'));
+  // DISABLED, not merely emptied: an enabled picker with nothing behind it reads
+  // as a broken control, and an enabled picker on a locked rail is the regression.
+  const noFee = pol.locked || quoteLocked || !pol.options.length;
   $('swFeePick').disabled = !!noFee;
   $('swFeePick').style.opacity = noFee ? '.5' : '';
-  if (payFromLn) $('swFeePick').title = `Paying over Lightning · the fee is in ${fm.ticker}, the asset you pay.`;
+  if (pol.why) $('swFeePick').title = pol.why;
+  else if (noFee) $('swFeePick').title = 'The fee asset is set by how this trade settles.';
   else $('swFeePick').removeAttribute('title');
 }
 
-// An asset is acceptable for fees if the node publishes a rate for it. Native is
-// always accepted by the protocol — a backend fact — so it's a valid fallback, but
-// it gets NO special label or position in the UI (open fee market, no privilege).
+// An asset is acceptable for fees if, and only if, the node publishes a rate for
+// it. BTC is never one: it is not a Sequentia-issued asset, so no Sequentia fee
+// can be denominated in it.
+//
+// The policy asset used to be hardcoded as always-accepted here, on the reasoning
+// that the protocol accepted it natively. That stopped being true: the node's
+// ConvertAmountToValue no longer falls back to 1:1 for an UNLISTED policy asset
+// (no asset is the reference unit), so an unlisted tSEQ is refused exactly like
+// any other unlisted asset. Keeping the privilege here would offer the user a fee
+// asset the mempool then rejects with a generic "min relay fee not met". The
+// whitelist is now the whole truth on both sides.
 function acceptedFee(hex){
   if (!hex || hex === 'BTC') return false;
-  if (hex === C.POLICY_HEX) return true;
   const r = C.feeRates || {};
   const e = r[hex] || r[C.assetMeta(hex).ticker];   // feeRates is keyed by ticker, not asset hex
   return !!(e && e.rate > 0);
 }
 const feeVal = (h) => Number(big((C.balObj()||{})[h] || 0)) / Math.pow(10, C.assetMeta(h).precision || 0);
-// Default fee asset: the one you're ALREADY paying with (neutral — no privileged
-// asset); else the largest node-accepted asset you hold; else any node-priced asset.
-function defaultFeeAsset(){
-  if (acceptedFee(S.payAsset)) return S.payAsset;
-  const bal = C.balObj() || {};
-  const owned = Object.keys(bal).filter(h => big(bal[h]) > 0n && acceptedFee(h)).sort((a,b)=> feeVal(b)-feeVal(a));
-  if (owned.length) return owned[0];
-  return C.POLICY_HEX;   // hold no node-accepted asset: fall back to tSEQ
+
+// ---------------------------------------------------------------------------
+// feeAssetPolicy — THE single authority on which asset pays the fee.
+// ---------------------------------------------------------------------------
+// Every consumer (the picker, defaultFeeAsset, paintFee, the affordability gates
+// and the review modals) reads this one function, because the previous split
+// between them is what produced the reported regression: the DISPLAY was locked
+// to BTC on the cross and mixed paths while the PICKER stayed live, so a user
+// could select a Sequentia asset for a fee that is only payable in BTC, and a
+// stale S.feeAsset survived a rail change because nothing forced it.
+//
+// The rule has three cases and one authority:
+//
+//   1. Paying BTC ON-CHAIN     -> LOCKED to BTC. This is a Bitcoin network fee
+//      (sat/vB) on the parent chain. It cannot be denominated in a Sequentia
+//      asset, whatever the picker used to allow.
+//   2. Paying over LIGHTNING   -> LOCKED to the asset being paid, BTC-LN
+//      included. An LN fee is a routing fee, and routing fees are paid in the
+//      asset being routed.
+//   3. Paying an ON-CHAIN SEQUENTIA ASSET -> the open fee market. Any on-chain
+//      Sequentia asset the node prices AND you actually hold. tSEQ is one row
+//      among equals with no privileged position, and BTC never appears: it is
+//      not a Sequentia-issued asset.
+//
+// `locked` means the user has no choice, so the picker must be DISABLED rather
+// than merely emptied — an enabled-but-empty control reads as a broken app.
+function feeAssetPolicy(){
+  const payAsset = S.payAsset;
+  if (!payAsset)
+    return { locked: false, asset: null, options: [],
+             note: 'Pay the fee in any asset the network prices.' };
+
+  // Rule 2 first: the rail decides before the asset does, so BTC-over-Lightning
+  // is a Lightning fee in BTC, not a Bitcoin network fee.
+  if (S.payRail === 'ln'){
+    const tk = C.assetMeta(payAsset).ticker;
+    return { locked: true, asset: payAsset, options: [],
+             note: `In ${tk} · the asset you pay over Lightning.`,
+             why: `Paying over Lightning · the fee is in ${tk}, the asset you pay.` };
+  }
+  // Rule 1.
+  if (payAsset === 'BTC')
+    return { locked: true, asset: 'BTC', options: [],
+             note: 'In BTC · the Bitcoin network fee.',
+             why: 'Paying Bitcoin on-chain · the fee is the Bitcoin network fee, payable only in BTC.' };
+
+  // Rule 3: the open fee market.
+  const options = feeAssetOptions();
+  const valid = new Set(options.map(o => o.hex));
+  // A pick only survives while it is still on offer. This is what stops a stale
+  // S.feeAsset from outliving the rail or pay-asset change that invalidated it.
+  const chosen = (S.feeAssetTouched && S.feeAsset && valid.has(S.feeAsset))
+    ? S.feeAsset
+    : preferredFeeAsset(options);
+  return { locked: false, asset: chosen, options,
+           note: 'Pay the fee in any asset the network prices.' };
 }
-// The fee-asset candidate list: the asset you're paying with first (most natural fee
-// source), then owned node-accepted assets, then any other node-priced asset. Every
-// entry is treated identically — no asset is flagged as a "default".
+
+// preferredFeeAsset picks the opening default from the offered set: the asset you
+// are already paying with (the most natural source, and neutral — no privileged
+// asset), else the largest holding. It never invents an asset outside the list,
+// which is what the old tSEQ fallback did.
+function preferredFeeAsset(options){
+  if (!options.length) return null;
+  const hexes = options.map(o => o.hex);
+  if (S.payAsset && hexes.includes(S.payAsset)) return S.payAsset;
+  return hexes.slice().sort((a, b) => feeVal(b) - feeVal(a))[0];
+}
+
+// Default fee asset: whatever the one authority says.
+function defaultFeeAsset(){ return feeAssetPolicy().asset; }
+
+// The rule-3 candidate list: on-chain Sequentia assets the node prices AND you
+// hold a positive balance of. Holding none of an asset makes it unpayable, and
+// offering an unpayable row is the same class of defect as leaving the picker
+// live on a locked rail. Every entry is treated identically — no asset is flagged
+// as a "default", and tSEQ earns its row only by being priced and held.
 function feeAssetOptions(){
   const seen = new Set(), out = [];
-  const add = (hex) => { if (hex && !seen.has(hex) && acceptedFee(hex)){ seen.add(hex); out.push({ hex, ticker: C.assetMeta(hex).ticker }); } };
-  add(S.payAsset);
   const bal = C.balObj() || {};
-  // You can only pay a fee in an asset you actually hold, so list held+accepted
-  // assets (plus tSEQ), not every node-accepted asset — the latter showed assets
-  // you don't hold at a confusing 0 balance.
-  Object.keys(bal).filter(h => big(bal[h]) > 0n).forEach(add);
-  add(C.POLICY_HEX);
+  const add = (hex) => {
+    if (!hex || seen.has(hex) || !acceptedFee(hex)) return;
+    if (big(bal[hex] || 0) <= 0n) return;
+    seen.add(hex); out.push({ hex, ticker: C.assetMeta(hex).ticker });
+  };
+  add(S.payAsset);   // listed first: the most natural fee source
+  Object.keys(bal).forEach(add);
   return out;
 }
 function renderFeePicker(){
-  // Paying from Lightning freezes the fee to the pay asset (see paintFee).
-  const payFromLn = (S.payRail === 'ln' && S.payAsset);
-  const fa = payFromLn ? S.payAsset : (S.feeAsset || (S.payAsset ? defaultFeeAsset() : null));
-  C.$('swFeeTk').textContent = fa ? C.assetMeta(fa).ticker : '-';
+  const pol = feeAssetPolicy();
+  // Force the state to agree with the policy on every render, so a rail or
+  // pay-asset change can never leave a stale pick behind.
+  if (pol.asset && S.feeAsset !== pol.asset){ S.feeAsset = pol.asset; }
+  if (pol.locked) S.feeAssetTouched = false;
+  C.$('swFeeTk').textContent = pol.asset ? C.assetMeta(pol.asset).ticker : '-';
   const pick = C.$('swFeePick');
-  if (pick && payFromLn){ pick.disabled = true; pick.style.opacity = '.5'; }
+  if (pick){
+    const noFee = pol.locked || !pol.options.length;
+    pick.disabled = !!noFee;
+    pick.style.opacity = noFee ? '.5' : '';
+    if (pol.why) pick.title = pol.why; else pick.removeAttribute('title');
+  }
 }
 function openFeePicker(){
   if (C.$('swFeePick').disabled) return;
-  const opts = feeAssetOptions();
+  const pol = feeAssetPolicy();
+  if (pol.locked || !pol.options.length) return;   // belt and braces: never open a locked picker
+  const opts = pol.options;
   popover(C.$('swFeePick'), opts.map(o => ({
     hex: o.hex, ticker: o.ticker, name: feeAssetSubline(o.hex), bal: balLine(o.hex), enabled: true,
   })), (hex) => {
@@ -4290,7 +4381,7 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
   };
   PLACED.push(rec); savePlaced();
   onStatus && onStatus('Funding the order on-chain…');
-  const { txid, vout } = await fundCovenant(covAddr, plan.spkHex, pay, payAtoms, S.feeAsset || defaultFeeAsset());
+  const { txid, vout } = await fundCovenant(covAddr, plan.spkHex, pay, payAtoms, feeAssetPolicy().asset);
   rec.covTxid = txid; rec.covVout = vout; savePlaced();   // outpoint known -> reclaim is fully self-contained
   const covenant = buildCovenantTerms(plan.order, txid, vout, plan.tap);
   const offer = buildCovenantOffer({
@@ -4459,7 +4550,7 @@ async function postToCovRelay(offer){
 async function sendSeqAsset(toAddr, assetHex, atoms){
   const addr = new C.wasm.Address(toAddr);
   const b = C.network.txBuilder().addExplicitRecipient(addr, BigInt(atoms), new C.wasm.AssetId(assetHex));
-  const pset = C.applyFee(b, S.feeAsset || defaultFeeAsset()).finish(C.wollet);
+  const pset = C.applyFee(b, feeAssetPolicy().asset).finish(C.wollet);
   const signed = C.signer.sign(pset);
   const finalized = C.wollet.finalize(signed);
   const t = await C.client.broadcast(finalized);
@@ -4792,7 +4883,7 @@ async function takeCovenantWalkReview(q){
   const { $ } = C;
   const pay = q.pay, receive = q.receive, payAtoms = BigInt(q.payAtoms), recvAtoms = BigInt(q.recvAtoms);
   const pm = C.assetMeta(pay), rm = C.assetMeta(receive);
-  const feeAsset = S.feeAsset || defaultFeeAsset();
+  const feeAsset = feeAssetPolicy().asset;
   const kv = [
     ['You pay', 'up to ' + amtRow(pay, payAtoms) + refSuffix(pay, payAtoms)],
     ['You receive', '~' + amtRow(receive, recvAtoms) + refSuffix(receive, recvAtoms)],
@@ -4838,7 +4929,7 @@ async function placeCovenantReview(q){
   const pm = C.assetMeta(pay), rm = C.assetMeta(receive);
   const payU = Number(payAtoms)/Math.pow(10, pm.precision||0), recvU = Number(recvAtoms)/Math.pow(10, rm.precision||0);
   const isMarket = S.mode !== 'post';
-  const feeAsset = S.feeAsset || defaultFeeAsset();
+  const feeAsset = feeAssetPolicy().asset;
   const feeAtoms = covFeeAtoms(feeAsset);
   const kv = [
     ['You pay', amtRow(pay, payAtoms) + refSuffix(pay, payAtoms)],
@@ -6978,7 +7069,7 @@ function stripBip32(b64){
 
 // Test-only exports: drive the REAL same-chain pipeline + the composer mapping
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
-export const __test__ = { stripBip32, dexPost,
+export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   setMarkets: (m) => { MARKETS = m; },
   // XMARKETS in the composer are the snake_case shape xswap.js's normMarket emits
   // (and that C.xroute.markets() returns). Normalize camelCase test fixtures to match.
