@@ -6295,15 +6295,61 @@ async function requoteLn(route, amtStr){
     $('swRate').textContent = `To keep an order resting at your price while your wallet is closed, set both sides on-chain.`;
     return;
   }
-  // The pure-LN CLI (xpln) has NO partial fill: it lifts the best resting offer IN FULL, so the size
-  // that actually executes is the OFFER'S size, not the typed amount. Price + PIN off the SAME book
-  // xpln lifts from — the LSP's /lnbook, sourced from the pure-LN relay (:9965) — NOT the on-chain
-  // cross book (XBOOK, a DIFFERENT market on :9955). Quoting the cross book showed a price/amounts the
-  // settle never honoured and enabled Review whenever cross had liquidity but pure-LN did not. Carry
-  // the chosen offer's real amounts AND its id/maker_pubkey so Review shows what will move and the
-  // settle lifts exactly THIS offer (pinned), never a relay-arbitrary one.
+  // BTC<->asset: quote from the UNIFIED book like every other rail.
+  //
+  // This path used to read the pure-LN relay's OWN book (/lnbook) even for a
+  // BTC-paired market, which meant an ln/ln user could be shown a different match
+  // than a chain/chain user for the SAME pair — the last place a rail quoted from
+  // its own book rather than the one book. Pure-LN offers are in the unified book
+  // now (the relay is merged and classifyRelayOffer handles ln_direction 2/3), and
+  // the reason this could not move earlier is gone: xpln had no partial fill, and
+  // now it does.
+  //
+  // asset<->asset keeps /lnbook below, because the unified book does not cover
+  // asset-paired markets at all (it queries <asset>/BTC). That is a real gap and is
+  // tracked separately; quoting those from a book that has no such market would be
+  // worse than quoting them from the relay that does.
+  // BTC<->asset: take the offers from the UNIFIED book, not the pure-LN relay's own.
+  //
+  // This path used to read /lnbook even for a BTC-paired market, so an ln/ln user
+  // could be shown a different match than a chain/chain user for the SAME pair — the
+  // last place a rail quoted from its own book rather than the one book. Pure-LN
+  // offers are in the unified book now (the relay is merged and classifyRelayOffer
+  // handles ln_direction 2/3).
+  //
+  // ONE BOOK DOES NOT MEAN EVERY OFFER IS TAKEABLE ON EVERY RAIL. Matching is
+  // price-first across the whole book; what a given shape can SETTLE is a separate
+  // question the settlement router answers. With both of this taker's legs over
+  // Lightning and no bridge in the value path, the offers it can settle natively are
+  // the pure-LN ones — so the unified book is the source of truth for price and
+  // identity, and settleability filters which of its entries this shape may lift.
+  // Quoting an offer we cannot settle is the "offer-then-refuse" failure, and
+  // quoting from a different book is the inconsistency; this avoids both.
+  //
+  // asset<->asset keeps /lnbook below: the unified book does not cover asset-paired
+  // markets at all (it queries <asset>/BTC). That gap is tracked separately.
+  let lnOffers = null;
+  if (!route.assetAsset && UBOOK && UBOOK.seqAsset === route.seqAsset){
+    const book = { asks: UBOOK.asks || [], bids: UBOOK.bids || [] };
+    const settleable = (side === 'buy' ? book.asks : book.bids)
+      .filter(o => o && o.rail === 'pureln' && Number(o.assetAtoms) > 0 && Number(o.btcSats) > 0);
+    if (settleable.length){
+      lnOffers = settleable.map(o => ({
+        assetAtoms: String(o.assetAtoms), btcAtoms: String(o.btcSats),
+        offer_id: o.id || null, maker_pubkey: o.maker || null,
+        minFill: (o.raw && (o.raw.min_fill ?? o.raw.minFill)) || 0,
+      }));
+    }
+  }
+  // Price + PIN the chosen offer so Review shows what will move and the settle lifts
+  // exactly THAT offer, never a relay-arbitrary one. Preferred source is the unified
+  // book above; /lnbook is the fallback for asset<->asset (which the unified book does
+  // not cover) and for a BTC pair whose pure-LN liquidity the merge has not picked up.
   let lnOffer = null;
-  if (L && L.lnBook){
+  if (lnOffers && lnOffers.length){
+    lnOffer = lnOffers[0];   // already price-ordered by mergeBook (asks ascending, bids descending)
+  }
+  if (!lnOffer && L && L.lnBook){
     try {
       const lb = await L.lnBook(route.seqAsset, route.quoteAsset);   // quoteAsset undefined for asset<->BTC
       const best = ((side === 'buy' ? lb.buy_offers : lb.sell_offers) || [])[0];
