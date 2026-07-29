@@ -76,5 +76,40 @@ ok(classifyRelayOffer({ offer_id:'n3', lightning:{ ln_direction:null } }) === nu
 const realDir0 = classifyRelayOffer({ offer_id:'n4', base_amount:1000, offer_amount:49, lightning:{ ln_direction:0 } });
 eq({ side:realDir0.side, rail:realDir0.rail }, { side:'bid', rail:'submarine' }, 'genuine numeric ln_direction 0 still classifies as a submarine bid');
 
+// --- PURE-LN (ln_direction 2/3): the last rail that read its own book ---------
+//
+// classifyRelayOffer handled 0/1 and 4/5 but not 2/3, so pure-LN offers never
+// entered the unified book and the ln/ln composer fell back to the pure-LN
+// relay's own /lnbook. For the same market and size that showed a DIFFERENT
+// matched offer than every other rail.
+const plnAsk = classifyRelayOffer({ offer_id:'p1', maker_pubkey:'mp', offer_amount:1000, want_amount:40,
+  lightning:{ ln_direction:3 }, maker_ln_node_pubkey:'03node' });
+eq({ side:plnAsk.side, rail:plnAsk.rail, asset:plnAsk.assetAtoms, btc:plnAsk.btcSats, price:plnAsk.price },
+   { side:'ask', rail:'pureln', asset:1000, btc:40, price:0.04 },
+   'pure-LN dir3 (maker SELLS the asset) -> ask on the unified book');
+ok(plnAsk.meta.caps.btc_ln === true && plnAsk.meta.caps.asset_ln === true && plnAsk.meta.caps.asset_onchain === false,
+   'pure-LN carries BOTH legs over Lightning and no on-chain leg');
+ok(plnAsk.meta.caps.interactive === true, 'pure-LN needs an online maker');
+
+const plnBid = classifyRelayOffer({ offer_id:'p2', offer_amount:35, want_amount:1000,
+  lightning:{ ln_direction:2 }, maker_ln_node_pubkey:'03node' });
+eq({ side:plnBid.side, rail:plnBid.rail, asset:plnBid.assetAtoms, btc:plnBid.btcSats },
+   { side:'bid', rail:'pureln', asset:1000, btc:35 },
+   'pure-LN dir2 (maker BUYS the asset) -> bid');
+
+// THE POINT OF THE UNIFICATION: a pure-LN offer competes on PRICE against every
+// other rail, and wins when it is cheapest. Matching is rail-blind; the rail is
+// metadata the settlement router reads on take.
+const mixed = buildUnifiedBook([
+  { offer_id:'x1', base_amount:1000, offer_amount:1000, want_amount:60, want_asset:'BTC' },              // on-chain cross ask @0.060
+  { offer_id:'x2', offer_amount:1000, want_amount:50, lightning:{ ln_direction:4 } },                    // sub-asset LN ask @0.050
+  { offer_id:'x3', base_amount:1000, offer_amount:1000, want_amount:45, lightning:{ ln_direction:1 } },  // submarine ask @0.045
+  { offer_id:'p1', offer_amount:1000, want_amount:40, lightning:{ ln_direction:3 } },                    // pure-LN ask @0.040
+]);
+eq(mixed.asks.map(a => a.rail), ['pureln','submarine','ln','onchain'],
+   'the cheapest ask wins regardless of rail, and pure-LN is now in the running');
+eq(bestFor(mixed, 'buy').id ?? bestFor(mixed, 'buy').raw.offer_id, 'p1',
+   'a buyer takes the pure-LN offer when it is the best price');
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
