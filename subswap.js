@@ -282,6 +282,69 @@ export function sizeSubswapTake({ want, offerAtoms, offerBtc, minFill, side } = 
   return { ...base, takeAtoms: wa, takeBtc: propBtc(wa * ob, oa), partial: true, belowMin: false, capped: false };
 }
 
+// ===========================================================================
+// walkBook — MULTI-OFFER book walking (the pure planner)
+// ---------------------------------------------------------------------------
+// A take used to read ONLY the single best-price offer, so a request larger than
+// that offer was capped at it and the rest of the book — often orders of magnitude
+// more liquidity — was simply unreachable. This consumes offers in PRICE ORDER
+// until the request is filled or the book runs out, and returns the resulting legs.
+//
+// It is deliberately pure: no I/O, no persistence, no settlement. Execution runs
+// the legs one at a time (each rail-crossing leg is an interactive HTLC session
+// with its own recovery material), and this planner is what decides what those legs
+// are so the composer and the executor can never disagree about them.
+//
+// ROUNDING is delegated to sizeSubswapTake per leg, so a walked leg is sized by
+// exactly the same rule as a single-offer take: a SELL floors the BTC side (the
+// maker's favour, since we receive it) and a BUY ceils it (never underpay a maker).
+// Summing per-leg amounts — rather than pro-rating the total — is what keeps every
+// leg independently valid, which matters because each one settles on its own.
+//
+// `offers` are unified-book entries, already price-sorted and already filtered of
+// non-quotes (see mergeBook / MIN_PRICEABLE_BTC_SATS). Each carries assetAtoms,
+// btcSats and optionally a per-offer min_fill.
+//
+// Returns { legs, filledAtoms, filledBtc, remainderAtoms, vwap, offersUsed,
+//           complete, partial }. `vwap` is BTC sats per asset atom across the whole
+// walk — the price that actually executes, which is worse than the best offer's and
+// is the number the user must be shown.
+export function walkBook({ offers, want, side } = {}) {
+  const wa = _big(want);
+  const out = { legs: [], filledAtoms: 0n, filledBtc: 0n, remainderAtoms: 0n,
+                vwap: null, offersUsed: 0, complete: false, partial: false };
+  if (wa <= 0n || !Array.isArray(offers) || !offers.length){
+    out.remainderAtoms = wa > 0n ? wa : 0n;
+    return out;
+  }
+  let left = wa;
+  for (const o of offers){
+    if (left <= 0n) break;
+    const offerAtoms = _big(o && (o.assetAtoms ?? o.asset_atoms));
+    const offerBtc = _big(o && (o.btcSats ?? o.btc_sats));
+    if (offerAtoms <= 0n || offerBtc <= 0n) continue;
+    const minFill = _big(o && (o.minFill ?? o.min_fill ?? (o.raw && (o.raw.min_fill ?? o.raw.minFill))));
+    const sz = sizeSubswapTake({ want: left, offerAtoms, offerBtc, minFill, side });
+    // A leg we cannot take at the size that remains is SKIPPED, not forced. This is
+    // the offer's own minimum talking: taking less than it allows would be rejected,
+    // and taking MORE than the user asked for to satisfy it would spend money they
+    // did not offer to spend. Deeper offers may still have a smaller minimum.
+    if (sz.belowMin) continue;
+    if (sz.takeAtoms <= 0n || sz.takeBtc <= 0n) continue;
+    out.legs.push({ offer: o, takeAtoms: sz.takeAtoms, takeBtc: sz.takeBtc,
+                    partial: sz.takeAtoms < offerAtoms });
+    out.filledAtoms += sz.takeAtoms;
+    out.filledBtc += sz.takeBtc;
+    left -= sz.takeAtoms;
+  }
+  out.offersUsed = out.legs.length;
+  out.remainderAtoms = left > 0n ? left : 0n;
+  out.complete = out.remainderAtoms === 0n && out.filledAtoms > 0n;
+  out.partial = out.filledAtoms > 0n && out.remainderAtoms > 0n;
+  if (out.filledAtoms > 0n) out.vwap = Number(out.filledBtc) / Number(out.filledAtoms);
+  return out;
+}
+
 // resolveConfirmedBlock — bind a funding tx to its CONFIRMED block via the ACTUAL txid's status
 // (deps.txStatus -> esplora /tx/<txid>/status), NEVER the maker-supplied leg.block_hash. Returns
 // { confirmed, block_hash }. Fails CLOSED (confirmed:false) when txStatus is unwired or the tx is still in
