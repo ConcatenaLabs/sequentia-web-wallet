@@ -60,3 +60,32 @@ test('a degenerate disp is refused rather than throwing something unreadable', (
   assert.throws(() => SW.sizedTake(null), /could not be sized/);
   assert.throws(() => SW.sizedTake({}), /could not be sized/);
 });
+
+// A RETRY MUST CARRY THE USER'S AMOUNT, NOT RE-DERIVE IT.
+//
+// advanceSubswapToNextOffer re-planned through bridgedTakePlan, which reads the amount
+// out of the composer input field — already cleared by resetComposer the moment the
+// user confirmed. So `want` arrived as 0, and a 0 want used to size to the WHOLE offer:
+// a 4 USDX order silently became the full 50 USDX one, on an offer the user never saw.
+//
+// The record holds the amount that was actually placed; the retry passes it explicitly.
+import { sizeSubswapTake } from './subswap.js';
+
+test('a retry sized from the RECORD keeps the original amount', () => {
+  // What the retry now does: want comes from b.asset_atoms, not the empty input.
+  const sz = sizeSubswapTake({ want: 400000000n, offerAtoms: 5000000000n, offerBtc: 78558n,
+    minFill: 0n, side: 'buy' });
+  assert.equal(sz.takeAtoms, 400000000n, 'still 4 USDX, not the whole 50');
+  assert.ok(sz.takeBtc < 7000n, `partial price, got ${sz.takeBtc}`);
+  assert.equal(sz.partial, true);
+});
+
+test('the old path — an empty composer — now yields NOTHING rather than everything', () => {
+  const sz = sizeSubswapTake({ want: 0n, offerAtoms: 5000000000n, offerBtc: 78558n,
+    minFill: 0n, side: 'buy' });
+  assert.equal(sz.takeAtoms, 0n);
+  assert.equal(sz.takeBtc, 0n);
+  // And a zero-sized plan is rejected before any order is built (sizedTake), so the
+  // two guards are independent: one refuses to size, the other refuses to order.
+  assert.throws(() => SW.sizedTake({ takeAtoms: sz.takeAtoms, takeBtc: sz.takeBtc }), /could not be sized/);
+});

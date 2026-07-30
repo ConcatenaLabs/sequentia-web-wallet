@@ -3509,7 +3509,7 @@ function clearDeadOffers(){ _deadOffers = new Set(); }
 // against the rails of the order as PLACED, not whatever the composer holds now —
 // resetComposer() clears S the moment the user confirms, so anything re-planning later
 // found the rails unset and gave up. The record carries them; pass them in.
-function bridgedTakePlan(route, rails){
+function bridgedTakePlan(route, rails, wantAtoms){
   try {
     if (!route || !route.seqAsset) return null;
     const payRail = (rails && rails.payRail) || S.payRail;
@@ -3553,7 +3553,10 @@ function bridgedTakePlan(route, rails){
     // below the minimum returns the MINIMUM (belowMin) so pay & receive never disagree. BTC is CEIL'd
     // (the maker is never underpaid). The LSP + maker re-verify every amount and fail closed on any mismatch.
     const offerAtoms = BigInt(offer.assetAtoms || 0), offerBtc = BigInt(offer.btcSats || 0);
-    const want = assetLegAtoms(route);
+    // wantAtoms when the caller has it (a retry / resume works from the RECORD; the
+    // composer input it would otherwise read has already been cleared by resetComposer,
+    // which reads as 0 — and a 0 want used to size to the WHOLE offer).
+    const want = (wantAtoms != null) ? BigInt(wantAtoms) : assetLegAtoms(route);
     const raw = offer.raw || {};
     const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: offerMinFill(offer, raw), side });
     // THE WALK. The single-offer sizing above stays as the per-leg authority and the
@@ -3741,8 +3744,9 @@ function advanceBridgeToNextOffer(b, why){
     // bridgedTakePlan reads the rails from composer state, so only retry while those
     // still match the order as placed. If they have moved on, fail plainly instead of
     // silently re-pricing on rails the user did not choose for this trade.
-    const bp = bridgedTakePlan(route, { payRail: b.payRail, recvRail: b.recvRail });
+    const bp = bridgedTakePlan(route, { payRail: b.payRail, recvRail: b.recvRail }, BigInt(b.asset_atoms || 0));
     if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
+    if (!(BigInt(bp.takeAtoms || 0) > 0n) || !(BigInt(bp.takeBtc || 0) > 0n)) return false;
     console.warn('[bridge] retrying on the next offer (' + bp.offer.id + ') after:', why);
     const keep = { swap_nonce: newSwapNonce(), asset: b.asset, side: b.side,
       payRail: b.payRail, recvRail: b.recvRail,
@@ -4680,8 +4684,9 @@ function advanceSubswapToNextOffer(b, why){
     // compared two blanks or refused outright — and a blank S then made the planner
     // itself bail on "rails unset", which is why no retry ever actually happened.
     const bp = bridgedTakePlan({ seqAsset: b.asset, payIsBtc: true },
-      { payRail: b.payRail, recvRail: b.recvRail });
+      { payRail: b.payRail, recvRail: b.recvRail }, BigInt(b.asset_atoms || 0));
     if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
+    if (!(BigInt(bp.takeAtoms || 0) > 0n) || !(BigInt(bp.takeBtc || 0) > 0n)) return false;
     console.warn('[subswap] retrying on the next offer (' + bp.offer.id + ') after:', why);
     SUBSWAP = { kind: b.kind, state: 'starting', asset: b.asset,
       payRail: b.payRail, recvRail: b.recvRail,

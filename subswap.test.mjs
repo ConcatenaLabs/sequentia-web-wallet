@@ -244,9 +244,19 @@ console.log("ok: bolt11MinFinalCltv decodes the 'c' field (default 18 absent, nu
 // sizeSubswapTake — SIZE the take to the user's amount; OVERSHOOT blocked when it can't be sliced.
 // ===========================================================================
 {
-  // SPEC §2: EVERY resting offer is partial-fillable down to its min_fill — there is NO indivisible offer.
-  const whole = sizeSubswapTake({ want: 0n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
-  assert.deepEqual([whole.takeAtoms, whole.takeBtc, whole.partial, whole.belowMin], [1000n, 500n, false, false], 'no requested size -> take the whole offer');
+  // A REQUEST FOR NOTHING IS NOT A REQUEST FOR EVERYTHING.
+  //
+  // This used to return the WHOLE offer for want:0, so any caller that lost track of the
+  // user's amount silently ordered the entire resting size. It happened live: a retry
+  // re-plans from the record, the amount it reads comes from the composer input that
+  // resetComposer() has already cleared, want arrived as 0, and a 4 USDX order was
+  // rebuilt as the full 50 USDX offer — 12.5x, behind a review screen showing 4.
+  //
+  // Zero in, zero out. A caller that genuinely wants the whole offer asks for its size.
+  const none = sizeSubswapTake({ want: 0n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
+  assert.deepEqual([none.takeAtoms, none.takeBtc, none.partial, none.belowMin], [0n, 0n, false, false], 'no requested size -> take NOTHING');
+  const whole = sizeSubswapTake({ want: 1000n, offerAtoms: 1000n, offerBtc: 500n, minFill: 0n });
+  assert.deepEqual([whole.takeAtoms, whole.takeBtc, whole.partial, whole.belowMin], [1000n, 500n, false, false], 'asking for the offer size still takes the whole offer');
   const part = sizeSubswapTake({ want: 400n, offerAtoms: 1000n, offerBtc: 500n, minFill: 100n });
   assert.deepEqual([part.takeAtoms, part.takeBtc, part.partial, part.belowMin], [400n, 200n, true, false], 'a request in [min_fill, offer] slices to the requested size (BTC ceil-proportional)');
   // BTC is CEIL'd so the maker is never underpaid: 3 atoms of a 1000/500 offer = 1.5 sats -> 2 sats.
