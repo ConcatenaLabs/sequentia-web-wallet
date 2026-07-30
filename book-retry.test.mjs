@@ -139,3 +139,30 @@ test('a maker that is simply GONE is retryable', () => {
     'could not reach the order-book relay',
   ]) assert.equal(SW.retryableHandshakeFailure(why), true, `should retry: ${why}`);
 });
+
+// THE RETRY MUST NOT DEPEND ON COMPOSER STATE.
+//
+// resetComposer() runs the instant the user confirms, so by the time ANY trade is
+// running S.payRail/S.recvRail are blank. The first version of the retry both compared
+// the record's rails against S and re-planned through S — so the planner bailed on
+// "rails unset" and the retry silently never happened, which is why a trade blocked by
+// "offer has a lift in progress" stayed dead at attempt 1 with live offers beside it.
+//
+// bridgedTakePlan now takes explicit rails, and the record carries the rails of the
+// order as PLACED (captured before the reset).
+test('bridgedTakePlan plans on the rails it is GIVEN, not the ones on screen', () => {
+  install();
+  SW.setFeeState({ payRail: '', recvRail: '' });           // composer already reset
+  SW.setUnifiedBook('aa'.repeat(32), { asks: [], bids: [] });
+  // With blank composer rails and none supplied, the planner reports rails-unset.
+  const noRails = SW.bridgedTakePlan({ seqAsset: 'aa'.repeat(32), payIsBtc: true });
+  assert.equal(noRails, null, 'blank rails and no override still means unplannable');
+  // Supplying the order's own rails must get PAST the rails-unset guard — an empty book
+  // is then the reason it returns null, not the rails.
+  const withRails = SW.bridgedTakePlan({ seqAsset: 'aa'.repeat(32), payIsBtc: true },
+    { payRail: 'ln', recvRail: 'chain' });
+  assert.equal(withRails, null, 'empty book still yields no plan');
+  // The distinction that matters: rails-unset is no longer the blocker.
+  assert.equal(SW.railsUnset(), false,
+    'with explicit rails the planner must not report "rails unset" — that flag is what stopped every retry');
+});
