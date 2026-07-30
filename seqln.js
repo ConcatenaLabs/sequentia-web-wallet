@@ -331,16 +331,35 @@ const LSP_TIMEOUT_MS = 90_000;
 async function lspFetch(path, opts = {}) {
   const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   if (CFG.token) headers.authorization = `Bearer ${CFG.token}`;
-  const signal = opts.signal || AbortSignal.timeout(opts.timeoutMs || LSP_TIMEOUT_MS);
+  // FEATURE-DETECT the timeout. AbortSignal.timeout is not available on older
+  // browsers and some WebViews, and calling it there throws a TypeError — which,
+  // because every caller of this function guards with a bare catch, would silently
+  // fail EVERY LSP call and present as "could not reach the order book" while the
+  // relay-backed book kept rendering fine. A timeout is a safety net; it must never
+  // be the thing that breaks the request.
+  const ms = opts.timeoutMs || LSP_TIMEOUT_MS;
+  let signal = opts.signal || null, timer = null;
+  if (!signal) {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      try { signal = AbortSignal.timeout(ms); } catch { signal = null; }
+    }
+    if (!signal && typeof AbortController === 'function') {
+      const ac = new AbortController();
+      signal = ac.signal;
+      timer = setTimeout(() => { try { ac.abort(); } catch {} }, ms);
+    }
+  }
   let r;
   try {
-    r = await fetch(CFG.lspUrl + path, { ...opts, headers, signal });
+    r = await fetch(CFG.lspUrl + path, signal ? { ...opts, headers, signal } : { ...opts, headers });
   } catch (e) {
     // Name the timeout for what it is. "The request timed out" is actionable; a bare
     // AbortError surfaced as an unexplained stall.
     if (e && (e.name === 'TimeoutError' || e.name === 'AbortError'))
       throw new Error('the request timed out - nothing of yours was committed');
     throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   const txt = await r.text();
   let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { ok: false, error: txt || 'bad json' }; }

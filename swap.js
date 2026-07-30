@@ -2313,6 +2313,7 @@ function paintQuoteSame(){
 // rail auto-selection (requote) and the book render (loadBtcBook) read it. Returns the raw LSP
 // payload ({ asks, bids, best_ask, best_bid, ... }) or null.
 let _ubookCache = { key: null, ts: 0, book: null };
+let _lastBookError = null;
 async function getUnifiedBook(seqAsset, quoteAsset){
   if (!seqAsset || seqAsset === 'BTC') return null;
   // Key the cache by the PAIR, not the base asset: EURX/BTC and EURX/OILX are
@@ -2321,7 +2322,20 @@ async function getUnifiedBook(seqAsset, quoteAsset){
   const key = seqAsset + '/' + qk;
   if (_ubookCache.key === key && (Date.now() - _ubookCache.ts) < 12000) return _ubookCache.book;
   let book = null;
-  try { if (L && L.unifiedBook){ const u = await L.unifiedBook(seqAsset, qk === 'BTC' ? undefined : qk); if (u && u.ok) book = u; } } catch {}
+  try {
+    if (L && L.unifiedBook){
+      const u = await L.unifiedBook(seqAsset, qk === 'BTC' ? undefined : qk);
+      if (u && u.ok) book = u;
+      else console.warn('[book] unified book returned no data:', u && u.error);
+    } else {
+      console.warn('[book] no unifiedBook capability wired');
+    }
+  } catch (e){
+    // Recorded, not swallowed: this is the exact call whose silent failure looked
+    // like an empty book while the relay-backed book rendered fine.
+    console.warn('[book] unified book fetch failed:', e);
+    _lastBookError = (e && e.message) || String(e);
+  }
   _ubookCache = { key, ts: Date.now(), book };
   return book;
 }
@@ -2796,7 +2810,11 @@ async function requoteCross(route, amtStr){
     status.textContent = ''; clearOpposite(); LAST_QUOTE = null; setReviewEnabled(false);
     $('swRate').textContent = 'Could not load the order book · retry.';
     $('swRoute').textContent = dirLabel;
-    $('swErr').textContent = 'Could not reach the order book right now. Check your connection and try again (re-enter the amount to retry).';
+    // Name the failing side. "Could not reach the order book" was true but useless
+    // when the visible book had loaded fine and it was the matching feed that failed.
+    const why = _lastBookError ? ' (' + _lastBookError + ')' : (_lastPlanError ? ' (' + _lastPlanError + ')' : '');
+    $('swErr').textContent = 'Offers are resting, but the matching feed could not be reached' + why +
+      '. Check your connection and try again (re-enter the amount to retry).';
     setFinality('cross');
     return;
   } catch (e){
@@ -3472,8 +3490,19 @@ function bridgedTakePlan(route){
       belowMin: sz.belowMin, minAtoms: sz.minAtoms, minBtc: sz.minBtc, capped: sz.capped,
       walk, offers: sideOffers,
       overshoot: false, wholeOnly: false };
-  } catch { return null; }
+  } catch (e){
+    // NEVER swallow this silently. A bare catch here made a node outage, an
+    // unreachable LSP and a genuine planning bug all present identically as
+    // "could not reach the order book", which cost real diagnosis time. The
+    // return value stays null (callers fall back honestly), but the reason is
+    // recorded so the next failure is one console line instead of a bisect.
+    console.warn('[book] take plan failed:', e);
+    _lastPlanError = (e && e.message) || String(e);
+    return null;
+  }
 }
+// The last reason bridgedTakePlan bailed, for the composer's diagnostics.
+let _lastPlanError = null;
 
 async function reviewBridged(route, bp){
   const { $ } = C;
