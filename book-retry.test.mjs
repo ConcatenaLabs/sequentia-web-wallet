@@ -166,3 +166,46 @@ test('bridgedTakePlan plans on the rails it is GIVEN, not the ones on screen', (
   assert.equal(SW.railsUnset(), false,
     'with explicit rails the planner must not report "rails unset" — that flag is what stopped every retry');
 });
+
+// "HAS A PREIMAGE" IS NOT A COMMITMENT SIGNAL ON THE PAYER RAIL.
+//
+// An LSP-payer buy mints P locally BEFORE the handshake starts — self-custody, the
+// taker owns the secret. So the record carries a preimage from its first moment, and
+// guarding the retry on `b.preimage` made it bail instantly on every attempt. That is
+// why a trade blocked by "offer has a lift in progress" stayed dead at attempt 1 while
+// live offers sat beside it in the book.
+//
+// What actually marks commitment is a funded asset leg or a minted/paid BTC-LN hold.
+test('a starting payer-bridge with a preimage but nothing funded IS retryable', async () => {
+  install();
+  initSwap({ assetMeta: () => ({ ticker: 'USDX', precision: 8 }), fmtAtoms: String,
+    $: () => null, el: () => null, balObj: () => ({}), feeRates: {},
+    ln: { jobStatusRaw: async () => ({ ok: true, status: 'running' }) } });
+  SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: 'starting', asset: 'aa'.repeat(32),
+    preimage: 'ab'.repeat(32), hash_h: 'cd'.repeat(32),
+    offer_id: 'dead', payRail: 'ln', recvRail: 'chain', offer_attempts: 1 });
+  // No book is loaded, so the advance cannot find a replacement and returns false —
+  // but it must get PAST the commitment guard to reach that point. The distinguishing
+  // check is that the dead offer was recorded, which only happens after the guard.
+  SW.advanceSubswapToNextOffer(SW.subswapRecord(), 'offer has a lift in progress');
+  assert.equal(SW.deadOffers().has('dead'), true,
+    'the guard must not bail before even marking the offer dead');
+});
+
+test('a payer-bridge that HAS committed is never retried', () => {
+  for (const over of [
+    { leg: { txid: 'ef'.repeat(32) } },
+    { bolt11: 'lnbc...' },
+    { hold_paid: true },
+    { state: 'held' },
+    { state: 'confirming' },
+  ]) {
+    install();
+    SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: 'starting', asset: 'aa'.repeat(32),
+      preimage: 'ab'.repeat(32), offer_id: 'committed' + JSON.stringify(over),
+      payRail: 'ln', recvRail: 'chain', offer_attempts: 1, ...over });
+    SW.advanceSubswapToNextOffer(SW.subswapRecord(), 'offer has a lift in progress');
+    assert.equal(SW.deadOffers().size, 0,
+      `a committed record (${JSON.stringify(over)}) must not even be considered for retry`);
+  }
+});
