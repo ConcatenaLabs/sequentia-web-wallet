@@ -4644,7 +4644,21 @@ async function reviewLspPayerBridge(route, disp){
 // because each one carries its own price and the maker binds on exact amounts.
 function advanceSubswapToNextOffer(b, why){
   try {
-    if (!b || b.preimage || (b.leg && b.leg.txid)) return false;      // never past commitment
+    // PRE-COMMITMENT for THIS rail, which is not "has no preimage".
+    //
+    // An LSP-payer buy mints P locally BEFORE the handshake even starts (self-custody:
+    // the taker owns the secret). So b.preimage is set from the first moment and means
+    // nothing about commitment — testing it here made the retry bail instantly on every
+    // single attempt, which is why a trade blocked by "offer has a lift in progress"
+    // stayed dead at attempt 1 with live offers beside it.
+    //
+    // Nothing of the user's has moved until the BTC-LN hold is actually held or the
+    // asset leg is funded. While the record is still 'starting' the handshake has not
+    // even produced terms, so there is nothing to lose by trying another maker.
+    if (!b) return false;
+    if (b.leg && b.leg.txid) return false;                 // asset leg funded
+    if (b.bolt11 || b.hold_paid || b.held) return false;   // BTC-LN hold minted/paid
+    if (b.state !== 'starting') return false;              // past the handshake
     const attempts = Number(b.offer_attempts || 1);
     if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
     markOfferDead(b.offer_id);
@@ -7914,6 +7928,7 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   retryableHandshakeFailure, markOfferDead, clearDeadOffers,
   deadOffers: () => _deadOffers,
   railsUnset: () => _railsUnset,
+  advanceSubswapToNextOffer,
   setSubswapRecord: (r) => { SUBSWAP = r; },
   setBridgeRecord: (r) => { BRIDGE = r; },
   subswapRecord: () => SUBSWAP,
