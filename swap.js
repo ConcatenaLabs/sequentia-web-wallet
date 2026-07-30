@@ -4687,6 +4687,28 @@ function advanceSubswapToNextOffer(b, why){
       { payRail: b.payRail, recvRail: b.recvRail }, BigInt(b.asset_atoms || 0));
     if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
     if (!(BigInt(bp.takeAtoms || 0) > 0n) || !(BigInt(bp.takeBtc || 0) > 0n)) return false;
+    // THE REPLACEMENT MUST SUIT THIS DRIVER.
+    //
+    // The retry re-uses the record's `kind`, which fixes which driver keeps running. If
+    // the next-best offer needs a DIFFERENT settlement path, carrying the old kind over
+    // points the wrong protocol at it: a payer-bridge retry that landed on a submarine
+    // offer sent the cross-chain courier's XcTermsRequest to a maker waiting for
+    // XcSubTermsRequest, and both sides waited for a message the other would never send
+    // until the handshake timed out. Observed live.
+    //
+    // Rather than switch drivers mid-record, skip an offer this driver cannot settle and
+    // let the next round consider the one after it.
+    const nextDisp = dispatchSubswap({ asset: b.asset, side: 'buy',
+      payRail: b.payRail, recvRail: b.recvRail, offer: bp.offer });
+    const wantPath = (b.kind === 'lsp-payer-buy') ? 'lsp-bridge' : 'p2p-submarine';
+    if (!nextDisp || nextDisp.path !== wantPath){
+      console.warn('[subswap] skipping ' + bp.offer.id + ': needs ' +
+        ((nextDisp && nextDisp.path) || 'an unknown path') + ', this trade is on ' + wantPath);
+      // Mark the CANDIDATE dead (not the record's own offer, which is already dead), so
+      // the next pass cannot pick it again — otherwise this recurses forever on it.
+      markOfferDead(bp.offer.id);
+      return advanceSubswapToNextOffer(b, why);
+    }
     console.warn('[subswap] retrying on the next offer (' + bp.offer.id + ') after:', why);
     SUBSWAP = { kind: b.kind, state: 'starting', asset: b.asset,
       payRail: b.payRail, recvRail: b.recvRail,
