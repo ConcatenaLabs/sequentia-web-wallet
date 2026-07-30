@@ -3011,8 +3011,10 @@ function initSwapTab(){
       // Sub-asset order book: dynamic rail gating (sell_available/buy_available) + resting
       // offers, and posting the wallet's own signed resting offer (LSP never signs).
       book: (asset) => seqlnBook(asset),
-      // Unified book: on-chain cross + sub-asset LN offers merged, price-sorted, rail-tagged.
-      unifiedBook: (asset) => seqlnUnifiedBook(asset),
+      // Unified book: every relay's offers merged, price-sorted, rail-tagged. The QUOTE
+      // asset must be forwarded — this wrapper used to take only `asset`, which silently
+      // dropped it and asked for the BTC-paired market whatever pair was on screen.
+      unifiedBook: (asset, quote) => seqlnUnifiedBook(asset, quote),
       // PURE-LN book from the relay xpln actually lifts from — the composer prices + PINS off this so
       // Review matches the settle (not the on-chain cross book, a different market).
       lnBook: (asset, quote) => seqlnLnBook(asset, quote),
