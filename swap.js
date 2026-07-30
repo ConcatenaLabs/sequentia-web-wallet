@@ -3485,6 +3485,12 @@ let _bridgeStarting = false;
 // match (taker rails + offer rails), and whether it CROSSES. Returns null when there is no unified book /
 // no resting offer -> the caller uses the existing native/post path. Pure + defensive: any failure
 // returns null so the take falls back to the proven native path, never dead-ends or throws.
+// Offers whose handshake already failed with NOTHING funded, for this composer session.
+// Kept out of the plan so a retry does not pick the same dead offer straight back.
+let _deadOffers = new Set();
+function markOfferDead(id){ if (id) _deadOffers.add(id); }
+function clearDeadOffers(){ _deadOffers = new Set(); }
+
 function bridgedTakePlan(route){
   try {
     if (!route || !route.seqAsset) return null;
@@ -3501,7 +3507,7 @@ function bridgedTakePlan(route){
     const book = (UBOOK && UBOOK.seqAsset === route.seqAsset && (UBOOK.quote || 'BTC') === wantQuote) ? UBOOK : null;
     if (!book) return null;
     const side = route.payIsBtc ? 'buy' : 'sell';                     // buy = pay BTC / receive asset; sell = pay asset / receive BTC
-    const offer = bestFor({ asks: book.asks || [], bids: book.bids || [] }, side);
+    const offer = bestFor({ asks: book.asks || [], bids: book.bids || [] }, side, _deadOffers);
     if (!offer || !(offer.price > 0)) return null;
     const { makerBtcRail, makerAssetRail } = makerRailsFromOffer(offer);
     const take = { asset: route.seqAsset, side, payRail: S.payRail, recvRail: S.recvRail,
@@ -3631,7 +3637,7 @@ async function startBridged(route, bp){
     BRIDGE = { state: 'starting', swap_nonce, asset, side: bp.side, payRail: S.payRail, recvRail: S.recvRail,
       maker_btc_rail: bp.makerBtcRail, maker_asset_rail: bp.makerAssetRail,
       btc_sats: String(bp.takeBtc), asset_atoms: String(bp.takeAtoms), partial: !!bp.partial,
-      offer_id: bp.offer.id || null, maker_pubkey: bp.offer.maker || null, started_ms: Date.now() };
+      offer_id: bp.offer.id || null, maker_pubkey: bp.offer.maker || null, offer_attempts: 1, started_ms: Date.now() };
     // W2 FRONT-BEFORE-FUND — mint the taker's OWN asset-refund key NOW (self-custody): only its PUBKEY goes
     // to the LSP (in the /swap handshake, so the maker binds it); the SECRET never leaves the device and is
     // what refunds the asset at T_seq if the swap stalls. Deterministic (the canonical HTLC key), so a
@@ -3653,6 +3659,85 @@ async function startBridged(route, bp){
     if (BRIDGE && (BRIDGE.poll || BRIDGE.job_id)){ BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); driveBridged(); }
     else { BRIDGE = { ...(BRIDGE || {}), state: 'failed', detail: 'This trade could not be completed - your funds are safe.' }; saveBridge(); }
   } finally { _bridgeStarting = false; }
+}
+
+// Is this handshake failure one where the LSP provably funded NOTHING, and where a
+// DIFFERENT maker could plausibly succeed?
+//
+// Deliberately a whitelist, not a blacklist. Retrying is only safe where nothing moved,
+// and only USEFUL where the fault is the maker's or the relay's — a malformed request
+// of ours (missing hash_h, no btc_sats bound) fails identically against every offer, so
+// walking the book would just burn the whole book on our own bug and report the last
+// maker's error instead of the real one.
+const RETRYABLE_HANDSHAKE = [
+  /lift in progress/i,          // the relay still holds a session for a maker that is gone
+  /offer not found or not open/i,
+  /offer already filled/i,
+  /another lift is in flight/i,
+  /min_fill/i,                  // below THIS offer's minimum; another may have a lower one
+  /maker wants .* above the offered/i,
+  /maker delivers .* below the offered/i,
+  /timed out|timeout/i,         // an unresponsive maker; nothing was funded
+  /handshake failed/i,          // generic maker-side failure, still pre-fund
+];
+function retryableHandshakeFailure(why){
+  const w = String(why || '');
+  // Never retry when the LSP told us the request itself was unusable.
+  if (/needs hash_h|needs taker_seq_claim_pub|needs offer_id|needs btc_sats|not configured|REFUSED/i.test(w)) return false;
+  return RETRYABLE_HANDSHAKE.some(re => re.test(w));
+}
+
+const BRIDGE_MAX_OFFER_ATTEMPTS = 4;
+
+// Move a pre-commitment bridge onto the next-best offer, re-pricing for THAT offer.
+// Returns true if a retry was started. The amounts are recomputed from the new offer
+// rather than carried over: each offer has its own price, and the maker's bind check
+// refuses on any mismatch.
+function advanceBridgeToNextOffer(b, why){
+  try {
+    if (!b || b.fronted || b.relayed || b.seq_redeem) return false;   // never past commitment
+    const attempts = Number(b.offer_attempts || 1);
+    if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
+    markOfferDead(b.offer_id);
+    // Rebuild the route from the RECORD, not from composer state: the user may have
+    // retyped the composer since placing this order, and re-planning against whatever
+    // is on screen now would quietly retry a DIFFERENT trade than the one they placed.
+    const route = { seqAsset: b.asset, payIsBtc: b.side === 'buy' };
+    // bridgedTakePlan reads the rails from composer state, so only retry while those
+    // still match the order as placed. If they have moved on, fail plainly instead of
+    // silently re-pricing on rails the user did not choose for this trade.
+    if (S.payRail !== b.payRail || S.recvRail !== b.recvRail) return false;
+    const bp = bridgedTakePlan(route);
+    if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
+    console.warn('[bridge] retrying on the next offer (' + bp.offer.id + ') after:', why);
+    const keep = { swap_nonce: newSwapNonce(), asset: b.asset, side: b.side,
+      payRail: b.payRail, recvRail: b.recvRail,
+      taker_seq_refund_pub: b.taker_seq_refund_pub, taker_seq_refund_secret: b.taker_seq_refund_secret,
+      node_key: b.node_key, btc_node_key: b.btc_node_key, started_ms: b.started_ms };
+    BRIDGE = { ...keep, state: 'starting',
+      maker_btc_rail: bp.makerBtcRail, maker_asset_rail: bp.makerAssetRail,
+      btc_sats: String(bp.takeBtc), asset_atoms: String(bp.takeAtoms), partial: !!bp.partial,
+      offer_id: bp.offer.id, maker_pubkey: bp.offer.maker || null,
+      offer_attempts: attempts + 1,
+      detail: 'Finding another maker for this trade…' };
+    saveBridge();
+    // Fresh handshake against the new maker; driveBridged re-enters from the top.
+    (async () => {
+      try {
+        const r = await L.swap(bridgeSwapBody(BRIDGE));
+        applyBridgeStatus(r || {}); saveBridge();
+        if (!bridgeTerminal()) driveBridged();
+      } catch (e){
+        console.warn('[bridge] retry start error:', e);
+        if (BRIDGE && !bridgeTerminal()){
+          BRIDGE.state = 'failed';
+          BRIDGE.detail = 'This trade could not be placed right now - try again shortly.';
+          saveBridge();
+        }
+      }
+    })();
+    return true;
+  } catch (e){ console.warn('[bridge] retry planning error:', e); return false; }
 }
 
 // The exact bridged-take /swap body — ONE builder so start + resume send byte-identical requests (so the
@@ -3708,7 +3793,9 @@ async function driveBridged(){
   catch (e){ console.warn('[bridge] drive error:', e); if (BRIDGE && !bridgeTerminal()){ BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); } }
   finally { _bridgeDriving = false; }
   if (BRIDGE && bridgeTerminal()){
-    if (BRIDGE.state === 'settled'){ try { C.toast('Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
+    if (BRIDGE.state === 'settled'){
+      clearDeadOffers();   // the book is evidently working; stop carrying old exclusions
+      try { C.toast('Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
   } else if (BRIDGE){
     clearTimeout(_bridgePoll); _bridgePoll = setTimeout(driveBridged, 8000);   // self-heal a transient gap / advance a long wait
   }
@@ -3743,7 +3830,18 @@ async function bridgedSteps(){
         b.state = 'confirming'; saveBridge(); break;
       }
       if (j && (j.status === 'failed' || (j.bridgeHandshake && j.bridgeHandshake.ok === false))){
-        console.warn('[bridge] handshake failed:', (j.bridgeHandshake && j.bridgeHandshake.error) || j.error);
+        const why = String((j.bridgeHandshake && j.bridgeHandshake.error) || j.error || '');
+        console.warn('[bridge] handshake failed:', why);
+        // RETRY DOWN THE BOOK. This branch is reached only BEFORE anything is funded —
+        // the LSP says so explicitly ("fail closed (nothing funded)") — so taking a
+        // different offer here risks nothing of the user's.
+        //
+        // It matters because a resting offer can outlive the maker process serving it:
+        // the relay keeps the offer until expiry, so a dead maker sits at top-of-book
+        // refusing every lift, and with no way past it EVERY take on that pair failed
+        // instantly until it expired. The on-chain cross path has had this retry
+        // (xswap.js T4); the bridged path never got it.
+        if (retryableHandshakeFailure(why) && advanceBridgeToNextOffer(b, why)) return;
         b.state = 'failed'; b.detail = 'This trade could not be placed right now - try again shortly.'; saveBridge(); return;
       }
       await bsleep(3000);
@@ -7717,6 +7815,10 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // record slots so the BRIDGE path (the one that actually stalled) is testable.
   reconcileJobStatus,
   bridgePreCommitment,
+  // Retry-down-the-book: a handshake that failed with NOTHING funded should move to the
+  // next offer rather than killing the trade, so one dead maker cannot fail every take.
+  retryableHandshakeFailure, markOfferDead, clearDeadOffers,
+  deadOffers: () => _deadOffers,
   setSubswapRecord: (r) => { SUBSWAP = r; },
   setBridgeRecord: (r) => { BRIDGE = r; },
   subswapRecord: () => SUBSWAP,
