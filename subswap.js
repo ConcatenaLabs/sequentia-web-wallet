@@ -470,8 +470,36 @@ export function anchorDepthVerdict({ anchorHeight, btcTip, minAnchorDepth, legAt
   const cap = Number(max0ConfAtoms || 0);
   if (cap > 0 && legAtoms != null && _big(legAtoms) <= _big(cap))
     return { ok: true, depth: 0, zeroConf: true, reason: `0-conf front (leg ${String(legAtoms)} atoms <= cap ${cap})` };
-  const min = Math.max(2, Number(minAnchorDepth || 0) || 3);
-  const ah = Number(anchorHeight), tip = Number(btcTip);
+  // A DEPTH OF 0 IS EXPRESSIBLE, AND IT IS THE DEFAULT.
+  //
+  // This used to read Math.max(2, Number(minAnchorDepth || 0) || 3), which cannot
+  // represent the two values that matter: `0 || 3` turns an explicit 0 into 3, and the
+  // floor of 2 makes 1 unreachable. Every offer on the book advertises
+  // min_anchor_depth: 0, so the wallet was silently overriding every maker and waiting
+  // 3 BITCOIN blocks — roughly half an hour — behind a UI that says "final in ~1 block".
+  //
+  // Depth here counts BITCOIN blocks burying the SEQ block's anchor. Requiring any is a
+  // deliberate departure from how this chain is supposed to work: a Sequentia block is
+  // final the moment it exists and names a Bitcoin block, and reverts only if Bitcoin
+  // reverts. Demanding 3 Bitcoin confirmations on top does not make the trade safer
+  // against anything except a Bitcoin reorg — which is the one risk the model already
+  // states plainly and accepts.
+  //
+  // So the offer's own figure is the authority, 0 included. An offer that genuinely
+  // wants burial can still ask for it; the taker is never forced into a wait its
+  // counterparty never requested.
+  const minRaw = Number(minAnchorDepth);
+  const min = Number.isFinite(minRaw) && minRaw > 0 ? Math.floor(minRaw) : 0;
+  if (min === 0)
+    return { ok: true, depth: 0, zeroConf: true,
+      reason: 'the offer asks for no anchor burial: Sequentia finality, reverts only if Bitcoin reverts' };
+  // Read STRICTLY. Number(null) is 0 — which is finite — so a null tip slipped past the
+  // "unreadable" guard and came out as "depth 0 < required N": still fail-closed, but
+  // reporting a shallow anchor when the truth was that we could not read the chain at
+  // all. Same for an empty string. Only a real number counts as a reading.
+  const readHeight = (v) => (typeof v === 'number' && Number.isFinite(v)) ? v
+    : (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) ? Number(v) : NaN;
+  const ah = readHeight(anchorHeight), tip = readHeight(btcTip);
   if (!Number.isFinite(ah) || ah <= 0) return { ok: false, depth: -1, reason: 'the SEQ block is not Bitcoin-anchored yet' };
   if (!Number.isFinite(tip)) return { ok: false, depth: -1, reason: 'the Bitcoin tip is unreadable' };
   const depth = Math.max(0, tip - ah + 1);

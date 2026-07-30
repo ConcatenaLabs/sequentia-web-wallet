@@ -3694,8 +3694,17 @@ const RETRYABLE_HANDSHAKE = [
   /maker wants .* above the offered/i,
   /maker delivers .* below the offered/i,
   /timed out|timeout/i,         // an unresponsive maker; nothing was funded
+  /never arrived|no response|did not respond/i,   // a maker that is simply GONE — see below
+  /relay did not accept the lift/i,
+  /could not reach the order-book relay/i,
   /handshake failed/i,          // generic maker-side failure, still pre-fund
 ];
+// NOTE ON "never arrived": this is the single most common real-world failure, and the
+// first version of this whitelist missed it — so the case it most needed to cover fell
+// straight through. A resting offer outlives the maker process that posted it (the
+// relay holds it until expiry), so lifting a dead maker's offer produces no refusal at
+// all, just silence until the terms wait expires. That is a maker that is GONE, nothing
+// was funded, and the next offer is very likely fine.
 function retryableHandshakeFailure(why){
   const w = String(why || '');
   // Never retry when the LSP told us the request itself was unusable.
@@ -4100,9 +4109,24 @@ function subCommonDeps(){
     seqTip: () => seqTipHeight(),
     sha256Hex: (hex) => sha256HexHex(hex),
     claimSeq: (p) => C.seqLeg.claim(p),
-    minAnchorDepth: 3,
+    // THE OFFER decides how much Bitcoin burial it wants, and 0 is the default every
+    // maker on the book actually advertises. A hardcoded 3 here overrode all of them and
+    // made a trade wait ~3 Bitcoin blocks — half an hour — behind copy promising
+    // "final in ~1 block". A Sequentia block is final once it names a Bitcoin block; it
+    // reverts only if Bitcoin reverts, and extra burial guards against nothing else.
+    // Callers that hold the offer pass its figure; this is the floor for the ones that
+    // do not, and the floor is what the makers ask for.
+    minAnchorDepth: 0,
     max0ConfAtoms: 0,
   };
+}
+
+// The anchor burial THIS record's counterparty asked for. Persisted at take time from
+// the offer, so a resumed trade honours the same figure the user agreed to rather than
+// a constant compiled into the wallet.
+function recordAnchorDepth(b){
+  const n = Number(b && (b.min_anchor_depth ?? b.minAnchorDepth));
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 // Bring the user's OWN hosted BTC-LN node online + return its node key (the counterpart of the asset node);
 // the taker PAYS or RECEIVES BTC over Lightning through it. Idempotent (re-attaches without re-funding).
@@ -4638,6 +4662,7 @@ async function startLspPayerBridge(route, disp){
     relay_url: disp.offer.relayUrl || null,
     asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
     payRail: S.payRail, recvRail: S.recvRail, offer_attempts: 1,
+    min_anchor_depth: Number((disp.offer.raw && (disp.offer.raw.min_anchor_depth ?? disp.offer.raw.minAnchorDepth)) || 0) || 0,
     started_ms: Date.now() };
   saveSubswap();
   // Say something IMMEDIATELY. resetComposer() has just cleared the form, so without
@@ -4771,7 +4796,7 @@ export async function resumeSubswap(){
           hashH: b.hash_h, myClaimPub: claimKey.public_key, makerRefundPub: terms.maker_seq_refund_pub,
           leg: { txid: ml.txid, vout: ml.vout, amount: ml.amount, asset: ml.asset || b.asset, redeem_script: ml.redeem_script, locktime: ml.locktime, block_hash: ml.block_hash },
           expectAsset: b.asset, expectAtoms: BigInt(b.asset_atoms), expectLocktime: Number(terms.seq_locktime) || ml.locktime,
-          minAnchorDepth: 3, max0ConfAtoms: 0,
+          minAnchorDepth: recordAnchorDepth(b), max0ConfAtoms: 0,
         }, { ...subCommonDeps(), anchorHeightOf: (bh) => anchorHeightOf(bh || ml.block_hash) });
         if (v.ok){
           const leg = { txid: ml.txid, vout: ml.vout, amount: String(ml.amount), asset: b.asset, redeem_script: v.redeem, locktime: Number(terms.seq_locktime) || ml.locktime };
