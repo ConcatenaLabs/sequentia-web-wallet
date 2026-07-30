@@ -273,8 +273,17 @@ export function sizeSubswapTake({ want, offerAtoms, offerBtc, minFill, side } = 
   const minAtoms = minFloor;
   const minBtc = (oa > 0n) ? propBtc(minFloor * ob, oa) : 0n;
   const base = { minAtoms, minBtc, overshoot: false, wholeOnly: false };
+  // A REQUEST FOR NOTHING IS NOT A REQUEST FOR EVERYTHING.
+  //
+  // This returned the WHOLE offer when want was 0 — so any caller that lost track of the
+  // user's amount silently ordered the entire resting size. That is exactly what
+  // happened on a retry: the re-plan reads the amount out of the composer input, which
+  // resetComposer() had already cleared, so want came through as 0 and a 4 USDX order
+  // was rebuilt as the full 50 USDX offer.
+  //
+  // Zero in, zero out. A caller that genuinely wants the whole offer asks for its size.
   if (wa <= 0n || oa <= 0n)
-    return { ...base, takeAtoms: oa, takeBtc: ob, partial: false, belowMin: false, capped: false };
+    return { ...base, takeAtoms: 0n, takeBtc: 0n, partial: false, belowMin: false, capped: false };
   if (wa >= oa)
     return { ...base, takeAtoms: oa, takeBtc: ob, partial: false, belowMin: false, capped: wa > oa };
   if (wa < minFloor)
