@@ -3505,13 +3505,19 @@ let _deadOffers = new Set();
 function markOfferDead(id){ if (id) _deadOffers.add(id); }
 function clearDeadOffers(){ _deadOffers = new Set(); }
 
-function bridgedTakePlan(route){
+// rails: optional { payRail, recvRail } override. A RESUMED or RETRIED take must plan
+// against the rails of the order as PLACED, not whatever the composer holds now —
+// resetComposer() clears S the moment the user confirms, so anything re-planning later
+// found the rails unset and gave up. The record carries them; pass them in.
+function bridgedTakePlan(route, rails){
   try {
     if (!route || !route.seqAsset) return null;
+    const payRail = (rails && rails.payRail) || S.payRail;
+    const recvRail = (rails && rails.recvRail) || S.recvRail;
     // Rails not chosen yet is a NORMAL composer state, not a failure. It is recorded
     // distinctly because the caller must not report it as a network problem — see
     // the fall-through in requoteCross.
-    if (!S.payRail || !S.recvRail){ _lastPlanError = null; _railsUnset = true; return null; }
+    if (!payRail || !recvRail){ _lastPlanError = null; _railsUnset = true; return null; }
     _railsUnset = false;
     // Asset-paired markets are served now: /book/unified takes a ?quote asset, so
     // EURX/OILX has a unified book like every BTC pair. The cached book must be for
@@ -3524,7 +3530,7 @@ function bridgedTakePlan(route){
     const offer = bestFor({ asks: book.asks || [], bids: book.bids || [] }, side, _deadOffers);
     if (!offer || !(offer.price > 0)) return null;
     const { makerBtcRail, makerAssetRail } = makerRailsFromOffer(offer);
-    const take = { asset: route.seqAsset, side, payRail: S.payRail, recvRail: S.recvRail,
+    const take = { asset: route.seqAsset, side, payRail, recvRail,
       makerBtcRail, makerAssetRail, takerAssetInbound: false, takerBtcInbound: false };   // false => the LSP JIT-provisions (always safe)
     const match = matchFromTake(take);
     const plan = planSettlement(match);
@@ -3637,12 +3643,15 @@ async function reviewBridged(route, bp){
     if (st) st.textContent = 'Increase the amount to the minimum shown, then place the order.';
     return;
   }
-  ok.onclick = async () => { modal.remove(); resetComposer(); await startBridged(route, bp); };
+  // Capture the rails BEFORE resetComposer blanks S — the record needs the rails of the
+  // order as PLACED, and everything that re-plans later (resume, retry) reads them from it.
+  ok.onclick = async () => { const rails = { payRail: S.payRail, recvRail: S.recvRail };
+    modal.remove(); resetComposer(); await startBridged(route, bp, rails); };
 }
 
 // Persist BEFORE the /swap POST (persist-before-broadcast): a lost 202 + retry (or a restart) re-POSTs
 // with the SAME swap_nonce, which the LSP dedupes to ONE job — never a second funded HTLC.
-async function startBridged(route, bp){
+async function startBridged(route, bp, rails){
   if (_bridgeStarting || hasBridgeInFlight() || hasSubswapInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   _bridgeStarting = true;
   try {
@@ -3650,7 +3659,8 @@ async function startBridged(route, bp){
     const swap_nonce = newSwapNonce();
     // P3.1 — persist the SIZED take (bp.takeAtoms/takeBtc), never the whole offer, so the /swap body,
     // the maker handshake bind, and any resume all use the user's requested size (§2.4).
-    BRIDGE = { state: 'starting', swap_nonce, asset, side: bp.side, payRail: S.payRail, recvRail: S.recvRail,
+    BRIDGE = { state: 'starting', swap_nonce, asset, side: bp.side,
+      payRail: (rails && rails.payRail) || S.payRail, recvRail: (rails && rails.recvRail) || S.recvRail,
       maker_btc_rail: bp.makerBtcRail, maker_asset_rail: bp.makerAssetRail,
       btc_sats: String(bp.takeBtc), asset_atoms: String(bp.takeAtoms), partial: !!bp.partial,
       offer_id: bp.offer.id || null, maker_pubkey: bp.offer.maker || null, offer_attempts: 1, started_ms: Date.now() };
@@ -3731,8 +3741,7 @@ function advanceBridgeToNextOffer(b, why){
     // bridgedTakePlan reads the rails from composer state, so only retry while those
     // still match the order as placed. If they have moved on, fail plainly instead of
     // silently re-pricing on rails the user did not choose for this trade.
-    if (S.payRail !== b.payRail || S.recvRail !== b.recvRail) return false;
-    const bp = bridgedTakePlan(route);
+    const bp = bridgedTakePlan(route, { payRail: b.payRail, recvRail: b.recvRail });
     if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
     console.warn('[bridge] retrying on the next offer (' + bp.offer.id + ') after:', why);
     const keep = { swap_nonce: newSwapNonce(), asset: b.asset, side: b.side,
@@ -4623,7 +4632,9 @@ async function reviewLspPayerBridge(route, disp){
     ['Your funds', 'Your funds stay in your control until this completes.'],
   ];
   const { m: modal, ok } = C.modalRows({ title: 'Review swap', kv });
-  ok.onclick = async () => { modal.remove(); resetComposer(); await startLspPayerBridge(route, disp); };
+  // Rails captured BEFORE the reset; see startBridged.
+  ok.onclick = async () => { const rails = { payRail: S.payRail, recvRail: S.recvRail };
+    modal.remove(); resetComposer(); await startLspPayerBridge(route, disp, rails); };
 }
 
 // Move a PRE-COMMITMENT payer-bridge onto the next-best offer. Same contract as
@@ -4637,8 +4648,12 @@ function advanceSubswapToNextOffer(b, why){
     const attempts = Number(b.offer_attempts || 1);
     if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
     markOfferDead(b.offer_id);
-    if (S.payRail !== b.payRail || S.recvRail !== b.recvRail) return false;
-    const bp = bridgedTakePlan({ seqAsset: b.asset, payIsBtc: true });
+    // The RECORD's rails, full stop. Comparing against S was wrong twice over: the
+    // composer is already reset by the time any trade is running, so the check either
+    // compared two blanks or refused outright — and a blank S then made the planner
+    // itself bail on "rails unset", which is why no retry ever actually happened.
+    const bp = bridgedTakePlan({ seqAsset: b.asset, payIsBtc: true },
+      { payRail: b.payRail, recvRail: b.recvRail });
     if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
     console.warn('[subswap] retrying on the next offer (' + bp.offer.id + ') after:', why);
     SUBSWAP = { kind: b.kind, state: 'starting', asset: b.asset,
@@ -4655,13 +4670,13 @@ function advanceSubswapToNextOffer(b, why){
   } catch (e){ console.warn('[subswap] retry planning error:', e); return false; }
 }
 
-async function startLspPayerBridge(route, disp){
+async function startLspPayerBridge(route, disp, rails){
   if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   SUBSWAP = { kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
     offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
     relay_url: disp.offer.relayUrl || null,
     asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
-    payRail: S.payRail, recvRail: S.recvRail, offer_attempts: 1,
+    payRail: (rails && rails.payRail) || S.payRail, recvRail: (rails && rails.recvRail) || S.recvRail, offer_attempts: 1,
     min_anchor_depth: Number((disp.offer.raw && (disp.offer.raw.min_anchor_depth ?? disp.offer.raw.minAnchorDepth)) || 0) || 0,
     started_ms: Date.now() };
   saveSubswap();
@@ -7898,6 +7913,7 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // next offer rather than killing the trade, so one dead maker cannot fail every take.
   retryableHandshakeFailure, markOfferDead, clearDeadOffers,
   deadOffers: () => _deadOffers,
+  railsUnset: () => _railsUnset,
   setSubswapRecord: (r) => { SUBSWAP = r; },
   setBridgeRecord: (r) => { BRIDGE = r; },
   subswapRecord: () => SUBSWAP,
