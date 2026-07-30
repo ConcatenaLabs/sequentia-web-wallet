@@ -65,14 +65,6 @@ export class Signer {
      * malformed / unsupported secret.
      */
     constructor(hsm_secret_bytes: Uint8Array);
-    /**
-     * Drive ONE hsmd request -> reply. `frame_bytes` is a single signer-split
-     * frame (`signer_frame.h`: little-endian `u32 len | is_main | node_id? |
-     * dbid | capabilities | hsmd_msg`); the return is the single framed reply
-     * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
-     * byte-for-byte what the native serve loop writes back. Throws only on a
-     * libhsmd-fatal condition (which closes the transport natively).
-     */
     processFrame(frame_bytes: Uint8Array): Uint8Array;
     /**
      * Turn the M4 validating policy on (`enforce`) or off (`permissive`). The
@@ -87,6 +79,16 @@ export class Signer {
      * custody proof, without hard-coding key derivation in JS.
      */
     walletSweepScript(index: number, taproot: boolean): Uint8Array;
+    /**
+     * Drive ONE hsmd request -> reply. `frame_bytes` is a single signer-split
+     * frame (`signer_frame.h`: little-endian `u32 len | is_main | node_id? |
+     * dbid | capabilities | hsmd_msg`); the return is the single framed reply
+     * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
+     * byte-for-byte what the native serve loop writes back. Throws only on a
+     * libhsmd-fatal condition (which closes the transport natively).
+     * The reason the last request was refused (cleared by the next successful one).
+     */
+    readonly lastReject: string | undefined;
 }
 
 /**
@@ -110,6 +112,7 @@ export interface InitOutput {
     readonly noisesession_readActTwo: (a: number, b: number, c: number) => [number, number, number, number];
     readonly noisesession_writeActOne: (a: number) => [number, number, number, number];
     readonly signer_fromMnemonic: (a: number, b: number) => [number, number, number];
+    readonly signer_lastReject: (a: number) => [number, number];
     readonly signer_new: (a: number, b: number) => [number, number, number];
     readonly signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
     readonly signer_setEnforce: (a: number, b: number) => void;

@@ -12,6 +12,7 @@ export const noisesession_newInitiator: (a: number, b: number, c: number, d: num
 export const noisesession_readActTwo: (a: number, b: number, c: number) => [number, number, number, number];
 export const noisesession_writeActOne: (a: number) => [number, number, number, number];
 export const signer_fromMnemonic: (a: number, b: number) => [number, number, number];
+export const signer_lastReject: (a: number) => [number, number];
 export const signer_new: (a: number, b: number) => [number, number, number];
 export const signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
 export const signer_setEnforce: (a: number, b: number) => void;

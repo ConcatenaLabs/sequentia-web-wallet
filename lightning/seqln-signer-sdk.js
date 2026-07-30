@@ -125,6 +125,8 @@ export class SeqlnSigner {
     // onRequest({seq,type,name,replyBytes,rejected}).
     this.onStatus = opts.onStatus || null;
     this.onRequest = opts.onRequest || null;
+    // onReject({type,name,reason}) — why the signer refused to sign.
+    this.onReject = opts.onReject || null;
   }
 
   // Build from a BIP-39 mnemonic (no passphrase). `opts.wasm` overrides the wasm
@@ -252,6 +254,20 @@ export class SeqlnSigner {
           this._served.set(type, (this._served.get(type) || 0) + 1);
 
           const reply = this._inner.processFrame(frame);   // wasm signs
+          // A refusal is a ZERO-LENGTH reply on the wire, identical for "policy said no"
+          // and "I do not implement that". The signer computes a precise reason and the
+          // wire has nowhere to put it, so it used to die inside the wasm: the node logged
+          // only "signerd rejected request", channeld died, and every payment on the
+          // channel failed with "First peer not ready" with nothing, anywhere, saying why.
+          // Surface it — a signer that refuses silently is indistinguishable from one that
+          // is broken.
+          if (reply.length === 4) {
+            let why = null;
+            try { why = this._inner.lastReject; } catch {}
+            const label = hsmdName(type);
+            try { console.warn('[signer] REFUSED ' + label + ': ' + (why || 'no reason reported')); } catch {}
+            if (this.onReject) { try { this.onReject({ type, name: label, reason: why || null }); } catch {} }
+          }
           if (this._nodeId === null) {
             const id = nodeIdFromInitReply(reply);
             if (id) { this._nodeId = id; this._status('node_id', id); }
