@@ -4586,12 +4586,42 @@ async function reviewLspPayerBridge(route, disp){
   ok.onclick = async () => { modal.remove(); resetComposer(); await startLspPayerBridge(route, disp); };
 }
 
+// Move a PRE-COMMITMENT payer-bridge onto the next-best offer. Same contract as
+// advanceBridgeToNextOffer, for the driver the composer actually uses: it is entered
+// only where nothing was funded, rebuilds the route from the RECORD (never from
+// composer state, which the user may have retyped), and re-prices for the new offer
+// because each one carries its own price and the maker binds on exact amounts.
+function advanceSubswapToNextOffer(b, why){
+  try {
+    if (!b || b.preimage || (b.leg && b.leg.txid)) return false;      // never past commitment
+    const attempts = Number(b.offer_attempts || 1);
+    if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
+    markOfferDead(b.offer_id);
+    if (S.payRail !== b.payRail || S.recvRail !== b.recvRail) return false;
+    const bp = bridgedTakePlan({ seqAsset: b.asset, payIsBtc: true });
+    if (!bp || !bp.offer || !bp.offer.id || bp.offer.id === b.offer_id) return false;
+    console.warn('[subswap] retrying on the next offer (' + bp.offer.id + ') after:', why);
+    SUBSWAP = { kind: b.kind, state: 'starting', asset: b.asset,
+      payRail: b.payRail, recvRail: b.recvRail,
+      offer_id: bp.offer.id, maker_pubkey: bp.offer.maker || null,
+      relay_url: bp.offer.relayUrl || null,
+      asset_atoms: String(bp.takeAtoms || 0), btc_sats: String(bp.takeBtc || 0),
+      offer_attempts: attempts + 1,
+      detail: 'Finding another maker for this trade…',
+      started_ms: Date.now() };
+    saveSubswap();
+    driveLspPayerBridge();
+    return true;
+  } catch (e){ console.warn('[subswap] retry planning error:', e); return false; }
+}
+
 async function startLspPayerBridge(route, disp){
   if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   SUBSWAP = { kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
     offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
     relay_url: disp.offer.relayUrl || null,
     asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
+    payRail: S.payRail, recvRail: S.recvRail, offer_attempts: 1,
     started_ms: Date.now() };
   saveSubswap();
   // Say something IMMEDIATELY. resetComposer() has just cleared the form, so without
@@ -4657,7 +4687,15 @@ async function driveLspPayerBridge(){
   } catch (e){
     console.warn('[subswap] payer-bridge drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
     if (SUBSWAP && SUBSWAP.preimage && SUBSWAP.leg && SUBSWAP.leg.txid){ SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; SUBSWAP.state = 'claiming'; saveSubswap(); }
-    else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
+    else if (SUBSWAP){
+      // PRE-COMMITMENT: no preimage and no funded leg, so nothing of the user's moved
+      // and a different maker may simply work. This is the LIVE payer-bridge path — the
+      // driver the composer actually uses for BTC-LN -> asset-on-chain.
+      const why = String((e && e.message) || e || '');
+      _subswapDriving = false;                     // the retry re-enters this driver
+      if (retryableHandshakeFailure(why) && advanceSubswapToNextOffer(SUBSWAP, why)) return;
+      SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap();
+    }
   } finally { _subswapDriving = false; }
   if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast('Swap settled · the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
 }
