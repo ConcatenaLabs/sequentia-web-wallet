@@ -20,8 +20,26 @@ function mk(side, rail, assetAtoms, btcSats, raw, meta) {
   // `price == null` drop in mergeBook, sort to the TOP of asks, and get auto-selected by bestFor as
   // "the best price". Null it so mergeBook discards the garbage offer.
   const price = (assetAtoms > 0 && btcSats > 0) ? btcSats / assetAtoms : null;
+  // WHOLE-OFFER-ONLY OFFERS ARE REAL, and the taker must be told.
+  //
+  // The wallet was built on "every offer is partial-fillable down to its min_fill —
+  // there is NO indivisible offer" (subswap.js, swap.js spec §2). That is false: a
+  // maker advertises allow_partial:false for a whole-HTLC lift, and the submarine
+  // fleet does exactly that. Nothing read the field, so the composer happily sized an
+  // 8% slice of an indivisible offer, the maker locked the WHOLE offer, and the take
+  // died on "asset leg amount 5000000000 != offer 400000000" — after the maker had
+  // already committed its leg.
+  //
+  // Normalising it to a min_fill of the FULL size is what makes every existing
+  // min_fill-aware path do the right thing without knowing about this at all:
+  // walkBook already skips an offer whose minimum exceeds what is left rather than
+  // force-filling it, so an indivisible offer is now taken whole or passed over.
+  const rawMin = num(raw && (raw.min_fill ?? raw.minFill));
+  const indivisible = raw && (raw.allow_partial === false || raw.allowPartial === false);
+  const minFill = indivisible ? assetAtoms : rawMin;
   return {
     side, rail, assetAtoms, btcSats, price,
+    minFill, indivisible: !!indivisible,
     id: (raw && (raw.offer_id || raw.offerId)) || null,
     // The relay holding this offer. A take must open its courier session there; see
     // the note where the book is merged.
