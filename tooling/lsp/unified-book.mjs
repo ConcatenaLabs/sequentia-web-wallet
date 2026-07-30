@@ -20,7 +20,21 @@ function mk(side, rail, assetAtoms, btcSats, raw, meta) {
   // `price == null` drop in mergeBook, sort to the TOP of asks, and get auto-selected by bestFor as
   // "the best price". Null it so mergeBook discards the garbage offer.
   const price = (assetAtoms > 0 && btcSats > 0) ? btcSats / assetAtoms : null;
-  // WHOLE-OFFER-ONLY OFFERS ARE REAL, and the taker must be told.
+  // A WHOLE-OFFER-ONLY OFFER IS A DEFECT, NOT A FEATURE — but never trust it blind.
+  //
+  // Every rail is meant to support partial fills; there should be no such thing as an
+  // indivisible offer. The submarine and pure-LN makers advertised allow_partial:false
+  // while their drivers fully supported slices, and the fix is on the maker side (they
+  // now advertise the truth and re-rest the remainder).
+  //
+  // This stays as a SAFETY NET, not as an accommodation. If any maker ever advertises
+  // whole-only again — a stale binary, a third-party maker, a regression — the taker
+  // must not size a slice against it, because the maker answers by locking the WHOLE
+  // offer and the take dies AFTER that leg is committed on-chain. Refusing to slice is
+  // strictly better than discovering the mismatch post-commitment.
+  //
+  // Expect this branch to be dead against our own fleet. If it starts firing, a maker
+  // is misadvertising and THAT is the bug to fix.
   //
   // The wallet was built on "every offer is partial-fillable down to its min_fill —
   // there is NO indivisible offer" (subswap.js, swap.js spec §2). That is false: a
