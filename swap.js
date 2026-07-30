@@ -4622,8 +4622,12 @@ async function reviewLspPayerBridge(route, disp){
   if (!railAvail('BTC', route.seqAsset).payLn.ok){ $('swErr').textContent = 'You will need Bitcoin in Lightning to pay this way · move it to Lightning first (Balance tab), then take this offer.'; return; }
   // Below-minimum: the request is under this offer's minimum fill — fail closed, never place a below-min take.
   if (disp.belowMin){ const minStr = C.fmtAtoms(BigInt(disp.minAtoms || 0), aprec) + ' ' + tk; const minBtcStr = C.fmtAtoms(BigInt(disp.minBtc || 0), 8) + ' BTC'; $('swErr').textContent = `The smallest amount you can buy here is ${minStr} (${minBtcStr}) · increase the amount to at least that.`; return; }
-  const assetStr = C.fmtAtoms(BigInt(disp.takeAtoms || disp.offer.assetAtoms || 0), aprec) + ' ' + tk;
-  const btcStr = C.fmtAtoms(BigInt(disp.takeBtc || disp.offer.btcSats || 0), 8) + ' BTC';
+  // The review must state the SIZED take. Falling back to the whole offer here would
+  // print one number while the order carried another.
+  let _rv; try { _rv = sizedTake(disp); }
+  catch { try { C.toast && C.toast('This trade could not be sized - nothing was placed.'); } catch {} return; }
+  const assetStr = C.fmtAtoms(_rv.atoms, aprec) + ' ' + tk;
+  const btcStr = C.fmtAtoms(_rv.btc, 8) + ' BTC';
   // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
   // the settlement machinery that carries the trade to completion.
   const kv = [
@@ -4693,12 +4697,32 @@ function advanceSubswapToNextOffer(b, why){
   } catch (e){ console.warn('[subswap] retry planning error:', e); return false; }
 }
 
+// The SIZED take, or a refusal. Never the whole offer.
+//
+// These read `disp.takeAtoms || disp.offer.assetAtoms` — so whenever the sized take was
+// missing or zero, the wallet silently fell back to the ENTIRE resting offer. A user who
+// asked for 4 USDX got a 50 USDX order built behind a review screen that still said 4,
+// and the only reason it did not execute was that a later step happened to fail.
+//
+// "If I do not know the size, buy everything" is never the right default for an order.
+// A missing size is a bug in the caller, and it must surface as one.
+function sizedTake(disp){
+  const atoms = BigInt((disp && disp.takeAtoms) || 0);
+  const btc = BigInt((disp && disp.takeBtc) || 0);
+  if (!(atoms > 0n) || !(btc > 0n))
+    throw new Error('this trade could not be sized - nothing was placed');
+  return { atoms, btc };
+}
+
 async function startLspPayerBridge(route, disp, rails){
   if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
+  let sized;
+  try { sized = sizedTake(disp); }
+  catch (e){ console.warn('[subswap] refusing to place an unsized take:', e); try { C.toast && C.toast('This trade could not be sized - nothing was placed.'); } catch {} return; }
   SUBSWAP = { kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
     offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
     relay_url: disp.offer.relayUrl || null,
-    asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
+    asset_atoms: String(sized.atoms), btc_sats: String(sized.btc),
     payRail: (rails && rails.payRail) || S.payRail, recvRail: (rails && rails.recvRail) || S.recvRail, offer_attempts: 1,
     min_anchor_depth: Number((disp.offer.raw && (disp.offer.raw.min_anchor_depth ?? disp.offer.raw.minAnchorDepth)) || 0) || 0,
     started_ms: Date.now() };
@@ -7938,6 +7962,7 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   deadOffers: () => _deadOffers,
   railsUnset: () => _railsUnset,
   advanceSubswapToNextOffer,
+  sizedTake,
   setSubswapRecord: (r) => { SUBSWAP = r; },
   setBridgeRecord: (r) => { BRIDGE = r; },
   subswapRecord: () => SUBSWAP,
