@@ -2569,6 +2569,13 @@ async function prepareBridgeLegs({ match, body, job }) {
       persistJobs();
       console.error('[bridge] forward maker terms: T_btc', terms.btcLocktime, 'T_seq', terms.seqLocktime, 'on taker H', takerHash);
     } catch (e) {
+      // RELEASE THE LIFT, don't just drop the socket. session.fail() reaches the MAKER
+      // through the courier so it frees its single in-flight slot at once; closing the
+      // socket is what tells the RELAY. Without the explicit fail, a failed take left the
+      // maker "busy" and the offer answering "another lift is in flight" for its whole
+      // timeout — so a taker retrying down the book kept colliding with offers its own
+      // previous attempts had wedged.
+      try { session && (await session.fail('taker_abort', 'handshake failed; releasing the lift')); } catch {}
       try { session && session.close(); } catch {}
       job._bridgeSession = null;
       job.bridgeHandshake = { ok: false, error: `forward maker handshake failed (nothing funded): ${scrubDetail(String((e && e.message) || e))}` };
