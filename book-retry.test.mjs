@@ -123,3 +123,19 @@ test('a commitment-stage failure string is not treated as retryable by accident'
   assert.equal(SW.retryableHandshakeFailure('asset claim broadcast rejected'), false);
   assert.equal(SW.retryableHandshakeFailure('hold invoice already settled'), false);
 });
+
+// THE MOST COMMON REAL FAILURE, which the first whitelist missed entirely.
+//
+// A resting offer outlives the maker process that posted it — the relay holds it until
+// expiry — so lifting a dead maker's offer produces no refusal at all, just silence
+// until the terms wait expires. That is the case the retry exists for, and
+// "terms never arrived" matched nothing, so a live trade sat in 'confirming' while
+// Sequentia blocks went by.
+test('a maker that is simply GONE is retryable', () => {
+  install();
+  for (const why of [
+    'payer bridge: the forward-maker terms never arrived (nothing committed)',
+    'relay did not accept the lift',
+    'could not reach the order-book relay',
+  ]) assert.equal(SW.retryableHandshakeFailure(why), true, `should retry: ${why}`);
+});
