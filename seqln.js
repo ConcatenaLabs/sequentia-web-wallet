@@ -328,7 +328,7 @@ export function disconnectProvisioned(assetId) {
 // bounded call, never by holding one open.
 const LSP_TIMEOUT_MS = 90_000;
 
-async function lspFetch(path, opts = {}) {
+async function lspFetch(path, { allowNotOk = false, ...opts } = {}) {
   const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   if (CFG.token) headers.authorization = `Bearer ${CFG.token}`;
   // FEATURE-DETECT the timeout. AbortSignal.timeout is not available on older
@@ -363,6 +363,10 @@ async function lspFetch(path, opts = {}) {
   }
   const txt = await r.text();
   let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { ok: false, error: txt || 'bad json' }; }
+  // opts.allowNotOk: for a STATUS read, `ok:false` is the answer, not an error.
+  // See seqlnJobStatusRaw. Transport failures (a non-2xx with no body we can parse)
+  // still throw, because those genuinely tell the caller nothing.
+  if (allowNotOk && txt && typeof j === 'object' && j && j.status) return j;
   if (!r.ok || j.ok === false) {
     // Surface the LSP's `detail` (the settlement binary's actual output) alongside the
     // summary error — dropping it left terminal failures as a bare "did not settle"
@@ -493,6 +497,22 @@ export function seqlnNodePayHash({ node_key, node_id, hash, amount_msat, min_fin
 export function seqlnJobStatus(pathOrId) {
   const p = String(pathOrId || '');
   return lspFetch(p.startsWith('/') ? p : ('/swap/' + p));
+}
+
+// The SAME status read, but it does not throw when the job itself has failed.
+//
+// lspFetch rejects on `ok:false`, which is right for a command ("the thing you
+// asked for did not happen") and exactly wrong for a status query: a FAILED job
+// answers {ok:false, status:'failed', error:'...'}, so the caller that most needs
+// to see the failure is the one that gets an exception instead of the body. That is
+// why the wallet could sit on a job the LSP had already failed — every probe threw
+// and was swallowed.
+//
+// Transport errors still throw; only a well-formed body with ok:false is returned
+// as data, because for a status read that IS the answer.
+export function seqlnJobStatusRaw(pathOrId) {
+  const p = String(pathOrId || '');
+  return lspFetch(p.startsWith('/') ? p : ('/swap/' + p), { allowNotOk: true });
 }
 
 // "Move back to chain": cooperatively close a channel on the user's own hosted node and send the
