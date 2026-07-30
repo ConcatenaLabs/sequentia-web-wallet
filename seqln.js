@@ -520,8 +520,25 @@ export function seqlnSwap({ side, asset, amount, quote_asset, payRail, recvRail,
   // destructure, so a bridged take silently lost bridge:true + all its terms and was MISROUTED into the
   // custodial submarine path (a false-success fund hole). Forward every one of them (W3a).
   bridge, btc_node_key, maker_btc_rail, maker_asset_rail, btc_sats, asset_atoms,
-  taker_asset_inbound, taker_btc_inbound, taker_seq_refund_pub }) {
+  taker_asset_inbound, taker_btc_inbound, taker_seq_refund_pub,
+  // PAYER LEG-BRIDGE (buy, pay BTC over LN, receive the asset on-chain). The taker
+  // mints P and sends only H; the LSP fails closed without it, and the maker locks
+  // the asset leg to taker_seq_claim_pub. Both were missing from this destructure,
+  // so the wallet computed them, stored them, and then dropped them on the way out —
+  // the LSP answered "payer bridge needs hash_h ... fail closed" and the take died
+  // after the user had already confirmed it.
+  hash_h, taker_seq_claim_pub,
+  // Anything this function does not name is DROPPED. That has now caused the same
+  // class of bug twice (bridge:true and its terms, then hash_h), so unknown keys are
+  // surfaced rather than silently discarded — see the rest check below.
+  ...rest }) {
   const body = { side, asset, amount };
+  // A caller that sends a field this function has never heard of is almost always a
+  // new protocol field that needs forwarding, not junk. Refusing to guess, but
+  // refusing to hide it either.
+  for (const k of Object.keys(rest || {})) {
+    if (rest[k] !== undefined) console.warn('[lsp] seqlnSwap is dropping an unrecognised field:', k);
+  }
   // asset<->asset pure-LN: the counter (quote) asset id. Omitted (or 'BTC') => the classic asset<->BTC
   // pure-LN, so the pure-LN body stays byte-identical to before for every existing asset<->BTC swap.
   if (quote_asset && String(quote_asset).toUpperCase() !== 'BTC') body.quote_asset = quote_asset;
@@ -541,6 +558,10 @@ export function seqlnSwap({ side, asset, amount, quote_asset, payRail, recvRail,
   // claimSell's economic gate checks) rather than an arbitrary one — matching Ambra's swapSub.
   if (offer_id) body.offer_id = offer_id;
   if (maker_pubkey) body.maker_pubkey = maker_pubkey;
+  // Payer leg-bridge terms (see the destructure): H is what the LSP and the maker
+  // bind to, and the asset leg is locked to the taker's own claim key.
+  if (hash_h) body.hash_h = String(hash_h).toLowerCase();
+  if (taker_seq_claim_pub) body.taker_seq_claim_pub = String(taker_seq_claim_pub).toLowerCase();
   // Sub-asset SELL idempotency key: the wallet persists it BEFORE this call and re-sends the SAME
   // value on a recovery re-call so the LSP returns the already-settled {preimage, btc_htlc} without
   // re-paying the asset. Only serialized when present, so the pure-LN body is byte-identical to before.
