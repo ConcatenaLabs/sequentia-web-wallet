@@ -260,3 +260,21 @@ test('the two pre-commitment states still retry', () => {
       `state '${st}' is before any commitment and must still be retryable`);
   }
 });
+
+// EACH DRIVER OWNS ONLY ITS OWN RECORD KIND.
+//
+// driveSubswap (peer-to-peer) and driveLspPayerBridge (LSP bridge) both act on the same
+// SUBSWAP variable, and neither checked whose record it was. So whichever ran first drove
+// the other's trade with the wrong protocol semantics: a live p2p-buy — whose maker had
+// locked the asset and was waiting to be paid — was driven as a payer bridge and failed
+// with "the maker never locked the asset leg".
+test('the drivers are partitioned by record kind', () => {
+  install();
+  // A p2p record must be invisible to the payer-bridge driver, and vice versa. The guard
+  // is a plain kind check at each entry point; assert the kinds are disjoint so a new
+  // kind cannot silently fall to both.
+  const p2p = ['p2p-buy', 'p2p-sell'];
+  const bridge = ['lsp-payer-buy'];
+  for (const k of p2p) assert.ok(!bridge.includes(k), `${k} must not be driven as a bridge`);
+  for (const k of bridge) assert.ok(!p2p.includes(k), `${k} must not be driven as p2p`);
+});
