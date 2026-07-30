@@ -229,3 +229,34 @@ test('an offer needing another path is SKIPPED, and cannot be picked again', () 
     'the rejected CANDIDATE must be excluded — marking only the record\'s own offer loops');
   assert.equal(SW.deadOffers().size, before + 1);
 });
+
+// A PAID HOLD MUST NEVER BE RETRIED AWAY.
+//
+// The commitment guard tested `b.held` — a FIELD — while the driver signals a paid hold
+// by setting `state = 'held'`. So a record whose Bitcoin was already committed sailed
+// through and got retried onto a different offer, orphaning the paid hold. Observed live.
+//
+// Only the two states before any value moves may retry.
+test('a record whose hold is PAID (state held) is never retried', () => {
+  for (const st of ['held', 'paying', 'claiming', 'settling', 'settled']) {
+    install();
+    SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: st, asset: 'aa'.repeat(32),
+      preimage: 'ab'.repeat(32), offer_id: 'paid-' + st, payRail: 'ln', recvRail: 'chain',
+      offer_attempts: 1 });
+    SW.advanceSubswapToNextOffer(SW.subswapRecord(), 'offer has a lift in progress');
+    assert.equal(SW.deadOffers().size, 0,
+      `state '${st}' means value has moved; it must not be considered for retry`);
+  }
+});
+
+test('the two pre-commitment states still retry', () => {
+  for (const st of ['starting', 'confirming']) {
+    install();
+    SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: st, asset: 'aa'.repeat(32),
+      preimage: 'ab'.repeat(32), offer_id: 'fresh-' + st, payRail: 'ln', recvRail: 'chain',
+      offer_attempts: 1 });
+    SW.advanceSubswapToNextOffer(SW.subswapRecord(), 'offer has a lift in progress');
+    assert.equal(SW.deadOffers().has('fresh-' + st), true,
+      `state '${st}' is before any commitment and must still be retryable`);
+  }
+});

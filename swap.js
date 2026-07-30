@@ -4676,6 +4676,12 @@ function advanceSubswapToNextOffer(b, why){
     // (retryableHandshakeFailure), so this is the second, independent check.
     if (b.leg && b.leg.txid) return false;                 // maker's asset leg recorded
     if (b.bolt11 || b.hold_paid || b.held) return false;   // BTC-LN hold minted / paid
+    // AND THE STATE ITSELF. 'held' means the hold is PAID — the guard above looked for a
+    // `held` FIELD and missed the `state === 'held'` that the driver actually sets, so a
+    // record whose Bitcoin was already committed got retried onto another offer,
+    // abandoning the paid hold. Only the two states before any value moves may retry:
+    // 'starting' (nothing posted) and 'confirming' (job posted, hold not yet minted).
+    if (b.state !== 'starting' && b.state !== 'confirming') return false;
     const attempts = Number(b.offer_attempts || 1);
     if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
     markOfferDead(b.offer_id);
