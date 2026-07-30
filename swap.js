@@ -4099,11 +4099,28 @@ function inFlightBlockMessage(){
 // and only when the LSP says the job failed AND nothing of ours is committed (no
 // preimage-plus-leg to recover), so it can never discard recovery material.
 let _jobCheckAt = 0;
+// A BRIDGE record is safe to auto-fail only BEFORE the taker commits anything.
+// The bridge order is starting -> confirming -> fronted -> relaying -> funding_asset
+// -> asset_funded -> settling -> settled, and nothing of ours has moved before
+// 'fronted': no hold minted, no asset funded, no preimage revealed. Past that point
+// the running driver owns the record and reconciling behind its back could mark a
+// trade dead that still has value in flight, so we leave it strictly alone.
+function bridgePreCommitment(b){
+  if (!b) return false;
+  if (b.state !== 'starting' && b.state !== 'confirming') return false;
+  return !(b.fronted || b.relayed || b.seq_redeem || b.hold_settled || b.taker_seq_leg);
+}
+
 async function reconcileJobStatus(force){
   try {
-    const b = SUBSWAP;
-    if (!b || subswapTerminal() || !(b.job_id || b.poll)) return;
-    if (b.preimage && b.leg && b.leg.txid) return;      // committed: the driver owns it
+    // BOTH records, because the reported stall was a BRIDGE and this only ever read
+    // SUBSWAP. 'confirming' is not even a subswap state — so for the rail that
+    // actually got stuck, the reconciler was inspecting the wrong object entirely
+    // and would have found nothing however well it read the job.
+    const b = SUBSWAP || (bridgePreCommitment(BRIDGE) ? BRIDGE : null);
+    const isBridge = b && b === BRIDGE;
+    if (!b || (isBridge ? bridgeTerminal() : subswapTerminal()) || !(b.job_id || b.poll)) return;
+    if (!isBridge && b.preimage && b.leg && b.leg.txid) return;      // committed: the driver owns it
     if (!force && Date.now() - _jobCheckAt < 15000) return;   // at most one probe per 15s when idle
     _jobCheckAt = Date.now();
     // jobStatusRaw, NOT jobStatus: lspFetch rejects on ok:false, and a FAILED job
@@ -4116,11 +4133,15 @@ async function reconcileJobStatus(force){
     try { j = await read(b.poll || b.job_id); }
     catch (e) { console.warn('[subswap] job-status probe failed:', e); return; }
     if (!j || j.status !== 'failed') return;
-    if (!SUBSWAP || subswapTerminal() || SUBSWAP.job_id !== b.job_id) return;   // moved on meanwhile
-    SUBSWAP.state = 'failed';
-    SUBSWAP.detail = 'This trade could not be completed - your funds are safe.' +
+    // Re-check the LIVE record, not the snapshot: the await above yields, and the
+    // driver may have advanced or replaced it while the probe was in flight.
+    const now = isBridge ? BRIDGE : SUBSWAP;
+    if (!now || now.job_id !== b.job_id) return;
+    if (isBridge ? (bridgeTerminal() || !bridgePreCommitment(now)) : subswapTerminal()) return;
+    now.state = 'failed';
+    now.detail = 'This trade could not be completed - your funds are safe.' +
       (j.error ? ' (' + String(j.error).slice(0, 160) + ')' : '');
-    saveSubswap();
+    if (isBridge) saveBridge(); else saveSubswap();
   } catch {}
 }
 
@@ -7691,6 +7712,15 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   covenantLocksAsset,
   // RAIL-BLIND take + markets overview, for headless verification of the composer's rail-blindness.
   bridgedTakePlan, overviewPairs, renderMixedTake,
+  // Job reconciliation: a record the LSP has already failed must mark itself failed
+  // rather than sit in flight blocking every subsequent trade. Exposed with both
+  // record slots so the BRIDGE path (the one that actually stalled) is testable.
+  reconcileJobStatus,
+  bridgePreCommitment,
+  setSubswapRecord: (r) => { SUBSWAP = r; },
+  setBridgeRecord: (r) => { BRIDGE = r; },
+  subswapRecord: () => SUBSWAP,
+  bridgeRecord: () => BRIDGE,
   setUnifiedBook: (seqAsset, book) => { UBOOK = book ? { seqAsset, asks: book.asks || [], bids: book.bids || [] } : null; },
   // Drive the FULL composer requote for the cross (chain/chain) + mixed (sub-asset) branches, so a headless
   // test can prove they render the SAME rail-blind preview (both source the offer/fill from bridgedTakePlan).

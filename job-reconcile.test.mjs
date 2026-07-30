@@ -80,3 +80,113 @@ test('a full path is passed through unchanged', async () => {
   await seqlnJobStatusRaw('/swap/abc');
   assert.equal(calls[0].url, 'http://lsp/swap/abc');
 });
+
+// ---------------------------------------------------------------------------
+// THE RECORD THE RECONCILER WAS NOT EVEN LOOKING AT.
+//
+// The stall that prompted this was a BRIDGE record stuck in 'confirming'. The
+// reconciler read SUBSWAP and nothing else — and 'confirming' is not a subswap
+// state at all, so for the rail that actually got stuck it was inspecting the
+// wrong object and would have found nothing however well it read the job.
+//
+// Two independent defects had to line up to produce the reported behaviour, and
+// each alone was enough to cause it:
+//   - the failed job could not be READ (ok:false threw), and
+//   - the failed record was not being LOOKED AT (SUBSWAP only).
+// ---------------------------------------------------------------------------
+import { initSwap, __test__ as SW } from './swap.js';
+
+const FAILED = { ok: false, job_id: 'j-bridge', status: 'failed', error: 'bridged take not settled' };
+
+function wallet({ jobs = FAILED } = {}) {
+  initSwap({
+    assetMeta: () => ({ ticker: 'USDX', precision: 8 }),
+    fmtAtoms: String, $: () => null, el: () => null,
+    balObj: () => ({}), feeRates: {},
+    ln: { jobStatusRaw: async () => jobs },
+  });
+  SW.setSubswapRecord(null);
+  SW.setBridgeRecord(null);
+}
+
+const bridgeRec = (over = {}) => ({ state: 'confirming', job_id: 'j-bridge',
+  poll: '/swap/j-bridge', asset: 'aa', ...over });
+
+test('THE REPORTED STALL: a bridge in confirming whose job failed marks itself failed', async () => {
+  wallet();
+  SW.setBridgeRecord(bridgeRec());
+  await SW.reconcileJobStatus(true);
+  const b = SW.bridgeRecord();
+  assert.equal(b.state, 'failed', 'this is what left the wallet refusing every later trade');
+  assert.match(b.detail, /your funds are safe/);
+  assert.match(b.detail, /not settled/, 'the LSP reason is carried through, not discarded');
+});
+
+test('a bridge job that is still running is left strictly alone', async () => {
+  wallet({ jobs: { ok: true, job_id: 'j-bridge', status: 'running' } });
+  SW.setBridgeRecord(bridgeRec());
+  await SW.reconcileJobStatus(true);
+  assert.equal(SW.bridgeRecord().state, 'confirming');
+});
+
+test('PAST COMMITMENT the reconciler must NOT touch the record', async () => {
+  // Beyond 'confirming' the taker has minted a hold / funded an asset leg, and the
+  // running driver owns it. Marking that dead behind the driver's back would call a
+  // trade lost while value is still in flight.
+  for (const over of [{ state: 'fronted' }, { state: 'relaying' }, { state: 'asset_funded' },
+                      { state: 'confirming', fronted: true },
+                      { state: 'confirming', seq_redeem: '51ab' },
+                      { state: 'confirming', hold_settled: true }]) {
+    wallet();
+    SW.setBridgeRecord(bridgeRec(over));
+    await SW.reconcileJobStatus(true);
+    assert.notEqual(SW.bridgeRecord().state, 'failed',
+      `a committed bridge (${JSON.stringify(over)}) must never be auto-failed`);
+  }
+});
+
+test('bridgePreCommitment names exactly the safe window', () => {
+  assert.equal(SW.bridgePreCommitment({ state: 'starting' }), true);
+  assert.equal(SW.bridgePreCommitment({ state: 'confirming' }), true);
+  assert.equal(SW.bridgePreCommitment({ state: 'fronted' }), false);
+  assert.equal(SW.bridgePreCommitment({ state: 'settled' }), false);
+  assert.equal(SW.bridgePreCommitment(null), false);
+});
+
+test('a subswap still reconciles — covering the bridge did not displace it', async () => {
+  wallet({ jobs: { ok: false, job_id: 'j-sub', status: 'failed', error: 'nope' } });
+  SW.setSubswapRecord({ state: 'paying', kind: 'lsp-payer-buy', job_id: 'j-sub', poll: '/swap/j-sub' });
+  await SW.reconcileJobStatus(true);
+  assert.equal(SW.subswapRecord().state, 'failed');
+});
+
+test('SUBSWAP takes precedence, and a committed subswap is left to its driver', async () => {
+  wallet({ jobs: { ok: false, job_id: 'j-sub', status: 'failed', error: 'nope' } });
+  SW.setSubswapRecord({ state: 'claiming', kind: 'p2p-buy', job_id: 'j-sub', poll: '/swap/j-sub',
+    preimage: 'ab'.repeat(32), leg: { txid: 'cd'.repeat(32) } });
+  await SW.reconcileJobStatus(true);
+  assert.equal(SW.subswapRecord().state, 'claiming', 'we hold P — the claim driver owns this');
+});
+
+test('a probe that THROWS leaves the record untouched rather than guessing', async () => {
+  initSwap({
+    assetMeta: () => ({ ticker: 'USDX', precision: 8 }), fmtAtoms: String,
+    $: () => null, el: () => null, balObj: () => ({}), feeRates: {},
+    ln: { jobStatusRaw: async () => { throw new Error('502 bad gateway'); } },
+  });
+  SW.setSubswapRecord(null);
+  SW.setBridgeRecord(bridgeRec());
+  await SW.reconcileJobStatus(true);
+  assert.equal(SW.bridgeRecord().state, 'confirming', 'a transport error is not evidence of failure');
+});
+
+test('with no job-status capability wired at all, nothing is invented', async () => {
+  initSwap({
+    assetMeta: () => ({ ticker: 'USDX', precision: 8 }), fmtAtoms: String,
+    $: () => null, el: () => null, balObj: () => ({}), feeRates: {},
+  });
+  SW.setSubswapRecord(null);
+  SW.setBridgeRecord(bridgeRec());
+  await SW.reconcileJobStatus(true);
+  assert.equal(SW.bridgeRecord().state, 'confirming');
+});
