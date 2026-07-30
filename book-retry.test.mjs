@@ -96,3 +96,30 @@ test('marking a null/empty id is inert', () => {
   SW.markOfferDead(null); SW.markOfferDead('');
   assert.equal(SW.deadOffers().size, 0);
 });
+
+// The retry must live on the driver the composer ACTUALLY uses.
+//
+// It was first wired into driveBridged (the BRIDGE record's driver) while the live
+// BTC-LN -> asset-on-chain path runs through driveLspPayerBridge on the SUBSWAP
+// record — so it was inert for the exact flow it was written for. Both drivers now
+// carry it, and both are entered only where nothing was funded.
+test('both pre-commitment failure paths are guarded by the same whitelist', () => {
+  install();
+  const why = 'payer bridge: the forward-maker handshake failed: forward maker handshake failed '
+            + '(nothing funded): relay: offer has a lift in progress; retry when it frees';
+  assert.equal(SW.retryableHandshakeFailure(why), true,
+    'the LIVE payer-bridge failure string must be recognised, wrapping and all');
+});
+
+test('the live p2p courier failure is retryable too', () => {
+  install();
+  assert.equal(SW.retryableHandshakeFailure('relay: offer not found or not open'), true);
+});
+
+test('a commitment-stage failure string is not treated as retryable by accident', () => {
+  install();
+  // Nothing in the whitelist should match a failure that happens AFTER funding; the
+  // callers also gate on preimage/leg, so this is belt and braces.
+  assert.equal(SW.retryableHandshakeFailure('asset claim broadcast rejected'), false);
+  assert.equal(SW.retryableHandshakeFailure('hold invoice already settled'), false);
+});
