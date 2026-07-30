@@ -4146,6 +4146,7 @@ function beginWalk(route, bp){
       offer_id: (l.offer && l.offer.id) || null,
       maker_pubkey: (l.offer && l.offer.maker) || null,
       rail: (l.offer && l.offer.rail) || null,
+      relayUrl: (l.offer && l.offer.relayUrl) || null,
       takeAtoms: String(l.takeAtoms), takeBtc: String(l.takeBtc),
     })),
     legIndex: 0, filledAtoms: '0', filledBtc: '0',
@@ -4206,6 +4207,8 @@ async function startSubswapP2P(route, disp){
   SUBSWAP = { kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: route.seqAsset,
     offer_id: (leg ? leg.offer_id : disp.offer.id) || null,
     maker_pubkey: (leg ? leg.maker_pubkey : disp.offer.maker) || null,
+    // The relay holding this offer — the courier must open there, not on the default.
+    relay_url: (leg && leg.relayUrl) || disp.offer.relayUrl || null,
     asset_atoms: String(leg ? leg.takeAtoms : (disp.takeAtoms || 0)),
     btc_sats: String(leg ? leg.takeBtc : (disp.takeBtc || 0)),
     partial: !!disp.partial, walk: !!walking,
@@ -4223,7 +4226,7 @@ async function runNextWalkLeg(){
   if (!leg){ WALK.state = 'done'; saveWalk(); return; }
   const buy = WALK.side === 'buy';
   SUBSWAP = { kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: WALK.asset,
-    offer_id: leg.offer_id, maker_pubkey: leg.maker_pubkey,
+    offer_id: leg.offer_id, maker_pubkey: leg.maker_pubkey, relay_url: leg.relayUrl || null,
     asset_atoms: String(leg.takeAtoms), btc_sats: String(leg.takeBtc),
     partial: true, walk: true,
     ln_direction: buy ? 1 : 0, started_ms: Date.now() };
@@ -4256,7 +4259,7 @@ async function driveSubswap(){
   try {
     if (b.kind === 'p2p-buy'){
       const deps = { ...subCommonDeps(),
-        offer: { offer_id: b.offer_id, maker_pubkey: b.maker_pubkey }, takeAtoms: BigInt(b.asset_atoms),
+        offer: { offer_id: b.offer_id, maker_pubkey: b.maker_pubkey, relayUrl: b.relay_url || null }, takeAtoms: BigInt(b.asset_atoms),
         expect: { asset, atoms: BigInt(b.asset_atoms), msat: BigInt(b.btc_sats) * 1000n },
         payInvoice: async (bolt11, opts) => {
           const node_key = await ensureBtcNodeKey();
@@ -4281,7 +4284,7 @@ async function driveSubswap(){
       const node_key = await ensureBtcNodeKey();
       b.btc_node_key = node_key; saveSubswap();
       const deps = { ...subCommonDeps(),
-        offer: { offer_id: b.offer_id, maker_pubkey: b.maker_pubkey }, takeAtoms: BigInt(b.asset_atoms),
+        offer: { offer_id: b.offer_id, maker_pubkey: b.maker_pubkey, relayUrl: b.relay_url || null }, takeAtoms: BigInt(b.asset_atoms),
         seqRefundKey: C.seqLeg.refundKey(),
         expect: { asset, atoms: BigInt(b.asset_atoms), msat: BigInt(b.btc_sats) * 1000n },
         randomSecret: () => randomSecretHex(),
@@ -4369,6 +4372,7 @@ async function startLspPayerBridge(route, disp){
   if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
   SUBSWAP = { kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
     offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
+    relay_url: disp.offer.relayUrl || null,
     asset_atoms: String(disp.takeAtoms || disp.offer.assetAtoms || 0), btc_sats: String(disp.takeBtc || disp.offer.btcSats || 0),
     started_ms: Date.now() };
   saveSubswap();
@@ -4398,7 +4402,7 @@ async function driveLspPayerBridge(){
   try {
     const deps = { ...subCommonDeps(),
       asset, assetAtoms: BigInt(b.asset_atoms), btcSats: BigInt(b.btc_sats),
-      offer: { id: b.offer_id, maker: b.maker_pubkey },
+      offer: { id: b.offer_id, maker: b.maker_pubkey, relayUrl: b.relay_url || null },
       randomSecret: () => randomSecretHex(),
       lspSwap: (body) => L.swap(body),
       lspSwapStatus: (jobId) => L.swapStatus(jobId),

@@ -2939,6 +2939,12 @@ const server = http.createServer(async (req, res) => {
           for (const o of ((await rr.json()).offers || [])) {
             const key = (o.maker_pubkey || '') + ':' + (o.offer_id || '');
             if (seen.has(key)) continue; seen.add(key);
+            // WHICH RELAY THIS OFFER CAME FROM. The book merges several relays, but a
+            // TAKE is an interactive courier session that must be opened against the
+            // relay actually holding the offer — anywhere else answers "offer not
+            // found or not open". Merging without carrying the origin is what made a
+            // matched offer unliftable.
+            o._relay = relay;
             raw.push(o);
           }
         } catch { /* a down relay just contributes no liquidity */ }

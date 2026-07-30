@@ -109,7 +109,28 @@ export class CourierSession {
   close(){ try { this.transport && this.transport.close && this.transport.close(); } catch {} }
 }
 
-function wsURL(){
+// Map a relay's UPSTREAM address (as the unified book reports it) to the
+// same-origin mount the browser can actually reach. The book merges several
+// relays; a take must open its courier where the offer lives, and a browser can
+// only get there through the wallet host's proxy.
+const RELAY_MOUNTS = [
+  [/:9965(\/|$)/, '/seqob-pln'],     // submarine + pure-LN makers
+  [/:9971(\/|$)/, '/seqob-subas'],   // sub-asset makers
+  [/:9955(\/|$)/, '/seqob'],         // on-chain cross (the default mount)
+];
+export function relayMountFor(relayUrl){
+  if (!relayUrl) return null;
+  for (const [re, mount] of RELAY_MOUNTS) if (re.test(String(relayUrl))) return mount;
+  return null;
+}
+
+function wsURL(relayUrl){
+  const mount = relayMountFor(relayUrl);
+  if (mount){
+    const proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss' : 'ws';
+    const origin = (typeof location !== 'undefined') ? (proto + '://' + location.host) : ('ws://127.0.0.1');
+    return origin + mount + '/v1/ws';
+  }
   const base = seqobBase();
   if (/^https?:\/\//i.test(base)){
     return base.replace(/^http/i, 'ws').replace(/\/$/, '') + '/v1/ws';
@@ -148,6 +169,10 @@ function wsTransport(ws){
 //   feeAsset  : taker fee asset hex ('' for default)
 export async function openCourierSession(offer, takeAtoms, feeAsset, opts){
   opts = opts || {};
+  // The relay HOLDING this offer. Without it a take opens against the default
+  // relay, which answers "offer not found or not open" for every offer the book
+  // merged in from elsewhere.
+  const relayUrl = opts.relayUrl || offer.relayUrl || offer._relay || null;
   const makerPubHex = offer.maker_pubkey || offer.makerPubkey;
   const offerId = offer.offer_id || offer.offerId;
   if (!makerPubHex || !offerId) throw new Error('offer missing maker_pubkey/offer_id');
@@ -156,7 +181,7 @@ export async function openCourierSession(offer, takeAtoms, feeAsset, opts){
     (secp256k1.utils.randomSecretKey ? secp256k1.utils.randomSecretKey() : crypto.getRandomValues(new Uint8Array(32)));
   const sessPub = secp256k1.getPublicKey(sessPriv, true);
 
-  const ws = new WebSocket(wsURL());
+  const ws = new WebSocket(wsURL(relayUrl));
   ws.binaryType = 'arraybuffer';
   const t = wsTransport(ws);
   await new Promise((resolve, reject) => {
