@@ -3734,6 +3734,14 @@ const server = http.createServer(async (req, res) => {
           // Persist the maker offer identity so a funded-but-unrelayed PAYER leg can RECONNECT its forward session
           // on resume (hole 5), and record the fronted-BTC bound so the exposure cap can sum live jobs (hole 6).
           ...(body.offer_id ? { offer_id: body.offer_id } : {}), ...(body.maker_pubkey ? { maker_pubkey: body.maker_pubkey } : {}),
+          // WHICH RELAY holds this offer, resolved against our OWN configured set (never
+          // the client's raw string). The courier session dies whenever the maker fleet
+          // restarts, and the reconnect above re-opens it — against the CROSS relay by
+          // default. For an offer resting anywhere else that reconnect just times out
+          // ("courier timed out") with the BTC leg already funded on-chain, so the take
+          // stalls until its locktime. Persist it with the job so the reconnect goes back
+          // to the same relay the handshake used.
+          relay_url: relayForOffer(body.relay_url),
           requested_btc_sats: Number(body.btc_sats) || null,
           ...(bnonce ? { swap_nonce: bnonce } : {}), requested_amount: body.amount ?? null, started_ms: Date.now() };
         setJob(jobId, job);   // persist BEFORE any funding (a restart sees 'interrupted', not a 404)
