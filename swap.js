@@ -2128,6 +2128,23 @@ function fieldUnits(el, hex){ const a = fieldAtoms(el, hex); const prec = C.asse
 // when the conversion is genuinely unavailable (no reference price for the asset).
 function setNativeField(el, str, hex){
   if (!el) return;
+  // ⚠ NEVER FIGHT THE FIELD BEING TYPED IN.
+  //
+  // renderMixedTake pins BOTH legs on every requote, and a requote fires on every
+  // keystroke. Without this guard the composer overwrites the input under the
+  // user's cursor mid-number: typing "100" gets caught at "10" and replaced with
+  // the sized take, and in reference-currency mode the replacement is the
+  // round-tripped value (10 USD -> atoms -> 9.99996818 USD), so even a completed
+  // number visibly rewrites itself.
+  //
+  // applyComposeDerivation has always had this rule ("never fight the field being
+  // typed in") for the OTHER leg; the pin needs it too. The field settles to the
+  // canonical value on the next requote after focus leaves.
+  if (typeof document !== 'undefined' && document.activeElement === el) return;
+  // Nor rewrite a value that already means the same thing. A user-typed amount and
+  // its canonical rendering can differ by rounding noise alone (10 vs 9.99996818);
+  // replacing one with the other changes nothing and looks like the app arguing.
+  if (hex && sameAmount(el, str, hex)) return;
   el._userTyped = false;
   if (el._refMode){
     const rv = refOfNativeStr(hex, str);
@@ -2136,6 +2153,18 @@ function setNativeField(el, str, hex){
     try { paintRefHints(); } catch {}
   }
   el.value = str;
+}
+
+// Whether a field already holds `str` in substance — same atoms once parsed,
+// whatever its display mode. Used so a pin never replaces a value with an
+// equivalent one that merely renders differently.
+function sameAmount(el, str, hex){
+  try {
+    const prec = C.assetMeta(hex).precision || 0;
+    const want = C.parseAtoms(String(str), prec);
+    const have = fieldAtoms(el, hex);
+    return want === have;
+  } catch { return false; }
 }
 
 // A native amount string -> its reference-currency (USD) number, or null when the
