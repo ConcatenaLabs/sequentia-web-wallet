@@ -548,6 +548,11 @@ export function seqlnSwap({ side, asset, amount, quote_asset, payRail, recvRail,
   // the LSP answered "payer bridge needs hash_h ... fail closed" and the take died
   // after the user had already confirmed it.
   hash_h, taker_seq_claim_pub,
+  // WHICH RELAY HOLDS THE OFFER. The book merges four relays, but the LSP's bridge
+  // lifted every offer against its cross relay — so any take on a submarine / sub-asset
+  // / pure-LN offer answered "offer not found or not open". The LSP validates this
+  // against its OWN configured relay list; it is a hint, never a URL to be trusted.
+  relay_url,
   // Anything this function does not name is DROPPED. That has now caused the same
   // class of bug twice (bridge:true and its terms, then hash_h), so unknown keys are
   // surfaced rather than silently discarded — see the rest check below.
@@ -562,6 +567,7 @@ export function seqlnSwap({ side, asset, amount, quote_asset, payRail, recvRail,
   // asset<->asset pure-LN: the counter (quote) asset id. Omitted (or 'BTC') => the classic asset<->BTC
   // pure-LN, so the pure-LN body stays byte-identical to before for every existing asset<->BTC swap.
   if (quote_asset && String(quote_asset).toUpperCase() !== 'BTC') body.quote_asset = quote_asset;
+  if (relay_url) body.relay_url = relay_url;
   if (payRail) body.payRail = payRail;
   if (recvRail) body.recvRail = recvRail;
   // Sub-asset SELL (pay asset over LN, receive BTC on-chain): the LSP drives the LN payment

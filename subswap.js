@@ -991,6 +991,10 @@ export async function runLspPayerBridge(deps) {
   const swapBody = { side: 'buy', bridge: true, payRail: 'ln', recvRail: 'chain', asset: deps.asset,
     amount: String(deps.assetAtoms), asset_atoms: String(deps.assetAtoms), btc_sats: String(deps.btcSats),
     offer_id: deps.offer.offer_id || deps.offer.id, maker_pubkey: deps.offer.maker_pubkey || deps.offer.maker,
+    // The relay HOLDING this offer. The unified book merges four of them; without this
+    // the LSP lifts every offer against its cross relay and anything resting elsewhere
+    // answers "offer not found or not open".
+    relay_url: deps.offer.relayUrl || deps.offer._relay || '',
     hash_h: hashH, taker_seq_claim_pub: claimPub.toLowerCase(),
     maker_btc_rail: 'chain', maker_asset_rail: 'chain', taker_asset_inbound: false, taker_btc_inbound: false };
   const started = await deps.lspSwap(swapBody);
