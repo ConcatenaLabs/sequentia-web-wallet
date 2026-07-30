@@ -233,6 +233,38 @@ const CFG = {
   provWsBase: Number(process.env.PROV_WS_BASE || 0) || undefined,
 };
 
+// The relay that actually holds an offer.
+//
+// The unified book merges four relays (cross, sub-asset, sub-asset-sell, pure-LN) and
+// stamps each entry with its source, but every LIFT went to CFG.crossRelay. So a take on
+// anything resting elsewhere — every submarine, sub-asset and pure-LN offer — answered
+// "offer not found or not open", and the taker walked the whole book collecting that
+// same error from offers that were perfectly fine.
+//
+// The client's hint is matched against OUR OWN configured set and never used as a URL in
+// its own right: a caller must not be able to point the LSP's courier at an arbitrary
+// host. An unrecognised hint falls back to the cross relay, which is exactly the old
+// behaviour.
+function relayForOffer(hint) {
+  const known = [CFG.crossRelay, CFG.subasRelay, CFG.subasSellRelay, CFG.plnRelay].filter(Boolean);
+  const want = String(hint || '').trim().replace(/\/+$/, '');
+  if (!want) return CFG.crossRelay;
+  for (const k of known) {
+    if (String(k).replace(/\/+$/, '') === want) return k;
+  }
+  // Also accept a bare host:port or port, since the wallet reaches relays through a
+  // proxy mount and may not know the LSP's own base URLs.
+  for (const k of known) {
+    try {
+      const ku = new URL(k);
+      if (want === ku.port || want.endsWith(':' + ku.port) || want.includes('/' + ku.port)) return k;
+    } catch {}
+  }
+  console.warn('[bridge] unrecognised relay hint', want, '- falling back to the cross relay');
+  return CFG.crossRelay;
+}
+
+
 // The per-asset node provisioner (enabled when the boot binaries + dir are configured).
 // SeqLN nodes are single-asset, so "move ANY asset into Lightning" needs a hosted node
 // per asset spun up on demand, keyed to the connecting device. This is that mechanism.
@@ -1127,6 +1159,9 @@ function startSubasBuyHodl(body) {
     node_key: nodeKey, payment_hash: H, asset_amount: assetAmount,
     btc_htlc: { txid: String(bh.txid), vout: bh.vout, amount: bh.amount, cltv: bh.cltv },
     offer_id: body.offer_id || null, maker_pubkey: body.maker_pubkey || null,
+    // Which relay this offer rests on, resolved against OUR configured set (never the
+    // client's raw string), so a RESUME reconnects to the same relay the take opened on.
+    relay_url: relayForOffer(body.relay_url),
     status: 'pending', held: false, settled: false,
     finality: 'confirming', anchor_bound: true, inbound: null, started_ms: Date.now() };
   setJob(jobId, job);   // persist on creation so a restart sees it (as 'interrupted'), not a 404
@@ -2175,7 +2210,9 @@ function makeBridgeIo({ match, body, job }) {
             // without resume support simply never replies -> the per-attempt recv times out -> re-drive -> refund.)
             if (!job.offer_id || !job.maker_pubkey) throw new Error('fund-onchain relay blocked: no forward maker session and no persisted offer to reconnect — cannot deliver XcBtcLegFunded (our BTC refunds at T_btc; double no-loss). fail closed');
             session = await openForwardBridgeSession({ offer: { offer_id: job.offer_id, maker_pubkey: job.maker_pubkey },
-              relayBase: CFG.crossRelay, takeAtoms: BigInt(Number(sa.seqAmount ?? (job.bridge_terms && job.bridge_terms.seq_amount) ?? 0)) });
+              // The relay this job's offer actually rests on — persisted at take time, so a
+              // RESUME reconnects to the same one rather than the cross relay by default.
+              relayBase: relayForOffer(job.relay_url), takeAtoms: BigInt(Number(sa.seqAmount ?? (job.bridge_terms && job.bridge_terms.seq_amount) ?? 0)) });
             job._bridgeSession = session;
           }
           const takerSeqClaimPub = sa.takerSeqClaimPub || (job.bridge_terms && job.bridge_terms.taker_seq_claim_pub);
@@ -2480,7 +2517,7 @@ async function prepareBridgeLegs({ match, body, job }) {
     try {
       session = await openForwardBridgeSession({
         offer: { offer_id: body.offer_id, maker_pubkey: body.maker_pubkey },
-        relayBase: CFG.crossRelay,
+        relayBase: relayForOffer(body.relay_url),
         takeAtoms: BigInt(Number(body.asset_atoms) || 0),
       });
       const terms = await runForwardBridgeTerms({ session,
@@ -2557,7 +2594,7 @@ async function prepareBridgeLegs({ match, body, job }) {
   try {
     session = await openReverseBridgeSession({
       offer: { offer_id: body.offer_id, maker_pubkey: body.maker_pubkey },
-      relayBase: CFG.crossRelay,
+      relayBase: relayForOffer(body.relay_url),
       takeAtoms: BigInt(Number(body.asset_atoms) || 0),
     });
     const hs = await runReverseBridgeTerms({ session,
