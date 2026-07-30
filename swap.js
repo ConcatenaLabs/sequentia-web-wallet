@@ -3569,7 +3569,12 @@ async function reviewBridged(route, bp){
   // IN-FLIGHT GUARD: block on BOTH a bridge AND a P2P subswap in flight — two concurrent rail-crossings can't
   // start (a p2p subswap in flight blocks a receiver-bridge sell, and vice-versa; each recovers via ONE key).
   try { reapStalledCrossings(); } catch {}
-  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
+  // Ask the LSP before refusing. A record whose job the LSP has already failed must
+  // never block a new trade — that turned one dead take into a wallet that refused
+  // every subsequent one, with the user told to finish something that could not be
+  // finished. Awaited (not fire-and-forget) so the very first press re-checks.
+  try { await reconcileJobStatus(true); } catch {}
+  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   const am = C.assetMeta(route.seqAsset) || {};
   const aprec = am.precision || 0, tk = am.ticker || 'asset';
   // P3.1 — FORMATTED units, never raw atoms/sats, and the SIZED take (bp.takeAtoms/takeBtc), never the
@@ -4039,6 +4044,12 @@ function subswapClearable(b){
   if (b.state === 'failed') return true;
   if (b.preimage && b.leg && b.leg.txid) return false;      // recovery material: keep it
   if (b.state === 'held') return false;                      // BTC committed; the driver must resolve it
+  // 'confirming' with no asset leg means the handshake round is still open: the
+  // /swap job exists but the hold has NOT been reported held, so nothing of the
+  // user's is committed. Those records used to be unclearable, which is how one
+  // dead take locked the wallet out of every future trade with no way forward. A
+  // record that holds nothing must never be a trap.
+  if (b.state === 'confirming' && !(b.leg && b.leg.txid)) return true;
   return b.state === 'starting';
 }
 function bridgeClearable(b){
@@ -4064,6 +4075,18 @@ const SUBSWAP_START_STALL_MS = 3 * 60 * 1000;
 // when the user comes back to look and when they try again. Only ever touches a
 // record with nothing committed — see subswapClearable/bridgeClearable for the same
 // reasoning applied to the Clear button.
+// What is actually blocking a new trade, and what the user can do about it. The old
+// text named "Active trades" and stopped there, which is no help when the blocking
+// record is one that can simply be cleared.
+function inFlightBlockMessage(){
+  const b = SUBSWAP && !subswapTerminal() ? SUBSWAP : (BRIDGE && !bridgeTerminal() ? BRIDGE : null);
+  const clearable = b === SUBSWAP ? subswapClearable(b) : bridgeClearable(b);
+  const base = 'You already have a trade in progress · see Active trades';
+  return clearable
+    ? base + '. Nothing of yours is committed to it, so you can Clear it there and start this one.'
+    : base + '. Finish or reclaim it before starting another.';
+}
+
 // Reconcile a persisted rail-crossing record against the LSP's own view of its job.
 //
 // The drivers already abort on a failed job — but only while the driver is RUNNING.
@@ -4076,12 +4099,12 @@ const SUBSWAP_START_STALL_MS = 3 * 60 * 1000;
 // and only when the LSP says the job failed AND nothing of ours is committed (no
 // preimage-plus-leg to recover), so it can never discard recovery material.
 let _jobCheckAt = 0;
-async function reconcileJobStatus(){
+async function reconcileJobStatus(force){
   try {
     const b = SUBSWAP;
     if (!b || subswapTerminal() || !(b.job_id || b.poll)) return;
     if (b.preimage && b.leg && b.leg.txid) return;      // committed: the driver owns it
-    if (Date.now() - _jobCheckAt < 15000) return;       // at most one probe per 15s
+    if (!force && Date.now() - _jobCheckAt < 15000) return;   // at most one probe per 15s when idle
     _jobCheckAt = Date.now();
     if (!(L && L.jobStatus)) return;
     const j = await L.jobStatus(b.poll || b.job_id).catch(() => null);
@@ -4119,7 +4142,12 @@ function reapStalledCrossings(){
 async function reviewSubmarineP2P(route, disp){
   const { $ } = C;
   try { reapStalledCrossings(); } catch {}
-  if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
+  // Ask the LSP before refusing. A record whose job the LSP has already failed must
+  // never block a new trade — that turned one dead take into a wallet that refused
+  // every subsequent one, with the user told to finish something that could not be
+  // finished. Awaited (not fire-and-forget) so the very first press re-checks.
+  try { await reconcileJobStatus(true); } catch {}
+  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   if (!(L && L.btcNodeKey && L.nodePay)){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
   const buy = disp.ln_direction === 1;
@@ -4405,7 +4433,12 @@ async function reviewLspPayerBridge(route, disp){
   const { $ } = C;
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
   try { reapStalledCrossings(); } catch {}
-  if (hasSubswapInFlight() || hasBridgeInFlight()){ $('swErr').textContent = 'You already have a trade in progress · finish it first (Active trades) before starting another.'; return; }
+  // Ask the LSP before refusing. A record whose job the LSP has already failed must
+  // never block a new trade — that turned one dead take into a wallet that refused
+  // every subsequent one, with the user told to finish something that could not be
+  // finished. Awaited (not fire-and-forget) so the very first press re-checks.
+  try { await reconcileJobStatus(true); } catch {}
+  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   // FAIL CLOSED (the ONLY surviving honest-disable): without the LSP payer-bridge hold + bare-hash pay this
   // shape has no settlement path, so refuse rather than offer-then-refuse. payerBridgeDisabledNote is the note.
   if (!(L && L.swap && L.bridgeHold && L.nodePayHash)){ $('swErr').textContent = payerBridgeDisabledNote(tk); return; }
