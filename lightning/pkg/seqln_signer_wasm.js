@@ -172,6 +172,25 @@ export class Signer {
         return Signer.__wrap(ret[0]);
     }
     /**
+     * Drive ONE hsmd request -> reply. `frame_bytes` is a single signer-split
+     * frame (`signer_frame.h`: little-endian `u32 len | is_main | node_id? |
+     * dbid | capabilities | hsmd_msg`); the return is the single framed reply
+     * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
+     * byte-for-byte what the native serve loop writes back. Throws only on a
+     * libhsmd-fatal condition (which closes the transport natively).
+     * The reason the last request was refused (cleared by the next successful one).
+     * @returns {string | undefined}
+     */
+    get lastReject() {
+        const ret = wasm.signer_lastReject(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
      * Construct from the raw `hsm_secret` bytes (mnemonic format:
      * `32 zero bytes || mnemonic`, i.e. the exact on-disk file). Throws on a
      * malformed / unsupported secret.
@@ -189,12 +208,6 @@ export class Signer {
         return this;
     }
     /**
-     * Drive ONE hsmd request -> reply. `frame_bytes` is a single signer-split
-     * frame (`signer_frame.h`: little-endian `u32 len | is_main | node_id? |
-     * dbid | capabilities | hsmd_msg`); the return is the single framed reply
-     * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
-     * byte-for-byte what the native serve loop writes back. Throws only on a
-     * libhsmd-fatal condition (which closes the transport natively).
      * @param {Uint8Array} frame_bytes
      * @returns {Uint8Array}
      */
