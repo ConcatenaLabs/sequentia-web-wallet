@@ -2571,7 +2571,7 @@ async function requoteMixed(route, amtStr){
     }
     const raw = bp.offer.raw || {};
     const dec = renderMixedTake(route, { side, offerAtoms: bp.offer.assetAtoms, offerBtc: bp.offer.btcSats,
-      minFill: BigInt(raw.min_fill || raw.minFill || 0) });
+      minFill: offerMinFill(bp.offer, raw) });
     paintFee('BTC', null, feeNote);
     renderTiming(route);
     // GENUINE fail-closed (the invisible settlement can't carry this crossing in THIS build). Not a rail /
@@ -2621,7 +2621,7 @@ async function requoteMixed(route, amtStr){
   if (bp && bp.offer){
     const raw = bp.offer.raw || {};
     offerAtoms = bp.offer.assetAtoms; offerBtc = bp.offer.btcSats;
-    minFill = BigInt(raw.min_fill || raw.minFill || 0);
+    minFill = offerMinFill(bp.offer, raw);
     const oid = String(bp.offer.id || '');
     matchedSub = oid ? (subassetOffers(route.seqAsset, side).find(o => String(o.offer_id || o.offerId || '') === oid) || null) : null;
   } else {
@@ -2753,7 +2753,7 @@ async function requoteCross(route, amtStr){
       // ALWAYS render the SAME matched offer + fill (the identical rail-blind preview both rails show). The
       // display is never gated on the settlement path — the gates below (capability + affordability) touch ONLY Place.
       const dec = renderMixedTake(route, { side, offerAtoms: bp.offer.assetAtoms, offerBtc: bp.offer.btcSats,
-        minFill: BigInt(raw.min_fill || raw.minFill || 0) });
+        minFill: offerMinFill(bp.offer, raw) });
       // IDENTICAL fee row + finality reassurance to the submarine combo, so the two look the same.
       paintFee('BTC', null, 'You trade at the price shown · your funds stay in your control until it completes.');
       renderTiming(route);
@@ -3462,6 +3462,20 @@ function closePopover(){
 // ===========================================================================
 // RAIL-BLIND BRIDGED TAKE (wallet side of a genuine rail crossing).
 //
+// The offer's EFFECTIVE minimum fill, in asset atoms.
+//
+// An offer with allow_partial:false is whole-or-nothing, which the unified book
+// normalises to a min_fill of the full size (see mk() in unified-book.mjs). Reading
+// raw.min_fill directly bypasses that normalisation and silently re-introduces the
+// bug it exists to prevent — an indivisible offer sized as if it were divisible, which
+// the maker answers by locking the WHOLE offer against a partial take.
+function offerMinFill(entry, raw){
+  if (entry && entry.minFill != null) return BigInt(entry.minFill);
+  if (raw && (raw.allow_partial === false || raw.allowPartial === false))
+    return BigInt(raw.base_amount ?? raw.baseAmount ?? raw.offer_amount ?? 0);
+  return BigInt((raw && (raw.min_fill ?? raw.minFill)) || 0);
+}
+
 // The take is rail-BLIND: pick the best-PRICE resting offer (bestFor over the unified book), regardless
 // of the taker's rail toggle, then build the settlement match from the TAKER's chosen rails + the
 // OFFER's rails (matchFromTake). Coincide -> the existing native review/execute (the LSP is NOT in the
@@ -3523,17 +3537,19 @@ function bridgedTakePlan(route){
     const supported = crosses && bridgedTakeSupported(take);
     // SUBMARINE = a P2P submarine settlement (an interactive maker that accepts BTC-LN). This selects the
     // settlement PATH only — it is INVISIBLE to the user and NEVER changes the matched offer or the fill.
-    // Every offer is partial-fillable down to its min_fill (spec §2), submarine included.
+    // An offer is partial-fillable down to its EFFECTIVE min_fill; a whole-offer-only maker
+    // (allow_partial:false) has an effective minimum of the FULL size. See offerMinFill.
     const submarine = crosses && chooseSettlementPath(match, (offer && offer.meta) || {}).path === 'p2p-submarine';
     // SIZE THE TAKE to the USER's composer amount, RAIL-BLIND, via the SHARED sizeSubswapTake authority
     // (subswap.js) so every entry point (on-chain preview, LN preview, P2P submarine review, LSP payer/receiver
-    // bridge review) agrees on takeAtoms/takeBtc. Every offer is partial-fillable down to its min_fill; a
-    // request below the minimum returns the MINIMUM (belowMin) so pay & receive never disagree. BTC is CEIL'd
+    // bridge review) agrees on takeAtoms/takeBtc. An offer is partial-fillable down to its EFFECTIVE minimum,
+    // which for a whole-offer-only maker (allow_partial:false) is the FULL size — see offerMinFill. A request
+    // below the minimum returns the MINIMUM (belowMin) so pay & receive never disagree. BTC is CEIL'd
     // (the maker is never underpaid). The LSP + maker re-verify every amount and fail closed on any mismatch.
     const offerAtoms = BigInt(offer.assetAtoms || 0), offerBtc = BigInt(offer.btcSats || 0);
     const want = assetLegAtoms(route);
     const raw = offer.raw || {};
-    const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: BigInt(raw.min_fill || raw.minFill || 0), side });
+    const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: offerMinFill(offer, raw), side });
     // THE WALK. The single-offer sizing above stays as the per-leg authority and the
     // fallback; this plans the FULL fill across the book in price order, so a request
     // larger than the best offer reaches the depth behind it instead of being capped
