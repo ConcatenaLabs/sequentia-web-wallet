@@ -590,7 +590,9 @@ export async function runTakerReverseSubmarine(deps) {
   if (!deps.expect || !deps.expect.asset || !(_big(deps.expect.atoms) > 0n)) throw new Error('reverse submarine: offer expectations (asset + atoms) are required');
 
   const session = deps.session || await openCourierSession(
-    { offer_id: deps.offer.offer_id || deps.offer.id, maker_pubkey: deps.offer.maker_pubkey || deps.offer.maker },
+    { offer_id: deps.offer.offer_id || deps.offer.id, maker_pubkey: deps.offer.maker_pubkey || deps.offer.maker,
+      // The relay holding this offer; the courier must open THERE (see relayMountFor).
+      relayUrl: deps.offer.relayUrl || deps.offer._relay || null },
     deps.takeAtoms != null ? deps.takeAtoms : deps.expect.atoms, deps.feeAsset || '');
   try {
     // 1. Request terms; hand the maker our SEQ-claim pubkey up front.
@@ -806,7 +808,9 @@ export async function runTakerSubmarine(deps) {
     throw new Error('normal submarine: offer expectations (asset + atoms + msat) are required');
 
   const session = deps.session || await openCourierSession(
-    { offer_id: deps.offer.offer_id || deps.offer.id, maker_pubkey: deps.offer.maker_pubkey || deps.offer.maker },
+    { offer_id: deps.offer.offer_id || deps.offer.id, maker_pubkey: deps.offer.maker_pubkey || deps.offer.maker,
+      // The relay holding this offer; the courier must open THERE (see relayMountFor).
+      relayUrl: deps.offer.relayUrl || deps.offer._relay || null },
     deps.takeAtoms != null ? deps.takeAtoms : deps.expect.atoms, deps.feeAsset || '');
   try {
     // 1. Request terms.

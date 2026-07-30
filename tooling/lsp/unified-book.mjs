@@ -23,6 +23,9 @@ function mk(side, rail, assetAtoms, btcSats, raw, meta) {
   return {
     side, rail, assetAtoms, btcSats, price,
     id: (raw && (raw.offer_id || raw.offerId)) || null,
+    // The relay holding this offer. A take must open its courier session there; see
+    // the note where the book is merged.
+    relayUrl: (raw && raw._relay) || null,
     maker: (raw && (raw.maker_pubkey || raw.makerPubkey)) || null,
     expires: num(raw && (raw.expires_at_unix || raw.expires_at)) || null,
     meta: meta || {}, raw,
