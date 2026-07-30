@@ -4520,6 +4520,12 @@ async function onWalkLegFinished(settled){
 // via the driver's onPaid before the claim, so a crash re-claims on the next boot (see resumeSubswap).
 async function driveSubswap(){
   if (!SUBSWAP || subswapTerminal() || _subswapDriving) return;
+  // ONLY the peer-to-peer kinds. Both drivers act on the same SUBSWAP record and
+  // neither checked whose it was, so whichever ran first drove the other's trade with
+  // the wrong protocol semantics — a p2p-buy got driven as a payer bridge and died on
+  // "the maker never locked the asset leg" while the maker had in fact locked it and
+  // was waiting to be paid.
+  if (SUBSWAP.kind !== 'p2p-buy' && SUBSWAP.kind !== 'p2p-sell') return;
   _subswapDriving = true;
   const b = SUBSWAP, asset = b.asset;
   try {
@@ -4768,6 +4774,8 @@ async function startLspPayerBridge(route, disp, rails){
 
 async function driveLspPayerBridge(){
   if (!SUBSWAP || subswapTerminal() || _subswapDriving) return;
+  // ONLY the LSP payer-bridge kind — see the note in driveSubswap.
+  if (SUBSWAP.kind !== 'lsp-payer-buy') return;
   // STALL WATCHDOG. Nothing here is committed while the record is still 'starting',
   // so a start that never got past it is a failure, not a position — and leaving it
   // non-terminal wedged every future trade behind the in-flight guard with no way to
