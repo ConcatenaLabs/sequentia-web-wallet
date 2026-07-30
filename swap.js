@@ -4106,8 +4106,15 @@ async function reconcileJobStatus(force){
     if (b.preimage && b.leg && b.leg.txid) return;      // committed: the driver owns it
     if (!force && Date.now() - _jobCheckAt < 15000) return;   // at most one probe per 15s when idle
     _jobCheckAt = Date.now();
-    if (!(L && L.jobStatus)) return;
-    const j = await L.jobStatus(b.poll || b.job_id).catch(() => null);
+    // jobStatusRaw, NOT jobStatus: lspFetch rejects on ok:false, and a FAILED job
+    // answers ok:false — so the probe that most needs to see a failure was the one
+    // that threw. Every reconcile attempt was silently swallowed by its own catch,
+    // which is why a record the LSP had already failed kept reporting "confirming".
+    const read = (L && (L.jobStatusRaw || L.jobStatus)) || null;
+    if (!read) { console.warn('[subswap] no job-status capability wired; cannot reconcile'); return; }
+    let j = null;
+    try { j = await read(b.poll || b.job_id); }
+    catch (e) { console.warn('[subswap] job-status probe failed:', e); return; }
     if (!j || j.status !== 'failed') return;
     if (!SUBSWAP || subswapTerminal() || SUBSWAP.job_id !== b.job_id) return;   // moved on meanwhile
     SUBSWAP.state = 'failed';

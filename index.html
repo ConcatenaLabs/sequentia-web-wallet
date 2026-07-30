@@ -956,7 +956,7 @@ import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasRev
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
-  seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
+  seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
@@ -3043,6 +3043,10 @@ function initSwapTab(){
       // subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
       bridgeHold: (p) => seqlnBridgeHold(p),
       jobStatus: (pathOrId) => seqlnJobStatus(pathOrId),   // advisory async-job status (sub-asset HODL BUY)
+      // The same read that does NOT throw when the job has failed — a failed job
+      // answers ok:false, which lspFetch turns into an exception. Reconciliation
+      // needs the body, not the throw.
+      jobStatusRaw: (pathOrId) => seqlnJobStatusRaw(pathOrId),
       // The submarine (mixed) async-job status — GET /swap/<id>, the SAME endpoint as jobStatus. Wiring
       // this is what lets pollMixed advance an anchor-gated (over-0-conf) submarine past SETTLING; it was
       // referenced by pollMixed but never defined, so those swaps could never learn they settled.
