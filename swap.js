@@ -2690,6 +2690,14 @@ async function requoteCross(route, amtStr){
     const haveUnified = !!(bp && bp.offer);
 
     // T7: relay unreachable AND nothing to show on EITHER book — offer a retry, never invite first-maker.
+    if (_railsUnset && (offers.length || haveUnified || !unreachable)){
+      // Same as below: missing a rail choice must never read as a broken connection.
+      status.textContent = ''; LAST_QUOTE = null; setReviewEnabled(false);
+      $('swRate').textContent = 'Choose how you pay & receive to see the price.';
+      $('swRoute').textContent = dirLabel;
+      $('swErr').textContent = '';
+      return;
+    }
     if (unreachable && !offers.length && !haveUnified){
       status.textContent = ''; clearOpposite(); LAST_QUOTE = null; setReviewEnabled(false);
       $('swRate').textContent = 'Could not load the order book · retry.';
@@ -2810,8 +2818,24 @@ async function requoteCross(route, amtStr){
     status.textContent = ''; clearOpposite(); LAST_QUOTE = null; setReviewEnabled(false);
     $('swRate').textContent = 'Could not load the order book · retry.';
     $('swRoute').textContent = dirLabel;
-    // Name the failing side. "Could not reach the order book" was true but useless
-    // when the visible book had loaded fine and it was the matching feed that failed.
+    // ⚠ RAILS NOT CHOSEN IS NOT AN ERROR. This branch used to report it as
+    // "could not reach the order book · check your connection", which is simply
+    // false: the book had loaded (it is on screen, with offers), the feed was fine,
+    // and the only thing missing was the user's own choice of how to pay and
+    // receive. The composer already knows this — its own button reads "Choose how
+    // you pay & receive" at the same moment — so telling the user their connection
+    // is broken sends them to debug a network that was never at fault.
+    if (_railsUnset){
+      status.textContent = ''; LAST_QUOTE = null; setReviewEnabled(false);
+      $('swRate').textContent = 'Choose how you pay & receive to see the price.';
+      $('swRoute').textContent = dirLabel;
+      $('swErr').textContent = '';
+      setFinality('cross');
+      return;
+    }
+    // A genuine failure: name the failing side. "Could not reach the order book" was
+    // true but useless when the visible book had loaded fine and it was the matching
+    // feed that failed.
     const why = _lastBookError ? ' (' + _lastBookError + ')' : (_lastPlanError ? ' (' + _lastPlanError + ')' : '');
     $('swErr').textContent = 'Offers are resting, but the matching feed could not be reached' + why +
       '. Check your connection and try again (re-enter the amount to retry).';
@@ -3435,7 +3459,11 @@ let _bridgeStarting = false;
 function bridgedTakePlan(route){
   try {
     if (!route || !route.seqAsset) return null;
-    if (!S.payRail || !S.recvRail) return null;
+    // Rails not chosen yet is a NORMAL composer state, not a failure. It is recorded
+    // distinctly because the caller must not report it as a network problem — see
+    // the fall-through in requoteCross.
+    if (!S.payRail || !S.recvRail){ _lastPlanError = null; _railsUnset = true; return null; }
+    _railsUnset = false;
     // Asset-paired markets are served now: /book/unified takes a ?quote asset, so
     // EURX/OILX has a unified book like every BTC pair. The cached book must be for
     // the SAME pair — matching only on the base asset would hand an EURX/OILX route
@@ -3503,6 +3531,8 @@ function bridgedTakePlan(route){
 }
 // The last reason bridgedTakePlan bailed, for the composer's diagnostics.
 let _lastPlanError = null;
+// Set when the ONLY thing missing is the user's rail choice.
+let _railsUnset = false;
 
 async function reviewBridged(route, bp){
   const { $ } = C;
