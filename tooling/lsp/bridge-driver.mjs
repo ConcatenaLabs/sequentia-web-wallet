@@ -443,14 +443,30 @@ export function fundedBtcSatsForResume(sbtc) {
   return 0;
 }
 
-// Derive a unified-book offer's per-leg maker rails. The unified book merges ONLY on-chain cross offers
-// (both legs on-chain) and sub-asset LN offers (asset leg over LN, BTC leg on-chain — that is exactly
-// what ln_direction 4/5 encode). So a maker's BTC leg is ALWAYS on-chain here, and only the asset leg
-// follows the offer's rail. (Pure-LN offers live in a different book, not the unified one.)
+// Derive a unified-book offer's per-leg maker rails.
+//
+// ⚠ THIS DELIBERATELY REPORTS A SUBMARINE MAKER'S BTC LEG AS ON-CHAIN, which is not what
+// the maker literally does (a submarine maker takes its BTC over Lightning). It is not an
+// oversight, and changing it to the literal truth BREAKS ROUTING — verified: with both
+// sides' rails agreeing, planSettlement reports a happyCoincidence and
+// chooseSettlementPath short-circuits to 'native', losing the p2p-submarine path that
+// this exact shape requires.
+//
+// What the router means by a leg "crossing" is "the two sides settle this leg through
+// different mechanisms and something must bridge them" — and a BTC-LN payment against an
+// on-chain asset HTLC needs the submarine protocol whether or not the two parties agree
+// about which rail each leg uses. Reporting 'chain' here is how that requirement reaches
+// the router.
+//
+// The honest fix is for planSettlement to distinguish "no rail conversion needed" from
+// "no cross-network protocol needed", at which point this can state the literal rails.
+// Until then, do not "correct" this function in isolation: see maker-rails.test.mjs,
+// which pins the routing outcomes that actually matter.
 export function makerRailsFromOffer(offer) {
   const railLn = !!offer && (offer.rail === 'ln');
   return { makerBtcRail: 'chain', makerAssetRail: railLn ? 'ln' : 'chain' };
 }
+
 
 // A convenience describer for the wallet's HONEST net-terms display: does this match need a bridge
 // and/or a JIT open, and on which legs. Pure; no fees computed here (the caller adds its fee model).

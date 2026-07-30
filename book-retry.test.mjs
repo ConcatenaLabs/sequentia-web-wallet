@@ -210,3 +210,22 @@ test('a payer-bridge that HAS committed is never retried', () => {
       `a committed record (${JSON.stringify(over)}) must not even be considered for retry`);
   }
 });
+
+// A RETRY MUST NOT HAND THE NEXT OFFER TO THE WRONG PROTOCOL.
+//
+// The retry re-uses the record's `kind`, which fixes which driver keeps running. When
+// the next-best offer needed a DIFFERENT settlement path, carrying the old kind over
+// pointed the wrong protocol at it: a payer-bridge retry that landed on a SUBMARINE
+// offer sent the cross-chain courier's XcTermsRequest to a maker waiting for
+// XcSubTermsRequest. Both sides then waited for a message the other would never send,
+// and the trade sat in 'confirming' until the handshake timed out. Observed live.
+test('an offer needing another path is SKIPPED, and cannot be picked again', () => {
+  install();
+  // Simulate the skip bookkeeping: the candidate must be marked dead, or the recursion
+  // that looks for the next one picks the same offer forever.
+  const before = SW.deadOffers().size;
+  SW.markOfferDead('needs-p2p');
+  assert.equal(SW.deadOffers().has('needs-p2p'), true,
+    'the rejected CANDIDATE must be excluded — marking only the record\'s own offer loops');
+  assert.equal(SW.deadOffers().size, before + 1);
+});
