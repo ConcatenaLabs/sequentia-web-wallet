@@ -4656,9 +4656,18 @@ function advanceSubswapToNextOffer(b, why){
     // asset leg is funded. While the record is still 'starting' the handshake has not
     // even produced terms, so there is nothing to lose by trying another maker.
     if (!b) return false;
-    if (b.leg && b.leg.txid) return false;                 // asset leg funded
-    if (b.bolt11 || b.hold_paid || b.held) return false;   // BTC-LN hold minted/paid
-    if (b.state !== 'starting') return false;              // past the handshake
+    // COMMITMENT IS A FACT ABOUT VALUE, NOT ABOUT THE STATE LABEL.
+    //
+    // Gating on state === 'starting' was still wrong: the record moves to 'confirming'
+    // as soon as the job is posted, which is long before anything of the user's moves —
+    // the hold is not minted until AFTER the maker's asset leg has been verified. So the
+    // guard blocked every real retry just as surely as the preimage test did.
+    //
+    // These three are the actual markers that value has moved. The caller has already
+    // established that the failure itself is one the LSP reports as "nothing funded"
+    // (retryableHandshakeFailure), so this is the second, independent check.
+    if (b.leg && b.leg.txid) return false;                 // maker's asset leg recorded
+    if (b.bolt11 || b.hold_paid || b.held) return false;   // BTC-LN hold minted / paid
     const attempts = Number(b.offer_attempts || 1);
     if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
     markOfferDead(b.offer_id);

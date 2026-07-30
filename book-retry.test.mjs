@@ -176,12 +176,14 @@ test('bridgedTakePlan plans on the rails it is GIVEN, not the ones on screen', (
 // live offers sat beside it in the book.
 //
 // What actually marks commitment is a funded asset leg or a minted/paid BTC-LN hold.
-test('a starting payer-bridge with a preimage but nothing funded IS retryable', async () => {
+test('a CONFIRMING payer-bridge with a preimage but nothing funded IS retryable', async () => {
   install();
   initSwap({ assetMeta: () => ({ ticker: 'USDX', precision: 8 }), fmtAtoms: String,
     $: () => null, el: () => null, balObj: () => ({}), feeRates: {},
     ln: { jobStatusRaw: async () => ({ ok: true, status: 'running' }) } });
-  SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: 'starting', asset: 'aa'.repeat(32),
+  // 'confirming' is reached as soon as the job is posted — long before the hold is
+  // minted, which only happens after the maker's asset leg is verified.
+  SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: 'confirming', asset: 'aa'.repeat(32),
     preimage: 'ab'.repeat(32), hash_h: 'cd'.repeat(32),
     offer_id: 'dead', payRail: 'ln', recvRail: 'chain', offer_attempts: 1 });
   // No book is loaded, so the advance cannot find a replacement and returns false —
@@ -197,8 +199,7 @@ test('a payer-bridge that HAS committed is never retried', () => {
     { leg: { txid: 'ef'.repeat(32) } },
     { bolt11: 'lnbc...' },
     { hold_paid: true },
-    { state: 'held' },
-    { state: 'confirming' },
+    { state: 'held', held: true },
   ]) {
     install();
     SW.setSubswapRecord({ kind: 'lsp-payer-buy', state: 'starting', asset: 'aa'.repeat(32),
