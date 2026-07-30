@@ -154,8 +154,22 @@ export function buildUnifiedBook(rawOffers) {
 
 // The offer a taker on `takerSide` ('buy' | 'sell') should take: the best PRICE, rail-blind.
 // buy -> the lowest ask; sell -> the highest bid. Null if that side is empty.
-export function bestFor(book, takerSide) {
-  if (takerSide === 'buy')  return book.asks[0] || null;
-  if (takerSide === 'sell') return book.bids[0] || null;
+//
+// `skip` is a Set of offer ids to pass over. A resting offer can outlive the maker
+// process serving it — the relay keeps it until expiry, so a dead maker's offer sits
+// at top-of-book answering every lift with "offer has a lift in progress" or nothing
+// at all. Without a way to look PAST it, one stale offer fails every take on the pair
+// until it expires. The caller only skips offers whose handshake already failed with
+// nothing funded, so this never routes around a maker that merely holds funds.
+export function bestFor(book, takerSide, skip) {
+  const usable = (list) => {
+    for (const o of (list || [])) {
+      if (skip && o && o.id && skip.has(o.id)) continue;
+      return o;
+    }
+    return null;
+  };
+  if (takerSide === 'buy')  return usable(book.asks);
+  if (takerSide === 'sell') return usable(book.bids);
   return null;
 }
