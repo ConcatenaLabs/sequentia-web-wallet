@@ -4064,6 +4064,36 @@ const SUBSWAP_START_STALL_MS = 3 * 60 * 1000;
 // when the user comes back to look and when they try again. Only ever touches a
 // record with nothing committed — see subswapClearable/bridgeClearable for the same
 // reasoning applied to the Clear button.
+// Reconcile a persisted rail-crossing record against the LSP's own view of its job.
+//
+// The drivers already abort on a failed job — but only while the driver is RUNNING.
+// A reload (or a closed tab) kills it, and the record then sits in whatever state it
+// last persisted. That is how a take whose job the LSP had already failed kept
+// showing "waiting for the asset leg to confirm on-chain" for many blocks: nothing
+// asked the LSP again.
+//
+// Fire-and-forget from the composer render. Only ever moves a record to `failed`,
+// and only when the LSP says the job failed AND nothing of ours is committed (no
+// preimage-plus-leg to recover), so it can never discard recovery material.
+let _jobCheckAt = 0;
+async function reconcileJobStatus(){
+  try {
+    const b = SUBSWAP;
+    if (!b || subswapTerminal() || !(b.job_id || b.poll)) return;
+    if (b.preimage && b.leg && b.leg.txid) return;      // committed: the driver owns it
+    if (Date.now() - _jobCheckAt < 15000) return;       // at most one probe per 15s
+    _jobCheckAt = Date.now();
+    if (!(L && L.jobStatus)) return;
+    const j = await L.jobStatus(b.poll || b.job_id).catch(() => null);
+    if (!j || j.status !== 'failed') return;
+    if (!SUBSWAP || subswapTerminal() || SUBSWAP.job_id !== b.job_id) return;   // moved on meanwhile
+    SUBSWAP.state = 'failed';
+    SUBSWAP.detail = 'This trade could not be completed - your funds are safe.' +
+      (j.error ? ' (' + String(j.error).slice(0, 160) + ')' : '');
+    saveSubswap();
+  } catch {}
+}
+
 function reapStalledCrossings(){
   const now = Date.now();
   try {
@@ -7278,6 +7308,7 @@ function renderInFlightCard(){
   const host = C.$('swInFlight'); if (!host) return;
   try { checkRefundWindows(); } catch {}   // P5.3 — nag once when a refund/reclaim window opens
   try { reapStalledCrossings(); } catch {}   // a wedged record self-heals when you come back to look
+  try { reconcileJobStatus(); } catch {}     // ...and so does one the LSP has already failed
   const rows = [];
   if (hasMixedInFlight()){
     const am = metaOf(MIXED.asset);
