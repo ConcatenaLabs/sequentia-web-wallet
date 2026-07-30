@@ -581,6 +581,25 @@ export function dispatchSubswap({ asset, side, payRail, recvRail, offer }) {
 // claim window; (8) persist leg+bolt11+marker; then (9) pay. The taker cannot lose BTC-LN without the
 // verified, window-gated, anchor-buried asset already locked to its own key on the same H.
 // ===========================================================================
+// The asset-side slice this take is for, as a JSON NUMBER.
+//
+// WIRE CONTRACT (xdriver_submarine.go): seq_amount must ride as a NUMBER. Go's
+// json.Unmarshal refuses a quoted string into a uint64 and leaves 0 — and 0 reads as
+// "the whole offer", so the maker locks the FULL size against a partial take. That is
+// exactly what happened: this taker sent no seq_amount at all, the maker locked all
+// 5,000,000,000 atoms for a 400,000,000 take, and our own verify then rejected the leg
+// with "asset leg amount 5000000000 != offer 400000000" — after the maker had already
+// committed it on-chain.
+//
+// Number() is safe here: asset atoms are far below 2^53 for any real offer, and a
+// BigInt would throw in JSON.stringify rather than silently truncate.
+function wireSeqAmount(atoms){
+  const n = Number(_big(atoms));
+  if (!Number.isFinite(n) || !Number.isSafeInteger(n) || n <= 0)
+    throw new Error('submarine: the take amount does not fit the wire contract (must be a positive safe integer)');
+  return n;
+}
+
 export async function runTakerReverseSubmarine(deps) {
   const log = deps.log || (() => {});
   const nap = deps.sleep || _sleep;
@@ -596,7 +615,10 @@ export async function runTakerReverseSubmarine(deps) {
     deps.takeAtoms != null ? deps.takeAtoms : deps.expect.atoms, deps.feeAsset || '');
   try {
     // 1. Request terms; hand the maker our SEQ-claim pubkey up front.
-    await session.send({ type: XcSubType.TermsRequest, taker_seq_claim_pub: claimPub.toLowerCase() });
+    // NAME THE SLICE. Omitting it reads as 0 on the wire, which the maker treats as
+    // "the whole offer" — see wireSeqAmount.
+    await session.send({ type: XcSubType.TermsRequest, taker_seq_claim_pub: claimPub.toLowerCase(),
+      seq_amount: wireSeqAmount(deps.expect.atoms) });
     const locked = await session.recv(XcSubType.AssetLocked, deps.recvWaitMs || 15 * 60 * 1000);
     if (deps.onLocked) { try { deps.onLocked(locked); } catch {} }
     const leg = locked.leg;
@@ -813,8 +835,9 @@ export async function runTakerSubmarine(deps) {
       relayUrl: deps.offer.relayUrl || deps.offer._relay || null },
     deps.takeAtoms != null ? deps.takeAtoms : deps.expect.atoms, deps.feeAsset || '');
   try {
-    // 1. Request terms.
-    await session.send({ type: XcSubType.TermsRequest });
+    // 1. Request terms, NAMING the slice (see wireSeqAmount: an absent seq_amount
+    //    reads as 0, which the maker takes to mean the whole offer).
+    await session.send({ type: XcSubType.TermsRequest, seq_amount: wireSeqAmount(deps.expect.atoms) });
     const terms = await session.recv(XcSubType.Terms, deps.recvWaitMs || 2 * 60 * 1000);
 
     // 2. Validate terms against the signed offer + a live-tip claim window.
