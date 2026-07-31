@@ -218,9 +218,28 @@ export async function openCourierSession(offer, takeAtoms, feeAsset, opts){
   const ws = new WebSocket(wsURL(relayUrl));
   ws.binaryType = 'arraybuffer';
   const t = wsTransport(ws);
+  // BOUND THE CONNECT. onerror fires for a REFUSED connection, but a socket that simply never
+  // completes its handshake (a stalled proxy hop, a relay that accepted the TCP and went quiet)
+  // leaves this promise pending forever — and with it the whole take, which is what it looked like
+  // from the wallet: the stepper stuck on its first step, no session ever reaching the relay, no
+  // error anywhere, indefinitely. A take must fail so the caller can try the next offer; hanging is
+  // the one outcome that cannot be recovered from.
+  const OPEN_TIMEOUT_MS = 12000;
+  // wsTransport already installed the handler that fails in-flight waiters when the socket drops.
+  // Borrow onclose only for the connect, then give its handler straight back — clearing it would
+  // leave the live session unable to notice the relay going away.
+  const transportOnClose = ws.onclose;
   await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = () => reject(new Error('could not reach the order-book relay'));
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch {}
+      reject(new Error('the order-book relay did not answer in time'));
+    }, OPEN_TIMEOUT_MS);
+    const done = (fn) => (...a) => { clearTimeout(timer); ws.onclose = transportOnClose; fn(...a); };
+    ws.onopen = done(resolve);
+    ws.onerror = done(() => reject(new Error('could not reach the order-book relay')));
+    // A socket that closes before opening is a failed connect, not a hang — report it as such rather
+    // than waiting out the timeout for an answer that can no longer come.
+    ws.onclose = done(() => reject(new Error('the order-book relay closed the connection')));
   });
 
   // Once the socket is open, close it on ANY error path — a rejected/mismatched lift used to leak the
