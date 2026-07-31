@@ -1574,6 +1574,16 @@ function paintRailSegs(ra){
       // undeployed mixed shape (asset over LN + BTC on-chain) stays disabled. A no-channel LN pick
       // gets an informative title (not disabled). On-chain is always available.
       let bad = false, tip = '';
+      // The BLINDED book settles both legs confidentially, which is an ON-CHAIN (Pedersen-committed)
+      // construction: there is no confidential Lightning rail, and requoteLn never consults isConfBook() —
+      // it prices off the TRANSPARENT pure-LN relay. Leaving this button live let a user who explicitly
+      // opted into confidentiality be quoted and settled transparently with nothing said. Fail closed on
+      // the control, with the real reason, instead of silently dropping the namespace they chose.
+      if (r === 'ln' && isConfBook()){
+        b.disabled = true;
+        b.title = 'The blinded book settles confidentially on-chain · Lightning cannot hide amounts, so switch to the Unblinded book to settle over Lightning.';
+        return;
+      }
       const p2 = leg === 'pay' ? r : S.payRail;
       const r2 = leg === 'pay' ? S.recvRail : r;
       if (r !== 'chain' && !railSupported(p2, r2)){ bad = true;
@@ -1613,6 +1623,9 @@ function setRail(leg, r){
   // the other. BTC pairs are genuinely rail-independent (the LSP bridges rails at settlement), so this is
   // scoped to same-chain, where no such bridge exists.
   const sameChain = !!(S.payAsset && S.receiveAsset && S.payAsset !== 'BTC' && S.receiveAsset !== 'BTC');
+  // Capture the OTHER leg BEFORE coupling: when the coupling moves a leg the user did NOT press, that has
+  // to be SAID (see the note emitted at the end of this function), never done silently.
+  const otherBefore = leg === 'pay' ? S.recvRail : S.payRail;
   if (sameChain){ S.payRail = r; S.recvRail = r; }
   LAST_QUOTE = null; setReviewEnabled(false);
   // A rail change can invalidate the fee asset outright (chain -> LN locks it to
@@ -1625,6 +1638,18 @@ function setRail(leg, r){
   try { renderFeePicker(); } catch {}   // reflect the pay-from-Lightning fee freeze immediately
   try { paintConfControl(); } catch {}  // the confidential-receive toggle depends on the receive rail (on-chain only)
   try { paintPanes(); } catch {}        // re-evaluate the place-CTA gate (both rails now required)
+  // The same-chain coupling above moved the leg the user did NOT press (and reset the fee asset with it).
+  // Say so, or a user who set "pay from Lightning" and then chose to receive on-chain places a fully
+  // on-chain order still believing the pay leg is on Lightning. Written AFTER paintPanes (which repaints
+  // this node via updateRails -> renderRailNote) so it survives; the next rail press or pair change
+  // repaints the node and clears it.
+  if (sameChain && otherBefore && otherBefore !== r){
+    const _n = C.$('swRailNote');
+    if (_n){
+      _n.classList.remove('hide');
+      _n.insertAdjacentHTML('afterbegin', `<span>Both sides moved to ${r === 'ln' ? 'Lightning' : 'On-chain'} · an asset-to-asset swap settles as ONE Sequentia transaction, so it cannot have one side on Lightning and the other on-chain.</span> `);
+    }
+  }
   requote().catch(()=>{});
 }
 function paintRefHints(){
@@ -2572,16 +2597,26 @@ async function requoteMixed(route, amtStr){
     const raw = bp.offer.raw || {};
     const dec = renderMixedTake(route, { side, offerAtoms: bp.offer.assetAtoms, offerBtc: bp.offer.btcSats,
       minFill: offerMinFill(bp.offer, raw) });
-    paintFee('BTC', null, feeNote);
-    renderTiming(route);
     // GENUINE fail-closed (the invisible settlement can't carry this crossing in THIS build). Not a rail /
     // liquidity message — the SAME shared predicate onReview uses (bridgedTakeSupported), so Review is never
     // offered then refused. A happy coincidence (native) or a supported crossing passes.
+    //
+    // This is a PERMANENT property of the crossing, not a passing condition: the matched offer rests its
+    // ASSET over Lightning, so the asset leg crosses rails too and there is no single on-chain asset HTLC to
+    // bind. "try again shortly" invited the user to wait for something that will never change. It is also
+    // refused BEFORE the fee + timing copy is painted: rendering "Instant. Your on-chain payment is fronted;
+    // you receive final GOLD now" and then refusing on the next line states two contradictory things at once.
     if (bp.crosses && !bp.supported){
       LAST_QUOTE = null; setReviewEnabled(false);
-      $('swErr').textContent = 'This trade could not be placed right now - try again shortly.';
+      clearTiming(); paintFee('BTC', null, null);
+      const tk2 = (metaOf(route.seqAsset) || {}).ticker || 'that asset';
+      $('swErr').textContent = buy
+        ? `The best ${tk2} offer delivers over Lightning, and this wallet cannot turn that into an on-chain receipt. Switch Receive to Lightning to take it · trying again later will not change this.`
+        : `The best ${tk2} offer settles over Lightning, and this wallet cannot pay it from your on-chain balance. Switch Pay to Lightning to take it · trying again later will not change this.`;
       return;
     }
+    paintFee('BTC', null, feeNote);
+    renderTiming(route);
     // PAYER LEG-BRIDGE capability gate (spec §4 — kill offer-then-refuse): a BUY that crosses to an
     // on-chain-only maker settles via the LSP payer bridge, which needs the bare-hash hold (L.bridgeHold) +
     // hold pay (L.nodePayHash). Gate Place on the SAME condition reviewLspPayerBridge enforces, so Review
@@ -2691,8 +2726,10 @@ function postModeCross(route){
   setReviewEnabled(both);
 }
 
+let _reqCrossGen = 0;   // supersession guard: a newer requoteCross invalidates an older one's in-flight book fetch
 async function requoteCross(route, amtStr){
   const { $ } = C;
+  const myGen = ++_reqCrossGen;
   // What this function actually needs is the cross BOOK. (It used to probe X.quote,
   // which no longer exists as a separate capability now the RFQ rail is gone.)
   if (!X || !X.book){ $('swErr').textContent = 'This trade isn’t available right now - try again shortly.'; setReviewEnabled(false); return; }
@@ -2709,13 +2746,41 @@ async function requoteCross(route, amtStr){
     // empty book (cross markets need a maker with BTC reserves, so unlike a
     // same-chain pair the wallet can't self-start one yet).
     const { offers, unreachable } = await loadBtcBook(route);
+    // Supersession (as requoteSame does): if a newer quote started while our book fetch was in
+    // flight, bail. Rendering now would paint an OLDER quote's error + disabled Place over the
+    // newer one's enabled Place, which reads exactly like a stale error latching the button.
+    if (myGen !== _reqCrossGen) return;
 
     // ONE BOOK, rail-blind: the on-chain-pay (chain/chain) buy + its mirror sell match the SAME unified book
     // and show the SAME renderMixedTake preview the Lightning-pay (submarine) combo uses — identical matched
     // offer, takeAtoms/takeBtc, price and partial/min_fill handling. The rail combo ONLY selects the invisible
     // settlement dispatch (chain/chain -> the on-chain courier, below in reviewCross). bridgedTakePlan is
     // rail-blind, so the fill never differs per rail.
-    const bp = bridgedTakePlan(route);
+    let bp = bridgedTakePlan(route);
+    // "NO SETTLEABLE MATCH ON THIS RAIL" IS NOT "NO LIQUIDITY". This composer settles through the
+    // on-chain courier (reviewCross -> xswap/xrswap), which speaks the cross relay's HTLC handshake
+    // and can lift ONE kind of offer: a plain on-chain cross offer (rail 'onchain'). Two live
+    // failures came from matching rail-blind and then ignoring that:
+    //   • a SUB-ASSET best ask (asset leg over Lightning, rail 'ln') made bp.crosses true, so the
+    //     composer refused the whole trade ("could not be placed right now") while on-chain offers
+    //     rested one level down — a priced order the user could not place, and no reason why;
+    //   • a SUBMARINE best ask looked like a HAPPY COINCIDENCE — makerRailsFromOffer reports a
+    //     submarine maker's legs as on-chain BY DESIGN, which is what routes the LN-taker shapes —
+    //     so Place was ENABLED and the courier then lifted an offer the cross relay does not hold
+    //     ("relay: offer not found or not open"): exactly the offer-then-refuse this file forbids.
+    // So prefer the rail-blind best, and when it is not liftable HERE re-plan against the best
+    // offer that is, DISPLAYING that one — the displayed offer stays the one lifted. Nothing
+    // liftable at all still fails closed at the gate below.
+    //
+    // Honest about what this is: rail-aware offer selection, which rail-blind matching says the
+    // bridge should make unnecessary. It is a stopgap that prefers a settleable offer over a
+    // refusal, not the end state. The end state is a bridge that settles the crossing, at which
+    // point the best-priced offer is takeable here and this fallback stops firing.
+    const courierLiftable = (o) => !!o && o.rail === 'onchain';
+    if (bp && bp.offer && !courierLiftable(bp.offer)){
+      const nat = bridgedTakePlan(route, null, null, courierLiftable);
+      if (nat && nat.offer) bp = nat;
+    }
     const haveUnified = !!(bp && bp.offer);
 
     // T7: relay unreachable AND nothing to show on EITHER book — offer a retry, never invite first-maker.
@@ -2765,7 +2830,11 @@ async function requoteCross(route, amtStr){
       // it — show the SAME fill but DISABLE Place with the shared plain note. NEVER silently fall through to a
       // different XBOOK offer, NEVER give rail advice; the user sees the true best match, told plainly it can't
       // be placed right now (mirrors requoteMixed's submarine-crosses block).
-      if (bp.crosses){
+      // !courierLiftable is the check bp.crosses was standing in for, and it is the one that is
+      // actually true: a submarine / pure-LN maker is NOT a happy coincidence for an on-chain taker
+      // (its BTC leg is Lightning; only makerRailsFromOffer's deliberate 'chain' made it look like
+      // one), so bp.crosses alone let that shape reach an enabled Place it could never execute.
+      if (bp.crosses || !courierLiftable(bp.offer)){
         LAST_QUOTE = null; setReviewEnabled(false);
         $('swErr').textContent = payerBridgeDisabledNote();
         return;
@@ -3277,9 +3346,20 @@ const ANCHOR_FINAL = 'reverts only if Bitcoin reverts';
 // Render the timing banner for the current route. The matrix is keyed off the RECEIVE
 // leg (an on-chain RECEIPT is never made instant by the CAP; the CAP only fronts an
 // on-chain PAYMENT). The inline "fix" links flip a leg to Lightning.
+// Take the timing/settlement line off the screen entirely. A crossing that is about to be
+// REFUSED must not first be described as instant and final: settlement copy above a refusal
+// is a promise the composer is one line away from breaking. clearTiming is the counterpart
+// of renderTiming, which restores the element on every path that really has timing to state.
+function clearTiming(){
+  const el = C.$('swTiming'), ic = C.$('swTimingIcon'), tx = C.$('swTimingText');
+  if (!el || !tx) return;
+  el.style.display = 'none'; el.className = 'swtiming';
+  if (ic) ic.textContent = ''; tx.innerHTML = '';
+}
 function renderTiming(route){
   const el = C.$('swTiming'), ic = C.$('swTimingIcon'), tx = C.$('swTimingText');
   if (!el || !tx) return;
+  el.style.display = '';   // undo a previous clearTiming (a refused crossing hides this line)
   const wireFix = () => { el.querySelectorAll('.swfix').forEach(s => s.onclick = () => setRail(s.dataset.fix, 'ln')); };
   const ln = lnAvailable();
   // Only offer a "switch this leg to Lightning" fix when that leg has a REAL usable
@@ -3509,7 +3589,11 @@ function clearDeadOffers(){ _deadOffers = new Set(); }
 // against the rails of the order as PLACED, not whatever the composer holds now —
 // resetComposer() clears S the moment the user confirms, so anything re-planning later
 // found the rails unset and gave up. The record carries them; pass them in.
-function bridgedTakePlan(route, rails, wantAtoms){
+// `only` (optional) narrows the book to the offers ONE settlement path can actually lift. Matching
+// stays rail-blind by default; a caller passes this ONLY when it would otherwise have to REFUSE a
+// trade the book can genuinely fill, and it must then DISPLAY the offer this picked — so the
+// invariant that the displayed offer IS the one lifted still holds exactly.
+function bridgedTakePlan(route, rails, wantAtoms, only){
   try {
     if (!route || !route.seqAsset) return null;
     const payRail = (rails && rails.payRail) || S.payRail;
@@ -3527,7 +3611,10 @@ function bridgedTakePlan(route, rails, wantAtoms){
     const book = (UBOOK && UBOOK.seqAsset === route.seqAsset && (UBOOK.quote || 'BTC') === wantQuote) ? UBOOK : null;
     if (!book) return null;
     const side = route.payIsBtc ? 'buy' : 'sell';                     // buy = pay BTC / receive asset; sell = pay asset / receive BTC
-    const offer = bestFor({ asks: book.asks || [], bids: book.bids || [] }, side, _deadOffers);
+    const pool = only
+      ? { asks: (book.asks || []).filter(only), bids: (book.bids || []).filter(only) }
+      : { asks: book.asks || [], bids: book.bids || [] };
+    const offer = bestFor(pool, side, _deadOffers);
     if (!offer || !(offer.price > 0)) return null;
     const { makerBtcRail, makerAssetRail } = makerRailsFromOffer(offer);
     const take = { asset: route.seqAsset, side, payRail, recvRail,
@@ -3569,7 +3656,7 @@ function bridgedTakePlan(route, rails, wantAtoms){
     // fill we cannot execute is the offer-then-refuse failure. Same-rail-as-best is
     // the honest filter today — a walk that silently changed settlement path halfway
     // would be a different trade than the one reviewed.
-    const sideOffers = (side === 'buy' ? (book.asks || []) : (book.bids || []))
+    const sideOffers = (side === 'buy' ? (pool.asks || []) : (pool.bids || []))
       .filter(o => o && o.price > 0 && o.rail === offer.rail);
     const walk = walkBook({ offers: sideOffers, want, side });
     return { side, offer, match, plan, describe: describeBridge(match), bridged: crosses && supported,
@@ -4208,15 +4295,27 @@ function tradeSlotsFree(){ return (activeSubswaps().length + (hasBridgeInFlight(
 // A plain-English status for the Active trades row. These records used to surface
 // nothing at all, so a stall was indistinguishable from an app that had ignored the
 // button press.
+// It must say WHAT IT IS WAITING FOR. Every state the p2p buy driver actually passes
+// through was missing here, so the two waits that take minutes each showed either the
+// step before them ('starting · contacting the other side', for four minutes, after the
+// other side had answered and locked) or a raw internal word ('verified') that tells the
+// user nothing. The anchor-burial wait in particular is the one moment the wallet is
+// deliberately holding the user's Bitcoin back, and it must say so.
 function subswapStatusLine(b){
   switch (b && b.state){
-    case 'starting':   return 'starting · contacting the other side';
-    case 'held':       return 'your Bitcoin is committed over Lightning · waiting for the asset';
-    case 'confirming': return 'waiting for the asset leg to confirm on-chain';
-    case 'claiming':   return 'claiming your asset on-chain (automatic)';
-    case 'funding':    return 'funding your asset leg';
-    case 'failed':     return 'this trade could not be completed · your funds are safe';
-    default:           return String((b && b.state) || 'in progress');
+    case 'starting':      return 'starting · contacting the other side';
+    case 'awaiting-lock': return 'the other side is locking your asset on-chain · this takes a block';
+    case 'verifying':     return 'checking the asset is locked to your key';
+    case 'verified':
+    case 'anchor-wait':   return 'waiting for the asset lock to be confirmed and anchored in Bitcoin · your payment is held back until it is';
+    case 'paying':        return 'paying over Lightning';
+    case 'held':          return 'your Bitcoin is committed over Lightning · waiting for the asset';
+    case 'confirming':    return 'waiting for the asset leg to confirm on-chain';
+    case 'claiming':      return 'claiming your asset on-chain (automatic)';
+    case 'funding':       return 'funding your asset leg';
+    case 'settling':      return 'waiting for the other side to pay you over Lightning';
+    case 'failed':        return 'this trade could not be completed · your funds are safe';
+    default:              return String((b && b.state) || 'in progress');
   }
 }
 
@@ -4237,7 +4336,10 @@ function subswapClearable(b){
   // dead take locked the wallet out of every future trade with no way forward. A
   // record that holds nothing must never be a trap.
   if (b.state === 'confirming' && !(b.leg && b.leg.txid)) return true;
-  return b.state === 'starting';
+  // 'awaiting-lock' is the window this record USED to spend in 'starting' (the maker is
+  // locking; the taker has committed nothing and holds nothing to recover). Naming the
+  // wait must not quietly take the Clear button away from it.
+  return b.state === 'starting' || b.state === 'awaiting-lock';
 }
 function bridgeClearable(b){
   if (!b) return false;
@@ -4590,6 +4692,12 @@ async function driveSubswap(rec){
           const r = await L.nodePay({ node_key, bolt11, wantHash: opts && opts.wantHash, amountMsat: opts && opts.amountMsat, maxCltv: opts && opts.maxCltv });
           if (!(r && r.preimage)){ console.warn('[subswap] BTC-LN pay returned no preimage'); throw new Error('This trade could not be completed - your funds are safe.'); }
           return r.preimage;
+        },
+        // The two LONG waits have no end-of-step callback of their own, so the record used
+        // to describe the step BEFORE the wait it was actually in. onStage names the wait.
+        onStage: (s) => {
+          if (s !== 'awaiting-lock' && s !== 'anchor-wait') return;
+          b.state = s; b.stage_since_ms = Date.now(); saveSubswap();
         },
         onLocked: () => { b.state = 'verifying'; saveSubswap(); },
         onVerified: () => { b.state = 'verified'; saveSubswap(); },
@@ -6929,6 +7037,14 @@ async function reviewCross(q){
     $('swErr').textContent = 'You already have a trade in progress. Finish or refund it first (open it under Active trades) before starting another.';
     return;
   }
+  // The wizards below speak the cross relay's on-chain HTLC handshake and nothing else. A quote
+  // carrying a sub-asset / submarine / pure-LN offer opens a session the maker never answers (or,
+  // against the relay that does not hold it, "offer not found or not open") and dead-ends the take.
+  // The composer no longer builds one; refuse here too rather than trust that it never will.
+  if (q.unified && q.offer && q.offer.rail !== 'onchain'){
+    $('swErr').textContent = payerBridgeDisabledNote();
+    return;
+  }
   // Market order bigger than the best maker's depth: a MARKET order on a cross/BTC pair is IOC (spec
   // §4/§10 closed decision) — fill what the book crosses now (the HTLC wizard / covenant path below)
   // and CANCEL the rest. A market order NEVER rests a remainder; resting is the LIMIT path (post mode →
@@ -7073,7 +7189,13 @@ async function requoteLn(route, amtStr){
   if (!lnOffer){
     LAST_QUOTE = null; setReviewEnabled(false);
     paintFee(route.quoteAsset || 'BTC', null, null);
-    $('swRate').textContent = `No offers resting here yet.`;
+    // asset<->asset over Lightning KEEPS the same-chain covenant ladder on screen (requote deliberately
+    // does not stopLiveBook for this route), so a bare "No offers resting here yet." flatly contradicts the
+    // resting orders the user can see and hides the one thing that would fix it. Name the real cause: this
+    // pair has no LIGHTNING liquidity, the visible orders rest ON-CHAIN, and both sides on-chain trades them.
+    $('swRate').textContent = route.assetAsset
+      ? `No Lightning offers for ${am.ticker}/${qtk} yet · the orders shown in the book rest on-chain · set both sides to On-chain to trade them.`
+      : `No offers resting here yet.`;
     return;
   }
   LAST_QUOTE = { kind: 'ln', side, seqAsset: route.seqAsset, payIsBtc: route.payIsBtc,
@@ -7108,6 +7230,63 @@ async function reviewLn(q){
       if (S.receiveAsset !== 'BTC') await L.connectNode(S.receiveAsset);
     } catch (e){ $('swErr').textContent = 'Could not bring your Lightning node signer online: ' + (e && e.message || e); return; }
   }
+  // === JIT INBOUND FOR THE ASSET RECEIVE LEG ==============================================
+  // WHICH OF THE TWO THIS IMPLEMENTS: we PROVISION. Refusal is kept only for the cases where
+  // provisioning genuinely does not exist, and then it names the leg, the shortfall and the way out —
+  // never "try again shortly". Provisioning is right here because the entry point is already built and
+  // proven end-to-end: L.channelInbound() (index.html:3028 -> seqlnChannelInbound, seqln.js:436) ->
+  // POST /channel/inbound (lsp-server.mjs) -> provisionInbound(), which has the LP open a 0-conf asset
+  // channel TOWARD the user's own node. The sub-asset HODL BUY already calls exactly this before its
+  // maker pays (see the L.channelInbound call in the buy flow); the pure-LN take was the one
+  // asset-receive path that never did.
+  //
+  // WHY IT WAS NEVER REQUESTED: the readiness verdict is AMOUNT-BLIND. ln-rail.js legOption() marks a
+  // 'recv' leg ok as soon as one active own channel has ANY room at all (`enough = l.receivable > 0n`),
+  // so a taker holding a stale or nearly-exhausted asset channel satisfies ra.pureLnOk, the whole
+  // `if (!ra.pureLnOk)` block below is skipped, and nothing is provisioned. The maker then registers its
+  // hold on H and its pay of the FULL offer size finds the invoice routehint unusable:
+  //   "Destination <taker asset node> is not reachable directly and all routehints were unusable."
+  // We deliberately do NOT make ln-rail.js amount-aware — it also drives composer copy for every rail —
+  // we make the SETTLEMENT decision size-correct here, the one place the pinned offer is known.
+  //
+  // SIZE FROM THE OFFER, NOT THE TYPED AMOUNT: xpln lifts the WHOLE pinned offer (see "xpln lifts the
+  // whole offer" below), so the inbound must cover the OFFER's leg. provisionInbound is idempotent
+  // (already_had_inbound when >= amount is already receivable from the LP), so running it on every take
+  // is safe and is a no-op when the room is already there.
+  const _offR = q.lnOffer || null;
+  const _payWant  = _offR ? big(q.side === 'buy' ? _offR.btcAtoms   : _offR.assetAtoms) : 0n;
+  const _recvWant = _offR ? big(q.side === 'buy' ? _offR.assetAtoms : _offR.btcAtoms)   : 0n;
+  if (S.receiveAsset !== 'BTC'){
+    const rm = metaOf(S.receiveAsset);
+    const want = _recvWant > 0n ? _recvWant : safeAtoms($('swRecvAmt').value, rm.precision || 0);
+    if (want <= 0n){
+      $('swErr').textContent = 'This offer no longer has a size to receive · reload the book and take it again.';
+      return;
+    }
+    if (!L.channelInbound || !L.assetNodeKey){
+      $('swErr').textContent = `This build cannot request inbound ${rm.ticker} Lightning liquidity, so the maker would have no route to pay you · set your receive leg to on-chain to take this offer.`;
+      return;
+    }
+    try {
+      $('swStatus').className = 'status';
+      $('swStatus').innerHTML = `<span class="spin"></span>Making room to receive ${C.fmtAtoms(want, rm.precision || 0)} ${rm.ticker} over Lightning…`;
+      const recvNodeKey = await L.assetNodeKey(S.receiveAsset);
+      await L.channelInbound({ node_key: recvNodeKey, asset: S.receiveAsset, amount: Number(want) });
+      $('swStatus').textContent = '';
+    } catch (e){
+      $('swStatus').textContent = '';
+      $('swErr').textContent = `Your ${rm.ticker} Lightning node has no room to receive ${C.fmtAtoms(want, rm.precision || 0)} ${rm.ticker}, and the service could not open it: ${(e && e.message) || e} · take this offer with your receive leg on-chain, or take a smaller offer.`;
+      return;
+    }
+    LNSTATUS = await L.status().catch(() => LNSTATUS);   // the fresh inbound must be visible to railAvail below
+    ra = railAvail(S.payAsset, S.receiveAsset);
+  } else if (_recvWant > 0n && ra.recvLn.ok && ra.recvLn.liquidity && ra.recvLn.liquidity.receivable < _recvWant){
+    // asset<->BTC SELL: we RECEIVE BTC over Lightning. provisionInbound is asset-only by construction
+    // (it funds an asset channel from the LP's asset inventory), so there is nothing to provision on this
+    // leg — REFUSE SPECIFICALLY rather than let the maker fail to route into a too-small channel.
+    $('swErr').textContent = `Your BTC Lightning channel can receive only ${C.fmtAtoms(ra.recvLn.liquidity.receivable, 8)} BTC and this offer pays you ${C.fmtAtoms(_recvWant, 8)} BTC · receive BTC on-chain instead, or take a smaller offer.`;
+    return;
+  }
   if (!ra.pureLnOk){
     // No usable channel on one/both legs. Instead of BLOCKING and sending the user to the Balance tab,
     // OPEN the missing channel(s) INLINE on the user's OWN nodes, then continue. Per-leg DIRECTION matters:
@@ -7116,20 +7295,22 @@ async function reviewLn(q){
     // user's node (channelInbound). The old code opened OUTBOUND for both, so a channel-less receive leg
     // got capacity it could never receive over. Honest, bounded progress; a clear failure — never a hang.
     if (!L.provisionChannel){ $('swErr').textContent = 'Opening a channel is unavailable in this build · open one from the Balance tab first.'; return; }
-    const sizeLeg = (hexOrBtc, amtEl) => {
+    // Size from the PINNED OFFER whenever we have one: xpln lifts the whole offer, so the offer's leg —
+    // not the typed amount — is what must fit through the channel. The typed field is only a fallback.
+    const sizeLeg = (hexOrBtc, amtEl, wantAtoms) => {
       const m = metaOf(hexOrBtc);
-      const atoms = safeAtoms(C.$(amtEl).value, m.precision || 0);
+      const atoms = (wantAtoms && wantAtoms > 0n) ? wantAtoms : safeAtoms(C.$(amtEl).value, m.precision || 0);
       if (atoms <= 0n) throw new Error('Enter an amount so the Lightning channel can be sized.');
       return { m, atoms };
     };
-    const provPayOutbound = async (hexOrBtc, amtEl) => {   // PAY leg: spendable OUTBOUND from the user's balance
-      const { m, atoms } = sizeLeg(hexOrBtc, amtEl);
+    const provPayOutbound = async (hexOrBtc, amtEl, wantAtoms) => {   // PAY leg: spendable OUTBOUND from the user's balance
+      const { m, atoms } = sizeLeg(hexOrBtc, amtEl, wantAtoms);
       const chain = hexOrBtc === 'BTC' ? 'btc' : 'seq';
       await L.provisionChannel({ chain, asset: chain === 'seq' ? hexOrBtc : undefined, ticker: m.ticker,
         amount: Number(atoms), onProgress: (t) => { $('swStatus').className = 'status'; $('swStatus').innerHTML = '<span class="spin"></span>' + t; } });
     };
-    const provRecvInbound = async (hexOrBtc, amtEl) => {   // RECEIVE leg: the LSP FRONTS inbound to the user's OWN node
-      const { m, atoms } = sizeLeg(hexOrBtc, amtEl);
+    const provRecvInbound = async (hexOrBtc, amtEl, wantAtoms) => {   // RECEIVE leg: the LSP FRONTS inbound to the user's OWN node
+      const { m, atoms } = sizeLeg(hexOrBtc, amtEl, wantAtoms);
       if (hexOrBtc === 'BTC' || !L.channelInbound || !L.assetNodeKey){
         // BTC-inbound fronting isn't wired (the LSP fronts asset inbound only). Fall back to the outbound
         // provision so the leg still comes up on the user's node — self-custody holds; the LP just can't
@@ -7142,8 +7323,8 @@ async function reviewLn(q){
     };
     try {
       $('swErr').textContent = '';
-      if (!ra.payLn.ok)  await provPayOutbound(S.payAsset,     'swPayAmt');
-      if (!ra.recvLn.ok) await provRecvInbound(S.receiveAsset, 'swRecvAmt');
+      if (!ra.payLn.ok)  await provPayOutbound(S.payAsset,     'swPayAmt',  _payWant);
+      if (!ra.recvLn.ok) await provRecvInbound(S.receiveAsset, 'swRecvAmt', _recvWant);
       LNSTATUS = await L.status();   // refresh so railAvail sees the freshly-opened channel(s)
       $('swStatus').textContent = '';
     } catch (e){
@@ -7152,7 +7333,14 @@ async function reviewLn(q){
       return;
     }
     ra = railAvail(S.payAsset, S.receiveAsset);
-    if (!ra.pureLnOk){ $('swErr').textContent = 'Your Lightning channel opened but is not ready to trade yet · please try again in a moment.'; return; }
+    if (!ra.pureLnOk){
+      // NEVER a generic "try again shortly": name the leg and quote the exact reason ln-rail.js reports,
+      // plus the on-chain way to take this same offer.
+      const bad = !ra.payLn.ok ? ra.payLn : ra.recvLn;
+      const why = [bad.reason || `${bad.name} Lightning is not ready to trade.`, bad.hint || ''].filter(Boolean).join(' ');
+      $('swErr').textContent = `${why} · take this offer with your ${bad.direction === 'pay' ? 'pay' : 'receive'} leg on-chain instead.`;
+      return;
+    }
   }
   const am = C.assetMeta(q.seqAsset);
   const aprec = am.precision || 0;
@@ -8071,7 +8259,7 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   setUnifiedBook: (seqAsset, book) => { UBOOK = book ? { seqAsset, asks: book.asks || [], bids: book.bids || [] } : null; },
   // Drive the FULL composer requote for the cross (chain/chain) + mixed (sub-asset) branches, so a headless
   // test can prove they render the SAME rail-blind preview (both source the offer/fill from bridgedTakePlan).
-  requoteMixed, requoteCross,
+  requoteMixed, requoteCross, requoteLn,
   setSubassetBook: (hex, entry) => { const k = String(hex).toLowerCase(); if (entry == null) delete SUBASSET_BOOK[k]; else SUBASSET_BOOK[k] = entry; },
   // The priced/oriented quote the composer carries into Review -> startBuy/startSell. A headless test reads it to
   // prove the settlement handle (buyOffer/sellOffer) + the authoritative fill (takeAssetAtoms/takeBtcSats) are

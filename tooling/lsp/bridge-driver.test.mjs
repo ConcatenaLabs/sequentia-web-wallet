@@ -707,6 +707,30 @@ test('P3.2 crossingShapeSupported: an asset-leg bridge (maker sub-asset LN, take
   assert.equal(crossingShapeSupported(plan), false);
 });
 
+// THE SHAPE THIS FILE HAD NO WORD FOR: the taker pays BTC ON-CHAIN and wants the asset over LIGHTNING,
+// against a maker that rests the asset ON-CHAIN. Only the ASSET leg crosses, and its LN end is the
+// RECEIVER (the taker). The test above pins the MIRROR (asset leg crossing, lnSide 'payer'), so nothing
+// pinned the one direction a taker actually asks for — meaning the predicate could be widened to admit it
+// with no test objecting, and Review would then promise a bridge the LSP refuses post-confirm.
+//
+// This is the branch that flips when the LSP can deliver an asset over Lightning and be made whole.
+// Flipping it is the WHOLE point; flipping it ALONE is the bug. So this asserts the pair together: the
+// shape is a genuine asset-leg 'receiver' crossing, AND it is refused. Whoever wires the delivery updates
+// this test in the same change as the predicate, which is exactly the coupling that keeps the wallet's
+// pre-Review promise and the LSP's /swap admission from drifting apart.
+test("P3.2 crossingShapeSupported: an asset-leg bridge, lnSide 'receiver' (taker pays BTC on-chain, wants the asset over LN, vs an ON-CHAIN maker) is NOT wired", () => {
+  const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'ln', makerBtcRail: 'chain', makerAssetRail: 'chain' });
+  const plan = planSettlement(m);
+  assert.equal(plan.btcLeg.bridge, false, 'the BTC leg is native (taker and maker both on-chain)');
+  assert.equal(plan.assetLeg.bridge, true, 'only the ASSET leg crosses');
+  assert.equal(plan.assetLeg.lnSide, 'receiver', "the taker is the LN end of the asset leg — it RECEIVES over Lightning");
+  assert.equal(crossingShapeSupported(plan), false,
+    'refused until the LSP can pay a bare-hash asset hold over Lightning AND recoup what it delivered');
+  // The wallet's pre-Review check must agree, or Review offers a Place that /swap then refuses.
+  assert.equal(bridgedTakeSupported({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'ln',
+    makerBtcRail: 'chain', makerAssetRail: 'chain' }), false);
+});
+
 test('P3.2 crossingShapeSupported: a HAPPY coincidence is never "supported" (settle natively, not via the bridge)', () => {
   const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'chain' });
   assert.equal(planSettlement(m).happyCoincidence, true);

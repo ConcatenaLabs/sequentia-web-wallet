@@ -640,6 +640,11 @@ function wireSeqAmount(atoms){
 export async function runTakerReverseSubmarine(deps) {
   const log = deps.log || (() => {});
   const nap = deps.sleep || _sleep;
+  // WHAT THE TAKER IS WAITING ON, reported as it changes. onLocked/onVerified/onAboutToPay
+  // only fire at the ENDS of the two long waits (the maker locking, then the anchor gate),
+  // so without this a caller's status can only ever describe the step BEFORE the wait it is
+  // actually sitting in. Never throws into the settlement flow.
+  const stage = (s, info) => { if (deps.onStage) { try { deps.onStage(s, info || null); } catch {} } };
   const claimPub = deps.seqClaimKey && deps.seqClaimKey.public_key;
   const claimSecret = deps.seqClaimKey && deps.seqClaimKey.secret_hex;
   if (!_hex66(claimPub) || !claimSecret) throw new Error('reverse submarine: a 33-byte seq claim key (public_key + secret_hex) is required');
@@ -656,6 +661,15 @@ export async function runTakerReverseSubmarine(deps) {
     // "the whole offer" — see wireSeqAmount.
     await session.send({ type: XcSubType.TermsRequest, taker_seq_claim_pub: claimPub.toLowerCase(),
       seq_amount: wireSeqAmount(deps.expect.atoms) });
+    // THE TAKE IS PLACED. Everything from here to AssetLocked is the MAKER working: it
+    // funds the asset HTLC and waits for that funding to CONFIRM on Sequentia before it
+    // can announce the leg (xchain LockSEQLeg polls up to ~3 min for the block hash), then
+    // mints the invoice. That is minutes on a live network, and with no callback across it
+    // the caller's record stayed on whatever it set before the send — "starting · contacting
+    // the other side" — long after the other side had been contacted, had answered, and had
+    // locked. Worse, swap.js's 3-minute stall reaper only ever looked at 'starting', so it
+    // failed healthy trades that were merely waiting for the maker's block.
+    stage('awaiting-lock');
     const locked = await session.recv(XcSubType.AssetLocked, deps.recvWaitMs || 15 * 60 * 1000);
     if (deps.onLocked) { try { deps.onLocked(locked); } catch {} }
     const leg = locked.leg;
@@ -682,6 +696,11 @@ export async function runTakerReverseSubmarine(deps) {
 
     // 4. ANCHOR GATE (P1): POLL until the asset HTLC funding block is Bitcoin-anchor-buried >= min_anchor_depth
     //    (a fresh 0–2 conf leg is WAITED OUT, not aborted) — a plain invoice cannot be refunded once paid.
+    // The SECOND long wait, and the one the user has no way to guess at: we are holding our
+    // Bitcoin back until the maker's asset lock is confirmed and its Bitcoin anchor reads at
+    // the depth this offer asked for. Name it before entering the poll, not after.
+    stage('anchor-wait', { txid: leg.txid, blockHash: leg.block_hash,
+      minAnchorDepth: Number(deps.minAnchorDepth || 0) });
     const anchor = await waitAnchorBuried({ txid: leg.txid, blockHash: leg.block_hash, minAnchorDepth: deps.minAnchorDepth,
       legAtoms: leg.amount, max0ConfAtoms: deps.max0ConfAtoms, deadlineMs: deps.anchorWaitMs, pollMs: deps.anchorPollMs }, deps, nap);
     if (!anchor.ok) { await session.fail('ANCHOR_TIMEOUT', anchor.reason); throw new Error('reverse submarine: ' + anchor.reason); }
