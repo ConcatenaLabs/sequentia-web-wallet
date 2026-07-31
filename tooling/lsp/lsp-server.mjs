@@ -2787,7 +2787,16 @@ async function prepareBridgeLegs({ match, body, job }) {
   // native asset leg. If the wallet ever promised a bridge for another shape, this refuses it identically.
   const canBridge = crossingShapeSupported(plan);
   if (!canBridge) {
-    job.bridgeHandshake = { ok: false, error: 'this crossing shape is not wired (only a BTC-leg crossing with a native asset leg, either direction: taker-sells-asset/receives-BTC-over-LN vs a reverse maker, or taker-buys-asset/pays-BTC-over-LN vs a forward maker)' };
+    // NAME THE SHAPE THAT WAS REFUSED, not just the list of shapes that are wired. The single sentence
+    // this used to emit enumerated only BTC-leg crossings, so the one crossing takers actually hit here —
+    // an ASSET-leg crossing, where the maker rests the asset on-chain and the taker wants it over
+    // Lightning — surfaced as "not wired" with no hint that it is a different, missing capability rather
+    // than a mis-shaped take. An operator reading a job error should be able to tell those apart.
+    const al = plan.assetLeg;
+    const assetCross = !!(al && al.bridge);
+    job.bridgeHandshake = { ok: false, error: assetCross
+      ? `this crossing needs the ASSET leg bridged (lnSide '${al.lnSide}': one end settles the asset over Lightning, the other on-chain). The LSP cannot DELIVER an asset over Lightning and be made whole for it yet, so it refuses the take outright rather than accept a hold it cannot fill. Wired today: a BTC-leg crossing with a native asset leg, either direction.`
+      : 'this crossing shape is not wired (only a BTC-leg crossing with a native asset leg, either direction: taker-sells-asset/receives-BTC-over-LN vs a reverse maker, or taker-buys-asset/pays-BTC-over-LN vs a forward maker)' };
     return plan;
   }
 

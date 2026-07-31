@@ -83,24 +83,45 @@ export class CourierSession {
   // recvXcType.
   async recv(wantType, timeoutMs){
     const deadline = Date.now() + (timeoutMs || 120000);
+    let undecryptable = 0, otherTypes = 0, seen = 0;
     for (;;){
       const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error('timed out waiting for "' + wantType + '"');
+      if (remaining <= 0) {
+        // A TIMEOUT MUST SAY WHAT IT SAW. Skipping undecryptable frames, and frames of
+        // another type, is correct — but in silence it makes two very different failures
+        // identical: the counterparty never answered, versus it answered and we could not
+        // read a word of it (a session-key mismatch skips EVERY frame). The second is what
+        // a stuck take looks like from outside: the maker locks the asset and waits to be
+        // paid, the relay delivers, and the taker sits in "contacting the other side" to
+        // the deadline with nothing anywhere saying why.
+        const detail = seen === 0
+          ? 'no frames arrived at all'
+          : `${seen} frame(s) arrived: ${undecryptable} undecryptable` +
+            (undecryptable ? " (this session's key does not match the counterparty's)" : '') +
+            `, ${otherTypes} of another type`;
+        throw new Error('timed out waiting for "' + wantType + '" — ' + detail);
+      }
       const env = await this.transport.recv(remaining);
       if (env == null) continue;
       if (env.error) throw new Error('relay: ' + (env.error.message || JSON.stringify(env.error)));
       const sm = env.swap_msg || env.swapMsg;
       if (!sm || !sm.ciphertext) continue;
+      seen++;
       let xc;
       try {
         xc = decodeXcMsg(await this.crypter.open(b64decode(sm.ciphertext)));
       } catch {
+        undecryptable++;
+        if (undecryptable === 1 && typeof console !== 'undefined')
+          console.warn('[courier] a frame arrived that this session cannot decrypt while waiting for "' + wantType +
+            '"; if this repeats the swap will time out with the counterparty still waiting');
         // Undecryptable frame: relay noise/injection at most; skip (the deadline
         // bounds the loop), matching the Go driver's continue-on-open-failure.
         continue;
       }
       if (xc.type === wantType) return xc;
       if (xc.type === XcType.Fail) throw new Error('peer failed the lift: ' + (xc.code || '') + ' ' + (xc.message || ''));
+      otherTypes++;
       // otherwise skip and keep waiting
     }
   }
