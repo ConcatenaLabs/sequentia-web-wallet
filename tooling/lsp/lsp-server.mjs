@@ -95,7 +95,7 @@ import { acceptUpgrade, bridgeWsToTcp } from './ws-bridge.mjs';
 import { settlementPlanForSide, planExecutionName, planSettlement } from './settlement-router.mjs';
 import { buildUnifiedBook } from './unified-book.mjs';
 import { runBridgedSwap, matchFromTake, describeBridge, classifyLegs, takeRailsCrossed, bridgeAssetHandoffAdmissible, bridgeAssetRelayLocktimeVerdict, bridgeFrontConfirmed, isPureLnTake, crossingShapeSupported, describeCrossingSupport, fundedBtcSatsForResume } from './bridge-driver.mjs';
-import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee } from './leg-bridge.mjs';
+import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee, decideAssetFront } from './leg-bridge.mjs';
 import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair, relayTakerAssetLeg, runForwardBridgeTerms, sendForwardBtcLegFunded, openForwardBridgeSession, checkMakerAssetLegObserved, buildHtlcRedeem } from './bridge-maker.mjs';
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 
@@ -127,6 +127,13 @@ const CFG = {
   // Mixed (submarine) rail: the on-chain asset leg needs a txindex Sequentia node.
   seqRpc: process.env.SEQ_RPC || '',
   seqWallet: process.env.SEQ_WALLET || '',
+  // BRIDGED-RAIL ASSET FRONTING (see the block above fundFrontedSeqLeg). The wallet
+  // holding the LSP's own asset inventory; empty disables fronting entirely, and the
+  // bridge falls back to waiting for the maker's anchor-gated leg. FRONT_MAX_ATOMS
+  // caps a single fronted leg, so an inventory read that is wrong (or a price that is)
+  // can only ever expose one bounded trade. 0 = no cap.
+  frontSeqWallet: process.env.FRONT_SEQ_WALLET || '',
+  frontMaxAtoms: Number(process.env.FRONT_MAX_ATOMS || 0),
   // The submarine's Lightning leg. Default: the device-cosigned hosted BTC node (so a
   // mixed swap stays non-custodial like pure-LN); overridable to an autonomous node.
   mixedBtcRpc: process.env.MIXED_BTC_RPC || process.env.HOSTED_BTC_RPC || hostedRpcFallback,
@@ -2113,6 +2120,43 @@ function makeBridgeIo({ match, body, job }) {
       if (!s || !s.receiverClaimPub || !s.hashH || !(s.amountSat > 0) || !s.cltv) throw new Error('fund-onchain blocked: receiver claim pub / H / amount / cltv not established — fail closed (nothing funded)');
       job.legState = job.legState || {};
       const sa = job.legState.asset = job.legState.asset || {};   // the REAL persisted asset leg (observe reads sa.onchain for P)
+
+      // (0) ASSET FRONTING — deliver the asset from the LSP's OWN inventory NOW, so a
+      // taker paying over Lightning is not made to wait for the maker's anchor gate.
+      //
+      // The decision is taken here, BEFORE any BTC is funded, and is STICKY once taken
+      // (job.bridge_front.armed) so a re-drive can never take the other branch and end
+      // up on both. The two branches are mutually exclusive by construction:
+      //   - already funded BTC (s.htlc) => NEVER front (P would be public while the
+      //     maker still holds its asset; it could sweep our HTLC and never lock);
+      //   - armed to front            => NEVER fund BTC (the front IS the settlement).
+      if (!s.htlc && !job.bridge_front) {
+        const wantAtoms = Number(sa.seqAmount ?? (job.bridge_terms && job.bridge_terms.seq_amount) ?? 0);
+        const claimPub = sa.takerSeqClaimPub || (job.bridge_terms && job.bridge_terms.taker_seq_claim_pub) || '';
+        const tSeq = Number(sa.seqLocktime ?? (job.bridge_terms && job.bridge_terms.seq_locktime));
+        // Read inventory only when the cheap checks already pass, so a declined front
+        // costs no RPC. decideAssetFront holds the whole rule (including the hard
+        // never-front-over-a-funded-BTC-HTLC refusal) and is unit-tested without a node.
+        const cheap = decideAssetFront({ btcHtlcFunded: !!s.htlc, frontWallet: CFG.frontSeqWallet,
+          wantAtoms, inventoryAtoms: Number.MAX_SAFE_INTEGER, maxAtoms: CFG.frontMaxAtoms, claimPub, tSeq });
+        const verdict = cheap.armed
+          ? decideAssetFront({ btcHtlcFunded: !!s.htlc, frontWallet: CFG.frontSeqWallet, wantAtoms,
+              inventoryAtoms: await frontableSeqAtoms(sa.seqAsset), maxAtoms: CFG.frontMaxAtoms, claimPub, tSeq })
+          : cheap;
+        job.bridge_front = verdict.armed
+          ? { armed: true, atoms: wantAtoms, asset: sa.seqAsset, t_seq: tSeq }
+          : { armed: false, reason: verdict.reason };
+        persistJobs();
+        console.error(job.bridge_front.armed
+          ? `[bridge] FRONTING the asset leg from LSP inventory (${wantAtoms} atoms of ${sa.seqAsset}) — the taker is not made to wait for the maker's anchor gate; no BTC HTLC will be funded for this job`
+          : `[bridge] not fronting (${job.bridge_front.reason}); falling back to the maker's anchor-gated asset leg`);
+      }
+      if (job.bridge_front && job.bridge_front.armed) {
+        if (s.htlc) throw new Error('INVARIANT VIOLATED: a fronted job has a funded BTC HTLC on H — refusing to proceed (fronting publishes P while the maker holds nothing, so that BTC could be swept for free)');
+        await frontAssetLeg({ job, s, sa });
+        return;
+      }
+
       // (1) FUND (idempotent) — skip if we already funded the BTC HTLC for this leg. The fund-once sequencing —
       // (i) NEVER broadcast on a locate uncertainty, (ii) ADOPT-BEFORE-GATE, (iii) PERSIST-INTENT-BEFORE-BROADCAST
       // + DEFINITIVE scan-before-broadcast — lives in the PURE runPayerFundOnce orchestrator (leg-bridge.mjs) so
@@ -2262,6 +2306,11 @@ function makeBridgeIo({ match, body, job }) {
     recoupClaim: async (leg, step, obs) => {
       const s = st(leg.unit);
       const P = obs && obs.ln && obs.ln.preimage;
+      // A FRONTED job funded no BTC HTLC, so there is nothing on-chain to recoup: the
+      // LSP is made whole by settling the taker's held invoice (recoup-settle), which
+      // the revealed P already enables. Inert rather than fail-closed, so an observer
+      // that asks for a claim on a fronted job cannot wedge the settle behind it.
+      if (job.bridge_front && job.bridge_front.armed) return;
       if (!s || !s.htlc || !s.lspClaimPriv || !P) throw new Error('recoup-claim blocked: HTLC/claim-key/preimage missing — fail closed (recoup deferred, never lost)');
       await claimBridgeHtlcBtc({ htlc: s.htlc, preimage: P, claimPriv: s.lspClaimPriv });
     },
@@ -2276,6 +2325,22 @@ function makeBridgeIo({ match, body, job }) {
     // to them on its own). Reuses the xsubas BTC refund path.
     refundOnchain: async (leg, step, obs) => {
       const s = st(leg.unit);
+      // A FRONTED job has no BTC HTLC at all — the front replaced it. What is at risk
+      // there is the LSP's OWN asset, locked to a taker that never claimed it; reclaim
+      // that on its refund branch after T_seq instead. The taker's hold expires by
+      // itself, so this is the same double-no-loss shape as the BTC path.
+      if (job.bridge_front && job.bridge_front.armed) {
+        const sa = (job.legState && job.legState.asset) || {};
+        if (!sa.frontedLeg || !s || !s.frontRefundPriv)
+          throw new Error('refund-onchain blocked: fronted asset leg / refund key missing — fail closed (nothing reclaimed, still refundable)');
+        if (sa.frontRefunded) return;   // idempotent across a re-drive
+        const txid = await refundFrontedSeqLeg({ leg: sa.frontedLeg, refundPriv: s.frontRefundPriv,
+          asset: sa.seqAsset, tSeq: Number(sa.frontedLeg.t_seq) });
+        sa.frontRefunded = true;
+        persistJobs();
+        console.error(`[bridge] fronted asset leg reclaimed after T_seq (the taker never claimed): ${scrubDetail(String(txid))}`);
+        return;
+      }
       if (!s || !s.htlc || !s.lspRefundPriv) throw new Error('refund-onchain blocked: HTLC/refund-key missing — fail closed');
       // Fix 2 — REFUND FEE ADEQUACY: size the refund fee from estimatesmartfee (targeting confirmation within the
       // hold's remaining life, holdBuffer blocks) with a floor/ceiling, so the refund confirms INSIDE the hold —
@@ -2307,6 +2372,10 @@ function makeBridgeIo({ match, body, job }) {
     // floor/ceiling). A flip to spent_claim / a buried refund makes the next observe drive recoup/done instead.
     refundBump: async (leg, step, obs) => {
       const s = st(leg.unit);
+      // Nothing to RBF on a fronted job: the fee-bump race exists because a stalled
+      // 0-conf BTC refund can be beaten by a maker claim, and a fronted job funded no
+      // BTC HTLC for a maker to claim. Its asset refund is a plain post-T_seq spend.
+      if (job.bridge_front && job.bridge_front.armed) return;
       if (!s || !s.htlc || !s.lspRefundPriv) throw new Error('refund-bump blocked: HTLC/refund-key missing — fail closed');
       const tip = Number(obs && obs.tip) || 0;
       await runPayerRefundBumpOnce({
@@ -2389,6 +2458,186 @@ function refundBridgeHtlcBtc({ htlc, refundPriv, feeSats }) {
     if (refundWallet) args.push('-btc-wallet', refundWallet);
     execFile(CFG.seqobCli, args, { timeout: CFG.mixedTimeoutMs, maxBuffer: 4 << 20 }, (err, stdout) => {
       if (err) return reject(new Error(`refund BTC HTLC: ${scrubDetail(err.message)}`));
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+// ══ BRIDGED-RAIL ASSET FRONTING ═══════════════════════════════════════════════
+//
+// WHY. A taker paying BTC over Lightning should never be slowed down by which rail
+// the best-priced offer happens to rest on. The bridge already absorbs half of
+// that: the taker's LN is held instantly and the LSP funds the on-chain BTC. But
+// the ASSET still came from the maker, and a cross maker will not lock its asset
+// until its node's anchor is past the BTC leg's height — by anchoring supremacy,
+// that is what makes a Bitcoin reorg erasing the BTC leg also reorg away the block
+// holding its asset lock. That wait is the MAKER's safety and is correct. It just
+// has no business being the USER's wait.
+//
+// So the LSP fronts the asset leg too: it locks its OWN inventory to the taker on
+// the SAME hash H, at the same T_seq, and hands that leg over immediately. The
+// taker claims it with P exactly as it would have claimed the maker's, which
+// publishes P on Sequentia, which lets the LSP settle the held invoice. Every
+// downstream step (observe P -> recoup-settle) is untouched — only the SOURCE of
+// the asset leg changes.
+//
+// ⚠ THE INVARIANT THAT MAKES THIS SAFE: a job must NEVER both front an asset leg
+// on H and fund a BTC HTLC on H.
+//
+// Without fronting, P becomes public only when the taker claims the MAKER's asset
+// leg — so by the time the maker can use P to sweep the LSP's BTC HTLC, it has
+// already delivered the asset. Fronting breaks that binding: the taker's claim of
+// OUR leg publishes P while the maker has locked nothing, and any maker watching
+// the chain could then take our BTC HTLC and simply never lock. We would be out
+// the asset AND the on-chain BTC.
+//
+// The front therefore REPLACES the BTC funding rather than following it. A fronted
+// job never funds a BTC HTLC, and releases the maker's lift instead of driving it.
+// Economically the LSP has simply sold its own inventory at the book's best price:
+// asset out, the taker's BTC-LN in, nothing else outstanding. Replenishing that
+// inventory from the maker is an ordinary cross take the LSP can run later, on a
+// hash of its own, with no user waiting on it.
+//
+// If the taker never claims, the LSP reclaims its asset on the refund branch after
+// T_seq (seqob-cli xseq-refund, added for exactly this) and the taker's hold
+// expires untouched — double no-loss, the same shape as the BTC path.
+
+// Read-only JSON-RPC to a NAMED wallet on the Sequentia node. seqRpcCall is
+// wallet-less (it serves the public /anchor read); inventory lives in a wallet.
+async function seqWalletRpcCall(method, params = [], wallet = '') {
+  if (!CFG.seqRpc) throw new Error('SEQ_RPC not configured');
+  const u = new URL(CFG.seqRpc);
+  const auth = 'Basic ' + Buffer.from(`${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`).toString('base64');
+  const base = `${u.protocol}//${u.host}`;
+  const endpoint = wallet ? `${base}/wallet/${encodeURIComponent(wallet)}` : base;
+  const r = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: auth },
+    body: JSON.stringify({ jsonrpc: '1.0', id: 'lsp-front', method, params }),
+    signal: AbortSignal.timeout(8000),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error((j.error && j.error.message) || `seq rpc ${method} error`);
+  return j.result;
+}
+
+// CONFIRMED, unreserved atoms of `assetId` the front wallet can lock right now.
+// Deliberately confirmed-only: xfund-seq broadcasts immediately (-no-wait), and
+// building it on an unconfirmed input would leave the taker's leg dependent on a
+// parent that may never confirm. Best-effort — an unreadable node advertises no
+// inventory, so the job falls back to the maker path rather than promising an
+// instant fill it cannot deliver.
+async function frontableSeqAtoms(assetId) {
+  if (!CFG.frontSeqWallet || !assetId) return 0;
+  try {
+    const utxos = await seqWalletRpcCall('listunspent', [1, 9999999], CFG.frontSeqWallet);
+    let atoms = 0;
+    for (const u of (utxos || [])) {
+      if (String(u.asset || '').toLowerCase() !== String(assetId).toLowerCase()) continue;
+      // Elements reports `amount` in whole units; the HTLC is denominated in atoms.
+      atoms += Math.round(Number(u.amount || 0) * 1e8);
+    }
+    return atoms;
+  } catch { return 0; }
+}
+
+// Lock the LSP's OWN asset in an on-chain HTLC paying `claimPub` (the REAL taker)
+// on H, refundable to us after T_seq. -no-wait returns at broadcast (0-conf), which
+// is the whole point: the taker is handed a leg it can claim in the same breath,
+// with no block wait anywhere in the user's path.
+function fundFrontedSeqLeg({ claimPub, hashH, atoms, asset, tSeq, refundPriv }) {
+  return new Promise((resolve, reject) => {
+    if (!CFG.seqRpc || !CFG.frontSeqWallet) return reject(new Error('asset fronting not configured (SEQ_RPC + FRONT_SEQ_WALLET)'));
+    const args = ['xfund-seq', '-seq-rpc', CFG.seqRpc, '-seq-wallet', CFG.frontSeqWallet,
+      '-asset', String(asset), '-seq-amount', String(atoms), '-hash', String(hashH),
+      '-maker-claim-pub', String(claimPub), '-refund-priv', String(refundPriv),
+      '-seq-locktime', String(tSeq), '-no-wait'];
+    execFile(CFG.seqobCli, args, { timeout: CFG.mixedTimeoutMs, maxBuffer: 4 << 20 }, (err, stdout) => {
+      if (err) return reject(new Error(`front asset leg: ${scrubDetail(err.message)}`));
+      try { resolve(JSON.parse(stdout)); } catch { reject(new Error('front asset leg: bad JSON')); }
+    });
+  });
+}
+
+// Fund the fronted asset leg and hand it to the taker. Idempotent across a re-drive
+// (sa.frontedLeg is the marker), and it observes the SAME fund-safety discipline as
+// the BTC path: mint + PERSIST the refund key BEFORE the irreversible broadcast, so
+// a crash in that window can never leave our own inventory locked in an HTLC whose
+// refund branch we cannot sign; then VERIFY-NOT-TRUST what actually landed on-chain
+// before the taker is told to claim it.
+async function frontAssetLeg({ job, s, sa }) {
+  const atoms = Number(job.bridge_front.atoms);
+  const tSeq = Number(job.bridge_front.t_seq);
+  const claimPub = sa.takerSeqClaimPub || (job.bridge_terms && job.bridge_terms.taker_seq_claim_pub) || '';
+
+  if (!sa.frontedLeg) {
+    if (!s.frontRefundPriv || !s.frontRefundPub) {
+      const rk = newBridgeClaimKeypair();
+      s.frontRefundPriv = rk.privHex;   // the ONLY key that reclaims this leg after T_seq
+      s.frontRefundPub = rk.pubHex;
+      persistJobs();                    // durable BEFORE any broadcast
+    }
+    const funded = await fundFrontedSeqLeg({ claimPub, hashH: s.hashH, atoms,
+      asset: sa.seqAsset, tSeq, refundPriv: s.frontRefundPriv });
+    // The leg must be refundable with the key we persisted, or our own inventory is
+    // locked in an HTLC only the taker can ever move.
+    if (String(funded.refund_pub || '').toLowerCase() !== String(s.frontRefundPub).toLowerCase())
+      throw new Error('fronted asset leg built on a refund pubkey that is not ours — refusing to record an un-refundable leg');
+    sa.frontedLeg = { txid: funded.seq_htlc_txid, vout: funded.seq_htlc_vout ?? 0,
+      amount: funded.amount || atoms, redeem_script: funded.redeem_script,
+      t_seq: Number(funded.seq_locktime || tSeq) };
+    persistJobs();
+    console.error(`[bridge] fronted asset leg broadcast ${sa.frontedLeg.txid}:${sa.frontedLeg.vout} (${atoms} atoms, 0-conf) — claimable by the taker with P now`);
+  }
+
+  // VERIFY-NOT-TRUST before handing it over: prove the leg we just built really pays
+  // the taker on H, for the agreed asset and at least the agreed atoms. A mismatch
+  // fails closed — the taker is never pointed at a leg it cannot claim, and ours
+  // refunds at T_seq.
+  const fl = sa.frontedLeg;
+  let observed = null;
+  try { observed = await xhtlcObserve({ rpc: CFG.seqRpc, txid: fl.txid, vout: fl.vout, hashH: s.hashH, redeem: fl.redeem_script }); }
+  catch (e) { throw new Error(`fronted asset leg observe failed (re-drive; nothing handed to the taker): ${scrubDetail(String((e && e.message) || e))}`); }
+  const v = checkMakerAssetLegObserved({ observed, expectAssetId: sa.seqAsset, expectAtoms: atoms });
+  if (!v.ok) throw new Error(`fronted asset leg REFUSED (fail closed, not handed to the taker): ${v.reason}`);
+
+  // Hand off exactly as the maker's leg would have been: the taker re-verifies
+  // sha256(P)==H and claim==its own key, then claims self-custody. sa.onchain is what
+  // observe reads P from, which is what settles the held invoice.
+  sa.onchain = { txid: fl.txid, vout: fl.vout, redeem: fl.redeem_script };
+  sa.makerSeqLeg = { txid: fl.txid, vout: fl.vout, redeem_script: fl.redeem_script, amount: fl.amount };
+  s.forwardRelayDone = true;
+  job.maker_seq_leg = sa.makerSeqLeg;
+  if (job.bridge_terms) job.bridge_terms.maker_seq_leg = sa.makerSeqLeg;
+  job.bridge_front.delivered = true;
+  persistJobs();
+
+  // RELEASE THE MAKER'S LIFT. We are not taking its offer — we sold our own
+  // inventory — so freeing its single in-flight slot at once keeps the offer
+  // takeable by the next taker instead of wedged until its timeout.
+  try {
+    const sess = job._bridgeSession;
+    if (sess) { await sess.fail('taker_abort', 'the LSP fronted this leg from inventory; releasing the lift'); sess.close(); }
+  } catch { /* best-effort: the relay also frees it when the socket drops */ }
+  job._bridgeSession = null;
+  persistJobs();
+  console.error('[bridge] fronted asset leg handed to the taker; maker lift released (no BTC HTLC was funded for this job)');
+}
+
+// Reclaim a fronted asset leg the taker never claimed, after T_seq. The mirror of
+// refundBridgeHtlcBtc on the asset side.
+function refundFrontedSeqLeg({ leg, refundPriv, asset, tSeq, feeSats }) {
+  return new Promise((resolve, reject) => {
+    if (!CFG.seqRpc || !CFG.frontSeqWallet) return reject(new Error('asset refund not configured (SEQ_RPC + FRONT_SEQ_WALLET)'));
+    if (!leg || !leg.txid || !leg.redeem_script || !(Number(leg.amount) > 0) || !refundPriv || !tSeq)
+      return reject(new Error('refund fronted asset leg: missing leg{txid,vout,amount,redeem_script} / refundPriv / T_seq — fail closed'));
+    const args = ['xseq-refund', '-seq-rpc', CFG.seqRpc, '-seq-wallet', CFG.frontSeqWallet,
+      '-txid', String(leg.txid), '-vout', String(leg.vout || 0), '-amount', String(leg.amount),
+      '-asset', String(asset), '-redeem-script', String(leg.redeem_script),
+      '-t-seq', String(tSeq), '-refund-priv', String(refundPriv)];
+    if (Number.isFinite(Number(feeSats)) && Number(feeSats) > 0) args.push('-spend-fee', String(Math.floor(Number(feeSats))));
+    execFile(CFG.seqobCli, args, { timeout: CFG.mixedTimeoutMs, maxBuffer: 4 << 20 }, (err, stdout) => {
+      if (err) return reject(new Error(`refund fronted asset leg: ${scrubDetail(err.message)}`));
       resolve(String(stdout || '').trim());
     });
   });
