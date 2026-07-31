@@ -368,6 +368,18 @@ export function crossingShapeSupported(plan) {
   // value move.
   if (btcBridged && assetBridged) return false;
   if (btcBridged) return btc.lnSide === 'receiver' || btc.lnSide === 'payer';
+  // THE ASSET LEG CROSSING, lnSide 'receiver' — the taker RECEIVES the asset over
+  // Lightning from an ON-CHAIN maker, paying its own BTC on-chain. Now settleable: the
+  // LSP delivers the asset over LN by paying a bare-hash hold on H from its own asset
+  // node (lsp-server payAssetHoldByHash, the same recipe as the Go maker's PayHash), and
+  // waitsendpay hands back P the instant the taker takes it — which is exactly what it
+  // recoups the taker's on-chain BTC HTLC with. Same front-then-recoup shape as the BTC
+  // 'receiver' bridge, one leg over.
+  //
+  // Still refused for 'payer' (the taker PAYS the asset over Lightning to an on-chain
+  // maker): that would need the LSP to originate an on-chain asset HTLC against a
+  // received asset hold, which nothing implements.
+  if (assetBridged) return asset.lnSide === 'receiver';
   return false;
 }
 
