@@ -700,11 +700,34 @@ test('P3.2 crossingShapeSupported: a payer-side BTC-leg bridge (BUY, pay BTC ove
   assert.equal(crossingShapeSupported(plan), true);   // the LSP payer leg-bridge funds the on-chain BTC HTLC to the maker
 });
 
-test('P3.2 crossingShapeSupported: an asset-leg bridge (maker sub-asset LN, taker wants asset on-chain) is NOT wired', () => {
+// NOW WIRED. The maker delivers its asset over Lightning and the taker wants it ON-CHAIN. Refusing this
+// broke the promise rail-blind matching exists to make: a GOLD take was told "this wallet cannot turn
+// that into an on-chain receipt" purely because the best-priced offer delivered over Lightning -- a
+// price the user was shown and then denied.
+//
+// It settles by sourcing the asset from that maker as PRINCIPAL (lsp-server sourceAssetOverLn) and
+// fronting it on-chain to the taker on the TAKER's H. Two atomic swaps, not one forwarded preimage: a
+// pure-LN maker negotiates its OWN H and cannot be handed someone else's. The LSP carries the risk
+// between them, bounded by ORDER -- it fronts only after the source take has settled.
+test('P3.2 crossingShapeSupported: maker delivers the asset over LN, taker wants it on-chain -> WIRED', () => {
   const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'ln' });
   const plan = planSettlement(m);
   assert.equal(plan.assetLeg.bridge, true);
-  assert.equal(crossingShapeSupported(plan), false);
+  assert.equal(plan.assetLeg.lnSide, 'payer', 'on the asset leg the payer is the SELLER — here, the maker');
+  assert.equal(plan.takerSide, 'buy', 'and the plan must carry which endpoint the taker is');
+  assert.equal(crossingShapeSupported(plan), true);
+});
+
+// The SAME lnSide, the OTHER taker: this must stay refused, and the pair is asserted together because
+// admitting both with one blanket check is exactly the bug that a single-lnSide predicate invites.
+test('P3.2 crossingShapeSupported: taker PAYS the asset over LN to an on-chain maker -> still refused', () => {
+  const m = matchFromTake({ asset: 'GOLD', side: 'sell', payRail: 'ln', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'chain' });
+  const plan = planSettlement(m);
+  assert.equal(plan.assetLeg.bridge, true);
+  assert.equal(plan.assetLeg.lnSide, 'payer', 'same lnSide as the wired shape above');
+  assert.equal(plan.takerSide, 'sell', 'but the LN end is the TAKER, which is a different problem');
+  assert.equal(crossingShapeSupported(plan), false,
+    'refused: nothing originates an on-chain asset HTLC against a received asset hold');
 });
 
 // THE SHAPE THIS FILE HAD NO WORD FOR: the taker pays BTC ON-CHAIN and wants the asset over LIGHTNING,
@@ -743,13 +766,7 @@ test("P3.2 crossingShapeSupported: an asset-leg bridge, lnSide 'receiver' (taker
 
 // The OTHER asset-leg direction stays refused, and deliberately: 'payer' would need the LSP
 // to originate an ON-CHAIN asset HTLC against a received asset hold, which nothing implements.
-test("P3.2 crossingShapeSupported: an asset-leg bridge, lnSide 'payer' (taker PAYS the asset over LN) is NOT wired", () => {
-  const m = matchFromTake({ asset: 'GOLD', side: 'sell', payRail: 'ln', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'chain' });
-  const plan = planSettlement(m);
-  if (plan.assetLeg && plan.assetLeg.bridge && plan.assetLeg.lnSide === 'payer')
-    assert.equal(crossingShapeSupported(plan), false,
-      'refused: no path originates an on-chain asset HTLC against a received asset hold');
-});
+
 
 test('P3.2 crossingShapeSupported: a HAPPY coincidence is never "supported" (settle natively, not via the bridge)', () => {
   const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'chain' });
@@ -793,18 +810,26 @@ test('P3.2 describeCrossingSupport: publishes the wired shape + supported crossi
   for (const s of d.unsupported_crossings) assert.equal(s.supported, false);
   // EXACTLY ONE LEG CROSSES, and the LSP has a delivery+recoup for whichever one it is:
   //   • BTC leg crosses (asset native) — the original bridge, both lnSides;
-  //   • ASSET leg crosses, lnSide 'receiver' — the taker receives the asset over Lightning
-  //     while paying BTC on-chain; the LSP pays a bare-hash asset hold and recoups the
-  //     taker's on-chain BTC HTLC with the P waitsendpay returns.
-  // Never both, and never an asset-leg 'payer' (nothing originates an on-chain asset HTLC
-  // against a received asset hold).
+  //   • ASSET leg, lnSide 'receiver' — the taker receives the asset over Lightning while paying BTC
+  //     on-chain; the LSP pays a bare-hash asset hold and recoups the taker's on-chain BTC HTLC with
+  //     the P waitsendpay returns;
+  //   • ASSET leg, lnSide 'payer' AND the taker BUYS — the MAKER delivers over Lightning and the taker
+  //     wants it on-chain; the LSP sources the asset from that maker as principal and fronts it
+  //     on-chain on the taker's H.
+  // Never both legs. And never asset-leg 'payer' when the taker SELLS — that is the taker paying its
+  // asset over Lightning to an on-chain maker, which nothing originates.
   for (const s of d.supported_crossings) {
     const plan = planSettlement(matchFromTake({ asset: 'x', side: s.side, payRail: s.payRail, recvRail: s.recvRail, makerBtcRail: 'chain', makerAssetRail: s.makerAssetRail }));
     const btcX = !!(plan.btcLeg && plan.btcLeg.bridge), assetX = !!(plan.assetLeg && plan.assetLeg.bridge);
     assert.ok(btcX !== assetX, `exactly one leg must cross: ${JSON.stringify(s)}`);
-    if (assetX) assert.equal(plan.assetLeg.lnSide, 'receiver',
-      `a supported asset-leg crossing is 'receiver' only: ${JSON.stringify(s)}`);
+    if (assetX) {
+      assert.ok(plan.assetLeg.lnSide === 'receiver' || (plan.assetLeg.lnSide === 'payer' && plan.takerSide === 'buy'),
+        `a supported asset-leg crossing is 'receiver', or 'payer' with the taker buying: ${JSON.stringify(s)}`);
+    }
   }
+  // The taker-sells asset-leg 'payer' shape must be published as UNsupported, not quietly absent —
+  // a client reading this descriptor has to be able to see the gap.
+  for (const s of d.unsupported_crossings) assert.equal(s.supported, false);
   // BOTH a sell/receiver and a buy/payer BTC-leg crossing are now supported.
   assert.ok(d.supported_crossings.some((s) => s.side === 'sell' && s.recvRail === 'ln'), 'sell/receiver crossing supported');
   assert.ok(d.supported_crossings.some((s) => s.side === 'buy' && s.payRail === 'ln'), 'buy/payer crossing supported');

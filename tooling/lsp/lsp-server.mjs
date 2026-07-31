@@ -2918,6 +2918,50 @@ function fundFrontedSeqLeg({ claimPub, hashH, atoms, asset, tSeq, refundPriv }) 
   });
 }
 
+// SOURCE THE ASSET FROM AN LN-DELIVERING MAKER, AS PRINCIPAL.
+//
+// The gap this closes: rail-blind matching promises the best-priced offer is takeable whatever rail
+// it rests on, but an offer whose ASSET leg is Lightning could not fill an ON-CHAIN receive, so the
+// composer refused it outright. That refusal is the one thing rail-blind matching exists to prevent.
+//
+// Why it needed principal risk rather than another hop on the shared H. Every bridged leg so far
+// forwards ONE preimage: the LSP terminates one rail and originates the other on the SAME H, so it is
+// never exposed between them. A pure-LN (`xpln`) maker cannot participate in that — it negotiates its
+// OWN H with whoever takes it, and only a bare-hash payer (the sub-asset makers) can be told to pay a
+// hold on someone else's H. So there is no shared-H path to an xpln maker, and pretending otherwise
+// would mean claiming an atomicity we do not have.
+//
+// What we do instead is what an LSP is for: TAKE THE OFFER OURSELVES, with our own nodes and our own
+// H, and separately front the asset on-chain to the taker on the TAKER's H, recouping from the
+// taker's held payment. Two atomic swaps, and the LSP carries the risk in between -- bounded, because
+// it only fronts after this take has actually SETTLED, so the asset is ours before any of it is
+// promised onward. That is the same front-then-recoup shape as every other bridged leg; only the
+// source of the inventory is different.
+async function sourceAssetOverLn({ assetId, atoms, offerId, makerPubkey }) {
+  if (!CFG.subasLpRpc) throw new Error('cannot source the asset over Lightning: no LP asset node configured (SUBAS_LP_RPC)');
+  const btcSock = targetFor('btc', null, null).rpc;
+  if (!btcSock) throw new Error('cannot source the asset over Lightning: no LSP BTC Lightning node');
+  const args = [
+    'xpln', '-side', 'buy', '-relay', CFG.relay,
+    '-asset', assetId, '-btc-asset', CFG.btcx,
+    '-asset-ln-socket', CFG.subasLpRpc, '-ln-socket', btcSock,
+    '-terms-wait', '60s', '-hold-wait', '90s',
+  ];
+  if (offerId) args.push('-offer-id', String(offerId));
+  if (makerPubkey) args.push('-maker-pubkey', String(makerPubkey));
+  const { err, out } = await new Promise((resolve) =>
+    execFile(CFG.seqobCli, args, { timeout: CFG.swapTimeoutMs, maxBuffer: 8 << 20 },
+      (e, so, se) => resolve({ err: e, out: (so || '') + (se || '') })));
+  const m = out.match(/PURE-LN SWAP SETTLED:\s+(bought|sold)\s+(\d+)\s+([0-9a-f]+)\s+for\s+(\d+)\s+BTC sats/i);
+  if (!m) throw new Error(`sourcing ${assetLabel(assetId)} over Lightning did not settle: ${scrubDetail(err ? String(err.message || err) : out.slice(-300))}`);
+  const got = Number(m[2]);
+  // Never front more than we actually bought. Fronting against a short fill would lock inventory we
+  // do not have against a recoup sized for inventory we do.
+  if (got < Number(atoms)) throw new Error(`sourced only ${got} of the ${atoms} needed — not fronting a leg we cannot cover`);
+  console.error(`[bridge] sourced ${got} ${assetLabel(assetId)} over Lightning as principal (paid ${m[4]} sats) — now frontable on-chain`);
+  return { ok: true, atoms: got, paidSats: Number(m[4]) };
+}
+
 // Fund the fronted asset leg and hand it to the taker. Idempotent across a re-drive
 // (sa.frontedLeg is the marker), and it observes the SAME fund-safety discipline as
 // the BTC path: mint + PERSIST the refund key BEFORE the irreversible broadcast, so
@@ -2930,6 +2974,17 @@ async function frontAssetLeg({ job, s, sa }) {
   const claimPub = sa.takerSeqClaimPub || (job.bridge_terms && job.bridge_terms.taker_seq_claim_pub) || '';
 
   if (!sa.frontedLeg) {
+    // OWN IT BEFORE PROMISING IT. When the matched maker delivers its asset over Lightning there is
+    // no on-chain maker leg to claim later, so the inventory has to come from somewhere: buy it from
+    // that maker as principal FIRST, and only then fund the taker's on-chain leg. Ordering is the
+    // whole safety property — fronting first would lock an asset we might fail to source.
+    // Idempotent: sourcedOverLn is persisted, so a re-drive never buys twice.
+    if (job.bridge_front && job.bridge_front.source_over_ln && !s.sourcedOverLn) {
+      const r = await sourceAssetOverLn({ assetId: sa.seqAsset, atoms,
+        offerId: job.bridge_front.source_offer_id, makerPubkey: job.bridge_front.source_maker_pubkey });
+      s.sourcedOverLn = { atoms: r.atoms, paid_sats: r.paidSats, at: Date.now() };
+      persistJobs();
+    }
     if (!s.frontRefundPriv || !s.frontRefundPub) {
       const rk = newBridgeClaimKeypair();
       s.frontRefundPriv = rk.privHex;   // the ONLY key that reclaims this leg after T_seq
