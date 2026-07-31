@@ -3605,7 +3605,7 @@ async function reviewBridged(route, bp){
   // every subsequent one, with the user told to finish something that could not be
   // finished. Awaited (not fire-and-forget) so the very first press re-checks.
   try { await reconcileJobStatus(true); } catch {}
-  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = inFlightBlockMessage(); return; }
+  if (!tradeSlotsFree()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   const am = C.assetMeta(route.seqAsset) || {};
   const aprec = am.precision || 0, tk = am.ticker || 'asset';
   // P3.1 — FORMATTED units, never raw atoms/sats, and the SIZED take (bp.takeAtoms/takeBtc), never the
@@ -3655,7 +3655,7 @@ async function reviewBridged(route, bp){
 // Persist BEFORE the /swap POST (persist-before-broadcast): a lost 202 + retry (or a restart) re-POSTs
 // with the SAME swap_nonce, which the LSP dedupes to ONE job — never a second funded HTLC.
 async function startBridged(route, bp, rails){
-  if (_bridgeStarting || hasBridgeInFlight() || hasSubswapInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
+  if (_bridgeStarting || !tradeSlotsFree()){ try { C.toast && C.toast(inFlightBlockMessage()); } catch {} return; }
   _bridgeStarting = true;
   try {
     const asset = route.seqAsset;
@@ -4154,20 +4154,56 @@ async function ensureBtcNodeKey(){
 // in-flight swap MUST survive a reload (else a crash between the irreversible act and the claim, or before a
 // T_seq refund, strands funds). Fund-safety: P + the verified leg are persisted BEFORE the claim.
 // ===========================================================================
-const SUBSWAP_KEY = 'swk.sequentia.subswap';
-let SUBSWAP = null;
-try { SUBSWAP = JSON.parse(localStorage.getItem(SUBSWAP_KEY) || 'null'); } catch { SUBSWAP = null; }
+// MORE THAN ONE TRADE AT A TIME.
+//
+// This was a single localStorage slot and a single module-level record, so the wallet
+// could only ever hold one rail-crossing trade — every new take was refused while one
+// was in flight, and a take that wedged locked the wallet out until it was cleared by
+// hand. Nothing about the protocol needs that: each record already carries its OWN
+// preimage, refund key, offer and leg, so two trades share no state that could collide.
+// The limit was the storage shape, not the settlement.
+//
+// Records are now a LIST. Each gets an `id` at creation and is driven independently,
+// so a stalled trade no longer blocks the next one and the Active-trades view shows
+// them all. The legacy single-record slot is migrated on first load, so a trade that
+// was in flight across the upgrade is preserved rather than orphaned with its funds.
+const SUBSWAP_KEY = 'swk.sequentia.subswap';     // legacy single slot (read once, then migrated)
+const SUBSWAPS_KEY = 'swk.sequentia.subswaps';
+function newTradeId(){ return 'sw-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+let SUBSWAPS = [];
+try {
+  const raw = JSON.parse(localStorage.getItem(SUBSWAPS_KEY) || 'null');
+  if (Array.isArray(raw)) SUBSWAPS = raw.filter(Boolean);
+} catch { SUBSWAPS = []; }
+if (!SUBSWAPS.length){
+  try { const one = JSON.parse(localStorage.getItem(SUBSWAP_KEY) || 'null'); if (one) SUBSWAPS = [one]; } catch {}
+}
+for (const r of SUBSWAPS) if (r && !r.id) r.id = newTradeId();
 function saveSubswap(){
-  try { localStorage.setItem(SUBSWAP_KEY, JSON.stringify(SUBSWAP)); } catch {}
+  try { localStorage.setItem(SUBSWAPS_KEY, JSON.stringify(SUBSWAPS)); } catch {}
+  try { localStorage.removeItem(SUBSWAP_KEY); } catch {}
   // Surface EVERY transition. These rails have no process view of their own, so
   // without this the trade ran invisibly and a stall was indistinguishable from the
   // app having ignored the button press. renderInFlightCard no-ops when its host is
   // absent, so this is safe from any context.
   try { renderInFlightCard(); } catch {}
 }
-function clearSubswap(){ SUBSWAP = null; try { localStorage.removeItem(SUBSWAP_KEY); } catch {} try { renderInFlightCard(); } catch {} }
-function subswapTerminal(){ return !SUBSWAP || SUBSWAP.state === 'settled' || SUBSWAP.state === 'failed' || SUBSWAP.state === 'refunded'; }
-export function hasSubswapInFlight(){ return !!SUBSWAP && !subswapTerminal(); }
+function addSubswap(rec){ rec.id = rec.id || newTradeId(); SUBSWAPS.push(rec); saveSubswap(); return rec; }
+// Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
+function clearSubswap(rec){
+  if (!rec){ SUBSWAPS = []; saveSubswap(); return; }
+  SUBSWAPS = SUBSWAPS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
+  saveSubswap();
+}
+function subswapTerminal(b){ return !b || b.state === 'settled' || b.state === 'failed' || b.state === 'refunded'; }
+function activeSubswaps(){ return SUBSWAPS.filter((r) => !subswapTerminal(r)); }
+function subswapById(id){ return SUBSWAPS.find((r) => r && r.id === id) || null; }
+export function hasSubswapInFlight(){ return activeSubswaps().length > 0; }
+// How many rail-crossing trades may run at once. Each is independent, but every one
+// ties up real value while it runs, so the ceiling is a deliberate bound rather than
+// an accident of storage.
+const MAX_CONCURRENT_TRADES = 3;
+function tradeSlotsFree(){ return (activeSubswaps().length + (hasBridgeInFlight() ? 1 : 0)) < MAX_CONCURRENT_TRADES; }
 
 // A plain-English status for the Active trades row. These records used to surface
 // nothing at all, so a stall was indistinguishable from an app that had ignored the
@@ -4209,7 +4245,10 @@ function bridgeClearable(b){
   if (b.job_id || b.poll) return false;                      // the LSP holds a job; let the driver finish
   return b.state === 'starting';
 }
-let _subswapDriving = false;
+// Driving is now PER RECORD: one stalled trade must not stop another from being
+// driven, which a single module-level flag guaranteed.
+const _drivingIds = new Set();
+function isDriving(rec){ return !!(rec && rec.id && _drivingIds.has(rec.id)); }
 // How long a rail-crossing take may sit in 'starting' before it is treated as failed.
 // Generous enough for a slow LSP round-trip and a JIT channel, short enough that a
 // wedged record does not outlive the user's patience.
@@ -4230,9 +4269,10 @@ const SUBSWAP_START_STALL_MS = 3 * 60 * 1000;
 // text named "Active trades" and stopped there, which is no help when the blocking
 // record is one that can simply be cleared.
 function inFlightBlockMessage(){
-  const b = SUBSWAP && !subswapTerminal() ? SUBSWAP : (BRIDGE && !bridgeTerminal() ? BRIDGE : null);
-  const clearable = b === SUBSWAP ? subswapClearable(b) : bridgeClearable(b);
-  const base = 'You already have a trade in progress · see Active trades';
+  const sub = activeSubswaps()[0] || null;
+  const b = sub || (BRIDGE && !bridgeTerminal() ? BRIDGE : null);
+  const clearable = sub ? subswapClearable(b) : bridgeClearable(b);
+  const base = `You already have ${MAX_CONCURRENT_TRADES} trades in progress · see Active trades`;
   return clearable
     ? base + '. Nothing of yours is committed to it, so you can Clear it there and start this one.'
     : base + '. Finish or reclaim it before starting another.';
@@ -4268,9 +4308,17 @@ async function reconcileJobStatus(force){
     // SUBSWAP. 'confirming' is not even a subswap state — so for the rail that
     // actually got stuck, the reconciler was inspecting the wrong object entirely
     // and would have found nothing however well it read the job.
-    const b = SUBSWAP || (bridgePreCommitment(BRIDGE) ? BRIDGE : null);
-    const isBridge = b && b === BRIDGE;
-    if (!b || (isBridge ? bridgeTerminal() : subswapTerminal()) || !(b.job_id || b.poll)) return;
+    // Every subswap record is reconciled, not just the first: with a list, a failed
+    // job on trade #2 must not be invisible because trade #1 is still healthy.
+    for (const r of activeSubswaps()) await reconcileOne(r, false, force);
+    const b = bridgePreCommitment(BRIDGE) ? BRIDGE : null;
+    if (b) await reconcileOne(b, true, force);
+  } catch {}
+}
+
+async function reconcileOne(b, isBridge, force){
+  try {
+    if (!b || (isBridge ? bridgeTerminal() : subswapTerminal(b)) || !(b.job_id || b.poll)) return;
     if (!isBridge && b.preimage && b.leg && b.leg.txid) return;      // committed: the driver owns it
     if (!force && Date.now() - _jobCheckAt < 15000) return;   // at most one probe per 15s when idle
     _jobCheckAt = Date.now();
@@ -4286,9 +4334,9 @@ async function reconcileJobStatus(force){
     if (!j || j.status !== 'failed') return;
     // Re-check the LIVE record, not the snapshot: the await above yields, and the
     // driver may have advanced or replaced it while the probe was in flight.
-    const now = isBridge ? BRIDGE : SUBSWAP;
+    const now = isBridge ? BRIDGE : subswapById(b.id);
     if (!now || now.job_id !== b.job_id) return;
-    if (isBridge ? (bridgeTerminal() || !bridgePreCommitment(now)) : subswapTerminal()) return;
+    if (isBridge ? (bridgeTerminal() || !bridgePreCommitment(now)) : subswapTerminal(now)) return;
     now.state = 'failed';
     now.detail = 'This trade could not be completed - your funds are safe.' +
       (j.error ? ' (' + String(j.error).slice(0, 160) + ')' : '');
@@ -4299,11 +4347,13 @@ async function reconcileJobStatus(force){
 function reapStalledCrossings(){
   const now = Date.now();
   try {
-    if (SUBSWAP && SUBSWAP.state === 'starting' && SUBSWAP.started_ms &&
-        now - SUBSWAP.started_ms > SUBSWAP_START_STALL_MS && !SUBSWAP.preimage && !SUBSWAP.job_id){
-      SUBSWAP.state = 'failed';
-      SUBSWAP.detail = 'This trade never got started · nothing of yours was committed. You can try again.';
-      saveSubswap();
+    for (const r of activeSubswaps()){
+      if (r.state === 'starting' && r.started_ms &&
+          now - r.started_ms > SUBSWAP_START_STALL_MS && !r.preimage && !r.job_id){
+        r.state = 'failed';
+        r.detail = 'This trade never got started · nothing of yours was committed. You can try again.';
+        saveSubswap();
+      }
     }
   } catch {}
   try {
@@ -4326,7 +4376,7 @@ async function reviewSubmarineP2P(route, disp){
   // every subsequent one, with the user told to finish something that could not be
   // finished. Awaited (not fire-and-forget) so the very first press re-checks.
   try { await reconcileJobStatus(true); } catch {}
-  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = inFlightBlockMessage(); return; }
+  if (!tradeSlotsFree()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   if (!(L && L.btcNodeKey && L.nodePay)){ $('swErr').textContent = 'This trade could not be placed right now - try again shortly.'; return; }
   const am = C.assetMeta(route.seqAsset) || {}; const tk = am.ticker || 'asset', aprec = am.precision || 0;
   const buy = disp.ln_direction === 1;
@@ -4459,7 +4509,7 @@ function walkStatusLine(w){
 }
 
 async function startSubswapP2P(route, disp){
-  if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
+  if (!tradeSlotsFree()){ try { C.toast && C.toast(inFlightBlockMessage()); } catch {} return; }
   if (disp.belowMin){ try { C.toast && C.toast('That amount is below the smallest this offer can fill · increase it to the minimum shown.'); } catch {} return; }   // fail closed — never place a below-minimum take
   const buy = disp.ln_direction === 1;
   // A multi-offer request becomes a WALK: the legs run one at a time through this
@@ -4470,7 +4520,7 @@ async function startSubswapP2P(route, disp){
   const leg = walking ? WALK.legs[0] : null;
   // P3.1 — persist the SIZED take (disp.takeAtoms/takeBtc), never the whole offer, so the courier bind, the
   // expect{atoms,msat} the driver gates on, and any resume all use the user's requested size (§2.4).
-  SUBSWAP = { kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: route.seqAsset,
+  const rec = addSubswap({ kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: route.seqAsset,
     offer_id: (leg ? leg.offer_id : disp.offer.id) || null,
     maker_pubkey: (leg ? leg.maker_pubkey : disp.offer.maker) || null,
     // The relay holding this offer — the courier must open there, not on the default.
@@ -4478,10 +4528,9 @@ async function startSubswapP2P(route, disp){
     asset_atoms: String(leg ? leg.takeAtoms : (disp.takeAtoms || 0)),
     btc_sats: String(leg ? leg.takeBtc : (disp.takeBtc || 0)),
     partial: !!disp.partial, walk: !!walking,
-    ln_direction: disp.ln_direction, started_ms: Date.now() };
-  saveSubswap();
+    ln_direction: disp.ln_direction, started_ms: Date.now() });
   if (walking) try { C.toast && C.toast(`Filling across ${WALK.legs.length} offers · follow it under Active trades.`); } catch {}
-  driveSubswap();
+  driveSubswap(rec);
 }
 
 // Start the walk's NEXT leg through the same per-leg path that settled the last one.
@@ -4491,13 +4540,12 @@ async function runNextWalkLeg(){
   const leg = WALK.legs[WALK.legIndex];
   if (!leg){ WALK.state = 'done'; saveWalk(); return; }
   const buy = WALK.side === 'buy';
-  SUBSWAP = { kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: WALK.asset,
+  const rec = addSubswap({ kind: buy ? 'p2p-buy' : 'p2p-sell', state: 'starting', asset: WALK.asset,
     offer_id: leg.offer_id, maker_pubkey: leg.maker_pubkey, relay_url: leg.relayUrl || null,
     asset_atoms: String(leg.takeAtoms), btc_sats: String(leg.takeBtc),
     partial: true, walk: true,
-    ln_direction: buy ? 1 : 0, started_ms: Date.now() };
-  saveSubswap();
-  await driveSubswap();
+    ln_direction: buy ? 1 : 0, started_ms: Date.now() });
+  await driveSubswap(rec);
 }
 
 // After a leg finishes, either run the next one or close the walk out honestly.
@@ -4518,16 +4566,17 @@ async function onWalkLegFinished(settled){
 // Drive the persisted subswap to completion (self-heals a transient gap; toasts on settle). Whole flow runs
 // in one live courier session; the RESUME-critical state (learned P + verified leg for a buy) is persisted
 // via the driver's onPaid before the claim, so a crash re-claims on the next boot (see resumeSubswap).
-async function driveSubswap(){
-  if (!SUBSWAP || subswapTerminal() || _subswapDriving) return;
+async function driveSubswap(rec){
+  const b0 = rec || activeSubswaps().find((r) => r.kind === 'p2p-buy' || r.kind === 'p2p-sell');
+  if (!b0 || subswapTerminal(b0) || isDriving(b0)) return;
   // ONLY the peer-to-peer kinds. Both drivers act on the same SUBSWAP record and
   // neither checked whose it was, so whichever ran first drove the other's trade with
   // the wrong protocol semantics — a p2p-buy got driven as a payer bridge and died on
   // "the maker never locked the asset leg" while the maker had in fact locked it and
   // was waiting to be paid.
-  if (SUBSWAP.kind !== 'p2p-buy' && SUBSWAP.kind !== 'p2p-sell') return;
-  _subswapDriving = true;
-  const b = SUBSWAP, asset = b.asset;
+  if (b0.kind !== 'p2p-buy' && b0.kind !== 'p2p-sell') return;
+  _drivingIds.add(b0.id);
+  const b = b0, asset = b.asset;
   try {
     if (b.kind === 'p2p-buy'){
       const deps = { ...subCommonDeps(),
@@ -4595,20 +4644,20 @@ async function driveSubswap(){
     console.warn('[subswap] drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
     // A failure AFTER learning P (buy) or funding the asset (sell) stays RESUMABLE (the claim/refund off-ramp
     // is still live); a failure before anything is committed is a clean terminal failure (nothing lost).
-    if (SUBSWAP && (SUBSWAP.preimage || (SUBSWAP.leg && SUBSWAP.leg.txid))){ SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; if (SUBSWAP.state === 'starting' || SUBSWAP.state === 'verifying' || SUBSWAP.state === 'paying') SUBSWAP.state = SUBSWAP.preimage ? 'claiming' : SUBSWAP.state; saveSubswap(); }
-    else if (SUBSWAP){ SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
-  } finally { _subswapDriving = false; }
-  const settled = !!(SUBSWAP && SUBSWAP.state === 'settled');
+    if (b.preimage || (b.leg && b.leg.txid)){ b.detail = 'This trade could not be completed - your funds are safe.'; if (b.state === 'starting' || b.state === 'verifying' || b.state === 'paying') b.state = b.preimage ? 'claiming' : b.state; saveSubswap(); }
+    else { b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
+  } finally { _drivingIds.delete(b.id); }
+  const settled = b.state === 'settled';
   // A WALK leg reports to the orchestrator instead of announcing itself: the user
   // agreed to one aggregate fill, so N per-leg "swap settled" toasts would misstate
   // what happened. A failed leg STOPS the walk — the remainder is never silently
   // re-routed to another offer at a price the user did not agree to.
-  if (SUBSWAP && SUBSWAP.walk && hasWalkInFlight()){
+  if (b.walk && hasWalkInFlight()){
     try { await C.sync(); } catch {}
     await onWalkLegFinished(settled);
     return;
   }
-  if (settled){ try { C.toast(SUBSWAP.kind === 'p2p-buy' ? 'Swap settled · the asset is yours.' : 'Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
+  if (settled){ try { C.toast(b.kind === 'p2p-buy' ? 'Swap settled · the asset is yours.' : 'Swap settled · you received Bitcoin over Lightning.'); } catch {} try { await C.sync(); } catch {} }
 }
 
 // Review the LSP PAYER leg-bridge — the BUY fallback vs an on-chain-only maker. The taker mints H (holds P),
@@ -4623,7 +4672,7 @@ async function reviewLspPayerBridge(route, disp){
   // every subsequent one, with the user told to finish something that could not be
   // finished. Awaited (not fire-and-forget) so the very first press re-checks.
   try { await reconcileJobStatus(true); } catch {}
-  if (hasBridgeInFlight() || hasSubswapInFlight()){ $('swErr').textContent = inFlightBlockMessage(); return; }
+  if (!tradeSlotsFree()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   // FAIL CLOSED (the ONLY surviving honest-disable): without the LSP payer-bridge hold + bare-hash pay this
   // shape has no settlement path, so refuse rather than offer-then-refuse. payerBridgeDisabledNote is the note.
   if (!(L && L.swap && L.bridgeHold && L.nodePayHash)){ $('swErr').textContent = payerBridgeDisabledNote(tk); return; }
@@ -4722,16 +4771,15 @@ function advanceSubswapToNextOffer(b, why){
       return advanceSubswapToNextOffer(b, why);
     }
     console.warn('[subswap] retrying on the next offer (' + bp.offer.id + ') after:', why);
-    SUBSWAP = { kind: b.kind, state: 'starting', asset: b.asset,
+    const rec = addSubswap({ kind: b.kind, state: 'starting', asset: b.asset,
       payRail: b.payRail, recvRail: b.recvRail,
       offer_id: bp.offer.id, maker_pubkey: bp.offer.maker || null,
       relay_url: bp.offer.relayUrl || null,
       asset_atoms: String(bp.takeAtoms || 0), btc_sats: String(bp.takeBtc || 0),
       offer_attempts: attempts + 1,
       detail: 'Finding another maker for this trade…',
-      started_ms: Date.now() };
-    saveSubswap();
-    driveLspPayerBridge();
+      started_ms: Date.now() });
+    driveLspPayerBridge(rec);
     return true;
   } catch (e){ console.warn('[subswap] retry planning error:', e); return false; }
 }
@@ -4754,43 +4802,43 @@ function sizedTake(disp){
 }
 
 async function startLspPayerBridge(route, disp, rails){
-  if (_subswapDriving || hasSubswapInFlight() || hasBridgeInFlight()){ try { C.toast && C.toast('A trade is already in progress · finish it first under Active trades.'); } catch {} return; }
+  if (!tradeSlotsFree()){ try { C.toast && C.toast(inFlightBlockMessage()); } catch {} return; }
   let sized;
   try { sized = sizedTake(disp); }
   catch (e){ console.warn('[subswap] refusing to place an unsized take:', e); try { C.toast && C.toast('This trade could not be sized - nothing was placed.'); } catch {} return; }
-  SUBSWAP = { kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
+  const rec = addSubswap({ kind: 'lsp-payer-buy', state: 'starting', asset: route.seqAsset,
     offer_id: disp.offer.id || null, maker_pubkey: disp.offer.maker || null,
     relay_url: disp.offer.relayUrl || null,
     asset_atoms: String(sized.atoms), btc_sats: String(sized.btc),
     payRail: (rails && rails.payRail) || S.payRail, recvRail: (rails && rails.recvRail) || S.recvRail, offer_attempts: 1,
     min_anchor_depth: Number((disp.offer.raw && (disp.offer.raw.min_anchor_depth ?? disp.offer.raw.minAnchorDepth)) || 0) || 0,
-    started_ms: Date.now() };
-  saveSubswap();
+    started_ms: Date.now() });
   // Say something IMMEDIATELY. resetComposer() has just cleared the form, so without
   // this the press produced no feedback whatsoever and the trade began invisibly.
   try { C.toast && C.toast('Trade started · follow it under Active trades.'); } catch {}
-  driveLspPayerBridge();
+  driveLspPayerBridge(rec);
 }
 
-async function driveLspPayerBridge(){
-  if (!SUBSWAP || subswapTerminal() || _subswapDriving) return;
+async function driveLspPayerBridge(rec){
+  const b0 = rec || activeSubswaps().find((r) => r.kind === 'lsp-payer-buy');
+  if (!b0 || subswapTerminal(b0) || isDriving(b0)) return;
   // ONLY the LSP payer-bridge kind — see the note in driveSubswap.
-  if (SUBSWAP.kind !== 'lsp-payer-buy') return;
+  if (b0.kind !== 'lsp-payer-buy') return;
   // STALL WATCHDOG. Nothing here is committed while the record is still 'starting',
   // so a start that never got past it is a failure, not a position — and leaving it
   // non-terminal wedged every future trade behind the in-flight guard with no way to
   // see or clear it. Fail it honestly instead, which also makes it clearable.
   try {
-    if (SUBSWAP.state === 'starting' && SUBSWAP.started_ms &&
-        Date.now() - SUBSWAP.started_ms > SUBSWAP_START_STALL_MS){
-      SUBSWAP.state = 'failed';
-      SUBSWAP.detail = 'This trade never got started · nothing of yours was committed. You can try again.';
+    if (b0.state === 'starting' && b0.started_ms &&
+        Date.now() - b0.started_ms > SUBSWAP_START_STALL_MS){
+      b0.state = 'failed';
+      b0.detail = 'This trade never got started · nothing of yours was committed. You can try again.';
       saveSubswap();
       return;
     }
   } catch {}
-  _subswapDriving = true;
-  const b = SUBSWAP, asset = b.asset;
+  _drivingIds.add(b0.id);
+  const b = b0, asset = b.asset;
   try {
     const deps = { ...subCommonDeps(),
       asset, assetAtoms: BigInt(b.asset_atoms), btcSats: BigInt(b.btc_sats),
@@ -4830,18 +4878,18 @@ async function driveLspPayerBridge(){
     await runLspPayerBridge(deps);
   } catch (e){
     console.warn('[subswap] payer-bridge drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
-    if (SUBSWAP && SUBSWAP.preimage && SUBSWAP.leg && SUBSWAP.leg.txid){ SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; SUBSWAP.state = 'claiming'; saveSubswap(); }
-    else if (SUBSWAP){
+    if (b.preimage && b.leg && b.leg.txid){ b.detail = 'This trade could not be completed - your funds are safe.'; b.state = 'claiming'; saveSubswap(); }
+    else {
       // PRE-COMMITMENT: no preimage and no funded leg, so nothing of the user's moved
       // and a different maker may simply work. This is the LIVE payer-bridge path — the
       // driver the composer actually uses for BTC-LN -> asset-on-chain.
       const why = String((e && e.message) || e || '');
-      _subswapDriving = false;                     // the retry re-enters this driver
-      if (retryableHandshakeFailure(why) && advanceSubswapToNextOffer(SUBSWAP, why)) return;
-      SUBSWAP.state = 'failed'; SUBSWAP.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap();
+      _drivingIds.delete(b.id);                    // the retry re-enters this driver
+      if (retryableHandshakeFailure(why) && advanceSubswapToNextOffer(b, why)) return;
+      b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap();
     }
-  } finally { _subswapDriving = false; }
-  if (SUBSWAP && SUBSWAP.state === 'settled'){ try { C.toast('Swap settled · the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
+  } finally { _drivingIds.delete(b.id); }
+  if (b.state === 'settled'){ try { C.toast('Swap settled · the asset is yours.'); } catch {} try { await C.sync(); } catch {} }
 }
 
 // Resume a persisted subswap on load. FUND-SAFETY: for a BUY that already learned P + verified the leg
@@ -4850,9 +4898,14 @@ async function driveLspPayerBridge(){
 // dropped. A p2p-buy/lsp-buy still pre-payment cannot resume its live courier session (nothing was
 // committed) — it is dropped so it never re-shows.
 export async function resumeSubswap(){
-  if (!SUBSWAP) return;
-  if (subswapTerminal()){ clearSubswap(); return; }
-  const b = SUBSWAP;
+  // Every persisted record resumes on its own. With a single slot only one trade could
+  // ever be recovered after a reload; the rest were simply lost along with whatever
+  // they had committed.
+  for (const r of SUBSWAPS.slice()) await resumeOneSubswap(r);
+}
+async function resumeOneSubswap(b){
+  if (!b) return;
+  if (subswapTerminal(b)){ clearSubswap(b); return; }
   // (A) A BUY that already learned P + verified the leg (state 'claiming'): re-claim idempotently (a crash
   //     between the irreversible act and the claim must never strand the asset — we hold P).
   if ((b.kind === 'p2p-buy' || b.kind === 'lsp-payer-buy') && b.preimage && b.leg && b.leg.txid){
@@ -7702,13 +7755,14 @@ function renderInFlightCard(){
       title: (WALK.side === 'buy' ? 'Buy ' : 'Sell ') + esc(metaOf(WALK.asset).ticker || 'asset'),
       status: walkStatusLine(WALK), action: 'clear-walk' });
   }
-  if (SUBSWAP && (hasSubswapInFlight() || SUBSWAP.state === 'failed')){
-    const am = metaOf(SUBSWAP.asset);
-    const buying = SUBSWAP.kind === 'p2p-buy' || SUBSWAP.kind === 'lsp-payer-buy';
-    rows.push({ view: null, need: SUBSWAP.state !== 'failed',
+  for (const S1 of SUBSWAPS){
+    if (!S1 || (subswapTerminal(S1) && S1.state !== 'failed')) continue;
+    const am = metaOf(S1.asset);
+    const buying = S1.kind === 'p2p-buy' || S1.kind === 'lsp-payer-buy';
+    rows.push({ id: S1.id, view: null, need: S1.state !== 'failed',
       title: (buying ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset') + (buying ? ' with Bitcoin' : ' for Bitcoin'),
-      status: SUBSWAP.detail || subswapStatusLine(SUBSWAP),
-      action: subswapClearable(SUBSWAP) ? 'clear-subswap' : null });
+      status: S1.detail || subswapStatusLine(S1),
+      action: subswapClearable(S1) ? 'clear-subswap' : null });
   }
   if (BRIDGE && (hasBridgeInFlight() || BRIDGE.state === 'failed')){
     const am = metaOf(BRIDGE.asset);
@@ -7735,7 +7789,7 @@ function renderInFlightCard(){
             : r.action === 'clear-sell' ? `<button type="button" class="ghost swclearsell">Clear</button>`
             : r.action === 'retry-sell' ? `<button type="button" class="ghost swretrysell">Retry</button>`
             : r.action === 'clear-walk' ? `<button type="button" class="ghost swclearwalk" title="Dismiss this finished walk. The part that filled is already yours.">Clear</button>`
-            : r.action === 'clear-subswap' ? `<button type="button" class="ghost swclearsub" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
+            : r.action === 'clear-subswap' ? `<button type="button" class="ghost swclearsub" data-id="${esc(r.id || '')}" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
             : r.action === 'clear-bridge' ? `<button type="button" class="ghost swclearbridge" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
             : '<span class="sub">automatic</span>'}
         </div>`).join('')
@@ -7770,7 +7824,10 @@ function renderInFlightCard(){
     clearWalk(); try { renderInFlightCard(); } catch {}
   });
   host.querySelectorAll('.swclearsub').forEach(b => b.onclick = () => {
-    clearSubswap(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
+    // Clear THIS trade. With several in flight, a button that dropped "the" record
+    // would silently discard whichever one happened to be first.
+    clearSubswap(subswapById(b.dataset.id) || null);
+    try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
     try { setReviewEnabled(false); requote().catch(()=>{}); } catch {}
   });
   host.querySelectorAll('.swclearbridge').forEach(b => b.onclick = () => {
@@ -8004,9 +8061,12 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   railsUnset: () => _railsUnset,
   advanceSubswapToNextOffer,
   sizedTake,
-  setSubswapRecord: (r) => { SUBSWAP = r; },
+  setSubswapRecord: (r) => { SUBSWAPS = r ? [Object.assign({ id: newTradeId() }, r)] : []; },
   setBridgeRecord: (r) => { BRIDGE = r; },
-  subswapRecord: () => SUBSWAP,
+  subswapRecord: () => SUBSWAPS[0] || null,
+  subswapRecords: () => SUBSWAPS,
+  addSubswap, clearSubswap, activeSubswaps, subswapById, tradeSlotsFree, subswapTerminal,
+  MAX_CONCURRENT_TRADES,
   bridgeRecord: () => BRIDGE,
   setUnifiedBook: (seqAsset, book) => { UBOOK = book ? { seqAsset, asks: book.asks || [], bids: book.bids || [] } : null; },
   // Drive the FULL composer requote for the cross (chain/chain) + mixed (sub-asset) branches, so a headless
