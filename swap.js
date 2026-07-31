@@ -2659,6 +2659,26 @@ async function requoteMixed(route, amtStr){
     minFill = offerMinFill(bp.offer, raw);
     const oid = String(bp.offer.id || '');
     matchedSub = oid ? (subassetOffers(route.seqAsset, side).find(o => String(o.offer_id || o.offerId || '') === oid) || null) : null;
+    // "NO SUB-ASSET COUNTERPART" IS NOT "NO LIQUIDITY ON THIS RAIL".
+    //
+    // The rail-blind best is whatever is cheapest across all four rails, and this path can
+    // only lift a SUB-ASSET offer (asset delivered over Lightning). When the best happens to
+    // be an on-chain or submarine maker there is no matching sub-asset offer by id, and this
+    // used to disable Place with the generic "could not be placed right now" — refusing a
+    // trade the sub-asset book could genuinely fill, one level down, with no reason given.
+    //
+    // Same shape, and same remedy, as the forward-cross branch: prefer the rail-blind best,
+    // and when it cannot be settled HERE re-quote against the best offer that can, DISPLAYING
+    // that one — so the displayed offer stays the offer lifted. No sub-asset offer at all
+    // still falls through to the honest refusal below.
+    if (!matchedSub){
+      const sub = subassetOffers(route.seqAsset, side)[0] || null;
+      if (sub){
+        matchedSub = sub;
+        offerAtoms = sub.asset_amount; offerBtc = sub.btc_sats;
+        minFill = BigInt(sub.min_fill || sub.minFill || 0);
+      }
+    }
   } else {
     // Unified feed has NO offer for this pair -> fall back to the sub-asset book for BOTH the display AND the
     // settlement (consistent: the displayed offer IS the one lifted).
