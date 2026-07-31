@@ -3515,6 +3515,33 @@ function prettyErr(e){
     return 'This transaction conflicts with one already in the mempool or a block; it may have already confirmed. Refresh to check; a confirmed transaction needs no bump.';
   if(/insufficient fee|min relay|fee too low|rejecting replacement/i.test(m))
     return 'The fee is too low for the network to accept; raise the fee rate and try again.';
+  // SETTLEMENT FAILURES THAT HAVE A NAME.
+  //
+  // The catch-all below is a real safeguard -- it stops any unanticipated error from leaking
+  // protocol internals into the UI. But it was also swallowing the failures we DO understand,
+  // so a swap that failed for a specific, explicable, often user-actionable reason reported
+  // "Something went wrong - please try again", and the only way to learn anything was to read
+  // a console warning. Seen live for a pure-LN swap whose real cause was the counterparty's
+  // node rejecting the payment: nothing in the interface said so.
+  //
+  // Each of these names WHAT happened and WHAT the user can do, without exposing the machinery.
+  // Order matters: the most specific cause wins, since several can appear in one message.
+  if(/redeem ?script mismatch|does not match quote/i.test(m))
+    return 'The other side of this trade changed before it completed, so it was refused rather than paid to the wrong party. Nothing was sent; anything already locked is returned automatically.';
+  if(/WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS|unknown payment|payment_hash.*unknown/i.test(m))
+    return 'The other side did not recognise this payment, so nothing was sent. Their offer has probably expired - reload the book and try again.';
+  if(/WIRE_TEMPORARY_NODE_FAILURE|temporary_node_failure|temporary channel failure|WIRE_TEMPORARY_CHANNEL_FAILURE/i.test(m))
+    return 'The other side’s Lightning node could not accept the payment just now, so nothing was sent. This usually clears on its own - try again, or take a different offer.';
+  if(/no route|route not found|failed to find a route|WIRE_UNKNOWN_NEXT_PEER/i.test(m))
+    return 'No Lightning route to the other side had room for this amount, so nothing was sent. Try a smaller amount or a different offer.';
+  if(/no verified .*offer found|offer (is )?(gone|expired|no longer)|unliftable/i.test(m))
+    return 'That offer is no longer on the book - reload the market and take a current one.';
+  if(/insufficient (funds|balance|capacity)|not enough (funds|liquidity)/i.test(m))
+    return 'There is not enough balance or Lightning capacity to complete this at the size requested. Try a smaller amount.';
+  if(/lightning-rpc|connection refused|ECONNREFUSED/i.test(m))
+    return 'Your Lightning node is not reachable right now, so nothing was sent. Reopen the wallet to reconnect it, then try again.';
+  if(/timed? ?out|timeout|deadline exceeded/i.test(m))
+    return 'This took too long to complete and was stopped, so nothing was committed. Try again.';
   // Anything not recognized as a plain, machinery-free sentence collapses to a safe default, so
   // no catch site can leak settlement internals even for an error we never anticipated.
   if(PRETTY_MACHINERY.test(m) || !looksPlain(m)){
