@@ -512,17 +512,17 @@ async function runForwardCourier(q){
         //    worse ratio than the one it signed — only fail to match it. A whole take reduces to
         //    tBtc === oBtc exactly as before.
         if (oSeq <= 0n || oBtc <= 0n)
-          throw abortTerms(s, 'the offer is missing its advertised amounts');
+          throw await abortTerms(s, 'the offer is missing its advertised amounts');
         const wantSeq = (atSeq > 0n && atSeq < oSeq) ? atSeq : oSeq;
         const wantBtc = proportionalBtcCeil(oBtc, wantSeq, oSeq);
         if (tSeq !== wantSeq)
-          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}, not the ${C.fmtAtoms(wantSeq, sm.precision)} ${sm.ticker} we asked to take`);
+          throw await abortTerms(s, `the maker quoted ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}, not the ${C.fmtAtoms(wantSeq, sm.precision)} ${sm.ticker} we asked to take`);
         if (tBtc !== wantBtc)
-          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the ${C.fmtAtoms(wantBtc,8)} BTC that slice prices to at the signed ratio`);
+          throw await abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the ${C.fmtAtoms(wantBtc,8)} BTC that slice prices to at the signed ratio`);
         if (!makerBtcClaimPub || !makerSeqRefundPub)
-          throw abortTerms(s, 'the maker’s terms were missing a key');
+          throw await abortTerms(s, 'the maker’s terms were missing a key');
         if (!(bl > sl))
-          throw abortTerms(s, `bad locktime ordering (T_btc ${bl} must exceed T_seq ${sl})`);
+          throw await abortTerms(s, `bad locktime ordering (T_btc ${bl} must exceed T_seq ${sl})`);
         // 2) The slice we take: takeSeq = the composer-requested amount (== the whole offer for a whole
         //    take). Refuse an over-ask (> the offer) or a non-positive slice BEFORE any BTC moves. Price the
         //    slice at the SIGNED offer's OWN ratio, CEIL (the maker never underpaid) — the SAME value the
@@ -530,12 +530,12 @@ async function runForwardCourier(q){
         //    (takeSeq == tSeq) reduces to fundBtc == tBtc, byte-identical to the pre-partial lift.
         const takeSeq = wantSeq;   // the slice the terms just bound to
         if (takeSeq <= 0n)
-          throw abortTerms(s, 'nothing to take (zero amount)');
+          throw await abortTerms(s, 'nothing to take (zero amount)');
         if (takeSeq > tSeq)
-          throw abortTerms(s, `you asked for ${C.fmtAtoms(takeSeq, sm.precision)} ${sm.ticker}, more than the offer's ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}`);
+          throw await abortTerms(s, `you asked for ${C.fmtAtoms(takeSeq, sm.precision)} ${sm.ticker}, more than the offer's ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}`);
         const fundBtc = proportionalBtcCeil(tBtc, takeSeq, tSeq);
         if (fundBtc <= 0n)
-          throw abortTerms(s, 'the slice prices to zero BTC (too small to take)');
+          throw await abortTerms(s, 'the slice prices to zero BTC (too small to take)');
         // MIN-SLICE DUST GUARD (mirror xminslice.go / xdriver.go:390-397): fail CLOSED, PRE-LOCK, when this
         // partial's BTC leg (fundBtc, ours to fund) or the asset it will CLAIM (takeSeq atoms) is sub-dust
         // AFTER the HTLC spend fee — an honest maker rejects it post-lock with 'amount_too_small', but by then
@@ -545,13 +545,13 @@ async function runForwardCourier(q){
         // name the slice, so comparing take-vs-terms would read every take as a whole one and skip the
         // guard entirely — exactly for the small partials it exists to catch.
         const _dustBtc = minSafeBtcReason(takeSeq, oSeq, fundBtc, DEFAULT_SPEND_FEE_SATS);
-        if (_dustBtc) throw abortAmountTooSmall(s, _dustBtc);
+        if (_dustBtc) throw await abortAmountTooSmall(s, _dustBtc);
         const _dustAsset = minSafeAssetReason(q.market.seq_asset, takeSeq, oSeq, takeSeq, DEFAULT_SPEND_FEE_SATS);
-        if (_dustAsset) throw abortAmountTooSmall(s, _dustAsset);
+        if (_dustAsset) throw await abortAmountTooSmall(s, _dustAsset);
         // Fee sanity vs the ACTUAL BTC we lock (the slice), never the whole offer: reject a maker fee
         // above ~1% of the slice + 1000 sats (defends against a punitive fee once the session is open).
         if (tFee > (fundBtc / 100n) + 1000n)
-          throw abortTerms(s, `the maker fee ${C.fmtAtoms(tFee,8)} BTC is too high`);
+          throw await abortTerms(s, `the maker fee ${C.fmtAtoms(tFee,8)} BTC is too high`);
 
         // Pre-lock handshake succeeded: bind the wizard to THIS offer + the priced SLICE, then lock.
         session = s; offer = atOffer;
@@ -680,14 +680,22 @@ async function runForwardCourier(q){
   }
 }
 // Seal a terms-mismatch abort into a thrown Error (the caller catches it).
-function abortTerms(session, why){
-  try { session.fail('terms_mismatch', why); } catch {}
+// RELEASE THE MAKER'S LIFT, AND WAIT FOR IT TO GO.
+//
+// session.fail is what tells the maker to free its single in-flight slot; the socket
+// close only tells the relay. These fired it WITHOUT awaiting and then threw, so the
+// caller closed the session before the frame could flush. The maker stayed "busy" for
+// its whole timeout, and the next take on that offer — ours, retrying — was refused
+// with "another lift is in flight (whole-HTLC, one at a time)". A taker that walks
+// away from a handshake it aborted must not wedge the offer behind it.
+async function abortTerms(session, why){
+  try { await session.fail('terms_mismatch', why); } catch {}
   return new Error('Terms didn’t match the offer: ' + why + ' - nothing was spent.');
 }
 // Seal an amount-too-small (min-slice dust) abort — the SAME code the Go maker uses (xdriver.go:391),
 // so a sub-dust slice is refused pre-lock exactly as the daemon would post-lock, but with nothing spent.
-function abortAmountTooSmall(session, why){
-  try { session.fail('amount_too_small', why); } catch {}
+async function abortAmountTooSmall(session, why){
+  try { await session.fail('amount_too_small', why); } catch {}
   return new Error(why + ' - nothing was spent.');
 }
 function normCourierSeqLeg(l){
