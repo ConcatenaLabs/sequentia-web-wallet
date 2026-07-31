@@ -6510,6 +6510,18 @@ async function startBuy(params){
 async function driveBuy(say){
   say = say || (() => {});
   const H = BUY.hash_h, node_key = BUY.node_key;
+  // Enriched receipt (P5.1): sub-asset BUY = BTC paid on-chain, asset received over LN. base = asset,
+  // quote = BTC; size = asset units bought, price = BTC paid per asset unit (best-effort from the HTLC).
+  // Shared by BOTH terminal-success paths (settle-now and already-settled) so a completed trade is
+  // never left showing its fund-time 'BTC locked' row. Same id as that row, so it upgrades in place.
+  const buyReceipt = () => {
+    const buyAssetU = (() => { try { return Number(big(BUY.asset_amount || 0)) / Math.pow(10, (metaOf(BUY.asset) || {}).precision || 0); } catch { return null; } })();
+    const buyBtcU = (() => { try { return Number(big((BUY.btc_htlc && (BUY.btc_htlc.amount || BUY.btc_htlc.btc_sats)) || 0)) / 1e8; } catch { return null; } })();
+    logTrade({ id: 'buy:' + H, title: 'Bought ' + BUY.ticker + ' with BTC', status: 'asset received',
+      rail: 'sub-asset', preimage: BUY.preimage || null, pair: (BUY.ticker || 'asset') + '/BTC', side: 'buy',
+      size: buyAssetU, sizeTicker: BUY.ticker || null,
+      price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null });
+  };
   // Reconcile a dropped/interrupted LSP job. The LSP now PERSISTS jobs, so a restart no longer 404s
   // ours — it reloads the job and, because the in-process driver died with the old process, marks it
   // 'interrupted'. Either signal (404/gone, 'failed', or 'interrupted') means the maker's pay-by-hash
@@ -6581,20 +6593,18 @@ async function driveBuy(say){
     tick++;
     let tip = 0; try { tip = await C.btcLeg.tipHeight(); } catch {}
     const status = await L.invoiceStatus({ node_key, payment_hash: H }).catch(() => null);
-    if (status && status.settled){ BUY.state = 'settled'; saveBuy(); return; }   // already settled (resume)
+    // ALREADY SETTLED. Reached when the hold was settled outside this loop (a resume, or a second
+    // driver instance that won the race). The trade is COMPLETE, so it needs the same receipt the
+    // held-branch writes — without this the history kept the fund-time row, and a trade that had
+    // actually delivered the asset was listed forever as 'BTC locked'. Seen live: a settled GOLD buy
+    // sat in the log as pending next to an identical one that had gone through the held branch.
+    if (status && status.settled){ BUY.state = 'settled'; saveBuy(); buyReceipt(); return; }
     if (status && status.held){
       BUY.state = 'holding'; saveBuy();
       say('Payment received · completing your trade …');
       await L.nodeSettle({ node_key, payment_hash: H, preimage: BUY.preimage });   // 5. device-settle
       BUY.state = 'settled'; saveBuy();
-      // Enriched receipt (P5.1): sub-asset BUY = BTC paid on-chain, asset received over LN. base = asset,
-      // quote = BTC; size = asset units bought, price = BTC paid per asset unit (best-effort from the HTLC).
-      const buyAssetU = (() => { try { return Number(big(BUY.asset_amount || 0)) / Math.pow(10, (metaOf(BUY.asset) || {}).precision || 0); } catch { return null; } })();
-      const buyBtcU = (() => { try { return Number(big((BUY.btc_htlc && (BUY.btc_htlc.amount || BUY.btc_htlc.btc_sats)) || 0)) / 1e8; } catch { return null; } })();
-      logTrade({ id: 'buy:' + H, title: 'Bought ' + BUY.ticker + ' with BTC', status: 'asset received',
-        rail: 'sub-asset', preimage: BUY.preimage || null, pair: (BUY.ticker || 'asset') + '/BTC', side: 'buy',
-        size: buyAssetU, sizeTicker: BUY.ticker || null,
-        price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null });
+      buyReceipt();
       // 6. best-effort: confirm the maker claimed the BTC (job settled). Non-fatal.
       if (L.jobStatus && (BUY.poll || BUY.job_id)){ try { const j = await L.jobStatus(BUY.poll || ('/swap/' + BUY.job_id)); if (j && j.status) { BUY.detail = j.status; saveBuy(); } } catch {} }
       return;
