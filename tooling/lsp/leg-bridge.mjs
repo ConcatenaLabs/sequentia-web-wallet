@@ -1153,3 +1153,51 @@ export async function runPayerRefundBumpOnce({ classifySpend, tipAdvanced, compu
   const result = await rebroadcast(fee);      // RBF-replace the refund with the higher fee (throws => retry next tick)
   return { bumped: true, status, fee, result };
 }
+
+/**
+ * decideAssetFront — may the LSP deliver the asset leg from its OWN inventory?
+ *
+ * A taker paying BTC over Lightning should not be slowed down by which rail the
+ * best-priced offer rests on. The bridge already holds the taker's LN instantly,
+ * but the ASSET came from a cross maker, and that maker will not lock it until its
+ * node's anchor is past the BTC leg's height — by anchoring supremacy, that is what
+ * makes a Bitcoin reorg erasing the BTC leg also reorg away the block holding its
+ * asset lock. Correct for the maker; no business being the user's wait. So the LSP
+ * locks its own asset to the taker on the SAME H and hands it over immediately.
+ *
+ * ⚠ THE INVARIANT: never front on H when a BTC HTLC is already funded on H.
+ *
+ * Without fronting, P becomes public only when the taker claims the MAKER's leg, so
+ * by the time the maker can use P to sweep the LSP's BTC HTLC it has already
+ * delivered. Fronting breaks that binding: the taker's claim of OUR leg publishes P
+ * while the maker has locked nothing, and any maker watching the chain could take
+ * our BTC and never lock. That is a real, unrecoverable loss of the fronted BTC, so
+ * `btcHtlcFunded` is a hard refusal and not a preference.
+ *
+ * Everything else fails to the SLOWER path, never to a promise that cannot be kept:
+ * no wallet, an unreadable/short inventory, an over-cap leg or an incomplete
+ * handshake all decline, and the bridge waits for the maker's leg as before.
+ *
+ * @param {{
+ *   btcHtlcFunded?:boolean,      // a BTC HTLC already exists on H => fronting is UNSAFE, full stop
+ *   frontWallet?:string,         // the configured inventory wallet ('' disables fronting)
+ *   wantAtoms?:number,           // the asset atoms this trade settles
+ *   inventoryAtoms?:number,      // CONFIRMED, unreserved atoms the wallet can lock now
+ *   maxAtoms?:number,            // per-leg cap (0 = uncapped)
+ *   claimPub?:string, tSeq?:number,  // handshake terms the fronted HTLC is built from
+ * }} args
+ * @returns {{ armed:boolean, reason:string }}
+ */
+export function decideAssetFront({ btcHtlcFunded = false, frontWallet = '', wantAtoms = 0,
+  inventoryAtoms = 0, maxAtoms = 0, claimPub = '', tSeq = 0 } = {}) {
+  if (btcHtlcFunded)
+    return { armed: false, reason: 'a BTC HTLC is already funded on H — fronting would publish P while the maker holds nothing, letting it sweep that BTC for free' };
+  if (!frontWallet) return { armed: false, reason: 'no front wallet configured' };
+  if (!(Number(wantAtoms) > 0) || !claimPub || !(Number(tSeq) > 0))
+    return { armed: false, reason: 'incomplete bridge terms' };
+  if (Number(maxAtoms) > 0 && Number(wantAtoms) > Number(maxAtoms))
+    return { armed: false, reason: `leg ${wantAtoms} exceeds the per-leg front cap ${maxAtoms}` };
+  if (!(Number(inventoryAtoms) >= Number(wantAtoms)))
+    return { armed: false, reason: `inventory ${inventoryAtoms} < ${wantAtoms}` };
+  return { armed: true, reason: 'LSP inventory covers the leg; the taker is not made to wait for the maker anchor gate' };
+}
