@@ -193,7 +193,20 @@ const CFG = {
   // commitment fee, which together cost ~9% of capacity at these sizes -- so a flat 5000 sat covered
   // a 50k channel and silently under-funded a 200k one. Percentage, because the holdback scales.
   subasInboundHeadroomBps: Number(process.env.SUBAS_INBOUND_HEADROOM_BPS || 1500), // 15%
-  subasInboundFeeBps: Number(process.env.SUBAS_INBOUND_FEE_BPS || 0),     // JIT-inbound fee, basis points of the amount (recorded)
+  // ── SELLING INBOUND LIQUIDITY ───────────────────────────────────────────────
+  // Inbound is real capital the LP locks up on the user's behalf for as long as the channel lives,
+  // so it is priced rather than given away. The shape follows Phoenix (ACINQ), which sells inbound
+  // from its LSP at 1% of the requested amount plus the mining fee, with a floor and a bounded range.
+  //
+  // Sequentia difference: this is NOT BTC-only. Inbound is sold in whatever asset it is denominated
+  // in -- native BTC and every LSP-supported asset alike -- and the fee is charged in THAT asset, so
+  // no asset is privileged and nobody has to hold a particular one to buy capacity.
+  inboundFeeBps: Number(process.env.INBOUND_FEE_BPS || 100),               // 1%, as Phoenix charges
+  inboundFeeMinSat: Number(process.env.INBOUND_FEE_MIN_SAT || 3000),       // BTC floor (Phoenix: 3000 sat)
+  inboundFeeMinAtoms: Number(process.env.INBOUND_FEE_MIN_ATOMS || 1000),   // per-asset floor, in that asset's atoms
+  inboundMinSat: Number(process.env.INBOUND_MIN_SAT || 100000),            // Phoenix sells 100k..10M
+  inboundMaxSat: Number(process.env.INBOUND_MAX_SAT || 10000000),
+  subasInboundFeeBps: Number(process.env.SUBAS_INBOUND_FEE_BPS || 0),     // legacy JIT-inbound fee (recorded only)
   // SUB-ASSET SELL: pay the asset OVER LIGHTNING, receive BTC ON-CHAIN (mirror of the buy).
   // A sub-asset-SELL maker (ln_direction=5) on SUBAS_SELL_RELAY locks BTC on-chain + holds
   // an asset invoice on H; the LSP commands the USER's node to pay the held asset, learns P,
@@ -1352,6 +1365,38 @@ function runSwap({ side, asset, amount, offer_id, maker_pubkey, quote_asset, nod
 // long — so the POST /swap handler runs runMixed in the BACKGROUND as a job and returns
 // immediately; this function is the same either way. Honest finality: 'confirming'
 // (anchor-bound), NOT the pure-LN instant-'final'.
+// PRICE FOR SELLING INBOUND LIQUIDITY.
+//
+// Modelled on Phoenix (ACINQ): a percentage of the requested amount, with a floor, over a bounded
+// range. Inbound is capital the LP locks up on the user's behalf for the life of the channel, so it
+// is sold rather than given away -- and quoting it up front is the honest half: the user sees the
+// price before anything is opened, not after.
+//
+// Denominated in the asset being bought. Native BTC and every LSP-supported asset are priced the
+// same way and charged in THEIR OWN units, so buying capacity never requires holding some other
+// asset first. `isBtc` only selects which floor applies, since a satoshi and an asset atom are not
+// comparable quantities.
+//
+// Pure and total: it never throws, and an out-of-range request comes back with ok:false and a reason
+// rather than a thrown error, because this is also what the quote endpoint returns to the UI.
+function quoteInboundFee(amount, { isBtc = false, bps, minSat, minAtoms, minAmount, maxAmount } = {}) {
+  const amt = Math.floor(Number(amount) || 0);
+  const rate = bps == null ? CFG.inboundFeeBps : Number(bps);
+  const floor = isBtc
+    ? (minSat == null ? CFG.inboundFeeMinSat : Number(minSat))
+    : (minAtoms == null ? CFG.inboundFeeMinAtoms : Number(minAtoms));
+  const lo = minAmount == null ? CFG.inboundMinSat : Number(minAmount);
+  const hi = maxAmount == null ? CFG.inboundMaxSat : Number(maxAmount);
+  if (!(amt > 0)) return { ok: false, reason: 'amount must be greater than zero', amount: 0, fee: 0 };
+  if (amt < lo) return { ok: false, reason: `the smallest amount of inbound sold is ${lo}`, amount: amt, fee: 0, min: lo, max: hi };
+  if (amt > hi) return { ok: false, reason: `the largest amount of inbound sold is ${hi}`, amount: amt, fee: 0, min: lo, max: hi };
+  // Round the percentage UP: rounding a price down means selling capacity below cost on every
+  // request that lands mid-atom, and those are the common case, not the exception.
+  const pct = Math.ceil((amt * rate) / 10000);
+  const fee = Math.max(pct, floor);
+  return { ok: true, amount: amt, fee, bps: rate, floor, min: lo, max: hi };
+}
+
 // provisionInbound gives the user's OWN hosted asset node INBOUND liquidity so it
 // can RECEIVE the asset (Move-to-Lightning only funds outbound). The LP (SUBAS_LP_RPC,
 // e.g. ln-asset) connects to the user node and opens a 0-conf asset channel TOWARD it,
@@ -3925,6 +3970,25 @@ const server = http.createServer(async (req, res) => {
     // 0-conf asset channel TOWARD the user's node. Idempotent, fail-closed. Call this
     // BEFORE creating the device invoice + POST /swap for a per-user sub-asset receive.
     //   POST /channel/inbound {node_key, asset, amount}  (amount in ASSET SATS)
+    // WHAT DOES INBOUND COST? Quote before anything is opened, so a purchase is never a surprise.
+    // Priced like Phoenix's liquidity sale (percentage of the amount, with a floor), but denominated
+    // in whatever is being bought -- native BTC or any LSP-supported asset, charged in its own units.
+    //   GET /channel/inbound/quote?asset=<id|BTC>&amount=<units>
+    if (req.method === 'GET' && url.pathname === '/channel/inbound/quote') {
+      const rawAsset = url.searchParams.get('asset') || '';
+      const isBtc = !rawAsset || /^btc$/i.test(rawAsset);
+      const assetId = isBtc ? '' : resolveAsset(rawAsset);
+      if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
+      const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc });
+      return send(res, q.ok ? 200 : 400, {
+        ...q,
+        asset: isBtc ? 'BTC' : assetId,
+        asset_label: isBtc ? 'BTC' : (assetLabel(assetId) || assetId.slice(0, 8)),
+        // The mining fee for the funding tx is the LP's cost and is not separable per request here,
+        // so say so rather than implying the quoted number is the only cost, as Phoenix does.
+        note: 'fee is charged in the asset being bought; the LP also pays the on-chain funding fee',
+      });
+    }
     if (req.method === 'POST' && url.pathname === '/channel/inbound') {
       const body = await readBody(req);
       if (!body) return send(res, 400, { ok: false, error: 'bad json body' });
