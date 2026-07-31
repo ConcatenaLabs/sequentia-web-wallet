@@ -1508,6 +1508,19 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   const pc = await lnrpc('listpeerchannels', [], userRpc).catch(() => ({ channels: [] }));
   const already = (pc.channels || []).find(c => c.peer_id === lpId && c.state === 'CHANNELD_NORMAL' && Number(c.receivable_msat || 0) >= need);
   if (already) return { ok: true, already_had_inbound: true, channel_id: already.channel_id || null, receivable_msat: already.receivable_msat ?? null, fee_msat: 0 };
+  // A channel that is ALREADY OPENING for this amount counts. Without this, a request whose channel
+  // was still confirming opened ANOTHER one -- the wait below gives up after a bounded time, and the
+  // caller's natural response is to retry, so every retry bought more capacity that was already on
+  // its way. That is how a wallet accumulated fourteen GOLD channels while never having one large
+  // enough. Report it as pending so the caller waits rather than buys again.
+  const opening = (pc.channels || []).find(c => c.peer_id === lpId
+    && c.state !== 'CHANNELD_NORMAL' && !/CLOSE|ONCHAIN/i.test(String(c.state || ''))
+    && Number(c.receivable_msat || 0) >= need);
+  if (opening) {
+    return { ok: true, already_had_inbound: true, pending: true, state: opening.state,
+      channel_id: opening.channel_id || null, receivable_msat: opening.receivable_msat ?? null, fee_msat: 0,
+      note: 'an inbound channel of this size is already confirming; it becomes usable without buying another' };
+  }
   // The user node's listen address, so the LP can dial it.
   const uinfo = await lnrpc('getinfo', [], userRpc, STATUS_RPC_TIMEOUT_MS);
   const userId = uinfo.id;
