@@ -135,9 +135,10 @@ export class CourierSession {
 // relays; a take must open its courier where the offer lives, and a browser can
 // only get there through the wallet host's proxy.
 const RELAY_MOUNTS = [
-  [/:9965(\/|$)/, '/seqob-pln'],     // submarine + pure-LN makers
-  [/:9971(\/|$)/, '/seqob-subas'],   // sub-asset makers
-  [/:9955(\/|$)/, '/seqob'],         // on-chain cross (the default mount)
+  [/:9965(\/|$)/, '/seqob-pln'],        // submarine + pure-LN makers
+  [/:9966(\/|$)/, '/seqob-subasbuy'],   // sub-asset BUY (pay BTC on-chain, receive the asset over LN)
+  [/:9971(\/|$)/, '/seqob-subas'],      // sub-asset SELL makers
+  [/:9955(\/|$)/, '/seqob'],            // on-chain cross (the default mount)
 ];
 export function relayMountFor(relayUrl){
   if (!relayUrl) return null;
@@ -147,6 +148,18 @@ export function relayMountFor(relayUrl){
 
 function wsURL(relayUrl){
   const mount = relayMountFor(relayUrl);
+  // AN UNMAPPED RELAY IS A WRONG RELAY, NOT A DEFAULT ONE.
+  //
+  // Falling through to the default mount for an absolute relay URL we have no mapping
+  // for dials a DIFFERENT relay than the one holding the offer, which then answers
+  // "offer not found or not open" — a confusing, apparently-transient error for what is
+  // really a missing route. :9966 sat unmapped exactly like this, making every sub-asset
+  // BUY offer visible and unliftable. Fail loudly instead: a same-origin/relative base
+  // still falls through normally, so only a genuinely unroutable upstream trips this.
+  if (!mount && /^https?:\/\//i.test(String(relayUrl || ''))){
+    throw new Error('no same-origin mount is configured for the relay holding this offer (' +
+      String(relayUrl) + ') — it cannot be lifted from a browser until one is added');
+  }
   if (mount){
     const proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss' : 'ws';
     const origin = (typeof location !== 'undefined') ? (proto + '://' + location.host) : ('ws://127.0.0.1');
