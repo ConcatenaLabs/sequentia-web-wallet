@@ -359,14 +359,23 @@ T.setUnifiedBook(GOLD, { asks: [ask], bids: [] });
   const route = { seqAsset: COPPER, payIsBtc: true, payRail: 'chain', recvRail: 'ln', kind: 'mixed' };
   await T.requoteMixed(route, '400');
 
-  // The fill is STILL displayed (400 GOLD for ceil(400*500/1000) = 200 sats) — the display is rail-blind.
-  assert.equal(REG.swRecvAmt.value, '400', 'the fill is STILL shown (400 GOLD) even though Place is gated');
-  assert.equal(REG.swPayAmt.value, '0.000002', 'the fill BTC (200 sats) is STILL shown');
-  // Place is BLOCKED with the shared plain note; no quote is produced -> nothing to lift.
-  assert.equal(T.lastQuote(), null, 'no placeable quote (never lift a DIFFERENT offer than shown)');
-  assert.equal(REG.swReview.disabled, true, 'Place is disabled when the unified best is an on-chain maker');
-  assert.equal(REG.swErr.textContent, T.payerBridgeDisabledNote(), 'the shared plain note is shown (no rail advice)');
-  console.log('ok: a chain/ln sub-asset BUY blocks Place (shared note) when the unified best is on-chain — never lifts a different offer');
+  // THE INVARIANT THAT MATTERS IS "DISPLAYED == LIFTED", NOT "REFUSE".
+  //
+  // This used to show the on-chain best's fill and then disable Place, because no sub-asset
+  // offer carried that id. That was safe but wrong in the same way the forward-cross branch
+  // was: it refused a trade the sub-asset book could genuinely fill, one level down, with no
+  // reason given. The remedy is not to lift a different offer than shown — it is to SHOW the
+  // offer that can actually be lifted. So the quote re-renders against the sub-asset offer
+  // and both the display and the settlement handle move to it together.
+  //
+  // 400 GOLD at the sub-asset offer's own ratio (900/1000) = ceil(400*900/1000) = 360 sats.
+  assert.equal(REG.swRecvAmt.value, '400', 'the fill is shown (400 GOLD)');
+  assert.equal(REG.swPayAmt.value, '0.0000036', 'the BTC shown is the SUB-ASSET offer price, not the on-chain best it cannot lift');
+  const q = T.lastQuote();
+  assert.ok(q, 'a placeable quote is produced against the offer this path can settle');
+  assert.equal(String((q.buyOffer || {}).offer_id || ''), 'other-7', 'the settlement handle IS the displayed offer');
+  assert.equal(REG.swReview.disabled, false, 'Place is enabled for a fill the sub-asset path can actually deliver');
+  console.log('ok: a chain/ln sub-asset BUY re-quotes onto the offer it CAN lift, and displays that offer (displayed == lifted)');
 }
 
 console.log('\nALL PASS');
