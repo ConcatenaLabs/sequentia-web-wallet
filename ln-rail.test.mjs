@@ -110,4 +110,31 @@ assert.ok(lspCanFront(usdxT, 'recv', FRONT) && !lspCanFront(goldT, 'recv', FRONT
 assert.ok(lspCanFront('BTC', 'recv', FRONT) && !lspCanFront('BTC', 'pay', FRONT), 'lspCanFront: BTC recv=outbound, pay=inbound');
 console.log('ok: no-own-channel leg is provisionable|unfrontable (never ok:true); own channel -> ok:true, LSP never fronts over it');
 
+// ── ONE PAYMENT FITS THROUGH ONE CHANNEL ─────────────────────────────────────
+// legLiquidity reported only TOTALS, so a leg with plenty of AGGREGATE room passed every check and
+// then failed at the counterparty, which has to route a single HTLC. Seen live: a GOLD pure-LN take
+// with ~1.5M atoms receivable across eight channels, largest 185,640, against a 200,000 offer. The
+// maker refused with "no direct channel ... with >= 200000000 msat spendable" and the taker saw only
+// a generic failure. Nothing in these rails splits a payment, so the per-channel maximum is the
+// figure that decides whether a take can settle.
+const manyChans = [
+  { peer_id: 'p', asset: GOLD, node_key: 'own-gold', spendable_units: 10, receivable_units: 185640, state: 'CHANNELD_NORMAL' },
+  { peer_id: 'p', asset: GOLD, node_key: 'own-gold', spendable_units: 70, receivable_units: 185640, state: 'CHANNELD_NORMAL' },
+  { peer_id: 'p', asset: GOLD, node_key: 'own-gold', spendable_units: 20, receivable_units:  57098, state: 'CHANNELD_NORMAL' },
+];
+const ml = legLiquidity(manyChans, goldT);
+assert.equal(ml.receivable, 428378n, 'the total is still reported');
+assert.equal(ml.maxReceivable, 185640n, 'the largest SINGLE channel is what one payment can use');
+assert.equal(ml.spendable, 100n, 'spendable total unchanged');
+assert.equal(ml.maxSpendable, 70n, 'largest single spendable exposed too');
+// The exact shape that failed: the sum says yes, one channel says no.
+const OFFER = 200000n;
+assert.ok(ml.receivable >= OFFER, 'the sum says yes — this is what used to be checked');
+assert.ok(ml.maxReceivable < OFFER, 'and the payment still cannot be routed');
+// Degenerate input stays arithmetic, never undefined.
+const empty = legLiquidity([], goldT);
+assert.equal(empty.maxReceivable, 0n, 'no channels -> 0, not undefined');
+assert.equal(empty.maxSpendable, 0n);
+console.log('ok: legLiquidity exposes per-channel maxima — a single HTLC must fit one channel');
+
 console.log('\nALL PASS');
