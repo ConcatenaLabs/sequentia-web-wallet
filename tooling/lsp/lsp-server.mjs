@@ -1842,6 +1842,12 @@ function makeBridgeIo({ match, body, job }) {
   return {
     sleep, log: (...a) => console.error('[bridge]', ...a),
     legAmountSat: (leg) => bridgeLegAmount(body, leg),
+    // FRONTED: this job delivered the asset from LSP inventory instead of funding a BTC
+    // HTLC, so stepPayerLn must recoup by settling the hold once the taker claims rather
+    // than by reading a BTC HTLC that does not exist. assetRefundHeight is that leg's
+    // T_seq, so an unclaimed front can be reclaimed on its refund branch.
+    isFronted: () => !!(job.bridge_front && job.bridge_front.armed),
+    assetRefundHeight: () => Number((job.bridge_front && job.bridge_front.t_seq) || 0),
     // W2(a): the driver flips this synchronously at its start / stop; /bridge/asset gates the taker's asset
     // hand-off on it (bridgeAssetHandoffAdmissible) rather than the lagging job.status.
     setDriverLive: (v) => { job._driverLive = !!v; },
@@ -1951,6 +1957,22 @@ function makeBridgeIo({ match, body, job }) {
       } else if (s.tipRpc) {
         try { const o = await xhtlcObserve({ rpc: s.tipRpc, txid: s.tipProbeTxid || '0'.repeat(64), vout: 0 }); if (typeof o.tip === 'number') tip = o.tip; } catch {}
       }
+      // FRONTED JOB: there is no BTC HTLC, so P has only one source — the taker's claim of
+      // the asset leg WE funded. Read it, and the Sequentia tip alongside, so stepPayerLn
+      // can settle our hold on the claim and reclaim the leg after T_seq if it never comes.
+      // Without this the observation carries no P at all and the front is never recouped.
+      let assetTip = 0;
+      if (job.bridge_front && job.bridge_front.armed) {
+        const fsa = (job.legState && job.legState.asset) || {};
+        if (fsa.onchain && fsa.onchain.txid) {
+          try {
+            const ao = await xhtlcObserve({ rpc: CFG.seqRpc, txid: fsa.onchain.txid, vout: fsa.onchain.vout || 0,
+              hashH: s.hashH, redeem: fsa.onchain.redeem });
+            if (typeof ao.tip === 'number') assetTip = ao.tip;
+            if (ao && ao.preimage && /^[0-9a-f]{64}$/i.test(ao.preimage) && !ln.preimage) ln.preimage = String(ao.preimage).toLowerCase();
+          } catch { /* observe hiccup -> no P this tick -> the step machine just waits */ }
+        }
+      }
       // CHAIN-TRUTH SPEND CLASSIFICATION (payer leg): fetch the AUTHORITATIVE on-chain fate of the LSP's OWN
       // funded BTC HTLC via the seqdex classifier and surface it as obs.onchain.spendStatus. stepPayerLn keys
       // the recoup-vs-refund-vs-release decision ENTIRELY on this chain fact — NEVER on the racy persisted
@@ -2022,6 +2044,7 @@ function makeBridgeIo({ match, body, job }) {
         if (publicP && job.public_preimage !== publicP) { job.public_preimage = publicP; persistJobs(); }
       }
       const base = (recvReady !== undefined) ? { tip, onchain, ln, recvReady } : { tip, onchain, ln };
+      if (assetTip) base.assetTip = assetTip;   // fronted job: T_seq is a SEQUENTIA height, so it is compared against the Sequentia tip
       if (crossFund) base.crossFund = true;   // B: fund-before-lock — nextBridgeStep funds once the hold is HELD, skipping the swapLocked deadlock
       if (relayPending) base.relayPending = true;   // B: fund-before-lock — re-drive the idempotent relay until the maker's asset leg is locked + relayed (resumable)
       // C — persisted on-chain FACT for the payer leg's transient-outage / reorg-eviction guard, so a momentary

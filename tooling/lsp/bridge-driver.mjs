@@ -182,7 +182,14 @@ export async function runBridgedSwap({ match, io, cfg = {}, driverCfg = {} }) {
   // io.legAmountSat(leg). Enrich each leg so nextBridgeStep's amount check (never front more than we
   // recoup) has a real bound. A missing legAmountSat is a wiring bug -> fail closed rather than front unbounded.
   const amtOf = (leg) => (io.legAmountSat ? Number(io.legAmountSat(leg)) : leg.amountSat);
-  const withAmt = (leg) => ({ lnSide: leg.lnSide, amountSat: amtOf(leg), unit: leg.unit, bridge: leg.bridge, jitInbound: leg.jitInbound });
+  // `fronted` tells nextBridgeStep the LSP delivered this leg from its OWN inventory
+  // rather than funding a BTC HTLC, so the recoup is "settle once the taker claims"
+  // and not "read the fate of our BTC HTLC" (which does not exist). assetRefundHeight
+  // is the T_seq that leg refunds at, so an unclaimed front can be reclaimed.
+  const withAmt = (leg) => ({ lnSide: leg.lnSide, amountSat: amtOf(leg), unit: leg.unit, bridge: leg.bridge,
+    jitInbound: leg.jitInbound,
+    fronted: io.isFronted ? !!io.isFronted(leg) : false,
+    assetRefundHeight: io.assetRefundHeight ? Number(io.assetRefundHeight(leg)) : 0 });
 
   // W2(a) — AUTHORITATIVE DRIVER-LIVENESS. Mark the driver LIVE for exactly the window it can still front,
   // and CLEAR it the instant the leg drivers stop (BELOW, before the post-loop awaits). The /bridge/asset
