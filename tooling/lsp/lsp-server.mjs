@@ -1395,6 +1395,27 @@ async function paymentStatusForHash(rpc, hashH) {
   return { preimage, pending };
 }
 
+// PROTOBUF `bytes` REACH US BASE64-ENCODED, NOT HEX.
+//
+// The relay marshals its offer protobuf to JSON, where a string field (maker_pubkey)
+// stays hex but a BYTES field (lightning.maker_claim_pub / maker_refund_pub) becomes
+// base64. Passing that straight through handed the wallet 'ArML4p01OwZC...' where it
+// expected a 33-byte hex pubkey, and the sub-asset BUY died inside the HTLC builder with
+// "invalid claim_pub hex: invalid hex character 114" — character 'r', the second byte of
+// the base64. Every consumer downstream assumes hex, so this is the boundary to fix it at.
+//
+// Tolerant on purpose: already-hex passes through unchanged, so it is correct whichever
+// encoding the relay sends and stays correct if that ever changes.
+function pubkeyHex(v) {
+  const s = String(v || '');
+  if (!s) return null;
+  if (/^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) return s.toLowerCase();
+  try {
+    const hex = Buffer.from(s, 'base64').toString('hex');
+    return hex.length ? hex : null;
+  } catch { return null; }
+}
+
 // ══ DELIVER AN ASSET OVER LIGHTNING, PAID BY BARE HASH ═══════════════════════
 //
 // The bridge could front the BTC leg over Lightning and the asset leg ON-CHAIN, but
@@ -3440,7 +3461,7 @@ const server = http.createServer(async (req, res) => {
               maker_ln_node: o.maker_ln_node_pubkey || null, ln_connect_hints: o.ln_connect_hints || null,
               // the maker identity pubkey the wallet locks its BTC HTLC's CLAIM branch to, and the
               // maker's suggested on-chain CLTV delta (the wallet sets T_btc = btc_tip + this-or-more).
-              maker_claim_pub: lt.maker_claim_pub || null, onchain_cltv: Number(lt.onchain_cltv || 0),
+              maker_claim_pub: pubkeyHex(lt.maker_claim_pub), onchain_cltv: Number(lt.onchain_cltv || 0),
               expires_at: Number(o.expires_at_unix || 0), interactive: true });
           }
         }
