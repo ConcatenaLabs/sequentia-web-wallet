@@ -188,7 +188,11 @@ const CFG = {
   // the maker can then pay over it). Unset => POST /channel/inbound + the per-user
   // sub-asset receive fail closed. The LP peer id/addr is CHANNEL_PEER_ASSET.
   subasLpRpc: process.env.SUBAS_LP_RPC || '',
-  subasInboundReserve: Number(process.env.SUBAS_INBOUND_RESERVE || 5000), // extra asset sat funded above the receive amount (channel reserve room)
+  subasInboundReserve: Number(process.env.SUBAS_INBOUND_RESERVE || 5000), // flat extra asset sat funded above the receive amount
+  // PROPORTIONAL headroom on top of that flat reserve. CLN holds back a 1% channel reserve plus the
+  // commitment fee, which together cost ~9% of capacity at these sizes -- so a flat 5000 sat covered
+  // a 50k channel and silently under-funded a 200k one. Percentage, because the holdback scales.
+  subasInboundHeadroomBps: Number(process.env.SUBAS_INBOUND_HEADROOM_BPS || 1500), // 15%
   subasInboundFeeBps: Number(process.env.SUBAS_INBOUND_FEE_BPS || 0),     // JIT-inbound fee, basis points of the amount (recorded)
   // SUB-ASSET SELL: pay the asset OVER LIGHTNING, receive BTC ON-CHAIN (mirror of the buy).
   // A sub-asset-SELL maker (ln_direction=5) on SUBAS_SELL_RELAY locks BTC on-chain + holds
@@ -1377,7 +1381,13 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
     .catch(e => { throw new Error(`LP could not connect to the user node: ${e.message}`); });
   // LP funds a 0-conf asset channel TOWARD the user (all liquidity on the LP side =
   // the user's inbound). Fails closed if the LP lacks the asset on-chain.
-  const fundAmt = amount + CFG.subasInboundReserve;
+  // SIZE FOR THE RECEIVABLE WE PROMISED, NOT THE FACE AMOUNT. A channel's usable inbound is its
+  // capacity minus CLN's 1% channel reserve and the commitment-fee holdback -- about 9% in practice
+  // here. Funding `amount + 5000` therefore produced a channel that could never receive `amount`:
+  // asking for 200,000 yielded 185,640 receivable, the idempotency check above rightly refused to
+  // count it, and the NEXT attempt opened another undersized channel. That is how one wallet ended up
+  // with thirteen GOLD channels, not one of which could carry the trade it was opened for.
+  const fundAmt = Math.ceil(amount * (1 + CFG.subasInboundHeadroomBps / 10000)) + CFG.subasInboundReserve;
   const fc = await lnrpc('fundchannel', [`id=${userId}`, `amount=${fundAmt}sat`, `asset=${assetId}`, 'mindepth=0', 'announce=false'], CFG.subasLpRpc);
   // Wait for CHANNELD_NORMAL on the user side (0-conf -> seconds).
   const deadline = Date.now() + 90000;
@@ -1388,6 +1398,16 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
     if (chan && chan.state === 'CHANNELD_NORMAL') break;
     if (Date.now() > deadline) throw new Error('inbound channel did not reach CHANNELD_NORMAL in time');
     await sleep(3000);
+  }
+  // VERIFY WHAT WE OPENED. This returned ok:true without ever checking the channel it had just
+  // funded, so an undersized one reported success and the caller went on to a take that could not
+  // settle -- the failure surfacing much later, at the maker, as "no direct channel with >= N msat
+  // spendable". A channel that cannot carry the amount it was opened for is a failure here, said
+  // with both numbers, not a success to be discovered downstream.
+  const got = Number(chan.receivable_msat || 0);
+  if (got < need) {
+    throw new Error(`inbound channel opened but can only receive ${Math.floor(got / 1000)} of the ${amount} asset sats requested `
+      + `(funded ${fundAmt}); raise SUBAS_INBOUND_HEADROOM_BPS`);
   }
   const feeMsat = Math.floor(need * CFG.subasInboundFeeBps / 10000);
   return { ok: true, already_had_inbound: false, channel_id: fc.channel_id || null, funding_txid: fc.txid || null,
