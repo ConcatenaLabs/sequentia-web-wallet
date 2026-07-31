@@ -70,7 +70,7 @@ export async function runBridgedLeg({ leg, io, cfg = {}, driverCfg = {} }) {
   // fronted := has the LSP put value at stake on this leg yet? It flips true the instant we execute a
   // front-ln/fund-onchain, and it gates whether a fail-closed must unwind. (leg-bridge only ever
   // fail-closes BEFORE a front, so this stays false there; it is defence-in-depth, not the primary bar.)
-  let fronted = false, lastAction = 'none';
+  let fronted = false, lastAction = 'none', failStreak = 0;
   for (let tick = 0; tick < d.maxTicks; tick++) {
     if (io.signal && io.signal.aborted) return { ok: false, reason: 'aborted', fronted, lastAction };
     let obs;
@@ -122,13 +122,24 @@ export async function runBridgedLeg({ leg, io, cfg = {}, driverCfg = {} }) {
     try {
       log('[bridge-leg] exec', step.action, '—', step.reason);
       await io[method](step, obs);
+      failStreak = 0;   // this action got through — drop any backoff
     } catch (e) {
       // An execution error is NOT a decision to move value differently: re-observe and let the core
       // re-decide from the true on-chain/LN state (e.g. a broadcast that actually landed shows up as
       // funded; a genuinely failed front shows up as still-unfunded and is retried safely).
-      log('[bridge-leg]', step.action, 'raised, re-observing:', e && e.message);
+      //
+      // BACK OFF ON A REPEATING FAILURE. Some failures never resolve: a payer leg whose maker offer is
+      // permanently gone can never finish its relay half, yet its BTC is real and only refunds at T_btc —
+      // possibly a day out. Retrying that at the poll interval for the whole session buys nothing and
+      // buries every other job's output (three such jobs emitted two lines a second here, drowning the
+      // log the operator needs). Keep retrying, because "gone" can also mean "the relay restarted", but
+      // slow down geometrically so a permanently stuck leg costs one line a minute instead of forty.
+      failStreak++;
+      if (failStreak <= 3 || failStreak % 10 === 0)
+        log('[bridge-leg]', step.action, 'raised, re-observing:', e && e.message,
+          failStreak > 3 ? `(failed ${failStreak}x — backing off)` : '');
     }
-    await nap(d.pollMs);
+    await nap(Math.min(d.pollMs * Math.max(1, 2 ** Math.min(failStreak, 5)), d.maxBackoffMs || 60000));
   }
   // maxTicks exhausted. RESUMABLE (marked 'interrupted' so resume-on-boot re-drives it, not 'failed' which
   // strands a committed leg) when EITHER:
