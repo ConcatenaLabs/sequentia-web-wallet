@@ -138,7 +138,21 @@ export function chooseSettlementPath(match, offerSignals = {}) {
   if (btc && btc.bridge) {
     // The BTC leg crosses. Its lnSide fixes the taker side: payer=>buy (taker pays BTC-LN), receiver=>sell.
     const side = btc.lnSide === 'payer' ? 'buy' : 'sell';
-    if (caps.interactive && caps.btc_ln)
+    // A P2P SUBMARINE CAN ONLY BRIDGE ONE LEG — THE BTC ONE.
+    //
+    // It is two counterparties swapping directly: the maker takes BTC over Lightning and settles its
+    // asset on-chain. That works precisely because the ASSET leg is native. When the asset leg crosses
+    // too (the maker delivers its asset over Lightning while the taker wants it on-chain), there is no
+    // party in a P2P swap who can produce an on-chain asset for the taker — the maker does not hold one
+    // and the LSP is not in the value path at all.
+    //
+    // This checked only the BTC leg, so a doubly-crossed shape against an interactive maker was routed
+    // to P2P anyway. Watched it happen: a GOLD buy dispatched to 'p2p-buy' and died with "This trade
+    // could not be completed", because the path chosen could never have settled it whatever the
+    // counterparties did. The LSP bridge is the only settlement for that shape (it sources the asset
+    // from the LN maker as principal and fronts it on-chain), so route there and let the capability
+    // predicate have the final word.
+    if (caps.interactive && caps.btc_ln && !(asset && asset.bridge))
       return { path: 'p2p-submarine', ln_direction: side === 'buy' ? 1 : 0, lnSide: btc.lnSide };
     return { path: 'lsp-bridge', ln_direction: null, lnSide: btc.lnSide };
   }
