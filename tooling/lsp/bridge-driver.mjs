@@ -70,7 +70,7 @@ export async function runBridgedLeg({ leg, io, cfg = {}, driverCfg = {} }) {
   // fronted := has the LSP put value at stake on this leg yet? It flips true the instant we execute a
   // front-ln/fund-onchain, and it gates whether a fail-closed must unwind. (leg-bridge only ever
   // fail-closes BEFORE a front, so this stays false there; it is defence-in-depth, not the primary bar.)
-  let fronted = false, lastAction = 'none', failStreak = 0;
+  let fronted = false, lastAction = 'none', failStreak = 0, sameAction = 0;
   for (let tick = 0; tick < d.maxTicks; tick++) {
     if (io.signal && io.signal.aborted) return { ok: false, reason: 'aborted', fronted, lastAction };
     let obs;
@@ -95,6 +95,14 @@ export async function runBridgedLeg({ leg, io, cfg = {}, driverCfg = {} }) {
           assetRefundHeight: io.assetRefundHeight ? Number(io.assetRefundHeight(leg)) : leg.assetRefundHeight }
       : leg;
     const step = nextBridgeStep(tickLeg, obs, cfg);
+    // A repeating decision is the signature of a leg whose STATE the core cannot see
+    // (a fronted job re-entering fund-onchain, say). Say what was decided and what it
+    // was decided from, throttled, so that is diagnosable from the log alone.
+    if (step.action === lastAction) sameAction++; else sameAction = 0;
+    if (sameAction > 0 && sameAction % 10 === 0)
+      log('[bridge-leg] still', step.action, `x${sameAction}`,
+        '| fronted=', !!tickLeg.fronted, 'held=', !!(obs.ln && obs.ln.held),
+        'P=', !!(obs.ln && obs.ln.preimage), 'ocFunded=', !!(obs.onchain && obs.onchain.funded));
     lastAction = step.action;
     if (step.action === 'done') { log('[bridge-leg] done:', step.reason); return { ok: true, reason: step.reason, fronted, lastAction }; }
     if (step.action === 'fail-closed') {
