@@ -206,6 +206,11 @@ const CFG = {
   inboundFeeMinAtoms: Number(process.env.INBOUND_FEE_MIN_ATOMS || 1000),   // per-asset floor, in that asset's atoms
   inboundMinSat: Number(process.env.INBOUND_MIN_SAT || 100000),            // Phoenix sells 100k..10M
   inboundMaxSat: Number(process.env.INBOUND_MAX_SAT || 10000000),
+  // How the fee is collected when the caller does not say: 'prepaid' (pay on-chain first) or
+  // 'deferred' (open now, owe it). Deferred is the friendlier default; the cap is what stops it
+  // from becoming unlimited free liquidity for a caller that simply never settles.
+  inboundCollectMode: (process.env.INBOUND_COLLECT_MODE || 'deferred').toLowerCase(),
+  inboundDebtCap: Number(process.env.INBOUND_DEBT_CAP || 50000),
   subasInboundFeeBps: Number(process.env.SUBAS_INBOUND_FEE_BPS || 0),     // legacy JIT-inbound fee (recorded only)
   // SUB-ASSET SELL: pay the asset OVER LIGHTNING, receive BTC ON-CHAIN (mirror of the buy).
   // A sub-asset-SELL maker (ln_direction=5) on SUBAS_SELL_RELAY locks BTC on-chain + holds
@@ -1365,6 +1370,58 @@ function runSwap({ side, asset, amount, offer_id, maker_pubkey, quote_asset, nod
 // long — so the POST /swap handler runs runMixed in the BACKGROUND as a job and returns
 // immediately; this function is the same either way. Honest finality: 'confirming'
 // (anchor-bound), NOT the pure-LN instant-'final'.
+// ── COLLECTING THE INBOUND FEE ──────────────────────────────────────────────
+// Two ways to pay, because they suit different moments and both are real:
+//
+//   'prepaid'  — the user sends the fee on-chain in the asset being bought BEFORE the channel is
+//                opened, and passes the txid. Phoenix's manual liquidity purchase. Auditable, and
+//                nothing is owed afterwards.
+//   'deferred' — the channel opens immediately and the fee is RECORDED AS OWED against that node,
+//                then charged on the user's next purchase or settled at channel close. This is the
+//                pay-to-open shape: capacity now, pay later.
+//
+// A word on what 'deferred' deliberately does NOT do. Phoenix's pay-to-open shaves its fee off the
+// incoming payment itself, so the receiver gets less than the sender sent. That cannot be done
+// safely here: on these rails an incoming amount is bound to a swap hash, and a counterparty that
+// receives less than the offer states correctly refuses the leg. Silently shaving an in-flight HTLC
+// would break settlement, so the debt is carried instead of taken mid-payment. The user still pays;
+// they just pay at a moment that cannot corrupt a swap.
+//
+// The ledger is persisted next to the jobs file: an unpaid debt must survive a restart, or the
+// restart is a way to get free liquidity.
+const DEBTS_FILE = CFG.provDir ? path.join(CFG.provDir, 'inbound-debts.json') : '';
+function loadDebts() {
+  if (!DEBTS_FILE) return new Map();
+  try { return new Map(Object.entries(JSON.parse(fs.readFileSync(DEBTS_FILE, 'utf8')) || {})); }
+  catch (e) {
+    if (!e || e.code !== 'ENOENT') console.error('[lsp] inbound-debts.json unreadable, starting empty:', e && e.message);
+    return new Map();
+  }
+}
+const inboundDebts = loadDebts();
+function persistDebts() {
+  if (!DEBTS_FILE) return;
+  try { fs.writeFileSync(DEBTS_FILE, JSON.stringify(Object.fromEntries(inboundDebts)), 'utf8'); }
+  catch (e) { console.error('[lsp] could not persist inbound debts:', e && e.message); }
+}
+const debtKey = (nodeKey, assetId) => `${nodeKey || ''}|${assetId || 'BTC'}`;
+function debtOwed(nodeKey, assetId) { return Number(inboundDebts.get(debtKey(nodeKey, assetId)) || 0); }
+function debtAdd(nodeKey, assetId, amount) {
+  const k = debtKey(nodeKey, assetId);
+  const next = Number(inboundDebts.get(k) || 0) + Math.max(0, Math.floor(Number(amount) || 0));
+  if (next > 0) inboundDebts.set(k, next); else inboundDebts.delete(k);
+  persistDebts();
+  return next;
+}
+function debtClear(nodeKey, assetId, amount) {
+  const k = debtKey(nodeKey, assetId);
+  const cur = Number(inboundDebts.get(k) || 0);
+  const next = amount == null ? 0 : Math.max(0, cur - Math.floor(Number(amount) || 0));
+  if (next > 0) inboundDebts.set(k, next); else inboundDebts.delete(k);
+  persistDebts();
+  return next;
+}
+
 // PRICE FOR SELLING INBOUND LIQUIDITY.
 //
 // Modelled on Phoenix (ACINQ): a percentage of the requested amount, with a floor, over a bounded
@@ -1395,6 +1452,41 @@ function quoteInboundFee(amount, { isBtc = false, bps, minSat, minAtoms, minAmou
   const pct = Math.ceil((amt * rate) / 10000);
   const fee = Math.max(pct, floor);
   return { ok: true, amount: amt, fee, bps: rate, floor, min: lo, max: hi };
+}
+
+// Where a prepaid fee is sent: an address on the LP's OWN on-chain wallet, which is also the node
+// that funds the channel — so the party bearing the cost is the party paid, with no separate
+// treasury to reconcile.
+async function inboundFeeAddress() {
+  if (!CFG.subasLpRpc) throw new Error('inbound fee collection is not configured on this LSP (set SUBAS_LP_RPC)');
+  const a = await lnrpc('newaddr', ['bech32'], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS);
+  const addr = a && (a.bech32 || a.address || a.p2tr);
+  if (!addr) throw new Error('could not allocate a fee address on the LP');
+  return addr;
+}
+
+// Verify a prepaid fee actually landed. Reads the LP's OWN funds for an output from that txid worth
+// at least the fee in the right asset.
+//
+// It fails CLOSED and it does NOT accept an unconfirmed-and-unknown tx: a fee that cannot be seen is
+// not a fee that was paid, and opening a channel on an unverified claim is how you give liquidity
+// away to anyone willing to type a plausible txid.
+async function verifyInboundFeePaid({ txid, assetId, fee }) {
+  if (!txid || !/^[0-9a-fA-F]{64}$/.test(String(txid))) throw new Error('fee_txid must be a 32-byte hex txid');
+  const lf = await lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS).catch(() => null);
+  if (!lf) throw new Error('could not read the LP wallet to verify the fee payment');
+  const want = String(txid).toLowerCase();
+  let paid = 0;
+  for (const o of (lf.outputs || [])) {
+    if (String(o.txid || '').toLowerCase() !== want) continue;
+    // Match the asset: an asset-denominated output must carry that asset id, and BTC must not.
+    const oAsset = String(o.asset || o.asset_id || '').toLowerCase();
+    if (assetId) { if (oAsset !== String(assetId).toLowerCase()) continue; }
+    else if (oAsset && oAsset !== '') continue;
+    paid += Number(o.amount_msat != null ? Math.floor(Number(o.amount_msat) / 1000) : (o.value || 0));
+  }
+  if (paid < fee) throw new Error(`the fee payment ${txid} pays ${paid}, which is less than the ${fee} quoted`);
+  return { ok: true, paid };
 }
 
 // provisionInbound gives the user's OWN hosted asset node INBOUND liquidity so it
@@ -3980,10 +4072,22 @@ const server = http.createServer(async (req, res) => {
       const assetId = isBtc ? '' : resolveAsset(rawAsset);
       if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
       const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc });
+      const nodeKey = url.searchParams.get('node_key') || '';
+      const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
+      // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
+      // when the LP is unreachable, so the mode is simply reported as unavailable rather than 500ing.
+      let payTo = null, payErr = null;
+      if (q.ok) { try { payTo = await inboundFeeAddress(); } catch (e) { payErr = String((e && e.message) || e); } }
       return send(res, q.ok ? 200 : 400, {
         ...q,
         asset: isBtc ? 'BTC' : assetId,
         asset_label: isBtc ? 'BTC' : (assetLabel(assetId) || assetId.slice(0, 8)),
+        // Both ways to pay, and what each means, so the caller can offer a real choice.
+        modes: ['prepaid', 'deferred'],
+        pay_to: payTo,
+        prepaid_unavailable: payErr,
+        already_owed: owed,
+        due_now: q.ok ? q.fee + owed : 0,   // a deferred debt is charged on the next purchase
         // The mining fee for the funding tx is the LP's cost and is not separable per request here,
         // so say so rather than implying the quoted number is the only cost, as Phoenix does.
         note: 'fee is charged in the asset being bought; the LP also pays the on-chain funding fee',
@@ -3996,9 +4100,40 @@ const server = http.createServer(async (req, res) => {
       if (!assetId || assetId === CFG.btcx) return send(res, 400, { ok: false, error: 'asset must be a Sequentia asset id' });
       const amount = Number(body.amount || 0);
       if (!(amount > 0)) return send(res, 400, { ok: false, error: 'amount (asset sats to be receivable) is required' });
+      // CHARGE FOR IT. The fee is quoted here from the same function the quote endpoint uses, so the
+      // price cannot drift between what was shown and what is charged, and any debt already carried
+      // by this node falls due now.
+      const q = quoteInboundFee(amount, { isBtc: false });
+      const owed = debtOwed(body.node_key, assetId);
+      const due = (q.ok ? q.fee : 0) + owed;
+      const mode = String(body.mode || CFG.inboundCollectMode || 'deferred').toLowerCase();
+      if (q.ok && due > 0 && CFG.inboundFeeBps > 0) {
+        if (mode === 'prepaid') {
+          try { await verifyInboundFeePaid({ txid: body.fee_txid, assetId, fee: due }); }
+          catch (e) {
+            // 402: the request is well-formed, the payment is what is missing. Hand back the price
+            // and the address so the caller can pay and retry without re-quoting.
+            let payTo = null; try { payTo = await inboundFeeAddress(); } catch {}
+            return send(res, 402, { ok: false, error: String((e && e.message) || e),
+              fee: q.fee, already_owed: owed, due_now: due, pay_to: payTo, asset: assetId, mode });
+          }
+          debtClear(body.node_key, assetId);
+        } else if (mode === 'deferred') {
+          if (owed > CFG.inboundDebtCap) {
+            return send(res, 402, { ok: false, mode, already_owed: owed, cap: CFG.inboundDebtCap,
+              error: `this node already owes ${owed} for inbound liquidity, which is over the ${CFG.inboundDebtCap} limit · settle it (mode "prepaid") before buying more` });
+          }
+        } else {
+          return send(res, 400, { ok: false, error: `unknown collection mode ${mode} (use "prepaid" or "deferred")` });
+        }
+      }
       try {
         const r = await provisionInbound({ nodeKey: body.node_key, assetId, amount });
-        return send(res, 200, r);
+        // Only record the debt once the channel actually exists — charging for a channel that failed
+        // to open would be billing for nothing. An idempotent no-op is not a new sale either.
+        let nowOwed = owed;
+        if (mode === 'deferred' && q.ok && !r.already_had_inbound && CFG.inboundFeeBps > 0) nowOwed = debtAdd(body.node_key, assetId, q.fee);
+        return send(res, 200, { ...r, fee_charged: mode === 'prepaid' ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode });
       } catch (e) { return send(res, 502, { ok: false, error: String((e && e.message) || e) }); }
     }
     // "Move back to chain": cooperatively close a channel on the user's own hosted node, sending
