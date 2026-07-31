@@ -513,6 +513,10 @@ const STATUS_RPC_TIMEOUT_MS = 5000;
 // heavier than a plain read. Same rationale as STATUS_RPC_TIMEOUT_MS: lnrpc defaults timeoutMs=0 (no
 // timeout), so an offline signer or a wedged node would hang the request handler forever otherwise.
 const SIGNER_RPC_TIMEOUT_MS = 20000;
+// How long a clean sub-asset-buy CLI exit may wait for the hold to actually appear on the user's node
+// before the job is called failed. The CLI legitimately returns at HELD a moment before a 2s watcher
+// poll observes it, so a short grace avoids a false failure; anything longer just delays the truth.
+const HELD_CONFIRM_GRACE_MS = 12000;
 // Bound the FORWARD (payer bridge) maker's XcSeqLegLocked reply after the LSP funds + sends XcBtcLegFunded.
 // A live maker locks the asset within seconds; cap the per-fund wait so a slow/absent maker cannot block the
 // driver tick for the full bolt-default (15m). On timeout fundOnchain throws -> the leg stalls no-loss (our
@@ -1127,7 +1131,40 @@ async function runSubasBuyHodl(job, body) {
     job.done_ms = Date.now();
     return job;
   }
-  if (job.status === 'pending') { job.held = true; job.held_ms = job.held_ms || Date.now(); job.status = 'held'; }
+  // DO NOT INFER 'held' FROM AN EXIT CODE. This used to declare the job held on any clean CLI exit,
+  // overriding the watcher's own holdinvoicelookup observation. So a CLI that exited 0 without the
+  // maker ever paying produced a job reporting status:'held' while the user's node reported the
+  // invoice still 'waiting' — and every waiter believed the job.
+  //
+  // Caught live: a GOLD buy sat with job status 'held', node invoice 'waiting', and NO matching
+  // sendpay on any maker node. The wallet's reconciler correctly reads 'held' as alive, so it waited
+  // on a hold that did not exist, and would have done so until T_btc.
+  //
+  // The invoice is the only authority on whether it holds. Give the watcher a short grace window
+  // (the CLI legitimately exits at HELD a moment before a 2s poll observes it), then believe it.
+  if (!job.held) {
+    const graceUntil = Date.now() + HELD_CONFIRM_GRACE_MS;
+    while (!job.held && Date.now() < graceUntil) {
+      try {
+        const l = await lnrpc('holdinvoicelookup', [job.payment_hash], userRpc, SIGNER_RPC_TIMEOUT_MS);
+        if (l.state === 'accepted') { job.held = true; job.held_ms = job.held_ms || Date.now(); break; }
+        if (l.state === 'settled') { job.held = true; job.settled = true; break; }
+      } catch { /* transient; the watcher is polling too */ }
+      await sleep(1000);
+    }
+  }
+  if (!job.held) {
+    // The CLI finished but nothing is holding on the user's node: the maker never paid. Say so, with
+    // the CLI's own output, instead of a status that reads like success.
+    watching = false;
+    job.status = 'failed';
+    job.error = 'sub-asset buy finished without the asset payment being held on your node (the maker never paid)';
+    job.detail = scrubDetail(out);
+    job.note = 'the BTC HTLC is refundable after T_btc via btcLeg.refund (the device holds the refund key).';
+    job.done_ms = Date.now();
+    return job;
+  }
+  if (job.status === 'pending') { job.held_ms = job.held_ms || Date.now(); job.status = 'held'; }
   // Keep the read-only holdinvoicelookup watcher ALIVE past the CLI exit: the wallet drives
   // /node/settle (the device reveals P), the maker claims the BTC, and holdinvoicelookup flips to
   // 'settled' -> the watcher sets job.settled. The LSP never sees P.
