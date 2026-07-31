@@ -83,3 +83,44 @@ test('the BTC-HTLC refusal outranks every other reason', () => {
   assert.equal(v.armed, false);
   assert.match(v.reason, /BTC HTLC is already funded/);
 });
+
+// ── THE HAND-OFF SHAPE ────────────────────────────────────────────────────────
+// A fronted leg the taker cannot verify is worse than no leg at all: the LSP's
+// asset is already locked on-chain and the taker refuses to claim, so the trade
+// fails and the inventory is stuck until T_seq. Caught live — the first fronted
+// take died on "locktime must be a positive block height" because the hand-off
+// object had dropped that key.
+import { frontedLegHandoff } from './leg-bridge.mjs';
+
+const FUNDED = { txid: 'ab'.repeat(32), vout: 1, amount: 1_000_000_000,
+  redeem_script: '63a820aa', t_seq: 61_171, block_hash: '' };
+
+test('the hand-off carries every field the taker re-verifies against', () => {
+  const h = frontedLegHandoff({ leg: FUNDED, asset: 'cd'.repeat(32), tSeq: 61_171 });
+  // verifySeqLeg rebuilds the redeem script from H + claim key + refund key + LOCKTIME
+  // and re-checks the asset and amount. Every one of these must survive the hand-off.
+  for (const k of ['txid', 'vout', 'amount', 'asset', 'redeem_script', 'locktime', 'block_hash', 'anchor_height'])
+    assert.ok(k in h, `hand-off dropped ${k} — the taker cannot verify the leg and will not claim it`);
+  assert.equal(h.locktime, 61_171, 'the locktime is what the failure was');
+  assert.equal(h.asset, 'cd'.repeat(32));
+  assert.equal(h.amount, 1_000_000_000);
+});
+
+test('the locktime falls back to the session T_seq when the CLI omits it', () => {
+  const h = frontedLegHandoff({ leg: { ...FUNDED, t_seq: undefined }, asset: 'cd'.repeat(32), tSeq: 61_171 });
+  assert.equal(h.locktime, 61_171);
+});
+
+test('a 0-conf front hands over an empty block_hash rather than undefined', () => {
+  // -no-wait returns before the funding tx is in a block. The anchor gate reads
+  // block_hash; undefined would read as a missing field rather than "not yet mined".
+  const h = frontedLegHandoff({ leg: FUNDED, asset: 'cd'.repeat(32), tSeq: 61_171 });
+  assert.equal(h.block_hash, '');
+  assert.equal(typeof h.block_hash, 'string');
+});
+
+test('a locktime that never resolves is 0, not NaN — it fails the check loudly', () => {
+  const h = frontedLegHandoff({ leg: { ...FUNDED, t_seq: undefined }, asset: 'x', tSeq: 0 });
+  assert.equal(h.locktime, 0, '0 trips the taker positive-height check; NaN would be murkier');
+  assert.ok(!Number.isNaN(h.locktime));
+});

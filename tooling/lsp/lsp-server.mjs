@@ -95,7 +95,7 @@ import { acceptUpgrade, bridgeWsToTcp } from './ws-bridge.mjs';
 import { settlementPlanForSide, planExecutionName, planSettlement } from './settlement-router.mjs';
 import { buildUnifiedBook } from './unified-book.mjs';
 import { runBridgedSwap, matchFromTake, describeBridge, classifyLegs, takeRailsCrossed, bridgeAssetHandoffAdmissible, bridgeAssetRelayLocktimeVerdict, bridgeFrontConfirmed, isPureLnTake, crossingShapeSupported, describeCrossingSupport, fundedBtcSatsForResume } from './bridge-driver.mjs';
-import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee, decideAssetFront } from './leg-bridge.mjs';
+import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee, decideAssetFront, frontedLegHandoff } from './leg-bridge.mjs';
 import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair, relayTakerAssetLeg, runForwardBridgeTerms, sendForwardBtcLegFunded, openForwardBridgeSession, checkMakerAssetLegObserved, buildHtlcRedeem } from './bridge-maker.mjs';
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 
@@ -2585,7 +2585,7 @@ async function frontAssetLeg({ job, s, sa }) {
       throw new Error('fronted asset leg built on a refund pubkey that is not ours — refusing to record an un-refundable leg');
     sa.frontedLeg = { txid: funded.seq_htlc_txid, vout: funded.seq_htlc_vout ?? 0,
       amount: funded.amount || atoms, redeem_script: funded.redeem_script,
-      t_seq: Number(funded.seq_locktime || tSeq) };
+      t_seq: Number(funded.seq_locktime || tSeq), block_hash: String(funded.block_hash || '') };
     persistJobs();
     console.error(`[bridge] fronted asset leg broadcast ${sa.frontedLeg.txid}:${sa.frontedLeg.vout} (${atoms} atoms, 0-conf) — claimable by the taker with P now`);
   }
@@ -2604,8 +2604,15 @@ async function frontAssetLeg({ job, s, sa }) {
   // Hand off exactly as the maker's leg would have been: the taker re-verifies
   // sha256(P)==H and claim==its own key, then claims self-custody. sa.onchain is what
   // observe reads P from, which is what settles the held invoice.
+  // The taker RE-VERIFIES the leg before it will claim (verifySeqLeg): it rebuilds the
+  // redeem script from H + its own claim key + the maker refund key + the LOCKTIME, and
+  // checks the asset and amount. So the hand-off must carry the SAME field set the
+  // maker's XcSeqLegLocked does — a leg missing `locktime` or `asset` is rejected
+  // ("locktime must be a positive block height") and the taker correctly refuses to
+  // claim a leg it cannot prove. block_hash is empty on a 0-conf front, which the
+  // anchor gate already handles.
   sa.onchain = { txid: fl.txid, vout: fl.vout, redeem: fl.redeem_script };
-  sa.makerSeqLeg = { txid: fl.txid, vout: fl.vout, redeem_script: fl.redeem_script, amount: fl.amount };
+  sa.makerSeqLeg = frontedLegHandoff({ leg: fl, asset: sa.seqAsset, tSeq });
   s.forwardRelayDone = true;
   job.maker_seq_leg = sa.makerSeqLeg;
   if (job.bridge_terms) job.bridge_terms.maker_seq_leg = sa.makerSeqLeg;
