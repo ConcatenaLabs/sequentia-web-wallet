@@ -90,3 +90,68 @@ test('a quote never charges more than the liquidity is worth', () => {
     assert.ok(q.fee < amt / 10, `fee ${q.fee} is more than 10% of ${amt}`);
   }
 });
+
+// ── COLLECTION: TWO WAYS TO PAY ──────────────────────────────────────────────
+// 'prepaid'  — the fee is sent on-chain before the channel opens (Phoenix's manual purchase).
+// 'deferred' — the channel opens now and the fee is recorded as owed (the pay-to-open shape).
+//
+// What 'deferred' deliberately does NOT do: Phoenix shaves its fee off the incoming payment, so the
+// receiver gets less than the sender sent. That cannot be done safely here — on these rails an
+// incoming amount is bound to a swap hash, and a counterparty receiving less than the offer states
+// correctly refuses the leg. So the debt is carried rather than taken mid-payment: the user still
+// pays, just at a moment that cannot corrupt a swap.
+
+// The ledger, mirrored from lsp-server.mjs.
+const mkLedger = () => {
+  const m = new Map();
+  const key = (n, a) => `${n || ''}|${a || 'BTC'}`;
+  return {
+    owed: (n, a) => Number(m.get(key(n, a)) || 0),
+    add: (n, a, amt) => { const k = key(n, a); const v = Number(m.get(k) || 0) + Math.max(0, Math.floor(Number(amt) || 0));
+      if (v > 0) m.set(k, v); else m.delete(k); return v; },
+    clear: (n, a, amt) => { const k = key(n, a); const cur = Number(m.get(k) || 0);
+      const v = amt == null ? 0 : Math.max(0, cur - Math.floor(Number(amt) || 0));
+      if (v > 0) m.set(k, v); else m.delete(k); return v; },
+  };
+};
+
+test('a deferred fee is owed until it is settled', () => {
+  const L = mkLedger();
+  assert.equal(L.owed('nodeA', 'GOLD'), 0);
+  L.add('nodeA', 'GOLD', 2000);
+  assert.equal(L.owed('nodeA', 'GOLD'), 2000);
+  L.add('nodeA', 'GOLD', 2000);
+  assert.equal(L.owed('nodeA', 'GOLD'), 4000, 'debts accumulate across purchases');
+  L.clear('nodeA', 'GOLD');
+  assert.equal(L.owed('nodeA', 'GOLD'), 0, 'a prepaid settlement clears it');
+});
+
+test('debt is per node AND per asset', () => {
+  // Charging a GOLD debt against a BTC purchase would take the fee in the wrong unit entirely.
+  const L = mkLedger();
+  L.add('nodeA', 'GOLD', 2000);
+  assert.equal(L.owed('nodeA', 'BTC'), 0, 'a GOLD debt is not owed in BTC');
+  assert.equal(L.owed('nodeB', 'GOLD'), 0, "and is not another node's debt");
+});
+
+test('the amount DUE on a purchase is the new fee plus what is already owed', () => {
+  // The whole point of the deferred mode: it defers, it does not forgive.
+  const L = mkLedger();
+  L.add('nodeA', 'GOLD', 2000);
+  const q = quoteInboundFee(500_000, { isBtc: false });
+  assert.equal(q.fee + L.owed('nodeA', 'GOLD'), 7000);
+});
+
+test('a partial settlement reduces the debt without erasing it', () => {
+  const L = mkLedger();
+  L.add('nodeA', 'GOLD', 5000);
+  assert.equal(L.clear('nodeA', 'GOLD', 2000), 3000);
+  assert.equal(L.clear('nodeA', 'GOLD', 99999), 0, 'overpaying settles it, never goes negative');
+});
+
+test('a debt cap is what stops deferred becoming unlimited free liquidity', () => {
+  const L = mkLedger();
+  const CAP = 50000;
+  L.add('nodeA', 'GOLD', CAP + 1);
+  assert.ok(L.owed('nodeA', 'GOLD') > CAP, 'over the cap, further deferred purchases must be refused');
+});
