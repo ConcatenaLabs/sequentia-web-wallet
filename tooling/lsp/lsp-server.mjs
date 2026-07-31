@@ -1969,8 +1969,13 @@ function makeBridgeIo({ match, body, job }) {
             const ao = await xhtlcObserve({ rpc: CFG.seqRpc, txid: fsa.onchain.txid, vout: fsa.onchain.vout || 0,
               hashH: s.hashH, redeem: fsa.onchain.redeem });
             if (typeof ao.tip === 'number') assetTip = ao.tip;
-            if (ao && ao.preimage && /^[0-9a-f]{64}$/i.test(ao.preimage) && !ln.preimage) ln.preimage = String(ao.preimage).toLowerCase();
-          } catch { /* observe hiccup -> no P this tick -> the step machine just waits */ }
+            if (ao && ao.preimage && /^[0-9a-f]{64}$/i.test(ao.preimage) && !ln.preimage) {
+              ln.preimage = String(ao.preimage).toLowerCase();
+              console.error('[bridge] fronted asset leg CLAIMED by the taker — P read on-chain; settling our held invoice');
+            } else if (ao && ao.spent && !ao.preimage) {
+              console.error('[bridge] fronted asset leg is spent but no P could be read from the spend — cannot settle the hold yet');
+            }
+          } catch (e) { console.error('[bridge] fronted asset-leg observe failed (no P this tick):', scrubDetail(String((e && e.message) || e))); }
         }
       }
       // CHAIN-TRUTH SPEND CLASSIFICATION (payer leg): fetch the AUTHORITATIVE on-chain fate of the LSP's OWN
