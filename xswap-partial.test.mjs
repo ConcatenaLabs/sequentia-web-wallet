@@ -90,8 +90,14 @@ const redeemOf = (h, claim, ref, lock) => `R:${h}:${claim}:${ref}:${lock}`;
 // The SEQ leg's redeem the taker re-derives in verifyLeg: claim = our SEQ key, refund = maker, T_seq.
 const FWD_SEQ_REDEEM = redeemOf(HASH, SEQ_CLAIM_PUB, MAKER_SEQ_REFUND, T_SEQ);
 
-function forwardTermsMsg(){
-  return { type: 'terms', btc_amount: Number(WHOLE_BTC), seq_amount: Number(WHOLE_SEQ), fee_btc: 0,
+// TERMS NAME THE SLICE the taker asked for, not the whole resting offer — what the
+// real maker sends (seqob-maker's PARTIAL quote) and what every taker now binds to.
+// Called with no argument it quotes the whole offer, which is what a whole take is.
+const propCeil = (whole, take, wholeSeq) => (take >= wholeSeq ? whole : (whole * take + wholeSeq - 1n) / wholeSeq);
+function forwardTermsMsg(takeSeq){
+  const seq = (takeSeq && takeSeq > 0n && takeSeq < WHOLE_SEQ) ? takeSeq : WHOLE_SEQ;
+  const btc = propCeil(WHOLE_BTC, seq, WHOLE_SEQ);
+  return { type: 'terms', btc_amount: Number(btc), seq_amount: Number(seq), fee_btc: 0,
     btc_locktime: T_BTC, seq_locktime: T_SEQ, maker_btc_claim_pub: MAKER_BTC_CLAIM, maker_refund_pub: MAKER_SEQ_REFUND };
 }
 function forwardSeqLockedMsg(lockedAtoms){
@@ -142,13 +148,13 @@ function forwardQuote(takeSeq){
     seq_amount: takeSeq, btc_amount: 0n, fee_btc: 0n, candidates: [] };
 }
 
-test('FORWARD partial: validates whole-ratio terms, funds ceil-proportional BTC, sends the slice, binds + settles', async () => {
+test('FORWARD partial: binds the SLICE terms, funds ceil-proportional BTC, sends the slice, binds + settles', async () => {
   installEnv();
   const takeSeq = 1500000n;
   const expectFundBtc = FWD.proportionalBtcCeil(WHOLE_BTC, takeSeq, WHOLE_SEQ);   // ceil(25001*1.5e6/5e6) = 7501
   assert.equal(expectFundBtc, 7501n, 'ceil-proportional BTC for the slice');
 
-  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(), forwardSeqLockedMsg(takeSeq)]);
+  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(takeSeq), forwardSeqLockedMsg(takeSeq)]);
   const { C, fundCalls, broadcastCalls } = forwardCtx(session);
   initXswap(C);
   FWD.clearSwap();
@@ -184,7 +190,7 @@ test('FORWARD partial: REFUSES (no secret reveal) when the maker locks LESS than
   const takeSeq = 1500000n;
   const underLock = takeSeq - 500000n;   // maker tries to deliver less asset than the taker funded
 
-  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(), forwardSeqLockedMsg(underLock)]);
+  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(takeSeq), forwardSeqLockedMsg(underLock)]);
   const { C, fundCalls, broadcastCalls } = forwardCtx(session);
   initXswap(C);
   FWD.clearSwap();
@@ -205,7 +211,7 @@ test('FORWARD partial: REFUSES (no secret reveal) when the maker locks LESS than
 test('FORWARD whole take is unchanged: fundBtc == the whole offer BTC, byte-identical lift', async () => {
   installEnv();
   const takeSeq = WHOLE_SEQ;   // taking the entire offer
-  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(), forwardSeqLockedMsg(takeSeq)]);
+  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(takeSeq), forwardSeqLockedMsg(takeSeq)]);
   const { C, fundCalls, broadcastCalls } = forwardCtx(session);
   initXswap(C);
   FWD.clearSwap();
@@ -344,7 +350,7 @@ test('FORWARD sub-dust: a tiny slice is REFUSED pre-lock (amount_too_small), NOT
 
   // Only the Terms are scripted — the driver must abort at the dust guard, BEFORE it would fund + send the leg
   // and receive a SeqLegLocked.
-  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg()]);
+  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(takeSeq)]);
   const { C, fundCalls, broadcastCalls } = forwardCtx(session);
   initXswap(C);
   FWD.clearSwap();
@@ -366,7 +372,7 @@ test('FORWARD just-above-floor: a slice whose BTC leg clears the dust minimum st
   const fundBtc = FWD.proportionalBtcCeil(WHOLE_BTC, takeSeq, WHOLE_SEQ);
   assert.ok(fundBtc >= 2546n, 'the slice clears the safe BTC-leg minimum');
 
-  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(), forwardSeqLockedMsg(takeSeq)]);
+  const { session, sent, failCalls } = scriptedSession([forwardTermsMsg(takeSeq), forwardSeqLockedMsg(takeSeq)]);
   const { C, fundCalls, broadcastCalls } = forwardCtx(session);
   initXswap(C);
   FWD.clearSwap();
