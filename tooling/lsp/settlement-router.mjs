@@ -49,6 +49,11 @@ export function planSettlement(match) {
   const bridged = btcLeg.bridge || assetLeg.bridge;
   return {
     asset: match.asset ?? null,
+    // WHICH ENDPOINT IS THE TAKER. A leg's lnSide names the PAYER/RECEIVER role that sits on Lightning,
+    // which is not enough on its own: on the asset leg 'payer' means the MAKER when the taker buys and
+    // the TAKER when the taker sells, and those are two completely different settlement problems. Carry
+    // it so a capability predicate can tell them apart instead of admitting both or refusing both.
+    takerSide: match.takerSide ?? null,
     btcLeg,
     assetLeg,
     // Whole-swap atomicity is always one shared preimage H. When the LSP bridges a leg it

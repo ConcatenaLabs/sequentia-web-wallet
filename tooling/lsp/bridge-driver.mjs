@@ -376,10 +376,47 @@ export function crossingShapeSupported(plan) {
   // recoups the taker's on-chain BTC HTLC with. Same front-then-recoup shape as the BTC
   // 'receiver' bridge, one leg over.
   //
-  // Still refused for 'payer' (the taker PAYS the asset over Lightning to an on-chain
-  // maker): that would need the LSP to originate an on-chain asset HTLC against a
-  // received asset hold, which nothing implements.
-  if (assetBridged) return asset.lnSide === 'receiver';
+  // lnSide 'payer' on the asset leg — the MAKER delivers its asset over Lightning and the taker wants
+  // it ON-CHAIN. (On this leg the payer is the SELLER, so 'payer' names the maker, not the taker.)
+  //
+  // This was refused, and refusing it broke the promise rail-blind matching exists to make: the
+  // best-priced offer must be takeable whatever rail it rests on. A GOLD take was told "this wallet
+  // cannot turn that into an on-chain receipt" purely because the best offer delivered over Lightning
+  // — a price the user was shown and then denied.
+  //
+  // It settles now by sourcing the asset from that maker as PRINCIPAL (lsp-server sourceAssetOverLn:
+  // the LSP takes the offer with its own nodes, on its own H) and then fronting it on-chain to the
+  // taker on the TAKER's H, recouping from the taker's held payment. Two atomic swaps rather than one
+  // forwarded preimage — a pure-LN maker negotiates its own H and cannot be handed someone else's, so
+  // there is no shared-H route to it and claiming one would be claiming an atomicity we do not have.
+  // The LSP carries the risk in between, which is what an LSP is for, and the exposure is bounded by
+  // ORDER: it fronts only after the source take has actually settled, so the asset is ours before any
+  // of it is promised onward.
+  // On the asset leg the PAYER is the seller, so lnSide 'payer' means two different things depending on
+  // which endpoint the taker is — and they are not the same settlement problem at all:
+  //
+  //   taker BUYS  -> the MAKER delivers its asset over Lightning, the taker wants it on-chain. WIRED:
+  //                  the LSP sources the asset from that maker as principal (lsp-server
+  //                  sourceAssetOverLn — it takes the offer with its own nodes, on its own H) and
+  //                  fronts it on-chain to the taker on the TAKER's H, recouping from the taker's held
+  //                  payment. Two atomic swaps rather than one forwarded preimage: a pure-LN maker
+  //                  negotiates its own H and cannot be handed someone else's, so there is no shared-H
+  //                  route to it and claiming one would be claiming an atomicity we do not have. The
+  //                  LSP carries the risk between them, which is what an LSP is for, bounded by ORDER —
+  //                  it fronts only after the source take has SETTLED, so the asset is ours before any
+  //                  of it is promised onward.
+  //
+  //   taker SELLS -> the TAKER pays its asset over Lightning to an on-chain maker. STILL REFUSED: that
+  //                  needs the LSP to originate an on-chain asset HTLC against a received asset hold,
+  //                  which nothing implements. Admitting it here would be an offer-then-refuse.
+  //
+  // Refusing the first is what broke rail-blind matching's promise — a GOLD take was told "this wallet
+  // cannot turn that into an on-chain receipt" purely because the best-priced offer delivered over
+  // Lightning, a price the user was shown and then denied.
+  if (assetBridged) {
+    if (asset.lnSide === 'receiver') return true;
+    return asset.lnSide === 'payer' && plan.takerSide === 'buy';
+  }
   return false;
 }
 
@@ -496,13 +533,13 @@ export function matchFromTake({
   assertR(makerBtcRail, 'makerBtcRail'); assertR(makerAssetRail, 'makerAssetRail');
   if (side === 'buy') {
     // taker BUYS: pays BTC on payRail, receives the asset on recvRail.
-    return { asset,
+    return { asset, takerSide: 'buy',
       buyer:  { btcRail: payRail, assetRail: recvRail, assetInbound: !!takerAssetInbound },
       seller: { assetRail: makerAssetRail, btcRail: makerBtcRail, btcInbound: !!makerBtcInbound } };
   }
   if (side === 'sell') {
     // taker SELLS: pays the asset on payRail, receives BTC on recvRail.
-    return { asset,
+    return { asset, takerSide: 'sell',
       seller: { assetRail: payRail, btcRail: recvRail, btcInbound: !!takerBtcInbound },
       buyer:  { btcRail: makerBtcRail, assetRail: makerAssetRail, assetInbound: !!makerAssetInbound } };
   }
