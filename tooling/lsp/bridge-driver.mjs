@@ -79,7 +79,22 @@ export async function runBridgedLeg({ leg, io, cfg = {}, driverCfg = {} }) {
     // Feed the whole-swap atomicity gate to the PURE core, so the front is withheld there (not by an
     // ad-hoc driver branch): the driver still executes exactly nextBridgeStep's output.
     if (io.swapLocked) obs = { ...obs, swapLocked: !!io.swapLocked() };
-    const step = nextBridgeStep(leg, obs, cfg);
+    // FRONTED-NESS IS DYNAMIC STATE, NOT CONSTRUCTION-TIME CONFIG.
+    //
+    // The caller builds this leg once, before the run starts — at which point no
+    // fronting decision has been taken yet, so a flag captured there is frozen false
+    // for the whole leg. The LSP decides to front DURING the first fund-onchain, and
+    // from that instant the recoup rule changes (there is no BTC HTLC to read).
+    //
+    // Reading it once meant the step machine never took the fronted branch: it kept
+    // returning fund-onchain against a job that had already fronted, re-entering the
+    // front every few seconds and never recouping. Re-read it each tick.
+    const tickLeg = (io.isFronted || io.assetRefundHeight)
+      ? { ...leg,
+          fronted: io.isFronted ? !!io.isFronted(leg) : leg.fronted,
+          assetRefundHeight: io.assetRefundHeight ? Number(io.assetRefundHeight(leg)) : leg.assetRefundHeight }
+      : leg;
+    const step = nextBridgeStep(tickLeg, obs, cfg);
     lastAction = step.action;
     if (step.action === 'done') { log('[bridge-leg] done:', step.reason); return { ok: true, reason: step.reason, fronted, lastAction }; }
     if (step.action === 'fail-closed') {
