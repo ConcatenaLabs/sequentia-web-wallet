@@ -515,6 +515,23 @@ export function seqlnJobStatusRaw(pathOrId) {
   return lspFetch(p.startsWith('/') ? p : ('/swap/' + p), { allowNotOk: true });
 }
 
+// Is this job body one that is NO LONGER BEING DRIVEN? A dead job means the LSP is not
+// commanding the maker any more, so a waiter must re-issue rather than keep waiting.
+//
+// Deliberately CONSERVATIVE about what counts as dead: a body we cannot read (null, a
+// transport blip, an unknown status) is treated as ALIVE. Declaring a live job dead
+// re-commands a maker that is already working; declaring a dead job alive only costs a
+// 30s tick. The asymmetry favours not thrashing a healthy trade.
+//
+// Returns { dead, reason } — the reason is what makes a stall explicable to the user
+// instead of an indefinite spinner.
+export function jobIsDead(body) {
+  if (!body || typeof body !== 'object') return { dead: false, reason: '' };
+  const status = String(body.status || '');
+  const dead = body.ok === false || status === 'failed' || status === 'interrupted' || !!body.interrupted;
+  return { dead, reason: dead ? String(body.error || body.reason || status || '') : '' };
+}
+
 // "Move back to chain": cooperatively close a channel on the user's own hosted node and send the
 // reclaimed funds to `destination` (the wallet's own on-chain address). The INVERSE of fundChannel.
 // The device signer MUST be connected first (the keyless node's closing tx is device-signed), so the

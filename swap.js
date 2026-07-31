@@ -40,6 +40,9 @@ import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
 import { computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit } from './covenant-flow.js';
 // HONEST per-asset Lightning-rail gating (offer LN only with a real usable channel).
 import { railAvailability } from './ln-rail.js';
+// Pure predicate only — LSP *transport* still reaches this module solely through the injected `L`
+// handle. This reads an already-fetched job body and says whether it is still being driven.
+import { jobIsDead } from './seqln.js';
 // The mixed-rail (submarine) swap state machine + localStorage resume (fund-safety:
 // an in-flight on-chain HTLC leg must survive a reload so it can be refunded).
 import * as sub from './submarine.js';
@@ -6447,15 +6450,18 @@ async function startBuy(params){
       }
     }
     // Bring our asset LN node's device signer ONLINE so it can register + settle the HODL invoice.
+    // NAME EACH STEP. These three awaits are unbounded LSP round-trips, and they all used to print the
+    // SAME 'Completing your trade …', so a hang in any of them was indistinguishable from the others —
+    // the user (and we) could not tell whether the node, the channel or the invoice was stuck.
     if (L.connectNode){
-      say('Completing your trade …');
+      say('Connecting your Lightning node …');
       const prov = await L.connectNode(asset);
       if (!(prov && prov.connected)) throw new Error('Could not reach Lightning right now · reopen the wallet and try again.');
     }
     // Ensure inbound asset liquidity so the maker can pay us over LN (JIT 0-conf; idempotent, best-effort).
-    if (L.channelInbound){ say('Completing your trade …'); try { await L.channelInbound({ node_key, asset, amount: assetAtoms }); } catch {} }
+    if (L.channelInbound){ say('Preparing Lightning to receive ' + am.ticker + ' …'); try { await L.channelInbound({ node_key, asset, amount: assetAtoms }); } catch {} }
     // 2. Register a HODL invoice on H at our OWN node (NO bolt11; the maker pays H BY HASH). Device keeps P.
-    say('Completing your trade …');
+    say('Registering your Lightning invoice …');
     const inv = await L.nodeInvoice({ node_key, asset, amount: assetAtoms, payment_hash: H });
     if (!(inv && (inv.payment_hash || inv.hodl))) throw new Error('This trade could not be completed - your funds are safe.');
     // 3. Build + FUND the BTC HTLC on H: maker claims with P, device refunds after T_btc (the PROVEN
@@ -6473,7 +6479,7 @@ async function startBuy(params){
       btc_htlc: { redeem_script: redeem, cltv: T_btc, amount: btcSats, maker_claim_pub: makerClaimPub, taker_refund_pub: refund.public_key },
       t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() };
     saveBuy();
-    say('Completing your trade …');
+    say('Locking your Bitcoin …');
     const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (BUY && BUY.btc_htlc){ BUY.btc_htlc.txid = String(txid); saveBuy(); } });
     BUY.btc_htlc.txid = String(funded.txid); BUY.btc_htlc.vout = funded.vout; BUY.state = 'funded'; saveBuy();
     const btc_htlc = BUY.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
@@ -6511,12 +6517,42 @@ async function driveBuy(say){
   // Safe to repeat: the on-chain HTLC is already funded and the hosted node's hold invoice on H can
   // only be paid once, so a duplicate command is idempotent. (Skipped on a fresh startBuy, whose
   // job_id points at a live job.)
-  if (BUY.job_id && L.jobStatus){
-    const alive = await L.jobStatus(BUY.poll || ('/swap/' + BUY.job_id))
-      .then(j => !!(j && j.ok !== false && j.status !== 'failed' && j.status !== 'interrupted' && !j.interrupted), () => false);
-    if (!alive){ BUY.job_id = null; BUY.poll = null; saveBuy(); }
-  }
-  // Resume-after-crash-before-swap (or after the reconcile above): funded the BTC but no live LSP job.
+  // Read the job's liveness. jobStatusRaw, NOT jobStatus: lspFetch rejects on ok:false, so a FAILED
+  // job answers with an exception and the caller that most needs the reason gets none. Returns
+  // { alive, reason } — a transport error reads as alive (we cannot conclude a job died from a
+  // network blip; the refund guard is the real backstop).
+  const jobAlive = async () => {
+    const read = (L && (L.jobStatusRaw || L.jobStatus)) || null;
+    if (!BUY.job_id || !read) return { alive: true, reason: '' };
+    try {
+      const v = jobIsDead(await read(BUY.poll || ('/swap/' + BUY.job_id)));
+      return { alive: !v.dead, reason: v.reason };
+    } catch { return { alive: true, reason: '' }; }   // transport-only: inconclusive, keep waiting
+  };
+  // Drop a dead job and re-command the maker. The LSP now PERSISTS jobs, so a restart no longer 404s
+  // ours — it reloads the job and, because the in-process driver died with the old process, marks it
+  // 'interrupted'. Either signal (404/gone, 'failed', or 'interrupted') means the maker's pay-by-hash
+  // is no longer being driven. Safe to repeat: the on-chain HTLC is already funded and the hosted
+  // node's hold invoice on H can only be paid once, so a duplicate command is idempotent.
+  let revivals = 0, lastReason = '';
+  const reviveJob = async () => {
+    const { alive, reason } = await jobAlive();
+    if (alive) return false;
+    if (reason) lastReason = reason;
+    BUY.job_id = null; BUY.poll = null; saveBuy();
+    if (!BUY.btc_htlc) return false;
+    revivals++;
+    try {
+      const job = await L.swap({ side: 'buy', hodl: true, asset: BUY.asset, node_key, payment_hash: H,
+        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc,
+        offer_id: BUY.offer_id, maker_pubkey: BUY.maker_pubkey });
+      BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
+      return true;
+    } catch (e){ lastReason = String((e && e.message) || lastReason || ''); return false; }
+    // never rethrow — the refund guard below is what actually protects the funds
+  };
+  await reviveJob();
+  // Resume-after-crash-before-swap: funded the BTC but never got a job id at all.
   if (!BUY.job_id && BUY.btc_htlc){
     try {
       const job = await L.swap({ side: 'buy', hodl: true, asset: BUY.asset, node_key, payment_hash: H,
@@ -6525,7 +6561,24 @@ async function driveBuy(say){
       BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
     } catch {}   // never mind — the refund guard below still protects the funds
   }
+  let tick = 0;
   for (;;){
+    // RECONCILE THE JOB, NOT ONLY THE INVOICE. This loop used to poll invoice-status alone, so a job
+    // that died moments after its 202 left the wallet printing 'Completing your trade …' until T_btc —
+    // hours of silence for a failure the LSP already knew about, rescuable only by reloading the page
+    // (which ran the one-shot reconcile above). Caught live on the first on-chain→LN take. Re-check
+    // every ~30s: cheap next to a 6s invoice poll, and it turns a silent stall into either a revived
+    // job or an honest reason.
+    if (tick && tick % 5 === 0){
+      const revived = await reviveJob();
+      if (revived) say('Re-sending your order to the seller …' + (revivals > 1 ? ' (attempt ' + revivals + ')' : ''));
+      else if (lastReason && !BUY.job_id)
+        // The job is dead AND could not be re-commanded. Say so, with the reason and the block at which
+        // the Bitcoin comes back on its own, rather than an indefinite reassuring spinner.
+        say('The seller isn’t responding · ' + C.prettyErr(new Error(lastReason))
+          + (BUY.t_btc ? ' · your Bitcoin returns automatically at block ' + BUY.t_btc + ' if this doesn’t complete.' : ''));
+    }
+    tick++;
     let tip = 0; try { tip = await C.btcLeg.tipHeight(); } catch {}
     const status = await L.invoiceStatus({ node_key, payment_hash: H }).catch(() => null);
     if (status && status.settled){ BUY.state = 'settled'; saveBuy(); return; }   // already settled (resume)
