@@ -4847,8 +4847,22 @@ async function reviewLspPayerBridge(route, disp){
   if (disp.belowMin){ const minStr = C.fmtAtoms(BigInt(disp.minAtoms || 0), aprec) + ' ' + tk; const minBtcStr = C.fmtAtoms(BigInt(disp.minBtc || 0), 8) + ' BTC'; $('swErr').textContent = `The smallest amount you can buy here is ${minStr} (${minBtcStr}) · increase the amount to at least that.`; return; }
   // The review must state the SIZED take. Falling back to the whole offer here would
   // print one number while the order carried another.
-  let _rv; try { _rv = sizedTake(disp); }
-  catch { try { C.toast && C.toast('This trade could not be sized - nothing was placed.'); } catch {} return; }
+  // A REFUSAL BELONGS ON THE ERROR LINE, NOT ONLY IN A TOAST.
+  //
+  // This bailed with a toast alone, so Place order did nothing visible and left no trace: no review
+  // sheet, an empty error line, and a notification the user may never have been looking at. Watched
+  // it happen live on the LN-pay/on-chain-receive rail — Place clicked, nothing whatsoever, and the
+  // only way to find out why was to read the source. Say it where every other refusal on this screen
+  // is said, and keep the toast for the case where the composer has scrolled out of view.
+  let _rv;
+  try { _rv = sizedTake(disp); }
+  catch (e) {
+    const why = C.prettyErr(e);
+    $('swErr').textContent = `This trade could not be sized, so nothing was placed: ${why}`;
+    try { C.toast && C.toast('This trade could not be sized - nothing was placed.'); } catch {}
+    try { console.warn('[payer-bridge] sizedTake failed:', e); } catch {}
+    return;
+  }
   const assetStr = C.fmtAtoms(_rv.atoms, aprec) + ' ' + tk;
   const btcStr = C.fmtAtoms(_rv.btc, 8) + ' BTC';
   // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
