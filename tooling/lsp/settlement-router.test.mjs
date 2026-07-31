@@ -142,5 +142,44 @@ ok(assetCross.path === 'lsp-bridge' && assetCross.lnSide === 'receiver', 'asset-
 throws(() => planSettlement({}), 'missing buyer/seller throws');
 throws(() => planLeg('btc', 'ln', 'satellite', false), 'invalid rail throws');
 
+
+// ── A P2P SUBMARINE CAN ONLY BRIDGE ONE LEG — THE BTC ONE ────────────────────
+// A P2P submarine is two counterparties swapping directly: the maker takes BTC over Lightning and
+// settles its asset on-chain. That works precisely BECAUSE the asset leg is native. When the asset leg
+// crosses too — the maker delivers its asset over Lightning while the taker wants it on-chain — no
+// party in a P2P swap can produce an on-chain asset for the taker: the maker does not hold one, and
+// the LSP is not in the value path at all.
+//
+// chooseSettlementPath checked only the BTC leg, so a doubly-crossed shape against an interactive
+// maker was routed to P2P regardless. Seen live: a GOLD buy dispatched to 'p2p-buy' and died with
+// "This trade could not be completed" — the chosen path could never have settled it, whatever the
+// counterparties did.
+{
+  const dbl = { asset: 'GOLD',
+    buyer:  { btcRail: 'ln',    assetRail: 'chain' },     // taker pays BTC-LN, wants the asset on-chain
+    seller: { assetRail: 'ln',  btcRail: 'chain' },       // maker delivers over LN, rests BTC on-chain
+    takerSide: 'buy' };
+  const dblPlan = planSettlement(dbl);
+  eq(dblPlan.btcLeg.bridge, true, 'BTC leg crosses');
+  eq(dblPlan.assetLeg.bridge, true, 'and so does the asset leg');
+  eq(chooseSettlementPath(dbl, { caps: { interactive: true, btc_ln: true } }).path, 'lsp-bridge',
+    'an interactive BTC-LN maker is still not a settlement for a leg it cannot deliver');
+
+  // REGRESSION GUARD: the common, cheapest path must be untouched. Only the BTC leg crosses here,
+  // the maker settles its asset on-chain itself, and P2P remains the right answer.
+  const single = { asset: 'GOLD',
+    buyer:  { btcRail: 'ln',    assetRail: 'chain' },
+    seller: { assetRail: 'chain', btcRail: 'chain' },
+    takerSide: 'buy' };
+  const singlePlan = planSettlement(single);
+  eq(singlePlan.btcLeg.bridge, true);
+  eq(singlePlan.assetLeg.bridge, false, 'asset leg native — the maker settles it itself');
+  const sd = chooseSettlementPath(single, { caps: { interactive: true, btc_ln: true } });
+  eq(sd.path, 'p2p-submarine');
+  eq(sd.ln_direction, 1);
+  // And a non-interactive maker on that same singly-crossed leg still falls back to the bridge.
+  eq(chooseSettlementPath(single, { caps: { interactive: false, btc_ln: true } }).path, 'lsp-bridge');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
