@@ -415,7 +415,16 @@ export function crossingShapeSupported(plan) {
   // Lightning, a price the user was shown and then denied.
   if (assetBridged) {
     if (asset.lnSide === 'receiver') return true;
-    return asset.lnSide === 'payer' && plan.takerSide === 'buy';
+    // ...AND ONLY FOR THE TAKER SHAPE THAT HAS A ROUTE. The LSP fronts the asset on-chain and recoups
+    // from the taker's HELD Lightning payment, so the taker must be paying BTC over Lightning; that is
+    // the shape the wallet reviews (pay-LN / receive-on-chain) and the only one the recoup exists for.
+    //
+    // Support has to stop exactly where the route stops. Admitting the shape on its merits alone made
+    // a chain/chain taker dead-end on "This trade could not be placed right now": the predicate said
+    // yes, no review path matched, and the composer refused a price it had just shown — the same
+    // offer-then-refuse from the other end. Narrowed, such a taker falls back to the best offer it CAN
+    // settle natively instead of being stopped.
+    return asset.lnSide === 'payer' && plan.takerSide === 'buy' && !!(btc && btc.rail === 'ln');
   }
   return false;
 }

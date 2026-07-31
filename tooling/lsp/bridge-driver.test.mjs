@@ -691,6 +691,20 @@ test('P3.2 crossingShapeSupported: the WIRED shape (SELL asset / receive BTC ove
   assert.equal(crossingShapeSupported(plan), true);
 });
 
+// SUPPORT STOPS EXACTLY WHERE THE ROUTE STOPS. The same crossing with the taker paying BTC ON-CHAIN has
+// no review path and no recoup (the LSP recoups by settling the taker's HELD Lightning payment, and
+// there is none). Admitting it on the crossing's merits alone made a chain/chain taker dead-end on
+// "This trade could not be placed right now" — the predicate said yes, nothing routed it, and the
+// composer refused a price it had just shown. Narrowed, that taker falls back to an offer it CAN settle.
+test('P3.2 crossingShapeSupported: same crossing, taker pays BTC on-chain -> refused (no route, no recoup)', () => {
+  const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'ln' });
+  const plan = planSettlement(m);
+  assert.equal(plan.assetLeg.bridge, true, 'the asset leg still crosses');
+  assert.equal(plan.assetLeg.lnSide, 'payer');
+  assert.equal(crossingShapeSupported(plan), false,
+    'no held Lightning payment to recoup from, so the front has nothing behind it');
+});
+
 test('P3.2 crossingShapeSupported: a payer-side BTC-leg bridge (BUY, pay BTC over LN) with a native asset leg IS wired', () => {
   const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'ln', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'chain' });
   const plan = planSettlement(m);
@@ -710,7 +724,10 @@ test('P3.2 crossingShapeSupported: a payer-side BTC-leg bridge (BUY, pay BTC ove
 // pure-LN maker negotiates its OWN H and cannot be handed someone else's. The LSP carries the risk
 // between them, bounded by ORDER -- it fronts only after the source take has settled.
 test('P3.2 crossingShapeSupported: maker delivers the asset over LN, taker wants it on-chain -> WIRED', () => {
-  const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'chain', recvRail: 'chain', makerBtcRail: 'chain', makerAssetRail: 'ln' });
+  // The taker pays BTC over Lightning: the LSP fronts the asset on-chain and recoups from that HELD
+  // payment, so the recoup only exists for this shape. (A chain-paying taker is asserted below to be
+  // refused, because no review path routes it and no recoup backs it.)
+  const m = matchFromTake({ asset: 'GOLD', side: 'buy', payRail: 'ln', recvRail: 'chain', makerBtcRail: 'ln', makerAssetRail: 'ln' });
   const plan = planSettlement(m);
   assert.equal(plan.assetLeg.bridge, true);
   assert.equal(plan.assetLeg.lnSide, 'payer', 'on the asset leg the payer is the SELLER — here, the maker');
