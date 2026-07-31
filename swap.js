@@ -6656,6 +6656,14 @@ export async function resumeBuy(){
   }
   if (!(BUY.state === 'funded' || BUY.state === 'holding')) return;
   try {
+    // BRING THE DEVICE SIGNER ONLINE FIRST. The user's asset node is KEYLESS: it only runs while the
+    // device signer is attached, and a reload detaches it. driveBuy went straight to re-commanding the
+    // LSP, which then could not reach the node at all — every retry died on
+    // "inbound provisioning failed: lightning-rpc: Connection refused", forever, on a trade whose
+    // Bitcoin was already locked. startBuy has always done this; the resume path simply never did.
+    //
+    // Best-effort: if it fails, driveBuy still runs and the refund guard still protects the funds.
+    if (L && L.connectNode && BUY.asset){ try { await L.connectNode(BUY.asset); } catch {} }
     await driveBuy();
     if (BUY.state === 'settled'){ try { C.toast && C.toast('Recovered your buy · ' + BUY.ticker + ' received over Lightning.'); } catch {} try { await C.sync(); } catch {} clearBuy(); }
     else if (BUY.state === 'refunded'){ try { C.toast && C.toast('Your buy timed out · Bitcoin refunded on-chain (' + String(BUY.refund_txid||'').slice(0,16) + '…).'); } catch {} try { await C.sync(); } catch {} clearBuy(); }
