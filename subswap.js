@@ -1104,13 +1104,33 @@ export async function runLspPayerBridge(deps) {
   //    OUT rather than aborting after the hold is already committed (a needless capital-lock abort on the honest
   //    path). P is revealed (the claim) ONLY after the leg verifies, buries, AND the claim window still holds.
   const seqLt = Number(terms.seq_locktime) || Number(leg.locktime);
-  const v = await verifySeqLeg({
-    hashH, myClaimPub: claimPub, makerRefundPub: legRefundPub, leg: {
-      txid: leg.txid, vout: leg.vout, amount: leg.amount, asset: leg.asset || deps.asset,
-      redeem_script: leg.redeem_script, locktime: leg.locktime },
-    expectAsset: deps.asset, expectAtoms: deps.assetAtoms, expectLocktime: seqLt,
-    minAnchorDepth: deps.minAnchorDepth, max0ConfAtoms: deps.max0ConfAtoms, skipAnchor: true,
-  }, { ...deps, readOutput: deps.readOutput, anchorHeightOf: (bh) => deps.anchorHeightOf(bh || leg.block_hash) });
+  // A leg we cannot SEE yet is not a leg that is WRONG.
+  //
+  // skipAnchor already says a fresh-but-honest leg should be waited out rather than
+  // aborted once the hold is committed, but the verify itself reads the funding output,
+  // and that read fails on a leg still in the mempool. The LSP fronts at 0-conf on
+  // purpose — that is what makes the take instant — so the honest path arrives here
+  // BEFORE the funding tx is visible to our chain read, and the trade died on
+  // "the asset HTLC funding output was not found on-chain (not yet confirmed?)".
+  //
+  // Poll that one reason, bounded by the same deadline the leg wait uses. Every other
+  // reason is a genuine mismatch and still fails closed on the first look — we never
+  // retry our way past a leg that is not ours.
+  let v = null;
+  const verifyDeadline = Date.now() + (Number(deps.legWaitMs) || 45 * 60 * 1000);
+  for (;;) {
+    v = await verifySeqLeg({
+      hashH, myClaimPub: claimPub, makerRefundPub: legRefundPub, leg: {
+        txid: leg.txid, vout: leg.vout, amount: leg.amount, asset: leg.asset || deps.asset,
+        redeem_script: leg.redeem_script, locktime: leg.locktime },
+      expectAsset: deps.asset, expectAtoms: deps.assetAtoms, expectLocktime: seqLt,
+      minAnchorDepth: deps.minAnchorDepth, max0ConfAtoms: deps.max0ConfAtoms, skipAnchor: true,
+    }, { ...deps, readOutput: deps.readOutput, anchorHeightOf: (bh) => deps.anchorHeightOf(bh || leg.block_hash) });
+    if (v.ok) break;
+    if (!/not found on-chain/i.test(String(v.reason || ''))) break;   // a real mismatch: stop at once
+    if (Date.now() > verifyDeadline) break;
+    await nap(pollMs);
+  }
   if (!v.ok) throw new Error('payer bridge: the maker asset leg failed verification (NOT claiming; the hold expires no-loss): ' + v.reason);
 
   // ANCHOR GATE (POLL, mirror runTakerReverseSubmarine step 4): WAIT until the asset HTLC funding block is
