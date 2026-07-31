@@ -63,9 +63,21 @@ let UNIFIED_FEED = null;
 const XROUTE = { quote: async () => ({}), book: async () => ({ forward: [], reverse: [], unreachable: false }) };
 
 const swap = await import('./swap.js');
-swap.initSwap({ ...C, xroute: XROUTE,
+// A build that CAN settle a sub-asset buy. subAssetBuySupported() is the single predicate
+// the composer's Place gate and startBuy both read, so without these stubs every chain/ln
+// case here would be gated on capability rather than on the matching logic under test.
+// They are presence-only: nothing in this file executes a settlement.
+const SUBAS_CAPABLE = {
+  btcLeg: { fund: async () => ({}), refund: async () => ({}), refundKey: () => ({}), tipHeight: async () => 0 },
+  wasm: { generateSwapSecret: () => ({ secret_hex: '00'.repeat(32), hash_hex: '11'.repeat(32) }),
+          buildSeqHtlcRedeemScript: () => '00' },
+};
+swap.initSwap({ ...C, ...SUBAS_CAPABLE, xroute: XROUTE,
   ln: { available: () => true, deployed: () => true, status: async () => ({ channels: [] }),
-        unifiedBook: async () => UNIFIED_FEED } });
+        unifiedBook: async () => UNIFIED_FEED,
+        // the sub-asset-buy half of the LN bridge (L = ctx.ln)
+        swap: async () => ({}), assetNodeKey: async () => 'k', nodeInvoice: async () => ({}),
+        invoiceStatus: async () => ({}), nodeSettle: async () => ({}) } });
 const T = swap.__test__;
 const S = T.state;
 

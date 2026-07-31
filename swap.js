@@ -2709,6 +2709,17 @@ async function requoteMixed(route, amtStr){
     $('swErr').textContent = payerBridgeDisabledNote();
     return;
   }
+  // A MATCH IS NOT A CAPABILITY. The re-quote above can now FIND a sub-asset offer when the
+  // rail-blind best is not one — but this build settles that shape through startBuy, which
+  // needs wasm HTLC helpers and an LSP invoice/settle client it does not ship. Enabling
+  // Place here produced a priced, confirmable trade that then died with "this trade isn't
+  // available in this build": an offer-then-refuse, and worse than the refusal it replaced.
+  // Gate on the executor's OWN predicate and say what is actually missing.
+  if (!subAssetBuySupported()){
+    LAST_QUOTE = null; setReviewEnabled(false);
+    $('swErr').textContent = subAssetBuyUnsupportedNote((C.assetMeta(route.seqAsset) || {}).ticker);
+    return;
+  }
   LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: buy,
     payRail: route.payRail, recvRail: route.recvRail,
     // Carry the SIZED take from the DISPLAYED unified book as the AUTHORITATIVE fill, so startBuy/startSell lift
@@ -6351,6 +6362,25 @@ export function hasBuyInFlight(){ return !!(_buyStarting || (BUY && (BUY.state =
 // BtcLocktimeDelta so the refund branch matures well after the swap should have settled.
 const BUY_CLTV_DELTA = 100;
 
+// CAN THIS BUILD ACTUALLY EXECUTE A SUB-ASSET BUY (pay BTC on-chain, receive the asset
+// over Lightning)? These are startBuy's OWN prerequisites, named once so the composer
+// gates Place on exactly what the executor requires.
+//
+// It must be one predicate, not two lists that drift: enabling Place while startBuy
+// would throw is an offer-then-refuse — the user gets a priced, confirmable trade and a
+// dead end. That is precisely what happened when the composer learned to re-quote onto a
+// sub-asset offer: it could now FIND one, and still could not settle it, because this
+// build ships neither the wasm HTLC helpers nor the LSP invoice/settle client.
+function subAssetBuySupported(){
+  return !!(L && L.swap && L.assetNodeKey && L.nodeInvoice && L.invoiceStatus && L.nodeSettle
+    && C.btcLeg && C.btcLeg.fund && C.btcLeg.refund && C.btcLeg.refundKey && C.btcLeg.tipHeight
+    && C.wasm && C.wasm.generateSwapSecret && C.wasm.buildSeqHtlcRedeemScript);
+}
+// What to SAY when it is not. Names the rail and the one thing that resolves it, instead
+// of "try again shortly" — this is a build capability, not a transient condition.
+function subAssetBuyUnsupportedNote(tk){
+  return `Receiving ${tk || 'this asset'} over Lightning while paying Bitcoin on-chain is not settled by this build yet · switch your receive leg to on-chain to take this offer now.`;
+}
 async function startBuy(params){
   const { $ } = C;
   const asset = params.asset, am = C.assetMeta(asset);
@@ -6372,9 +6402,9 @@ async function startBuy(params){
   const done = () => { closeBtn.textContent = 'Close'; };
   try {
     _buyStarting = true;   // block a concurrent second buy through the whole pre-fund prologue (TOCTOU)
-    if (!(L && L.swap && L.assetNodeKey && L.nodeInvoice && L.invoiceStatus && L.nodeSettle)) throw new Error('Lightning isn’t available in this build.');
-    if (!(C.btcLeg && C.btcLeg.fund && C.btcLeg.refund && C.btcLeg.refundKey && C.btcLeg.tipHeight)) throw new Error('This trade isn’t available in this build.');
-    if (!(C.wasm && C.wasm.generateSwapSecret && C.wasm.buildSeqHtlcRedeemScript)) throw new Error('This trade isn’t available in this build.');
+    // One predicate, shared with the composer's Place gate (see subAssetBuySupported), so
+    // Review can never enable a Place this then refuses.
+    if (!subAssetBuySupported()) throw new Error(subAssetBuyUnsupportedNote(am && am.ticker));
     const makerClaimPub = offer && (offer.maker_claim_pub || offer.maker_claim_pubkey);
     if (!offer || !makerClaimPub) throw new Error('No resting ' + am.ticker + ' buy offer right now · try again shortly.');
     say('Preparing your buy…');
