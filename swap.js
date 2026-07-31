@@ -3613,11 +3613,44 @@ let _bridgeStarting = false;
 // match (taker rails + offer rails), and whether it CROSSES. Returns null when there is no unified book /
 // no resting offer -> the caller uses the existing native/post path. Pure + defensive: any failure
 // returns null so the take falls back to the proven native path, never dead-ends or throws.
-// Offers whose handshake already failed with NOTHING funded, for this composer session.
-// Kept out of the plan so a retry does not pick the same dead offer straight back.
-let _deadOffers = new Set();
-function markOfferDead(id){ if (id) _deadOffers.add(id); }
-function clearDeadOffers(){ _deadOffers = new Set(); }
+// Offers whose handshake already failed with NOTHING funded. Kept out of the plan so a retry does not
+// pick the same dead offer straight back.
+//
+// THE BLACKLIST EXPIRES, because almost nothing that puts an offer here is permanent. A maker serving
+// one lift at a time answers "busy" to everyone else — for a few seconds — and the offer was then
+// struck out for the REST OF THE SESSION. With a fleet where every maker is briefly busy in turn, the
+// book emptied itself: a wallet facing 24 live GOLD offers ended up with nothing it would take and
+// said "This trade could not be placed right now" against a full order book. The refusal was even
+// truthful about each individual attempt; the memory of it was the bug.
+//
+// So entries carry an expiry, and a refusal that is obviously momentary gets a short one. A genuinely
+// structural mismatch (an offer this trade's settlement path cannot use at all) still gets the long
+// TTL — it will not become usable within a session, but it is not immortal either, because offers are
+// re-posted under new ids anyway and a stale grudge against a rotated fleet helps nobody.
+const DEAD_TTL_MS = 5 * 60 * 1000;          // structural: long enough to stop a retry loop
+const DEAD_TTL_TRANSIENT_MS = 45 * 1000;    // "busy" / "draining": the maker frees itself in seconds
+let _deadUntil = new Map();                 // offer id -> epoch ms at which it is takeable again
+function markOfferDead(id, why){
+  if (!id) return;
+  _deadUntil.set(id, Date.now() + (transientRefusal(why) ? DEAD_TTL_TRANSIENT_MS : DEAD_TTL_MS));
+}
+function clearDeadOffers(){ _deadUntil = new Map(); }
+// A refusal that says the counterparty is momentarily occupied, not that this offer is unusable.
+function transientRefusal(why){
+  return /\bbusy\b|another lift is in flight|draining|shutting down for a re-quote|try again in a moment/i
+    .test(String(why || ''));
+}
+// Set-shaped view for the planner (bestFor takes something with .has), with expiry applied on read so
+// a lapsed entry disappears without anyone having to sweep it.
+const _deadOffers = {
+  has(id){
+    const until = _deadUntil.get(id);
+    if (until == null) return false;
+    if (Date.now() >= until){ _deadUntil.delete(id); return false; }
+    return true;
+  },
+  get size(){ let n = 0; for (const id of [..._deadUntil.keys()]) if (this.has(id)) n++; return n; },
+};
 
 // rails: optional { payRail, recvRail } override. A RESUMED or RETRIED take must plan
 // against the rails of the order as PLACED, not whatever the composer holds now —
@@ -3857,7 +3890,7 @@ function advanceBridgeToNextOffer(b, why){
     if (!b || b.fronted || b.relayed || b.seq_redeem) return false;   // never past commitment
     const attempts = Number(b.offer_attempts || 1);
     if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
-    markOfferDead(b.offer_id);
+    markOfferDead(b.offer_id, why);
     // Rebuild the route from the RECORD, not from composer state: the user may have
     // retyped the composer since placing this order, and re-planning against whatever
     // is on screen now would quietly retry a DIFFERENT trade than the one they placed.
@@ -4917,7 +4950,7 @@ function advanceSubswapToNextOffer(b, why){
     if (b.state !== 'starting' && b.state !== 'confirming') return false;
     const attempts = Number(b.offer_attempts || 1);
     if (attempts >= BRIDGE_MAX_OFFER_ATTEMPTS) return false;
-    markOfferDead(b.offer_id);
+    markOfferDead(b.offer_id, why);
     // The RECORD's rails, full stop. Comparing against S was wrong twice over: the
     // composer is already reset by the time any trade is running, so the check either
     // compared two blanks or refused outright — and a blank S then made the planner
