@@ -2611,6 +2611,22 @@ async function frontAssetLeg({ job, s, sa }) {
   // ("locktime must be a positive block height") and the taker correctly refuses to
   // claim a leg it cannot prove. block_hash is empty on a 0-conf front, which the
   // anchor gate already handles.
+  // THE REFUND BRANCH OF A FRONTED LEG IS OURS, AND THE TERMS MUST SAY SO.
+  //
+  // The taker rebuilds the redeem script from H + its own claim key + the refund key
+  // the TERMS name + the locktime, and refuses to claim unless it matches what is
+  // on-chain. Those terms still named the MAKER's refund key while the leg we funded
+  // carries ours, so the taker rejected it — "asset HTLC is not locked to this wallet"
+  // — and the trade failed with our inventory already locked.
+  //
+  // Correct the terms, never the leg: building the front on the MAKER's refund key
+  // would let a maker that delivered nothing reclaim our asset after T_seq. Naming
+  // ourselves costs the taker nothing. Its security property is that the leg is
+  // claimable by IT with P before T_seq and by the counterparty only after — and when
+  // we front, we ARE the counterparty for this leg.
+  sa.makerSeqRefundPub = s.frontRefundPub;
+  if (job.bridge_terms) job.bridge_terms.maker_seq_refund_pub = s.frontRefundPub;
+
   sa.onchain = { txid: fl.txid, vout: fl.vout, redeem: fl.redeem_script };
   sa.makerSeqLeg = frontedLegHandoff({ leg: fl, asset: sa.seqAsset, tSeq });
   s.forwardRelayDone = true;
