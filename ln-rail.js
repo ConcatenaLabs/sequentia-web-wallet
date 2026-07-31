@@ -48,8 +48,19 @@ export function channelActive(c) {
 }
 
 // Aggregate the live liquidity across every ACTIVE channel matching `target`.
+// Totals AND per-channel maxima. The totals answer "how much could move in principle"; the maxima
+// answer "how much can move in ONE payment", and for these rails that second question is the real
+// one: a swap leg settles as a single HTLC, so it must fit through a single channel. Nothing here
+// splits a payment across channels.
+//
+// Reporting only the sum said yes to payments that could not be routed. A GOLD pure-LN take saw
+// ~1.5M atoms receivable across eight channels, passed every check, and then died at the maker with
+// "no direct channel ... with >= 200000000 msat spendable" — because the largest single channel held
+// 185,640 atoms and the offer was 200,000. The user was told nothing useful; the maker's own log was
+// the only place the real reason existed.
 export function legLiquidity(channels, target) {
   let active = false, spendable = 0n, receivable = 0n, count = 0;
+  let maxSpendable = 0n, maxReceivable = 0n;
   for (const c of channels || []) {
     // Only the wallet's OWN device-provisioned channels (carry a node_key) count for rail
     // liquidity — never shared/demo-topology channels the LSP's /status also returns. Keeps the
@@ -58,10 +69,13 @@ export function legLiquidity(channels, target) {
     if (!c.node_key) continue;
     if (!channelMatches(c, target) || !channelActive(c)) continue;
     active = true; count++;
-    spendable += big(c.spendable_units ?? c.spendable ?? 0);
-    receivable += big(c.receivable_units ?? c.receivable ?? 0);
+    const s = big(c.spendable_units ?? c.spendable ?? 0);
+    const r = big(c.receivable_units ?? c.receivable ?? 0);
+    spendable += s; receivable += r;
+    if (s > maxSpendable) maxSpendable = s;
+    if (r > maxReceivable) maxReceivable = r;
   }
-  return { active, spendable, receivable, count };
+  return { active, spendable, receivable, count, maxSpendable, maxReceivable };
 }
 
 export function hasChannel(channels, target) { return legLiquidity(channels, target).active; }

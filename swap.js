@@ -7469,11 +7469,21 @@ async function reviewLn(q){
     }
     LNSTATUS = await L.status().catch(() => LNSTATUS);   // the fresh inbound must be visible to railAvail below
     ra = railAvail(S.payAsset, S.receiveAsset);
-  } else if (_recvWant > 0n && ra.recvLn.ok && ra.recvLn.liquidity && ra.recvLn.liquidity.receivable < _recvWant){
+    // ONE PAYMENT, ONE CHANNEL. channelInbound can report success because the TOTAL receivable across
+    // channels now covers the offer, but this leg settles as a single HTLC and nothing here splits it.
+    // Without this check the take proceeded and died at the maker with "no direct channel ... with >=
+    // N msat spendable", which the user never saw. Seen live: 1.5M atoms receivable across eight GOLD
+    // channels, largest 185,640, against a 200,000 offer.
+    const rl = ra.recvLn && ra.recvLn.liquidity;
+    if (rl && rl.maxReceivable != null && rl.maxReceivable < _recvWant){
+      $('swErr').textContent = `This offer pays you ${C.fmtAtoms(_recvWant, rm.precision || 0)} ${rm.ticker} in one Lightning payment, and your largest ${rm.ticker} channel can receive ${C.fmtAtoms(rl.maxReceivable, rm.precision || 0)} · take a smaller offer, or receive ${rm.ticker} on-chain.`;
+      return;
+    }
+  } else if (_recvWant > 0n && ra.recvLn.ok && ra.recvLn.liquidity && (ra.recvLn.liquidity.maxReceivable ?? ra.recvLn.liquidity.receivable) < _recvWant){
     // asset<->BTC SELL: we RECEIVE BTC over Lightning. provisionInbound is asset-only by construction
     // (it funds an asset channel from the LP's asset inventory), so there is nothing to provision on this
     // leg — REFUSE SPECIFICALLY rather than let the maker fail to route into a too-small channel.
-    $('swErr').textContent = `Your BTC Lightning channel can receive only ${C.fmtAtoms(ra.recvLn.liquidity.receivable, 8)} BTC and this offer pays you ${C.fmtAtoms(_recvWant, 8)} BTC · receive BTC on-chain instead, or take a smaller offer.`;
+    $('swErr').textContent = `Your largest BTC Lightning channel can receive ${C.fmtAtoms(ra.recvLn.liquidity.maxReceivable ?? ra.recvLn.liquidity.receivable, 8)} BTC in one payment and this offer pays you ${C.fmtAtoms(_recvWant, 8)} BTC · receive BTC on-chain instead, or take a smaller offer.`;
     return;
   }
   if (!ra.pureLnOk){
