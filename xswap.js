@@ -498,15 +498,27 @@ async function runForwardCourier(q){
         const sl = Number(pick(terms, 'seq_locktime', 'seqLocktime'));
         const makerBtcClaimPub = pick(terms, 'maker_btc_claim_pub', 'makerBtcClaimPub');
         const makerSeqRefundPub = pick(terms, 'maker_refund_pub', 'makerRefundPub');
-        // 1) Validate the OFFER'S ratio (whole-vs-whole), NOT the slice: the maker must quote its
-        //    advertised offer, and a partial is a slice of THAT ratio — so a partial must NOT abort here.
-        //    Mirrors the Go taker's whole-vs-whole terms guard (xdriver.go:360-367).
+        // 1) TERMS NAME THE SLICE BEING TRADED, NOT THE WHOLE RESTING OFFER.
+        //
+        //    This demanded terms equal to the whole offer, on the reading that a maker quotes its
+        //    advertisement and the taker slices it afterwards. The maker quotes the SLICE — it is what
+        //    this session actually settles, and it is what every other participant reads (the Go taker
+        //    binds to the slice, and so does the LSP's bridge). So a partial cross take died right here
+        //    on "the maker quoted 0.00006 BTC, not the offered 0.00079152 BTC" while both ends had
+        //    computed the identical proportional price.
+        //
+        //    Verifying against the slice loses nothing: takeSeq and its price are derived from OUR OWN
+        //    copy of the signed offer (oSeq/oBtc), never from the terms, so a maker still cannot quote a
+        //    worse ratio than the one it signed — only fail to match it. A whole take reduces to
+        //    tBtc === oBtc exactly as before.
         if (oSeq <= 0n || oBtc <= 0n)
           throw abortTerms(s, 'the offer is missing its advertised amounts');
-        if (tBtc !== oBtc)
-          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the offered ${C.fmtAtoms(oBtc,8)} BTC`);
-        if (tSeq !== oSeq)
-          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}, not the offered ${C.fmtAtoms(oSeq, sm.precision)} ${sm.ticker}`);
+        const wantSeq = (atSeq > 0n && atSeq < oSeq) ? atSeq : oSeq;
+        const wantBtc = proportionalBtcCeil(oBtc, wantSeq, oSeq);
+        if (tSeq !== wantSeq)
+          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tSeq, sm.precision)} ${sm.ticker}, not the ${C.fmtAtoms(wantSeq, sm.precision)} ${sm.ticker} we asked to take`);
+        if (tBtc !== wantBtc)
+          throw abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the ${C.fmtAtoms(wantBtc,8)} BTC that slice prices to at the signed ratio`);
         if (!makerBtcClaimPub || !makerSeqRefundPub)
           throw abortTerms(s, 'the maker’s terms were missing a key');
         if (!(bl > sl))
@@ -516,7 +528,7 @@ async function runForwardCourier(q){
         //    slice at the SIGNED offer's OWN ratio, CEIL (the maker never underpaid) — the SAME value the
         //    maker recomputes and binds our BTC leg against (xdriver.go:373-381, 790-791). A whole take
         //    (takeSeq == tSeq) reduces to fundBtc == tBtc, byte-identical to the pre-partial lift.
-        const takeSeq = atSeq;
+        const takeSeq = wantSeq;   // the slice the terms just bound to
         if (takeSeq <= 0n)
           throw abortTerms(s, 'nothing to take (zero amount)');
         if (takeSeq > tSeq)
@@ -529,9 +541,12 @@ async function runForwardCourier(q){
         // AFTER the HTLC spend fee — an honest maker rejects it post-lock with 'amount_too_small', but by then
         // our BTC HTLC is an unrefundable sub-dust output. Nothing is spent until lockBtcLeg below, so aborting
         // here (session.fail + move on / bounce to the composer) strands nothing. A whole take is exempt.
-        const _dustBtc = minSafeBtcReason(takeSeq, tSeq, fundBtc, DEFAULT_SPEND_FEE_SATS);
+        // Measure the slice against the WHOLE signed offer (oSeq), not against the terms: the terms now
+        // name the slice, so comparing take-vs-terms would read every take as a whole one and skip the
+        // guard entirely — exactly for the small partials it exists to catch.
+        const _dustBtc = minSafeBtcReason(takeSeq, oSeq, fundBtc, DEFAULT_SPEND_FEE_SATS);
         if (_dustBtc) throw abortAmountTooSmall(s, _dustBtc);
-        const _dustAsset = minSafeAssetReason(q.market.seq_asset, takeSeq, tSeq, takeSeq, DEFAULT_SPEND_FEE_SATS);
+        const _dustAsset = minSafeAssetReason(q.market.seq_asset, takeSeq, oSeq, takeSeq, DEFAULT_SPEND_FEE_SATS);
         if (_dustAsset) throw abortAmountTooSmall(s, _dustAsset);
         // Fee sanity vs the ACTUAL BTC we lock (the slice), never the whole offer: reject a maker fee
         // above ~1% of the slice + 1000 sats (defends against a punitive fee once the session is open).
