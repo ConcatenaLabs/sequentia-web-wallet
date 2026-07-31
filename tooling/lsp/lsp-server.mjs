@@ -1395,6 +1395,59 @@ async function paymentStatusForHash(rpc, hashH) {
   return { preimage, pending };
 }
 
+// ══ DELIVER AN ASSET OVER LIGHTNING, PAID BY BARE HASH ═══════════════════════
+//
+// The bridge could front the BTC leg over Lightning and the asset leg ON-CHAIN, but
+// never the asset leg over LIGHTNING — so a taker paying BTC on-chain and wanting the
+// asset on LN had no settlement at all, and the composer could only refuse it.
+//
+// This is the missing primitive, and it is the same recipe the Go maker already uses
+// (xchain clnLNLeg.PayHash): route to the destination IN THIS ASSET, sendpay keyed on
+// the bare hash H, then waitsendpay — which blocks until the payee settles the hold and
+// hands back P. Being a hold, the payment stays in flight until then, so this is a true
+// front rather than a fire-and-forget: the LSP learns P at exactly the moment the taker
+// takes the asset, and P is what it recoups the on-chain BTC leg with.
+//
+// Asset-aware getroute reads only the GOSSIP graph, so it misses an unannounced private
+// channel — which is precisely how a JIT-provisioned taker is connected. Fall back to a
+// single direct hop over that channel, mirroring the Go path; without it every freshly
+// provisioned taker would be unreachable.
+async function payAssetHoldByHash({ rpc, assetId, destNodeId, amountMsat, hashH, finalCltv }) {
+  if (!rpc) throw new Error('asset-over-LN delivery is not configured on this LSP (no asset node RPC)');
+  if (!/^[0-9a-f]{64}$/i.test(String(hashH || ''))) throw new Error('asset-over-LN delivery: hashH must be 32-byte hex');
+  if (!destNodeId) throw new Error('asset-over-LN delivery: no destination node id');
+  if (!(Number(amountMsat) > 0)) throw new Error('asset-over-LN delivery: amount must be positive');
+
+  let route = null;
+  const rparams = [`id=${destNodeId}`, `amount_msat=${Math.floor(Number(amountMsat))}`, 'riskfactor=10'];
+  if (Number.isFinite(Number(finalCltv)) && Number(finalCltv) > 0) rparams.push(`cltv=${Math.floor(Number(finalCltv))}`);
+  if (assetId) rparams.push(`asset=${assetId}`);
+  try {
+    const r = await lnrpcKw('getroute', rparams, rpc, SIGNER_RPC_TIMEOUT_MS);
+    if (r && Array.isArray(r.route) && r.route.length) route = r.route;
+  } catch { /* fall through to the direct-channel path */ }
+
+  if (!route) {
+    // Unannounced/private channel: build the one-hop route ourselves from listpeerchannels.
+    let chans = [];
+    try {
+      const pc = await lnrpcKw('listpeerchannels', [`id=${destNodeId}`], rpc, SIGNER_RPC_TIMEOUT_MS);
+      chans = (pc && pc.channels) || [];
+    } catch (e) { throw new Error(`asset-over-LN delivery: no route to ${destNodeId} and listpeerchannels failed: ${scrubDetail(String((e && e.message) || e))}`); }
+    const live = chans.find((c) => String(c.state || '').startsWith('CHANNELD_NORMAL') && c.short_channel_id
+      && (!assetId || String(c.asset || '').toLowerCase() === String(assetId).toLowerCase()));
+    if (!live) throw new Error(`asset-over-LN delivery: no usable channel to ${destNodeId} for asset ${assetId || '(btc)'} — cannot deliver`);
+    route = [{ id: destNodeId, channel: live.short_channel_id, direction: Number(live.direction || 0),
+      amount_msat: Math.floor(Number(amountMsat)), delay: Math.max(1, Math.floor(Number(finalCltv) || 18)), style: 'tlv' }];
+  }
+
+  await lnrpcKw('sendpay', [`route=${JSON.stringify(route)}`, `payment_hash=${hashH}`], rpc, SIGNER_RPC_TIMEOUT_MS);
+  const w = await lnrpc('waitsendpay', [String(hashH)], rpc, CFG.mixedTimeoutMs);
+  const P = w && (w.payment_preimage || w.preimage);
+  if (!/^[0-9a-f]{64}$/i.test(String(P || ''))) throw new Error('asset-over-LN delivery: settled without a usable preimage');
+  return String(P).toLowerCase();
+}
+
 // settledPreimageForHash is the tolerant variant used by the within-call poll: a genuinely-COMPLETE
 // preimage or null (swallowing an unreadable node, since the poll just retries).
 async function settledPreimageForHash(rpc, hashH) {
@@ -2078,6 +2131,33 @@ function makeBridgeIo({ match, body, job }) {
       const s = st(leg.unit);
       if (!s || !s.recvNodeId || !s.hashH || !(s.amountSat > 0)) throw new Error('front-ln blocked: taker node id / H / amount not established yet — fail closed (no LN fronted)');
       s.frontAttempted = true; persistJobs();
+
+      // AN ASSET LEG IS FRONTED OVER THE ASSET NODE, IN THAT ASSET.
+      //
+      // Everything below this branch routes on the BTC node in bitcoin, which is right for
+      // the BTC leg and meaningless for an asset one. This is the shape where the taker
+      // pays BTC on-chain and wants the asset over Lightning: we deliver the asset by
+      // paying a bare-hash hold on H from our own asset node, and waitsendpay hands back P
+      // the instant the taker takes it — which is exactly what recoup-claim then spends the
+      // taker's on-chain BTC HTLC with. Same front-then-recoup shape as the BTC receiver
+      // bridge, one leg over.
+      //
+      // The amount is ASSET ATOMS here, not sats: legState carries the leg's own unit, and
+      // CLN counts an asset payment in that asset's smallest unit as msat.
+      if (leg.unit !== 'btc') {
+        const assetId = s.assetId || job.asset || (job.legState && job.legState.asset && job.legState.asset.seqAsset);
+        if (!assetId) throw new Error('front-ln blocked (asset leg): no asset id on the leg — fail closed, nothing fronted');
+        if (s.frontPreimage) return;                    // already delivered; idempotent across a re-drive
+        const P = await payAssetHoldByHash({
+          rpc: CFG.subasLpRpc || CFG.hostedAssetRpc, assetId,
+          destNodeId: s.recvNodeId, amountMsat: s.amountSat * 1000,
+          hashH: s.hashH, finalCltv: Number(s.lnExpiryBlocks) || undefined,
+        });
+        s.frontPreimage = P;
+        if (s.frontHeld !== true) { s.frontHeld = true; if (job.status === 'confirming') job.status = 'fronted'; }
+        persistJobs();
+        return;
+      }
       const amtMsat = s.amountSat * 1000;
       const adoptP = (p) => { if (p && /^[0-9a-f]{64}$/i.test(String(p))) { s.frontPreimage = String(p).toLowerCase(); persistJobs(); return true; } return false; };
       // W2 FRONT-BEFORE-FUND — mark the front CONFIRMED (committed toward the taker's hold on H) so the
