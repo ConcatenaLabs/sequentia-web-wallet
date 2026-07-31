@@ -1846,8 +1846,19 @@ function makeBridgeIo({ match, body, job }) {
     // HTLC, so stepPayerLn must recoup by settling the hold once the taker claims rather
     // than by reading a BTC HTLC that does not exist. assetRefundHeight is that leg's
     // T_seq, so an unclaimed front can be reclaimed on its refund branch.
-    isFronted: () => !!(job.bridge_front && job.bridge_front.armed),
-    assetRefundHeight: () => Number((job.bridge_front && job.bridge_front.t_seq) || 0),
+    // READ THE LIVE JOB, NOT THIS CLOSURE'S COPY.
+    //
+    // setJob replaces a job with a SPREAD CLONE ({...jobs.get(id), ...}), so a hook
+    // that closes over the object captured at io-construction can diverge from the one
+    // the rest of the system updates. That is not theoretical: the driver reported
+    // `fronted=false` and kept re-entering fund-onchain while the persisted job plainly
+    // read `bridge_front.armed: true`, with the fronted leg already claimed. The front
+    // was never recouped because the core was asked about a stale object.
+    //
+    // Look the job up by id each time and fall back to the captured reference only if
+    // it has been removed from the store.
+    isFronted: () => { const j = (job.job_id && jobs.get(job.job_id)) || job; return !!(j.bridge_front && j.bridge_front.armed); },
+    assetRefundHeight: () => { const j = (job.job_id && jobs.get(job.job_id)) || job; return Number((j.bridge_front && j.bridge_front.t_seq) || 0); },
     // W2(a): the driver flips this synchronously at its start / stop; /bridge/asset gates the taker's asset
     // hand-off on it (bridgeAssetHandoffAdmissible) rather than the lagging job.status.
     setDriverLive: (v) => { job._driverLive = !!v; },
