@@ -1201,3 +1201,34 @@ export function decideAssetFront({ btcHtlcFunded = false, frontWallet = '', want
     return { armed: false, reason: `inventory ${inventoryAtoms} < ${wantAtoms}` };
   return { armed: true, reason: 'LSP inventory covers the leg; the taker is not made to wait for the maker anchor gate' };
 }
+
+/**
+ * frontedLegHandoff — the asset leg the taker is handed for a FRONTED bridged take.
+ *
+ * The taker does not trust the leg: verifySeqLeg REBUILDS the redeem script from
+ * H + its own claim key + the maker refund key + the LOCKTIME, and re-checks the
+ * asset and amount, before it will reveal P. So a fronted leg must be handed over
+ * with the SAME field set the maker's XcSeqLegLocked carries. Handing over a
+ * subset is not a smaller promise, it is an unclaimable one: a leg missing
+ * `locktime` was rejected with "locktime must be a positive block height" and the
+ * taker correctly refused to claim — the trade failed with the LSP's asset already
+ * locked on-chain, recoverable only at T_seq.
+ *
+ * Building the hand-off here keeps that contract in one tested place rather than
+ * in an object literal that can quietly lose a key.
+ *
+ * @param {{ leg:{txid,vout,amount,redeem_script,t_seq,block_hash}, asset:string, tSeq:number }} args
+ * @returns {{txid,vout,amount,asset,redeem_script,locktime,block_hash,anchor_height}}
+ */
+export function frontedLegHandoff({ leg = {}, asset = '', tSeq = 0 } = {}) {
+  return {
+    txid: String(leg.txid || ''),
+    vout: Number(leg.vout || 0),
+    amount: Number(leg.amount || 0),
+    asset: String(asset || ''),
+    redeem_script: String(leg.redeem_script || ''),
+    locktime: Number(leg.t_seq || tSeq || 0),
+    block_hash: String(leg.block_hash || ''),   // empty on a 0-conf front; the anchor gate handles it
+    anchor_height: 0,
+  };
+}
