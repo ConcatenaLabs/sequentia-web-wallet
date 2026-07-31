@@ -3915,7 +3915,29 @@ function applyBridgeStatus(r){
   if (r.job_id) BRIDGE.job_id = r.job_id;
   if (r.poll) BRIDGE.poll = r.poll;
   if (r.settlement_plan) BRIDGE.settlement_plan = r.settlement_plan;
-  if (r.status === 'settled' || r.settled) BRIDGE.state = 'settled';
+  if (r.status === 'settled' || r.settled){
+    const wasSettled = BRIDGE.state === 'settled';
+    BRIDGE.state = 'settled';
+    // RECORD THE TRADE. A bridged take moved real value and then left no trace: the LSP log showed the
+    // full cycle ("fronted asset leg CLAIMED by the taker — P read on-chain; settling our held invoice")
+    // while the wallet's history stayed exactly as it was. A settled trade the user cannot see in their
+    // own history is indistinguishable from one that never happened. Keyed on the swap hash so a
+    // re-poll upgrades the same row rather than appending a duplicate.
+    if (!wasSettled){
+      try {
+        const bm = metaOf(BRIDGE.asset) || {};
+        const aprec = bm.precision || 0;
+        const assetU = Number(big(BRIDGE.asset_atoms || 0)) / Math.pow(10, aprec);
+        const btcU = Number(big(BRIDGE.btc_sats || 0)) / 1e8;
+        const sell = BRIDGE.side === 'sell';
+        logTrade({ id: 'bridge:' + (BRIDGE.hash_h || BRIDGE.job_id || BRIDGE.swap_nonce || ''),
+          title: (sell ? 'Sold ' : 'Bought ') + (bm.ticker || 'asset') + (sell ? ' for BTC' : ' with BTC'),
+          status: 'settled', rail: 'bridged', pair: (bm.ticker || 'asset') + '/BTC',
+          side: sell ? 'sell' : 'buy', size: assetU || null, sizeTicker: bm.ticker || null,
+          price: (assetU > 0) ? btcU / assetU : null });
+      } catch {}
+    }
+  }
   else if (r.status === 'failed' || (r.ok === false && !(r.poll || r.job_id))){ BRIDGE.state = 'failed'; if (r.error || r.reason){ try { console.warn('[bridge] failure detail:', r.error || r.reason); } catch {} } BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; }
   else if (BRIDGE.state === 'starting') BRIDGE.state = 'confirming';
 }
