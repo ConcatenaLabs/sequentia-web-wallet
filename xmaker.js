@@ -683,7 +683,18 @@ export async function RunMakerReverse(session, lift, offer, onState, signal){
 
   // 3. LockBTCLeg FIRST — maker funds BTC: claim=taker, refund=maker, T_btc.
   const btcRedeem = C.wasm.buildSeqHtlcRedeemScript(sec.hash_hex, takerBtcClaimPub, makerBtcRefund.public_key, btcLocktime);
-  const funded = await C.btcLeg.fund(btcRedeem, Number(btcAmount), btcLocktime, makerBtcRefund);   // {txid,vout,height,amount}
+  // PERSIST-BEFORE-CONFIRM. This called fund() with a stale 4-arg signature — (redeem, amount,
+  // locktime, refundKey) against (redeem, amount, onBroadcast) — so the locktime landed in the
+  // onBroadcast slot, was not a function, and was silently skipped. The maker therefore sat through
+  // the entire confirmation wait having recorded NOTHING about its funding tx: a crash in that window
+  // left real BTC locked in an HTLC whose outpoint the maker no longer knew. Hand the txid over the
+  // instant it broadcasts, exactly as the taker side does. The maker still WAITS for the confirmation
+  // — it locks first, so it is not the party that should be carrying 0-conf risk.
+  const funded = await C.btcLeg.fund(btcRedeem, Number(btcAmount), (txid) => {
+    st.btc_leg = { ...(st.btc_leg || {}), txid: String(txid), amount: btcAmount.toString(),
+      redeem_script: btcRedeem, locktime: btcLocktime };
+    try { emit(st); } catch {}
+  });   // {txid,vout,height,amount}
   st.btc_leg = { txid: funded.txid, vout: funded.vout, amount: btcAmount.toString(), redeem_script: btcRedeem, locktime: btcLocktime, height: funded.height || 0 };
   st.state = 'btc_locked'; emit(st);
 

@@ -6480,7 +6480,12 @@ async function startBuy(params){
       t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() };
     saveBuy();
     say('Locking your Bitcoin …');
-    const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (BUY && BUY.btc_htlc){ BUY.btc_htlc.txid = String(txid); saveBuy(); } });
+    // 0-CONF HAND-OFF: do NOT block on a Bitcoin confirmation here. This rail delivers the asset over
+    // Lightning, so waiting for a block before even commanding the maker gave the trade Bitcoin's
+    // latency for no protocol reason — the exact "why am I waiting for a Bitcoin confirmation?" this
+    // rail exists to avoid. The maker carries the 0-conf risk and advertises its own policy, so it
+    // makes that call on the outpoint we hand it. The CLTV refund path is unchanged.
+    const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (BUY && BUY.btc_htlc){ BUY.btc_htlc.txid = String(txid); saveBuy(); } }, { waitConf: false });
     BUY.btc_htlc.txid = String(funded.txid); BUY.btc_htlc.vout = funded.vout; BUY.state = 'funded'; saveBuy();
     const btc_htlc = BUY.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
     logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with BTC', status: 'BTC locked' });

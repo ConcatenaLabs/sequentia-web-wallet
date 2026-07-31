@@ -1650,7 +1650,12 @@ async function btcBuildTx(outputs, feeRate){
   tx.finalize();
   // btcChangeNext is advanced only after a SUCCESSFUL broadcast (see btcReviewBroadcast),
   // so a cancelled or failed build never burns a change index or marches past the scan window.
-  return { hex: tx.hex, txid: tx.id, fee, inputs: sel.length, vsize: tx.vsize, changeIndex: withChange ? btcChangeNext : null };
+  // outputIndexes[i] is where requested output i landed. The requested outputs are added first and
+  // change last, so this is simply 0..n-1 — but a caller that needs an outpoint BEFORE the chain can
+  // confirm it (the 0-conf HTLC hand-off) must read the index from the builder that placed it, not
+  // re-assume the ordering at a distance.
+  return { hex: tx.hex, txid: tx.id, fee, inputs: sel.length, vsize: tx.vsize,
+    outputIndexes: outputs.map((_, i) => i), changeIndex: withChange ? btcChangeNext : null };
 }
 
 // review + broadcast a Bitcoin testnet4 payment (mirrors the Sequentia reviewBroadcast UX)
@@ -1755,7 +1760,19 @@ const btcLeg = {
   },
   // Fund the HTLC P2SH (from a redeemScript hex) with `amountAtoms` BTC on
   // testnet4, then poll until it has >=1 confirmation; return the outpoint+height.
-  async fund(redeemHex, amountAtoms, onBroadcast){
+  // opts.waitConf (default TRUE) decides whether this blocks until the funding tx confirms.
+  //
+  // Waiting is right when the COUNTERPARTY has nothing to do until the lock is real. It is wrong on a
+  // 0-conf rail, where it silently converts an instant trade into a wait for a Bitcoin block: the
+  // sub-asset BUY could not even ASK the maker until a block arrived, so a rail whose whole promise is
+  // instant delivery over Lightning inherited Bitcoin's block time for no protocol reason. The maker is
+  // the party that carries 0-conf risk and already advertises its own policy (max_0conf_amount), so the
+  // decision belongs to it, not to us — we hand over the outpoint at broadcast and let it choose.
+  //
+  // Nothing about fund-safety changes: the refund material is persisted before broadcast either way,
+  // and an unconfirmed outpoint is still refundable via the same CLTV branch.
+  async fund(redeemHex, amountAtoms, onBroadcast, opts){
+    const waitConf = !(opts && opts.waitConf === false);
     const redeem = bytesOfHex(redeemHex);
     const p2sh = btc.p2sh({ script: redeem }, btc.TEST_NETWORK);   // {address, script}
     const address = p2sh.address;
@@ -1769,6 +1786,12 @@ const btcLeg = {
     // Fund-safety: hand the caller the txid the INSTANT it broadcasts, before the confirmation wait, so
     // the swap's refund material can be persisted with the outpoint reference before we block.
     if(typeof onBroadcast==='function'){ try{ onBroadcast(txid); }catch{} }
+    if(!waitConf){
+      // The vout comes from the builder that placed the output, so the outpoint is complete and
+      // verifiable the moment it is broadcast. height 0 = "not mined yet", not "unknown".
+      const vout = (built.outputIndexes && built.outputIndexes[0]) || 0;
+      return { txid, vout, height: 0, amount: BigInt(amountAtoms), asset_id: '' };
+    }
     // Find the HTLC vout (the output paying the P2SH scriptPubKey) and wait for a conf.
     const spkHex = hexOfBytes(p2sh.script);
     const { vout, height } = await btcWaitConf(txid, spkHex);
