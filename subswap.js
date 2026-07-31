@@ -1069,11 +1069,31 @@ export async function runLspPayerBridge(deps) {
 
   // 3. Wait for the maker's asset leg (the LSP relays it to us after funding + verify).
   let leg = null;
+  // THE REFUND KEY IS A PROPERTY OF THE LEG WE ARE HANDED, NOT OF THE HANDSHAKE.
+  //
+  // `terms` is latched at the handshake so H and the price cannot be moved under us.
+  // The asset leg's counterparty, though, is only settled when the leg actually
+  // arrives: the LSP may relay the maker's leg, or front the asset from its own
+  // inventory, and a fronted leg is refundable by the LSP — necessarily so, since a
+  // leg built on the MAKER's refund key would let a maker that delivered nothing
+  // reclaim it. Verifying against the latched value rejected every fronted leg with
+  // "redeem_script does not match ... (asset HTLC is not locked to this wallet)".
+  //
+  // Re-read ONLY this one field, from the same response that carried the leg. It costs
+  // no safety: the refund branch decides who reclaims AFTER T_seq, never who may claim
+  // before it. Our claim branch is still our own key on our own H, and the amount,
+  // asset and locktime are still checked against what we agreed.
+  let legRefundPub = terms.maker_seq_refund_pub;
   const legDeadline = Date.now() + (Number(deps.legWaitMs) || 45 * 60 * 1000);
   for (;;) {
     const j = await deps.lspSwapStatus(poll).catch(() => null);
     const ml = j && (j.maker_seq_leg || (j.bridge_terms && j.bridge_terms.maker_seq_leg));
-    if (ml && ml.txid) { leg = ml; break; }
+    if (ml && ml.txid) {
+      leg = ml;
+      const fresh = j && j.bridge_terms && j.bridge_terms.maker_seq_refund_pub;
+      if (fresh) legRefundPub = fresh;
+      break;
+    }
     if (j && j.status === 'failed') throw new Error('payer bridge: the swap failed before the asset leg locked: ' + (j.error || 'unknown'));
     if (Date.now() > legDeadline) throw new Error('payer bridge: the maker never locked the asset leg (the hold expires no-loss)');
     await nap(pollMs);
@@ -1085,7 +1105,7 @@ export async function runLspPayerBridge(deps) {
   //    path). P is revealed (the claim) ONLY after the leg verifies, buries, AND the claim window still holds.
   const seqLt = Number(terms.seq_locktime) || Number(leg.locktime);
   const v = await verifySeqLeg({
-    hashH, myClaimPub: claimPub, makerRefundPub: terms.maker_seq_refund_pub, leg: {
+    hashH, myClaimPub: claimPub, makerRefundPub: legRefundPub, leg: {
       txid: leg.txid, vout: leg.vout, amount: leg.amount, asset: leg.asset || deps.asset,
       redeem_script: leg.redeem_script, locktime: leg.locktime },
     expectAsset: deps.asset, expectAtoms: deps.assetAtoms, expectLocktime: seqLt,
