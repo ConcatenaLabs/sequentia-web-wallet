@@ -533,6 +533,18 @@ function livePayerBridgeJobs() {
   for (const [, j] of jobs) {
     if (!j || j.rail !== 'bridged') continue;
     if (j.status === 'settled' || j.status === 'failed') continue;   // terminal -> exposure resolved
+    // A FRONTED job has NO BTC exposure and holds NO maker lift: fronting replaces the
+    // BTC funding outright and releases the lift immediately (see frontAssetLeg). What
+    // it ties up is asset INVENTORY, which bounds itself — a locked leg's UTXO is spent,
+    // so frontableSeqAtoms already refuses the next front once inventory runs out, and
+    // FRONT_MAX_ATOMS bounds each one.
+    //
+    // Counting it here charged the wrong budget twice over: it consumed the BTC exposure
+    // cap while holding no BTC, and it pinned the PER-OFFER cap ("a self-trading
+    // counterparty cannot lock LSP liquidity at will") against a maker whose offer we
+    // released and never took. Two fronted jobs against one offer were enough to refuse
+    // every further take on it, for as long as they sat un-terminal.
+    if (j.bridge_front && j.bridge_front.armed) continue;
     const sb = j.legState && j.legState.btc;
     const bl = j.settlement_plan && j.settlement_plan.btc_leg;   // { rail, bridge, lnSide, jitInbound }
     // legState.btc.lnSide is set once prepareBridgeLegs runs; settlement_plan.btc_leg carries it from the
