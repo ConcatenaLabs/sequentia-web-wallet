@@ -1864,6 +1864,23 @@ const btcLeg = {
   async refund({ txid, vout, amount, redeem_script, locktime }){
     return await btcHtlcSpend({ branch:'refund', txid, vout, amount, redeem_script, locktime, signNode: btcHtlcRefundNode() });
   },
+  // The parent-chain tip height. startBuy (sub-asset BUY: pay BTC on-chain, receive the
+  // asset over Lightning) needs it to size its HTLC locktime and to refuse a premature
+  // refund — and it was the ONE method of that rail's prerequisites this file never
+  // defined. Its absence gated the entire rail off through subAssetBuySupported(), with
+  // every other piece already built and wired: the wasm HTLC helpers, the LSP hold
+  // primitives (nodeInvoice/invoiceStatus/nodeSettle), fund, refund and refundKey. A
+  // whole settlement path was dark for one missing accessor.
+  //
+  // Throws rather than returning 0 on an unreadable tip: a caller sizing a locktime from
+  // a silently-zero height would build an HTLC that is instantly refundable.
+  async tipHeight(){
+    const r = await fetch(`${T4_API}/blocks/tip/height`);
+    if (!r.ok) throw new Error('could not read the Bitcoin tip height');
+    const n = Number((await r.text()).trim());
+    if (!Number.isFinite(n) || n <= 0) throw new Error('the Bitcoin tip height is unreadable');
+    return n;
+  },
 };
 
 // ---------- SEQ-leg HTLC helper (reverse cross-chain swap: asset -> BTC) ----------
