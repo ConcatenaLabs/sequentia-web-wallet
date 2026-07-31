@@ -6560,18 +6560,18 @@ async function driveBuy(say){
     if (!BUY.btc_htlc) return false;
     revivals++;
     try {
-      // DO NOT RE-PIN THE VANISHED OFFER. The original command names the exact offer the user was
-      // quoted, but resting offers expire and re-post under new ids every few minutes, so by the time
-      // a job needs reviving that id is usually gone — and re-commanding it fails identically forever.
-      // Seen live: 'no verified sub-asset offer found', re-issued against the same dead id until T_btc,
-      // while the book held a perfectly good offer the whole time.
+      // DROP THE OFFER ID, KEEP THE MAKER. Resting offers expire and re-post under new ids every few
+      // minutes, so by the time a job needs reviving the quoted id is usually gone and re-commanding
+      // it fails identically forever ('no verified sub-asset offer found') while the book holds a
+      // perfectly good offer from the same maker.
       //
-      // Dropping the id is safe BECAUSE BOTH AMOUNTS ARE ALREADY FIXED: the funded HTLC pins the BTC
-      // and asset_amount pins what we must receive for it. A maker can only accept at that ratio or
-      // better, so the user cannot be filled worse than what they signed — and matching on
-      // price/asset/size rather than an offer id is what rail-blind matching means in the first place.
+      // The MAKER, though, is not interchangeable: its claim key is baked into the funded HTLC's
+      // redeem script, so only that maker can ever claim the BTC. Re-matching to a different one is
+      // refused — correctly — with 'redeemScript mismatch', the two scripts differing in exactly that
+      // one field. So a revival asks for the same maker's CURRENT offer, whatever it is now.
       const job = await L.swap({ side: 'buy', hodl: true, asset: BUY.asset, node_key, payment_hash: H,
-        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc });
+        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc,
+        maker_pubkey: BUY.maker_pubkey });
       BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
       return true;
     } catch (e){ lastReason = String((e && e.message) || lastReason || ''); return false; }
@@ -6579,12 +6579,13 @@ async function driveBuy(say){
   };
   await reviveJob();
   // Resume-after-crash-before-swap: funded the BTC but never got a job id at all. Same reasoning as
-  // the revival above — this runs long after the quote, so the originally-named offer is usually gone.
-  // The locked BTC + asset_amount carry the price, so match on those.
+  // the revival above — this runs long after the quote, so the originally-named offer is usually gone,
+  // while the maker must stay pinned because the funded HTLC carries its claim key.
   if (!BUY.job_id && BUY.btc_htlc){
     try {
       const job = await L.swap({ side: 'buy', hodl: true, asset: BUY.asset, node_key, payment_hash: H,
-        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc });
+        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc,
+        maker_pubkey: BUY.maker_pubkey });
       BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
     } catch {}   // never mind — the refund guard below still protects the funds
   }
