@@ -341,7 +341,34 @@ export function takeRailsCrossed(take) {
 export function crossingShapeSupported(plan) {
   if (!plan || plan.happyCoincidence) return false;   // not a crossing -> settle natively, not via the bridge
   const btc = plan.btcLeg, asset = plan.assetLeg;
-  return !!(btc && btc.bridge && (btc.lnSide === 'receiver' || btc.lnSide === 'payer') && (!asset || !asset.bridge));
+  const btcBridged = !!(btc && btc.bridge), assetBridged = !!(asset && asset.bridge);
+  // THE PREDICATE, STATED (it used to be one boolean expression whose asset-leg half read as an
+  // afterthought). EXACTLY ONE leg may cross, and which one decides what the LSP has to be able to do:
+  //   • BOTH cross          -> never. The LSP would have to be the counterparty on both ends of one H
+  //                            with no leg left to recoup against; no shape here settles it.
+  //   • the BTC leg crosses -> supported in BOTH lnSides. This is the live bridge: 'receiver' claims the
+  //                            maker's on-chain BTC HTLC after fronting the taker's BTC-LN hold; 'payer'
+  //                            funds an on-chain BTC HTLC to the maker against the taker's held BTC-LN.
+  //   • the ASSET leg crosses, lnSide 'receiver' (the taker RECEIVES the asset over Lightning against an
+  //                            ON-CHAIN maker) -> the gap. Settling it needs the LSP to DELIVER an asset
+  //                            over Lightning and then be made whole, which is a capability it does not
+  //                            have yet (see the note below). REFUSED here, deliberately, because this
+  //                            predicate is a PERMISSION TO ENTER the bridge that Review reads: widening
+  //                            it before the delivery+recoup io exists turns an honest disable into an
+  //                            offer-then-refuse, which is worse than the gap.
+  //   • the ASSET leg crosses, lnSide 'payer' (the taker PAYS the asset over Lightning to an on-chain
+  //                            maker) -> not wired either; the LSP would have to originate an on-chain
+  //                            asset HTLC against a received asset hold.
+  //
+  // FLIPPING THE ASSET-RECEIVER BRANCH. It becomes `return true` the moment the LSP can (1) pay a
+  // bare-hash asset hold over Lightning from its own asset node — getroute `asset=<id>` + sendpay +
+  // waitsendpay, with the private-channel single-hop fallback, mirroring seqdex clnLNLeg.PayHash — and
+  // (2) recoup what it delivered. Nothing below this line has to change: nextBridgeStep still refuses to
+  // front until the recoup is secured, so the predicate can only ever admit a shape, never authorise a
+  // value move.
+  if (btcBridged && assetBridged) return false;
+  if (btcBridged) return btc.lnSide === 'receiver' || btc.lnSide === 'payer';
+  return false;
 }
 
 // P3.2 — the wallet's pre-Review verdict for a rail-blind TAKE: does this crossing settle on the LSP's
