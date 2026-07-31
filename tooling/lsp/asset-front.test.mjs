@@ -124,3 +124,51 @@ test('a locktime that never resolves is 0, not NaN — it fails the check loudly
   assert.equal(h.locktime, 0, '0 trips the taker positive-height check; NaN would be murkier');
   assert.ok(!Number.isNaN(h.locktime));
 });
+
+// ── RECOUPING A FRONTED LEG ───────────────────────────────────────────────────
+// A fronted job funds NO BTC HTLC, so the whole BTC recoup/refund/release decision
+// has nothing to read. Before this branch existed the job never reached
+// recoup-settle: the taker claimed the asset and the LSP's hold quietly expired,
+// losing the fronted inventory outright — the one outcome fronting must not have.
+import { nextBridgeStep } from './leg-bridge.mjs';
+
+const FRONTED = { lnSide: 'payer', amountSat: 6000, unit: 'btc', bridge: true,
+  fronted: true, assetRefundHeight: 61_500 };
+const obs = (ln, extra = {}) => ({ tip: 900, onchain: null, ln, ...extra });
+
+test('P public means the taker claimed our leg — settle the hold', () => {
+  const s = nextBridgeStep(FRONTED, obs({ held: true, settled: false, preimage: 'ab'.repeat(32) }));
+  assert.equal(s.action, 'recoup-settle');
+  assert.match(s.reason, /fronted/);
+});
+
+test('no BTC HTLC no longer means no decision — it waits, it does not stall forever', () => {
+  const s = nextBridgeStep(FRONTED, obs({ held: true, settled: false, preimage: null }), {});
+  assert.equal(s.action, 'wait');
+  assert.match(s.reason, /awaiting the claim/);
+});
+
+test('an unclaimed front past T_seq reclaims the asset', () => {
+  const s = nextBridgeStep(FRONTED, obs({ held: true, settled: false, preimage: null }, { assetTip: 61_500 }));
+  assert.equal(s.action, 'refund-onchain', 'the asset must come back to the LSP once the claim window closes');
+  assert.match(s.reason, /T_seq/);
+});
+
+test('before T_seq an unclaimed front waits rather than reclaiming early', () => {
+  // Reclaiming while the taker can still legitimately claim would race its claim.
+  const s = nextBridgeStep(FRONTED, obs({ held: true, settled: false, preimage: null }, { assetTip: 61_499 }));
+  assert.equal(s.action, 'wait');
+});
+
+test('a settled hold is terminal for a fronted job too', () => {
+  const s = nextBridgeStep(FRONTED, obs({ held: true, settled: true, preimage: 'ab'.repeat(32) }));
+  assert.equal(s.action, 'done');
+});
+
+test('a NON-fronted payer leg is untouched by the fronted branch', () => {
+  // The BTC-HTLC path must behave exactly as before for a normal bridged take.
+  const normal = { lnSide: 'payer', amountSat: 6000, unit: 'btc', bridge: true, fronted: false };
+  const s = nextBridgeStep(normal, obs({ held: true, settled: false, preimage: 'ab'.repeat(32) }));
+  assert.notEqual(s.action, 'recoup-settle',
+    'a non-fronted leg must still key its recoup on the BTC HTLC, not on P alone');
+});

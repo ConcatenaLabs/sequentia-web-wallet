@@ -851,6 +851,35 @@ function stepPayerLn(leg, obs, c) {
   if (obs.ln.settled) return { action: 'done', reason: 'LN hold settled with P — our on-chain fund recouped' };
 
   // ============================================================================
+  // A FRONTED PAYER LEG HAS NO BTC HTLC, SO ITS RECOUP CANNOT BE READ FROM ONE.
+  //
+  // Everything below keys the recoup/refund/release decision on the fate of the BTC
+  // HTLC the LSP funded — the right question when there IS one. When the LSP fronts
+  // the asset leg instead, it funds no BTC at all: it hands its OWN asset to the
+  // taker, and its recoup is simply settling the held invoice once the taker claims.
+  //
+  // Falling through to the BTC logic left oc.funded false forever, so the job never
+  // reached recoup-settle: the taker walked away with the asset and the LSP's hold
+  // quietly expired. That is a straight loss of the fronted inventory, and it is the
+  // one outcome fronting must never produce.
+  //
+  // The decision is small because the exposure is: P public means the taker claimed
+  // our leg, so settle. No P once the claim window has closed means it never will, so
+  // reclaim the asset on its refund branch. Anything else waits — and waiting is safe
+  // in both directions (the hold returns to the taker, the asset to us).
+  // ============================================================================
+  if (leg.fronted) {
+    if (obs.ln.preimage)
+      return { action: 'recoup-settle', reason: 'the taker claimed our fronted asset leg and P is public — settle the held invoice (a fronted job has no BTC HTLC to recoup from)' };
+    if (!obs.ln.held)
+      return { action: 'wait', reason: 'fronted asset leg delivered — awaiting the taker hold to be held' };
+    const tSeq = Number(leg.assetRefundHeight);
+    if (Number.isFinite(tSeq) && tSeq > 0 && Number(obs.assetTip || 0) >= tSeq)
+      return { action: 'refund-onchain', reason: `the taker never claimed our fronted asset leg and T_seq (${tSeq}) has passed — reclaim the asset on its refund branch; the taker hold expires no-loss` };
+    return { action: 'wait', reason: 'fronted asset leg is claimable by the taker — awaiting the claim that reveals P and settles our hold' };
+  }
+
+  // ============================================================================
   // CHAIN-TRUTH recoup/refund decision (STRUCTURAL FIX, round 7). Once OUR BTC HTLC is FUNDED, the
   // recoup-vs-refund-vs-release choice keys ENTIRELY on the AUTHORITATIVE on-chain spend classification
   // (obs.onchain.spendStatus, from the seqdex xsubas-htlc-spend-status classifier) — NEVER on the racy
