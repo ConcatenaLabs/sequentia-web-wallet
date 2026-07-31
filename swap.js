@@ -5991,12 +5991,18 @@ async function reviewMixed(q){
   // claims with the maker-revealed preimage. Gated on live sell-side book liquidity.
   const isSubAssetSell = (side === 'sell' && assetLeg === 'ln' && btcLeg === 'chain');
   const isSubmarine = (assetLeg === 'chain' && btcLeg === 'ln');
-  // Per-kind in-flight guard (fund-safety): refuse a second swap of the SAME kind (its single-key
-  // recovery handle would be overwritten). startMixed/startBuy/startSell also self-guard below.
-  if ((isSubmarine && hasMixedInFlight()) || (isSubAsset && hasBuyInFlight()) || (isSubAssetSell && hasSellInFlight())){
+  // Per-kind in-flight guard (fund-safety): the rails whose recovery handle is still a SINGLE key
+  // refuse a second swap of the same kind, because a second record would overwrite it.
+  //
+  // Sub-asset BUY is NOT one of those any more — it keys its records per trade, so it is bounded by
+  // the shared concurrency ceiling instead. It used to be here, which meant one buy that could not
+  // complete (a maker rotating its identity out from under a funded HTLC) blocked every later buy in
+  // the wallet until its CLTV matured, hours away.
+  if ((isSubmarine && hasMixedInFlight()) || (isSubAssetSell && hasSellInFlight())){
     $('swErr').textContent = 'You already have a swap of this kind in progress. Finish or refund it first (open it under Active trades) before starting another.';
     return;
   }
+  if (isSubAsset && !buySlotsFree()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   // Rail-agnostic (Stage 3): don't pre-block on a live maker (subassetCapable/sellCapable) — the
   // rail is a settlement preference. Any recognized mixed shape proceeds; the settlement router
   // decides + bridges on Place-order and fails closed CLEANLY (refundable) if there's no
@@ -6349,18 +6355,51 @@ export async function resumeSell(){
 // BUY is persisted+resumable; resumeBuy() settles (asset in) once held, or refunds the BTC after
 // T_btc. INVARIANT: the LSP/maker are BLIND to P until the device settles; the maker claims BTC
 // with its identity key (seqdex 2152f33). BUY and SELL stay on SEPARATE books (ln_direction 5 vs 4).
-const BUY_KEY = 'swk.subasset.buy';
-let BUY = null;
-// Synchronous in-flight sentinel (mirror of _sellStarting). BUY.state only becomes 'funded' AFTER the
-// pre-fund prologue, so without this a dismissed modal lets a second buy fund a SECOND BTC HTLC and
-// overwrite BUY (the single-key handle to the locked BTC). Set at the top of startBuy, cleared in its
-// finally, so the guard covers the whole pre-fund prologue too.
+// ONE RECORD PER BUY, not one record for the wallet.
+//
+// This was a single localStorage key holding a single record, so a buy that could not complete blocked
+// the ENTIRE rail until its CLTV refund matured — hours. That happened for real: a maker rotated its
+// identity out from under a funded HTLC, leaving a trade nothing could fill, and with it every future
+// sub-asset buy in that wallet. One stuck counterparty should cost one trade, not the rail.
+//
+// Same shape as SUBSWAPS (the rail-crossing trades): an array persisted under one key, records carrying
+// their own id, terminal ones dropped individually. The legacy single-record key is migrated on load so
+// an in-flight buy from the old build is not orphaned by the upgrade.
+const BUY_KEY = 'swk.subasset.buy';        // legacy single-record key (migrated, then removed)
+const BUYS_KEY = 'swk.subasset.buys';
+let BUYS = [];
+try {
+  const raw = JSON.parse(localStorage.getItem(BUYS_KEY) || 'null');
+  if (Array.isArray(raw)) BUYS = raw.filter(Boolean);
+} catch { BUYS = []; }
+if (!BUYS.length){
+  try { const one = JSON.parse(localStorage.getItem(BUY_KEY) || 'null'); if (one) BUYS = [one]; } catch {}
+}
+for (const b of BUYS) if (b && !b.id) b.id = newTradeId();
+// Synchronous in-flight sentinel (mirror of _sellStarting). A record only reaches 'funded' AFTER the
+// pre-fund prologue, so without this two rapid starts could both pass the slot check and fund two BTC
+// HTLCs for one slot. It bounds CONCURRENT STARTS, not the number of live buys.
 let _buyStarting = false;
-function saveBuy(){ try { localStorage.setItem(BUY_KEY, JSON.stringify(BUY)); } catch {} }
-function clearBuy(){ BUY = null; try { localStorage.removeItem(BUY_KEY); } catch {} }
+function saveBuys(){
+  try { localStorage.setItem(BUYS_KEY, JSON.stringify(BUYS)); } catch {}
+  try { localStorage.removeItem(BUY_KEY); } catch {}
+  try { renderInFlightCard(); } catch {}
+}
+function addBuy(rec){ rec.id = rec.id || newTradeId(); BUYS.push(rec); saveBuys(); return rec; }
+// Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
+function clearBuy(rec){
+  if (!rec){ BUYS = []; saveBuys(); return; }
+  BUYS = BUYS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
+  saveBuys();
+}
+function buyTerminal(b){ return !b || b.state === 'settled' || b.state === 'failed' || b.state === 'refunded'; }
+function activeBuys(){ return BUYS.filter((b) => !buyTerminal(b)); }
+// Buys count against the SAME global ceiling as the other rails: each one ties up real Bitcoin while
+// it runs, so the bound is about committed value, not about which rail happens to commit it.
+function buySlotsFree(){ return (activeBuys().length + activeSubswaps().length + (hasBridgeInFlight() ? 1 : 0)) < MAX_CONCURRENT_TRADES; }
 // True while a buy is starting or has FUNDED its BTC HTLC but is not yet settled/refunded — the BTC is
 // locked, so the record must survive a reload (resumeBuy settles on hold, or refunds after T_btc).
-export function hasBuyInFlight(){ return !!(_buyStarting || (BUY && (BUY.state === 'funding' || BUY.state === 'funded' || BUY.state === 'holding'))); }
+export function hasBuyInFlight(){ return !!(_buyStarting || activeBuys().length); }
 // T_btc safety delta over the current BTC tip (parent-chain blocks), matching the maker's
 // BtcLocktimeDelta so the refund branch matures well after the swap should have settled.
 const BUY_CLTV_DELTA = 100;
@@ -6388,8 +6427,10 @@ async function startBuy(params){
   const { $ } = C;
   const asset = params.asset, am = C.assetMeta(asset);
   const offer = params.offer || null;
-  // FUND-SAFETY self-guard: a second buy would overwrite BUY (the single-key handle to the locked BTC).
-  if (hasBuyInFlight()){ if (C.toast) C.toast('You already have a buy in progress (Bitcoin locked) · finish or refund it first under Active trades.'); return; }
+  // Bound CONCURRENT buys against the same ceiling as every other rail, rather than allowing exactly
+  // one ever. _buyStarting still serialises the pre-fund prologue so two rapid starts cannot both pass
+  // this check and fund two HTLCs for one slot.
+  if (_buyStarting || !buySlotsFree()){ if (C.toast) C.toast(inFlightBlockMessage()); return; }
   const modal = C.el('div','modal'); const card = C.el('div','card');
   card.appendChild(C.el('label','lbl','Buying ' + am.ticker + ' over Lightning'));
   const st = C.el('div','status'); card.appendChild(st);
@@ -6403,8 +6444,9 @@ async function startBuy(params){
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   const say = (t, cls) => { st.className = 'status' + (cls ? ' ' + cls : ''); st.innerHTML = (cls ? '' : '<span class="spin"></span>') + esc(t); };
   const done = () => { closeBtn.textContent = 'Close'; };
+  let b = null;            // THIS buy's record; created at persist-before-broadcast
   try {
-    _buyStarting = true;   // block a concurrent second buy through the whole pre-fund prologue (TOCTOU)
+    _buyStarting = true;   // serialise the pre-fund prologue so two starts cannot share one slot (TOCTOU)
     // One predicate, shared with the composer's Place gate (see subAssetBuySupported), so
     // Review can never enable a Place this then refuses.
     if (!subAssetBuySupported()) throw new Error(subAssetBuyUnsupportedNote(am && am.ticker));
@@ -6475,56 +6517,58 @@ async function startBuy(params){
     // it before the txid is captured strands the BTC with no refund. Persist the recovery material as
     // 'funding' NOW, capture the txid via onBroadcast (BEFORE the confirmation wait), and advance to
     // 'funded' only once the outpoint is known. resumeBuy recovers a 'funding' record by its txid.
-    BUY = { state: 'funding', asset, ticker: am.ticker, preimage: P, hash_h: H, node_key,
+    b = addBuy({ state: 'funding', asset, ticker: am.ticker, preimage: P, hash_h: H, node_key,
       btc_htlc: { redeem_script: redeem, cltv: T_btc, amount: btcSats, maker_claim_pub: makerClaimPub, taker_refund_pub: refund.public_key },
-      t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() };
-    saveBuy();
+      t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() });
     say('Locking your Bitcoin …');
     // 0-CONF HAND-OFF: do NOT block on a Bitcoin confirmation here. This rail delivers the asset over
     // Lightning, so waiting for a block before even commanding the maker gave the trade Bitcoin's
     // latency for no protocol reason — the exact "why am I waiting for a Bitcoin confirmation?" this
     // rail exists to avoid. The maker carries the 0-conf risk and advertises its own policy, so it
     // makes that call on the outpoint we hand it. The CLTV refund path is unchanged.
-    const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (BUY && BUY.btc_htlc){ BUY.btc_htlc.txid = String(txid); saveBuy(); } }, { waitConf: false });
-    BUY.btc_htlc.txid = String(funded.txid); BUY.btc_htlc.vout = funded.vout; BUY.state = 'funded'; saveBuy();
-    const btc_htlc = BUY.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
+    const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (b && b.btc_htlc){ b.btc_htlc.txid = String(txid); saveBuys(); } }, { waitConf: false });
+    b.btc_htlc.txid = String(funded.txid); b.btc_htlc.vout = funded.vout; b.state = 'funded'; saveBuys();
+    const btc_htlc = b.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
     logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with BTC', status: 'BTC locked' });
     // 4. Command the LSP to drive the maker's pay-by-hash (ASYNC job -> 202 { job_id, poll, held:false }).
     say('Waiting for your trade to settle …');
     const job = await L.swap({ side: 'buy', hodl: true, asset, node_key, payment_hash: H, asset_amount: assetAtoms,
       payRail: 'chain', recvRail: 'ln', btc_htlc, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey });
-    BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
+    b.job_id = job && (job.job_id || job.jobId); b.poll = job && job.poll; saveBuys();
     // 5. Wait for the maker's asset payment to arrive HELD, then DEVICE-SETTLE with P (or refund after T_btc).
     say('Waiting for your trade to settle …');
-    await driveBuy(say);
-    if (BUY && BUY.state === 'settled'){ say('Done · your BTC bought ' + am.ticker + ', received over Lightning.', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(); }
-    else if (BUY && BUY.state === 'refunded'){ say('This trade didn’t complete in time · your Bitcoin has been returned (' + String(BUY.refund_txid||'').slice(0,16) + '…).', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(); }
+    await driveBuy(b, say);
+    if (b.state === 'settled'){ say('Done · your BTC bought ' + am.ticker + ', received over Lightning.', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(b); }
+    else if (b.state === 'refunded'){ say('This trade didn’t complete in time · your Bitcoin has been returned (' + String(b.refund_txid||'').slice(0,16) + '…).', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(b); }
     else { done(); }
   } catch (e){
-    // If the BTC HTLC was already funded (BUY persisted), keep it for settle/refund on reload — never lose it.
-    say('Failed: ' + C.prettyErr(e) + (BUY && (BUY.state === 'funded' || BUY.state === 'holding') ? ' · your Bitcoin is still locked; reopen the wallet to finish or refund it.' : ''), 'err');
+    // If the BTC HTLC was already funded, KEEP the record for settle/refund on reload — never lose it.
+    // If the prologue threw before funding, drop the stub so it does not hold a slot forever.
+    const funded = !!(b && (b.state === 'funded' || b.state === 'holding'));
+    say('Failed: ' + C.prettyErr(e) + (funded ? ' · your Bitcoin is still locked; reopen the wallet to finish or refund it.' : ''), 'err');
+    if (b && !funded && !b.btc_htlc?.txid) clearBuy(b);
     done();
   } finally {
-    _buyStarting = false;   // hand off to the BUY.state guard (or clear if the prologue never funded)
+    _buyStarting = false;   // hand off to the per-record state guard
   }
 }
 // Poll the HODL invoice on our node until the maker's asset payment is HELD, then device-settle with
 // P (releases the asset to us AND reveals P so the maker claims the BTC), then best-effort confirm the
 // LSP job settled. Bounded by T_btc: if the asset never holds before the BTC HTLC times out, refund
 // the BTC (the ONLY loss-avoiding path). Shared by startBuy and resumeBuy. Mutates + persists BUY.
-async function driveBuy(say){
+async function driveBuy(b, say){
   say = say || (() => {});
-  const H = BUY.hash_h, node_key = BUY.node_key;
+  const H = b.hash_h, node_key = b.node_key;
   // Enriched receipt (P5.1): sub-asset BUY = BTC paid on-chain, asset received over LN. base = asset,
   // quote = BTC; size = asset units bought, price = BTC paid per asset unit (best-effort from the HTLC).
   // Shared by BOTH terminal-success paths (settle-now and already-settled) so a completed trade is
   // never left showing its fund-time 'BTC locked' row. Same id as that row, so it upgrades in place.
   const buyReceipt = () => {
-    const buyAssetU = (() => { try { return Number(big(BUY.asset_amount || 0)) / Math.pow(10, (metaOf(BUY.asset) || {}).precision || 0); } catch { return null; } })();
-    const buyBtcU = (() => { try { return Number(big((BUY.btc_htlc && (BUY.btc_htlc.amount || BUY.btc_htlc.btc_sats)) || 0)) / 1e8; } catch { return null; } })();
-    logTrade({ id: 'buy:' + H, title: 'Bought ' + BUY.ticker + ' with BTC', status: 'asset received',
-      rail: 'sub-asset', preimage: BUY.preimage || null, pair: (BUY.ticker || 'asset') + '/BTC', side: 'buy',
-      size: buyAssetU, sizeTicker: BUY.ticker || null,
+    const buyAssetU = (() => { try { return Number(big(b.asset_amount || 0)) / Math.pow(10, (metaOf(b.asset) || {}).precision || 0); } catch { return null; } })();
+    const buyBtcU = (() => { try { return Number(big((b.btc_htlc && (b.btc_htlc.amount || b.btc_htlc.btc_sats)) || 0)) / 1e8; } catch { return null; } })();
+    logTrade({ id: 'buy:' + H, title: 'Bought ' + b.ticker + ' with BTC', status: 'asset received',
+      rail: 'sub-asset', preimage: b.preimage || null, pair: (b.ticker || 'asset') + '/BTC', side: 'buy',
+      size: buyAssetU, sizeTicker: b.ticker || null,
       price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null });
   };
   // Reconcile a dropped/interrupted LSP job. The LSP now PERSISTS jobs, so a restart no longer 404s
@@ -6540,9 +6584,9 @@ async function driveBuy(say){
   // network blip; the refund guard is the real backstop).
   const jobAlive = async () => {
     const read = (L && (L.jobStatusRaw || L.jobStatus)) || null;
-    if (!BUY.job_id || !read) return { alive: true, reason: '' };
+    if (!b.job_id || !read) return { alive: true, reason: '' };
     try {
-      const v = jobIsDead(await read(BUY.poll || ('/swap/' + BUY.job_id)));
+      const v = jobIsDead(await read(b.poll || ('/swap/' + b.job_id)));
       return { alive: !v.dead, reason: v.reason };
     } catch { return { alive: true, reason: '' }; }   // transport-only: inconclusive, keep waiting
   };
@@ -6556,8 +6600,8 @@ async function driveBuy(say){
     const { alive, reason } = await jobAlive();
     if (alive) return false;
     if (reason) lastReason = reason;
-    BUY.job_id = null; BUY.poll = null; saveBuy();
-    if (!BUY.btc_htlc) return false;
+    b.job_id = null; b.poll = null; saveBuys();
+    if (!b.btc_htlc) return false;
     revivals++;
     try {
       // DROP THE OFFER ID, KEEP THE MAKER. Resting offers expire and re-post under new ids every few
@@ -6569,10 +6613,10 @@ async function driveBuy(say){
       // redeem script, so only that maker can ever claim the BTC. Re-matching to a different one is
       // refused — correctly — with 'redeemScript mismatch', the two scripts differing in exactly that
       // one field. So a revival asks for the same maker's CURRENT offer, whatever it is now.
-      const job = await L.swap({ side: 'buy', hodl: true, asset: BUY.asset, node_key, payment_hash: H,
-        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc,
-        maker_pubkey: BUY.maker_pubkey });
-      BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
+      const job = await L.swap({ side: 'buy', hodl: true, asset: b.asset, node_key, payment_hash: H,
+        asset_amount: b.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: b.btc_htlc,
+        maker_pubkey: b.maker_pubkey });
+      b.job_id = job && (job.job_id || job.jobId); b.poll = job && job.poll; saveBuys();
       return true;
     } catch (e){ lastReason = String((e && e.message) || lastReason || ''); return false; }
     // never rethrow — the refund guard below is what actually protects the funds
@@ -6581,12 +6625,12 @@ async function driveBuy(say){
   // Resume-after-crash-before-swap: funded the BTC but never got a job id at all. Same reasoning as
   // the revival above — this runs long after the quote, so the originally-named offer is usually gone,
   // while the maker must stay pinned because the funded HTLC carries its claim key.
-  if (!BUY.job_id && BUY.btc_htlc){
+  if (!b.job_id && b.btc_htlc){
     try {
-      const job = await L.swap({ side: 'buy', hodl: true, asset: BUY.asset, node_key, payment_hash: H,
-        asset_amount: BUY.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: BUY.btc_htlc,
-        maker_pubkey: BUY.maker_pubkey });
-      BUY.job_id = job && (job.job_id || job.jobId); BUY.poll = job && job.poll; saveBuy();
+      const job = await L.swap({ side: 'buy', hodl: true, asset: b.asset, node_key, payment_hash: H,
+        asset_amount: b.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: b.btc_htlc,
+        maker_pubkey: b.maker_pubkey });
+      b.job_id = job && (job.job_id || job.jobId); b.poll = job && job.poll; saveBuys();
     } catch {}   // never mind — the refund guard below still protects the funds
   }
   let tick = 0;
@@ -6600,11 +6644,11 @@ async function driveBuy(say){
     if (tick && tick % 5 === 0){
       const revived = await reviveJob();
       if (revived) say('Re-sending your order to the seller …' + (revivals > 1 ? ' (attempt ' + revivals + ')' : ''));
-      else if (lastReason && !BUY.job_id)
+      else if (lastReason && !b.job_id)
         // The job is dead AND could not be re-commanded. Say so, with the reason and the block at which
         // the Bitcoin comes back on its own, rather than an indefinite reassuring spinner.
         say('The seller isn’t responding · ' + C.prettyErr(new Error(lastReason))
-          + (BUY.t_btc ? ' · your Bitcoin returns automatically at block ' + BUY.t_btc + ' if this doesn’t complete.' : ''));
+          + (b.t_btc ? ' · your Bitcoin returns automatically at block ' + b.t_btc + ' if this doesn’t complete.' : ''));
     }
     tick++;
     let tip = 0; try { tip = await C.btcLeg.tipHeight(); } catch {}
@@ -6614,48 +6658,55 @@ async function driveBuy(say){
     // held-branch writes — without this the history kept the fund-time row, and a trade that had
     // actually delivered the asset was listed forever as 'BTC locked'. Seen live: a settled GOLD buy
     // sat in the log as pending next to an identical one that had gone through the held branch.
-    if (status && status.settled){ BUY.state = 'settled'; saveBuy(); buyReceipt(); return; }
+    if (status && status.settled){ b.state = 'settled'; saveBuys(); buyReceipt(); return; }
     if (status && status.held){
-      BUY.state = 'holding'; saveBuy();
+      b.state = 'holding'; saveBuys();
       say('Payment received · completing your trade …');
-      await L.nodeSettle({ node_key, payment_hash: H, preimage: BUY.preimage });   // 5. device-settle
-      BUY.state = 'settled'; saveBuy();
+      await L.nodeSettle({ node_key, payment_hash: H, preimage: b.preimage });   // 5. device-settle
+      b.state = 'settled'; saveBuys();
       buyReceipt();
       // 6. best-effort: confirm the maker claimed the BTC (job settled). Non-fatal.
-      if (L.jobStatus && (BUY.poll || BUY.job_id)){ try { const j = await L.jobStatus(BUY.poll || ('/swap/' + BUY.job_id)); if (j && j.status) { BUY.detail = j.status; saveBuy(); } } catch {} }
+      if (L.jobStatus && (b.poll || b.job_id)){ try { const j = await L.jobStatus(b.poll || ('/swap/' + b.job_id)); if (j && j.status) { b.detail = j.status; saveBuys(); } } catch {} }
       return;
     }
-    if (tip && BUY.t_btc && tip >= BUY.t_btc){ say('This trade didn’t complete in time · returning your Bitcoin …'); await refundBuy(); return; }   // 7. refund branch
+    if (tip && b.t_btc && tip >= b.t_btc){ say('This trade didn’t complete in time · returning your Bitcoin …'); await refundBuy(b); return; }   // 7. refund branch
     await new Promise(r => setTimeout(r, 6000));
   }
 }
 // Refund the funded BTC HTLC via its CLTV branch after T_btc (a real on-chain reclaim). Terminal.
-async function refundBuy(){
-  const H = BUY.btc_htlc;
-  const txid = await C.btcLeg.refund({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, locktime: BUY.t_btc });
-  BUY.state = 'refunded'; BUY.refund_txid = (txid && txid.toString) ? txid.toString() : String(txid); saveBuy();
-  logTrade({ id: 'buy:' + (BUY.hash_h || ''), title: 'Buy refunded (' + BUY.ticker + ')', status: 'BTC refunded', txid: BUY.refund_txid });
+async function refundBuy(b){
+  const H = b.btc_htlc;
+  const txid = await C.btcLeg.refund({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, locktime: b.t_btc });
+  b.state = 'refunded'; b.refund_txid = (txid && txid.toString) ? txid.toString() : String(txid); saveBuys();
+  logTrade({ id: 'buy:' + (b.hash_h || ''), title: 'Buy refunded (' + b.ticker + ')', status: 'BTC refunded', txid: b.refund_txid });
 }
 // On wallet load: if a buy funded its BTC HTLC but never completed, resume it — settle if the asset
 // is now held, or refund the BTC once past T_btc. The fund-recovery path (mirrors resumeSell).
+// Every active record is resumed INDEPENDENTLY and CONCURRENTLY: one stuck counterparty must not hold
+// up another trade's settle or refund, which is the whole point of keying these per buy.
+const _resumingBuys = new Set();
 export async function resumeBuy(){
-  try { BUY = JSON.parse(localStorage.getItem(BUY_KEY) || 'null'); } catch { BUY = null; }
-  if (!BUY || !BUY.preimage || !BUY.btc_htlc) return;
-  // A 'funding' record died between persist-before-broadcast and confirmation. If onBroadcast captured
-  // the txid, the BTC is locked -> recover the outpoint and advance to 'funded'. If no txid was ever
-  // captured, the funding never broadcast (nothing locked) -> drop the stub.
-  if (BUY.state === 'funding'){
-    if (!BUY.btc_htlc.txid){ clearBuy(); return; }
-    if (BUY.btc_htlc.vout == null){
-      try {
-        const f = await C.btcLeg.findFunding(BUY.btc_htlc.txid, BUY.btc_htlc.redeem_script);
-        if (f && f.vout != null){ BUY.btc_htlc.vout = f.vout; BUY.state = 'funded'; saveBuy(); }
-        else return;   // not indexed yet; retry next load — the BTC stays refundable at T_btc
-      } catch { return; }
-    } else { BUY.state = 'funded'; saveBuy(); }
-  }
-  if (!(BUY.state === 'funded' || BUY.state === 'holding')) return;
+  await Promise.all(activeBuys().map((b) => resumeOneBuy(b)));
+}
+async function resumeOneBuy(b){
+  if (!b || !b.preimage || !b.btc_htlc) return;
+  if (_resumingBuys.has(b.id)) return;   // already being driven by an earlier call
+  _resumingBuys.add(b.id);
   try {
+    // A 'funding' record died between persist-before-broadcast and confirmation. If onBroadcast captured
+    // the txid, the BTC is locked -> recover the outpoint and advance to 'funded'. If no txid was ever
+    // captured, the funding never broadcast (nothing locked) -> drop the stub.
+    if (b.state === 'funding'){
+      if (!b.btc_htlc.txid){ clearBuy(b); return; }
+      if (b.btc_htlc.vout == null){
+        try {
+          const f = await C.btcLeg.findFunding(b.btc_htlc.txid, b.btc_htlc.redeem_script);
+          if (f && f.vout != null){ b.btc_htlc.vout = f.vout; b.state = 'funded'; saveBuys(); }
+          else return;   // not indexed yet; retry next load — the BTC stays refundable at T_btc
+        } catch { return; }
+      } else { b.state = 'funded'; saveBuys(); }
+    }
+    if (!(b.state === 'funded' || b.state === 'holding')) return;
     // BRING THE DEVICE SIGNER ONLINE FIRST. The user's asset node is KEYLESS: it only runs while the
     // device signer is attached, and a reload detaches it. driveBuy went straight to re-commanding the
     // LSP, which then could not reach the node at all — every retry died on
@@ -6663,11 +6714,12 @@ export async function resumeBuy(){
     // Bitcoin was already locked. startBuy has always done this; the resume path simply never did.
     //
     // Best-effort: if it fails, driveBuy still runs and the refund guard still protects the funds.
-    if (L && L.connectNode && BUY.asset){ try { await L.connectNode(BUY.asset); } catch {} }
-    await driveBuy();
-    if (BUY.state === 'settled'){ try { C.toast && C.toast('Recovered your buy · ' + BUY.ticker + ' received over Lightning.'); } catch {} try { await C.sync(); } catch {} clearBuy(); }
-    else if (BUY.state === 'refunded'){ try { C.toast && C.toast('Your buy timed out · Bitcoin refunded on-chain (' + String(BUY.refund_txid||'').slice(0,16) + '…).'); } catch {} try { await C.sync(); } catch {} clearBuy(); }
+    if (L && L.connectNode && b.asset){ try { await L.connectNode(b.asset); } catch {} }
+    await driveBuy(b);
+    if (b.state === 'settled'){ try { C.toast && C.toast('Recovered your buy · ' + b.ticker + ' received over Lightning.'); } catch {} try { await C.sync(); } catch {} clearBuy(b); }
+    else if (b.state === 'refunded'){ try { C.toast && C.toast('Your buy timed out · Bitcoin refunded on-chain (' + String(b.refund_txid||'').slice(0,16) + '…).'); } catch {} try { await C.sync(); } catch {} clearBuy(b); }
   } catch (e){ /* leave persisted; the BTC is still refundable at T_btc — retried when the user re-enters Swap */ }
+  finally { _resumingBuys.delete(b.id); }
 }
 // ===========================================================================
 // Mixed-rail (submarine) swap — PERSISTED + RESUMABLE trade-process view.
@@ -8053,9 +8105,12 @@ function renderInFlightCard(){
     rows.push({ view: null, need: !failed, title: 'Sell ' + esc(SELL.ticker) + ' for BTC',
       status, action: failed ? 'clear-sell' : (SELL.error ? 'retry-sell' : null) });
   }
-  if (BUY && hasBuyInFlight()){
-    rows.push({ view: null, need: true, title: 'Buy ' + esc(BUY.ticker || 'asset') + ' with BTC',
-      status: BUY.state === 'holding' ? 'ready · confirm from your wallet to receive' : 'paid with Bitcoin · receiving the asset over Lightning' });
+  // ONE ROW PER LIVE BUY. This rendered a single row from a single global, so a second concurrent buy
+  // was invisible here — and an invisible trade with Bitcoin locked in it is exactly what this card
+  // exists to prevent.
+  for (const b of activeBuys()){
+    rows.push({ view: null, need: true, title: 'Buy ' + esc(b.ticker || 'asset') + ' with BTC',
+      status: b.state === 'holding' ? 'ready · confirm from your wallet to receive' : 'paid with Bitcoin · receiving the asset over Lightning' });
   }
   // RAIL-CROSSING records (SUBSWAP: peer-to-peer submarine + the LSP payer bridge;
   // BRIDGE: the LSP receiver bridge). These were MISSING from this card, which is
