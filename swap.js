@@ -2526,9 +2526,14 @@ function renderMixedTake(route, plan){
   const payEl = $('swPayAmt'), recvEl = $('swRecvAmt');
   const [payStr, recvStr] = buy ? [btcStr, assetStr] : [assetStr, btcStr];
   $('swRoute').textContent = '';   // the settlement path is invisible — no rail label
+  // ROUTING HONESTY (owner ruling): when the ONLY candidates for this mixed take settle
+  // through the maker-first bridge — a Bitcoin-confirmation wait, with no fast maker resting —
+  // the quote line itself carries the slow class, so the user knows BEFORE typing an amount
+  // (the review repeats it before Confirm). Never shown when a Sequentia-speed maker serves it.
+  const slowNote = plan.slowOnly ? ' · waits on Bitcoin confirmations — typically 10-60+ minutes on testnet4' : '';
   // NO amount typed yet: show the plain price and wait for an amount.
   if (want <= 0n){
-    $('swRate').textContent = priceU > 0 ? `1 ${tk} = ${trim(priceU)} ${qtk}` : `${tk} / ${qtk}`;
+    $('swRate').textContent = priceU > 0 ? `1 ${tk} = ${trim(priceU)} ${qtk}${slowNote}` : `${tk} / ${qtk}${slowNote}`;
     return { ...sz, hasAmount: false };
   }
   // Paint BOTH legs to the sized take so pay & receive can NEVER disagree.
@@ -2563,8 +2568,8 @@ function renderMixedTake(route, plan){
       ? ` · ${C.fmtAtoms(w.remainderAtoms, aprec)} ${tk} of your order cannot fill right now`
       : '';
     $('swRate').textContent = buy
-      ? `${wBtc} ${qtk} → ${wAsset} ${tk}${across}${restNote}`
-      : `${wAsset} ${tk} → ${wBtc} ${qtk}${across}${restNote}`;
+      ? `${wBtc} ${qtk} → ${wAsset} ${tk}${across}${restNote}${slowNote}`
+      : `${wAsset} ${tk} → ${wBtc} ${qtk}${across}${restNote}${slowNote}`;
     return { ...sz, takeAtoms: w.filledAtoms, takeBtc: w.filledBtc,
              walk: w, hasAmount: true, capped: false, partial: w.partial };
   }
@@ -2576,8 +2581,8 @@ function renderMixedTake(route, plan){
     ? ` · limited to ${buy ? btcStr + ' ' + qtk : assetStr + ' ' + tk} — that is all this offer has right now`
     : '';
   $('swRate').textContent = buy
-    ? `${btcStr} ${qtk} → ${assetStr} ${tk}${capNote}`
-    : `${assetStr} ${tk} → ${btcStr} ${qtk}${capNote}`;
+    ? `${btcStr} ${qtk} → ${assetStr} ${tk}${capNote}${slowNote}`
+    : `${assetStr} ${tk} → ${btcStr} ${qtk}${capNote}${slowNote}`;
   return { ...sz, hasAmount: true };
 }
 
@@ -2642,7 +2647,10 @@ async function requoteMixed(route, amtStr){
     }
     const raw = bp.offer.raw || {};
     const dec = renderMixedTake(route, { side, offerAtoms: bp.offer.assetAtoms, offerBtc: bp.offer.btcSats,
-      minFill: offerMinFill(bp.offer, raw) });
+      minFill: offerMinFill(bp.offer, raw),
+      // ONLY-slow-candidates note (owner ruling): when nothing at Sequentia speed can fill this
+      // take, the quote line states the Bitcoin-confirmation class BEFORE an amount is typed.
+      slowOnly: bp.speedClass === 'slow' && !bp.fastAvailable });
     // GENUINE fail-closed (the invisible settlement can't carry this crossing in THIS build). Not a rail /
     // liquidity message — the SAME shared predicate onReview uses (bridgedTakeSupported), so Review is never
     // offered then refused. A happy coincidence (native) or a supported crossing passes.
@@ -3702,6 +3710,57 @@ const _deadOffers = {
   get size(){ let n = 0; for (const id of [..._deadUntil.keys()]) if (this.has(id)) n++; return n; },
 };
 
+// --- SPEED-AWARE SELECTION (routing honesty; owner ruling) -------------------------------
+// A taker paying BTC over Lightning must NEVER wait on Bitcoin confirmations to receive the
+// asset they bought when a maker that settles at Sequentia speed rests at the same price.
+// These two strings are the ONE copy for the settlement class, shared by the reviews and the
+// drive-time status so they can never drift apart.
+const SPEED_FAST_NOTE = 'Settles at Sequentia speed · typically about a minute.';
+const SPEED_SLOW_NOTE = 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave — it resumes and refunds automatically.';
+
+// Does taking THIS offer, on THESE taker rails, settle at Sequentia speed? An offer served
+// natively (the sub-asset shapes) or by a P2P submarine (an interactive maker on the matching
+// rails) settles in ~a minute (0-conf-tolerant); an offer that needs the LSP leg-bridge runs
+// the maker-first pipeline, which waits on testnet4 confirmations (tens of minutes to hours).
+// CONSTRAINT: this reads the SAME authorities the settlement dispatch reads
+// (makerRailsFromOffer + chooseSettlementPath), so the speed class can never disagree with
+// the path that actually executes. Selection/label input ONLY — never a settlement decision.
+function offerSettlesFast(offer, { asset, side, payRail, recvRail }){
+  try {
+    const { makerBtcRail, makerAssetRail } = makerRailsFromOffer(offer);
+    const disp = chooseSettlementPath(matchFromTake({ asset, side, payRail, recvRail,
+      makerBtcRail, makerAssetRail, takerAssetInbound: false, takerBtcInbound: false }),
+      (offer && offer.meta) || {});
+    return disp.path === 'native' || disp.path === 'p2p-submarine';
+  } catch { return false; }
+}
+
+// The legs a take of `want` would EXECUTE against one offer — sized by sizeSubswapTake, the
+// ONE sizing authority (identical ceil-on-buy / floor-on-sell rounding the take itself uses;
+// never a different rounding). No amount typed (want<=0) compares the offer's own whole legs
+// (exact integers, no rounding at all).
+function executedLegsFor(offer, side, want){
+  const oa = BigInt(offer.assetAtoms || 0), ob = BigInt(offer.btcSats || 0);
+  if (want > 0n){
+    const sz = sizeSubswapTake({ want, offerAtoms: oa, offerBtc: ob,
+      minFill: offerMinFill(offer, offer.raw || {}), side });
+    if (sz.takeAtoms > 0n && sz.takeBtc > 0n) return { atoms: sz.takeAtoms, btc: sz.takeBtc };
+  }
+  return { atoms: oa, btc: ob };
+}
+
+// Is the BRIDGED (slow) offer's price STRICTLY better than the native (fast) one's, on the
+// EXECUTED amounts? Cross-multiplied BigInt (no float, no re-rounding): on a BUY the taker
+// pays the BTC leg, so strictly better = strictly fewer sats per executed atom; on a SELL
+// the taker receives it, so strictly better = strictly more. A TIE on the executed amounts
+// is NOT strictly better — the native maker wins it.
+function bridgedBeatsExecuted(bridged, native, side, want){
+  const b = executedLegsFor(bridged, side, want), n = executedLegsFor(native, side, want);
+  if (!(b.atoms > 0n && n.atoms > 0n)) return false;
+  return side === 'buy' ? (b.btc * n.atoms < n.btc * b.atoms)
+                        : (b.btc * n.atoms > n.btc * b.atoms);
+}
+
 // rails: optional { payRail, recvRail } override. A RESUMED or RETRIED take must plan
 // against the rails of the order as PLACED, not whatever the composer holds now —
 // resetComposer() clears S the moment the user confirms, so anything re-planning later
@@ -3731,8 +3790,50 @@ function bridgedTakePlan(route, rails, wantAtoms, only){
     const pool = only
       ? { asks: (book.asks || []).filter(only), bids: (book.bids || []).filter(only) }
       : { asks: book.asks || [], bids: book.bids || [] };
-    const offer = bestFor(pool, side, _deadOffers);
+    // The user's requested size, HOISTED above selection: the speed-aware preference below
+    // compares candidates on the EXECUTED amounts, which need the want. wantAtoms when the
+    // caller has it (a retry / resume works from the RECORD; the composer input it would
+    // otherwise read has already been cleared by resetComposer, which reads as 0 — and a 0
+    // want used to size to the WHOLE offer).
+    const want = (wantAtoms != null) ? BigInt(wantAtoms) : assetLegAtoms(route);
+    let offer = bestFor(pool, side, _deadOffers);
     if (!offer || !(offer.price > 0)) return null;
+    // === SPEED-AWARE SELECTION PREFERENCE (mixed takes only; owner ruling) ================
+    // When both a native-fast candidate (Sequentia speed) and a bridged-slow one (the LSP
+    // maker-first pipeline: a Bitcoin-confirmation wait) can fill this take, prefer the
+    // NATIVE maker whenever its price is EQUAL OR BETTER; a bridged offer is chosen over a
+    // native one ONLY for a STRICTLY better price — compared on the EXECUTED amounts via the
+    // same proportional math the take uses (bridgedBeatsExecuted), never a different rounding.
+    // Selection only: settlement dispatch, fund-safety and the displayed==lifted invariant are
+    // untouched (the review/execute paths re-derive the same deterministic pick from the same
+    // book, so nothing resorts mid-flow after review). Applies only to the MIXED shapes
+    // (payRail !== recvRail) — the same-rail routes never enter the bridge for speed reasons.
+    const mixedTake = payRail !== recvRail;
+    const speedOf = (o) => offerSettlesFast(o, { asset: route.seqAsset, side, payRail, recvRail });
+    let speedFast = mixedTake ? speedOf(offer) : null;
+    let fastAvailable = !!speedFast;
+    if (mixedTake && !speedFast){
+      // The book is price-sorted, so the FIRST usable fast candidate is the best-priced one.
+      // A fast candidate that cannot fill the executed take (below its own minimum for this
+      // want) is not a candidate at all and is passed over.
+      const sideList = side === 'buy' ? (pool.asks || []) : (pool.bids || []);
+      let alt = null;
+      for (const o of sideList){
+        if (!o || !(o.price > 0)) continue;
+        if (o.id && _deadOffers.has(o.id)) continue;
+        if (!speedOf(o)) continue;
+        if (want > 0n){
+          const szo = sizeSubswapTake({ want, offerAtoms: BigInt(o.assetAtoms || 0),
+            offerBtc: BigInt(o.btcSats || 0), minFill: offerMinFill(o, o.raw || {}), side });
+          if (szo.belowMin || !(szo.takeAtoms > 0n)) continue;
+        }
+        alt = o; break;
+      }
+      if (alt){
+        fastAvailable = true;
+        if (!bridgedBeatsExecuted(offer, alt, side, want)){ offer = alt; speedFast = true; }
+      }
+    }
     const { makerBtcRail, makerAssetRail } = makerRailsFromOffer(offer);
     const take = { asset: route.seqAsset, side, payRail, recvRail,
       makerBtcRail, makerAssetRail, takerAssetInbound: false, takerBtcInbound: false };   // false => the LSP JIT-provisions (always safe)
@@ -3757,10 +3858,6 @@ function bridgedTakePlan(route, rails, wantAtoms, only){
     // below the minimum returns the MINIMUM (belowMin) so pay & receive never disagree. BTC is CEIL'd
     // (the maker is never underpaid). The LSP + maker re-verify every amount and fail closed on any mismatch.
     const offerAtoms = BigInt(offer.assetAtoms || 0), offerBtc = BigInt(offer.btcSats || 0);
-    // wantAtoms when the caller has it (a retry / resume works from the RECORD; the
-    // composer input it would otherwise read has already been cleared by resetComposer,
-    // which reads as 0 — and a 0 want used to size to the WHOLE offer).
-    const want = (wantAtoms != null) ? BigInt(wantAtoms) : assetLegAtoms(route);
     const raw = offer.raw || {};
     const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: offerMinFill(offer, raw), side });
     // THE WALK. The single-offer sizing above stays as the per-leg authority and the
@@ -3781,6 +3878,11 @@ function bridgedTakePlan(route, rails, wantAtoms, only){
       takeAtoms: sz.takeAtoms, takeBtc: sz.takeBtc, want, partial: sz.partial,
       belowMin: sz.belowMin, minAtoms: sz.minAtoms, minBtc: sz.minBtc, capped: sz.capped,
       walk, offers: sideOffers,
+      // Speed class of the CHOSEN offer for these rails (mixed takes only; null otherwise),
+      // and whether ANY fast candidate could fill this take — the quote-line note fires only
+      // when the ONLY candidates are bridged-slow (speedClass 'slow' + !fastAvailable).
+      speedClass: mixedTake ? (speedFast ? 'fast' : 'slow') : null,
+      fastAvailable: mixedTake ? fastAvailable : null,
       overshoot: false, wholeOnly: false };
   } catch (e){
     // NEVER swallow this silently. A bare catch here made a node outage, an
@@ -3836,6 +3938,10 @@ async function reviewBridged(route, bp){
     ['Direction', bp.side === 'buy' ? `Buy ${tk} with Bitcoin` : `Sell ${tk} for Bitcoin`],
     ['You trade', `${pricing}${partialNote}`],
     ['Your funds', 'Your funds stay in your control until this completes.'],
+    // ROUTING HONESTY (owner ruling): the receiver leg-bridge also runs the maker-first
+    // pipeline (the LSP fronts only after the on-chain BTC leg it recoups from confirms on
+    // testnet4) — the class is stated BEFORE Confirm, always.
+    ['Speed', SPEED_SLOW_NOTE],
   ];
   // Below-minimum guard (defense-in-depth; the composer already blocks Place): the request is under this
   // offer's minimum fill, so show the true minimum plainly and BLOCK Place — never lift more than asked.
@@ -4460,21 +4566,35 @@ function tradeSlotsFree(){ return (activeSubswaps().length + (hasBridgeInFlight(
 // user nothing. The anchor-burial wait in particular is the one moment the wallet is
 // deliberately holding the user's Bitcoin back, and it must say so.
 function subswapStatusLine(b){
-  switch (b && b.state){
-    case 'starting':      return 'starting · contacting the other side';
-    case 'awaiting-lock': return 'the other side is locking your asset on-chain · this takes a block';
-    case 'verifying':     return 'checking the asset is locked to your key';
-    case 'verified':
-    case 'anchor-wait':   return 'waiting for the asset lock to be confirmed and anchored in Bitcoin · your payment is held back until it is';
-    case 'paying':        return 'paying over Lightning';
-    case 'held':          return 'your Bitcoin is committed over Lightning · waiting for the asset';
-    case 'confirming':    return 'waiting for the asset leg to confirm on-chain';
-    case 'claiming':      return 'claiming your asset on-chain (automatic)';
-    case 'funding':       return 'funding your asset leg';
-    case 'settling':      return 'waiting for the other side to pay you over Lightning';
-    case 'failed':        return 'this trade could not be completed · your funds are safe';
-    default:              return String((b && b.state) || 'in progress');
+  const base = (() => {
+    switch (b && b.state){
+      case 'starting':      return 'starting · contacting the other side';
+      case 'awaiting-lock': return 'the other side is locking your asset on-chain · this takes a block';
+      case 'verifying':     return 'checking the asset is locked to your key';
+      case 'verified':
+      case 'anchor-wait':   return 'waiting for the asset lock to be confirmed and anchored in Bitcoin · your payment is held back until it is';
+      case 'paying':        return 'paying over Lightning';
+      case 'held':          return 'your Bitcoin is committed over Lightning · waiting for the asset';
+      case 'confirming':    return 'waiting for the asset leg to confirm on-chain';
+      case 'claiming':      return 'claiming your asset on-chain (automatic)';
+      case 'funding':       return 'funding your asset leg';
+      case 'settling':      return 'waiting for the other side to pay you over Lightning';
+      case 'failed':        return 'this trade could not be completed · your funds are safe';
+      default:              return String((b && b.state) || 'in progress');
+    }
+  })();
+  // DRIVE-TIME SPEED CLASS (owner ruling): while an LSP payer-bridge buy waits on the maker
+  // leg, say WHICH pipeline it is in. front_mode/expected_wait are read TOLERANTLY off the
+  // LSP job response (a parallel LSP change adds asset-side fronting: 'inventory' = the LSP
+  // fronts the asset now — fast; 'maker-first' = waits on Bitcoin confirmations — slow);
+  // ABSENT fields mean the current maker-first behavior (slow). Label only, never a
+  // settlement decision.
+  if (b && b.kind === 'lsp-payer-buy' && (b.state === 'held' || b.state === 'confirming')){
+    if (b.front_mode === 'inventory') return base + ' · fronted from inventory — typically about a minute';
+    const wait = b.expected_wait ? 'expected wait ' + String(b.expected_wait) : 'typically 10-60+ minutes on testnet4';
+    return base + ' · waits on Bitcoin confirmations — ' + wait + ' · safe to leave, resumes + refunds automatically';
   }
+  return base;
 }
 
 // Whether the local record may be FORGOTTEN. Safe exactly while nothing of the
@@ -4657,14 +4777,19 @@ async function reviewSubmarineP2P(route, disp){
   const partialNote = disp.partial ? ` Partial fill of a larger resting offer (${offerAssetStr}).` : '';
   // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
   // the settlement machinery that carries the trade to completion.
+  // ROUTING HONESTY (owner ruling): every mixed-take review states the expected settlement
+  // class BEFORE Confirm. A P2P submarine is an interactive maker on the matching rails —
+  // Sequentia speed, never a Bitcoin-confirmation wait.
   const kv = buy ? [
     ['Direction', 'Buy ' + tk + ' with Bitcoin over Lightning'],
     ['You trade', 'Pay ' + btcStr + ', receive ' + assetStr + '.' + partialNote],
     ['Your funds', 'Your funds stay in your control until this completes.'],
+    ['Speed', SPEED_FAST_NOTE],
   ] : [
     ['Direction', 'Sell ' + tk + ' for Bitcoin over Lightning'],
     ['You trade', 'Sell ' + assetStr + ', receive ' + btcStr + '.' + partialNote],
     ['Your funds', 'Your funds stay in your control until this completes.'],
+    ['Speed', SPEED_FAST_NOTE],
   ];
   // Below-minimum guard (defense-in-depth; the composer already blocks Place): the request is under this
   // offer's minimum fill. Show the true minimum plainly and BLOCK Place — every offer is partial-fillable
@@ -4969,10 +5094,16 @@ async function reviewLspPayerBridge(route, disp){
   const btcStr = C.fmtAtoms(_rv.btc, 8) + ' BTC';
   // The Review shows ONLY the user's own legs (what they pay / receive) + a plain reassurance — never any of
   // the settlement machinery that carries the trade to completion.
+  // ROUTING HONESTY (owner ruling): the payer bridge runs the maker-first pipeline, which
+  // waits on testnet4 confirmations — this class is stated HERE, before Confirm, always.
+  // The composer only routes here when this offer's price strictly beats every maker that
+  // could serve the take at Sequentia speed, or when no such maker rests (bridgedTakePlan's
+  // speed-aware selection); the review still owes the user the timescale.
   const kv = [
     ['Direction', 'Buy ' + tk + ' with Bitcoin over Lightning'],
     ['You trade', 'Pay ' + btcStr + ', receive ' + assetStr + '.'],
     ['Your funds', 'Your funds stay in your control until this completes.'],
+    ['Speed', SPEED_SLOW_NOTE],
   ];
   const { m: modal, ok } = C.modalRows({ title: 'Review swap', kv });
   // Rails captured BEFORE the reset; see startBridged.
@@ -5151,7 +5282,12 @@ async function driveLspPayerBridge(rec){
         console.warn('[subswap] no BTC-LN target returned for the hold payment');
         throw new Error('This trade could not be completed - your funds are safe.');
       },
-      persist: (rec) => { b.hash_h = rec.hash_h; b.preimage = rec.preimage; b.job_id = rec.job_id || b.job_id; b.poll = rec.poll || b.poll; if (rec.leg) b.leg = rec.leg; b.state = rec.state || b.state; saveSubswap(); },
+      persist: (rec) => { b.hash_h = rec.hash_h; b.preimage = rec.preimage; b.job_id = rec.job_id || b.job_id; b.poll = rec.poll || b.poll; if (rec.leg) b.leg = rec.leg;
+        // Speed-class signal (label only): carried onto the record so subswapStatusLine can
+        // state the true pipeline while the trade runs. Absent = maker-first (slow).
+        if (rec.front_mode != null) b.front_mode = rec.front_mode;
+        if (rec.expected_wait != null) b.expected_wait = rec.expected_wait;
+        b.state = rec.state || b.state; saveSubswap(); },
       onPaid: (preimage, leg) => { b.preimage = preimage; b.leg = leg; b.state = 'claiming'; saveSubswap(); },
       onClaimed: (txid) => { b.seq_claim_txid = txid; b.state = 'settled'; saveSubswap(); },
     };
@@ -6206,6 +6342,10 @@ async function reviewMixed(q){
     ['Direction', dir],
     ['Pricing', pricingRow],
     ['Your funds', 'Your funds stay in your control until this completes.'],
+    // ROUTING HONESTY (owner ruling): every shape that reaches THIS review settles natively
+    // (sub-asset / submarine — an interactive maker on the matching rails) at Sequentia speed;
+    // the bridged shapes were re-routed to their own reviews above, which state the slow class.
+    ['Speed', SPEED_FAST_NOTE],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
   ok.onclick = async () => {
@@ -8748,6 +8888,10 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   covenantLocksAsset,
   // RAIL-BLIND take + markets overview, for headless verification of the composer's rail-blindness.
   bridgedTakePlan, overviewPairs, renderMixedTake,
+  // Speed-aware selection (routing honesty): the class predicate + the executed-amount price
+  // comparison, exposed so the "native wins ties / bridged only on strictly better" rule and
+  // its rounding discipline are pinned headlessly. subswapStatusLine for the drive-time label.
+  offerSettlesFast, bridgedBeatsExecuted, subswapStatusLine,
   // Job reconciliation: a record the LSP has already failed must mark itself failed
   // rather than sit in flight blocking every subsequent trade. Exposed with both
   // record slots so the BRIDGE path (the one that actually stalled) is testable.

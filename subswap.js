@@ -1020,6 +1020,18 @@ export async function runLspPayerBridge(deps) {
   const jobId = (started && (started.job_id || started.jobId)) || null;
   const poll = (started && started.poll) || jobId;
   if (!poll) throw new Error('payer bridge: the LSP /swap returned no job handle');
+  // ASSET-SIDE FRONTING SIGNAL (tolerant; LABEL ONLY, never a settlement decision). A parallel
+  // LSP change adds front_mode ('inventory' = the LSP fronts the asset from its own inventory —
+  // fast; 'maker-first' = the pipeline waits on Bitcoin confirmations — slow) + expected_wait
+  // (a human-readable estimate) to the job responses. Read both tolerantly and persist them so
+  // the wallet's status line can state the true class at drive time; ABSENT fields mean the
+  // current maker-first behavior (slow), and nothing below ever branches on them.
+  const readFrontSignal = (r) => {
+    if (!r) return;
+    if (typeof r.front_mode === 'string' && r.front_mode) rec.front_mode = r.front_mode;
+    if (r.expected_wait != null && r.expected_wait !== '') rec.expected_wait = String(r.expected_wait);
+  };
+  readFrontSignal(started);
   rec.job_id = jobId; rec.poll = poll; rec.state = 'confirming';
   if (deps.persist) { try { deps.persist(rec); } catch {} }
 
@@ -1028,6 +1040,7 @@ export async function runLspPayerBridge(deps) {
   const hsDeadline = Date.now() + (Number(deps.handshakeWaitMs) || 10 * 60 * 1000);
   for (;;) {
     const j = await deps.lspSwapStatus(poll).catch(() => null);
+    readFrontSignal(j);   // the status body may carry/refine front_mode late (tolerant, label only)
     if (j && j.bridge_terms && j.bridge_terms.hash_h) {
       if (String(j.bridge_terms.hash_h).toLowerCase() !== hashH) throw new Error('payer bridge: the LSP handshake bound a different H');
       terms = j.bridge_terms; break;
