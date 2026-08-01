@@ -4443,10 +4443,11 @@ function subswapTerminal(b){ return !b || b.state === 'settled' || b.state === '
 function activeSubswaps(){ return SUBSWAPS.filter((r) => !subswapTerminal(r)); }
 function subswapById(id){ return SUBSWAPS.find((r) => r && r.id === id) || null; }
 export function hasSubswapInFlight(){ return activeSubswaps().length > 0; }
-// How many rail-crossing trades may run at once. Each is independent, but every one
-// ties up real value while it runs, so the ceiling is a deliberate bound rather than
-// an accident of storage.
-const MAX_CONCURRENT_TRADES = 10;
+// NOT a product limit — a runaway backstop. Concurrent rail-crossing trades are
+// independent per-record state machines and there is no principled ceiling on how many
+// a trader may run; this bound exists only so a bug that spawns trades in a loop
+// cannot lock funds without bound. Set far above any human trading pattern.
+const MAX_CONCURRENT_TRADES = 100;
 function tradeSlotsFree(){ return (activeSubswaps().length + (hasBridgeInFlight() ? 1 : 0)) < MAX_CONCURRENT_TRADES; }
 
 // A plain-English status for the Active trades row. These records used to surface
