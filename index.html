@@ -2292,6 +2292,13 @@ async function openWallet(phrase){
   // Resume a persisted P2P submarine / LSP payer-bridge take: re-claim a BUY that already learned P (fund-
   // safety), refund a SELL whose maker never paid past T_seq, and drop terminal/pre-commitment records.
   try{ resumeSubswap(); }catch(e){ console.warn('[resume] rail-crossing subswap resume failed:', e?.message??e); }
+  // PERIODIC retry, not just at boot: a resumable record can fail on a transient (a testnet block
+  // burst skews node heights and fails the pay; the next attempt succeeds) and the only retry used
+  // to be a full page reload. resumeSubswap is idempotent (re-query, cached preimage, per-record
+  // driving guards), so a slow tick is safe and turns "reload to heal" into "heals by itself".
+  let _resumeTickBusy=false;
+  setInterval(async ()=>{ if (_resumeTickBusy) return; _resumeTickBusy=true;
+    try{ if (hasSubswapInFlight()) await resumeSubswap(); }catch{} finally{ _resumeTickBusy=false; } }, 2*60*1000);
   // Finish a Move-to-Lightning that was interrupted after its deposit landed (funds on the user's
   // own node, never lost) — self-healing so a network blip / reload can't strand a deposit.
   try{ updateLnMoveBanner(); }catch{}   // show the in-flight banner immediately if a move is still pending from last session
