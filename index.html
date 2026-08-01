@@ -3526,6 +3526,12 @@ function prettyErr(e){
   //
   // Each of these names WHAT happened and WHAT the user can do, without exposing the machinery.
   // Order matters: the most specific cause wins, since several can appear in one message.
+  // The same-chain swap builder blinds the receive output to the maker's blinding pubkey, so it
+  // REQUIRES a confidential receive address (lwk_wollet seqdex_swap.rs). Transparent is the wallet's
+  // default, by design, so this is a completely ordinary thing to hit -- and it arrived as the raw
+  // Rust error "Address must be confidential", which tells a user nothing and hides the one-click fix.
+  if(/must be confidential|NotConfidentialAddress/i.test(m))
+    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap confidentially" and place it again - nothing was sent.';
   if(/redeem ?script mismatch|does not match quote/i.test(m))
     return 'The other side of this trade changed before it completed, so it was refused rather than paid to the wrong party. Nothing was sent; anything already locked is returned automatically.';
   if(/WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS|unknown payment|payment_hash.*unknown/i.test(m))

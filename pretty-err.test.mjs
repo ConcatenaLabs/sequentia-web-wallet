@@ -17,6 +17,8 @@ import test from 'node:test';
 const PRETTY_MACHINERY = /\b(rpc|hsmd|wasm|htlc|redeem|scriptpubkey|psbt|sendpay|waitsendpay|WIRE_[A-Z_]+|preimage|txid|vout|cltv|msat)\b/i;
 const looksPlain = (m) => /^[A-Z0-9]/.test(m) && m.length < 300 && !/[{}<>]/.test(m);
 function prettyErr(m) {
+  if (/must be confidential|NotConfidentialAddress/i.test(m))
+    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap confidentially" and place it again - nothing was sent.';
   if (/redeem ?script mismatch|does not match quote/i.test(m))
     return 'The other side of this trade changed before it completed, so it was refused rather than paid to the wrong party. Nothing was sent; anything already locked is returned automatically.';
   if (/WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS|unknown payment|payment_hash.*unknown/i.test(m))
@@ -49,6 +51,10 @@ const REAL = {
   // bare default while the console held the real sentence.
   'relay: maker is not connected; this offer cannot be lifted right now':
     /gone offline/,
+  // The same-chain swap builder requires a blinded receive output; transparent is the wallet default,
+  // so this is ordinary — and it surfaced as the bare Rust error, hiding a one-click fix.
+  'Could not fill against the resting orders: Address must be confidential':
+    /blinded address/,
   'inbound provisioning failed: getinfo: lightning-cli: Connecting to \'lightning-rpc\': Connection refused':
     /Lightning node is not reachable/,
 };
@@ -73,7 +79,7 @@ test('a named message never leaks the machinery that produced it', () => {
 
 test('every named message says what to do next', () => {
   for (const raw of Object.keys(REAL)) {
-    assert.match(prettyErr(raw), /try again|reload|Reopen|smaller|different offer|returned automatically/i,
+    assert.match(prettyErr(raw), /try again|reload|Reopen|smaller|different offer|returned automatically|place it again/i,
       'a failure the user cannot act on is only half-reported');
   }
 });
