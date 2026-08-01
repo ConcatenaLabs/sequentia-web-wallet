@@ -604,6 +604,28 @@ function payerBridgeAdmission({ offerId, btcSats } = {}) {
 const scrubDetail = (out) => String(out || '').split('\n').filter(Boolean).slice(-6).join(' | ')
   .replace(/(https?:\/\/)[^@\s/]+@/gi, '$1<redacted>@')
   .replace(/\/root\/[^\s'"|]+/g, '<path>');
+// A job served to a CLIENT must carry no LSP key material. legState is the driver's internal
+// per-leg state and holds the LSP's OWN private keys (lspRefundPriv / frontRefundPriv — the keys
+// that refund its fronted HTLCs); serving a job verbatim handed every polling client the key to
+// steal the LSP's refund branch after CLTV. Drop the live session + legState whole, then
+// deep-redact any secret-shaped field anywhere on the job as a class-level backstop.
+function scrubJobSecrets(job){
+  const { _bridgeSession, legState, ...pub } = job || {};
+  const redact = (v) => {
+    if (Array.isArray(v)) return v.map(redact);
+    if (v && typeof v === 'object'){
+      const out = {};
+      for (const [k, x] of Object.entries(v)){
+        if (/priv|secret|seed|mnemonic/i.test(k)) continue;
+        if (k.startsWith('_')) continue;   // internal driver handles are never client data
+        out[k] = redact(x);
+      }
+      return out;
+    }
+    return v;
+  };
+  return redact(pub);
+}
 async function nodeStatus(rpc, leg) {
   const info = await lnrpc('getinfo', [], rpc, STATUS_RPC_TIMEOUT_MS);
   let channels = [];
@@ -1305,7 +1327,7 @@ function startSubasBuyHodl(body) {
   runSubasBuyHodl(job, body)
     .catch((e) => { job.status = 'failed'; job.error = String((e && e.message) || e); job.done_ms = Date.now(); })
     .finally(() => persistJobs());   // capture the terminal state (settled/failed) on disk
-  return { ...job, ok: true, held: false, poll: `/swap/${jobId}`,
+  return { ...scrubJobSecrets(job), ok: true, held: false, poll: `/swap/${jobId}`,
     note: 'Sub-asset HODL buy: poll GET /swap/<job_id>; when held:true, settle via /node/settle to release P and let the maker claim your BTC.' };
 }
 
@@ -4185,7 +4207,7 @@ const server = http.createServer(async (req, res) => {
       if (!job) return send(res, 404, { ok: false, error: 'unknown channel job id' });
       // ok:true = the poll succeeded; the job's own `status` (active|failed|…) is the
       // source of truth, so the wallet can read a failed job's error without a throw.
-      return send(res, 200, { ...job, ok: true });
+      return send(res, 200, { ...scrubJobSecrets(job), ok: true });
     }
     // Start a "Move to Lightning" channel-open (background: watch deposit -> fundchannel).
     if (req.method === 'POST' && url.pathname === '/channel/open') {
@@ -4286,8 +4308,7 @@ const server = http.createServer(async (req, res) => {
       const id = url.pathname.slice('/swap/'.length);
       const job = jobs.get(id);
       if (!job) return send(res, 404, { ok: false, error: 'unknown job id' });
-      const { _bridgeSession, ...pub } = job;   // never serialize the live WS session
-      return send(res, 200, { ok: true, ...pub });
+      return send(res, 200, { ok: true, ...scrubJobSecrets(job) });
     }
     // BRIDGE PHASE 1b — FRONT-BEFORE-FUND hold-ready. The taker, having learned H from POST /swap's
     // bridge_terms, registers a hold on H at its OWN BTC-LN node, then calls this with its recv_node_id to
