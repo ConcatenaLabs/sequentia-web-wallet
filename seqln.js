@@ -179,6 +179,14 @@ function chStoreFor(storageKey) {
 }
 // Diagnostic surface for an untracked-channel refusal: name the channel and the
 // recovery path instead of leaving only channeld's opaque death in the node log.
+// A policy refusal kills the channel it was for (channeld exits, every later HTLC
+// on it fails with "unowned"), so the REASON must reach the log — otherwise the
+// wallet reports a generic Lightning failure for a decision the device made.
+function onRejectFor(label) {
+  return ({ name, reason }) => {
+    console.warn(`seqln[${label}]: the signer REFUSED ${name} — ${reason}`);
+  };
+}
 function onUntrackedFor(label) {
   return ({ peerId, dbid }) => {
     console.warn(`seqln[${label}]: the signer refused channel dbid ${dbid} with peer ${peerId.slice(0, 16)}… `
@@ -215,7 +223,7 @@ export async function connectDevice({
   const mod = await import(CFG.sdkPath);
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
-    { channelStore: chStoreFor(node), onUntracked: onUntrackedFor(node) });
+    { channelStore: chStoreFor(node), onUntracked: onUntrackedFor(node), onReject: onRejectFor(node) });
   signer.setPolicy(policy);
   s.signer = signer;
   signer.onStatus = (st) => {
@@ -287,7 +295,7 @@ export async function connectProvisioned({ assetId, key, deviceSigningSeed, devi
   const mod = await import(CFG.sdkPath);
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
-    { channelStore: chStoreFor(mapKey), onUntracked: onUntrackedFor(mapKey) });
+    { channelStore: chStoreFor(mapKey), onUntracked: onUntrackedFor(mapKey), onReject: onRejectFor(mapKey) });
   signer.setPolicy(policy);
   s.signer = signer;
   signer.onStatus = (st) => {
