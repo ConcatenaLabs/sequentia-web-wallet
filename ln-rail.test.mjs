@@ -137,4 +137,27 @@ assert.equal(empty.maxReceivable, 0n, 'no channels -> 0, not undefined');
 assert.equal(empty.maxSpendable, 0n);
 console.log('ok: legLiquidity exposes per-channel maxima — a single HTLC must fit one channel');
 
+// ── A CHANNEL WITH NO OWNING DAEMON IS NOT CAPACITY ──────────────────────────
+// CLN keeps reporting CHANNELD_NORMAL and a full spendable balance for a channel whose channeld has
+// died. Nothing can be sent over it — sendpay refuses with "First peer not ready" — but it looked
+// like perfectly good capacity, so the wallet never opened a working channel and kept paying into a
+// corpse. Seen live: a BTC channel showing 894,128 sats spendable, owner null, channeld crashing at
+// init, and every pure-LN swap failing on it.
+assert.equal(channelActive({ state: 'CHANNELD_NORMAL', owner: 'channeld' }), true, 'a live channel is usable');
+assert.equal(channelActive({ state: 'CHANNELD_NORMAL', owner: null }), false, 'no channeld -> nothing can be sent');
+assert.equal(channelActive({ state: 'CHANNELD_NORMAL', owner: '' }), false, 'empty owner is no owner');
+// ABSENT is not dead. A status source that does not report `owner` at all must keep working, or this
+// check would call every channel unusable and disable the Lightning rail outright.
+assert.equal(channelActive({ state: 'CHANNELD_NORMAL' }), true, 'omitted owner must not disable the rail');
+// And the state check still rules first.
+assert.equal(channelActive({ state: 'OPENINGD', owner: 'channeld' }), false, 'still not open yet');
+// The ownerless channel must not contribute liquidity either.
+{
+  const dead = [{ node_key: 'k', asset: GOLD, state: 'CHANNELD_NORMAL', owner: null, spendable_units: 894128, receivable_units: 0 }];
+  const l = legLiquidity(dead, goldT);
+  assert.equal(l.active, false, 'a dead channel is not an active leg');
+  assert.equal(l.spendable, 0n, 'and its balance must not be counted as spendable');
+}
+console.log('ok: a channel whose channeld has died is not counted as usable capacity');
+
 console.log('\nALL PASS');
