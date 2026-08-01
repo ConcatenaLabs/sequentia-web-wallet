@@ -1125,6 +1125,14 @@ function findRoute(pay, receive){
       payIsBtc: pay === cp.quote,             // "paying the quote" is the structural analog of paying BTC (= a BUY of the base)
       payRail: 'ln', recvRail: 'ln' };
   }
+  // MIXED same-chain (one leg Lightning, one on-chain): a first-class combination per the spec, settled
+  // P2P as one asset-LN HTLC + one on-chain HTLC bound by one preimage when the counterparty's per-leg
+  // choices complement (the LSP bridges a leg only when that leg's two SIDES disagree). The offer
+  // protocol cannot yet EXPRESS a per-leg rail on a same-chain pair (LightningTerms hard-codes the
+  // Lightning leg as BTC), so nothing can rest or match in this shape: fail CLOSED with a named reason.
+  // NEVER fall through to 'same' — that silently settles fully on-chain, a rail the user did not choose.
+  if (S.payRail && S.recvRail && S.payRail !== S.recvRail)
+    return { kind: 'same-railgap', pay, receive, payRail: S.payRail, recvRail: S.recvRail };
   // Same-chain order book: ANY two distinct Sequentia assets form a market. It may
   // have no resting offers yet, in which case the user can start it by posting one.
   return { kind: 'same', pay, receive };
@@ -1619,17 +1627,25 @@ function setRail(leg, r){
   const cur = leg === 'pay' ? S.payRail : S.recvRail;
   if (cur === r) return;
   if (leg === 'pay') S.payRail = r; else S.recvRail = r;
-  // Same-chain asset<->asset has NO mixed-rail settlement path: both legs go over Lightning (pure-LN,
-  // two asset-LN HTLCs bound by one preimage) OR both on-chain (the covenant book). A split (one LN, one
-  // chain) has no bridge, so findRoute silently falls through to the on-chain 'same' route while the UI
-  // has frozen the fee "over Lightning" — a no-op that mis-settles. Couple the rails: setting one leg sets
-  // the other. BTC pairs are genuinely rail-independent (the LSP bridges rails at settlement), so this is
-  // scoped to same-chain, where no such bridge exists.
-  const sameChain = !!(S.payAsset && S.receiveAsset && S.payAsset !== 'BTC' && S.receiveAsset !== 'BTC');
-  // Capture the OTHER leg BEFORE coupling: when the coupling moves a leg the user did NOT press, that has
-  // to be SAID (see the note emitted at the end of this function), never done silently.
-  const otherBefore = leg === 'pay' ? S.recvRail : S.payRail;
-  if (sameChain){ S.payRail = r; S.recvRail = r; }
+  // THE FOUR COMBINATIONS ARE ALL FIRST-CLASS, INCLUDING ON A SAME-CHAIN PAIR.
+  //
+  // The spec (seqdex-terminal-spec.md §"The user's two choices") is explicit: every order carries TWO
+  // INDEPENDENT settlement preferences, "four combinations, all valid, all first-class", and "there is
+  // no 'the system picks the rail'" — the user states a preference and the backend honours it.
+  //
+  // This used to COUPLE the rails on an asset<->asset pair, on the reasoning that such a swap settles as
+  // one Sequentia transaction so it "cannot" be split. That is true only of the fully-on-chain primitive:
+  // with a Lightning leg the swap is two HTLCs bound by ONE preimage (the proven submarine construction,
+  // with the counter asset in BTC's structural place), settled PEER-TO-PEER against a counterparty whose
+  // per-leg choices complement. The LSP is NOT implied by a mixed order — it bridges a leg only when the
+  // two SIDES of that leg disagree, and separately fronts liquidity; nothing else. The coupling silently
+  // overwrote a leg the user had just chosen and removed two of the four combinations outright, so it is
+  // gone.
+  //
+  // The rails are now independent for every pair. Until the offer protocol can EXPRESS a per-leg rail on
+  // a same-chain pair (LightningTerms hard-codes the Lightning leg as BTC), the mixed same-chain shape
+  // has nothing to rest or match against, so findRoute fails CLOSED with a named reason ('same-railgap')
+  // — never the old silent overwrite, and never a fall-through to a rail the user did not choose.
   LAST_QUOTE = null; setReviewEnabled(false);
   // A rail change can invalidate the fee asset outright (chain -> LN locks it to
   // the pay asset; BTC on-chain locks it to BTC). Drop the manual pick so the
@@ -1641,18 +1657,6 @@ function setRail(leg, r){
   try { renderFeePicker(); } catch {}   // reflect the pay-from-Lightning fee freeze immediately
   try { paintConfControl(); } catch {}  // the confidential-receive toggle depends on the receive rail (on-chain only)
   try { paintPanes(); } catch {}        // re-evaluate the place-CTA gate (both rails now required)
-  // The same-chain coupling above moved the leg the user did NOT press (and reset the fee asset with it).
-  // Say so, or a user who set "pay from Lightning" and then chose to receive on-chain places a fully
-  // on-chain order still believing the pay leg is on Lightning. Written AFTER paintPanes (which repaints
-  // this node via updateRails -> renderRailNote) so it survives; the next rail press or pair change
-  // repaints the node and clears it.
-  if (sameChain && otherBefore && otherBefore !== r){
-    const _n = C.$('swRailNote');
-    if (_n){
-      _n.classList.remove('hide');
-      _n.insertAdjacentHTML('afterbegin', `<span>Both sides moved to ${r === 'ln' ? 'Lightning' : 'On-chain'} · an asset-to-asset swap settles as ONE Sequentia transaction, so it cannot have one side on Lightning and the other on-chain.</span> `);
-    }
-  }
   requote().catch(()=>{});
 }
 function paintRefHints(){
@@ -1767,6 +1771,15 @@ async function requote(){
     if (route.kind === 'ln')         { if (!route.assetAsset) stopLiveBook(); await requoteLn(route, amtStr); }  // asset<->asset LN: keep the same-chain covenant book live (it's the on-chain alternative the note points at); asset<->BTC LN uses the cross book, so drop the same-chain stream
     else if (route.kind === 'cross') { stopLiveBook(); await requoteCross(route, amtStr); }
     else if (route.kind === 'mixed') { stopLiveBook(); await requoteMixed(route, amtStr); }
+    else if (route.kind === 'same-railgap'){
+      // The BOOK is rail-blind, so the pair's one book renders exactly as it would on-chain — but the
+      // settlement this shape needs is not expressible in the offer protocol yet (no per-leg rail), so
+      // refuse to quote, with the reason named. Fail closed: LAST_QUOTE stays null, Review stays off,
+      // and the on-chain route is never quoted in this shape's place.
+      await requoteSame({ kind: 'same', pay: route.pay, receive: route.receive }, amtStr);
+      LAST_QUOTE = null; setReviewEnabled(false);
+      $('swErr').textContent = 'Paying over Lightning while receiving on-chain (or the mirror) is not available yet on an asset-to-asset pair · set both legs to Lightning or both to on-chain to trade now.';
+    }
     else                             await requoteSame(route, amtStr);
   } finally {
     try { paintCostLine(); } catch {}   // E2: the one cost line, after any rail quotes
@@ -3408,6 +3421,12 @@ function renderTiming(route){
     // Same-chain atomic swap: on-chain receipt (no LN option here), anchor-bound.
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
     tx.innerHTML = `Appears immediately, final in <b>~1 block</b> · ${ANCHOR_FINAL}.`;
+    return;
+  }
+  if (route.kind === 'same-railgap'){
+    // Fail-closed shape (findRoute): one leg Lightning, one on-chain, on an asset<->asset pair.
+    el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
+    tx.innerHTML = 'One leg over Lightning and one on-chain is not available yet on an asset-to-asset pair · set both legs the same way to trade now.';
     return;
   }
   // BTC pair: the exact 4-case matrix keyed off the receive leg.
