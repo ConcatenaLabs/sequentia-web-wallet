@@ -2429,7 +2429,8 @@ async function loadBtcBook(route){
   const ub = await getUnifiedBook(seqAsset, ((route.assetAsset || route.mixedSame) && route.quoteAsset) ? route.quoteAsset : 'BTC');
   const unified = ub ? { asks: ub.asks || [], bids: ub.bids || [] } : null;
   UBOOK = unified ? { seqAsset, quote: (ub && ub.quote) || 'BTC', ...unified } : null;
-  renderXBook(seqAsset, route.payIsBtc, forward, reverse, unified);
+  renderXBook(seqAsset, route.payIsBtc, forward, reverse, unified,
+    ((route.assetAsset || route.mixedSame) && route.quoteAsset) ? route.quoteAsset : 'BTC');
   return { offers, unreachable: book.unreachable };
 }
 function numVal(el){ return parseFloat((((el && el.value) || '')).replace(/,/g, '')) || 0; }
@@ -3037,9 +3038,13 @@ function xOfferAmts(o, payIsBtc){
 // rendered as the SAME ladder as the same-chain book — no rail distinction, orders
 // look identical. Buying asset with BTC => the offers are ASKS you can take; selling
 // asset for BTC => they are BIDS you can take. Prices are BTC per asset unit.
-function renderXBook(seqAsset, payIsBtc, forward, reverse, unified){
+function renderXBook(seqAsset, payIsBtc, forward, reverse, unified, quoteHex){
   const host = C.$('swBook'); if (!host) return;
   const am = C.assetMeta(seqAsset);
+  // The QUOTE leg's identity: BTC for the cross pairs; a real asset for the mixed
+  // same-chain pairs (ticker + ladder keys follow it — never a hard-coded 'BTC').
+  const qHex = (quoteHex && String(quoteHex).toUpperCase() !== 'BTC') ? quoteHex : 'BTC';
+  const qTk = qHex === 'BTC' ? 'BTC' : ((C.assetMeta(qHex) || {}).ticker || 'quote');
   forward = forward || []; reverse = reverse || [];
   let asks, bids, n;
   const useUnified = !!(unified && ((unified.asks && unified.asks.length) || (unified.bids && unified.bids.length)));
@@ -3083,7 +3088,7 @@ function renderXBook(seqAsset, payIsBtc, forward, reverse, unified){
   bids.sort((a, b) => b.price - a.price);
   { let c = 0; const t = bids.reduce((s, r) => s + r.size, 0) || 1; bids.forEach(r => { c += r.size; r.cum = c; r.frac = c / t; }); }
   // Stash the FULL aggregated levels (best-first) for the Market-mode price field's sweep estimate.
-  LAST_LADDER = { base: seqAsset, quote: 'BTC', asks: asks.slice(), bids: bids.slice() };
+  LAST_LADDER = { base: seqAsset, quote: qHex, asks: asks.slice(), bids: bids.slice() };
   // Click-to-seed the takeable side's LEVELS: the level price + its aggregated size (exact atoms).
   const wireX = (r) => { if (r.take) r.onClick = () => seedFromLevel(r.price, r.sizeAtoms); };
   asks.forEach(wireX); bids.forEach(wireX);
@@ -3091,10 +3096,10 @@ function renderXBook(seqAsset, payIsBtc, forward, reverse, unified){
   const bestBid = bids.length ? Math.max(...bids.map(b => b.price)) : null;
   const mid = (bestAsk != null && bestBid != null) ? (bestAsk + bestBid) / 2 : (bestAsk != null ? bestAsk : bestBid);
   const spread = (bestAsk != null && bestBid != null) ? (bestAsk - bestBid) : null;
-  LAST_MID = { price: mid, cross: true, base: seqAsset, quote: 'BTC', oneSided: !(bestAsk != null && bestBid != null) };
+  LAST_MID = { price: mid, cross: true, base: seqAsset, quote: qHex, oneSided: !(bestAsk != null && bestBid != null) };
   renderLadder(host, {
     asks: asks.slice(0, 8).reverse(), bids: bids.slice(0, 8), mid, spread,   // 8 BEST (lowest) asks, shown high->low near the mid
-    priceLabel: `(${am.ticker}/BTC)`, sizeLabel: am.ticker,
+    priceLabel: `(${am.ticker}/${qTk})`, sizeLabel: am.ticker,
     refMidStr: oneUnitRefStr(seqAsset),
     headTitle: 'Order book', headSub: `${n} offer${n === 1 ? '' : 's'}`,
     emptyMsg: 'No offers resting here yet.',
@@ -8356,8 +8361,14 @@ function renderInFlightCard(){
     const status = failed
       ? (sr.error || 'This sell could not be completed.')
       : (sr.error ? (sr.error + ' · will retry') : 'claiming your ' + qtk + ' on-chain (automatic)');
+    // Clear is offered whenever forgetting the record cannot strand funds: a terminal
+    // 'failed', OR a 'paying' record with NO preimage — nothing claimable exists yet,
+    // and its idempotent nonce means a re-place can never double-pay. Without this, a
+    // definitively-unsettled sell occupied a concurrency slot for the whole 24h TTL
+    // with no off-ramp (mirrors subswapClearable's nothing-committed rule).
+    const clearable = failed || (sr.state === 'paying' && !sr.preimage);
     rows.push({ view: null, need: !failed, id: sr.id, title: 'Sell ' + esc(sr.ticker) + ' for ' + esc(qtk),
-      status, action: failed ? 'clear-sell' : (sr.error ? 'retry-sell' : null) });
+      status, action: clearable ? 'clear-sell' : (sr.error ? 'retry-sell' : null) });
   }
   // ONE ROW PER LIVE BUY. This rendered a single row from a single global, so a second concurrent buy
   // was invisible here — and an invisible trade with Bitcoin locked in it is exactly what this card
