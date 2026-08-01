@@ -6105,15 +6105,16 @@ async function reviewMixed(q){
   // Per-kind in-flight guard (fund-safety): the rails whose recovery handle is still a SINGLE key
   // refuse a second swap of the same kind, because a second record would overwrite it.
   //
-  // Sub-asset BUY is NOT one of those any more — it keys its records per trade, so it is bounded by
-  // the shared concurrency ceiling instead. It used to be here, which meant one buy that could not
-  // complete (a maker rotating its identity out from under a funded HTLC) blocked every later buy in
-  // the wallet until its CLTV matured, hours away.
-  if ((isSubmarine && hasMixedInFlight()) || (isSubAssetSell && hasSellInFlight())){
+  // Sub-asset BUY and SELL are NOT of that kind any more — both key their records per trade, so
+  // they are bounded by the shared concurrency ceiling instead (spec §7: a blanket
+  // finish-this-first gate is only legitimate for an order holding the SAME funds, and every
+  // sell holds its own preimage + HTLC). The single-key sell used to sit here, which meant one
+  // stuck claim wedged the whole sell rail.
+  if (isSubmarine && hasMixedInFlight()){
     $('swErr').textContent = 'You already have a swap of this kind in progress. Finish or refund it first (open it under Active trades) before starting another.';
     return;
   }
-  if (isSubAsset && !buySlotsFree()){ $('swErr').textContent = inFlightBlockMessage(); return; }
+  if ((isSubAsset || isSubAssetSell) && !buySlotsFree()){ $('swErr').textContent = inFlightBlockMessage(); return; }
   // Rail-agnostic (Stage 3): don't pre-block on a live maker (subassetCapable/sellCapable) — the
   // rail is a settlement preference. Any recognized mixed shape proceeds; the settlement router
   // decides + bridges on Place-order and fails closed CLEANLY (refundable) if there's no
@@ -6223,8 +6224,24 @@ async function reviewMixed(q){
 // broadcast. Persisted/resumable (the claim is the fund step, must survive a reload).
 // [Finalized + testnet-verified once xchainBtcClaim lands in the wasm — stubbed until then so
 //  the rail is gated honestly and never half-executes a real BTC claim.]
-const SELL_KEY = 'swk.subasset.sell';
-let SELL = null;
+// PER-TRADE sell records (mirror of BUYS, and of the spec's §7 rule: a "finish this one
+// before starting another" gate is only ever legitimate for an order holding the SAME
+// funds — and every sell holds ITS OWN preimage + HTLC, nothing shared). The old
+// single-key SELL meant one stuck claim wedged the whole sell rail for hours; records
+// are now keyed per trade, dropped individually, bounded by the shared concurrency
+// ceiling. The legacy single-record key is migrated on load so an in-flight sell from
+// the old build is not orphaned by the upgrade.
+const SELL_KEY = 'swk.subasset.sell';      // legacy single-record key (migrated, then removed)
+const SELLS_KEY = 'swk.subasset.sells';
+let SELLS = [];
+try {
+  const raw = JSON.parse(localStorage.getItem(SELLS_KEY) || 'null');
+  if (Array.isArray(raw)) SELLS = raw.filter(Boolean);
+} catch { SELLS = []; }
+if (!SELLS.length){
+  try { const one = JSON.parse(localStorage.getItem(SELL_KEY) || 'null'); if (one) SELLS = [one]; } catch {}
+}
+for (const s of SELLS) if (s && !s.id) s.id = newTradeId();
 // A fresh 32-byte random hex idempotency key for a sub-asset sell (same CSPRNG the maker key uses).
 // The wallet persists it in the 'paying' record BEFORE the asset-paying /swap, and re-sends the SAME
 // value on recovery so the LSP returns the already-settled result rather than re-paying the asset.
@@ -6232,25 +6249,34 @@ function newSwapNonce(){ const a = new Uint8Array(32); (crypto || window.crypto)
 // After this long, a still-'paying' record can't complete (any unsettled Lightning payment has
 // auto-returned past its own timeout), so resumeSell clears it rather than re-attempting forever.
 const SELL_PAYING_TTL_MS = 24 * 60 * 60 * 1000;
-// Synchronous in-flight sentinel. SELL.state only becomes 'claiming' AFTER the LN-pay prologue
-// (assetNodeKey / connectNode / L.swap), so hasSellInFlight is blind during it. With the progress
-// modal now dismissable, a user could start a SECOND sell in that window and overwrite SELL (the
-// single-key handle to the BTC claim). Set true synchronously at the top of startSell, cleared in
-// its finally, so the guard covers the whole pre-claim prologue too.
+// Synchronous in-flight sentinel (mirror of _buyStarting): a record only becomes visible to the
+// slot check AFTER the LN-pay prologue, so without this two rapid starts could both pass it. It
+// bounds CONCURRENT STARTS, not the number of live sells.
 let _sellStarting = false;
-function saveSell(){ try { localStorage.setItem(SELL_KEY, JSON.stringify(SELL)); } catch {} }
-function clearSell(){ SELL = null; try { localStorage.removeItem(SELL_KEY); } catch {} }
-// True while a sell is starting or is persisted with the preimage but its BTC claim is not yet
-// confirmed — the claim is the FUND step, so it must survive a reload (resumeSell re-attempts it).
-// 'paying' is ALSO in-flight: the asset may already be paid but its response was lost, so the record
-// is the ONLY recovery handle (its nonce) — a second sell must never overwrite it (fund-safety).
-export function hasSellInFlight(){ return !!(_sellStarting || (SELL && (SELL.state === 'claiming' || SELL.state === 'paying'))); }
+function saveSells(){
+  try { localStorage.setItem(SELLS_KEY, JSON.stringify(SELLS)); } catch {}
+  try { localStorage.removeItem(SELL_KEY); } catch {}
+  try { renderInFlightCard(); } catch {}
+}
+function addSell(rec){ rec.id = rec.id || newTradeId(); SELLS.push(rec); saveSells(); return rec; }
+// Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
+function clearSell(rec){
+  if (!rec){ SELLS = []; saveSells(); return; }
+  SELLS = SELLS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
+  saveSells();
+}
+function sellTerminal(s){ return !s || s.state === 'done' || s.state === 'failed'; }
+function activeSells(){ return SELLS.filter((s) => !sellTerminal(s)); }
+// True while ANY sell is starting or live — kept for the composer's rail copy; it no longer
+// BLOCKS a second sell (the shared concurrency ceiling does the bounding).
+export function hasSellInFlight(){ return !!(_sellStarting || activeSells().length); }
 
 async function startSell(params){
   const { $ } = C;
   const asset = params.asset, am = C.assetMeta(asset);
-  // FUND-SAFETY self-guard: a second sell would overwrite SELL (the single-key handle to the BTC claim).
-  if (hasSellInFlight()){ if (C.toast) C.toast('You already have a sell in progress · finish or refund it first under Active trades.'); return; }
+  // Bound CONCURRENT sells by the shared ceiling (per-trade records; nothing to overwrite).
+  // _sellStarting still serialises the pre-pay prologue so two rapid starts cannot race it.
+  if (_sellStarting || !buySlotsFree()){ if (C.toast) C.toast(inFlightBlockMessage()); return; }
   const modal = C.el('div','modal'); const card = C.el('div','card');
   card.appendChild(C.el('label','lbl','Selling ' + am.ticker + ' over Lightning'));
   const st = C.el('div','status'); card.appendChild(st);
@@ -6269,8 +6295,9 @@ async function startSell(params){
   // (network error after we may have paid -> keep the 'paying' record for recovery) from a pre-pay or
   // definitive-rejection error (asset NOT paid -> discard it so it neither blocks nor re-runs).
   let paidCallStarted = false;
+  let rec = null;
   try {
-    _sellStarting = true;   // block a concurrent second sell through the whole pre-claim prologue (TOCTOU)
+    _sellStarting = true;   // serialise the pre-pay prologue (TOCTOU on the slot check)
     if (!(L && L.swap && L.assetNodeKey)) throw new Error('Lightning isn’t available in this build.');
     // Mixed same-chain: the claim leg is the QUOTE asset on the Sequentia chain (C.seqLeg);
     // the BTC shapes keep C.btcLeg. One capability check per leg family.
@@ -6319,9 +6346,9 @@ async function startSell(params){
     // after the LSP already paid the asset, resumeSell() re-calls with this SAME nonce and the LSP
     // returns the settled {preimage, btc_htlc} idempotently (it never re-pays for a stored nonce).
     const swap_nonce = newSwapNonce();
-    SELL = { state: 'paying', swap_nonce, asset, ticker: am.ticker, amount: params.amount ?? null,
+    rec = addSell({ state: 'paying', swap_nonce, asset, ticker: am.ticker, amount: params.amount ?? null,
       quote_asset: qh || undefined,   // mixed same-chain: the claim leg's REAL asset (absent = BTC)
-      node_key, btc_claim_pub, offer, ts: Date.now() }; saveSell();
+      node_key, btc_claim_pub, offer, ts: Date.now() });
     // Pay the asset over Lightning (LSP drives the hold-invoice pay from our node; device co-signs).
     // On settle the maker reveals the preimage, returned here WITH the BTC HTLC terms — the LSP
     // never claims (no claim key) and we claim on-chain ourselves.
@@ -6337,15 +6364,16 @@ async function startSell(params){
     if (!(resp && resp.settled && resp.preimage && resp.btc_htlc)){ if (resp && resp.error){ try { console.warn('[sell] swap did not settle:', resp.error); } catch {} } throw new Error('This trade could not be completed - your funds are safe.'); }
     const H = resp.btc_htlc;
     // Persist BEFORE the on-chain claim: the asset is now paid, so the BTC claim is the fund step
-    // and MUST survive a reload — resumeSell() re-attempts it from here.
-    SELL = { state: 'claiming', asset, ticker: am.ticker, preimage: resp.preimage, hash_h: resp.hash_h, btc_htlc: H,
-      quote_asset: qh || undefined, expected_btc: expectedBtc, swap_nonce, ts: mixedTip() }; saveSell();
+    // and MUST survive a reload — resumeSell() re-attempts it from here. Mutate (never replace)
+    // so the record keeps its id.
+    Object.assign(rec, { state: 'claiming', preimage: resp.preimage, hash_h: resp.hash_h, btc_htlc: H,
+      expected_btc: expectedBtc, ts: mixedTip() }); saveSells();
     say('Completing your trade …');
-    await claimSell();   // verify + claim; updates SELL + st
-    say('Done · you paid ' + am.ticker + ' over Lightning and received your ' + qtk + ' (' + String(SELL.claim_txid || '').slice(0,16) + '…).', 'ok');
+    await claimSell(rec);   // verify + claim; updates the record + st
+    say('Done · you paid ' + am.ticker + ' over Lightning and received your ' + qtk + ' (' + String(rec.claim_txid || '').slice(0,16) + '…).', 'ok');
     done();
     try { await C.sync(); } catch {}
-    clearSell();
+    clearSell(rec);
   } catch (e){
     // Was the asset possibly paid? Only if we reached L.swap AND the failure was a LOST RESPONSE — a
     // network/fetch error (surfaced as a TypeError; the LSP may already have settled). A DEFINITIVE
@@ -6356,17 +6384,17 @@ async function startSell(params){
     const msg = String((e && e.message) || '');
     const lostResponse = paidCallStarted && ((e instanceof TypeError) || (e && e.name === 'AbortError')
       || /failed to fetch|networkerror|network error|network request failed|load failed|fetch failed|connection|timed? ?out|timeout/i.test(msg));
-    if (SELL && SELL.state === 'paying' && !lostResponse) clearSell();   // definitive failure / pre-pay error: nothing was paid
-    const recoverable = !!(SELL && (SELL.state === 'claiming' || SELL.state === 'paying'));
+    if (rec && rec.state === 'paying' && !lostResponse) clearSell(rec);   // definitive failure / pre-pay error: nothing was paid
+    const recoverable = !!(rec && SELLS.includes(rec) && (rec.state === 'claiming' || rec.state === 'paying'));
     say('Failed: ' + C.prettyErr(e) + (recoverable ? ' · your funds are safe; reopen the wallet to complete this sell.' : ''), 'err');
     done();
   } finally {
-    _sellStarting = false;   // hand off to the SELL.state guard (or clear if the prologue never funded)
+    _sellStarting = false;   // hand off to the per-record state guard
   }
 }
 // Verify the maker's BTC HTLC binds our claim key + H, then claim it on-chain with the preimage.
 // Idempotent-ish: a duplicate claim of an already-spent HTLC just errors, which we surface.
-async function claimSell(){
+async function claimSell(SELL){
   const H = SELL.btc_htlc;
   // ECONOMIC gate: the maker's returned BTC HTLC must be worth at least what we were QUOTED (offer.btc_sats).
   // verifyClaimable only checks the HTLC's on-chain value equals what the LSP reported — NOT that it meets
@@ -6377,7 +6405,7 @@ async function claimSell(){
   try {
     const got = BigInt(String(H.amount || 0)), want = BigInt(String(SELL.expected_btc || 0));
     if (want > 0n && got < want) {
-      SELL.shortfall = { got: String(got), want: String(want) }; saveSell();
+      SELL.shortfall = { got: String(got), want: String(want) }; saveSells();
       const wtk = SELL.quote_asset ? ((C.assetMeta(SELL.quote_asset) || {}).ticker || 'quote') : 'BTC';
       C.toast && C.toast(`Warning: you are receiving only ${C.fmtAtoms(got, 8)} ${wtk}, less than the quoted ${C.fmtAtoms(want, 8)} ${wtk} · taking it anyway.`, { level: 'warn' });
     }
@@ -6403,7 +6431,7 @@ async function claimSell(){
       preimage: SELL.preimage, txid: H.txid, vout: H.vout, amount: H.amount });
     claimTxid = await C.btcLeg.claim({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, preimage: SELL.preimage });
   }
-  SELL.state = 'done'; SELL.claim_txid = (claimTxid && claimTxid.toString) ? claimTxid.toString() : String(claimTxid); saveSell();
+  SELL.state = 'done'; SELL.claim_txid = (claimTxid && claimTxid.toString) ? claimTxid.toString() : String(claimTxid); saveSells();
   // Enriched receipt (P5.1): sub-asset SELL = asset paid over LN, BTC claimed on-chain. base = the asset,
   // quote = BTC; size = asset units sold, price = BTC received per asset unit.
   const sellQtk = SELL.quote_asset ? ((C.assetMeta(SELL.quote_asset) || {}).ticker || 'quote') : 'BTC';
@@ -6416,24 +6444,35 @@ async function claimSell(){
 }
 // On wallet load: if a sell paid the asset but its BTC claim never confirmed, re-attempt the
 // claim (the preimage + HTLC terms are persisted). This is the fund-recovery path.
+const _resumingSells = new Set();
 export async function resumeSell(){
-  try { SELL = JSON.parse(localStorage.getItem(SELL_KEY) || 'null'); } catch { SELL = null; }
+  await Promise.all(activeSells().map((r) => resumeOneSell(r)));
+}
+async function resumeOneSell(SELL){
+  if (!SELL) return;
+  if (_resumingSells.has(SELL.id)) return;   // already being driven by an earlier call
+  _resumingSells.add(SELL.id);
+  try {
+    await driveResumeSell(SELL);
+  } finally { _resumingSells.delete(SELL.id); }
+}
+async function driveResumeSell(SELL){
   if (!SELL) return;
   // (A) Asset paid + response received: SELL holds the preimage + HTLC -> re-attempt the on-chain
   //     claim (the FUND step). The original recovery path, unchanged.
   if (SELL.state === 'claiming' && SELL.preimage && SELL.btc_htlc){
     try {
-      await claimSell();
-      try { C.toast && C.toast('Recovered your sell · you received your BTC (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
+      await claimSell(SELL);
+      try { C.toast && C.toast('Recovered your sell · you received your funds (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
       try { await C.sync(); } catch {}
-      clearSell();
+      clearSell(SELL);
     } catch (e){
       // The claim failed. Record WHY (so the Active-trades row can SHOW it instead of a silent
       // 'claiming' spinner), and decide whether it's terminal: if the HTLC outpoint is already SPENT
       // on-chain (the maker reclaimed it after its CLTV — the classic "wallet stayed closed too long"
       // case), the claim can NEVER succeed, so mark it terminal so it STOPS wedging every future sell.
       // Otherwise keep 'claiming' for a Retry (transient, or the timelock not yet mature).
-      SELL.error = C.prettyErr(e); saveSell();
+      SELL.error = C.prettyErr(e); saveSells();
       try {
         const H = SELL.btc_htlc;
         const spendChecker = SELL.quote_asset ? (C.seqLeg && C.seqLeg.outspend) : (C.btcLeg && C.btcLeg.outspend);
@@ -6442,7 +6481,7 @@ export async function resumeSell(){
           if (os.known && os.spent){
             SELL.state = 'failed';
             SELL.error = 'This trade is already resolved · your balance is up to date, and you can clear this.';
-            saveSell();
+            saveSells();
             try { await C.sync(); } catch {}
           }
         }
@@ -6478,18 +6517,17 @@ export async function resumeSell(){
         // Confirmed NOT settled. Only now is a TTL clear safe: past the Lightning leg's own timeout
         // an unsettled asset payment has auto-returned, so this record can never complete. Within the
         // TTL, keep it for a later retry.
-        if (SELL.ts && (Date.now() - SELL.ts) > SELL_PAYING_TTL_MS){ clearSell(); try { C.toast && C.toast('A sell that never completed has expired · any Lightning payment has been returned.'); } catch {} }
+        if (SELL.ts && (Date.now() - SELL.ts) > SELL_PAYING_TTL_MS){ clearSell(SELL); try { C.toast && C.toast('A sell that never completed has expired · any Lightning payment has been returned.'); } catch {} }
         return;
       }
-      SELL = { state: 'claiming', asset, ticker: SELL.ticker || ((C.assetMeta(asset)||{}).ticker || ''),
+      Object.assign(SELL, { state: 'claiming', ticker: SELL.ticker || ((C.assetMeta(asset)||{}).ticker || ''),
         preimage: resp.preimage, hash_h: resp.hash_h, btc_htlc: resp.btc_htlc,
-        quote_asset: SELL.quote_asset || undefined,
         expected_btc: Number((offer && offer.btc_sats) || SELL.expected_btc || 0),
-        swap_nonce: SELL.swap_nonce, ts: mixedTip() }; saveSell();
-      await claimSell();
-      try { C.toast && C.toast('Recovered your sell · you received your BTC (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
+        ts: mixedTip() }); saveSells();
+      await claimSell(SELL);
+      try { C.toast && C.toast('Recovered your sell · you received your funds (' + String(SELL.claim_txid||'').slice(0,16) + '…).'); } catch {}
       try { await C.sync(); } catch {}
-      clearSell();
+      clearSell(SELL);
     } catch (e){ /* leave the 'paying' record; its nonce keeps recovery idempotent on the next load */ }
     return;
   }
@@ -6546,7 +6584,7 @@ function buyTerminal(b){ return !b || b.state === 'settled' || b.state === 'fail
 function activeBuys(){ return BUYS.filter((b) => !buyTerminal(b)); }
 // Buys count against the SAME global ceiling as the other rails: each one ties up real Bitcoin while
 // it runs, so the bound is about committed value, not about which rail happens to commit it.
-function buySlotsFree(){ return (activeBuys().length + activeSubswaps().length + (hasBridgeInFlight() ? 1 : 0)) < MAX_CONCURRENT_TRADES; }
+function buySlotsFree(){ return (activeBuys().length + activeSells().length + activeSubswaps().length + (hasBridgeInFlight() ? 1 : 0)) < MAX_CONCURRENT_TRADES; }
 // True while a buy is starting or has FUNDED its BTC HTLC but is not yet settled/refunded — the BTC is
 // locked, so the record must survive a reload (resumeBuy settles on hold, or refunds after T_btc).
 export function hasBuyInFlight(){ return !!(_buyStarting || activeBuys().length); }
@@ -8299,13 +8337,19 @@ function renderInFlightCard(){
   // sell either silently wedged the rail (old bug: 'claiming' forever, no message) or, once terminal,
   // vanished with no explanation. A failed sell offers Clear (safe: the HTLC is resolved on-chain); a
   // transient one offers Retry.
-  if (SELL && (hasSellInFlight() || SELL.state === 'failed' || SELL.error)){
-    const failed = SELL.state === 'failed';
+  // ONE ROW PER SELL (live, errored, or terminally failed) — per-trade records, same shape
+  // as the buys below. A failed sell offers Clear (safe: its HTLC is resolved on-chain); a
+  // transient error offers Retry. A stuck one never blocks new sells any more.
+  for (const sr of SELLS){
+    if (!sr) continue;
+    if (sellTerminal(sr) && sr.state !== 'failed' && !sr.error) continue;
+    const failed = sr.state === 'failed';
+    const qtk = sr.quote_asset ? ((C.assetMeta(sr.quote_asset) || {}).ticker || 'quote') : 'BTC';
     const status = failed
-      ? (SELL.error || 'This sell could not be completed.')
-      : (SELL.error ? (SELL.error + ' · will retry') : 'claiming your BTC on-chain (automatic)');
-    rows.push({ view: null, need: !failed, title: 'Sell ' + esc(SELL.ticker) + ' for BTC',
-      status, action: failed ? 'clear-sell' : (SELL.error ? 'retry-sell' : null) });
+      ? (sr.error || 'This sell could not be completed.')
+      : (sr.error ? (sr.error + ' · will retry') : 'claiming your ' + qtk + ' on-chain (automatic)');
+    rows.push({ view: null, need: !failed, id: sr.id, title: 'Sell ' + esc(sr.ticker) + ' for ' + esc(qtk),
+      status, action: failed ? 'clear-sell' : (sr.error ? 'retry-sell' : null) });
   }
   // ONE ROW PER LIVE BUY. This rendered a single row from a single global, so a second concurrent buy
   // was invisible here — and an invisible trade with Bitcoin locked in it is exactly what this card
@@ -8368,8 +8412,8 @@ function renderInFlightCard(){
       + rows.map(r => `<div class="swbook-row${r.need ? ' needsact' : ''}">
           <span class="mono">${r.title} · ${esc(r.status)}${r.need ? ' <b class="actneed">action may be needed</b>' : ''}</span>
           ${r.view ? `<button type="button" class="ghost swviewtrade" data-view="${r.view}">View</button>`
-            : r.action === 'clear-sell' ? `<button type="button" class="ghost swclearsell">Clear</button>`
-            : r.action === 'retry-sell' ? `<button type="button" class="ghost swretrysell">Retry</button>`
+            : r.action === 'clear-sell' ? `<button type="button" class="ghost swclearsell" data-id="${esc(r.id || '')}">Clear</button>`
+            : r.action === 'retry-sell' ? `<button type="button" class="ghost swretrysell" data-id="${esc(r.id || '')}">Retry</button>`
             : r.action === 'clear-walk' ? `<button type="button" class="ghost swclearwalk" title="Dismiss this finished walk. The part that filled is already yours.">Clear</button>`
             : r.action === 'clear-subswap' ? `<button type="button" class="ghost swclearsub" data-id="${esc(r.id || '')}" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
             : r.action === 'clear-bridge' ? `<button type="button" class="ghost swclearbridge" title="Forget this stalled trade so you can start another. Nothing of yours is committed.">Clear</button>`
@@ -8400,7 +8444,8 @@ function renderInFlightCard(){
   // Clear a terminally-failed sub-asset sell: its BTC HTLC is already resolved on-chain, so removing
   // the record loses no funds and unblocks the sell rail. Retry re-drives resumeSell for a transient one.
   host.querySelectorAll('.swclearsell').forEach(b => b.onclick = () => {
-    clearSell(); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
+    const rec = SELLS.find((r) => r && r.id === b.dataset.id) || null;
+    clearSell(rec); try { renderInFlightCard(); } catch {} try { updateRails(); } catch {}
   });
   host.querySelectorAll('.swclearwalk').forEach(b => b.onclick = () => {
     clearWalk(); try { renderInFlightCard(); } catch {}
@@ -8418,7 +8463,8 @@ function renderInFlightCard(){
   });
   host.querySelectorAll('.swretrysell').forEach(b => b.onclick = async () => {
     b.disabled = true; b.textContent = 'Retrying…';
-    try { SELL && (SELL.error = null, saveSell()); await resumeSell(); } catch {}
+    const rec = SELLS.find((r) => r && r.id === b.dataset.id) || null;
+    try { if (rec){ rec.error = null; saveSells(); await resumeOneSell(rec); } } catch {}
     try { renderInFlightCard(); } catch {}
   });
   host.querySelectorAll('.swviewtrade').forEach(b => b.onclick = () => {
@@ -8640,6 +8686,11 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // next offer rather than killing the trade, so one dead maker cannot fail every take.
   retryableHandshakeFailure, markOfferDead, clearDeadOffers,
   deadOffers: () => _deadOffers,
+  // Per-trade sell records (the wedge-the-rail fix): exposed so the concurrency
+  // semantics — a stuck sell never blocks the next one — are pinned headlessly.
+  sells: () => SELLS,
+  setSells: (arr) => { SELLS = Array.isArray(arr) ? arr : []; },
+  addSell, clearSell, sellTerminal, activeSells, buySlotsFree,
   railsUnset: () => _railsUnset,
   advanceSubswapToNextOffer,
   sizedTake,
