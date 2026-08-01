@@ -95,7 +95,7 @@ import { acceptUpgrade, bridgeWsToTcp } from './ws-bridge.mjs';
 import { settlementPlanForSide, planExecutionName, planSettlement } from './settlement-router.mjs';
 import { buildUnifiedBook } from './unified-book.mjs';
 import { runBridgedSwap, matchFromTake, describeBridge, classifyLegs, takeRailsCrossed, bridgeAssetHandoffAdmissible, bridgeAssetRelayLocktimeVerdict, bridgeFrontConfirmed, isPureLnTake, crossingShapeSupported, describeCrossingSupport, fundedBtcSatsForResume } from './bridge-driver.mjs';
-import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee, decideAssetFront, frontedLegHandoff } from './leg-bridge.mjs';
+import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee, decideAssetFront, checkAssetFrontGate, frontModeFields, decideReplenish, frontedLegHandoff } from './leg-bridge.mjs';
 import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair, relayTakerAssetLeg, runForwardBridgeTerms, sendForwardBtcLegFunded, openForwardBridgeSession, checkMakerAssetLegObserved, buildHtlcRedeem } from './bridge-maker.mjs';
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 
@@ -134,6 +134,17 @@ const CFG = {
   // can only ever expose one bounded trade. 0 = no cap.
   frontSeqWallet: process.env.FRONT_SEQ_WALLET || '',
   frontMaxAtoms: Number(process.env.FRONT_MAX_ATOMS || 0),
+  // INVENTORY REPLENISHMENT for a fronted leg: after the LSP sells its own asset to the taker, it
+  // re-takes the SAME maker offer as principal (seqob-cli xlift — the LSP's OWN fresh hash, a
+  // standard atomic cross-chain swap) so the fronted inventory is restocked on the LSP's own
+  // schedule, invisible to the taker. Deliberately NOT on the taker's H (see decideReplenish).
+  // LSP_FRONT_REPLENISH=0 disables; the concurrency cap bounds the BTC the LSP locks as principal.
+  frontReplenish: process.env.LSP_FRONT_REPLENISH !== '0',
+  frontReplenishMax: Number(process.env.LSP_FRONT_REPLENISH_MAX || 3),
+  // xlift spans a real parent-chain confirmation (its -btc-conf-wait defaults to 90m), so the child
+  // gets a generous hard timeout; on any failure its -state-file keeps the BTC leg recoverable via
+  // `seqob-cli xrefund` (the failure log prints the exact command).
+  frontReplenishTimeoutMs: Number(process.env.LSP_FRONT_REPLENISH_TIMEOUT_MS || 3 * 3600 * 1000),
   // The submarine's Lightning leg. Default: the device-cosigned hosted BTC node (so a
   // mixed swap stays non-custodial like pure-LN); overridable to an autonomous node.
   mixedBtcRpc: process.env.MIXED_BTC_RPC || process.env.HOSTED_BTC_RPC || hostedRpcFallback,
@@ -2194,6 +2205,30 @@ function bridgeLegAmount(body, leg) {
   return leg.unit === 'btc' ? Number(body.btc_sats || 0) : Number(body.asset_atoms || 0);
 }
 
+// The ACTUAL committed facts of the taker's incoming hold on H, read from the LSP's OWN BTC-LN node
+// (VERIFY-NOT-TRUST — never a requested/advertised value): the live BTC tip, the earliest-lapsing
+// incoming HTLC's absolute CLTV, and the SUMMED held sats across the incoming HTLCs on H (holdinvoice
+// marks HELD on the FIRST HTLC regardless of amount, so the sum — not the hold state — is what a front
+// or fund may be sized against). Shared by the asset-front hold gate (F0/F1) and the BTC-branch payer
+// fund gate (B0/B2/B3). Any unreadable value comes back NaN, and BOTH callers fail closed on NaN.
+async function readPayerHoldFacts(lspRpc, hashH) {
+  let btcTip = NaN, incomingHtlcExpiry = NaN, heldSat = NaN;
+  try {
+    const gi = await lnrpc('getinfo', [], lspRpc, SIGNER_RPC_TIMEOUT_MS);
+    btcTip = Number(gi && gi.blockheight);
+    const lh = await lnrpc('listhtlcs', [], lspRpc, SIGNER_RPC_TIMEOUT_MS);
+    const mine = ((lh && lh.htlcs) || []).filter((x) => String(x.payment_hash || '').toLowerCase() === String(hashH).toLowerCase()
+      && x.direction === 'in' && Number.isFinite(Number(x.expiry)));
+    if (mine.length) {
+      incomingHtlcExpiry = Math.min(...mine.map((x) => Number(x.expiry)));   // the earliest-lapsing incoming HTLC governs settleability
+      // SUM the taker's incoming HTLCs on H. CLN's amount lives on amount_msat (msat, number or
+      // "..msat" string) or msatoshi -> convert to sats.
+      heldSat = mine.reduce((acc, x) => acc + Math.floor(Number(String(x.amount_msat ?? x.msatoshi ?? 0).toString().replace(/msat$/i, '')) / 1000), 0);
+    }
+  } catch { /* unreadable -> NaN -> the caller fails closed / re-drives */ }
+  return { btcTip, incomingHtlcExpiry, heldSat };
+}
+
 // Build the LIVE io the pure driver runs against. observe + provisionInbound + legAmountSat are FULLY
 // wired to existing primitives. The value-moving actions compose the EXISTING audited primitives
 // (lnrpc pay/settle + the xsubas-* HTLC CLIs) and read the per-leg handshake data (H, the counterparty
@@ -2584,17 +2619,49 @@ function makeBridgeIo({ match, body, job }) {
         // never-front-over-a-funded-BTC-HTLC refusal) and is unit-tested without a node.
         const cheap = decideAssetFront({ btcHtlcFunded: !!s.htlc, frontWallet: CFG.frontSeqWallet,
           wantAtoms, inventoryAtoms: Number.MAX_SAFE_INTEGER, maxAtoms: CFG.frontMaxAtoms, claimPub, tSeq });
-        const verdict = cheap.armed
+        let verdict = cheap.armed
           ? decideAssetFront({ btcHtlcFunded: !!s.htlc, frontWallet: CFG.frontSeqWallet, wantAtoms,
               inventoryAtoms: await frontableSeqAtoms(sa.seqAsset), maxAtoms: CFG.frontMaxAtoms, claimPub, tSeq })
           : cheap;
+        // HOLD GATE (F0/F1) — the front's ONLY recompense is settling the taker's held BTC-LN with the
+        // P its claim reveals, so before ARMING verify from the LSP node's ACTUAL committed incoming
+        // HTLCs that the hold (a) sums to at least the ordered BTC price (holdinvoice marks HELD on
+        // the FIRST HTLC regardless of amount — a 1-sat pay must not draw the full asset leg) and
+        // (b) outlives the fronted leg's whole claim horizon (T_seq + reorg/settle margins) — else a
+        // late claim reveals P into a dead hold: asset delivered, nothing recouped. TRANSIENT
+        // unreadable facts (NaN) THROW so the driver just re-drives — the decision is NOT taken and a
+        // momentary node hiccup cannot stick an eligible taker to the slower maker-first path. A
+        // DEFINITIVE gate failure declines sticky (honest maker-first fallback; nothing at stake).
+        if (verdict.armed) {
+          const facts = await readPayerHoldFacts(lspRpc, s.hashH);
+          let frontSeqTip = NaN;
+          try { const so = await xhtlcObserve({ rpc: CFG.seqRpc, txid: '0'.repeat(64), vout: 0 }); frontSeqTip = Number(so && so.tip); } catch { /* NaN -> transient, throw below */ }
+          for (const [k, v] of Object.entries({ btcTip: facts.btcTip, incomingHtlcExpiry: facts.incomingHtlcExpiry, heldSat: facts.heldSat, seqTip: frontSeqTip })) {
+            if (!Number.isFinite(v)) throw new Error(`front decision blocked (transient): ${k} unreadable this tick — re-drive; the front/fund choice is not yet taken (nothing at stake)`);
+          }
+          const hg = checkAssetFrontGate({ btcTip: facts.btcTip, incomingHtlcExpiry: facts.incomingHtlcExpiry,
+            seqTip: frontSeqTip, seqRefundHeight: tSeq, heldAmountSat: facts.heldSat, orderedAmountSat: Number(s.amountSat) });
+          if (!hg.ok) verdict = { armed: false, reason: hg.reason };
+        }
         job.bridge_front = verdict.armed
           ? { armed: true, atoms: wantAtoms, asset: sa.seqAsset, t_seq: tSeq }
           : { armed: false, reason: verdict.reason };
+        // HONEST wallet-facing fields: which path this job is on and what (if anything) the user is
+        // actually waiting for. One tested vocabulary (frontModeFields), served as-is by GET /swap.
+        const fm = frontModeFields({ armed: job.bridge_front.armed, reason: job.bridge_front.armed ? '' : verdict.reason });
+        job.front_mode = fm.front_mode; job.expected_wait = fm.expected_wait; job.front_reason = fm.front_reason;
         persistJobs();
         console.error(job.bridge_front.armed
           ? `[bridge] FRONTING the asset leg from LSP inventory (${wantAtoms} atoms of ${sa.seqAsset}) — the taker is not made to wait for the maker's anchor gate; no BTC HTLC will be funded for this job`
           : `[bridge] not fronting (${job.bridge_front.reason}); falling back to the maker's anchor-gated asset leg`);
+      }
+      // A resumed pre-upgrade job (or one that funded before these fields existed) still deserves the
+      // honest answer: it is on the maker-first path and waits on Bitcoin confirmations until the
+      // maker's leg is handed over.
+      if (!job.front_mode && !(job.bridge_front && job.bridge_front.armed)) {
+        const fm = frontModeFields({ armed: false, reason: (job.bridge_front && job.bridge_front.reason) || 'maker-first pipeline' });
+        job.front_mode = fm.front_mode; job.expected_wait = fm.expected_wait; job.front_reason = fm.front_reason;
+        persistJobs();
       }
       if (job.bridge_front && job.bridge_front.armed) {
         if (s.htlc) throw new Error('INVARIANT VIOLATED: a fronted job has a funded BTC HTLC on H — refusing to proceed (fronting publishes P while the maker holds nothing, so that BTC could be swept for free)');
@@ -2627,24 +2694,14 @@ function makeBridgeIo({ match, body, job }) {
             // T_seq, (B3) T_btc matures inside the hold's life. The taker's BTC is merely HELD, so a refusal is
             // no-loss. Any unreadable value arrives at the gate as NaN and it fails closed (throws).
             const tSeqForGate = Number(sa.seqLocktime ?? (job.bridge_terms && job.bridge_terms.seq_locktime));
-            let gateBtcTip = NaN, incomingHtlcExpiry = NaN, gateSeqTip = NaN, heldSat = NaN;
-            try {
-              const gi = await lnrpc('getinfo', [], lspRpc, SIGNER_RPC_TIMEOUT_MS);
-              gateBtcTip = Number(gi && gi.blockheight);
-              const lh = await lnrpc('listhtlcs', [], lspRpc, SIGNER_RPC_TIMEOUT_MS);
-              const mine = ((lh && lh.htlcs) || []).filter((x) => String(x.payment_hash || '').toLowerCase() === String(s.hashH).toLowerCase()
-                && x.direction === 'in' && Number.isFinite(Number(x.expiry)));
-              if (mine.length) {
-                incomingHtlcExpiry = Math.min(...mine.map((x) => Number(x.expiry)));   // the earliest-lapsing incoming HTLC governs settleability
-                // B0 — SUM the taker's incoming HTLCs on H. holdinvoice marks HELD on the FIRST HTLC regardless of
-                // amount, so a 1-sat pay would else trip funding; require the full ordered price to be held. CLN's
-                // amount lives on amount_msat (msat, number or "..msat" string) or msatoshi -> convert to sats.
-                heldSat = mine.reduce((acc, x) => acc + Math.floor(Number(String(x.amount_msat ?? x.msatoshi ?? 0).toString().replace(/msat$/i, '')) / 1000), 0);
-              }
-            } catch { /* unreadable -> NaN -> gate fails closed below */ }
+            // B0's summed-held-amount + the committed incoming-HTLC CLTV + the live BTC tip come from the
+            // shared ACTUAL-facts reader (also the asset-front hold gate's source); NaN on unreadable.
+            const gateFacts = await readPayerHoldFacts(lspRpc, s.hashH);
+            let gateSeqTip = NaN;
             try { const so = await xhtlcObserve({ rpc: CFG.seqRpc, txid: '0'.repeat(64), vout: 0 }); gateSeqTip = Number(so && so.tip); } catch { /* unreadable -> NaN -> gate fails closed */ }
-            const fundGate = checkPayerFundGate({ btcTip: gateBtcTip, incomingHtlcExpiry, btcRefundHeight: Number(s.cltv),
-              seqTip: gateSeqTip, seqRefundHeight: tSeqForGate, heldAmountSat: heldSat, orderedAmountSat: Number(s.amountSat) });
+            const fundGate = checkPayerFundGate({ btcTip: gateFacts.btcTip, incomingHtlcExpiry: gateFacts.incomingHtlcExpiry,
+              btcRefundHeight: Number(s.cltv),
+              seqTip: gateSeqTip, seqRefundHeight: tSeqForGate, heldAmountSat: gateFacts.heldSat, orderedAmountSat: Number(s.amountSat) });
             if (!fundGate.ok) throw new Error(`fund-onchain blocked (fail closed, nothing funded): ${fundGate.reason}`);
           },
           persistIntent: async () => {
@@ -2740,6 +2797,7 @@ function makeBridgeIo({ match, body, job }) {
         s.forwardRelayDone = true;
         job.maker_seq_leg = ml;
         if (job.bridge_terms) job.bridge_terms.maker_seq_leg = ml;
+        job.expected_wait = null;   // honest field: the maker's leg is handed over — nothing left to wait for
         persistJobs();
         // The forward session's work is done (asset locked, verified, relayed). Free it; observe reads P on-chain now.
         try { const sess = job._bridgeSession; if (sess) sess.close(); } catch {}
@@ -3135,9 +3193,10 @@ async function frontAssetLeg({ job, s, sa }) {
   job.bridge_front.delivered = true;
   persistJobs();
 
-  // RELEASE THE MAKER'S LIFT. We are not taking its offer — we sold our own
-  // inventory — so freeing its single in-flight slot at once keeps the offer
-  // takeable by the next taker instead of wedged until its timeout.
+  // RELEASE THE MAKER'S LIFT. The TAKER's settlement is not taking its offer — it
+  // was served from our own inventory — so freeing its single in-flight slot at
+  // once keeps the offer takeable (including by our own replenish take below)
+  // instead of wedged until its timeout.
   try {
     const sess = job._bridgeSession;
     if (sess) { await sess.fail('taker_abort', 'the LSP fronted this leg from inventory; releasing the lift'); sess.close(); }
@@ -3145,6 +3204,99 @@ async function frontAssetLeg({ job, s, sa }) {
   job._bridgeSession = null;
   persistJobs();
   console.error('[bridge] fronted asset leg handed to the taker; maker lift released (no BTC HTLC was funded for this job)');
+
+  // REPLENISH the inventory the front just spent: re-take the SAME offer as principal, on the LSP's
+  // OWN schedule — the taker's settlement is already complete and never waits on this.
+  maybeStartReplenish(job);
+}
+
+// ---------------------------------------------------------------------------
+// INVENTORY REPLENISHMENT — the maker settlement of a FRONTED job, with the LSP
+// as the effective taker.
+//
+// A front sells the LSP's own asset to the taker and recoups the taker's BTC-LN;
+// the matched maker's offer — the reason this trade priced at all — has delivered
+// nothing yet. Completing that settlement is what keeps the inventory stocked, and
+// it happens HERE, on the LSP's own schedule (Bitcoin confirmations and all),
+// invisible to the taker: seqob-cli xlift re-takes the SAME offer as a standard
+// atomic cross-chain swap in which the LSP mints ITS OWN secret/hash, funds the
+// BTC leg, and claims the maker's asset (locked to the LSP's claim key) into the
+// FRONT wallet — restoring exactly what was fronted, at the price that won.
+//
+// DELIBERATELY NOT ON THE TAKER'S H. On the shared H the taker's claim of the
+// fronted leg publishes P while the maker has locked nothing; any BTC HTLC then
+// funded (or left standing) on that H is sweepable by the maker for free — the
+// exact loss decideAssetFront's hard invariant refuses. On its OWN hash the
+// replenish take needs no maker trust at all: worst case its BTC leg refunds at
+// its T_btc (xlift persists the session to -state-file BEFORE any coins move, and
+// the failure log prints the exact `seqob-cli xrefund` recovery command).
+//
+// Bounded and fail-open-to-skipped: decideReplenish (pure, tested) refuses when
+// disabled, already-recorded (a re-driven hand-off can never double-take), the
+// offer identity is missing, or the concurrency cap is reached — a skip only
+// leaves the inventory lighter, never the taker or the maker exposed. The child
+// outlives nothing: an LSP restart abandons it, the per-job record shows
+// 'running' from a dead process, and the state file still recovers the BTC leg.
+// ---------------------------------------------------------------------------
+const REPLENISH = { live: 0 };
+function maybeStartReplenish(job) {
+  const live = (job.job_id && jobs.get(job.job_id)) || job;   // setJob spread-clones — always mutate the LIVE job
+  const bf = live.bridge_front || {};
+  const d = decideReplenish({ enabled: CFG.frontReplenish, alreadyStarted: !!bf.replenish,
+    offerId: live.offer_id, makerPubkey: live.maker_pubkey, atoms: Number(bf.atoms),
+    liveCount: REPLENISH.live, maxConcurrent: CFG.frontReplenishMax });
+  if (!d.start) {
+    // A re-driven hand-off arrives here with the record already written (alreadyStarted) — stay silent
+    // then; only a NEW skip is recorded + logged once.
+    if (!bf.replenish) {
+      bf.replenish = { status: 'skipped', reason: d.reason, at: Date.now() };
+      persistJobs();
+      console.error(`[bridge] replenish skipped for job ${live.job_id}: ${d.reason}`);
+    }
+    return;
+  }
+  if (!CFG.subasBtcRpc || !CFG.subasBtcWallet || !CFG.seqRpc || !CFG.frontSeqWallet || !CFG.provDir) {
+    bf.replenish = { status: 'skipped', at: Date.now(),
+      reason: 'replenish needs SUBAS_BTC_RPC + SUBAS_BTC_WALLET + SEQ_RPC + FRONT_SEQ_WALLET + a durable PROV_DIR (for the recoverable session state file)' };
+    persistJobs();
+    console.error(`[bridge] replenish skipped for job ${live.job_id}: ${bf.replenish.reason}`);
+    return;
+  }
+  const atoms = Number(bf.atoms);
+  // The state file is server-local (holds the session's refund keys); it is NEVER stored on the job —
+  // jobs are served to clients — only derived here and printed to the operator log.
+  const stateFile = path.join(CFG.provDir, `replenish-${live.job_id}.json`);
+  bf.replenish = { status: 'running', atoms, started_at: Date.now() };
+  persistJobs();
+  REPLENISH.live++;
+  const args = ['xlift', '-relay', relayForOffer(live.relay_url), '-asset', String(bf.asset),
+    '-offer-id', String(live.offer_id), '-maker-pubkey', String(live.maker_pubkey),
+    '-amount', String(atoms),
+    '-btc-rpc', CFG.subasBtcRpc, '-btc-wallet', CFG.subasBtcWallet, '-btc-chain', CFG.subasBtcChain,
+    '-seq-rpc', CFG.seqRpc, '-seq-wallet', CFG.frontSeqWallet,   // the asset claims back into the FRONT wallet
+    '-state-file', stateFile];
+  console.error(`[bridge] replenish take started for job ${live.job_id}: xlift ${atoms} atoms of ${assetLabel(bf.asset)} from offer ${live.offer_id} (own hash, atomic; state ${stateFile})`);
+  execFile(CFG.seqobCli, args, { timeout: CFG.frontReplenishTimeoutMs, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
+    REPLENISH.live = Math.max(0, REPLENISH.live - 1);
+    const j2 = (live.job_id && jobs.get(live.job_id)) || live;
+    const rec = (j2.bridge_front && j2.bridge_front.replenish) || bf.replenish || {};
+    const out = String(stdout || '') + String(stderr || '');
+    const m = out.match(/CROSS SWAP SETTLED:\s*claimed\s+(\d+)/i);
+    if (!err && m) {
+      Object.assign(rec, { status: 'settled', claimed_atoms: Number(m[1]), finished_at: Date.now() });
+      console.error(`[bridge] replenish SETTLED for job ${j2.job_id}: claimed ${m[1]} atoms back into ${CFG.frontSeqWallet}`);
+    } else if (!err) {
+      // exit 0 without the settle line — do not claim what was not proven.
+      Object.assign(rec, { status: 'unverified', reason: scrubDetail(out), finished_at: Date.now() });
+      console.error(`[bridge] replenish exited clean but UNVERIFIED for job ${j2.job_id}: ${rec.reason}`);
+    } else {
+      Object.assign(rec, { status: 'failed', reason: scrubDetail(out || String(err.message || err)), finished_at: Date.now() });
+      console.error(`[bridge] replenish FAILED for job ${j2.job_id} (${rec.reason}) — the front already settled fair (LN in vs asset out); only the restock is missing. `
+        + `If a BTC leg was locked, recover it after its T_btc with: ${CFG.seqobCli} xrefund -state-file ${stateFile} -btc-rpc <url> -btc-wallet ${CFG.subasBtcWallet} -btc-chain ${CFG.subasBtcChain} -wait`);
+    }
+    if (j2.bridge_front) j2.bridge_front.replenish = rec;
+    persistJobs();
+  });
 }
 
 // Reclaim a fronted asset leg the taker never claimed, after T_seq. The mirror of

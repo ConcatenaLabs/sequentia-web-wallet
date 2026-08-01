@@ -172,3 +172,136 @@ test('a NON-fronted payer leg is untouched by the fronted branch', () => {
   assert.notEqual(s.action, 'recoup-settle',
     'a non-fronted leg must still key its recoup on the BTC HTLC, not on P alone');
 });
+
+// ── THE HOLD GATE (F0/F1) ─────────────────────────────────────────────────────
+// The fronted asset's only recompense is settling the taker's held BTC-LN with
+// the P its claim reveals. So the hold must be WORTH the leg (F0 — holdinvoice
+// marks HELD on the first HTLC regardless of amount) and must OUTLIVE the leg's
+// whole claim horizon (F1 — the taker may claim as late as just before T_seq;
+// a claim into a dead hold delivers the asset and recoups nothing).
+import { checkAssetFrontGate, HOLD_LIFE_DEFAULTS, requiredTakerHold } from './leg-bridge.mjs';
+
+// T_seq 240 SEQ blocks out (the honest fleet's resting delta). requiredTakerHold
+// sizes the front-HTLC/hold coverage from it — reuse it so the test tracks the
+// one shared sizing rather than hard-coding a second copy of the arithmetic.
+const GATE = { btcTip: 90_000, seqTip: 61_000, seqRefundHeight: 61_240,
+  heldAmountSat: 80_000, orderedAmountSat: 80_000 };
+const REQ_BLOCKS = requiredTakerHold({ seqTip: GATE.seqTip, seqRefundHeight: GATE.seqRefundHeight }).minFinalCltvBlocks;
+
+test('a hold that covers the price and the claim horizon arms the gate', () => {
+  const v = checkAssetFrontGate({ ...GATE, incomingHtlcExpiry: GATE.btcTip + REQ_BLOCKS });
+  assert.equal(v.ok, true, v.reason);
+  assert.equal(v.requiredTakerBlocks, REQ_BLOCKS);
+});
+
+test('F1: a hold that cannot outlive the claim horizon refuses to front', () => {
+  // One block short of the required coverage: the taker could claim the front at
+  // T_seq-1, reveal P, and the hold would already be dead — asset gone, nothing
+  // settled. This is THE task-critical refusal.
+  const v = checkAssetFrontGate({ ...GATE, incomingHtlcExpiry: GATE.btcTip + REQ_BLOCKS - 1 });
+  assert.equal(v.ok, false, 'a short hold must never be fronted against');
+  assert.match(v.reason, /below the \d+ needed to stay settleable/);
+  assert.match(v.reason, /nothing fronted/i);
+});
+
+test('F0: a token payment does not draw the full asset leg', () => {
+  // holdinvoice marks HELD on the FIRST incoming HTLC regardless of amount.
+  const v = checkAssetFrontGate({ ...GATE, incomingHtlcExpiry: GATE.btcTip + REQ_BLOCKS, heldAmountSat: 1 });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /below the ordered 80000 sat/);
+});
+
+test('unreadable facts fail closed, never front on a guess', () => {
+  for (const bad of [{ btcTip: NaN }, { incomingHtlcExpiry: NaN }, { seqTip: NaN },
+    { seqRefundHeight: NaN }, { heldAmountSat: NaN }, { orderedAmountSat: NaN }]) {
+    const v = checkAssetFrontGate({ ...GATE, incomingHtlcExpiry: GATE.btcTip + REQ_BLOCKS, ...bad });
+    assert.equal(v.ok, false, `armed on ${JSON.stringify(bad)}`);
+    assert.match(v.reason, /not a finite number/);
+  }
+});
+
+test('a timestamp CLTV is refused — the gate does height arithmetic', () => {
+  const v = checkAssetFrontGate({ ...GATE, incomingHtlcExpiry: 500_000_001 });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /UNIX TIMESTAMP/);
+});
+
+test('the T_seq min/max bound rides along via requiredTakerHold', () => {
+  // A collapsed T_seq (margin-collapse / self-trade guard) must refuse the front
+  // exactly as it refuses the BTC branch.
+  const near = checkAssetFrontGate({ ...GATE, seqRefundHeight: GATE.seqTip + HOLD_LIFE_DEFAULTS.minTseqBlocks - 1,
+    incomingHtlcExpiry: GATE.btcTip + 2016 });
+  assert.equal(near.ok, false);
+  assert.match(near.reason, /below the min/);
+});
+
+// ── HONEST FALLBACK FIELDS ────────────────────────────────────────────────────
+// When the LSP cannot front, the job must SAY what path it is on and what the
+// user is actually waiting for — never an unexplained spinner.
+import { frontModeFields } from './leg-bridge.mjs';
+
+test('insufficient inventory falls back to maker-first with honest fields', () => {
+  // The task-mandated composition: the inventory gate declines, and the fields a
+  // wallet surfaces say maker-first + bitcoin-confirmations, carrying the reason.
+  const verdict = decideAssetFront({ ...ok, inventoryAtoms: ok.wantAtoms - 1 });
+  assert.equal(verdict.armed, false);
+  const f = frontModeFields(verdict);
+  assert.equal(f.front_mode, 'maker-first');
+  assert.equal(f.expected_wait, 'bitcoin-confirmations');
+  assert.match(f.front_reason, /inventory/);
+});
+
+test('a fronted job carries no wait at all', () => {
+  const f = frontModeFields({ armed: true, reason: 'covered' });
+  assert.equal(f.front_mode, 'fronted');
+  assert.equal(f.expected_wait, null, 'a fronted leg is claimable now — advertising a wait would be a lie');
+  assert.ok(f.front_reason);
+});
+
+test('the field vocabulary is exactly what wallets key on', () => {
+  // These two strings are the wire contract; a drift here silently breaks every
+  // wallet that switches copy on them.
+  assert.deepEqual(
+    [frontModeFields({ armed: true }).front_mode, frontModeFields({ armed: false }).front_mode],
+    ['fronted', 'maker-first']);
+  assert.equal(frontModeFields({ armed: false }).expected_wait, 'bitcoin-confirmations');
+});
+
+// ── REPLENISH DECISION ────────────────────────────────────────────────────────
+// A front drains inventory; the maker settlement completes as the LSP's OWN
+// atomic take (own hash — never the taker's H, where a standing BTC HTLC would
+// be sweepable once P is public). The decision to start it is pure and bounded.
+import { decideReplenish } from './leg-bridge.mjs';
+
+const REPL = { enabled: true, alreadyStarted: false, offerId: 'of1', makerPubkey: '02'.repeat(33),
+  atoms: 1_000_000_000, liveCount: 0, maxConcurrent: 3 };
+
+test('a delivered front with a live offer identity starts a replenish take', () => {
+  const d = decideReplenish(REPL);
+  assert.equal(d.start, true);
+  assert.match(d.reason, /own hash/);
+});
+
+test('replenish never double-takes: a recorded attempt refuses another', () => {
+  const d = decideReplenish({ ...REPL, alreadyStarted: true });
+  assert.equal(d.start, false);
+  assert.match(d.reason, /never take the offer twice/);
+});
+
+test('the concurrency cap bounds the BTC the LSP locks as principal', () => {
+  assert.equal(decideReplenish({ ...REPL, liveCount: 3 }).start, false);
+  assert.equal(decideReplenish({ ...REPL, liveCount: 2 }).start, true);
+  assert.equal(decideReplenish({ ...REPL, maxConcurrent: 0 }).start, false, '0 disables, never unbounded');
+});
+
+test('no offer identity / nothing to restock / disabled all skip harmlessly', () => {
+  for (const bad of [{ offerId: '' }, { makerPubkey: '' }, { atoms: 0 }, { enabled: false }]) {
+    const d = decideReplenish({ ...REPL, ...bad });
+    assert.equal(d.start, false, `started on ${JSON.stringify(bad)}`);
+  }
+});
+
+test('degenerate input is inert (skip), never a throw', () => {
+  assert.equal(decideReplenish().start, false);
+  assert.equal(decideReplenish({}).start, false);
+});
