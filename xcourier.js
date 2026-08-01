@@ -18,8 +18,8 @@
 // driver wires those to a CourierSession in place of the RFQ round-trips.
 // ---------------------------------------------------------------------------
 
-import { secp256k1 } from './btc.js';
-import { Crypter, hexToBytes, bytesToHex, seqobBase } from './seqob.js';
+import { secp256k1, sha256 } from './btc.js';
+import { Crypter, hexToBytes, bytesToHex, seqobBase, derEncode } from './seqob.js';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
@@ -267,6 +267,49 @@ export async function openCourierSession(offer, takeAtoms, feeAsset, opts){
 
     const crypter = await Crypter.fromECDH(sessPriv, hexToBytes(makerPubHex));
     const sessionId = la.session_id || la.sessionId;
+    return new CourierSession(crypter, sessionId, t);
+  } catch (e){
+    try { ws.close(); } catch {}
+    throw e;
+  }
+}
+
+// REATTACH A SESSION WHOSE SOCKET DIED, INSTEAD OF LOSING THE SWAP.
+//
+// A cross swap commits real BTC on-chain and then keeps talking to the maker over this WebSocket. Any
+// drop after that point -- a reload, a relay restart, a network blip -- left the taker with no way
+// back into its own session: the wallet reported "interrupted after your Bitcoin was locked and can no
+// longer complete with the maker", and the only recovery was to wait out the CLTV and refund. The
+// maker and the relay have supported SessionReattach the whole time; the taker simply never used it.
+//
+// What made it impossible was that the session key lived only in memory. The caller must persist
+// sessPriv alongside the swap (it is what authenticates the reattach) and hand it back here.
+//
+// The relay authenticates with a DER signature over sha256("seqob-reattach|<session>|<role>") by the
+// session key it already bound at start_lift, so a reattach cannot be forged by anyone watching.
+export async function reattachCourierSession(relayUrl, sessionId, sessPriv, makerPubHex){
+  if (!sessionId) throw new Error('reattach needs a session id');
+  if (!sessPriv || !sessPriv.length) throw new Error('reattach needs the persisted session key');
+  const ws = new WebSocket(wsURL(relayUrl));
+  ws.binaryType = 'arraybuffer';
+  const t = wsTransport(ws);
+  const transportOnClose = ws.onclose;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { try { ws.close(); } catch {} reject(new Error('the order-book relay did not answer in time')); }, 12000);
+    const done = (fn) => (...a) => { clearTimeout(timer); ws.onclose = transportOnClose; fn(...a); };
+    ws.onopen = done(resolve);
+    ws.onerror = done(() => reject(new Error('could not reach the order-book relay')));
+    ws.onclose = done(() => reject(new Error('the order-book relay closed the connection')));
+  });
+  try {
+    const h = sha256(new TextEncoder().encode('seqob-reattach|' + sessionId + '|taker'));
+    const c = secp256k1.sign(h, sessPriv, { prehash: false });
+    t.send({ session_reattach: { session_id: sessionId, role: 'taker',
+      sig: b64encode(derEncode(c.subarray(0, 32), c.subarray(32, 64))) } });
+    const m = await t.recv(20000);
+    const ra = m.session_reattached || m.sessionReattached;
+    if (!ra) throw new Error((m.error && (m.error.message || m.error.Message)) || 'the relay refused to reattach this session');
+    const crypter = await Crypter.fromECDH(sessPriv, hexToBytes(makerPubHex));
     return new CourierSession(crypter, sessionId, t);
   } catch (e){
     try { ws.close(); } catch {}

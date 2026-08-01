@@ -58,6 +58,7 @@
 // ---------------------------------------------------------------------------
 
 import * as xc from './xcourier.js';       // cross-chain courier transport (order book)
+import { secp256k1 } from './btc.js';      // session key for the swap's reattach credential
 import * as seqob from './seqob.js';        // order-book relay client (fetchBook, base, Crypter)
 
 let C = null;            // the injected app context (see index.html initXswapTab)
@@ -408,6 +409,11 @@ async function fetchXquoteCourier(seqAsset, seqAtoms){
 
 // Seed the wizard with a composer-supplied quote and show the lock step. The
 // stepper host (#xStepper) + the lock review modal (onLockBtc) take over from here.
+// Hex for the persisted session key. Kept local so this module does not depend on the courier's
+// internals for something it has to write to storage.
+function bytesToHexLocal(b){ return Array.from(b).map(x => x.toString(16).padStart(2,'0')).join(''); }
+function hexToBytesLocal(h){ const a = new Uint8Array(h.length/2); for (let i=0;i<a.length;i++) a[i]=parseInt(h.substr(i*2,2),16); return a; }
+
 export function openFromComposer(q){
   LAST_XQUOTE = q;
   if (!XMARKETS.length && q && q.market) XMARKETS = [q.market];
@@ -484,7 +490,18 @@ async function runForwardCourier(q){
       let s = null;
       try {
         if (i > 0) setStepStatus('terms', `That maker didn’t respond; trying the next resting offer (${i}/${attempts.length - 1})…`, true);
-        s = await (C.openCourierSession || xc.openCourierSession)(atOffer, atSeq, '');
+        // PERSIST THE SESSION KEY WITH THE SWAP. It is what authenticates a reattach, and a cross swap
+        // commits real BTC before it is done talking to the maker — so losing this key to a reload or a
+        // dropped socket is what turned every interruption into "can no longer complete with the maker"
+        // and a wait for the CLTV refund. Generated here (not inside the courier) so it can be recorded.
+        const sessPriv = (secp256k1.utils && secp256k1.utils.randomSecretKey)
+          ? secp256k1.utils.randomSecretKey() : crypto.getRandomValues(new Uint8Array(32));
+        s = await (C.openCourierSession || xc.openCourierSession)(atOffer, atSeq, '', { sessPriv });
+        if (SWAP){
+          SWAP.sess_priv = bytesToHexLocal(sessPriv);
+          SWAP.session_id = s.sessionId;
+          SWAP.relay_url = atOffer.relayUrl || atOffer._relay || null;
+        }
         XSESSION = s;
         await s.send({ type: xc.XcType.TermsRequest });
         setStepStatus('terms', i > 0 ? 'Waiting for the next maker’s terms…' : 'Waiting for the maker’s terms…', true);
@@ -845,8 +862,36 @@ async function resumeCourierStranded(){
         }
       }
     }
-    // No asset leg found: the swap can no longer complete with the maker. Mark it so the stepper stops
-    // implying progress, and point at the refund. The BTC HTLC stays reclaimable after T_btc.
+    // TRY TO REJOIN THE SESSION BEFORE WRITING THE SWAP OFF.
+    //
+    // Reaching here only means the maker has not locked the asset YET. If our socket died -- a reload,
+    // a relay restart, a blip -- the maker is still sitting in that session waiting to hear from us,
+    // and the relay will let us back in on a signature from the session key we persisted at open.
+    //
+    // Without this, every interruption after the BTC lock was terminal: the user was told the swap
+    // "can no longer complete" and had to wait out the CLTV for a refund, while the counterparty was
+    // right there. The maker and relay have supported reattach the whole time.
+    if (SWAP.session_id && SWAP.sess_priv && SWAP.maker_pubkey && !SWAP.reattachTried){
+      SWAP.reattachTried = true; saveSwap();
+      try {
+        const s2 = await xc.reattachCourierSession(SWAP.relay_url, SWAP.session_id,
+          hexToBytesLocal(SWAP.sess_priv), SWAP.maker_pubkey);
+        XSESSION = s2;
+        setStepStatus('seq', 'Reconnected to the maker · waiting for it to lock the asset…', true);
+        const locked = await s2.recv(xc.XcType.SeqLegLocked, 15 * 60 * 1000);
+        if (locked && locked.leg){
+          SWAP.seq_leg = normCourierSeqLeg(locked.leg);
+          SWAP.state = ST.SEQ_LOCKED; SWAP.stranded = false; saveSwap(); renderStepper();
+          await resumeAnchorClaim();
+          return;
+        }
+      } catch (e){
+        try { console.warn('[xswap] reattach failed:', e && e.message); } catch {}
+      }
+    }
+    // No asset leg found and no way back into the session: the swap can no longer complete with the
+    // maker. Mark it so the stepper stops implying progress, and point at the refund. The BTC HTLC
+    // stays reclaimable after T_btc.
     SWAP.stranded = true;
     SWAP.detail = 'Interrupted after your Bitcoin was locked; the maker did not lock the asset.';
     saveSwap(); renderStepper();

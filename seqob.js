@@ -291,7 +291,7 @@ function trimInt(b){
   if (v[0] & 0x80){ const t = new Uint8Array(v.length+1); t[0]=0; t.set(v,1); v = t; } // sign byte
   return v;
 }
-function derEncode(r32, s32){
+export function derEncode(r32, s32){
   const r = trimInt(r32), s = trimInt(s32);
   const body = concatBytes(Uint8Array.of(0x02, r.length), r, Uint8Array.of(0x02, s.length), s);
   return concatBytes(Uint8Array.of(0x30, body.length), body);
