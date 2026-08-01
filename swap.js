@@ -4446,7 +4446,7 @@ export function hasSubswapInFlight(){ return activeSubswaps().length > 0; }
 // How many rail-crossing trades may run at once. Each is independent, but every one
 // ties up real value while it runs, so the ceiling is a deliberate bound rather than
 // an accident of storage.
-const MAX_CONCURRENT_TRADES = 3;
+const MAX_CONCURRENT_TRADES = 10;
 function tradeSlotsFree(){ return (activeSubswaps().length + (hasBridgeInFlight() ? 1 : 0)) < MAX_CONCURRENT_TRADES; }
 
 // A plain-English status for the Active trades row. These records used to surface
