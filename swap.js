@@ -1863,6 +1863,9 @@ function setReviewEnabled(on){
   // is NO default. A ready quote is necessary but not sufficient. paintPanes labels the CTA to prompt.
   const railsChosen = !!(S.payRail && S.recvRail);
   b.disabled = !(on && railsChosen);
+  // Every error site disables the CTA, so an enabled Place beside an error banner means the
+  // banner is stale (a past attempt's failure) — clear it the moment placement becomes possible.
+  if (!b.disabled){ const e = C.$('swErr'); if (e) e.textContent = ''; }
 }
 
 // Build BOOK (asks/bids split by trade direction, expiry- and signature-filtered, best-price-first)
