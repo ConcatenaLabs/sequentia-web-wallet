@@ -701,8 +701,11 @@ export function seqlnBridgeHold({ job_id }) {
 // The sub-asset order book for an asset: { sell_available, buy_available, sell_offers[],
 // buy_offers[] }. Drives DYNAMIC rail gating (light the toggle only when real resting
 // counterparty liquidity exists — for ANY asset, no hardcoded maker list) and the book view.
-export function seqlnBook(asset) {
-  return lspFetch('/book?asset=' + encodeURIComponent(asset));
+export function seqlnBook(asset, quote) {
+  // `quote` = a real Sequentia asset id for a mixed same-chain market (the on-chain
+  // leg is that asset); omitted/'BTC' keeps the classic <asset>/BTC book unchanged.
+  const q = quote && String(quote).toUpperCase() !== 'BTC' ? '&quote=' + encodeURIComponent(quote) : '';
+  return lspFetch('/book?asset=' + encodeURIComponent(asset) + q);
 }
 
 // The UNIFIED order book for a BTC<->asset pair (Stage 2, rail-agnostic matching): ONE price-sorted

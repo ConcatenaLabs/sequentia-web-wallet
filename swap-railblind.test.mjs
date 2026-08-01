@@ -69,6 +69,8 @@ const swap = await import('./swap.js');
 // They are presence-only: nothing in this file executes a settlement.
 const SUBAS_CAPABLE = {
   btcLeg: { fund: async () => ({}), refund: async () => ({}), refundKey: () => ({}), tipHeight: async () => 0 },
+  seqLeg: { fund: async () => ({}), refund: async () => ({}), refundKey: () => ({}), claim: async () => ({}),
+    claimKey: () => ({}), readOutput: async () => null, findFundingByAddress: async () => null },
   wasm: { generateSwapSecret: () => ({ secret_hex: '00'.repeat(32), hash_hex: '11'.repeat(32) }),
           buildSeqHtlcRedeemScript: () => '00' },
 };
@@ -388,6 +390,42 @@ T.setUnifiedBook(GOLD, { asks: [ask], bids: [] });
   assert.equal(String((q.buyOffer || {}).offer_id || ''), 'other-7', 'the settlement handle IS the displayed offer');
   assert.equal(REG.swReview.disabled, false, 'Place is enabled for a fill the sub-asset path can actually deliver');
   console.log('ok: a chain/ln sub-asset BUY re-quotes onto the offer it CAN lift, and displays that offer (displayed == lifted)');
+}
+
+// ===========================================================================
+// 8) MIXED SAME-CHAIN (rails 7/8): an asset<->asset pair with one leg over Lightning drives
+//    the SAME sub-asset branch with the QUOTE ASSET standing in BTC's structural place — the
+//    fill renders in the quote's own units (never 'BTC'), the settlement handle is the pair's
+//    book offer, and the quote carries the quoteAsset for the executors.
+// ===========================================================================
+{
+  const TIN  = 'cd'.repeat(32);   // base
+  const EURX = 'ce'.repeat(32);   // quote (numeraire)
+  // The pair's sub-asset book: a dir-4 offer, 1000 TIN for 500,000,000 EURX atoms (5 EURX).
+  const offer = { offer_id: 'mixed-8', asset_amount: 1000, btc_sats: 500000000, min_fill: 0,
+    maker_pubkey: '09'.padEnd(66, 'b'), maker_claim_pub: '0a'.padEnd(66, 'c'), onchain_cltv: 144 };
+  T.setSubassetBook(TIN, { sell_available: false, buy_available: true, sell_offers: [], buy_offers: [offer], ts: Date.now() }, EURX);
+  UNIFIED_FEED = { ok: true, asks: [], bids: [] };   // no unified feed: the pair book IS the display
+
+  REG.swPayAmt = mkEl('input'); REG.swRecvAmt = mkEl('input'); REG.swRecvAmt.value = '400';
+  REG.swReview = mkEl('button'); REG.swReview.disabled = true; REG.swErr = mkEl('div');
+  S.payAsset = EURX; S.receiveAsset = TIN; S.edited = 'receive'; S.mode = 'take';
+  S.payRail = 'chain'; S.recvRail = 'ln';
+  const route = { kind: 'mixed', mixedSame: true, seqAsset: TIN, quoteAsset: EURX,
+    payIsBtc: true, payRail: 'chain', recvRail: 'ln' };
+  await T.requoteMixed(route, '400');
+
+  // 400 TIN of the 1000 → ceil(400*500000000/1000) = 200,000,000 EURX atoms, rendered at the
+  // QUOTE ASSET's own precision (this harness's assetMeta gives non-BTC assets precision 0, so
+  // the atoms render verbatim) — NEVER the BTC 8-dp rendering ('2' with 1e8 scaling) the old
+  // hard-coded quote produced.
+  assert.equal(REG.swRecvAmt.value, '400', 'the base fill is shown (400 TIN)');
+  assert.equal(REG.swPayAmt.value, '200000000', 'the pay side renders in the QUOTE asset\'s own units/precision, not BTC 8-dp');
+  const q = T.lastQuote();
+  assert.ok(q && q.kind === 'mixed', 'a placeable mixed same-chain quote was produced');
+  assert.equal(String((q.buyOffer || {}).offer_id || ''), 'mixed-8', 'the settlement handle is the pair book\'s offer');
+  assert.equal(q.route && q.route.quoteAsset, EURX, 'the quote asset rides the route for the executor');
+  console.log('ok: a mixed same-chain BUY drives the sub-asset branch with the quote asset in BTC\'s place');
 }
 
 console.log('\nALL PASS');
