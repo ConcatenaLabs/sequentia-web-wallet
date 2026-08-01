@@ -44,7 +44,19 @@ export function channelMatches(c, target) {
 // (CHANNELD_NORMAL / CHANNELD_AWAITING_LOCKIN etc.). An opening/closing/onchain
 // channel carries no live routable liquidity, so it must NOT enable the LN rail.
 export function channelActive(c) {
-  return String((c && c.state) || '').toUpperCase().startsWith('CHANNELD');
+  if (!String((c && c.state) || '').toUpperCase().startsWith('CHANNELD')) return false;
+  // A CHANNEL WITH NO OWNING DAEMON IS NOT USABLE, WHATEVER ITS STATE SAYS.
+  //
+  // CLN keeps reporting CHANNELD_NORMAL and a full spendable balance for a channel whose channeld has
+  // died. Nothing can be sent over it — sendpay refuses with "First peer not ready" — but it looked
+  // like perfectly good capacity here, so the wallet never opened a working channel and kept paying
+  // into a corpse. Seen live: a BTC channel showing 894,128 sats spendable, owner null, channeld
+  // crashing at init, and every pure-LN swap failing on it.
+  //
+  // `owner` is only present on a status that reports it; an older/other source omits it entirely, and
+  // absent must NOT read as dead — that would call every channel unusable and disable the rail.
+  if (c && 'owner' in c && (c.owner === null || c.owner === '')) return false;
+  return true;
 }
 
 // Aggregate the live liquidity across every ACTIVE channel matching `target`.

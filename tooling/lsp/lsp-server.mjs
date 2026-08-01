@@ -622,6 +622,14 @@ async function nodeStatus(rpc, leg) {
           short_channel_id: c.short_channel_id || null,
           state: c.state, asset, asset_label: assetLabel(asset),
           spendable_units: spendable, receivable_units: receivable,
+          // A CHANNEL WITH NO OWNING DAEMON CANNOT MOVE AN HTLC, WHATEVER ITS STATE SAYS.
+          //
+          // CLN reports CHANNELD_NORMAL and a full spendable balance for a channel whose channeld has
+          // died (it crashed at init here, against a keyless node whose signer had no record of it).
+          // Nothing can be sent over it: sendpay refuses with "First peer not ready". The wallet was
+          // counting it as usable capacity and so never opened a working channel — it just kept paying
+          // into a corpse. Surface the owner so the rail check can tell a live channel from a listed one.
+          owner: c.owner ?? null,
         };
       });
   } catch { /* pre-channel */ }
