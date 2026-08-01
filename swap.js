@@ -4395,6 +4395,23 @@ async function ensureBtcNodeKey(){
 // was in flight across the upgrade is preserved rather than orphaned with its funds.
 const SUBSWAP_KEY = 'swk.sequentia.subswap';     // legacy single slot (read once, then migrated)
 const SUBSWAPS_KEY = 'swk.sequentia.subswaps';
+// ── Multi-tab safety for the per-trade stores ──────────────────────────────
+// Each open wallet tab holds its own in-memory array and used to WRITE IT BLINDLY, so two
+// tabs (e.g. one restored by the browser session) alternately erased each other's records —
+// a funded trade's on-disk recovery material vanished whenever the tab that never saw it
+// wrote last (seen live: three funded buys on disk collapsing to one, ~every 30s). A save
+// now MERGES: disk records whose id this tab has never seen are preserved, records this tab
+// knows win by id, and records this tab deliberately cleared (tombstoned) stay dead — so a
+// settle/clear in one tab cannot resurrect from a sibling. Tombstones are per-tab and
+// session-long; on the next load every tab boots from the union.
+function mergedStoreSave(key, arr, tombstones){
+  let disk = [];
+  try { const raw = JSON.parse(localStorage.getItem(key) || 'null'); if (Array.isArray(raw)) disk = raw.filter(Boolean); } catch {}
+  const mine = new Set(arr.map((r) => r && r.id).filter(Boolean));
+  const keep = disk.filter((r) => r && r.id && !mine.has(r.id) && !(tombstones && tombstones.has(r.id)));
+  try { localStorage.setItem(key, JSON.stringify(arr.concat(keep))); } catch {}
+}
+const _subswapTombstones = new Set(), _buyTombstones = new Set(), _sellTombstones = new Set();
 function newTradeId(){ return 'sw-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
 let SUBSWAPS = [];
 try {
@@ -4406,7 +4423,7 @@ if (!SUBSWAPS.length){
 }
 for (const r of SUBSWAPS) if (r && !r.id) r.id = newTradeId();
 function saveSubswap(){
-  try { localStorage.setItem(SUBSWAPS_KEY, JSON.stringify(SUBSWAPS)); } catch {}
+  try { mergedStoreSave(SUBSWAPS_KEY, SUBSWAPS, _subswapTombstones); } catch {}
   try { localStorage.removeItem(SUBSWAP_KEY); } catch {}
   // Surface EVERY transition. These rails have no process view of their own, so
   // without this the trade ran invisibly and a stall was indistinguishable from the
@@ -4417,7 +4434,8 @@ function saveSubswap(){
 function addSubswap(rec){ rec.id = rec.id || newTradeId(); SUBSWAPS.push(rec); saveSubswap(); return rec; }
 // Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
 function clearSubswap(rec){
-  if (!rec){ SUBSWAPS = []; saveSubswap(); return; }
+  if (!rec){ for (const r of SUBSWAPS) if (r && r.id) _subswapTombstones.add(r.id); SUBSWAPS = []; saveSubswap(); return; }
+  if (rec.id) _subswapTombstones.add(rec.id);
   SUBSWAPS = SUBSWAPS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
   saveSubswap();
 }
@@ -6262,14 +6280,15 @@ const SELL_PAYING_TTL_MS = 24 * 60 * 60 * 1000;
 // bounds CONCURRENT STARTS, not the number of live sells.
 let _sellStarting = false;
 function saveSells(){
-  try { localStorage.setItem(SELLS_KEY, JSON.stringify(SELLS)); } catch {}
+  try { mergedStoreSave(SELLS_KEY, SELLS, _sellTombstones); } catch {}
   try { localStorage.removeItem(SELL_KEY); } catch {}
   try { renderInFlightCard(); } catch {}
 }
 function addSell(rec){ rec.id = rec.id || newTradeId(); SELLS.push(rec); saveSells(); return rec; }
 // Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
 function clearSell(rec){
-  if (!rec){ SELLS = []; saveSells(); return; }
+  if (!rec){ for (const r of SELLS) if (r && r.id) _sellTombstones.add(r.id); SELLS = []; saveSells(); return; }
+  if (rec.id) _sellTombstones.add(rec.id);
   SELLS = SELLS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
   saveSells();
 }
@@ -6585,14 +6604,15 @@ for (const b of BUYS) if (b && !b.id) b.id = newTradeId();
 // HTLCs for one slot. It bounds CONCURRENT STARTS, not the number of live buys.
 let _buyStarting = false;
 function saveBuys(){
-  try { localStorage.setItem(BUYS_KEY, JSON.stringify(BUYS)); } catch {}
+  try { mergedStoreSave(BUYS_KEY, BUYS, _buyTombstones); } catch {}
   try { localStorage.removeItem(BUY_KEY); } catch {}
   try { renderInFlightCard(); } catch {}
 }
 function addBuy(rec){ rec.id = rec.id || newTradeId(); BUYS.push(rec); saveBuys(); return rec; }
 // Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
 function clearBuy(rec){
-  if (!rec){ BUYS = []; saveBuys(); return; }
+  if (!rec){ for (const r of BUYS) if (r && r.id) _buyTombstones.add(r.id); BUYS = []; saveBuys(); return; }
+  if (rec.id) _buyTombstones.add(rec.id);
   BUYS = BUYS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
   saveBuys();
 }
