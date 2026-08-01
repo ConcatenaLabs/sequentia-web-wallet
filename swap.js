@@ -7836,7 +7836,9 @@ async function reviewLn(q){
         offer_id: (q.lnOffer && q.lnOffer.offer_id) || undefined,
         maker_pubkey: (q.lnOffer && q.lnOffer.maker_pubkey) || undefined });
       const bm = C.assetMeta(r.asset || q.seqAsset);
-      const qtkR = r.quote_asset_label || qtk;   // the LSP echoes the real quote label (BTC or the asset)
+      // Quote ticker for the receipt: the wallet's own asset metadata, never the LSP's echoed label —
+      // the LSP may not know a ticker and then echoes the raw hex id, which must never reach the UI.
+      const qtkR = qtk || r.quote_asset_label || 'BTC';
       // Format the settled amount into human units (fmtAtoms), never raw atoms: base uses the asset
       // precision (aprec), quote uses the counter-leg precision (qprec = BTC's 8 or the quote asset's).
       const got = (r.direction === 'sold') ? `${C.fmtAtoms(big(r.quote_amount), qprec)} ${qtkR}`
