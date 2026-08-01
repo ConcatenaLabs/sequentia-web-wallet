@@ -44,8 +44,8 @@ test('terminal sells free their slot; the ceiling counts live sells', () => {
   T.addSell({ state: 'done', ticker: 'GOLD' });
   assert.equal(T.activeSells().length, 0, 'failed/done are terminal');
   assert.equal(hasSellInFlight(), false);
+  for (let i = 0; i < 9; i++) T.addSell({ state: 'claiming', ticker: 'GOLD' });
+  assert.equal(T.buySlotsFree(), true, 'nine live sells still leave a slot under the ceiling of ten');
   T.addSell({ state: 'claiming', ticker: 'GOLD' });
-  T.addSell({ state: 'claiming', ticker: 'GOLD' });
-  T.addSell({ state: 'claiming', ticker: 'GOLD' });
-  assert.equal(T.buySlotsFree(), false, 'three live sells fill the shared ceiling');
+  assert.equal(T.buySlotsFree(), false, 'ten live sells fill the shared ceiling');
 });
