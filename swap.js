@@ -6415,9 +6415,17 @@ async function claimSell(SELL){
     // Mixed same-chain: verify the funded output pays P2SH(redeem) in the QUOTE asset for the
     // reported amount (readOutput is explicit-only, so a blinded/absent output fails closed),
     // then claim via the wallet's Sequentia HTLC spender (fee paid in the claimed asset).
+    // A READ FAILURE IS NOT A MISMATCH. readOutput returns null for a tx the
+    // explorer has not indexed YET (the claim runs seconds after the maker
+    // settles), and reporting that as "the lock does not match" both lies about
+    // a perfectly good HTLC and makes the failure look permanent — the record
+    // then sits at 'claiming' with a wrong reason. Separate the two: an
+    // unreadable output is TRANSIENT (retried on the next resume), a real
+    // disagreement is fatal.
     const out = await C.seqLeg.readOutput(H.txid, H.vout);
+    if (!out) throw new Error('Could not read the counterparty’s on-chain lock yet · retrying automatically.');
     const wantSpk = C.seqLeg.htlcSpkHex(H.redeem_script).toLowerCase();
-    if (!out || String(out.spk || '').toLowerCase() !== wantSpk)
+    if (String(out.spk || '').toLowerCase() !== wantSpk)
       throw new Error('The counterparty’s on-chain lock does not match this trade · not claiming.');
     if (String(out.asset || '').toLowerCase() !== String(SELL.quote_asset).toLowerCase())
       throw new Error('The counterparty’s on-chain lock is in the wrong asset · not claiming.');
