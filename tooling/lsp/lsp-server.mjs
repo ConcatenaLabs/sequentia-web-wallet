@@ -1128,6 +1128,44 @@ async function runSubasBuyHodl(job, body) {
     '-asset-ln-socket', userRpc, '-taker-ln-node-id', String(userNodeId),
     '-payment-hash', job.payment_hash, '-state-file', `/tmp/xsubas-${job.job_id}.json`,
     '-min-btc-conf', String(CFG.subasMinBtcConf)];
+  // RESIZE-ON-REVIVE. A revival (no offer_id: the quoted offer expired; the maker is pinned by
+  // the funded HTLC's claim key) re-matches the maker's CURRENT offer — whose price may have
+  // moved since the wallet funded. The funded sats are FIXED on-chain and the maker demands the
+  // exact proportional amount for the take, so re-asking for the original asset amount fails
+  // forever ("btc leg X != required Y") and strands the HTLC until its CLTV refund. Instead,
+  // size the take to what the funded sats buy at the current price: the largest take whose
+  // exact proportional price equals the funded amount. Only ever shrinks; if no exact-fit take
+  // exists (rounding), the original behavior — an honest failure — remains.
+  if (!job.offer_id && job.maker_pubkey && bh && bh.amount > 0 && job.asset_amount) {
+    try {
+      const q = job.quote_asset || 'BTC';
+      const r = await fetch(`${CFG.subasRelay}/v1/market/${job.asset}/${q}/orderbook`);
+      const book = r.ok ? await r.json() : null;
+      const cur = ((book && book.offers) || []).find((o) =>
+        o.maker_pubkey === job.maker_pubkey && o.trade_dir === 'TRADE_DIR_SELL' &&
+        o.lightning && (o.lightning.ln_direction === 4 || o.lightning.ln_direction === 5));
+      if (cur) {
+        const base = BigInt(cur.base_amount || cur.offer_amount || 0), want = BigInt(cur.want_amount || 0);
+        const funded = BigInt(bh.amount);
+        if (base > 0n && want > 0n) {
+          const ceilDiv = (n, d) => (n + d - 1n) / d;
+          let take = (funded * base) / want;                     // floor: the most the funded sats can buy
+          if (take > BigInt(job.asset_amount)) take = BigInt(job.asset_amount);
+          // Walk down to the largest take whose EXACT proportional price is the funded amount
+          // (the maker compares with equality, so overpaying is refused too).
+          let fit = 0n;
+          for (let i = 0n; i < 64n && take - i > 0n; i++) {
+            if (ceilDiv(want * (take - i), base) === funded) { fit = take - i; break; }
+          }
+          if (fit > 0n && fit !== BigInt(job.asset_amount)) {
+            console.log(`[subas-buy ${job.job_id}] resize-on-revive: ${job.asset_amount} -> ${fit} atoms (funded ${funded} sats @ current offer ${cur.offer_id})`);
+            job.asset_amount = Number(fit);
+            job.resized = true;
+          }
+        }
+      }
+    } catch { /* best-effort: the original honest failure remains the fallback */ }
+  }
   // T8 partial fill: take exactly the asset amount the wallet asked for (<= the offer). xsubas
   // locks the proportional BTC and the maker re-rests the remainder; 0/absent = the whole offer.
   if (job.asset_amount) args.push('-amount', String(job.asset_amount));
