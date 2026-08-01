@@ -151,6 +151,42 @@ export function lnFinalityCopy() {
   return 'Instant and final · pure Lightning, nothing on-chain, no Bitcoin-reorg risk.';
 }
 
+// Channel-store persistence for a device signer (the restart contract). CLN sends
+// setup_channel ONCE at channel creation; a page reload builds a FRESH wasm signer
+// that has lost every channel, and in enforce mode that freezes the channel's funds
+// (every commitment sign refused, channeld dies at init, closing included). The
+// hosted proxy's durable priming replays setup_channel on attach (the primary
+// heal); this localStorage blob is the device-side backstop for when the node's
+// priming cache is lost. It carries no secrets and is MAC'd to the signing seed,
+// so a foreign or stale blob fails import harmlessly.
+function chStoreFor(storageKey) {
+  const k = 'swk.seqln.chstore.' + storageKey;
+  return {
+    load: () => {
+      const b64 = localStorage.getItem(k);
+      if (!b64) return null;
+      const bin = atob(b64);
+      const u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      return u;
+    },
+    save: (bytes) => {
+      let s = '';
+      for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      try { localStorage.setItem(k, btoa(s)); } catch {}
+    },
+  };
+}
+// Diagnostic surface for an untracked-channel refusal: name the channel and the
+// recovery path instead of leaving only channeld's opaque death in the node log.
+function onUntrackedFor(label) {
+  return ({ peerId, dbid }) => {
+    console.warn(`seqln[${label}]: the signer refused channel dbid ${dbid} with peer ${peerId.slice(0, 16)}… `
+      + '(no tracked channel). The hosted proxy re-primes it on the next device attach; '
+      + 'if this repeats, the node\'s priming cache and the device store are both gone.');
+  };
+}
+
 // -- 1. on-device signers (browser-gated: WebSocket + wasm + the SDK) ----------
 // Connect ONE hosted node's device signer. Called once per node (asset + btc).
 //   node                   'asset' | 'btc' (which hosted node this signer serves)
@@ -178,7 +214,8 @@ export async function connectDevice({
   setPhase(node, 'connecting', 'loading signer');
   const mod = await import(CFG.sdkPath);
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
-  const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed);
+  const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
+    { channelStore: chStoreFor(node), onUntracked: onUntrackedFor(node) });
   signer.setPolicy(policy);
   s.signer = signer;
   signer.onStatus = (st) => {
@@ -249,7 +286,8 @@ export async function connectProvisioned({ assetId, key, deviceSigningSeed, devi
   s.phase = 'connecting';
   const mod = await import(CFG.sdkPath);
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
-  const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed);
+  const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
+    { channelStore: chStoreFor(mapKey), onUntracked: onUntrackedFor(mapKey) });
   signer.setPolicy(policy);
   s.signer = signer;
   signer.onStatus = (st) => {

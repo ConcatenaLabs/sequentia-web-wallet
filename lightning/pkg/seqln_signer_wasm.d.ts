@@ -55,10 +55,31 @@ export class Signer {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * One-time recovery: track a channel from parameters read off the NODE
+     * (`listpeerchannels`) after the persisted blob was lost — trust-
+     * equivalent to `setup_channel`, which also comes via the node. Refuses
+     * to overwrite a tracked channel (returns false). `funding_txid` is the
+     * DISPLAY-order 32 bytes (as RPC JSON shows it); reversed internally.
+     */
+    armChannel(node_id: Uint8Array, dbid: bigint, funding_sats: bigint, funding_txid: Uint8Array, funding_txout: number, local_to_self_delay: number, remote_to_self_delay: number, remote_revocation: Uint8Array, remote_payment: Uint8Array, remote_htlc: Uint8Array, remote_delayed: Uint8Array, remote_funding: Uint8Array, option_static_remotekey: boolean, option_anchors: boolean): boolean;
+    /**
+     * The persistable channel store (canonical payload + seed-keyed MAC).
+     */
+    exportChannels(): Uint8Array;
+    /**
      * Convenience: construct from just the mnemonic string (no passphrase),
      * synthesizing the `32 zero bytes || mnemonic` on-disk form.
      */
     static fromMnemonic(mnemonic: string): Signer;
+    /**
+     * Is this (peer, dbid) tracked?
+     */
+    hasChannel(node_id: Uint8Array, dbid: bigint): boolean;
+    /**
+     * Restore a persisted channel store. Live entries are never overwritten;
+     * returns how many were added. Throws on a bad MAC / malformed blob.
+     */
+    importChannels(blob: Uint8Array): number;
     /**
      * Construct from the raw `hsm_secret` bytes (mnemonic format:
      * `32 zero bytes || mnemonic`, i.e. the exact on-disk file). Throws on a
@@ -71,6 +92,17 @@ export class Signer {
      * browser build has no env, so this is how a caller selects enforce mode.
      */
     setEnforce(enforce: boolean): void;
+    /**
+     * The store changed since last asked (take-and-clear) — the cue to
+     * persist `exportChannels`.
+     */
+    takeChannelsDirty(): boolean;
+    /**
+     * The (peer node_id 33 bytes || dbid 8 bytes LE) of the most recent
+     * "no tracked channel" refusal, take-and-clear; null when none. The
+     * host's cue to fetch that channel off the node and `armChannel` it.
+     */
+    takeLastUntracked(): Uint8Array | undefined;
     /**
      * The node's OWN wallet sweep scriptPubKey for key `index`: p2wpkh of the
      * bip86 key when `taproot` is false (the Elements sweep destination), or the
@@ -111,11 +143,17 @@ export interface InitOutput {
     readonly noisesession_newInitiator: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly noisesession_readActTwo: (a: number, b: number, c: number) => [number, number, number, number];
     readonly noisesession_writeActOne: (a: number) => [number, number, number, number];
+    readonly signer_armChannel: (a: number, b: number, c: number, d: bigint, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => [number, number, number];
+    readonly signer_exportChannels: (a: number) => [number, number];
     readonly signer_fromMnemonic: (a: number, b: number) => [number, number, number];
+    readonly signer_hasChannel: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly signer_importChannels: (a: number, b: number, c: number) => [number, number, number];
     readonly signer_lastReject: (a: number) => [number, number];
     readonly signer_new: (a: number, b: number) => [number, number, number];
     readonly signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
     readonly signer_setEnforce: (a: number, b: number) => void;
+    readonly signer_takeChannelsDirty: (a: number) => number;
+    readonly signer_takeLastUntracked: (a: number) => [number, number];
     readonly signer_walletSweepScript: (a: number, b: number, c: number) => [number, number];
     readonly rustsecp256k1_v0_10_0_context_create: (a: number) => number;
     readonly rustsecp256k1_v0_10_0_context_destroy: (a: number) => void;

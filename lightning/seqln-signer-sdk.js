@@ -125,21 +125,94 @@ export class SeqlnSigner {
     // onRequest({seq,type,name,replyBytes,rejected}).
     this.onStatus = opts.onStatus || null;
     this.onRequest = opts.onRequest || null;
-    // onReject({type,name,reason}) — why the signer refused to sign.
-    this.onReject = opts.onReject || null;
+    // Channel-store persistence (the restart contract). CLN sends setup_channel
+    // ONCE, at channel creation — a fresh wasm instance (any page reload) has
+    // lost every channel, enforce mode then refuses all their commitment signs,
+    // channeld dies at init and the channel funds are FROZEN (closing needs a
+    // signature too). Pass `channelStore` = { load(): bytes|null, save(bytes) }
+    // (both may be async) and the SDK restores on construction and re-persists
+    // after any frame that changed the store. The blob carries no secrets and
+    // is MAC'd to the seed, so a foreign/tampered blob fails import harmlessly.
+    this._chStore = opts.channelStore || null;
+    // Re-arm cue: fires with { peerId, dbid } when the signer refused a request
+    // for a channel it does not track (persisted blob lost/predates the fix).
+    // The host fetches that channel's parameters off the node and calls
+    // armChannel() — after which the next channeld restart succeeds.
+    this.onUntracked = opts.onUntracked || null;
+    // TEST-ONLY hook (opt-in; null in production). A Set of hsmd wire types to
+    // reject ONCE each: the first time such a type is seen the serve loop sends
+    // the zero-length error sentinel instead of the wasm reply, then serves it
+    // normally. Used by the reconnect stress harness to exercise the proxy's
+    // B6 fail-soft path (a device reject on a master-fd op must not kill the node).
+    this._rejectOnce = opts.rejectOnce ? new Set(opts.rejectOnce.map(Number)) : null;
   }
 
   // Build from a BIP-39 mnemonic (no passphrase). `opts.wasm` overrides the wasm
   // source (Node: pass the .wasm bytes; browser: omit).
   static async fromMnemonic(mnemonic, opts = {}) {
     await ensureWasm(opts.wasm);
-    return new SeqlnSigner(Signer.fromMnemonic(mnemonic.trim()), opts);
+    const s = new SeqlnSigner(Signer.fromMnemonic(mnemonic.trim()), opts);
+    await s._restoreChannels();
+    return s;
   }
   // Build from raw hsm_secret bytes (the on-disk `32 zero bytes || mnemonic`).
   static async fromHsmSecret(bytes, opts = {}) {
     await ensureWasm(opts.wasm);
-    return new SeqlnSigner(new Signer(hexToBytes(bytes)), opts);
+    const s = new SeqlnSigner(new Signer(hexToBytes(bytes)), opts);
+    await s._restoreChannels();
+    return s;
   }
+
+  // ---- channel-store persistence (see the constructor note) ----------------
+  async _restoreChannels() {
+    if (!this._chStore || !this._chStore.load) return;
+    try {
+      const blob = await this._chStore.load();
+      if (blob && blob.length) {
+        const n = this._inner.importChannels(blob instanceof Uint8Array ? blob : new Uint8Array(blob));
+        if (n) console.log(`seqln-signer: restored ${n} channel(s) from the persisted store`);
+      }
+    } catch (e) {
+      // A bad blob must never block the signer: it is refused whole (MAC) and
+      // the re-arm cue (onUntracked) recovers the channels off the node.
+      console.warn('seqln-signer: persisted channel store not restored:', e && e.message || e);
+    }
+  }
+  _persistChannels() {
+    if (!this._chStore || !this._chStore.save) return;
+    try {
+      if (this._inner.takeChannelsDirty()) this._chStore.save(this._inner.exportChannels());
+    } catch (e) {
+      console.warn('seqln-signer: channel store not persisted:', e && e.message || e);
+    }
+  }
+  _emitUntracked() {
+    if (!this.onUntracked) return;
+    const u = this._inner.takeLastUntracked();
+    if (!u) return;
+    const peerId = bytesToHex(u.subarray(0, 33));
+    const dv = new DataView(u.buffer, u.byteOffset + 33, 8);
+    const dbid = Number(dv.getBigUint64(0, true));
+    try { this.onUntracked({ peerId, dbid }); } catch {}
+  }
+
+  // One-time recovery: track a channel from `listpeerchannels` data after the
+  // persisted store was lost. Hex strings throughout; fundingTxid in DISPLAY
+  // order (as the RPC shows it). Returns false if the channel was already
+  // tracked (never overwrites). Persists on success.
+  armChannel({ peerId, dbid, fundingSats, fundingTxid, fundingOutnum,
+               localToSelfDelay, remoteToSelfDelay,
+               revocation, payment, htlc, delayed, funding,
+               staticRemotekey = true, anchors = false }) {
+    const added = this._inner.armChannel(
+      hexToBytes(peerId), BigInt(dbid), BigInt(fundingSats), hexToBytes(fundingTxid),
+      fundingOutnum, localToSelfDelay, remoteToSelfDelay,
+      hexToBytes(revocation), hexToBytes(payment), hexToBytes(htlc),
+      hexToBytes(delayed), hexToBytes(funding), staticRemotekey, anchors);
+    if (added) this._persistChannels();
+    return added;
+  }
+  hasChannel(peerId, dbid) { return this._inner.hasChannel(hexToBytes(peerId), BigInt(dbid)); }
   // Compute the transport pubkey a host must pin for a given device privkey,
   // without constructing a signer (handy for provisioning UIs).
   static async devicePubkey(privkey, opts = {}) {
@@ -253,20 +326,12 @@ export class SeqlnSigner {
           const type = frameHsmdType(frame);
           this._served.set(type, (this._served.get(type) || 0) + 1);
 
-          const reply = this._inner.processFrame(frame);   // wasm signs
-          // A refusal is a ZERO-LENGTH reply on the wire, identical for "policy said no"
-          // and "I do not implement that". The signer computes a precise reason and the
-          // wire has nowhere to put it, so it used to die inside the wasm: the node logged
-          // only "signerd rejected request", channeld died, and every payment on the
-          // channel failed with "First peer not ready" with nothing, anywhere, saying why.
-          // Surface it — a signer that refuses silently is indistinguishable from one that
-          // is broken.
-          if (reply.length === 4) {
-            let why = null;
-            try { why = this._inner.lastReject; } catch {}
-            const label = hsmdName(type);
-            try { console.warn('[signer] REFUSED ' + label + ': ' + (why || 'no reason reported')); } catch {}
-            if (this.onReject) { try { this.onReject({ type, name: label, reason: why || null }); } catch {} }
+          let reply = this._inner.processFrame(frame);   // wasm signs
+          // TEST-ONLY one-shot reject (see constructor): emit the zero-length
+          // error sentinel (a 4-byte frame, body length 0) for a listed type.
+          if (this._rejectOnce && this._rejectOnce.has(type)) {
+            this._rejectOnce.delete(type);
+            reply = new Uint8Array([0, 0, 0, 0]);
           }
           if (this._nodeId === null) {
             const id = nodeIdFromInitReply(reply);
@@ -278,6 +343,10 @@ export class SeqlnSigner {
               this.onRequest({ seq, type, name: hsmdName(type), replyBytes: reply.length - 4, rejected: reply.length === 4 });
             } catch {}
           }
+          // Persist the channel store if this frame changed it (setup/forget),
+          // and surface any untracked-channel refusal for the re-arm flow.
+          this._persistChannels();
+          this._emitUntracked();
           ws.send(noise.encrypt(reply));
           if (closed) break;
         }
