@@ -6717,7 +6717,7 @@ async function startBuy(params){
     // 5. Wait for the maker's asset payment to arrive HELD, then DEVICE-SETTLE with P (or refund after T_btc).
     say('Waiting for your trade to settle …');
     await driveBuy(b, say);
-    if (b.state === 'settled'){ say('Done · your BTC bought ' + am.ticker + ', received over Lightning.', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(b); }
+    if (b.state === 'settled'){ say('Done · your ' + qtk + ' bought ' + am.ticker + ', received over Lightning.', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(b); }
     else if (b.state === 'refunded'){ say('This trade didn’t complete in time · your Bitcoin has been returned (' + String(b.refund_txid||'').slice(0,16) + '…).', 'ok'); done(); try { await C.sync(); } catch {} clearBuy(b); }
     else { done(); }
   } catch (e){
