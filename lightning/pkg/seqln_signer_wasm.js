@@ -157,6 +157,59 @@ export class Signer {
         wasm.__wbg_signer_free(ptr, 0);
     }
     /**
+     * One-time recovery: track a channel from parameters read off the NODE
+     * (`listpeerchannels`) after the persisted blob was lost — trust-
+     * equivalent to `setup_channel`, which also comes via the node. Refuses
+     * to overwrite a tracked channel (returns false). `funding_txid` is the
+     * DISPLAY-order 32 bytes (as RPC JSON shows it); reversed internally.
+     * @param {Uint8Array} node_id
+     * @param {bigint} dbid
+     * @param {bigint} funding_sats
+     * @param {Uint8Array} funding_txid
+     * @param {number} funding_txout
+     * @param {number} local_to_self_delay
+     * @param {number} remote_to_self_delay
+     * @param {Uint8Array} remote_revocation
+     * @param {Uint8Array} remote_payment
+     * @param {Uint8Array} remote_htlc
+     * @param {Uint8Array} remote_delayed
+     * @param {Uint8Array} remote_funding
+     * @param {boolean} option_static_remotekey
+     * @param {boolean} option_anchors
+     * @returns {boolean}
+     */
+    armChannel(node_id, dbid, funding_sats, funding_txid, funding_txout, local_to_self_delay, remote_to_self_delay, remote_revocation, remote_payment, remote_htlc, remote_delayed, remote_funding, option_static_remotekey, option_anchors) {
+        const ptr0 = passArray8ToWasm0(node_id, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(funding_txid, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(remote_revocation, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray8ToWasm0(remote_payment, wasm.__wbindgen_malloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passArray8ToWasm0(remote_htlc, wasm.__wbindgen_malloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passArray8ToWasm0(remote_delayed, wasm.__wbindgen_malloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passArray8ToWasm0(remote_funding, wasm.__wbindgen_malloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ret = wasm.signer_armChannel(this.__wbg_ptr, ptr0, len0, dbid, funding_sats, ptr1, len1, funding_txout, local_to_self_delay, remote_to_self_delay, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, option_static_remotekey, option_anchors);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * The persistable channel store (canonical payload + seed-keyed MAC).
+     * @returns {Uint8Array}
+     */
+    exportChannels() {
+        const ret = wasm.signer_exportChannels(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
      * Convenience: construct from just the mnemonic string (no passphrase),
      * synthesizing the `32 zero bytes || mnemonic` on-disk form.
      * @param {string} mnemonic
@@ -170,6 +223,36 @@ export class Signer {
             throw takeFromExternrefTable0(ret[1]);
         }
         return Signer.__wrap(ret[0]);
+    }
+    /**
+     * Is this (peer, dbid) tracked?
+     * @param {Uint8Array} node_id
+     * @param {bigint} dbid
+     * @returns {boolean}
+     */
+    hasChannel(node_id, dbid) {
+        const ptr0 = passArray8ToWasm0(node_id, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.signer_hasChannel(this.__wbg_ptr, ptr0, len0, dbid);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * Restore a persisted channel store. Live entries are never overwritten;
+     * returns how many were added. Throws on a bad MAC / malformed blob.
+     * @param {Uint8Array} blob
+     * @returns {number}
+     */
+    importChannels(blob) {
+        const ptr0 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.signer_importChannels(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
     }
     /**
      * Drive ONE hsmd request -> reply. `frame_bytes` is a single signer-split
@@ -229,6 +312,30 @@ export class Signer {
      */
     setEnforce(enforce) {
         wasm.signer_setEnforce(this.__wbg_ptr, enforce);
+    }
+    /**
+     * The store changed since last asked (take-and-clear) — the cue to
+     * persist `exportChannels`.
+     * @returns {boolean}
+     */
+    takeChannelsDirty() {
+        const ret = wasm.signer_takeChannelsDirty(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * The (peer node_id 33 bytes || dbid 8 bytes LE) of the most recent
+     * "no tracked channel" refusal, take-and-clear; null when none. The
+     * host's cue to fetch that channel off the node and `armChannel` it.
+     * @returns {Uint8Array | undefined}
+     */
+    takeLastUntracked() {
+        const ret = wasm.signer_takeLastUntracked(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
     }
     /**
      * The node's OWN wallet sweep scriptPubKey for key `index`: p2wpkh of the
