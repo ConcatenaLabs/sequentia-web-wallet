@@ -2530,7 +2530,8 @@ function renderMixedTake(route, plan){
   // through the maker-first bridge — a Bitcoin-confirmation wait, with no fast maker resting —
   // the quote line itself carries the slow class, so the user knows BEFORE typing an amount
   // (the review repeats it before Confirm). Never shown when a Sequentia-speed maker serves it.
-  const slowNote = plan.slowOnly ? ' · waits on Bitcoin confirmations — typically 10-60+ minutes on testnet4' : '';
+  const slowNote = (plan.slowOnly ? ' · waits on Bitcoin confirmations — typically 10-60+ minutes on testnet4' : '')
+    + (plan.betterOtherRails ? ' · a better price rests on rails this selection cannot settle (switch the Lightning leg to take it)' : '');
   // NO amount typed yet: show the plain price and wait for an amount.
   if (want <= 0n){
     $('swRate').textContent = priceU > 0 ? `1 ${tk} = ${trim(priceU)} ${qtk}${slowNote}` : `${tk} / ${qtk}${slowNote}`;
@@ -2650,7 +2651,8 @@ async function requoteMixed(route, amtStr){
       minFill: offerMinFill(bp.offer, raw),
       // ONLY-slow-candidates note (owner ruling): when nothing at Sequentia speed can fill this
       // take, the quote line states the Bitcoin-confirmation class BEFORE an amount is typed.
-      slowOnly: bp.speedClass === 'slow' && !bp.fastAvailable });
+      slowOnly: bp.speedClass === 'slow' && !bp.fastAvailable,
+      betterOtherRails: !!bp.betterOtherRails });
     // GENUINE fail-closed (the invisible settlement can't carry this crossing in THIS build). Not a rail /
     // liquidity message — the SAME shared predicate onReview uses (bridgedTakeSupported), so Review is never
     // offered then refused. A happy coincidence (native) or a supported crossing passes.
@@ -3798,6 +3800,49 @@ function bridgedTakePlan(route, rails, wantAtoms, only){
     const want = (wantAtoms != null) ? BigInt(wantAtoms) : assetLegAtoms(route);
     let offer = bestFor(pool, side, _deadOffers);
     if (!offer || !(offer.price > 0)) return null;
+    // === EXECUTABILITY BEFORE PRICE (mixed takes only) ====================================
+    // An offer whose crossing this build cannot settle for THESE rails (e.g. an asset-over-LN
+    // maker matched by a receive-on-chain taker) is not a candidate at any price — letting it
+    // win the price sort turned the whole take into a refusal while a perfectly executable
+    // maker rested one row down (seen live). Executability is decided by the SAME predicates
+    // Review enforces (planSettlement happy-coincidence / bridgedTakeSupported), so nothing
+    // is selected here and refused later. When a better-priced unexecutable offer is passed
+    // over, the quote line says so instead of silently hiding the price.
+    const mixedSel = payRail !== recvRail;
+    const executableFor = (o) => {
+      try {
+        const { makerBtcRail: mb, makerAssetRail: ma } = makerRailsFromOffer(o);
+        const t = { asset: route.seqAsset, side, payRail, recvRail,
+          makerBtcRail: mb, makerAssetRail: ma, takerAssetInbound: false, takerBtcInbound: false };
+        return planSettlement(matchFromTake(t)).happyCoincidence || bridgedTakeSupported(t);
+      } catch { return false; }
+    };
+    let betterOtherRails = false;
+    if (mixedSel && !executableFor(offer)){
+      const passedOver = offer;
+      const sideList = side === 'buy' ? (pool.asks || []) : (pool.bids || []);
+      let alt = null;
+      for (const o of sideList){
+        if (!o || !(o.price > 0)) continue;
+        if (o.id && _deadOffers.has(o.id)) continue;
+        if (!executableFor(o)) continue;
+        if (want > 0n){
+          const szo = sizeSubswapTake({ want, offerAtoms: BigInt(o.assetAtoms || 0),
+            offerBtc: BigInt(o.btcSats || 0), minFill: offerMinFill(o, o.raw || {}), side });
+          if (szo.belowMin || !(szo.takeAtoms > 0n)) continue;
+        }
+        alt = o; break;
+      }
+      if (alt){
+        // No price battle across executability: the executable maker IS the market for this
+        // rail selection. Note when the passed-over price was strictly better on the amounts
+        // this take would execute.
+        betterOtherRails = bridgedBeatsExecuted(passedOver, alt, side, want);
+        offer = alt;
+      }
+      // No executable candidate at all: keep the original pick so the existing honest
+      // refusal downstream names the rails to switch — that message is still the truth.
+    }
     // === SPEED-AWARE SELECTION PREFERENCE (mixed takes only; owner ruling) ================
     // When both a native-fast candidate (Sequentia speed) and a bridged-slow one (the LSP
     // maker-first pipeline: a Bitcoin-confirmation wait) can fill this take, prefer the
@@ -3874,7 +3919,7 @@ function bridgedTakePlan(route, rails, wantAtoms, only){
       .filter(o => o && o.price > 0 && o.rail === offer.rail);
     const walk = walkBook({ offers: sideOffers, want, side });
     return { side, offer, match, plan, describe: describeBridge(match), bridged: crosses && supported,
-      crosses, supported, makerBtcRail, makerAssetRail, submarine,
+      crosses, supported, betterOtherRails, makerBtcRail, makerAssetRail, submarine,
       takeAtoms: sz.takeAtoms, takeBtc: sz.takeBtc, want, partial: sz.partial,
       belowMin: sz.belowMin, minAtoms: sz.minAtoms, minBtc: sz.minBtc, capped: sz.capped,
       walk, offers: sideOffers,

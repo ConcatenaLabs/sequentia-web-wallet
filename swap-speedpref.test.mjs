@@ -251,3 +251,30 @@ function planSell(bids, want = '400'){
 }
 
 console.log('\nALL PASS');
+
+// ===========================================================================
+// 7) EXECUTABILITY BEFORE PRICE (the live GOLD-buy incident): a best-priced offer whose
+//    crossing this build cannot settle for the chosen rails (asset-over-LN maker vs a
+//    receive-on-chain taker) is NOT a candidate — the executable submarine maker one row
+//    down is chosen, and the passed-over better price is flagged for the quote line.
+// ===========================================================================
+{
+  const subasset = (id, atoms, sats) => classifyRelayOffer({ lightning: { ln_direction: 4 },
+    base_amount: atoms, offer_amount: atoms, want_amount: sats, offer_id: id,
+    maker_pubkey: '03'.padEnd(66, 'd'), maker_ln_node_pubkey: '02'.padEnd(66, 'e') });
+  // Unexecutable best (0.4 sats/atom) vs executable submarine (0.5): the submarine wins.
+  let bp = planBuy([subasset('a-sa', 1000, 400), subAsk('z-sub', 1000, 500)]);
+  assert.ok(bp && bp.offer, 'a plan is produced');
+  assert.equal(bp.offer.id, 'z-sub', 'the executable submarine maker is chosen over an unexecutable better price');
+  assert.equal(bp.submarine, true, 'and settles P2P at Sequentia speed');
+  assert.equal(bp.betterOtherRails, true, 'the passed-over better price is flagged for the quote line');
+  // Equal executed price: still the submarine, but no better-price note.
+  bp = planBuy([subasset('a-sa', 1000, 500), subAsk('z-sub', 1000, 500)]);
+  assert.equal(bp.offer.id, 'z-sub');
+  assert.equal(bp.betterOtherRails, false, 'an equal passed-over price is not called better');
+  // ONLY the unexecutable offer rests: the plan keeps it so the dispatch refuses honestly.
+  bp = planBuy([subasset('only-sa', 1000, 400)]);
+  assert.ok(bp && bp.offer && bp.offer.id === 'only-sa', 'nothing executable -> the original pick survives');
+  assert.ok(bp.crosses && !bp.supported, 'and downstream refuses it by name (crosses unsupported)');
+  console.log('ok: executability precedes price; passed-over better prices are named, not hidden');
+}
