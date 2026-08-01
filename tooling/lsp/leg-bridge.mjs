@@ -1261,3 +1261,110 @@ export function frontedLegHandoff({ leg = {}, asset = '', tSeq = 0 } = {}) {
     anchor_height: 0,
   };
 }
+
+/**
+ * checkAssetFrontGate — may the LSP front the asset AGAINST THIS PARTICULAR HOLD?
+ *
+ * decideAssetFront answers "may we front at all" from the LSP's OWN side (wallet,
+ * inventory, cap, terms). This gate answers the question that bounds the RECOUP:
+ * the fronted asset's only recompense is settling the taker's held BTC-LN with the
+ * P its claim reveals, so the hold must be worth the leg AND must outlive the leg's
+ * whole claim horizon. Two branches, each a straight inventory loss if skipped:
+ *
+ *   (F0) HELD AMOUNT >= the ordered price. holdinvoice marks HELD on the FIRST
+ *        incoming HTLC regardless of amount, so without this a 1-sat payment
+ *        fronts the full asset leg. (The B0 twin of checkPayerFundGate.)
+ *   (F1) the hold's ACTUAL committed incoming-HTLC CLTV covers T_seq + the reorg/
+ *        settle margins (requiredTakerHold — the SAME sizing the BTC branch's B2
+ *        uses). The taker may legitimately claim the fronted leg as late as just
+ *        before T_seq; if its own hold has lapsed by then, the claim still reveals
+ *        P but there is nothing left to settle — asset delivered, nothing recouped.
+ *
+ * Pure; fails closed on any missing/non-finite/timestamp input (the io treats a
+ * TRANSIENT unreadable input as a re-drive instead, so a momentary node hiccup
+ * does not stick the job to the slower path — see the caller).
+ *
+ * @param {{ btcTip:number, incomingHtlcExpiry:number,   // live BTC tip + the ACTUAL committed CLTV of the taker's incoming hold HTLC on H
+ *           seqTip:number, seqRefundHeight:number,       // live Sequentia tip + the front's T_seq (its refund height)
+ *           heldAmountSat:number, orderedAmountSat:number, // (F0) summed incoming HTLCs on H vs the ordered BTC price
+ *           cfg?:object }} args
+ * @returns {{ ok:boolean, reason:string, requiredTakerBlocks:number, incomingHoldBlocks:number }}
+ */
+export function checkAssetFrontGate({ btcTip, incomingHtlcExpiry, seqTip, seqRefundHeight,
+  heldAmountSat, orderedAmountSat, cfg = {} } = {}) {
+  const fail = (reason) => ({ ok: false, reason, requiredTakerBlocks: NaN, incomingHoldBlocks: NaN });
+  for (const [k, v] of Object.entries({ btcTip, incomingHtlcExpiry, seqTip, seqRefundHeight, heldAmountSat, orderedAmountSat })) {
+    if (!Number.isFinite(v)) return fail(`asset front gate: ${k} is not a finite number — cannot verify the hold covers the front, fail closed (nothing fronted)`);
+  }
+  for (const [k, v] of Object.entries({ incomingHtlcExpiry, seqRefundHeight })) {
+    if (v >= LOCKTIME_THRESHOLD) return fail(`asset front gate: ${k} ${v} is a UNIX TIMESTAMP (>= ${LOCKTIME_THRESHOLD}), not a block height — fail closed`);
+  }
+  // (F0) the hold must be WORTH the leg before it may pay for it.
+  if (!(orderedAmountSat > 0))
+    return fail(`asset front gate (F0): the ordered BTC price is not a positive number (got ${JSON.stringify(orderedAmountSat)}) — cannot bound the held-amount check, fail closed`);
+  if (heldAmountSat < orderedAmountSat)
+    return fail(`asset front gate (F0): the taker's HELD BTC-LN totals ${heldAmountSat} sat across its incoming HTLCs on H, below the ordered ${orderedAmountSat} sat — holdinvoice marks HELD on the first HTLC regardless of amount, so front the asset ONLY once the FULL price is held. Fail closed (nothing fronted).`);
+  // (F1) the hold must OUTLIVE the front's whole claim horizon (T_seq + reorg/settle margins).
+  // requiredTakerHold also enforces the T_seq min/max bound, so a collapsed or absurdly-far T_seq —
+  // which would pin the LSP's inventory or squeeze its own refund window — fails closed right here.
+  const req = requiredTakerHold({ seqTip, seqRefundHeight, cfg });
+  if (!req.ok) return fail(`asset front gate: ${req.reason}`);
+  const requiredTakerBlocks = req.minFinalCltvBlocks;
+  const incomingHoldBlocks = incomingHtlcExpiry - btcTip;
+  if (incomingHoldBlocks < requiredTakerBlocks)
+    return { ok: false, requiredTakerBlocks, incomingHoldBlocks,
+      reason: `asset front gate (F1): the taker's incoming BTC-LN hold gives only ${incomingHoldBlocks} BTC blocks (committed CLTV ${incomingHtlcExpiry} - tip ${btcTip}), below the ${requiredTakerBlocks} needed to stay settleable until after the fronted leg's T_seq (${seqRefundHeight}) + reorg/settle margin — the taker could claim the front late and settle nothing (asset delivered, hold dead). Fail closed (nothing fronted).` };
+  return { ok: true, requiredTakerBlocks, incomingHoldBlocks,
+    reason: `asset front gate: held ${heldAmountSat} sat covers the ordered ${orderedAmountSat} and the hold's ${incomingHoldBlocks} BTC blocks cover the front's claim horizon (${requiredTakerBlocks}) — safe to front the asset from inventory` };
+}
+
+/**
+ * frontModeFields — the HONEST, wallet-facing job fields for a front decision.
+ *
+ * The owner's rule is that a Lightning payer must never wait for Bitcoin
+ * confirmations; when the LSP nevertheless cannot front (no inventory, no wallet,
+ * over cap, hold too short) the fallback is the maker's anchor-gated leg — and the
+ * job must SAY so, in fields a wallet can surface, instead of leaving the user
+ * staring at an unexplained wait. One tested place builds them so the vocabulary
+ * ('fronted' | 'maker-first'; expected_wait 'bitcoin-confirmations') cannot drift
+ * per call site.
+ *
+ * @param {{ armed:boolean, reason?:string }} verdict  the front decision (decideAssetFront / checkAssetFrontGate shape)
+ * @returns {{ front_mode:'fronted'|'maker-first', expected_wait:string|null, front_reason:string }}
+ */
+export function frontModeFields({ armed = false, reason = '' } = {}) {
+  return armed
+    ? { front_mode: 'fronted', expected_wait: null, front_reason: String(reason || 'fronted from LSP inventory') }
+    : { front_mode: 'maker-first', expected_wait: 'bitcoin-confirmations',
+        front_reason: String(reason || 'not fronted — the maker locks after its Bitcoin confirmation gate') };
+}
+
+/**
+ * decideReplenish — should the LSP now take the maker's offer FOR ITSELF to
+ * replace the inventory a front just delivered?
+ *
+ * A front sells the LSP's own asset to the taker; without replenishment every
+ * front drains the inventory until fronting silently degrades to maker-first.
+ * The replenish take is a SEPARATE, self-contained cross-chain swap with the
+ * LSP as the taker on its OWN fresh hash (seqob-cli xlift mints its own secret)
+ * — deliberately NOT the taker's H: reusing H while a maker-claimable BTC HTLC
+ * exists would let a maker sweep that BTC with the P the taker's claim already
+ * published, without ever locking its asset. On its own hash the take is a
+ * standard atomic swap: worst case its BTC leg refunds at its T_btc.
+ *
+ * Pure decision; the caller owns the spawn. Fails to NO on anything unproven.
+ *
+ * @param {{ enabled:boolean, alreadyStarted:boolean, offerId?:string, makerPubkey?:string,
+ *           atoms:number, liveCount:number, maxConcurrent:number }} args
+ * @returns {{ start:boolean, reason:string }}
+ */
+export function decideReplenish({ enabled = false, alreadyStarted = false, offerId = '', makerPubkey = '',
+  atoms = 0, liveCount = 0, maxConcurrent = 0 } = {}) {
+  if (!enabled) return { start: false, reason: 'replenish disabled (LSP_FRONT_REPLENISH=0)' };
+  if (alreadyStarted) return { start: false, reason: 'a replenish take is already recorded for this job — never take the offer twice for one front' };
+  if (!offerId || !makerPubkey) return { start: false, reason: 'no persisted offer identity (offer_id + maker_pubkey) — cannot re-take the offer' };
+  if (!(Number(atoms) > 0)) return { start: false, reason: `nothing to replenish (atoms ${JSON.stringify(atoms)})` };
+  if (!(Number(maxConcurrent) > 0) || Number(liveCount) >= Number(maxConcurrent))
+    return { start: false, reason: `${liveCount} replenish take(s) already live (cap ${maxConcurrent}) — the concurrent BTC the LSP locks as principal stays bounded; the front stands, only the restock is skipped` };
+  return { start: true, reason: 'front delivered from inventory — re-take the maker offer as principal (own hash, atomic) to restock exactly what was fronted' };
+}
