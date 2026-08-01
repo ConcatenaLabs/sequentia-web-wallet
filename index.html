@@ -1918,6 +1918,25 @@ const seqLeg = {
   // The taker's SEQ-leg refund keypair — the canonical HTLC key at m/3/0 (used as
   // the SEQ CLAIM key in the forward flow; here it is the SEQ REFUND key).
   refundKey(){ return signer.htlcKeypair(); },           // { public_key, secret_hex }
+  // The mixed same-chain SELL claims the maker's quote-asset HTLC with the SAME
+  // canonical HTLC key (a different HTLC per swap; the key's ROLE differs, never
+  // both roles in one script).
+  claimKey(){ return signer.htlcKeypair(); },            // { public_key, secret_hex }
+  // The Sequentia tip height (the mixed same-chain CLTV clock).
+  async tipHeight(){
+    const r = await fetch(`${ESPLORA}/blocks/tip/height`);
+    if (!r.ok) throw new Error('seq tip: HTTP ' + r.status);
+    return Number(await r.text());
+  },
+  // Spend status of an outpoint (the btcLeg.outspend twin): { known, spent }.
+  // known=false on any read error, so a blip is never mistaken for unspent/spent.
+  async outspend(txid, vout){
+    try {
+      const os = await fetch(`${ESPLORA}/tx/${txid}/outspend/${vout}`).then(r=>r.ok?r.json():null);
+      if (!os) return { known: false, spent: false };
+      return { known: true, spent: os.spent === true };
+    } catch { return { known: false, spent: false }; }
+  },
   htlcSpkHex(redeemHex){ return hexOfBytes(btc.p2sh({ script: bytesOfHex(redeemHex) }, btc.TEST_NETWORK).script); },
   htlcAddress(redeemHex){
     const a = btc.p2sh({ script: bytesOfHex(redeemHex) }, btc.TEST_NETWORK).address;
@@ -3050,7 +3069,7 @@ function initSwapTab(){
       swap: (p) => seqlnSwap(p),
       // Sub-asset order book: dynamic rail gating (sell_available/buy_available) + resting
       // offers, and posting the wallet's own signed resting offer (LSP never signs).
-      book: (asset) => seqlnBook(asset),
+      book: (asset, quote) => seqlnBook(asset, quote),
       // Unified book: every relay's offers merged, price-sorted, rail-tagged. The QUOTE
       // asset must be forwarded — this wrapper used to take only `asset`, which silently
       // dropped it and asked for the BTC-paired market whatever pair was on screen.

@@ -1116,7 +1116,12 @@ async function runSubasBuyHodl(job, body) {
   if (!userNodeId) { try { const gi = await lnrpc('getinfo', [], userRpc); userNodeId = gi.id || ''; } catch {} }
   if (!userNodeId) throw new Error('could not resolve the user node LN id for the HODL buy');
   const args = ['xsubas', '-asset', job.asset, '-relay', CFG.subasRelay,
-    '-btc-rpc', CFG.subasBtcRpc, '-btc-chain', CFG.subasBtcChain,
+    // Mixed same-chain: the device funded a QUOTE-asset HTLC on the Sequentia chain — the driver
+    // verifies/relays it via the Sequentia node; the classic shape keeps bitcoind.
+    ...(job.quote_asset
+      ? ['-quote-asset', job.quote_asset, '-xseq-rpc', CFG.seqRpc,
+         ...(CFG.seqWallet ? ['-xseq-wallet', CFG.seqWallet] : [])]
+      : ['-btc-rpc', CFG.subasBtcRpc, '-btc-chain', CFG.subasBtcChain]),
     '-btc-htlc-txid', String(bh.txid), '-btc-htlc-vout', String(bh.vout),
     '-btc-htlc-amount', String(bh.amount), '-btc-htlc-script', String(bh.redeem_script),
     '-btc-locktime', String(bh.cltv), '-btc-refund-pub', String(bh.taker_refund_pub),
@@ -1230,8 +1235,15 @@ function startSubasBuyHodl(body) {
   if (!bh || need.some((k) => bh[k] === undefined || bh[k] === null || bh[k] === '')) {
     return { ok: false, error: 'btc_htlc must carry {txid,vout,amount,redeem_script,cltv,maker_claim_pub,taker_refund_pub} (the device-funded on-chain HTLC on H)' };
   }
+  // Mixed same-chain (rails 7/8): the on-chain leg is the QUOTE asset on the Sequentia chain.
+  const quoteAsset = body.quote_asset && String(body.quote_asset).toUpperCase() !== 'BTC'
+    ? resolveAsset(body.quote_asset) : null;
   // Backend gates (fail closed).
-  if (!CFG.subasBtcRpc || !CFG.subasRelay) {
+  if (quoteAsset) {
+    if (!CFG.seqRpc || !CFG.subasRelay) {
+      return { ok: false, code: 503, error: 'the mixed same-chain rail is not configured on this LSP (set SEQ_RPC + SUBAS_RELAY + a mixed maker on SUBAS_RELAY)' };
+    }
+  } else if (!CFG.subasBtcRpc || !CFG.subasRelay) {
     return { ok: false, code: 503, error: 'the sub-asset BUY rail is not configured on this LSP (set SUBAS_BTC_RPC + SUBAS_RELAY + a sub-asset maker on SUBAS_RELAY)' };
   }
   if (!PROV) return { ok: false, code: 501, error: 'per-asset node provisioning is not enabled on this LSP' };
@@ -1243,6 +1255,7 @@ function startSubasBuyHodl(body) {
     job_id: jobId, side: 'buy', hodl: true, rail: 'subasset',
     pay_rail: 'chain', recv_rail: 'ln', asset: assetId, asset_label: assetLabel(assetId),
     node_key: nodeKey, payment_hash: H, asset_amount: assetAmount,
+    quote_asset: quoteAsset,   // mixed same-chain: the on-chain leg's REAL asset (null = BTC)
     btc_htlc: { txid: String(bh.txid), vout: bh.vout, amount: bh.amount, cltv: bh.cltv },
     offer_id: body.offer_id || null, maker_pubkey: body.maker_pubkey || null,
     // Which relay this offer rests on, resolved against OUR configured set (never the
@@ -1780,7 +1793,7 @@ async function preSpawnGuardSubasSell(body) {
   return { action: 'rerun' };                                     // provably no prior pay
 }
 
-function runMixed({ side, asset, amount, payRail, recvRail, node_key, asset_bolt11, payment_hash, asset_amount, btc_claim_pub, offer_id, maker_pubkey, btc_htlc, swap_nonce }) {
+function runMixed({ side, asset, amount, payRail, recvRail, node_key, asset_bolt11, payment_hash, asset_amount, btc_claim_pub, offer_id, maker_pubkey, btc_htlc, swap_nonce, quote_asset }) {
   return new Promise(async (resolve) => {
     const assetId = resolveAsset(asset);
     if (side !== 'buy' && side !== 'sell') return resolve({ ok: false, error: "side must be 'buy' or 'sell'" });
@@ -1841,7 +1854,12 @@ function runMixed({ side, asset, amount, payRail, recvRail, node_key, asset_bolt
       // any paid/pending/uncertain state). The file then reflects ONLY this run.
       try { fs.unlinkSync(swapStateFile); } catch { /* no stale file: fine */ }
       const sellArgs = ['xsubas-sell', '-asset', assetId, '-relay', CFG.subasSellRelay,
-        '-btc-rpc', CFG.subasBtcRpc, '-btc-chain', CFG.subasBtcChain,
+        // Mixed same-chain: verify (and let the WALLET claim) a QUOTE-asset HTLC on the
+        // Sequentia chain instead of a BTC one.
+        ...(quote_asset && String(quote_asset).toUpperCase() !== 'BTC'
+          ? ['-quote-asset', quote_asset, '-xseq-rpc', CFG.seqRpc,
+             ...(CFG.seqWallet ? ['-xseq-wallet', CFG.seqWallet] : [])]
+          : ['-btc-rpc', CFG.subasBtcRpc, '-btc-chain', CFG.subasBtcChain]),
         '-asset-ln-socket', userRpc, '-btc-claim-pub', btc_claim_pub,
         '-min-btc-conf', String(CFG.subasMinBtcConf), '-state-file', swapStateFile, '-json'];
       // Lift a SPECIFIC resting offer (order-book take) when the wallet names one.
@@ -3705,12 +3723,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/book') {
       const assetId = resolveAsset(url.searchParams.get('asset'));
       if (!assetId || assetId === CFG.btcx) return send(res, 400, { ok: false, error: '?asset=<sequentia asset id> is required (not BTC)' });
+      // Mixed same-chain (rails 7/8): ?quote=<real asset id> reads the <asset>/<quote> book —
+      // the on-chain leg is the QUOTE asset in BTC's structural place. Absent/BTC = the classic book.
+      const quoteParam = url.searchParams.get('quote');
+      const quoteId = quoteParam && String(quoteParam).toUpperCase() !== 'BTC' ? resolveAsset(quoteParam) : null;
+      const quoteKey = quoteId || 'BTC';
       const relays = [...new Set([CFG.subasSellRelay, CFG.subasRelay].filter(Boolean))];
       const seen = new Set(), sell = [], buy = [];
       for (const relay of relays) {
         let offers = [];
         try {
-          const rr = await fetch(`${relay}/v1/market/${assetId}/BTC/orderbook`, { signal: AbortSignal.timeout(5000) });
+          const rr = await fetch(`${relay}/v1/market/${assetId}/${quoteKey}/orderbook`, { signal: AbortSignal.timeout(5000) });
           if (rr.ok) offers = (await rr.json()).offers || [];
         } catch { /* a down relay just contributes no liquidity */ }
         for (const o of offers) {
@@ -3743,7 +3766,7 @@ const server = http.createServer(async (req, res) => {
       // as worst.
       sell.sort((a, b) => (b.price_sats_per_atom ?? -Infinity) - (a.price_sats_per_atom ?? -Infinity));
       buy.sort((a, b) => (a.price_sats_per_atom ?? Infinity) - (b.price_sats_per_atom ?? Infinity));
-      return send(res, 200, { ok: true, asset: assetId, asset_label: assetLabel(assetId),
+      return send(res, 200, { ok: true, asset: assetId, asset_label: assetLabel(assetId), quote: quoteKey,
         sell_available: sell.length > 0, buy_available: buy.length > 0, sell_offers: sell, buy_offers: buy });
     }
 

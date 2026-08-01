@@ -1126,13 +1126,18 @@ function findRoute(pay, receive){
       payRail: 'ln', recvRail: 'ln' };
   }
   // MIXED same-chain (one leg Lightning, one on-chain): a first-class combination per the spec, settled
-  // P2P as one asset-LN HTLC + one on-chain HTLC bound by one preimage when the counterparty's per-leg
-  // choices complement (the LSP bridges a leg only when that leg's two SIDES disagree). The offer
-  // protocol cannot yet EXPRESS a per-leg rail on a same-chain pair (LightningTerms hard-codes the
-  // Lightning leg as BTC), so nothing can rest or match in this shape: fail CLOSED with a named reason.
-  // NEVER fall through to 'same' — that silently settles fully on-chain, a rail the user did not choose.
-  if (S.payRail && S.recvRail && S.payRail !== S.recvRail)
-    return { kind: 'same-railgap', pay, receive, payRail: S.payRail, recvRail: S.recvRail };
+  // P2P as one asset-LN HTLC + one on-chain HTLC bound by one preimage — the sub-asset construction
+  // with the QUOTE asset standing in BTC's structural place (no privileged unit; the LSP bridges a leg
+  // only when that leg's two SIDES disagree). Routed through the SAME 'mixed' pipeline as the BTC
+  // shapes, marked mixedSame so every consumer knows the on-chain leg is the QUOTE ASSET on the
+  // Sequentia chain: "payIsBtc" keeps its structural meaning of "paying the QUOTE side" (a BUY of the
+  // base). The orientations whose LIGHTNING leg is the quote (the submarine mirror) are not wired yet;
+  // requoteMixed refuses those by name — never a fall-through to 'same'.
+  if (S.payRail && S.recvRail && S.payRail !== S.recvRail){
+    const cp = canonicalPair(pay, receive);
+    return { kind: 'mixed', mixedSame: true, seqAsset: cp.base, quoteAsset: cp.quote,
+      payIsBtc: pay === cp.quote, xm: null, payRail: S.payRail, recvRail: S.recvRail };
+  }
   // Same-chain order book: ANY two distinct Sequentia assets form a market. It may
   // have no resting offers yet, in which case the user can start it by posting one.
   return { kind: 'same', pay, receive };
@@ -1470,6 +1475,9 @@ function updateRails(){
   box.classList.remove('hide');
   // Probe the sub-asset book (async, cached) so the LN-readiness note reflects live liquidity.
   if (pay === 'BTC' || receive === 'BTC'){ try { refreshSubassetBook(pay === 'BTC' ? receive : pay); } catch {} }
+  else { // mixed same-chain: the base/<quote> sub-asset book (quote = the pair's numeraire)
+    try { const cp = canonicalPair(pay, receive); refreshSubassetBook(cp.base, cp.quote); } catch {}
+  }
   const ra = lnDeployed() ? railAvail(pay, receive) : null;
   paintRailSegs(ra);
   renderRailNote(ra);
@@ -1532,16 +1540,22 @@ function renderRailNote(ra){
 const SUBASSET_BOOK = {};   // assetHexLower -> { sell_available, buy_available, sell_offers, buy_offers, ts }
 function subassetCapable(seqAssetHex){ const e = seqAssetHex && SUBASSET_BOOK[seqAssetHex.toLowerCase()]; return !!(e && e.buy_available); }
 function sellCapable(seqAssetHex){ const e = seqAssetHex && SUBASSET_BOOK[seqAssetHex.toLowerCase()]; return !!(e && e.sell_available); }
-function subassetOffers(seqAssetHex, dir){ const e = seqAssetHex && SUBASSET_BOOK[seqAssetHex.toLowerCase()]; return (e && (dir === 'sell' ? e.sell_offers : e.buy_offers)) || []; }
+function subassetOffers(seqAssetHex, dir, quoteHex){
+  const k = seqAssetHex && (seqAssetHex.toLowerCase() + '|' + String(quoteHex || 'BTC').toLowerCase());
+  const e = k && SUBASSET_BOOK[k];
+  return (e && (dir === 'sell' ? e.sell_offers : e.buy_offers)) || [];
+}
 let _bookInflight = {};
-async function refreshSubassetBook(seqAssetHex){
+async function refreshSubassetBook(seqAssetHex, quoteHex){
   if (!seqAssetHex || seqAssetHex === 'BTC' || !(L && L.book && lnDeployed())) return;
-  const k = seqAssetHex.toLowerCase();
+  // Cache per PAIR: a mixed same-chain book (quote = a real asset) must never
+  // shadow the BTC book for the same base, or vice versa.
+  const k = seqAssetHex.toLowerCase() + '|' + String(quoteHex || 'BTC').toLowerCase();
   const prev = SUBASSET_BOOK[k];
   if (prev && (Date.now() - prev.ts) < 15000) return;   // ~15s cache
   if (_bookInflight[k]) return; _bookInflight[k] = true;
   try {
-    const b = await L.book(seqAssetHex);
+    const b = await L.book(seqAssetHex, quoteHex);
     const wasSell = !!(prev && prev.sell_available), wasBuy = !!(prev && prev.buy_available);
     SUBASSET_BOOK[k] = { sell_available: !!b.sell_available, buy_available: !!b.buy_available,
       sell_offers: b.sell_offers || [], buy_offers: b.buy_offers || [], ts: Date.now() };
@@ -1771,15 +1785,6 @@ async function requote(){
     if (route.kind === 'ln')         { if (!route.assetAsset) stopLiveBook(); await requoteLn(route, amtStr); }  // asset<->asset LN: keep the same-chain covenant book live (it's the on-chain alternative the note points at); asset<->BTC LN uses the cross book, so drop the same-chain stream
     else if (route.kind === 'cross') { stopLiveBook(); await requoteCross(route, amtStr); }
     else if (route.kind === 'mixed') { stopLiveBook(); await requoteMixed(route, amtStr); }
-    else if (route.kind === 'same-railgap'){
-      // The BOOK is rail-blind, so the pair's one book renders exactly as it would on-chain — but the
-      // settlement this shape needs is not expressible in the offer protocol yet (no per-leg rail), so
-      // refuse to quote, with the reason named. Fail closed: LAST_QUOTE stays null, Review stays off,
-      // and the on-chain route is never quoted in this shape's place.
-      await requoteSame({ kind: 'same', pay: route.pay, receive: route.receive }, amtStr);
-      LAST_QUOTE = null; setReviewEnabled(false);
-      $('swErr').textContent = 'Paying over Lightning while receiving on-chain (or the mirror) is not available yet on an asset-to-asset pair · set both legs to Lightning or both to on-chain to trade now.';
-    }
     else                             await requoteSame(route, amtStr);
   } finally {
     try { paintCostLine(); } catch {}   // E2: the one cost line, after any rail quotes
@@ -2421,7 +2426,7 @@ async function loadBtcBook(route){
   // never "no maker for your rail". Falls back to the on-chain-only cross book if the LSP is
   // unreachable. The proven on-chain take path (XBOOK) is unchanged; an LN row seeds the amount and
   // the composer requotes on the user's rail (the LSP bridges / fails closed cleanly on take).
-  const ub = await getUnifiedBook(seqAsset, route.assetAsset ? route.quoteAsset : 'BTC');
+  const ub = await getUnifiedBook(seqAsset, ((route.assetAsset || route.mixedSame) && route.quoteAsset) ? route.quoteAsset : 'BTC');
   const unified = ub ? { asks: ub.asks || [], bids: ub.bids || [] } : null;
   UBOOK = unified ? { seqAsset, quote: (ub && ub.quote) || 'BTC', ...unified } : null;
   renderXBook(seqAsset, route.payIsBtc, forward, reverse, unified);
@@ -2480,7 +2485,8 @@ function wantAssetAtomsFor(route, offerAtoms, offerBtc){
   const editedEl = S.edited === 'pay' ? C.$('swPayAmt') : C.$('swRecvAmt');
   const editedHex = S.edited === 'pay' ? S.payAsset : S.receiveAsset;
   if (editedHex === seqAsset) return fieldAtoms(editedEl, seqAsset);
-  const btcAtoms = fieldAtoms(editedEl, 'BTC');
+  const qHex = (route.mixedSame && route.quoteAsset) ? route.quoteAsset : 'BTC';
+  const btcAtoms = fieldAtoms(editedEl, qHex);
   return (btcAtoms > 0n && offerBtc > 0n) ? (btcAtoms * BigInt(offerAtoms)) / BigInt(offerBtc) : 0n;
 }
 // One-tap "Use minimum": accept the offer's minimum fill (a real placeable take) and re-quote so Place enables.
@@ -2501,30 +2507,35 @@ function renderMixedTake(route, plan){
   const { $ } = C;
   const am = C.assetMeta(route.seqAsset) || {};
   const tk = am.ticker || 'asset', aprec = am.precision || 0;
+  // The QUOTE leg: BTC for the cross shapes; the pair's quote ASSET for the mixed
+  // same-chain shape (it stands in BTC's structural place, ticker + precision too).
+  const qHex = (route.mixedSame && route.quoteAsset) ? route.quoteAsset : 'BTC';
+  const qm = qHex === 'BTC' ? { ticker: 'BTC', precision: 8 } : (C.assetMeta(qHex) || {});
+  const qtk = qm.ticker || 'quote', qprec = (qm.precision == null ? 8 : qm.precision);
   const buy = plan.side === 'buy';
   const offerAtoms = BigInt(plan.offerAtoms || 0), offerBtc = BigInt(plan.offerBtc || 0);
   const want = wantAssetAtomsFor(route, offerAtoms, offerBtc);
   const sz = sizeSubswapTake({ want, offerAtoms, offerBtc, minFill: BigInt(plan.minFill || 0), side: plan.side });
-  const assetStr = C.fmtAtoms(sz.takeAtoms, aprec), btcStr = C.fmtAtoms(sz.takeBtc, 8);
-  const minAssetStr = C.fmtAtoms(sz.minAtoms, aprec), minBtcStr = C.fmtAtoms(sz.minBtc, 8);
+  const assetStr = C.fmtAtoms(sz.takeAtoms, aprec), btcStr = C.fmtAtoms(sz.takeBtc, qprec);
+  const minAssetStr = C.fmtAtoms(sz.minAtoms, aprec), minBtcStr = C.fmtAtoms(sz.minBtc, qprec);
   const priceU = btcPerAssetUnits(offerAtoms, offerBtc, aprec);
   const payEl = $('swPayAmt'), recvEl = $('swRecvAmt');
   const [payStr, recvStr] = buy ? [btcStr, assetStr] : [assetStr, btcStr];
   $('swRoute').textContent = '';   // the settlement path is invisible — no rail label
   // NO amount typed yet: show the plain price and wait for an amount.
   if (want <= 0n){
-    $('swRate').textContent = priceU > 0 ? `1 ${tk} = ${trim(priceU)} BTC` : `${tk} / BTC`;
+    $('swRate').textContent = priceU > 0 ? `1 ${tk} = ${trim(priceU)} ${qtk}` : `${tk} / ${qtk}`;
     return { ...sz, hasAmount: false };
   }
   // Paint BOTH legs to the sized take so pay & receive can NEVER disagree.
   // Pass each leg's ASSET so a field showing USD keeps showing USD (see setNativeField).
-  const payHex = buy ? 'BTC' : route.seqAsset, recvHex = buy ? route.seqAsset : 'BTC';
+  const payHex = buy ? qHex : route.seqAsset, recvHex = buy ? route.seqAsset : qHex;
   setNativeField(payEl, payStr, payHex); setNativeField(recvEl, recvStr, recvHex);
   if (sz.belowMin){
     // Below this offer's minimum: show the true minimum plainly + a one-tap to use it, and BLOCK Place right
     // here (the caller also fails closed). Pay & receive were painted to the minimum above, so they agree.
     setReviewEnabled(false);
-    const msg = `The smallest amount you can ${buy ? 'buy' : 'sell'} here is ${minAssetStr} ${tk} (${minBtcStr} BTC).`;
+    const msg = `The smallest amount you can ${buy ? 'buy' : 'sell'} here is ${minAssetStr} ${tk} (${minBtcStr} ${qtk}).`;
     $('swRate').innerHTML = esc(msg) + ` <a href="#" class="swusemin" style="text-decoration:underline;cursor:pointer">Use minimum</a>`;
     const link = ($('swRate').querySelector && $('swRate').querySelector('.swusemin')) || null;
     if (link) link.onclick = (e) => { if (e && e.preventDefault) e.preventDefault(); useMinimumFill(route, sz); };
@@ -2538,7 +2549,7 @@ function renderMixedTake(route, plan){
   // executes — the total, the price across all of it, and any genuine remainder.
   const w = plan.walk;
   if (w && w.offersUsed > 1 && w.filledAtoms > 0n){
-    const wAsset = C.fmtAtoms(w.filledAtoms, aprec), wBtc = C.fmtAtoms(w.filledBtc, 8);
+    const wAsset = C.fmtAtoms(w.filledAtoms, aprec), wBtc = C.fmtAtoms(w.filledBtc, qprec);
     const [wPay, wRecv] = buy ? [wBtc, wAsset] : [wAsset, wBtc];
     setNativeField(payEl, wPay, payHex); setNativeField(recvEl, wRecv, recvHex);
     const across = ` · across ${w.offersUsed} offers`;
@@ -2597,6 +2608,21 @@ async function requoteMixed(route, amtStr){
   //   • BTC on-chain (asset over LN) -> sub-asset family: lift a resting sub-asset offer (its own book).
   const btcLeg = buy ? route.payRail : route.recvRail;
   const isSubmarine = (btcLeg === 'ln');
+  const qHex = (route.mixedSame && route.quoteAsset) ? route.quoteAsset : 'BTC';
+  const qtk = qHex === 'BTC' ? 'BTC' : ((C.assetMeta(qHex) || {}).ticker || 'the quote asset');
+
+  if (isSubmarine && route.mixedSame){
+    // Mixed same-chain with the QUOTE leg over Lightning (the submarine mirror with an
+    // issued asset in BTC's place) is not settled by this build yet. Name it and the
+    // remedy — the OTHER mixed orientation of the same pair is fully wired.
+    LAST_QUOTE = null; setReviewEnabled(false);
+    $('swRoute').textContent = '';
+    const btk = (metaOf(route.seqAsset) || {}).ticker || 'the base asset';
+    $('swRate').textContent = `Paying or receiving ${qtk} over Lightning on this pair is not settled by this build yet · put ${qtk} on-chain (and ${btk} over Lightning) to trade now.`;
+    paintFee(qHex, null, null);
+    renderTiming(route);
+    return;
+  }
 
   if (isSubmarine){
     // RAIL-BLIND: match the ONE unified book on {asset,price,size,side}; the rail only selects the invisible
@@ -2674,7 +2700,7 @@ async function requoteMixed(route, amtStr){
     offerAtoms = bp.offer.assetAtoms; offerBtc = bp.offer.btcSats;
     minFill = offerMinFill(bp.offer, raw);
     const oid = String(bp.offer.id || '');
-    matchedSub = oid ? (subassetOffers(route.seqAsset, side).find(o => String(o.offer_id || o.offerId || '') === oid) || null) : null;
+    matchedSub = oid ? (subassetOffers(route.seqAsset, side, qHex).find(o => String(o.offer_id || o.offerId || '') === oid) || null) : null;
     // "NO SUB-ASSET COUNTERPART" IS NOT "NO LIQUIDITY ON THIS RAIL".
     //
     // The rail-blind best is whatever is cheapest across all four rails, and this path can
@@ -2688,7 +2714,7 @@ async function requoteMixed(route, amtStr){
     // that one — so the displayed offer stays the offer lifted. No sub-asset offer at all
     // still falls through to the honest refusal below.
     if (!matchedSub){
-      const sub = subassetOffers(route.seqAsset, side)[0] || null;
+      const sub = subassetOffers(route.seqAsset, side, qHex)[0] || null;
       if (sub){
         matchedSub = sub;
         offerAtoms = sub.asset_amount; offerBtc = sub.btc_sats;
@@ -2698,12 +2724,12 @@ async function requoteMixed(route, amtStr){
   } else {
     // Unified feed has NO offer for this pair -> fall back to the sub-asset book for BOTH the display AND the
     // settlement (consistent: the displayed offer IS the one lifted).
-    const subOffer = subassetOffers(route.seqAsset, side)[0] || null;
+    const subOffer = subassetOffers(route.seqAsset, side, qHex)[0] || null;
     if (!subOffer){
       LAST_QUOTE = null; setReviewEnabled(false);
       $('swRoute').textContent = '';
       $('swRate').textContent = 'No offers resting here yet.';
-      paintFee('BTC', null, null);
+      paintFee(qHex, null, null);
       renderTiming(route);
       return;
     }
@@ -2712,7 +2738,7 @@ async function requoteMixed(route, amtStr){
     minFill = BigInt(subOffer.min_fill || subOffer.minFill || 0);
   }
   const dec = renderMixedTake(route, { side, offerAtoms, offerBtc, minFill });
-  paintFee('BTC', null, feeNote);
+  paintFee(qHex, null, feeNote);
   renderTiming(route);
   if (dec.belowMin || !dec.hasAmount){ LAST_QUOTE = null; setReviewEnabled(false); return; }
   // GATE ONLY PLACE on sub-asset SETTLEABILITY (mirrors requoteCross's show-fill-then-gate-Place): the
@@ -2731,9 +2757,12 @@ async function requoteMixed(route, amtStr){
   // Place here produced a priced, confirmable trade that then died with "this trade isn't
   // available in this build": an offer-then-refuse, and worse than the refusal it replaced.
   // Gate on the executor's OWN predicate and say what is actually missing.
-  if (!subAssetBuySupported()){
+  const supported = route.mixedSame ? subAssetMixedSupported() : subAssetBuySupported();
+  if (!supported){
     LAST_QUOTE = null; setReviewEnabled(false);
-    $('swErr').textContent = subAssetBuyUnsupportedNote((C.assetMeta(route.seqAsset) || {}).ticker);
+    $('swErr').textContent = route.mixedSame
+      ? `Trading ${(C.assetMeta(route.seqAsset) || {}).ticker || 'this pair'} with one leg over Lightning is not settled by this build yet · set both legs the same way to trade now.`
+      : subAssetBuyUnsupportedNote((C.assetMeta(route.seqAsset) || {}).ticker);
     return;
   }
   LAST_QUOTE = { kind: 'mixed', route, seqAsset: route.seqAsset, payIsBtc: buy,
@@ -3423,12 +3452,6 @@ function renderTiming(route){
     tx.innerHTML = `Appears immediately, final in <b>~1 block</b> · ${ANCHOR_FINAL}.`;
     return;
   }
-  if (route.kind === 'same-railgap'){
-    // Fail-closed shape (findRoute): one leg Lightning, one on-chain, on an asset<->asset pair.
-    el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
-    tx.innerHTML = 'One leg over Lightning and one on-chain is not available yet on an asset-to-asset pair · set both legs the same way to trade now.';
-    return;
-  }
   // BTC pair: the exact 4-case matrix keyed off the receive leg.
   const pr = route.payRail, rr = route.recvRail;
   const tk = esc(C.assetMeta(route.seqAsset).ticker);
@@ -3693,7 +3716,7 @@ function bridgedTakePlan(route, rails, wantAtoms, only){
     // EURX/OILX has a unified book like every BTC pair. The cached book must be for
     // the SAME pair — matching only on the base asset would hand an EURX/OILX route
     // the EURX/BTC book.
-    const wantQuote = (route.assetAsset && route.quoteAsset) ? route.quoteAsset : 'BTC';
+    const wantQuote = ((route.assetAsset || route.mixedSame) && route.quoteAsset) ? route.quoteAsset : 'BTC';
     const book = (UBOOK && UBOOK.seqAsset === route.seqAsset && (UBOOK.quote || 'BTC') === wantQuote) ? UBOOK : null;
     if (!book) return null;
     const side = route.payIsBtc ? 'buy' : 'sell';                     // buy = pay BTC / receive asset; sell = pay asset / receive BTC
@@ -6161,6 +6184,7 @@ async function reviewMixed(q){
       // takeBtcSats) as authoritative so the economic gate + the defense-in-depth price check use exactly
       // what the composer showed (never re-priced off a different offer's ratio).
       await startSell({ asset: q.seqAsset, amount, offer: q.sellOffer || null,
+        quoteAsset: (q.route && q.route.mixedSame && q.route.quoteAsset) || null,
         expectedBtcSats: q.takeBtcSats, expectedAssetAtoms: q.takeAssetAtoms });
       return;
     }
@@ -6170,8 +6194,9 @@ async function reviewMixed(q){
       // offer whose fill was DISPLAYED (q.buyOffer, matched by id in requoteMixed) and carry the DISPLAYED
       // fill (takeAssetAtoms/takeBtcSats) as authoritative — startBuy lifts exactly it, never re-deriving the
       // fill off this offer's ratio (which showed 50 GOLD but delivered 25 when the offer differed).
-      const buyOffer = q.buyOffer || subassetOffers(q.seqAsset, 'buy')[0] || null;
-      await startBuy({ asset: q.seqAsset, amount, offer: buyOffer,
+      const qQuote = (q.route && q.route.mixedSame && q.route.quoteAsset) || null;
+      const buyOffer = q.buyOffer || subassetOffers(q.seqAsset, 'buy', qQuote)[0] || null;
+      await startBuy({ asset: q.seqAsset, amount, offer: buyOffer, quoteAsset: qQuote,
         expectedAssetAtoms: q.takeAssetAtoms, expectedBtcSats: q.takeBtcSats });
       return;
     }
@@ -6241,9 +6266,15 @@ async function startSell(params){
   try {
     _sellStarting = true;   // block a concurrent second sell through the whole pre-claim prologue (TOCTOU)
     if (!(L && L.swap && L.assetNodeKey)) throw new Error('Lightning isn’t available in this build.');
-    if (!(C.btcLeg && C.btcLeg.claim && C.btcLeg.claimKey && C.btcLeg.verifyClaimable)) throw new Error('This trade isn’t available in this build.');
+    // Mixed same-chain: the claim leg is the QUOTE asset on the Sequentia chain (C.seqLeg);
+    // the BTC shapes keep C.btcLeg. One capability check per leg family.
+    const qh = params.quoteAsset || null;
+    const qtk = qh ? ((C.assetMeta(qh) || {}).ticker || 'quote') : 'BTC';
+    if (qh){
+      if (!(C.seqLeg && C.seqLeg.claim && C.seqLeg.claimKey && C.seqLeg.readOutput)) throw new Error('This trade isn’t available in this build.');
+    } else if (!(C.btcLeg && C.btcLeg.claim && C.btcLeg.claimKey && C.btcLeg.verifyClaimable)) throw new Error('This trade isn’t available in this build.');
     say('Preparing your sell…');
-    const btc_claim_pub = C.btcLeg.claimKey().public_key;   // the device claim key; only we can claim
+    const btc_claim_pub = (qh ? C.seqLeg.claimKey() : C.btcLeg.claimKey()).public_key;   // the device claim key; only we can claim
     const node_key = await L.assetNodeKey(asset);           // our own hosted asset node pays over LN
     const offer = params.offer || null;
     // FUND-SAFETY: this rail pays the asset over Lightning and can only compare the maker's returned BTC
@@ -6256,7 +6287,7 @@ async function startSell(params){
     // the floor-proportional BTC a SELL receives for a partial), falling back to the whole offer's btc_sats.
     // Using the whole offer for a partial would false-warn "shortfall" on a correct proportional fill.
     const expectedBtc = Number((params.expectedBtcSats != null ? params.expectedBtcSats : (offer && offer.btc_sats)) || 0);
-    if (!(expectedBtc > 0)) throw new Error('This sell has no resting Bitcoin offer to price against · refresh the order book and pick an offer, so the Bitcoin you will receive is known before you pay the asset.');
+    if (!(expectedBtc > 0)) throw new Error('This sell has no resting offer to price against · refresh the order book and pick an offer, so what you will receive is known before you pay the asset.');
     // DEFENSE-IN-DEPTH: the offer we are about to lift MUST be the SAME (price) as the one whose fill was
     // DISPLAYED. A SELL RECEIVES BTC, so the maker's FLOOR-proportional BTC for the displayed asset fill must
     // match the displayed BTC within 1 sat of rounding; a material disagreement means a different-priced offer
@@ -6283,6 +6314,7 @@ async function startSell(params){
     // returns the settled {preimage, btc_htlc} idempotently (it never re-pays for a stored nonce).
     const swap_nonce = newSwapNonce();
     SELL = { state: 'paying', swap_nonce, asset, ticker: am.ticker, amount: params.amount ?? null,
+      quote_asset: qh || undefined,   // mixed same-chain: the claim leg's REAL asset (absent = BTC)
       node_key, btc_claim_pub, offer, ts: Date.now() }; saveSell();
     // Pay the asset over Lightning (LSP drives the hold-invoice pay from our node; device co-signs).
     // On settle the maker reveals the preimage, returned here WITH the BTC HTLC terms — the LSP
@@ -6290,6 +6322,7 @@ async function startSell(params){
     say('Paying ' + am.ticker + ' over Lightning…');
     paidCallStarted = true;   // from here a lost response means the asset MAY be paid -> keep for recovery
     const resp = await L.swap({ side: 'sell', asset, node_key, btc_claim_pub, amount: params.amount,
+      quote_asset: qh || undefined,
       // State the rails EXPLICITLY (asset over Lightning, BTC on-chain) so the LSP routes this to
       // the sub-asset sell (xsubas-sell) rather than defaulting omitted rails to pure-LN (xpln).
       payRail: 'ln', recvRail: 'chain',
@@ -6300,10 +6333,10 @@ async function startSell(params){
     // Persist BEFORE the on-chain claim: the asset is now paid, so the BTC claim is the fund step
     // and MUST survive a reload — resumeSell() re-attempts it from here.
     SELL = { state: 'claiming', asset, ticker: am.ticker, preimage: resp.preimage, hash_h: resp.hash_h, btc_htlc: H,
-      expected_btc: expectedBtc, swap_nonce, ts: mixedTip() }; saveSell();
+      quote_asset: qh || undefined, expected_btc: expectedBtc, swap_nonce, ts: mixedTip() }; saveSell();
     say('Completing your trade …');
     await claimSell();   // verify + claim; updates SELL + st
-    say('Done · you paid ' + am.ticker + ' over Lightning and received your BTC (' + String(SELL.claim_txid || '').slice(0,16) + '…).', 'ok');
+    say('Done · you paid ' + am.ticker + ' over Lightning and received your ' + qtk + ' (' + String(SELL.claim_txid || '').slice(0,16) + '…).', 'ok');
     done();
     try { await C.sync(); } catch {}
     clearSell();
@@ -6339,20 +6372,39 @@ async function claimSell(){
     const got = BigInt(String(H.amount || 0)), want = BigInt(String(SELL.expected_btc || 0));
     if (want > 0n && got < want) {
       SELL.shortfall = { got: String(got), want: String(want) }; saveSell();
-      C.toast && C.toast(`Warning: you are receiving only ${C.fmtAtoms(got, 8)} BTC, less than the quoted ${C.fmtAtoms(want, 8)} BTC · taking it anyway.`, { level: 'warn' });
+      const wtk = SELL.quote_asset ? ((C.assetMeta(SELL.quote_asset) || {}).ticker || 'quote') : 'BTC';
+      C.toast && C.toast(`Warning: you are receiving only ${C.fmtAtoms(got, 8)} ${wtk}, less than the quoted ${C.fmtAtoms(want, 8)} ${wtk} · taking it anyway.`, { level: 'warn' });
     }
   } catch {}
-  await C.btcLeg.verifyClaimable({ redeem_script: H.redeem_script, hash_h: SELL.hash_h,
-    claim_pub: H.taker_claim_pubkey, maker_refund_pub: H.maker_refund_pubkey, t_btc: H.t_btc,
-    preimage: SELL.preimage, txid: H.txid, vout: H.vout, amount: H.amount });
-  const claimTxid = await C.btcLeg.claim({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, preimage: SELL.preimage });
+  let claimTxid;
+  if (SELL.quote_asset){
+    // Mixed same-chain: verify the funded output pays P2SH(redeem) in the QUOTE asset for the
+    // reported amount (readOutput is explicit-only, so a blinded/absent output fails closed),
+    // then claim via the wallet's Sequentia HTLC spender (fee paid in the claimed asset).
+    const out = await C.seqLeg.readOutput(H.txid, H.vout);
+    const wantSpk = C.seqLeg.htlcSpkHex(H.redeem_script).toLowerCase();
+    if (!out || String(out.spk || '').toLowerCase() !== wantSpk)
+      throw new Error('The counterparty’s on-chain lock does not match this trade · not claiming.');
+    if (String(out.asset || '').toLowerCase() !== String(SELL.quote_asset).toLowerCase())
+      throw new Error('The counterparty’s on-chain lock is in the wrong asset · not claiming.');
+    if (BigInt(out.value) !== BigInt(String(H.amount || 0)))
+      throw new Error('The counterparty’s on-chain lock has the wrong amount · not claiming.');
+    claimTxid = await C.seqLeg.claim({ txid: H.txid, vout: H.vout, amount: H.amount, asset_id: SELL.quote_asset,
+      redeem_script: H.redeem_script, claim_secret: C.seqLeg.claimKey().secret_hex, secret_hex: SELL.preimage });
+  } else {
+    await C.btcLeg.verifyClaimable({ redeem_script: H.redeem_script, hash_h: SELL.hash_h,
+      claim_pub: H.taker_claim_pubkey, maker_refund_pub: H.maker_refund_pubkey, t_btc: H.t_btc,
+      preimage: SELL.preimage, txid: H.txid, vout: H.vout, amount: H.amount });
+    claimTxid = await C.btcLeg.claim({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, preimage: SELL.preimage });
+  }
   SELL.state = 'done'; SELL.claim_txid = (claimTxid && claimTxid.toString) ? claimTxid.toString() : String(claimTxid); saveSell();
   // Enriched receipt (P5.1): sub-asset SELL = asset paid over LN, BTC claimed on-chain. base = the asset,
   // quote = BTC; size = asset units sold, price = BTC received per asset unit.
+  const sellQtk = SELL.quote_asset ? ((C.assetMeta(SELL.quote_asset) || {}).ticker || 'quote') : 'BTC';
   const sellBtcU = (() => { try { return Number(big(H.amount || 0)) / 1e8; } catch { return null; } })();
-  logTrade({ id: 'sell:' + (SELL.hash_h || SELL.claim_txid || ''), title: 'Sold ' + SELL.ticker + ' for BTC',
-    status: 'BTC claimed', txid: SELL.claim_txid, rail: 'sub-asset', preimage: SELL.preimage || null,
-    pair: (SELL.ticker || 'asset') + '/BTC', side: 'sell', sizeTicker: SELL.ticker || null,
+  logTrade({ id: 'sell:' + (SELL.hash_h || SELL.claim_txid || ''), title: 'Sold ' + SELL.ticker + ' for ' + sellQtk,
+    status: sellQtk + ' claimed', txid: SELL.claim_txid, rail: 'sub-asset', preimage: SELL.preimage || null,
+    pair: (SELL.ticker || 'asset') + '/' + sellQtk, side: 'sell', sizeTicker: SELL.ticker || null,
     size: (SELL.amount != null ? Number(SELL.amount) : null),
     price: (sellBtcU != null && Number(SELL.amount) > 0) ? sellBtcU / Number(SELL.amount) : null });
 }
@@ -6378,8 +6430,9 @@ export async function resumeSell(){
       SELL.error = C.prettyErr(e); saveSell();
       try {
         const H = SELL.btc_htlc;
-        if (H && H.txid != null && H.vout != null && C.btcLeg && C.btcLeg.outspend){
-          const os = await C.btcLeg.outspend(H.txid, H.vout);
+        const spendChecker = SELL.quote_asset ? (C.seqLeg && C.seqLeg.outspend) : (C.btcLeg && C.btcLeg.outspend);
+        if (H && H.txid != null && H.vout != null && spendChecker){
+          const os = await (SELL.quote_asset ? C.seqLeg : C.btcLeg).outspend(H.txid, H.vout);
           if (os.known && os.spent){
             SELL.state = 'failed';
             SELL.error = 'This trade is already resolved · your balance is up to date, and you can clear this.';
@@ -6403,13 +6456,15 @@ export async function resumeSell(){
     // abandoned that BTC. So re-call FIRST; only clear once the LSP confirms the payment did not
     // settle. If the service is unavailable, keep the record (retry next load) regardless of age.
     if (!(L && L.swap && L.assetNodeKey)) return;                                             // service unavailable in this build; retry next load
-    if (!(C.btcLeg && C.btcLeg.claim && C.btcLeg.claimKey && C.btcLeg.verifyClaimable)) return;
+    if (SELL.quote_asset ? !(C.seqLeg && C.seqLeg.claim && C.seqLeg.claimKey)
+                         : !(C.btcLeg && C.btcLeg.claim && C.btcLeg.claimKey && C.btcLeg.verifyClaimable)) return;
     try {
       const asset = SELL.asset, offer = SELL.offer || null;
-      const btc_claim_pub = C.btcLeg.claimKey().public_key;     // re-derived the SAME way startSell does
+      const btc_claim_pub = (SELL.quote_asset ? C.seqLeg.claimKey() : C.btcLeg.claimKey()).public_key;     // re-derived the SAME way startSell does
       const node_key = await L.assetNodeKey(asset);
       if (L.connectNode){ const prov = await L.connectNode(asset); if (!(prov && prov.connected)) return; }
       const resp = await L.swap({ side: 'sell', asset, node_key, btc_claim_pub, amount: SELL.amount,
+        quote_asset: SELL.quote_asset || undefined,
         payRail: 'ln', recvRail: 'chain',
         offer_id: offer && offer.offer_id, maker_pubkey: offer && offer.maker_pubkey,
         swap_nonce: SELL.swap_nonce });
@@ -6422,6 +6477,7 @@ export async function resumeSell(){
       }
       SELL = { state: 'claiming', asset, ticker: SELL.ticker || ((C.assetMeta(asset)||{}).ticker || ''),
         preimage: resp.preimage, hash_h: resp.hash_h, btc_htlc: resp.btc_htlc,
+        quote_asset: SELL.quote_asset || undefined,
         expected_btc: Number((offer && offer.btc_sats) || SELL.expected_btc || 0),
         swap_nonce: SELL.swap_nonce, ts: mixedTip() }; saveSell();
       await claimSell();
@@ -6511,10 +6567,26 @@ function subAssetBuySupported(){
 function subAssetBuyUnsupportedNote(tk){
   return `Receiving ${tk || 'this asset'} over Lightning while paying Bitcoin on-chain is not settled by this build yet · switch your receive leg to on-chain to take this offer now.`;
 }
+// CAN THIS BUILD EXECUTE A MIXED SAME-CHAIN SWAP (one leg over Lightning, the on-chain
+// leg an issued asset)? The seqLeg twin of subAssetBuySupported: the BUY funds/refunds a
+// Sequentia HTLC on the quote asset; the SELL claims one. One predicate, gating Place on
+// exactly what the executors require.
+function subAssetMixedSupported(){
+  return !!(L && L.swap && L.assetNodeKey && L.nodeInvoice && L.invoiceStatus && L.nodeSettle
+    && C.seqLeg && C.seqLeg.fund && C.seqLeg.refund && C.seqLeg.refundKey && C.seqLeg.claim
+    && C.seqLeg.findFundingByAddress
+    && C.wasm && C.wasm.generateSwapSecret && C.wasm.buildSeqHtlcRedeemScript);
+}
 async function startBuy(params){
   const { $ } = C;
   const asset = params.asset, am = C.assetMeta(asset);
   const offer = params.offer || null;
+  // Mixed same-chain: the on-chain leg is THIS issued asset (the pair's quote) on the
+  // Sequentia chain via C.seqLeg, instead of Bitcoin via C.btcLeg. Everything else —
+  // the HODL invoice, the preimage discipline, the LSP job — is identical.
+  const qh = params.quoteAsset || null;
+  const qm = qh ? (C.assetMeta(qh) || {}) : { ticker: 'BTC', precision: 8 };
+  const qtk = qm.ticker || 'quote';
   // Bound CONCURRENT buys against the same ceiling as every other rail, rather than allowing exactly
   // one ever. _buyStarting still serialises the pre-fund prologue so two rapid starts cannot both pass
   // this check and fund two HTLCs for one slot.
@@ -6537,7 +6609,7 @@ async function startBuy(params){
     _buyStarting = true;   // serialise the pre-fund prologue so two starts cannot share one slot (TOCTOU)
     // One predicate, shared with the composer's Place gate (see subAssetBuySupported), so
     // Review can never enable a Place this then refuses.
-    if (!subAssetBuySupported()) throw new Error(subAssetBuyUnsupportedNote(am && am.ticker));
+    if (qh ? !subAssetMixedSupported() : !subAssetBuySupported()) throw new Error(subAssetBuyUnsupportedNote(am && am.ticker));
     const makerClaimPub = offer && (offer.maker_claim_pub || offer.maker_claim_pubkey);
     if (!offer || !makerClaimPub) throw new Error('No resting ' + am.ticker + ' buy offer right now · try again shortly.');
     say('Preparing your buy…');
@@ -6596,8 +6668,8 @@ async function startBuy(params){
     if (!(inv && (inv.payment_hash || inv.hodl))) throw new Error('This trade could not be completed - your funds are safe.');
     // 3. Build + FUND the BTC HTLC on H: maker claims with P, device refunds after T_btc (the PROVEN
     //    xswap.js:689-695 engine, roles flipped). T_btc = max(offer.onchain_cltv, tip + delta).
-    const refund = C.btcLeg.refundKey();                // device refund key; only we can refund
-    const tip = await C.btcLeg.tipHeight();
+    const refund = qh ? C.seqLeg.refundKey() : C.btcLeg.refundKey();   // device refund key; only we can refund
+    const tip = qh ? await seqTipHeight() : await C.btcLeg.tipHeight();
     const T_btc = Math.max(Number(offer.onchain_cltv || 0), tip + BUY_CLTV_DELTA);
     const redeem = C.wasm.buildSeqHtlcRedeemScript(H, makerClaimPub, refund.public_key, T_btc);
     // PERSIST-BEFORE-BROADCAST (fund-safety): the funding tx below locks BTC and then BLOCKS for a
@@ -6606,21 +6678,34 @@ async function startBuy(params){
     // 'funding' NOW, capture the txid via onBroadcast (BEFORE the confirmation wait), and advance to
     // 'funded' only once the outpoint is known. resumeBuy recovers a 'funding' record by its txid.
     b = addBuy({ state: 'funding', asset, ticker: am.ticker, preimage: P, hash_h: H, node_key,
+      quote_asset: qh || undefined,   // mixed same-chain: the on-chain leg's REAL asset (absent = BTC)
       btc_htlc: { redeem_script: redeem, cltv: T_btc, amount: btcSats, maker_claim_pub: makerClaimPub, taker_refund_pub: refund.public_key },
       t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() });
-    say('Locking your Bitcoin …');
+    say(qh ? ('Locking your ' + qtk + ' …') : 'Locking your Bitcoin …');
     // 0-CONF HAND-OFF: do NOT block on a Bitcoin confirmation here. This rail delivers the asset over
     // Lightning, so waiting for a block before even commanding the maker gave the trade Bitcoin's
     // latency for no protocol reason — the exact "why am I waiting for a Bitcoin confirmation?" this
     // rail exists to avoid. The maker carries the 0-conf risk and advertises its own policy, so it
     // makes that call on the outpoint we hand it. The CLTV refund path is unchanged.
-    const funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (b && b.btc_htlc){ b.btc_htlc.txid = String(txid); saveBuys(); } }, { waitConf: false });
+    let funded;
+    if (qh){
+      // Sequentia HTLC on the quote asset (0-conf hand-off identical to the BTC leg): fund via the
+      // wallet's own tx builder, persist the txid the moment it exists, then locate the HTLC vout
+      // (esplora includes mempool UTXOs, so this resolves at 0-conf).
+      const r = await C.seqLeg.fund(redeem, qh, btcSats);
+      if (b && b.btc_htlc){ b.btc_htlc.txid = String(r.txid); saveBuys(); }
+      const f = await C.seqLeg.findFundingByAddress(redeem);
+      funded = { txid: String(r.txid), vout: f && f.txid === String(r.txid) ? f.vout : (f ? f.vout : 0) };
+    } else {
+      funded = await C.btcLeg.fund(redeem, btcSats, (txid) => { if (b && b.btc_htlc){ b.btc_htlc.txid = String(txid); saveBuys(); } }, { waitConf: false });
+    }
     b.btc_htlc.txid = String(funded.txid); b.btc_htlc.vout = funded.vout; b.state = 'funded'; saveBuys();
     const btc_htlc = b.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
-    logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with BTC', status: 'BTC locked' });
+    logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with ' + qtk, status: qtk + ' locked' });
     // 4. Command the LSP to drive the maker's pay-by-hash (ASYNC job -> 202 { job_id, poll, held:false }).
     say('Waiting for your trade to settle …');
     const job = await L.swap({ side: 'buy', hodl: true, asset, node_key, payment_hash: H, asset_amount: assetAtoms,
+      quote_asset: qh || undefined,
       payRail: 'chain', recvRail: 'ln', btc_htlc, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey });
     b.job_id = job && (job.job_id || job.jobId); b.poll = job && job.poll; saveBuys();
     // 5. Wait for the maker's asset payment to arrive HELD, then DEVICE-SETTLE with P (or refund after T_btc).
@@ -6654,8 +6739,8 @@ async function driveBuy(b, say){
   const buyReceipt = () => {
     const buyAssetU = (() => { try { return Number(big(b.asset_amount || 0)) / Math.pow(10, (metaOf(b.asset) || {}).precision || 0); } catch { return null; } })();
     const buyBtcU = (() => { try { return Number(big((b.btc_htlc && (b.btc_htlc.amount || b.btc_htlc.btc_sats)) || 0)) / 1e8; } catch { return null; } })();
-    logTrade({ id: 'buy:' + H, title: 'Bought ' + b.ticker + ' with BTC', status: 'asset received',
-      rail: 'sub-asset', preimage: b.preimage || null, pair: (b.ticker || 'asset') + '/BTC', side: 'buy',
+    logTrade({ id: 'buy:' + H, title: 'Bought ' + b.ticker + ' with ' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), status: 'asset received',
+      rail: 'sub-asset', preimage: b.preimage || null, pair: (b.ticker || 'asset') + '/' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), side: 'buy',
       size: buyAssetU, sizeTicker: b.ticker || null,
       price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null });
   };
@@ -6702,7 +6787,8 @@ async function driveBuy(b, say){
       // refused — correctly — with 'redeemScript mismatch', the two scripts differing in exactly that
       // one field. So a revival asks for the same maker's CURRENT offer, whatever it is now.
       const job = await L.swap({ side: 'buy', hodl: true, asset: b.asset, node_key, payment_hash: H,
-        asset_amount: b.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: b.btc_htlc,
+        asset_amount: b.asset_amount, quote_asset: b.quote_asset || undefined,
+        payRail: 'chain', recvRail: 'ln', btc_htlc: b.btc_htlc,
         maker_pubkey: b.maker_pubkey });
       b.job_id = job && (job.job_id || job.jobId); b.poll = job && job.poll; saveBuys();
       return true;
@@ -6716,7 +6802,8 @@ async function driveBuy(b, say){
   if (!b.job_id && b.btc_htlc){
     try {
       const job = await L.swap({ side: 'buy', hodl: true, asset: b.asset, node_key, payment_hash: H,
-        asset_amount: b.asset_amount, payRail: 'chain', recvRail: 'ln', btc_htlc: b.btc_htlc,
+        asset_amount: b.asset_amount, quote_asset: b.quote_asset || undefined,
+        payRail: 'chain', recvRail: 'ln', btc_htlc: b.btc_htlc,
         maker_pubkey: b.maker_pubkey });
       b.job_id = job && (job.job_id || job.jobId); b.poll = job && job.poll; saveBuys();
     } catch {}   // never mind — the refund guard below still protects the funds
@@ -6736,10 +6823,10 @@ async function driveBuy(b, say){
         // The job is dead AND could not be re-commanded. Say so, with the reason and the block at which
         // the Bitcoin comes back on its own, rather than an indefinite reassuring spinner.
         say('The seller isn’t responding · ' + C.prettyErr(new Error(lastReason))
-          + (b.t_btc ? ' · your Bitcoin returns automatically at block ' + b.t_btc + ' if this doesn’t complete.' : ''));
+          + (b.t_btc ? ' · your ' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'funds') : 'Bitcoin') + ' returns automatically at block ' + b.t_btc + ' if this doesn’t complete.' : ''));
     }
     tick++;
-    let tip = 0; try { tip = await C.btcLeg.tipHeight(); } catch {}
+    let tip = 0; try { tip = b.quote_asset ? await seqTipHeight() : await C.btcLeg.tipHeight(); } catch {}
     const status = await L.invoiceStatus({ node_key, payment_hash: H }).catch(() => null);
     // ALREADY SETTLED. Reached when the hold was settled outside this loop (a resume, or a second
     // driver instance that won the race). The trade is COMPLETE, so it needs the same receipt the
@@ -6764,9 +6851,18 @@ async function driveBuy(b, say){
 // Refund the funded BTC HTLC via its CLTV branch after T_btc (a real on-chain reclaim). Terminal.
 async function refundBuy(b){
   const H = b.btc_htlc;
-  const txid = await C.btcLeg.refund({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, locktime: b.t_btc });
+  let txid;
+  if (b.quote_asset){
+    // Mixed same-chain: reclaim the quote-asset HTLC on the Sequentia chain via its CLTV branch.
+    txid = await C.seqLeg.refund({ txid: H.txid, vout: H.vout, amount: H.amount, asset_id: b.quote_asset,
+      redeem_script: H.redeem_script, locktime: b.t_btc,
+      refund_secret: C.seqLeg.refundKey().secret_hex });
+  } else {
+    txid = await C.btcLeg.refund({ txid: H.txid, vout: H.vout, amount: H.amount, redeem_script: H.redeem_script, locktime: b.t_btc });
+  }
   b.state = 'refunded'; b.refund_txid = (txid && txid.toString) ? txid.toString() : String(txid); saveBuys();
-  logTrade({ id: 'buy:' + (b.hash_h || ''), title: 'Buy refunded (' + b.ticker + ')', status: 'BTC refunded', txid: b.refund_txid });
+  const qtk2 = b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'funds') : 'BTC';
+  logTrade({ id: 'buy:' + (b.hash_h || ''), title: 'Buy refunded (' + b.ticker + ')', status: qtk2 + ' refunded', txid: b.refund_txid });
 }
 // On wallet load: if a buy funded its BTC HTLC but never completed, resume it — settle if the asset
 // is now held, or refund the BTC once past T_btc. The fund-recovery path (mirrors resumeSell).
@@ -6788,7 +6884,9 @@ async function resumeOneBuy(b){
       if (!b.btc_htlc.txid){ clearBuy(b); return; }
       if (b.btc_htlc.vout == null){
         try {
-          const f = await C.btcLeg.findFunding(b.btc_htlc.txid, b.btc_htlc.redeem_script);
+          const f = b.quote_asset
+            ? await C.seqLeg.findFundingByAddress(b.btc_htlc.redeem_script)
+            : await C.btcLeg.findFunding(b.btc_htlc.txid, b.btc_htlc.redeem_script);
           if (f && f.vout != null){ b.btc_htlc.vout = f.vout; b.state = 'funded'; saveBuys(); }
           else return;   // not indexed yet; retry next load — the BTC stays refundable at T_btc
         } catch { return; }
@@ -8550,7 +8648,7 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // Drive the FULL composer requote for the cross (chain/chain) + mixed (sub-asset) branches, so a headless
   // test can prove they render the SAME rail-blind preview (both source the offer/fill from bridgedTakePlan).
   requoteMixed, requoteCross, requoteLn,
-  setSubassetBook: (hex, entry) => { const k = String(hex).toLowerCase(); if (entry == null) delete SUBASSET_BOOK[k]; else SUBASSET_BOOK[k] = entry; },
+  setSubassetBook: (hex, entry, quote) => { const k = String(hex).toLowerCase() + '|' + String(quote || 'BTC').toLowerCase(); if (entry == null) delete SUBASSET_BOOK[k]; else SUBASSET_BOOK[k] = entry; },
   // The priced/oriented quote the composer carries into Review -> startBuy/startSell. A headless test reads it to
   // prove the settlement handle (buyOffer/sellOffer) + the authoritative fill (takeAssetAtoms/takeBtcSats) are
   // exactly what the composer DISPLAYED (the sub-asset settle-offer must be the SAME id it showed).
