@@ -6599,6 +6599,24 @@ if (!BUYS.length){
   try { const one = JSON.parse(localStorage.getItem(BUY_KEY) || 'null'); if (one) BUYS = [one]; } catch {}
 }
 for (const b of BUYS) if (b && !b.id) b.id = newTradeId();
+// RESCUE ADOPTION: 'swk.rescue.buys' is a side-channel for recovery records (a funded HTLC whose
+// primary record was lost — e.g. erased by a sibling tab running pre-merge code). Nothing else ever
+// writes this key, so it survives any clobber of the primary store; every boot re-adopts what it has
+// not seen (by id/hash) and drops entries that have gone terminal. Idempotent by design.
+try {
+  const rescue = JSON.parse(localStorage.getItem('swk.rescue.buys') || 'null');
+  if (Array.isArray(rescue)){
+    const live = [];
+    for (const r of rescue){
+      if (!r || !(r.btc_htlc && r.btc_htlc.txid)) continue;
+      if (r.state === 'settled' || r.state === 'refunded' || r.state === 'failed') continue;
+      live.push(r);
+      const seen = BUYS.some((b) => b && ((r.id && b.id === r.id) || (r.hash_h && b.hash_h === r.hash_h)));
+      if (!seen){ if (!r.id) r.id = newTradeId(); BUYS.push(r); }
+    }
+    localStorage.setItem('swk.rescue.buys', JSON.stringify(live));
+  }
+} catch {}
 // Synchronous in-flight sentinel (mirror of _sellStarting). A record only reaches 'funded' AFTER the
 // pre-fund prologue, so without this two rapid starts could both pass the slot check and fund two BTC
 // HTLCs for one slot. It bounds CONCURRENT STARTS, not the number of live buys.
@@ -6614,6 +6632,14 @@ function clearBuy(rec){
   if (!rec){ for (const r of BUYS) if (r && r.id) _buyTombstones.add(r.id); BUYS = []; saveBuys(); return; }
   if (rec.id) _buyTombstones.add(rec.id);
   BUYS = BUYS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
+  // Retire any rescue copy of this record: the trade is terminal, so the side-channel must not
+  // resurrect it on the next boot.
+  try {
+    const rescue = JSON.parse(localStorage.getItem('swk.rescue.buys') || 'null');
+    if (Array.isArray(rescue))
+      localStorage.setItem('swk.rescue.buys', JSON.stringify(rescue.filter((r) =>
+        r && !(rec.id && r.id === rec.id) && !(rec.hash_h && r.hash_h === rec.hash_h))));
+  } catch {}
   saveBuys();
 }
 function buyTerminal(b){ return !b || b.state === 'settled' || b.state === 'failed' || b.state === 'refunded'; }
