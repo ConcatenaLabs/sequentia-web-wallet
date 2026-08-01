@@ -25,8 +25,8 @@ function prettyErr(m) {
     return 'The other side’s Lightning node could not accept the payment just now, so nothing was sent. This usually clears on its own - try again, or take a different offer.';
   if (/no route|route not found|failed to find a route|WIRE_UNKNOWN_NEXT_PEER/i.test(m))
     return 'No Lightning route to the other side had room for this amount, so nothing was sent. Try a smaller amount or a different offer.';
-  if (/no verified .*offer found|offer (is )?(gone|expired|no longer)|unliftable/i.test(m))
-    return 'That offer is no longer on the book - reload the market and take a current one.';
+  if (/no verified .*offer found|offer (is )?(gone|expired|no longer)|unliftable|maker is not connected|cannot be lifted/i.test(m))
+    return 'The other side of that offer has gone offline, so it can no longer be filled - reload the market and take a current one.';
   if (/insufficient (funds|balance|capacity)|not enough (funds|liquidity)/i.test(m))
     return 'There is not enough balance or Lightning capacity to complete this at the size requested. Try a smaller amount.';
   if (/lightning-rpc|connection refused|ECONNREFUSED/i.test(m))
@@ -44,7 +44,11 @@ const REAL = {
   'peer failed the cross-chain lift: btc_leg_invalid: xchain: taker BTC leg invalid (does not match quote): redeemScript mismatch (want 63a820.., got 63a820..)':
     /other side of this trade changed/,
   'error: no verified sub-asset offer found to buy 3a0f9192 with on-chain BTC':
-    /no longer on the book/,
+    /no longer be filled|no longer on the book/,
+  // The same-chain covenant fill's own wording for a departed maker, which reached the user as the
+  // bare default while the console held the real sentence.
+  'relay: maker is not connected; this offer cannot be lifted right now':
+    /gone offline/,
   'inbound provisioning failed: getinfo: lightning-cli: Connecting to \'lightning-rpc\': Connection refused':
     /Lightning node is not reachable/,
 };
