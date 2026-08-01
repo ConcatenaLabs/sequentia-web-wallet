@@ -179,15 +179,22 @@ function wsURL(relayUrl){
 function wsTransport(ws){
   const inbox = [];
   let waiter = null;
+  let closed = false;
   const push = (m) => { if (waiter){ const w = waiter; waiter = null; w.resolve(m); } else inbox.push(m); };
   ws.onmessage = (ev) => { try { push(JSON.parse(typeof ev.data === 'string' ? ev.data : td.decode(new Uint8Array(ev.data)))); } catch {} };
-  ws.onclose = () => { if (waiter){ const w = waiter; waiter = null; w.reject(new Error('relay connection closed')); } };
+  // A close must fail EVERY future recv, not only one already pending: without the flag, a
+  // recv() issued after the socket died parked a waiter nothing could ever resolve, and the
+  // take sat silent to its full deadline instead of failing the moment the relay was gone.
+  ws.onclose = () => { closed = true; if (waiter){ const w = waiter; waiter = null; w.reject(new Error('relay connection closed')); } };
   return {
-    send: (obj) => ws.send(JSON.stringify(obj)),
+    send: (obj) => { if (closed) throw new Error('relay connection closed'); ws.send(JSON.stringify(obj)); },
     recv: (timeoutMs) => new Promise((resolve, reject) => {
-      if (inbox.length) return resolve(inbox.shift());
-      waiter = { resolve, reject };
-      if (timeoutMs) setTimeout(() => { if (waiter){ waiter = null; reject(new Error('courier timed out')); } }, timeoutMs);
+      if (inbox.length) return resolve(inbox.shift());   // drain frames that arrived before the close
+      if (closed) return reject(new Error('relay connection closed'));
+      const w = { resolve, reject };
+      waiter = w;
+      // Identity-checked: a stale timer from an earlier recv must never clobber a later waiter.
+      if (timeoutMs) setTimeout(() => { if (waiter === w){ waiter = null; reject(new Error('courier timed out')); } }, timeoutMs);
     }),
     close: () => { try { ws.close(); } catch {} },
     _ws: ws,
