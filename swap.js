@@ -2559,8 +2559,8 @@ function renderMixedTake(route, plan){
       ? ` · ${C.fmtAtoms(w.remainderAtoms, aprec)} ${tk} of your order cannot fill right now`
       : '';
     $('swRate').textContent = buy
-      ? `${wBtc} BTC → ${wAsset} ${tk}${across}${restNote}`
-      : `${wAsset} ${tk} → ${wBtc} BTC${across}${restNote}`;
+      ? `${wBtc} ${qtk} → ${wAsset} ${tk}${across}${restNote}`
+      : `${wAsset} ${tk} → ${wBtc} ${qtk}${across}${restNote}`;
     return { ...sz, takeAtoms: w.filledAtoms, takeBtc: w.filledBtc,
              walk: w, hasAmount: true, capped: false, partial: w.partial };
   }
@@ -2569,11 +2569,11 @@ function renderMixedTake(route, plan){
   // request cut down by orders of magnitude read as the app quietly overwriting the
   // field — which is exactly how it was reported.
   const capNote = sz.capped
-    ? ` · limited to ${buy ? btcStr + ' BTC' : assetStr + ' ' + tk} — that is all this offer has right now`
+    ? ` · limited to ${buy ? btcStr + ' ' + qtk : assetStr + ' ' + tk} — that is all this offer has right now`
     : '';
   $('swRate').textContent = buy
-    ? `${btcStr} BTC → ${assetStr} ${tk}${capNote}`
-    : `${assetStr} ${tk} → ${btcStr} BTC${capNote}`;
+    ? `${btcStr} ${qtk} → ${assetStr} ${tk}${capNote}`
+    : `${assetStr} ${tk} → ${btcStr} ${qtk}${capNote}`;
   return { ...sz, hasAmount: true };
 }
 
@@ -6152,13 +6152,19 @@ async function reviewMixed(q){
     }
   }
   const amount = fieldUnits($('swPayAmt'), S.payAsset) || null;
+  // The quote leg's NAME: Bitcoin for the cross shapes, the quote asset's ticker for
+  // the mixed same-chain shape (it stands in BTC's structural place, words included).
+  const mixedQ = (q.route && q.route.mixedSame && q.route.quoteAsset) || null;
+  const qName = mixedQ ? ((C.assetMeta(mixedQ) || {}).ticker || 'the quote asset') : 'Bitcoin';
+  const qTick = mixedQ ? ((C.assetMeta(mixedQ) || {}).ticker || 'quote') : 'BTC';
+  const qPrec = mixedQ ? ((C.assetMeta(mixedQ) || {}).precision ?? 8) : 8;
   const dir = isSubAsset
-    ? `Buy ${am.ticker} with Bitcoin on-chain · receive ${am.ticker} over Lightning`
+    ? `Buy ${am.ticker} with ${qName} on-chain · receive ${am.ticker} over Lightning`
     : isSubAssetSell
-    ? `Sell ${am.ticker} over Lightning · receive Bitcoin on-chain`
+    ? `Sell ${am.ticker} over Lightning · receive ${qName} on-chain`
     : (side === 'buy'
-      ? `Buy ${am.ticker} with Bitcoin over Lightning · receive ${am.ticker} on-chain`
-      : `Sell ${am.ticker} on-chain · receive Bitcoin over Lightning`);
+      ? `Buy ${am.ticker} with ${qName} over Lightning · receive ${am.ticker} on-chain`
+      : `Sell ${am.ticker} on-chain · receive ${qName} over Lightning`);
   // The Review shows ONLY the user's own legs (what they pay / receive, via `dir`) + a plain reassurance —
   // never any of the settlement machinery that carries the trade to completion. The Pricing row states the
   // REAL (possibly partial) fill terms from the sized take the composer carried — never "the whole offer".
@@ -6166,7 +6172,7 @@ async function reviewMixed(q){
   const takeA = q.takeAssetAtoms != null ? BigInt(q.takeAssetAtoms) : null;
   const takeB = q.takeBtcSats != null ? BigInt(q.takeBtcSats) : null;
   const pricingRow = (takeA != null && takeB != null)
-    ? `Best resting offer · ${C.fmtAtoms(takeA, aprec)} ${am.ticker} for ${C.fmtAtoms(takeB, 8)} BTC`
+    ? `Best resting offer · ${C.fmtAtoms(takeA, aprec)} ${am.ticker} for ${C.fmtAtoms(takeB, qPrec)} ${qTick}`
     : 'Best resting offer at its posted price';
   const kv = [
     ['Direction', dir],
