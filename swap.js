@@ -119,6 +119,42 @@ function loadHist(){
   } catch { return []; }
 }
 function saveHist(h){ try { localStorage.setItem(histKey(), JSON.stringify(h.slice(0, HIST_CAP))); } catch {} }
+// ---------------------------------------------------------------------------
+// Hidden assets (F2). Hiding is VISUAL DECLUTTERING ONLY: a hidden asset keeps its
+// full standing everywhere that matters — it still counts toward the reference-currency
+// headline total, still trades, and is still FOUND by ticker search or a pasted id in
+// the asset pickers. It just leaves the default balance list + default picker rows.
+// Persisted per wallet (same fingerprint idiom as the trade history key), so one
+// browser holding several wallets never blends their hidden sets. Native BTC (the
+// parent-chain first-class asset) can never be hidden.
+// ---------------------------------------------------------------------------
+const HIDDEN_KEY = 'swk.hidden';
+function hiddenKey(){ return HIDDEN_KEY + '.' + walletTag(); }
+export function hiddenAssets(){
+  try { return new Set(JSON.parse(localStorage.getItem(hiddenKey()) || '[]')); } catch { return new Set(); }
+}
+export function isAssetHidden(hex){ return !!hex && hex !== 'BTC' && hiddenAssets().has(hex); }
+export function setAssetHidden(hex, on){
+  if (!hex || hex === 'BTC') return;   // BTC is the parent chain: always visible, never hideable
+  const s = hiddenAssets();
+  if (on) s.add(hex); else s.delete(hex);
+  try { localStorage.setItem(hiddenKey(), JSON.stringify([...s])); } catch {}
+}
+// Split a balance-list key set into the visible main list and the collapsed hidden
+// section. A hidden asset whose TOTAL is zero appears in neither (the balance list
+// already elides zero rows, and an invisible zero row has nothing to unhide toward
+// — it comes back by itself the moment it holds a balance again, still hidden).
+// totalAtomsOf(hex) -> the row's combined total (on-chain + Lightning), as the
+// balance renderer computes it; BTC is never partitioned out.
+export function partitionHidden(keys, totalAtomsOf){
+  const s = hiddenAssets(), visible = [], hidden = [];
+  for (const h of keys || []){
+    if (h !== 'BTC' && s.has(h)){
+      if (big(totalAtomsOf ? totalAtomsOf(h) : 1n) > 0n) hidden.push(h);
+    } else visible.push(h);
+  }
+  return { visible, hidden };
+}
 // Derive the pair label, side (buy/sell of the pair's base), price (quote per base) and base size for a
 // receipt from the trade's pay/receive assets + atom amounts. Pure/display; used to enrich logTrade.
 function tradeMeta(pay, receive, payAtoms, recvAtoms){
@@ -956,8 +992,19 @@ function startableAssets(){
     if (!cur){ byKey.set(key, h); continue; }
     if ((reg.has(h) && !reg.has(cur)) || (held(h) && !held(cur))) byKey.set(key, h);   // prefer registry-known, then held
   }
-  return [...byKey.values()];
+  const out = [...byKey.values()];
+  // F1 paste-an-id: an asset id the user explicitly pasted + picked stays selectable for the
+  // session even with no registry entry and no balance — otherwise the resolved/held dedup
+  // above drops it and ensureDefaults would silently clear the user's own pick.
+  for (const h of PASTED){ if (!out.includes(h)) out.push(h); }
+  return out;
 }
+// Session set of asset ids the user pasted into a picker search box and PICKED (F1).
+// Registered by the popover on selection; read by startableAssets so the pick survives
+// validation. Session-only on purpose: an id that was never traded needs no persistence,
+// and one that WAS traded persists through the trade history/balances instead.
+const PASTED = new Set();
+function notePasted(hex){ try { PASTED.add(String(hex).toLowerCase()); } catch {} }
 
 // ---------------------------------------------------------------------------
 // P5.2 — markets overview (pair discovery)
@@ -1261,7 +1308,22 @@ function ensureDefaults(){
 // ---------------------------------------------------------------------------
 function tk(hex){ return hex ? C.assetMeta(hex).ticker : 'Select'; }
 // Precision/ticker for BTC, the one parent-chain asset, so it formats like any other.
-function metaOf(hex){ return hex === 'BTC' ? { ticker: 'BTC', precision: 8 } : C.assetMeta(hex); }
+// An id NOBODY can name (not in the registry, user labels, or built-in defaults) comes back
+// from assetMeta as the generic placeholder {ticker:'<8-hex>…', name:'Asset', precision:0}.
+// Precision 0 would mis-scale every typed amount by 1e8, which made a pasted unknown id
+// effectively untradeable. F1 makes it TRADEABLE instead: keep the id-prefix ticker but
+// quote/trade at the chain-native precision 8 (the books are keyed by raw hex, so quoting
+// needs no registry presence — only a sane amount scale). The placeholder is recognized by
+// its exact construction (id-prefix ticker + generic name), so a real registry/labeled
+// asset with precision 0 is never touched.
+function metaOf(hex){
+  if (hex === 'BTC') return { ticker: 'BTC', precision: 8 };
+  const m = C.assetMeta(hex);
+  if (m && m.name === 'Asset' && !m.precision && typeof hex === 'string'
+      && m.ticker === hex.slice(0, 8) + '…')
+    return { ...m, precision: 8 };
+  return m;
+}
 function balAtoms(hex){
   if (!hex) return 0n;
   if (hex === 'BTC') return big(C.btcBalance || 0);   // parent-chain balance, shown like any other
@@ -3908,20 +3970,28 @@ function balLine(hex){
   return { b: C.fmtAtoms(a, m.precision) + ' ' + m.ticker, r: C.refValueStr(hex, a) || '' };
 }
 
-function openPicker(side){
+// The candidate rows for one side's picker. Candidate set: assets that trade against the
+// OTHER side (or all tradable if the other side is unset) — this is what enforces "only
+// offer a counter-asset that trades". Each row is flagged held (a positive balance
+// ON-CHAIN OR LIGHTNING — a fully-moved asset is still yours) and hidden (F2), which is
+// what pickerMatches keys the default-vs-search visibility on. Split out of openPicker
+// so the headless harness drives the REAL candidate construction.
+function pickerCandidates(side){
   const other = side === 'pay' ? S.receiveAsset : S.payAsset;
-  // Candidate set: assets that trade against the OTHER side (or all tradable if the
-  // other side is unset). This is what enforces "only offer a counter-asset that trades".
   const candidates = counterpartsOf(other);
   const cur = side === 'pay' ? S.payAsset : S.receiveAsset;
   // Your HELD assets first (carrying the on-chain/Lightning split that used to be on the top
   // cards), then every other tradable asset — so a registry of thousands stays navigable via the
-  // search box + a capped "All assets" tail. This dropdown is what replaces the removed cards.
-  const list = candidates.map(hex => ({
-    hex, ticker: C.assetMeta(hex).ticker, name: pickerName(hex), bal: balLine(hex),
-    held: balAtoms(hex) > 0n, split: balAtoms(hex) > 0n ? heldSplitStr(hex) : '',
-    enabled: hex !== cur,
-  }));
+  // search box. This dropdown is what replaces the removed cards.
+  const list = candidates.map(hex => {
+    const held = balAtoms(hex) > 0n || instantAtomsFor(hex) > 0n;
+    return {
+      hex, ticker: metaOf(hex).ticker, name: pickerName(hex), bal: balLine(hex),
+      held, split: held ? heldSplitStr(hex) : '',
+      hidden: isAssetHidden(hex),
+      enabled: hex !== cur,
+    };
+  });
   list.sort((a, b) => (b.held ? 1 : 0) - (a.held ? 1 : 0) || a.ticker.localeCompare(b.ticker));
   // The OPPOSITE side's asset used to be silently OMITTED here, so reversing a pair took a
   // three-step dance through a neutral asset. Show it instead — first, visually distinct,
@@ -3932,6 +4002,11 @@ function openPicker(side){
       split: '<span class="z">on the other side · tap to swap sides</span>',
       enabled: true, cls: 'swopt-other', pin: true });
   }
+  return { list, other };
+}
+
+function openPicker(side){
+  const { list, other } = pickerCandidates(side);
   const anchor = side === 'pay' ? C.$('swPayPick') : C.$('swRecvPick');
   popover(anchor, list, (hex) => {
     // The opposite side's asset = the swap-sides affordance: flip the whole pair (assets,
@@ -3959,6 +4034,31 @@ function pickerName(hex){ if (hex === 'BTC') return 'Bitcoin testnet4'; return C
 function heldSplitStr(hex){
   const m = metaOf(hex), instant = instantAtomsFor(hex), onchain = balAtoms(hex);
   return `<span class="z">${C.fmtAtoms(instant, m.precision)} Lightning</span> · ${C.fmtAtoms(onchain, m.precision)} on-chain`;
+}
+
+// Which rows a picker query shows (F1) — pure over the candidate rows, so the headless
+// harness pins it.
+// EMPTY query: only assets you HOLD (on-chain or Lightning) plus native BTC — the
+// parent-chain asset stays first-class in the picker even at 0 — minus hidden assets
+// (F2, Balance-tab hide). Pinned rows (the other side's tap-to-swap affordance) always
+// show. The registry tail is reachable by typing, never rendered eagerly.
+// TYPED query: search EVERY candidate (full registry, hidden assets included) by
+// ticker, name, or id. A 64-hex query that matches nothing known is still an asset id:
+// synthesize a selectable row for it (metaOf resolves registry metadata when known,
+// otherwise the id-prefix ticker at precision 8), marked pasted so the pick is
+// registered for the session (notePasted) and survives composer validation.
+function pickerMatches(items, q){
+  q = (q || '').trim();
+  if (!q) return items.filter(it => it.pin || it.hex === 'BTC' || (it.held && !it.hidden));
+  const ql = q.toLowerCase();
+  const match = items.filter(it => (it.ticker + ' ' + (it.name || '') + ' ' + it.hex).toLowerCase().includes(ql));
+  if (!match.length && /^[0-9a-fA-F]{64}$/.test(q)){
+    const hex = ql;   // asset ids are canonically lowercase hex
+    const m = metaOf(hex) || {};
+    match.push({ hex, ticker: m.ticker || hex.slice(0, 8) + '…', name: m.name || 'Asset',
+      bal: balLine(hex), held: false, split: '', hidden: false, enabled: true, pasted: true });
+  }
+  return match;
 }
 
 // A lightweight searchable popover anchored under `anchorEl`. `items` are
@@ -3992,13 +4092,15 @@ function popover(anchorEl, items, onPick){
     if (it.bal && it.bal.b) bal.appendChild(el('div','b', it.bal.b));
     if (it.bal && it.bal.r) bal.appendChild(el('div','r', it.bal.r));
     b.appendChild(t); b.appendChild(mid); b.appendChild(bal);
-    b.onclick = () => { if (it.enabled){ onPick(it.hex); closePopover(); } };
+    b.onclick = () => { if (it.enabled){ pickItem(it); } };
     return b;
   };
+  // One selection path for click + Enter: a pasted-id row is registered for the session
+  // (notePasted) so startableAssets keeps offering it and ensureDefaults never drops it.
+  const pickItem = (it) => { if (it.pasted) notePasted(it.hex); onPick(it.hex); closePopover(); };
   const draw = (q) => {
     listEl.innerHTML = ''; kbdIdx = -1; shown = []; optEls = [];
-    const ql = (q || '').toLowerCase();
-    const match = items.filter(it => !q || (it.ticker + ' ' + (it.name||'') + ' ' + it.hex).toLowerCase().includes(ql));
+    const match = pickerMatches(items, q);
     if (!match.length){ listEl.appendChild(el('div','swopt-empty','No matching assets.')); return; }
     // PINNED rows first (the other side's asset · tap-to-swap-sides), then your held assets,
     // then everything else. The "All assets" tail is capped until you search, so a registry
@@ -4010,10 +4112,12 @@ function popover(anchorEl, items, onPick){
       listEl.appendChild(b); shown.push(it); optEls.push(b);
     }
     const held = match.filter(it => it.held && !it.pin), all = match.filter(it => !it.held && !it.pin);
-    const capped = !q && all.length > ALL_CAP;
+    const capped = q && all.length > ALL_CAP;
     const groups = [];
     if (held.length) groups.push(['Your assets', held]);
-    if (all.length) groups.push([held.length ? 'All assets' : 'Assets', capped ? all.slice(0, ALL_CAP) : all]);
+    // Default view: the non-held tail is just BTC (and never the registry), so it is
+    // labeled plain 'Assets'; under a search the tail really is the registry sweep.
+    if (all.length) groups.push([(q && held.length) ? 'All assets' : 'Assets', capped ? all.slice(0, ALL_CAP) : all]);
     for (const [label, arr] of groups){
       listEl.appendChild(el('div','swopt-grp', label));
       for (const it of arr){
@@ -4023,6 +4127,8 @@ function popover(anchorEl, items, onPick){
       }
     }
     if (capped) listEl.appendChild(el('div','swopt-more', `+${all.length - ALL_CAP} more · keep typing to find them.`));
+    // The default view holds only your assets + BTC: say how to reach everything else.
+    if (!q) listEl.appendChild(el('div','swopt-more','Type to search every registry asset, or paste an asset id.'));
   };
   const markKbd = () => {
     optEls.forEach((c,i)=>c.classList.toggle('kbd', i===kbdIdx));
@@ -4032,7 +4138,7 @@ function popover(anchorEl, items, onPick){
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown'){ e.preventDefault(); kbdIdx = Math.min(shown.length-1, kbdIdx+1); markKbd(); }
     else if (e.key === 'ArrowUp'){ e.preventDefault(); kbdIdx = Math.max(0, kbdIdx-1); markKbd(); }
-    else if (e.key === 'Enter'){ e.preventDefault(); const it = shown[kbdIdx] || shown[0]; if (it && it.enabled){ onPick(it.hex); closePopover(); } }
+    else if (e.key === 'Enter'){ e.preventDefault(); const it = shown[kbdIdx] || shown[0]; if (it && it.enabled){ pickItem(it); } }
     else if (e.key === 'Escape'){ closePopover(); anchorEl.focus(); }
   });
   draw('');
@@ -9500,6 +9606,11 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // route the composer would take ({kind:'same', side, market} | {kind:'cross', ...} | null).
   composerRoute: (pay, receive) => findRoute(pay, receive),
   counterpartsOf, startableAssets, allTradableAssets: startableAssets,
+  // F1/F2 — asset picker default-vs-search visibility, paste-an-id tradability, and the
+  // hidden-asset store, exposed so the REAL candidate construction + filtering are pinned
+  // headlessly (no popover DOM needed).
+  pickerCandidates, pickerMatches, metaOf, notePasted, pastedIds: () => PASTED,
+  hiddenAssets, setAssetHidden, isAssetHidden, partitionHidden, ensureDefaults,
   acceptedFee, defaultFeeAsset,
   // Take/Post + rail-combo helpers, for headless verification of the composer's gating.
   postSupported, railSupported, applyAutoMode,
