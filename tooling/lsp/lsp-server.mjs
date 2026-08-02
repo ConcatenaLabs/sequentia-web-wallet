@@ -680,16 +680,42 @@ async function nodeStatus(rpc, leg) {
 // The BTC leg fronts over the BTC-LN node's (btc-taker) OWN channels: spendable = the LSP can DELIVER
 // BTC-LN (user receives), receivable = the LSP can RECEIVE it (user pays). Fully best-effort: a down LP
 // or BTC node simply advertises no fronting for its leg (the wallet then offers on-chain, honestly).
+// The POLICY asset (tSEQ) rides listfunds outputs UNTAGGED, and keying those under the
+// literal string 'policy' hid the LP's real tSEQ inventory from every wallet lookup
+// (ln-rail asks frontable.assets[<hex>]) — making the policy asset the ONE asset the
+// LSP would not front, which violates equal standing. Resolve the real hex once from
+// the chain's own labels and key untagged outputs under it ('policy' kept as an alias).
+let _policyAssetHex = process.env.POLICY_ASSET_HEX || '';
+async function policyAssetHex() {
+  if (_policyAssetHex) return _policyAssetHex;
+  if (!(CFG.elementsCli && CFG.seqRpcPort)) return '';
+  try {
+    const labels = await new Promise((resolve, reject) => {
+      execFile(CFG.elementsCli, [`-rpcport=${CFG.seqRpcPort}`, `-rpcuser=${CFG.seqRpcUser}`,
+        `-rpcpassword=${CFG.seqRpcPass}`, 'dumpassetlabels'],
+        { timeout: 8000, maxBuffer: 1 << 20 },
+        (err, stdout) => err ? reject(err) : resolve(JSON.parse(stdout)));
+    });
+    const hex = labels && labels.bitcoin;
+    if (/^[0-9a-f]{64}$/i.test(hex || '')) _policyAssetHex = String(hex).toLowerCase();
+  } catch { /* node unreadable now; retried on the next status read */ }
+  return _policyAssetHex;
+}
 async function frontableInventory() {
   const assets = {}; const btc = { out_sat: 0, in_sat: 0 };
   if (CFG.subasLpRpc) {
     try {
+      const policyHex = await policyAssetHex();
       const lf = await lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS);
       for (const o of (lf.outputs || [])) {
         if (o.status !== 'confirmed' || o.reserved) continue;                 // confirmed + unreserved only
-        const a = (o.asset || 'policy').toLowerCase();
+        const raw = (o.asset || '').toLowerCase();
+        const a = raw || policyHex || 'policy';
         const sat = Math.round(Number(o.amount_msat ?? 0) / 1000);
-        if (sat > 0) assets[a] = (assets[a] || 0) + sat;
+        if (sat > 0) {
+          assets[a] = (assets[a] || 0) + sat;
+          if (!raw && policyHex) assets.policy = (assets.policy || 0) + sat;   // legacy alias
+        }
       }
     } catch { /* LP down -> no asset-leg fronting advertised */ }
   }
