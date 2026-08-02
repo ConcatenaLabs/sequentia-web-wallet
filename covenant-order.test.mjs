@@ -100,6 +100,43 @@ check('fill_part_rem_idx', String(recPart.plan.remainderIndex), '1');
   // The covenant field is load-bearing in the signature: mutating rate breaks it.
   const tampered = { ...signed, covenant: { ...ct, rate_num: '5' } };
   ok('cov_offer_tamper_detected', !seqob.__test__.verifyOffer(tampered), 'mutated covenant must fail verify');
+
+  // REGRESSION: the relay's watcher rewrites the resting outpoint
+  // (covenant_txid/covenant_vout) on every partial-fill re-rest while the maker
+  // is offline and cannot re-sign — so the outpoint is excluded from the signed
+  // canonical bytes and the signature must SURVIVE an outpoint rewrite. Funding
+  // stays trustless: takers re-derive the covenant spk from the signed terms and
+  // gettxout-verify the claimed outpoint.
+  const rerested = { ...signed, covenant: { ...ct, covenant_txid: 'ff'.repeat(32), covenant_vout: 3 } };
+  ok('cov_offer_survives_outpoint_rewrite', seqob.__test__.verifyOffer(rerested),
+     'signature must survive a watcher outpoint rewrite');
+  check('cov_canonical_outpoint_independent',
+        seqob.bytesToHex(seqob.__test__.canonicalOfferBytes(rerested)),
+        seqob.bytesToHex(seqob.__test__.canonicalOfferBytes(signed)));
+}
+
+// --- non-covenant canonical bytes are untouched by the outpoint exclusion ----
+// Pinned vector generated BEFORE covenant_txid/vout were dropped from
+// encodeCovenantTerms: a same-chain offer never enters that branch, so its
+// canonical byte-form must be identical before and after the change.
+{
+  const scOffer = {
+    offer_id: 'sc-1', schema_version: 1,
+    pair: { base_asset: 'gold', quote_asset: 'usdx' },
+    trade_dir: 'TRADE_DIR_SELL',
+    offer_amount: '100', offer_asset: 'gold',
+    want_amount: '45', want_asset: 'usdx',
+    allow_partial: true, min_fill: '1',
+    created_at_unix: '1750000000', expires_at_unix: '1750003600',
+    maker_pubkey: '02' + '11'.repeat(32),
+    same_chain: { maker_recv_address: 'el1qqexampleaddr', maker_blinding_pub: '02blindingpub' },
+  };
+  check('samechain_canonical_bytes_unchanged',
+        seqob.bytesToHex(seqob.__test__.canonicalOfferBytes(scOffer)),
+        '0a0473632d3110011a0c0a04676f6c64120475736478200130643a04676f6c64402d4a047573647850' +
+        '0158016080c3bbc2066890dfbbc20672423032313131313131313131313131313131313131313131313131' +
+        '31313131313131313131313131313131313131313131313131313131313131313131313131313131a2012' +
+        '10a10656c3171716578616d706c6561646472120d3032626c696e64696e67707562');
 }
 
 // --- REFUND: planRefund derives the byte-exact reclaim recipe ---------------

@@ -207,8 +207,13 @@ function encodeSameChain(s){
 function encodeCovenantTerms(c){
   if (!c) return null;
   const w = new PW();
-  w.str(1, O(c,'covenant_txid','covenantTxid'));
-  w.uint(2, O(c,'covenant_vout','covenantVout'));
+  // Fields 1-2 (covenant_txid/covenant_vout) are DELIBERATELY excluded from the
+  // signed canonical bytes: the relay's watcher rewrites the resting outpoint on
+  // every partial-fill re-rest and the offline maker cannot re-sign. Funding is
+  // verified against the covenant spk derived from these signed terms (plus a
+  // live gettxout on the claimed outpoint), mirroring the Go relay's
+  // CanonicalOfferBytes. The JSON POST wire format is unaffected — the outpoint
+  // still travels in the offer JSON; only the signed byte-form omits it.
   w.str(3, O(c,'asset_a','assetA'));
   w.str(4, O(c,'asset_b','assetB'));
   w.uint(5, O(c,'rate_num','rateNum'));
