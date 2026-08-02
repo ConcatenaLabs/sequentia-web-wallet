@@ -200,6 +200,10 @@ function normSeqLeg(l){
 function saveSwap(){
   try {
     if (!SWAP){ localStorage.removeItem(LS_KEY); return; }
+    // Per-stage timestamp (task 21a): stamped in the one save funnel every state transition
+    // goes through, so the stepper can say how long the current stage has been running.
+    if (SWAP.stage_state !== SWAP.state || !SWAP.stage_since_ms){ SWAP.stage_state = SWAP.state; SWAP.stage_since_ms = Date.now(); }
+    if (!SWAP.started_ms) SWAP.started_ms = Date.now();
     // BigInt isn't JSON-serializable; store amounts as decimal strings.
     const ser = JSON.parse(JSON.stringify(SWAP, (k, v) => typeof v === 'bigint' ? v.toString() : v));
     localStorage.setItem(LS_KEY, JSON.stringify(ser));
@@ -603,10 +607,14 @@ async function runForwardCourier(q){
       return;
     }
 
-    setStepStatus('lock', `Locking your ${C.fmtAtoms(fq.btc_amount,8)} BTC and waiting for 1 confirmation (about one Bitcoin block - often ~20 min on testnet4)…`, true);
-    // Pass the courier identity so lockBtcLeg persists it in the PENDING stub, before its confirmation
-    // wait — a reload during that wait then resumes on the courier path (see the stub in lockBtcLeg).
-    await lockBtcLeg(fq, { courier: true, offer_id: offer.offer_id || offer.offerId, maker_pubkey: offer.maker_pubkey || offer.makerPubkey });
+    // Block-aware conf-wait line (task 21a): live "last block N min ago · M min elapsed"
+    // while C.btcLeg.fund blocks on the 1-confirmation wait.
+    const stopConfNarr = startConfWaitNarrative(`Locking your ${C.fmtAtoms(fq.btc_amount,8)} BTC`);
+    try {
+      // Pass the courier identity so lockBtcLeg persists it in the PENDING stub, before its confirmation
+      // wait — a reload during that wait then resumes on the courier path (see the stub in lockBtcLeg).
+      await lockBtcLeg(fq, { courier: true, offer_id: offer.offer_id || offer.offerId, maker_pubkey: offer.maker_pubkey || offer.makerPubkey });
+    } finally { stopConfNarr(); }
     SWAP.courier = true;                  // re-assert in memory (lockBtcLeg already persisted these)
     SWAP.offer_id = offer.offer_id || offer.offerId;
     SWAP.maker_pubkey = offer.maker_pubkey || offer.makerPubkey;
@@ -743,6 +751,8 @@ function confirmLockModal(fq, sm){
       ['Maker fee', C.fmtAtoms(fq.fee_btc, 8) + ' BTC'],
       ['BTC refund after', 'block ' + fq.btc_locktime + ' (if the maker stalls, you reclaim the BTC)'],
       ['Then, automatically', 'the maker locks the asset, the wallet checks the Bitcoin anchor, and claims your asset. Anchor-bound to Bitcoin - reverts only if Bitcoin reverts.'],
+      // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
+      ['Speed', 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave, it resumes and refunds automatically.'],
     ];
     const { m, ok } = C.modalRows({ title: 'Confirm cross-chain swap', kv });
     if (ok) ok.textContent = 'Lock BTC & swap';
@@ -1041,6 +1051,8 @@ async function onLockBtc(){
     ['Maker fee', C.fmtAtoms(q.fee_btc, 8) + ' BTC'],
     ['BTC refund after', 'block ' + q.btc_locktime + ' (if the maker stalls, you reclaim the BTC)'],
     ['Atomicity', 'The BTC is claimable by the maker only with your secret; you can refund it after the timeout.'],
+    // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
+    ['Speed', 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave, it resumes and refunds automatically.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Lock the BTC leg', kv });
   ok.onclick = async () => {
@@ -1500,6 +1512,46 @@ function setStepStatus(_step, msg, spin){
   const el = C.$('xStepStatus'); if (!el) return;
   el.className = 'status'; el.innerHTML = (spin ? '<span class="spin"></span>' : '') + msg;
 }
+// Task 21a — stage narrative for the stepper header: typical duration per state (honest
+// testnet4 figures; PENDING is the 1-Bitcoin-confirmation wait) + elapsed since the stamp
+// saveSwap writes on each transition. Refreshed on re-render (each transition), so the
+// figure is a floor, not a live ticker — the conf-wait line below is the live one.
+function fmtDurX(ms){ const s = Math.max(0, Math.round(Number(ms)/1000)); if (s < 90) return s + 's'; const m = Math.round(s/60); if (m < 90) return m + 'm'; return (Math.round(m/6)/10) + 'h'; }
+function stageLine(){
+  if (!SWAP) return '';
+  const typical = { [ST.QUOTED]: 1, [ST.PENDING]: 20, [ST.SEQ_LOCKED]: 3, [ST.SEQ_CLAIMED]: 2 }[SWAP.state];
+  let out = '';
+  if (typical) out += ' · usually ~' + typical + 'm';
+  if (SWAP.stage_since_ms > 0) out += ' · ' + fmtDurX(Date.now() - SWAP.stage_since_ms) + ' elapsed';
+  return out;
+}
+// Task 21a — block-aware conf-wait line: "… waiting for 1 Bitcoin confirmation · last block
+// N min ago · M min elapsed". Tip time from the testnet4 esplora /blocks list (first row's
+// timestamp). When unreadable, the block-age clause is simply omitted (elapsed-only) —
+// never a fabricated figure. Returns a stop() the caller runs when the wait resolves.
+async function btcLastBlockAgeMin(){
+  try {
+    const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
+    const r = await fetch(base + '/blocks', { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;
+    const arr = await r.json();
+    const ts = Array.isArray(arr) && arr[0] && Number(arr[0].timestamp);
+    return (ts > 0) ? Math.max(0, Math.round((Date.now() / 1000 - ts) / 60)) : null;
+  } catch { return null; }
+}
+function startConfWaitNarrative(prefix){
+  const t0 = Date.now();
+  const paint = async () => {
+    const age = await btcLastBlockAgeMin();
+    const mins = Math.round((Date.now() - t0) / 60000);
+    setStepStatus('lock', prefix + ' · waiting for 1 Bitcoin confirmation · usually ~20m on testnet4'
+      + (age != null ? ' · last block ' + age + ' min ago' : '')
+      + (mins > 0 ? ' · ' + mins + ' min elapsed' : ''), true);
+  };
+  paint();
+  const timer = setInterval(paint, 30000);
+  return () => clearInterval(timer);
+}
 // Render the wizard body for the current SWAP (or the quote form if none).
 function renderStepper(){
   const { $, el } = C;
@@ -1529,7 +1581,9 @@ function renderStepper(){
       title: 'Bought ' + C.fmtAtoms(SWAP.seq_amount || 0, sm.precision) + ' ' + sm.ticker + ' with BTC (cross-chain)',
       status: 'complete', txid: SWAP.seq_claim_txid || null, rail: 'cross',
       pair: (sm.ticker || 'asset') + '/BTC', side: 'buy', size: xbSeqU, sizeTicker: sm.ticker || null,
-      price: (xbBtcU != null && xbSeqU > 0) ? xbBtcU / xbSeqU : null });
+      price: (xbBtcU != null && xbSeqU > 0) ? xbBtcU / xbSeqU : null,
+      // Task 21b: genuine settlement -> settle card (logTrade dedups by id, so exactly once).
+      card: true, elapsed_ms: (SWAP.started_ms > 0) ? (Date.now() - SWAP.started_ms) : null });
   }
 
   // Header card: market + overall badge + amounts + the secret/timeouts.
@@ -1542,6 +1596,9 @@ function renderStepper(){
   head.appendChild(kvRow('Paying', C.fmtAtoms(SWAP.btc_amount, 8) + ' BTC'));
   head.appendChild(kvRow('Timeouts', `T_btc=${SWAP.btc_locktime} · T_seq=${SWAP.seq_locktime}`));
   head.appendChild(kvRow('Hashlock H', short(SWAP.hash_hex)));
+  // Per-stage progress narrative (task 21a); only while the swap is still running.
+  if (!isForwardComplete() && SWAP.state !== ST.REFUNDED && SWAP.state !== ST.FAILED)
+    head.appendChild(kvRow('This stage', blabel + stageLine()));
   wrap.appendChild(head);
 
   // Step cards.
