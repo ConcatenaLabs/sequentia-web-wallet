@@ -389,7 +389,7 @@ function b64ToHex(s){
   try { const b = b64decode(s); return [...b].map(x => x.toString(16).padStart(2, '0')).join(''); }
   catch { return s; }
 }
-function normRelayOffer(o){
+export function normRelayOffer(o){
   const cov = o && (o.covenant || o.Covenant);
   if (cov){
     for (const k of ['maker_prog', 'makerProg', 'maker_x', 'makerX', 'internal_key', 'internalKey']){
@@ -587,10 +587,15 @@ export function openRelay(markets, handlers){
     const status = m.order_status || m.orderStatus;
     const removed = m.public_order_removed || m.publicOrderRemoved;
     if (book && handlers.onBook){
-      const offers = (book.offers || book.Offers || []).map(o => ({ ...o, _verified: verifyOffer(o) }));
+      // normRelayOffer BEFORE verify, exactly like fetchBook: the relay protojson-encodes a
+      // covenant offer's proto `bytes` fields as base64, and verifying without converting them
+      // back to the wallet's hex convention fails EVERY covenant offer delivered over the WS —
+      // so a stream rebuild silently dropped the whole covenant book while the REST path kept
+      // it (the same REST-vs-WS split as the relay-side ghost filter, from the other side).
+      const offers = (book.offers || book.Offers || []).map(o => { normRelayOffer(o); return { ...o, _verified: verifyOffer(o) }; });
       try { handlers.onBook({ pair: book.pair || book.Pair || null, offers }); } catch {}
     }
-    if (created && handlers.onOfferCreated){ try { handlers.onOfferCreated({ ...created, _verified: verifyOffer(created) }); } catch {} }
+    if (created && handlers.onOfferCreated){ try { normRelayOffer(created); handlers.onOfferCreated({ ...created, _verified: verifyOffer(created) }); } catch {} }
     if (matched && handlers.onMatched)         { try { handlers.onMatched(matched); } catch {} }
     if (status && handlers.onOrderStatus)      { try { handlers.onOrderStatus(status); } catch {} }
     if (removed && handlers.onOfferRemoved)    { try { handlers.onOfferRemoved(removed); } catch {} }

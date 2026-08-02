@@ -3950,25 +3950,34 @@ const server = http.createServer(async (req, res) => {
       // leaving it out is what forced the ln/ln composer onto a separate book and let
       // it show a different matched offer than every other rail for the same market.
       const relays = [...new Set([CFG.crossRelay, CFG.subasRelay, CFG.subasSellRelay, CFG.plnRelay].filter(Boolean))];
+      // The relay keys a market by EXACT base/quote order, and a same-chain resting order can
+      // sit under either orientation of the pair — reading only <asset>/<quote> silently
+      // dropped everything resting under <quote>/<asset> (the wallet's own book fetch reads
+      // both for exactly this reason). Read both; the maker:offer_id dedupe collapses overlap.
+      const markets = [`${assetId}/${quoteKey}`, `${quoteKey}/${assetId}`];
       const seen = new Set(), raw = [];
       for (const relay of relays) {
-        try {
-          const rr = await fetch(`${relay}/v1/market/${assetId}/${quoteKey}/orderbook`, { signal: AbortSignal.timeout(5000) });
-          if (!rr.ok) continue;
-          for (const o of ((await rr.json()).offers || [])) {
-            const key = (o.maker_pubkey || '') + ':' + (o.offer_id || '');
-            if (seen.has(key)) continue; seen.add(key);
-            // WHICH RELAY THIS OFFER CAME FROM. The book merges several relays, but a
-            // TAKE is an interactive courier session that must be opened against the
-            // relay actually holding the offer — anywhere else answers "offer not
-            // found or not open". Merging without carrying the origin is what made a
-            // matched offer unliftable.
-            o._relay = relay;
-            raw.push(o);
-          }
-        } catch { /* a down relay just contributes no liquidity */ }
+        for (const market of markets) {
+          try {
+            const rr = await fetch(`${relay}/v1/market/${market}/orderbook`, { signal: AbortSignal.timeout(5000) });
+            if (!rr.ok) continue;
+            for (const o of ((await rr.json()).offers || [])) {
+              const key = (o.maker_pubkey || '') + ':' + (o.offer_id || '');
+              if (seen.has(key)) continue; seen.add(key);
+              // WHICH RELAY THIS OFFER CAME FROM. The book merges several relays, but a
+              // TAKE is an interactive courier session that must be opened against the
+              // relay actually holding the offer — anywhere else answers "offer not
+              // found or not open". Merging without carrying the origin is what made a
+              // matched offer unliftable.
+              o._relay = relay;
+              raw.push(o);
+            }
+          } catch { /* a down relay just contributes no liquidity */ }
+        }
       }
-      const book = buildUnifiedBook(raw);
+      // quoteKey enables the same-chain asset<->asset family (the covenant CLOB / plain
+      // same-chain intents) for asset-paired markets; a BTC quote keeps the classic shapes.
+      const book = buildUnifiedBook(raw, { quote: quoteKey });
       return send(res, 200, { ok: true, asset: assetId, quote: quoteKey,
         asks: book.asks, bids: book.bids,
         best_ask: book.asks[0] || null, best_bid: book.bids[0] || null,
