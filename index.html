@@ -953,7 +953,7 @@ import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address
   openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr }
   from './pkg/lwk_wasm.js';
 import { HDKey, mnemonicToSeedSync, btc, schnorr } from './btc.js';
-import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade } from './swap.js';
+import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -3360,8 +3360,16 @@ function renderBalance(){
 
   // Uniform order (by ticker); tSEQ is one row among equals, not pinned.
   const keys = [...seqKeys].sort((x,y)=> assetMeta(x).ticker.localeCompare(assetMeta(y).ticker));
+  // F2 — hidden assets. The partition runs AFTER the headline total above, which already
+  // counted every asset, hidden included: hiding is visual decluttering, not accounting,
+  // so the reference-currency total never changes when an asset is hidden. Hidden rows
+  // move to the collapsed "Hidden assets" section at the bottom of the list; they also
+  // leave the default asset-picker dropdowns but stay findable there by search (swap.js
+  // pickerMatches). BTC (the parent chain) is never partitioned out.
+  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n);
+  const { visible: visKeys, hidden: hidKeys } = partitionHidden(keys, totalOf);
   const lmap=labels();
-  for(const h of keys){
+  for(const h of visKeys){
     const meta=assetMeta(h);
     const known=precisionKnown(h);
     // Elide the 64-char hex id (link text), and use the /explorer/ prefix so the link lands on the
@@ -3376,6 +3384,10 @@ function renderBalance(){
     } else if(lmap[h] && lmap[h].local){
       const m2=el('button','ghost','local label'); m2.title='A wallet-local label (not in the registry). Click to edit.'; m2.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px;opacity:.75'; m2.onclick=()=>labelAssetDialog(h); sub.appendChild(m2);
     }
+    // F2 — per-row hide affordance (same unobtrusive ghost-button idiom as the label
+    // controls above). BTC has no such control: the parent-chain asset is never hideable.
+    const hb=el('button','ghost','Hide'); hb.title='Hide this asset from the balance list and the default asset pickers. It still counts toward your total and can be found by search.';
+    hb.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px;opacity:.55'; hb.onclick=()=>{ setAssetHidden(h,true); renderBalance(); }; sub.appendChild(hb);
     // Unknown-precision assets: show raw atoms honestly (labeling then renders the real amount).
     const movable = known && !!(feeRateEntry(h) && feeRateEntry(h).rate>0);
     rowFull({ ticker:meta.ticker, refKey: known?h:null, precision:meta.precision, onchainAtoms:BigInt(b[h]||0n), kind:h,
@@ -3398,8 +3410,44 @@ function renderBalance(){
   }
   for(const id of oids) oampAssetRow(list, id, BigInt(oampBalances[id].atoms||0n), {});
   for(const id of legacyIds) oampAssetRow(list, id, BigInt(oampLegacyBalances[id].atoms||0n), {legacy:true});
+  // F2 — collapsed "Hidden assets (N)" section at the bottom of the balance list. The only
+  // place a hidden balance is listed, and the way back (Unhide). These balances were already
+  // counted into the headline total above: hiding never changes accounting.
+  if(hidKeys.length){
+    const hdr=el('div','asset-row arow2'); hdr.style.cursor='pointer';
+    const hh=el('div','arow-head');
+    hh.appendChild(el('span','tk', _hiddenOpen ? '▾' : '▸'));
+    const hm=el('div','grow'); hm.appendChild(el('div','sub','Hidden assets ('+hidKeys.length+')'));
+    hh.appendChild(hm); hdr.appendChild(hh);
+    hdr.title = _hiddenOpen ? 'Collapse the hidden assets' : 'Show the hidden assets';
+    hdr.onclick=()=>{ _hiddenOpen=!_hiddenOpen; renderBalance(); };
+    list.appendChild(hdr);
+    if(_hiddenOpen){
+      for(const h of hidKeys){
+        const meta=assetMeta(h), known=precisionKnown(h);
+        const r=el('div','asset-row arow2'); r.style.opacity='.75';
+        const head=el('div','arow-head');
+        head.appendChild(el('span','tk', meta.ticker));
+        const tb=trustBadge(h); if(tb) head.appendChild(tb);
+        const mid=el('div','grow'); const sub=el('div');
+        sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
+        const ub=el('button','ghost','Unhide'); ub.title='Show this asset in the balance list and the default asset pickers again.';
+        ub.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px'; ub.onclick=(ev)=>{ ev.stopPropagation(); setAssetHidden(h,false); renderBalance(); }; sub.appendChild(ub);
+        mid.appendChild(sub); head.appendChild(mid);
+        const totalAtoms=totalOf(h);
+        const a=el('span','amt');
+        a.appendChild(el('div',null, known ? fmtAtoms(totalAtoms, meta.precision) : (totalAtoms.toString()+' atoms')));
+        const ref = known ? refValueStr(h, totalAtoms) : '';
+        if(ref) a.appendChild(el('div','sub', ref));
+        head.appendChild(a);
+        r.appendChild(head); list.appendChild(r);
+      }
+    }
+  }
   refreshAllAvail();   // keep the Send tab's "Available:" lines in sync with balances
 }
+// F2 — whether the hidden-assets section is expanded (session-only; collapsed on load).
+let _hiddenOpen=false;
 // Wallet-local "label this asset" affordance (T9 / W2): give a received-but-unknown asset a ticker,
 // name, and PRECISION so it can be read and SENT. Stored in localStorage (LBL) marked local:true and
 // visibly distinguished from registry/default labels. Precedence stays user > registry > default.
