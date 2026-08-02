@@ -145,5 +145,31 @@ ok(!buildUnifiedBook([{ offer_id:'d', offer_amount:1000, want_amount:5, lightnin
 ok(buildUnifiedBook([{ offer_id:'k', offer_amount:1000, want_amount:MIN_PRICEABLE_BTC_SATS, lightning:{ ln_direction:4 } }]).asks.length === 1,
    'exactly at the floor is priceable (1% resolution) and kept');
 
+// --- classify: SAME-CHAIN asset<->asset (the missing family; needs the quote context) ---
+// An asset-paired market names its quote asset; giving the base for the quote is an ask,
+// giving the quote for the base is a bid. Without the quote context these offers stay
+// unrecognized (no BTC leg, no LN terms), which is exactly the gap that kept the covenant
+// CLOB out of the unified book.
+const scAsk = classifyRelayOffer({ offer_id:'sc1', maker_pubkey:'m9', base_amount:1000, offer_amount:1000, want_amount:500,
+  offer_asset:'GOLDHEX', want_asset:'EURXHEX' }, { quote:'EURXHEX' });
+eq({ side:scAsk.side, rail:scAsk.rail, asset:scAsk.assetAtoms, btc:scAsk.btcSats, price:scAsk.price },
+   { side:'ask', rail:'onchain', asset:1000, btc:500, price:0.5 }, 'same-chain give-base -> ask (quote atoms in btcSats)');
+eq({ same:scAsk.meta.samechain, cov:scAsk.meta.covenant, interactive:scAsk.meta.caps.interactive },
+   { same:true, cov:false, interactive:true }, 'plain same-chain intent: interactive (needs its maker live)');
+const scBid = classifyRelayOffer({ offer_id:'sc2', maker_pubkey:'m9', base_amount:1000, offer_amount:520, want_amount:1000,
+  offer_asset:'EURXHEX', want_asset:'GOLDHEX', covenant:{ covenant_txid:'ff' } }, { quote:'EURXHEX' });
+eq({ side:scBid.side, rail:scBid.rail, asset:scBid.assetAtoms, btc:scBid.btcSats, price:scBid.price },
+   { side:'bid', rail:'onchain', asset:1000, btc:520, price:0.52 }, 'same-chain give-quote -> bid');
+eq({ same:scBid.meta.samechain, cov:scBid.meta.covenant, interactive:scBid.meta.caps.interactive },
+   { same:true, cov:true, interactive:false }, 'covenant same-chain: passive (fills with the maker offline)');
+ok(classifyRelayOffer({ offer_id:'sc3', offer_amount:1000, want_amount:500, offer_asset:'GOLDHEX', want_asset:'EURXHEX' }) === null,
+   'without the quote context a same-chain offer stays unclassified (BTC pairs unchanged)');
+ok(classifyRelayOffer({ offer_id:'sc4', offer_amount:1000, want_amount:500, offer_asset:'GOLDHEX', want_asset:'OTHERHEX' }, { quote:'EURXHEX' }) === null,
+   'an offer for a DIFFERENT market never leaks into the pair book');
+ok(buildUnifiedBook([
+  { offer_id:'sc5', base_amount:1000, offer_amount:1000, want_amount:500, offer_asset:'GOLDHEX', want_asset:'EURXHEX' },
+  { offer_id:'sc6', base_amount:1000, offer_amount:520, want_amount:1000, offer_asset:'EURXHEX', want_asset:'GOLDHEX' },
+], { quote:'EURXHEX' }).asks.length === 1, 'buildUnifiedBook threads the quote context');
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

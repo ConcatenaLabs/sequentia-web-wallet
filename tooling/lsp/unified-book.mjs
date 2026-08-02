@@ -86,8 +86,20 @@ const lnNodePub = (o) => (o && (o.maker_ln_node_pubkey ?? o.makerLnNodePubkey)) 
 //   • SUB-ASSET LN (ln_direction 4/5): asset leg over Lightning, BTC leg an ON-CHAIN HTLC (btc_ln:false).
 //   • ON-CHAIN cross (plain intents): both legs on-chain — recognized by the parent-BTC leg
 //     (want_asset==='BTC' => a taker BUYS = ask; offer_asset==='BTC' => a taker SELLS = bid). No LN.
-export function classifyRelayOffer(o) {
+//   • SAME-CHAIN asset<->asset (plain intents or funded covenants): both legs on the Sequentia
+//     chain, no BTC and no Lightning terms. Recognized only when the caller names the pair's
+//     QUOTE asset (opts.quote — an asset-paired market), because side classification needs to
+//     know which asset is the numeraire: giving the quote is buying the base (bid), wanting the
+//     quote is selling it (ask). `btcSats` carries the quote asset's atoms, same convention as
+//     the rest of the asset-paired book. A covenant offer is passive (fills with the maker
+//     offline); a plain intent needs its maker's live courier — carried in caps.interactive so
+//     the settlement layer can tell them apart. This was the missing family: the unified book
+//     covered cross, submarine, sub-asset and pure-LN, but a same-chain resting order — the
+//     covenant CLOB itself — never entered it, so an asset-paired pair's "one book" silently
+//     excluded its on-chain liquidity.
+export function classifyRelayOffer(o, opts) {
   if (!o || o._verified === false) return null;
+  const quoteAsset = opts && opts.quote && String(opts.quote).toUpperCase() !== 'BTC' ? opts.quote : null;
   const lt = o.lightning || o.Lightning || {};
   const dir = Number(lt.ln_direction);
   const nodePub = lnNodePub(o);
@@ -139,6 +151,16 @@ export function classifyRelayOffer(o) {
     { trade_dir: 'sell', caps: { btc_ln: false, interactive: false, asset_onchain: true, maker_ln_node_pubkey: null } });
   if (oa === 'BTC') return mk('bid', 'onchain', assetAtoms || num(o.want_amount), num(o.offer_amount), o,
     { trade_dir: 'buy', caps: { btc_ln: false, interactive: false, asset_onchain: true, maker_ln_node_pubkey: null } });
+  // SAME-CHAIN asset<->asset (see the family note above). Only with a named quote asset, and only
+  // when the offer's two legs are exactly this pair (an offer for a different market never leaks in).
+  if (quoteAsset) {
+    const covenant = !!(o.covenant || o.Covenant);
+    const caps = { btc_ln: false, interactive: !covenant, asset_onchain: true, maker_ln_node_pubkey: null };
+    if (wa === quoteAsset && oa && oa !== 'BTC') return mk('ask', 'onchain', assetAtoms || num(o.offer_amount), num(o.want_amount), o,
+      { trade_dir: 'sell', samechain: true, covenant, caps });
+    if (oa === quoteAsset && wa && wa !== 'BTC') return mk('bid', 'onchain', assetAtoms || num(o.want_amount), num(o.offer_amount), o,
+      { trade_dir: 'buy', samechain: true, covenant, caps });
+  }
   return null;
 }
 
@@ -179,9 +201,10 @@ export function mergeBook(offers) {
   return { asks, bids };
 }
 
-// classify + merge in one step, from raw relay offers.
-export function buildUnifiedBook(rawOffers) {
-  return mergeBook((rawOffers || []).map(classifyRelayOffer).filter(Boolean));
+// classify + merge in one step, from raw relay offers. opts.quote names the pair's quote asset
+// for asset-paired markets (enables the same-chain family; BTC/absent keeps the classic shapes).
+export function buildUnifiedBook(rawOffers, opts) {
+  return mergeBook((rawOffers || []).map((o) => classifyRelayOffer(o, opts)).filter(Boolean));
 }
 
 // The offer a taker on `takerSide` ('buy' | 'sell') should take: the best PRICE, rail-blind.
