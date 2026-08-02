@@ -1947,6 +1947,11 @@ function runMixed({ side, asset, amount, payRail, recvRail, node_key, asset_bolt
       // Lift a SPECIFIC resting offer (order-book take) when the wallet names one.
       if (offer_id) sellArgs.push('-offer-id', String(offer_id));
       if (maker_pubkey) sellArgs.push('-maker-pubkey', String(maker_pubkey));
+      // PARTIAL FILL (review == execution): the wallet's reviewed asset amount IS the trade. Without
+      // this the CLI lifted the WHOLE offer while the review showed a slice — seen live: a 0.0002 GOLD
+      // review paid 0.0005 over LN. asset_amount rides in atoms; 0/absent = whole (old behavior).
+      const sellTake = Number(asset_amount || 0);
+      if (sellTake > 0) sellArgs.push('-amount', String(sellTake));
       const t0s = Date.now();
       return execFile(CFG.seqobCli, sellArgs, { timeout: CFG.mixedTimeoutMs, maxBuffer: 8 << 20 }, async (err, stdout, stderr) => {
         const out = (stdout || '') + (stderr || '');
