@@ -159,6 +159,11 @@ function normMarket(m){
 function saveSwap(){
   try {
     if (!SWAP){ localStorage.removeItem(LS_KEY); return; }
+    // Per-stage timestamp (task 21a): the reverse flow's stage is state+phase; stamped in the
+    // one save funnel every transition goes through, so the stepper can show stage elapsed.
+    const stage = String(SWAP.state) + '|' + String(SWAP.phase || '');
+    if (SWAP.stage_key !== stage || !SWAP.stage_since_ms){ SWAP.stage_key = stage; SWAP.stage_since_ms = Date.now(); }
+    if (!SWAP.started_ms) SWAP.started_ms = Date.now();
     const ser = JSON.parse(JSON.stringify(SWAP, (k, v) => typeof v === 'bigint' ? v.toString() : v));
     localStorage.setItem(LS_KEY, JSON.stringify(ser));
   } catch (e){ /* best-effort */ }
@@ -628,6 +633,8 @@ async function onOpen(){
       ['You commit', 'your ' + sm.ticker + ' once the maker’s BTC lock confirms - until then nothing is spent'],
       ['If the maker stalls', 'your asset is refundable after the maker’s stated Sequentia timeout (the exact block is shown once the maker locks; the wizard offers the refund then, with a countdown)'],
       ['Settlement', 'the BTC you receive is anchor-bound to Bitcoin; it can revert only if Bitcoin itself reverts'],
+      // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
+      ['Speed', 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave, it resumes and refunds automatically.'],
     ];
     const { m: modal, ok, st } = C.modalRows({ title: 'Sell ' + sm.ticker + ' for BTC', kv });
 
@@ -876,12 +883,44 @@ async function failAbort(session, code, msg){
   if (C.$('xrswapErr')) C.$('xrswapErr').textContent = msg;
 }
 
+// Task 21a — block-aware conf-wait narrative. Tip time from the testnet4 esplora /blocks
+// list (first row's timestamp), cached ~30s. Unreadable -> null, and the caller simply
+// omits the block-age clause (elapsed-only) rather than fabricating a figure.
+let _blkAge = { at: 0, min: null };
+async function btcLastBlockAgeMin(){
+  if (Date.now() - _blkAge.at < 30000) return _blkAge.min;
+  let min = null;
+  try {
+    const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
+    const r = await fetch(base + '/blocks', { signal: AbortSignal.timeout(6000) });
+    if (r.ok){
+      const arr = await r.json();
+      const ts = Array.isArray(arr) && arr[0] && Number(arr[0].timestamp);
+      if (ts > 0) min = Math.max(0, Math.round((Date.now() / 1000 - ts) / 60));
+    }
+  } catch {}
+  _blkAge = { at: Date.now(), min };
+  return min;
+}
 // waitMakerBtcConf polls our own node for the maker's BTC-leg confirmation.
 // Returns the confirmation height, or null if T_btc passed first (abort — we
 // never funded our asset, so nothing of ours is at risk).
 async function waitMakerBtcConf(txid, redeemHex, tBtc){
+  const t0 = Date.now();
   for (let i = 0; i < 600; i++){
     if (!SWAP || SWAP.state === ST.FAILED) return null;
+    // Live block-aware wait line (task 21a) on the stepper's status slot.
+    try {
+      const el = C.$('xrStepStatus');
+      if (el){
+        const age = await btcLastBlockAgeMin();
+        const mins = Math.round((Date.now() - t0) / 60000);
+        el.className = 'status';
+        el.innerHTML = '<span class="spin"></span>Waiting for 1 Bitcoin confirmation of the maker’s lock · usually ~20m on testnet4'
+          + (age != null ? ' · last block ' + age + ' min ago' : '')
+          + (mins > 0 ? ' · ' + mins + ' min elapsed' : '');
+      }
+    } catch {}
     try {
       const f = await C.btcLeg.findFunding(txid, redeemHex);
       if (f && f.confirmed && f.height > 0){
@@ -1107,7 +1146,10 @@ function renderStepper(){
       title: 'Sold ' + C.fmtAtoms(SWAP.seq_amount || 0, sm.precision) + ' ' + sm.ticker + ' for BTC (cross-chain)',
       status: 'complete', txid: SWAP.btc_claim_txid || null, rail: 'cross',
       pair: (sm.ticker || 'asset') + '/BTC', side: 'sell', size: xsSeqU, sizeTicker: sm.ticker || null,
-      price: (xsBtcU != null && xsSeqU > 0) ? xsBtcU / xsSeqU : null });
+      price: (xsBtcU != null && xsSeqU > 0) ? xsBtcU / xsSeqU : null,
+      // Task 21b: genuine settlement -> settle card; the BTC claim tx lives on testnet4.
+      card: true, parentTxids: SWAP.btc_claim_txid ? [SWAP.btc_claim_txid] : [],
+      elapsed_ms: (SWAP.started_ms > 0) ? (Date.now() - SWAP.started_ms) : null });
   }
 
   const head = el('div','card');
@@ -1119,6 +1161,13 @@ function renderStepper(){
   head.appendChild(kvRow('Receiving', C.fmtAtoms(SWAP.btc_amount, 8) + ' BTC'));
   head.appendChild(kvRow('Timeouts', `T_btc=${SWAP.btc_locktime} · T_seq=${SWAP.seq_locktime}`));
   head.appendChild(kvRow('Hashlock H', short(SWAP.hash_hex)));
+  // Per-stage progress narrative (task 21a); only while the swap is still running. Elapsed
+  // reads the stamp saveSwap writes on each state/phase transition.
+  if (![ST.BTC_CLAIMED, ST.REFUNDED, ST.FAILED].includes(SWAP.state) && SWAP.stage_since_ms > 0){
+    const s = Math.max(0, Math.round((Date.now() - SWAP.stage_since_ms) / 1000));
+    const el2 = s < 90 ? s + 's' : Math.round(s / 60) + 'm';
+    head.appendChild(kvRow('This stage', blabel + ' · ' + el2 + ' elapsed'));
+  }
   wrap.appendChild(head);
 
   wrap.appendChild(stepOpenCard());

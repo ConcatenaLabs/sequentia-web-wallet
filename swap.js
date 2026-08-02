@@ -135,11 +135,17 @@ export function logTrade(e){
   if (!e || !e.id) return;
   try {
     const h = loadHist();
-    if (h.some(x => x.id === e.id)) return;   // once per trade
-    const at = e.at || Date.now();
+    const prevIdx = h.findIndex(x => x.id === e.id);
+    // Once per trade — UNLESS the caller marks an UPGRADE. A settle path re-logs the SAME id
+    // to replace its fund-time row (e.g. 'EURX locked' -> 'Bought GOLD with EURX'); the plain
+    // dedupe silently dropped that second write, so a settled buy sat in the history forever
+    // as '<QUOTE> locked' (task 19b, seen live on the quote-shape sub-asset BUY).
+    if (prevIdx >= 0 && !e.upgrade) return;
+    const prev = prevIdx >= 0 ? h.splice(prevIdx, 1)[0] : null;
+    const at = (prev && prev.at) || e.at || Date.now();
     h.unshift({
       id: e.id, title: e.title || '', status: e.status || '',
-      txid: e.txid || (Array.isArray(e.txids) && e.txids[0]) || null, at, ts: e.ts || at,
+      txid: e.txid || (Array.isArray(e.txids) && e.txids[0]) || (prev && prev.txid) || null, at, ts: e.ts || (prev && prev.ts) || at,
       // Enriched, durable receipt fields (all optional; a path that can't supply one leaves it blank —
       // honest, not fabricated). pair/side/price/size/fee/rail feed the "Your trades" view + the export.
       pair: e.pair || null, side: e.side || null,
@@ -151,6 +157,9 @@ export function logTrade(e){
     });
     saveHist(h);
     try { renderInFlightCard(); } catch {}   // surface the new receipt in the trades view immediately
+    // Settle card (task 21b): a caller that marks a genuine settlement gets the one-shot
+    // completion card. Opt-in by flag — the fund-time and refund rows must never pop one.
+    if (e.card){ try { showSettleCard(h[0], e); } catch {} }
   } catch {}
 }
 // P5.1 — export the user's durable trade history as CSV or JSON (a file they keep). Reads the SAME
@@ -178,6 +187,87 @@ function exportTrades(fmt){
     setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 4000);
   } catch (err){ try { C.toast && C.toast('Export failed: ' + (err && err.message || err)); } catch {} }
 }
+
+// --- Per-trade progress narrative (task 21a) --------------------------------------
+// Typical stage durations: honest rough figures for THIS deployment (an LN hop is seconds, a
+// Sequentia block ~1 minute, a testnet4 Bitcoin block 10-60+ minutes), keyed by the record
+// states the drivers actually set. Absent key = no honest figure; show elapsed alone.
+const STAGE_TYPICAL_S = {
+  starting: 15, 'awaiting-lock': 90, verifying: 10, verified: 120, 'anchor-wait': 120,
+  paying: 15, held: 120, confirming: 1800, claiming: 90, funding: 30, settling: 90,
+  funded: 90, holding: 15,
+};
+function fmtDur(ms){
+  const s = Math.max(0, Math.round(Number(ms) / 1000));
+  if (s < 90) return s + 's';
+  const m = Math.round(s / 60); if (m < 90) return m + 'm';
+  return (Math.round(m / 6) / 10) + 'h';
+}
+// "· usually ~Ns · Ms elapsed", appended to a record's status line. Reads the stage timestamp
+// the save funnels stamp (stampStages), so no driver has to remember to set it.
+function stageNarrative(rec){
+  if (!rec) return '';
+  const t = STAGE_TYPICAL_S[rec.state];
+  let out = '';
+  if (t) out += ' · usually ~' + (t < 90 ? t + 's' : Math.round(t / 60) + 'm');
+  if (rec.stage_since_ms > 0) out += ' · ' + fmtDur(Date.now() - rec.stage_since_ms) + ' elapsed';
+  return out;
+}
+let _narrTick = null;   // the slow elapsed-refresh timer (renderInFlightCard)
+// Stamp stage_since_ms on every state TRANSITION, persisted with the record. Lives in the save
+// funnels — the one path every transition already goes through — so it cannot be forgotten.
+function stampStages(arr){
+  for (const r of (arr || [])){
+    if (!r) continue;
+    if (r.stage_state !== r.state || !r.stage_since_ms){ r.stage_state = r.state; r.stage_since_ms = Date.now(); }
+  }
+}
+
+// --- Settle card (task 21b) --------------------------------------------------------
+// ONE dismissable completion card when a trade genuinely settles, rendered from the SAME
+// receipt logTrade persists: both legs in their own tickers, short linked txids / preimage,
+// total elapsed when the caller knows it. The history row stays as before — this is a
+// surface, not a second record. Opt-in via logTrade's `card` flag (fund-time and refund
+// rows must never pop one). DOM-only; headless harnesses without document no-op.
+let _settleCard = null;
+function showSettleCard(row, e){
+  if (typeof document === 'undefined' || !document.body || !C || !C.el) return;
+  try { if (_settleCard) _settleCard.remove(); } catch {}
+  _settleCard = null;
+  const modal = C.el('div','modal'); const card = C.el('div','card');
+  card.appendChild(C.el('label','lbl','Trade complete'));
+  const kv = (k, v) => { const d = C.el('div','kv'); d.appendChild(C.el('span','k',k));
+    if (typeof v === 'string') d.appendChild(C.el('span','v',v)); else d.appendChild(v);
+    card.appendChild(d); };
+  kv('Trade', row.title || row.pair || 'Trade');
+  // Both legs in their own tickers when the receipt carries them: size/sizeTicker is the
+  // base leg; price × size re-derives the quote leg in the pair's own quote ticker.
+  if (row.size != null && row.sizeTicker)
+    kv(row.side === 'sell' ? 'You paid' : 'You received', trim(Number(row.size)) + ' ' + row.sizeTicker);
+  const qt = (row.pair && row.pair.indexOf('/') > 0) ? row.pair.split('/')[1] : null;
+  if (row.price != null && row.size != null && qt)
+    kv(row.side === 'sell' ? 'You received' : 'You paid', trim(Number(row.price) * Number(row.size)) + ' ' + qt);
+  // Short, linked txids (the existing txLink idiom: Sequentia txs on /explorer, parent-chain
+  // txs on /testnet4 — the caller names which of its txids are parent-chain).
+  const parent = new Set(((e && e.parentTxids) || []).map(String));
+  for (const t of (row.txids || [])){
+    const v = C.el('span','v mono');
+    const a = C.el('a','', String(t).slice(0, 18) + '…');
+    a.href = (parent.has(String(t)) ? '/testnet4/tx/' : '/explorer/tx/') + t;
+    a.target = '_blank'; a.rel = 'noopener';
+    v.appendChild(a); kv('Transaction', v);
+  }
+  if (row.preimage) kv('Preimage', String(row.preimage).slice(0, 18) + '…');
+  if (e && Number(e.elapsed_ms) > 0) kv('Total time', fmtDur(e.elapsed_ms));
+  const act = C.el('div','row'); act.style.marginTop = '12px';
+  const close = C.el('button','primary','Close');
+  close.onclick = () => { try { modal.remove(); } catch {} _settleCard = null; };
+  act.appendChild(close); card.appendChild(act);
+  modal.appendChild(card); document.body.appendChild(modal);
+  modal.onclick = (ev) => { if (ev.target === modal){ try { modal.remove(); } catch {} _settleCard = null; } };
+  _settleCard = modal;
+}
+
 // Same-chain DEX swaps receive TRANSPARENTLY by default (principle #6: transparent-by-default);
 // the user can OPT IN to a confidential (blinded) receive. Persisted wallet-wide.
 let _confidentialReceive = false;
@@ -1564,6 +1654,37 @@ async function refreshSubassetBook(seqAssetHex, quoteHex){
   } catch { SUBASSET_BOOK[k] = { sell_available:false, buy_available:false, sell_offers:[], buy_offers:[], ts: Date.now() }; }
   finally { _bookInflight[k] = false; }
 }
+// FUND-SAFETY RECONFIRM (the stale-cap fund mismatch): ONE live relay read immediately before
+// the irreversible fund, bypassing every wallet-side cache. The reviewed offer must still rest
+// with its economic terms unchanged (same id, same asset_amount/btc_sats, same claim key); a
+// maker that re-priced between review and Confirm is refused HERE, where nothing is lost,
+// instead of by the maker's exact-amount check AFTER the on-chain lock (which strands the
+// funds until the CLTV refund). Any inability to confirm — offer gone, price fields changed,
+// relay unreadable — fails closed with the same honest message.
+const OFFER_CHANGED_MSG = 'The offer changed while you reviewed · re-quote and try again.';
+async function reconfirmSubassetOffer(seqAssetHex, dir, quoteHex, reviewed){
+  const stale = () => new Error(OFFER_CHANGED_MSG);
+  if (!reviewed) throw stale();
+  if (!(L && L.book)) throw stale();
+  let b = null;
+  try { b = await L.book(seqAssetHex, quoteHex || undefined); } catch { throw stale(); }
+  const list = (b && (dir === 'sell' ? b.sell_offers : b.buy_offers)) || [];
+  // Fold the fresh read into the composer's cache so the re-quote after a refusal starts current.
+  try {
+    const k = seqAssetHex.toLowerCase() + '|' + String(quoteHex || 'BTC').toLowerCase();
+    SUBASSET_BOOK[k] = { sell_available: !!b.sell_available, buy_available: !!b.buy_available,
+      sell_offers: b.sell_offers || [], buy_offers: b.buy_offers || [], ts: Date.now() };
+  } catch {}
+  const id = String(reviewed.offer_id || reviewed.offerId || '');
+  const live = id ? (list.find(o => String(o.offer_id || o.offerId || '') === id) || null) : null;
+  if (!live) throw stale();
+  if (String(live.asset_amount) !== String(reviewed.asset_amount)
+    || String(live.btc_sats) !== String(reviewed.btc_sats)) throw stale();
+  const lc = String(live.maker_claim_pub || live.maker_claim_pubkey || '').toLowerCase();
+  const rc = String(reviewed.maker_claim_pub || reviewed.maker_claim_pubkey || '').toLowerCase();
+  if (lc !== rc) throw stale();
+  return live;
+}
 
 // Is (payRail, recvRail) a rail combination with a backend for the current pair? Both
 // legs the same (pure-LN or fully on-chain) always work. Two mixed shapes exist:
@@ -1720,6 +1841,9 @@ function onFlip(){
   const f = C.$('swFlip');
   f.classList.toggle('spun');
   // Swap assets AND amounts; keep the user's intent by flipping which side was edited.
+  // Amount policy (task 20): the typed amount RIDES WITH ITS ASSET to the other field —
+  // "I was buying 50 GOLD, now I'm selling 50 GOLD" keeps the number meaningful, where
+  // keeping the number in place would silently re-denominate it in the other asset.
   [S.payAsset, S.receiveAsset] = [S.receiveAsset, S.payAsset];
   const pa = C.$('swPayAmt'), ra = C.$('swRecvAmt');
   [pa.value, ra.value] = [ra.value, pa.value];
@@ -2498,7 +2622,15 @@ function useMinimumFill(route, sz){
   const buy = route.payIsBtc;
   const assetEl = buy ? C.$('swRecvAmt') : C.$('swPayAmt');
   const am = C.assetMeta(route.seqAsset) || {};
-  setNativeField(assetEl, C.fmtAtoms(BigInt(sz.minAtoms || 0), am.precision || 0), route.seqAsset);
+  // AUTHORITATIVE WRITE (task 19a). setNativeField has two guards that can silently eat this
+  // explicit user action: it skips a still-focused field ("never fight the field being typed
+  // in" — the click can land while the amount field still holds focus), and in ⇄ reference-
+  // currency mode it round-trips the amount through the reference price, which can come back
+  // BELOW the minimum and re-block Place with the same message the user just acted on. The
+  // clicked minimum is stated in the asset's own units, so write exactly that, in native mode.
+  try { if (typeof document !== 'undefined' && document.activeElement === assetEl && assetEl.blur) assetEl.blur(); } catch {}
+  if (assetEl._refMode){ assetEl._refMode = false; try { paintRefHints(); } catch {} }
+  assetEl.value = C.fmtAtoms(BigInt(sz.minAtoms || 0), am.precision || 0);
   assetEl._userTyped = true;
   S.edited = buy ? 'receive' : 'pay';
   requote().catch(()=>{});
@@ -2547,8 +2679,21 @@ function renderMixedTake(route, plan){
     setReviewEnabled(false);
     const msg = `The smallest amount you can ${buy ? 'buy' : 'sell'} here is ${minAssetStr} ${tk} (${minBtcStr} ${qtk}).`;
     $('swRate').innerHTML = esc(msg) + ` <a href="#" class="swusemin" style="text-decoration:underline;cursor:pointer">Use minimum</a>`;
-    const link = ($('swRate').querySelector && $('swRate').querySelector('.swusemin')) || null;
-    if (link) link.onclick = (e) => { if (e && e.preventDefault) e.preventDefault(); useMinimumFill(route, sz); };
+    // DELEGATED click (task 19a): the handler lives on the PERSISTENT #swRate element, not on
+    // the anchor — every repaint (requote per keystroke, background book refresh) destroys and
+    // recreates the anchor, so a per-anchor onclick could be gone by the time the click lands.
+    // Each belowMin paint only swaps the stored action; the wiring survives all repaints.
+    const rateEl = $('swRate');
+    rateEl._useMin = () => useMinimumFill(route, sz);
+    if (!rateEl._useMinWired){
+      rateEl._useMinWired = true;
+      rateEl.onclick = (e) => {
+        const hit = e && e.target && e.target.closest && e.target.closest('.swusemin');
+        if (!hit) return;
+        if (e.preventDefault) e.preventDefault();
+        if (rateEl._useMin) rateEl._useMin();
+      };
+    }
     return { ...sz, hasAmount: true };
   }
   // IOC truth: a market take reads only this single best-price offer, so a request larger than it fills THIS
@@ -2715,6 +2860,18 @@ async function requoteMixed(route, amtStr){
     minFill = offerMinFill(bp.offer, raw);
     const oid = String(bp.offer.id || '');
     matchedSub = oid ? (subassetOffers(route.seqAsset, side, qHex).find(o => String(o.offer_id || o.offerId || '') === oid) || null) : null;
+    // ONE SNAPSHOT (the stale-cap fund mismatch): the unified book (~12s cache) and the
+    // sub-asset book (~15s cache) refresh independently, so the SAME offer id can carry
+    // two different prices at once. The display used the unified copy while startBuy
+    // funded from the sub-asset copy — a fresh 6507-sat quote funded 6536 stale sats and
+    // the maker's exact-amount check refused AFTER the on-chain lock (stranded to CLTV).
+    // The settlement handle is matchedSub, so matchedSub's OWN price fields must feed the
+    // display too — quote and fund are then byte-for-byte the same snapshot, and the live
+    // pre-fund re-read in startBuy decides whether that snapshot is still current.
+    if (matchedSub){
+      offerAtoms = matchedSub.asset_amount; offerBtc = matchedSub.btc_sats;
+      minFill = BigInt(matchedSub.min_fill || matchedSub.minFill || 0);
+    }
     // "NO SUB-ASSET COUNTERPART" IS NOT "NO LIQUIDITY ON THIS RAIL".
     //
     // The rail-blind best is whatever is cheapest across all four rails, and this path can
@@ -3525,8 +3682,20 @@ function openPicker(side){
     enabled: hex !== cur,
   }));
   list.sort((a, b) => (b.held ? 1 : 0) - (a.held ? 1 : 0) || a.ticker.localeCompare(b.ticker));
+  // The OPPOSITE side's asset used to be silently OMITTED here, so reversing a pair took a
+  // three-step dance through a neutral asset. Show it instead — first, visually distinct,
+  // with an explicit swap-sides affordance; picking it flips the whole pair (onFlip).
+  if (other){
+    list.unshift({ hex: other, ticker: (metaOf(other) || {}).ticker || 'asset',
+      name: pickerName(other), bal: balLine(other), held: false,
+      split: '<span class="z">on the other side · tap to swap sides</span>',
+      enabled: true, cls: 'swopt-other', pin: true });
+  }
   const anchor = side === 'pay' ? C.$('swPayPick') : C.$('swRecvPick');
   popover(anchor, list, (hex) => {
+    // The opposite side's asset = the swap-sides affordance: flip the whole pair (assets,
+    // amounts, rails) rather than setting both sides to the same asset.
+    if (hex === other){ onFlip(); return; }
     if (side === 'pay') S.payAsset = hex; else S.receiveAsset = hex;
     // If the new selection collides with the other side, clear the other side.
     if (S.payAsset && S.payAsset === S.receiveAsset){
@@ -3571,7 +3740,7 @@ function popover(anchorEl, items, onPick){
   const ALL_CAP = 40;   // don't render a whole (potentially huge) registry eagerly — search finds the rest
   let kbdIdx = -1, shown = [], optEls = [];
   const rowFor = (it) => {
-    const b = el('button','swopt'); b.type = 'button'; b.setAttribute('role','option');
+    const b = el('button','swopt' + (it.cls ? ' ' + it.cls : '')); b.type = 'button'; b.setAttribute('role','option');
     if (!it.enabled){ b.disabled = true; }
     const t = el('span','swopt-tk', it.ticker);
     // E1: verified ✓ / unregistered ⚠ trust badge next to the ticker (same signal as the Balance list).
@@ -3590,9 +3759,16 @@ function popover(anchorEl, items, onPick){
     const ql = (q || '').toLowerCase();
     const match = items.filter(it => !q || (it.ticker + ' ' + (it.name||'') + ' ' + it.hex).toLowerCase().includes(ql));
     if (!match.length){ listEl.appendChild(el('div','swopt-empty','No matching assets.')); return; }
-    // Your held assets FIRST, then everything else. The "All assets" tail is capped until you
-    // search, so a registry of thousands never renders thousands of rows.
-    const held = match.filter(it => it.held), all = match.filter(it => !it.held);
+    // PINNED rows first (the other side's asset · tap-to-swap-sides), then your held assets,
+    // then everything else. The "All assets" tail is capped until you search, so a registry
+    // of thousands never renders thousands of rows.
+    const pinned = match.filter(it => it.pin);
+    for (const it of pinned){
+      const b = rowFor(it); const idx = shown.length;
+      b.onmouseenter = () => { kbdIdx = idx; markKbd(); };
+      listEl.appendChild(b); shown.push(it); optEls.push(b);
+    }
+    const held = match.filter(it => it.held && !it.pin), all = match.filter(it => !it.held && !it.pin);
     const capped = !q && all.length > ALL_CAP;
     const groups = [];
     if (held.length) groups.push(['Your assets', held]);
@@ -3661,6 +3837,7 @@ const BRIDGE_KEY = 'swk.sequentia.bridge';
 let BRIDGE = null;
 try { BRIDGE = JSON.parse(localStorage.getItem(BRIDGE_KEY) || 'null'); } catch { BRIDGE = null; }
 function saveBridge(){
+  try { stampStages([BRIDGE]); } catch {}
   try { localStorage.setItem(BRIDGE_KEY, JSON.stringify(BRIDGE)); } catch {}
   try { renderInFlightCard(); } catch {}   // see saveSubswap: every transition must be visible
 }
@@ -4168,7 +4345,9 @@ function applyBridgeStatus(r){
           title: (sell ? 'Sold ' : 'Bought ') + (bm.ticker || 'asset') + (sell ? ' for BTC' : ' with BTC'),
           status: 'settled', rail: 'bridged', pair: (bm.ticker || 'asset') + '/BTC',
           side: sell ? 'sell' : 'buy', size: assetU || null, sizeTicker: bm.ticker || null,
-          price: (assetU > 0) ? btcU / assetU : null });
+          price: (assetU > 0) ? btcU / assetU : null,
+          card: true,   // task 21b: genuine settlement -> settle card
+          elapsed_ms: (BRIDGE.started_ms > 0) ? (Date.now() - BRIDGE.started_ms) : null });
       } catch {}
     }
   }
@@ -4574,6 +4753,7 @@ if (!SUBSWAPS.length){
 }
 for (const r of SUBSWAPS) if (r && !r.id) r.id = newTradeId();
 function saveSubswap(){
+  try { stampStages(SUBSWAPS); } catch {}
   try { mergedStoreSave(SUBSWAPS_KEY, SUBSWAPS, _subswapTombstones); } catch {}
   try { localStorage.removeItem(SUBSWAP_KEY); } catch {}
   // Surface EVERY transition. These rails have no process view of their own, so
@@ -5497,7 +5677,23 @@ async function resumeOneSubswap(b){
   clearSubswap();
 }
 
+// ONE review sheet at a time (task 19c): a double-click on Review stacked two identical
+// modals, each Confirm firing its own trade. Two guards, because the review functions await
+// (quotes, provisioning) BEFORE their modal exists: the sentinel covers the opening window,
+// the DOM check covers an already-open modal — which the second click focuses, never stacks.
+let _reviewOpening = false;
 async function onReview(){
+  const { $ } = C;
+  if (_reviewOpening) return;
+  if (typeof document !== 'undefined' && document.querySelector){
+    const open = document.querySelector('.modal');
+    if (open){ try { if (open.focus) open.focus(); } catch {} return; }
+  }
+  _reviewOpening = true;
+  try { return await _onReviewInner(); }
+  finally { _reviewOpening = false; }
+}
+async function _onReviewInner(){
   const { $ } = C; $('swErr').textContent = '';
   const q = LAST_QUOTE;
   if (!q){ $('swErr').textContent = 'Enter an amount to get a quote first.'; return; }
@@ -6194,8 +6390,10 @@ async function takeCovenantWalkReview(q){
     ['Finality', 'Each fill settles in ~1 block · reverts only if Bitcoin reverts.'],
     ['Settlement', 'Each fill settles in full or not at all.'],
   ];
+  // CTA stays modalRows' default 'Confirm & sign' (task 19c): every rail's review sheet uses
+  // one confirm label; the old 'Place market order' override made this one modal read
+  // differently for no reason.
   const { m: modal, ok, st } = C.modalRows({ title: 'Review market order', kv });
-  if (ok) ok.textContent = 'Place market order';
   ok.onclick = async () => {
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Walking the order book…';
     try {
@@ -6208,6 +6406,7 @@ async function takeCovenantWalkReview(q){
       logTrade({ id: 'covfill:' + (res.txids[0] || Date.now()), title: 'Swapped ' + pm.ticker + ' for ' + rm.ticker,
         status: 'settled', txid: res.txids[0] || null, txids: res.txids, rail: 'chain',
         fee: covFeeUnits(feeAsset), feeTicker: C.assetMeta(feeAsset).ticker,
+        card: true,   // task 21b: genuine settlement -> settle card
         ...tradeMeta(pay, receive, res.paidPay, res.gotRecv) });
       const gotStr = C.fmtAtoms(res.gotRecv, rm.precision);
       if (res.full)
@@ -6249,8 +6448,8 @@ async function placeCovenantReview(q){
   const split = isMarket ? marketFillSplit(payAtoms, recvAtoms) : null;
   if (split) kv.splice(3, 0, ['Now / resting',
     `About ${C.fmtAtoms(split.fill, pm.precision)} ${pm.ticker} fills now against the book; the remaining ${C.fmtAtoms(split.rest, pm.precision)} ${pm.ticker} rests at your price until it's crossed.`]);
+  // CTA stays modalRows' default 'Confirm & sign' (task 19c): one confirm label on every rail.
   const { m: modal, ok, st } = C.modalRows({ title: 'Place order', kv });
-  if (ok) ok.textContent = 'Place order';
   ok.onclick = async () => {
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Funding the order on-chain…';
     try {
@@ -6414,7 +6613,11 @@ async function reviewMixed(q){
       // fill (takeAssetAtoms/takeBtcSats) as authoritative — startBuy lifts exactly it, never re-deriving the
       // fill off this offer's ratio (which showed 50 GOLD but delivered 25 when the offer differed).
       const qQuote = (q.route && q.route.mixedSame && q.route.quoteAsset) || null;
-      const buyOffer = q.buyOffer || subassetOffers(q.seqAsset, 'buy', qQuote)[0] || null;
+      // ONLY the reviewed offer object, threaded byte-for-byte. The old fallback re-read
+      // subassetOffers()[0] AT CONFIRM TIME — a different snapshot than the one reviewed,
+      // which is the stale-cap fund-mismatch class. No reviewed offer -> startBuy refuses
+      // honestly before anything is funded.
+      const buyOffer = q.buyOffer || null;
       await startBuy({ asset: q.seqAsset, amount, offer: buyOffer, quoteAsset: qQuote,
         expectedAssetAtoms: q.takeAssetAtoms, expectedBtcSats: q.takeBtcSats });
       return;
@@ -6466,6 +6669,7 @@ const SELL_PAYING_TTL_MS = 24 * 60 * 60 * 1000;
 // bounds CONCURRENT STARTS, not the number of live sells.
 let _sellStarting = false;
 function saveSells(){
+  try { stampStages(SELLS); } catch {}
   try { mergedStoreSave(SELLS_KEY, SELLS, _sellTombstones); } catch {}
   try { localStorage.removeItem(SELL_KEY); } catch {}
   try { renderInFlightCard(); } catch {}
@@ -6561,6 +6765,7 @@ async function startSell(params){
     const swap_nonce = newSwapNonce();
     rec = addSell({ state: 'paying', swap_nonce, asset, ticker: am.ticker, amount: params.amount ?? null,
       quote_asset: qh || undefined,   // mixed same-chain: the claim leg's REAL asset (absent = BTC)
+      started_ms: Date.now(),         // total-elapsed anchor for the progress narrative + settle card
       node_key, btc_claim_pub, offer, ts: Date.now() });
     // Pay the asset over Lightning (LSP drives the hold-invoice pay from our node; device co-signs).
     // On settle the maker reveals the preimage, returned here WITH the BTC HTLC terms — the LSP
@@ -6568,6 +6773,9 @@ async function startSell(params){
     say('Paying ' + am.ticker + ' over Lightning…');
     paidCallStarted = true;   // from here a lost response means the asset MAY be paid -> keep for recovery
     const resp = await L.swap({ side: 'sell', asset, node_key, btc_claim_pub, amount: params.amount,
+      // PARTIAL FILL (review == execution): the sized atoms the review displayed ARE the trade.
+      // Without this the LSP's CLI lifted the WHOLE offer while the sheet showed a slice.
+      asset_amount: params.expectedAssetAtoms != null ? String(params.expectedAssetAtoms) : undefined,
       quote_asset: qh || undefined,
       // State the rails EXPLICITLY (asset over Lightning, BTC on-chain) so the LSP routes this to
       // the sub-asset sell (xsubas-sell) rather than defaulting omitted rails to pure-LN (xpln).
@@ -6661,7 +6869,11 @@ async function claimSell(SELL){
     status: sellQtk + ' claimed', txid: SELL.claim_txid, rail: 'sub-asset', preimage: SELL.preimage || null,
     pair: (SELL.ticker || 'asset') + '/' + sellQtk, side: 'sell', sizeTicker: SELL.ticker || null,
     size: (SELL.amount != null ? Number(SELL.amount) : null),
-    price: (sellBtcU != null && Number(SELL.amount) > 0) ? sellBtcU / Number(SELL.amount) : null });
+    price: (sellBtcU != null && Number(SELL.amount) > 0) ? sellBtcU / Number(SELL.amount) : null,
+    // Task 21b: a genuine settlement -> settle card. The claim tx is on-chain: testnet4 for
+    // the BTC shape, Sequentia for the quote-asset shape.
+    card: true, parentTxids: (!SELL.quote_asset && SELL.claim_txid) ? [SELL.claim_txid] : [],
+    elapsed_ms: (SELL.started_ms > 0) ? (Date.now() - SELL.started_ms) : null });
 }
 // On wallet load: if a sell paid the asset but its BTC claim never confirmed, re-attempt the
 // claim (the preimage + HTLC terms are persisted). This is the fund-recovery path.
@@ -6808,6 +7020,7 @@ try {
 // HTLCs for one slot. It bounds CONCURRENT STARTS, not the number of live buys.
 let _buyStarting = false;
 function saveBuys(){
+  try { stampStages(BUYS); } catch {}
   try { mergedStoreSave(BUYS_KEY, BUYS, _buyTombstones); } catch {}
   try { localStorage.removeItem(BUY_KEY); } catch {}
   try { renderInFlightCard(); } catch {}
@@ -6964,12 +7177,19 @@ async function startBuy(params){
     const tip = qh ? await seqTipHeight() : await C.btcLeg.tipHeight();
     const T_btc = Math.max(Number(offer.onchain_cltv || 0), tip + BUY_CLTV_DELTA);
     const redeem = C.wasm.buildSeqHtlcRedeemScript(H, makerClaimPub, refund.public_key, T_btc);
+    // LIVE-BOOK RECONFIRM, immediately before the irreversible fund: the reviewed offer must
+    // still rest byte-for-byte on its economic terms. Refusing here loses nothing (only the
+    // hold invoice on our own node, which simply expires); funding a stale copy strands the
+    // locked funds until the CLTV refund when the maker refuses the mismatched amount.
+    say('Re-checking the offer …');
+    await reconfirmSubassetOffer(asset, 'buy', qh, offer);
     // PERSIST-BEFORE-BROADCAST (fund-safety): the funding tx below locks BTC and then BLOCKS for a
     // confirmation (minutes). H is random (NOT HD-derivable) and the redeem script embeds it, so losing
     // it before the txid is captured strands the BTC with no refund. Persist the recovery material as
     // 'funding' NOW, capture the txid via onBroadcast (BEFORE the confirmation wait), and advance to
     // 'funded' only once the outpoint is known. resumeBuy recovers a 'funding' record by its txid.
     b = addBuy({ state: 'funding', asset, ticker: am.ticker, preimage: P, hash_h: H, node_key,
+      started_ms: Date.now(),         // total-elapsed anchor for the progress narrative + settle card
       quote_asset: qh || undefined,   // mixed same-chain: the on-chain leg's REAL asset (absent = BTC)
       btc_htlc: { redeem_script: redeem, cltv: T_btc, amount: btcSats, maker_claim_pub: makerClaimPub, taker_refund_pub: refund.public_key },
       t_btc: T_btc, asset_amount: assetAtoms, offer_id: offer.offer_id, maker_pubkey: offer.maker_pubkey, ts: mixedTip() });
@@ -7034,7 +7254,14 @@ async function driveBuy(b, say){
     logTrade({ id: 'buy:' + H, title: 'Bought ' + b.ticker + ' with ' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), status: 'asset received',
       rail: 'sub-asset', preimage: b.preimage || null, pair: (b.ticker || 'asset') + '/' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), side: 'buy',
       size: buyAssetU, sizeTicker: b.ticker || null,
-      price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null });
+      price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null,
+      // Task 19b: UPGRADE the fund-time '<QUOTE> locked' row in place (same id) — for the BTC
+      // shape and the quote shape alike. Task 21b: this is a genuine settlement -> settle card,
+      // with the funding txid linked on its own chain (testnet4 for the BTC shape).
+      upgrade: true, card: true,
+      txids: (b.btc_htlc && b.btc_htlc.txid) ? [b.btc_htlc.txid] : [],
+      parentTxids: (!b.quote_asset && b.btc_htlc && b.btc_htlc.txid) ? [b.btc_htlc.txid] : [],
+      elapsed_ms: (b.started_ms > 0) ? (Date.now() - b.started_ms) : null });
   };
   // Reconcile a dropped/interrupted LSP job. The LSP now PERSISTS jobs, so a restart no longer 404s
   // ours — it reloads the job and, because the in-process driver died with the old process, marks it
@@ -7154,7 +7381,9 @@ async function refundBuy(b){
   }
   b.state = 'refunded'; b.refund_txid = (txid && txid.toString) ? txid.toString() : String(txid); saveBuys();
   const qtk2 = b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'funds') : 'BTC';
-  logTrade({ id: 'buy:' + (b.hash_h || ''), title: 'Buy refunded (' + b.ticker + ')', status: qtk2 + ' refunded', txid: b.refund_txid });
+  // upgrade: replace the fund-time '<QUOTE> locked' row (same id) — a refunded buy must not
+  // read as still locked. No settle card: a refund is not a settlement.
+  logTrade({ id: 'buy:' + (b.hash_h || ''), title: 'Buy refunded (' + b.ticker + ')', status: qtk2 + ' refunded', txid: b.refund_txid, upgrade: true });
 }
 // On wallet load: if a buy funded its BTC HTLC but never completed, resume it — settle if the asset
 // is now held, or refund the BTC once past T_btc. The fund-recovery path (mirrors resumeSell).
@@ -7206,7 +7435,7 @@ async function resumeOneBuy(b){
 // in-flight swap is persisted to localStorage and resumed on load, with a live "Refund
 // BTC leg" off-ramp — never a fire-and-forget modal that a refresh strands.
 // ===========================================================================
-function saveMixed(){ try { sub.saveSwap(localStorage, MIXED_KEY, MIXED); } catch {} }
+function saveMixed(){ try { stampStages([MIXED]); } catch {} try { sub.saveSwap(localStorage, MIXED_KEY, MIXED); } catch {} }
 function clearMixed(){ MIXED = null; try { sub.clearSwap(localStorage, MIXED_KEY); } catch {} }
 // True while a submarine swap is persisted and NOT terminal — the composer resumes the
 // stepper (instead of the composer) on tab entry, exactly like the cross-chain wizards.
@@ -7297,7 +7526,10 @@ function renderMixedSwap(){
     rail: 'submarine', pair: metaOf(MIXED.asset).ticker + '/BTC', side: MIXED.side === 'buy' ? 'buy' : 'sell',
     preimage: (MIXED.state === sub.ST.SETTLED ? (MIXED.preimage || null) : null),
     size: (MIXED.amount != null ? Number(MIXED.amount) / Math.pow(10, metaOf(MIXED.asset).precision || 0) : null),
-    sizeTicker: metaOf(MIXED.asset).ticker });
+    sizeTicker: metaOf(MIXED.asset).ticker,
+    // Task 21b: only a genuinely SETTLED submarine gets the settle card (failed/refunded do not).
+    card: MIXED.state === sub.ST.SETTLED,
+    elapsed_ms: (MIXED.state === sub.ST.SETTLED && MIXED.started_ms > 0) ? (Date.now() - MIXED.started_ms) : null });
   const phase = {
     [sub.ST.SETTLING]:  'Completing your trade · confirming on Bitcoin.',
     [sub.ST.REFUNDING]: 'Refunding your trade…',
@@ -8166,7 +8398,8 @@ async function reviewLn(q){
         title: (r.direction === 'sold' ? 'Sold ' + bm.ticker + ' for ' + qtkR : 'Bought ' + bm.ticker + ' with ' + qtkR) + ' over Lightning',
         status: 'settled', rail: 'ln', preimage: r.preimage || null,
         pair: bm.ticker + '/' + qtkR, side: (r.direction === 'sold') ? 'sell' : 'buy',
-        price: lnBaseU > 0 ? lnQuoteU / lnBaseU : null, size: lnBaseU || null, sizeTicker: bm.ticker });
+        price: lnBaseU > 0 ? lnQuoteU / lnBaseU : null, size: lnBaseU || null, sizeTicker: bm.ticker,
+        card: true });   // task 21b: genuine settlement -> settle card
       C.toast(`Lightning swap settled and final: received ${got}.`);
       resetComposer();
       await C.sync();
@@ -8646,6 +8879,12 @@ function fmtHistRow(e){
 // deliberate, informed choice. Rendered in the composer (above your resting orders).
 function renderInFlightCard(){
   const host = C.$('swInFlight'); if (!host) return;
+  // Live elapsed (task 21a): the card re-renders on every record save; this slow tick keeps
+  // the "· Ns elapsed" figures honest between transitions. One timer, page-lifetime.
+  if (!_narrTick && typeof setInterval === 'function'){
+    _narrTick = setInterval(() => { try { renderInFlightCard(); } catch {} }, 30000);
+    if (_narrTick && _narrTick.unref) _narrTick.unref();   // node (headless tests): never hold the process open
+  }
   try { checkRefundWindows(); } catch {}   // P5.3 — nag once when a refund/reclaim window opens
   try { reapStalledCrossings(); } catch {}   // a wedged record self-heals when you come back to look
   try { reconcileJobStatus(); } catch {}     // ...and so does one the LSP has already failed
@@ -8655,7 +8894,7 @@ function renderInFlightCard(){
     const need = sub.isRefundable(MIXED, mixedTip());
     rows.push({ view: 'mixed', need,
       title: (MIXED.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker),
-      status: need ? 'refundable now' : String(MIXED.state) });
+      status: (need ? 'refundable now' : String(MIXED.state)) + stageNarrative(MIXED) });
   }
   // Gate on the OBJECT, not just the predicate: hasSell/BuyInFlight() also returns true off the
   // synchronous _sellStarting/_buyStarting sentinel DURING the pre-fund prologue, before SELL/BUY is
@@ -8684,14 +8923,16 @@ function renderInFlightCard(){
     // with no off-ramp (mirrors subswapClearable's nothing-committed rule).
     const clearable = failed || (sr.state === 'paying' && !sr.preimage);
     rows.push({ view: null, need: !failed, id: sr.id, title: 'Sell ' + esc(sr.ticker) + ' for ' + esc(qtk),
-      status, action: clearable ? 'clear-sell' : (sr.error ? 'retry-sell' : null) });
+      status: status + (failed ? '' : stageNarrative(sr)),
+      action: clearable ? 'clear-sell' : (sr.error ? 'retry-sell' : null) });
   }
   // ONE ROW PER LIVE BUY. This rendered a single row from a single global, so a second concurrent buy
   // was invisible here — and an invisible trade with Bitcoin locked in it is exactly what this card
   // exists to prevent.
   for (const b of activeBuys()){
     rows.push({ view: null, need: true, title: 'Buy ' + esc(b.ticker || 'asset') + ' with BTC',
-      status: b.state === 'holding' ? 'ready · confirm from your wallet to receive' : 'paid with Bitcoin · receiving the asset over Lightning' });
+      status: (b.state === 'holding' ? 'ready · confirm from your wallet to receive' : 'paid with Bitcoin · receiving the asset over Lightning')
+        + stageNarrative(b) });
   }
   // RAIL-CROSSING records (SUBSWAP: peer-to-peer submarine + the LSP payer bridge;
   // BRIDGE: the LSP receiver bridge). These were MISSING from this card, which is
@@ -8722,14 +8963,15 @@ function renderInFlightCard(){
     const buying = S1.kind === 'p2p-buy' || S1.kind === 'lsp-payer-buy';
     rows.push({ id: S1.id, view: null, need: S1.state !== 'failed',
       title: (buying ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset') + (buying ? ' with Bitcoin' : ' for Bitcoin'),
-      status: S1.detail || subswapStatusLine(S1),
+      status: (S1.detail || subswapStatusLine(S1)) + (S1.state === 'failed' ? '' : stageNarrative(S1)),
       action: subswapClearable(S1) ? 'clear-subswap' : null });
   }
   if (BRIDGE && (hasBridgeInFlight() || BRIDGE.state === 'failed')){
     const am = metaOf(BRIDGE.asset);
     rows.push({ view: null, need: BRIDGE.state !== 'failed',
       title: (BRIDGE.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset'),
-      status: BRIDGE.detail || ('' + (BRIDGE.state || 'in progress')),
+      status: (BRIDGE.detail || ('' + (BRIDGE.state || 'in progress')))
+        + (BRIDGE.state === 'failed' ? '' : stageNarrative(BRIDGE)),
       action: bridgeClearable(BRIDGE) ? 'clear-bridge' : null });
   }
   if (X && X.hasInFlight && X.hasInFlight()){
@@ -9053,5 +9295,12 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // exactly what the composer DISPLAYED (the sub-asset settle-offer must be the SAME id it showed).
   lastQuote: () => LAST_QUOTE,
   subassetOffers, payerBridgeDisabledNote,
+  // Stale-cap fund-safety (task 19/JOB1): the full BUY executor + its record store, so the
+  // "quote == fund, byte-for-byte" and "mutated book at Confirm refuses pre-fund" invariants
+  // are pinned headlessly against the REAL startBuy (not a re-implementation).
+  startBuy, reconfirmSubassetOffer,
+  buys: () => BUYS, clearBuys: () => { BUYS = []; },
+  // Progress narrative (task 21a), for headless verification of stamps + composition.
+  stageNarrative, stampStages, fmtDur,
   state: S,
 };
