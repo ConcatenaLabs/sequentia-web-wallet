@@ -98,6 +98,7 @@ import { runBridgedSwap, matchFromTake, describeBridge, classifyLegs, takeRailsC
 import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, verifyFrontRouteExpiry, checkPayerFundGate, runPayerFundOnce, runPayerRefundOnce, runPayerRefundBumpOnce, sizeRefundFee, decideAssetFront, checkAssetFrontGate, frontModeFields, decideReplenish, frontedLegHandoff } from './leg-bridge.mjs';
 import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair, relayTakerAssetLeg, runForwardBridgeTerms, sendForwardBtcLegFunded, openForwardBridgeSession, checkMakerAssetLegObserved, buildHtlcRedeem } from './bridge-maker.mjs';
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
+import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -1377,7 +1378,7 @@ async function closeChannel(body) {
     scid: ch.short_channel_id || null, destination: dest, asset_label: assetId ? assetLabel(assetId) : 'BTC' };
 }
 
-function runSwap({ side, asset, amount, offer_id, maker_pubkey, quote_asset, node_key, counter_node_key }) {
+function runSwap({ side, asset, amount, take_atoms, offer_id, maker_pubkey, quote_asset, node_key, counter_node_key }) {
   return new Promise((resolve) => {
     const assetId = resolveAsset(asset);
     if (side !== 'buy' && side !== 'sell') return resolve({ ok: false, error: "side must be 'buy' or 'sell'" });
@@ -1411,6 +1412,13 @@ function runSwap({ side, asset, amount, offer_id, maker_pubkey, quote_asset, nod
     // xpln filled a relay-arbitrary one (a worse-price surprise). Pass them through when given.
     if (offer_id) args.push('-offer-id', String(offer_id));
     if (maker_pubkey) args.push('-maker-pubkey', String(maker_pubkey));
+    // PARTIAL FILL: `take_atoms` is the wallet's asset-side slice (the asset's own
+    // atoms). xpln derives the BTC side from the SIGNED offer's ratio and requires
+    // it exactly (the maker cannot re-price the slice), and the maker re-rests the
+    // remainder. 0/absent = the whole offer — the argv stays byte-identical.
+    const ta = takeAssetMsatArgs(take_atoms);
+    if (!ta.ok) return resolve({ ok: false, error: ta.error });
+    args.push(...ta.args);
     const t0 = Date.now();
     execFile(CFG.seqobCli, args, { timeout: CFG.swapTimeoutMs, maxBuffer: 8 << 20 }, async (err, stdout, stderr) => {
       const out = (stdout || '') + (stderr || '');
@@ -1421,6 +1429,9 @@ function runSwap({ side, asset, amount, offer_id, maker_pubkey, quote_asset, nod
         quote_asset: assetAsset ? quoteId : (CFG.btcx || 'BTC'),
         quote_asset_label: assetAsset ? assetLabel(quoteId) : 'BTC',   // the "BTC sats" in the CLI line is a cosmetic label; the amount is the quote asset's atoms
         preimage: m[5], finality: 'final', settled_ms: Date.now() - t0, requested_amount: amount ?? null,
+        // Partial settle: xpln's PARTIAL line -> {partial:true, remaining_atoms}
+        // (the remainder re-rested on the book). Whole fill -> no extra fields.
+        ...partialFields(out),
       });
       // RECONCILE before declaring nothing was spent. If xpln got as far as committing funds it
       // printed `paying maker hold on H=<hash>` (the taker pays the maker's hold: BTC for a buy, the

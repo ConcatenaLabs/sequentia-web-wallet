@@ -597,7 +597,7 @@ export function closeChannelLsp({ chain = 'seq', asset, node, scid, destination,
 //     over Lightning). Anchor-gated; returns finality:'confirming' (anchor-bound).
 // Rails are only serialized when present, so the pure-LN call is byte-identical to
 // before (the LSP treats a missing rail as ln/ln).
-export function seqlnSwap({ side, asset, amount, quote_asset, payRail, recvRail, node_key, counter_node_key, btc_claim_pub, offer_id, maker_pubkey, swap_nonce, hodl, payment_hash, asset_amount, btc_htlc,
+export function seqlnSwap({ side, asset, amount, take_atoms, quote_asset, payRail, recvRail, node_key, counter_node_key, btc_claim_pub, offer_id, maker_pubkey, swap_nonce, hodl, payment_hash, asset_amount, btc_htlc,
   // RAIL-BLIND BRIDGED TAKE (a genuine rail crossing): these fields route the take into the LSP's
   // non-custodial bridged driver (POST /swap with bridge:true). They were previously DROPPED by this
   // destructure, so a bridged take silently lost bridge:true + all its terms and was MISROUTED into the
@@ -630,6 +630,12 @@ export function seqlnSwap({ side, asset, amount, quote_asset, payRail, recvRail,
   // asset<->asset pure-LN: the counter (quote) asset id. Omitted (or 'BTC') => the classic asset<->BTC
   // pure-LN, so the pure-LN body stays byte-identical to before for every existing asset<->BTC swap.
   if (quote_asset && String(quote_asset).toUpperCase() !== 'BTC') body.quote_asset = quote_asset;
+  // Pure-LN PARTIAL FILL: the asset-side slice, in the asset's own atoms. The LSP
+  // turns it into xpln's -take-asset-msat (atoms*1000); the BTC side is derived
+  // from the signed offer's ratio, and the maker re-rests the remainder. Only
+  // serialized when a partial was actually priced (> 0), so every whole-offer
+  // body stays byte-identical to before.
+  if (take_atoms != null && Number(take_atoms) > 0) body.take_atoms = Number(take_atoms);
   if (relay_url) body.relay_url = relay_url;
   if (payRail) body.payRail = payRail;
   if (recvRail) body.recvRail = recvRail;

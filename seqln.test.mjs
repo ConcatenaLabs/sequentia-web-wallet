@@ -128,6 +128,19 @@ assert.equal(swReq.method, 'POST'); assert.equal(swReq.path, '/swap');
 assert.deepEqual(JSON.parse(swReq.body), { side: 'buy', asset: 'GOLD', amount: 100000 });
 console.log('ok: seqlnSwap() POSTs {side,asset,amount} and parses the settle (preimage + amounts)');
 
+// PURE-LN PARTIAL FILL: take_atoms (the asset-side slice, atoms) must reach the LSP —
+// it becomes xpln's -take-asset-msat. Only serialized when > 0, so the whole-offer
+// body above stays byte-identical (already asserted by the deepEqual there).
+{
+  await seqlnSwap({ side: 'buy', asset: 'GOLD', amount: 400, take_atoms: 400 });
+  const b1 = JSON.parse(seen.at(-1).body);
+  assert.equal(b1.take_atoms, 400, 'a priced slice rides the wire as take_atoms');
+  await seqlnSwap({ side: 'buy', asset: 'GOLD', amount: 1000, take_atoms: 0 });
+  const b2 = JSON.parse(seen.at(-1).body);
+  assert.ok(!('take_atoms' in b2), 'take_atoms: 0 (whole offer) is NOT serialized — the classic body is unchanged');
+  console.log('ok: seqlnSwap() forwards take_atoms only when a partial was priced');
+}
+
 // W3(a): a RAIL-BLIND BRIDGED take must forward its FULL contract. These fields were previously DROPPED
 // by seqlnSwap's fixed destructure, so a bridged take lost bridge:true + all its terms and was misrouted
 // into the LSP's CUSTODIAL submarine path (a false-success fund hole). Verify every field survives.
