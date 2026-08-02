@@ -7756,6 +7756,50 @@ async function reviewCross(q){
 // pricing is a later refinement), so there is no per-keystroke quote round-trip
 // here — we render the rail + the honest (final) finality and enable Review. The
 // actual amounts come back in the settle response.
+
+// PARTIAL-FILL pricing for the pure-LN rail — the EXACT mirror of the Go taker
+// (seqdex xdriver_pureln.go RunTakerPureLN): the taker names an asset-side slice
+// and the quote (BTC / counter-asset) side is derived from the SIGNED offer's
+// ratio at msat granularity,
+//   msat = offerQuoteMsat * takeMsat / offerAssetMsat
+//        = offerQuoteAtoms * takeAtoms * 1000 / offerAssetAtoms   (the *1000s cancel)
+// rounded DOWN when the taker GIVES the quote side (BUY pays BTC:
+// ProportionalBtcFloor — a partial never overpays the offer's exact ratio) and
+// UP when the taker RECEIVES it (SELL: ProportionalBtc — a partial never
+// underpays the maker). BigInt throughout: the product overflows 2^53 at
+// realistic sizes. quoteAtoms = msat/1000 floored, which is exactly what the
+// driver reports settled (FilledBtcMsat/1000) — so the numbers on the review
+// sheet are the numbers on the wire. A slice whose quote side prices to 0 atoms
+// is DUST: the Go driver refuses 0 msat, and we refuse the (slightly wider)
+// 0-atom case client-side BEFORE any POST, because a sheet saying "You pay 0"
+// would lie in the other direction. take >= the offer collapses to the whole
+// offer (the classic lift, exactly as the Go clamps it).
+function plnSliceQuote(side, takeAtoms, offerAssetAtoms, offerQuoteAtoms){
+  const take = big(takeAtoms), oa = big(offerAssetAtoms), oq = big(offerQuoteAtoms);
+  if (take <= 0n || oa <= 0n || oq <= 0n) return null;
+  if (take >= oa) return { whole: true, takeAtoms: oa, quoteAtoms: oq, quoteMsat: oq * 1000n, dust: oq <= 0n };
+  const num = oq * take * 1000n;
+  const msat = side === 'sell' ? (num + oa - 1n) / oa : num / oa;   // sell RECEIVES the quote -> ceil; buy GIVES it -> floor
+  const quoteAtoms = msat / 1000n;
+  return { whole: false, takeAtoms: take, quoteAtoms, quoteMsat: msat, dust: quoteAtoms <= 0n };
+}
+
+// The EXACT wire body for a pure-LN take — one builder shared by Review's confirm
+// so the sheet and the POST can never drift (review == execution). take_atoms
+// (the asset-side slice, atoms) rides only when a partial was priced; a
+// whole-offer body stays byte-identical to before (the LSP treats absent as
+// "lift the whole offer").
+function plnSwapBody(q, node_key, counter_node_key){
+  return { side: q.side, asset: q.seqAsset, amount: q.amount,
+    quote_asset: q.assetAsset ? q.quoteAsset : undefined,   // asset<->asset: the real counter asset (BTC implied otherwise)
+    node_key, counter_node_key,
+    // PIN the exact offer the user reviewed: the LSP forwards offer_id/maker_pubkey
+    // to xpln so it lifts THIS resting offer, not a relay-arbitrary one.
+    offer_id: (q.lnOffer && q.lnOffer.offer_id) || undefined,
+    maker_pubkey: (q.lnOffer && q.lnOffer.maker_pubkey) || undefined,
+    take_atoms: q.takeAtoms != null ? Number(q.takeAtoms) : undefined };
+}
+
 async function requoteLn(route, amtStr){
   const { $ } = C;
   // The counter (quote) leg: BTC for asset<->BTC pure-LN, else the REAL quote asset for asset<->asset.
@@ -7865,13 +7909,43 @@ async function requoteLn(route, amtStr){
       : `No offers resting here yet.`;
     return;
   }
+  // PARTIAL FILL SIZING (the Go slice rail, now threaded end-to-end): the TYPED
+  // amount is the take when it is under the offer — takeAtoms = min(typed, offer).
+  // Read the typed leg in its OWN atoms (fieldAtoms honours ref-input mode); a
+  // quote-side entry converts to asset atoms at the offer's exact ratio, floored,
+  // so the slice never takes more than the typed quote amount pays for.
+  const offerAtoms = big(lnOffer.assetAtoms), offerQuote = big(lnOffer.btcAtoms);
+  const editedEl = S.edited === 'pay' ? $('swPayAmt') : $('swRecvAmt');
+  const editedHex = S.edited === 'pay' ? S.payAsset : S.receiveAsset;
+  const qHex = route.assetAsset ? route.quoteAsset : 'BTC';
+  let typedRaw = 0n, typedAtoms = 0n;
+  if (editedHex === route.seqAsset){ typedRaw = typedAtoms = fieldAtoms(editedEl, route.seqAsset); }
+  else {
+    typedRaw = fieldAtoms(editedEl, qHex);
+    if (typedRaw > 0n && offerQuote > 0n) typedAtoms = (typedRaw * offerAtoms) / offerQuote;
+  }
+  const slice = typedAtoms > 0n ? plnSliceQuote(side, typedAtoms, offerAtoms, offerQuote) : null;
+  if ((typedRaw > 0n && typedAtoms <= 0n) || (slice && slice.dust)){
+    // DUST: the slice prices to 0 on one side (the Go driver refuses it as
+    // "prices to 0 msat"). Refuse HERE, before any POST, with the way out.
+    LAST_QUOTE = null; setReviewEnabled(false);
+    paintFee(route.quoteAsset || 'BTC', null, null);
+    $('swRate').textContent = `That amount is too small to fill from this offer · the ${typedAtoms <= 0n ? am.ticker : qtk} side would round to 0 · enter a larger amount.`;
+    return;
+  }
+  // null takeAtoms = the WHOLE offer (no amount typed, or typed >= the offer —
+  // the offer is all there is, exactly the pre-slice behavior).
+  const takeAtoms = (slice && !slice.whole) ? slice.takeAtoms : null;
   LAST_QUOTE = { kind: 'ln', side, seqAsset: route.seqAsset, payIsBtc: route.payIsBtc,
     assetAsset: route.assetAsset, quoteAsset: route.quoteAsset,
-    amount: amtStr ? parseFloat(amtStr) : null, lnOffer };
+    amount: amtStr ? parseFloat(amtStr) : null, lnOffer,
+    takeAtoms, sliceQuoteAtoms: takeAtoms != null ? slice.quoteAtoms : null };
   paintFee(route.quoteAsset || 'BTC', null, 'You trade at the price shown · the rate already includes the fee.');
   const qprec = qm.precision || 0;
-  const assetStr = C.fmtAtoms(big(lnOffer.assetAtoms), aprec), btcStr = C.fmtAtoms(big(lnOffer.btcAtoms), qprec);
-  $('swRate').innerHTML = `${assetStr} ${am.ticker} for ${btcStr} ${qtk} · best resting offer`;
+  const assetStr = C.fmtAtoms(offerAtoms, aprec), btcStr = C.fmtAtoms(offerQuote, qprec);
+  $('swRate').innerHTML = takeAtoms != null
+    ? `${C.fmtAtoms(takeAtoms, aprec)} ${am.ticker} for ${C.fmtAtoms(slice.quoteAtoms, qprec)} ${qtk} · part of the best resting offer (${assetStr} ${am.ticker}) · the remainder stays on the book`
+    : `${assetStr} ${am.ticker} for ${btcStr} ${qtk} · best resting offer`;
   setReviewEnabled(true);   // LP fixed terms (proven path) — Review is offerable
 }
 
@@ -7916,13 +7990,17 @@ async function reviewLn(q){
   // We deliberately do NOT make ln-rail.js amount-aware — it also drives composer copy for every rail —
   // we make the SETTLEMENT decision size-correct here, the one place the pinned offer is known.
   //
-  // SIZE FROM THE OFFER, NOT THE TYPED AMOUNT: xpln lifts the WHOLE pinned offer (see "xpln lifts the
-  // whole offer" below), so the inbound must cover the OFFER's leg. provisionInbound is idempotent
-  // (already_had_inbound when >= amount is already receivable from the LP), so running it on every take
+  // SIZE FROM WHAT WILL EXECUTE: the priced SLICE when one was quoted (q.takeAtoms
+  // rides to the LSP as take_atoms and xpln fills exactly that), else the WHOLE
+  // pinned offer (the classic lift) — so the inbound covers the leg that actually
+  // moves, never more. provisionInbound is idempotent (already_had_inbound when
+  // >= amount is already receivable from the LP), so running it on every take
   // is safe and is a no-op when the room is already there.
   const _offR = q.lnOffer || null;
-  const _payWant  = _offR ? big(q.side === 'buy' ? _offR.btcAtoms   : _offR.assetAtoms) : 0n;
-  const _recvWant = _offR ? big(q.side === 'buy' ? _offR.assetAtoms : _offR.btcAtoms)   : 0n;
+  const _execAsset = q.takeAtoms != null ? big(q.takeAtoms) : (_offR ? big(_offR.assetAtoms) : 0n);
+  const _execQuote = q.takeAtoms != null ? big(q.sliceQuoteAtoms) : (_offR ? big(_offR.btcAtoms) : 0n);
+  const _payWant  = _offR ? (q.side === 'buy' ? _execQuote : _execAsset) : 0n;
+  const _recvWant = _offR ? (q.side === 'buy' ? _execAsset : _execQuote) : 0n;
   if (S.receiveAsset !== 'BTC'){
     const rm = metaOf(S.receiveAsset);
     const want = _recvWant > 0n ? _recvWant : safeAtoms($('swRecvAmt').value, rm.precision || 0);
@@ -7972,8 +8050,9 @@ async function reviewLn(q){
     // user's node (channelInbound). The old code opened OUTBOUND for both, so a channel-less receive leg
     // got capacity it could never receive over. Honest, bounded progress; a clear failure — never a hang.
     if (!L.provisionChannel){ $('swErr').textContent = 'Opening a channel is unavailable in this build · open one from the Balance tab first.'; return; }
-    // Size from the PINNED OFFER whenever we have one: xpln lifts the whole offer, so the offer's leg —
-    // not the typed amount — is what must fit through the channel. The typed field is only a fallback.
+    // Size from the EXECUTED legs whenever we have them (_payWant/_recvWant: the priced slice when one
+    // was quoted, else the whole pinned offer) — that is what must fit through the channel. The typed
+    // field is only a fallback for a quote with no pinned offer.
     const sizeLeg = (hexOrBtc, amtEl, wantAtoms) => {
       const m = metaOf(hexOrBtc);
       const atoms = (wantAtoms && wantAtoms > 0n) ? wantAtoms : safeAtoms(C.$(amtEl).value, m.precision || 0);
@@ -8025,11 +8104,13 @@ async function reviewLn(q){
   const qm = q.assetAsset ? C.assetMeta(q.quoteAsset) : { ticker: 'BTC', precision: 8 };
   const qtk = qm.ticker, qprec = qm.precision || 0;
   const dir = q.side === 'buy' ? `Buy ${am.ticker} with ${qtk}` : `Sell ${am.ticker} for ${qtk}`;
-  // xpln lifts the whole offer, so the amounts that actually move come from the offer, NOT q.amount.
-  // Show them explicitly and warn if they differ materially from what the user typed.
+  // The amounts that actually move: the priced SLICE when one was quoted (they now
+  // EQUAL execution — take_atoms goes on the wire below and xpln fills exactly
+  // that), else the whole offer. Review == execution: these are the numbers the
+  // settle response will echo back.
   const off = q.lnOffer || null;
-  const assetStr = off ? (C.fmtAtoms(big(off.assetAtoms), aprec) + ' ' + am.ticker) : null;
-  const btcStr = off ? (C.fmtAtoms(big(off.btcAtoms), qprec) + ' ' + qtk) : null;
+  const assetStr = off ? (C.fmtAtoms(_execAsset, aprec) + ' ' + am.ticker) : null;
+  const btcStr = off ? (C.fmtAtoms(_execQuote, qprec) + ' ' + qtk) : null;
   const payStr = off ? (q.side === 'buy' ? btcStr : assetStr) : null;
   const recvStr = off ? (q.side === 'buy' ? assetStr : btcStr) : null;
   const kv = [
@@ -8038,13 +8119,14 @@ async function reviewLn(q){
   ];
   if (payStr){ kv.push(['You pay', payStr], ['You receive', recvStr]); }
   kv.push(
-    ['Pricing', 'Fills the best resting Lightning offer in full · the rate includes the spread (no separate network fee)'],
+    ['Pricing', 'Fills against the best resting Lightning offer · any remainder stays on the book · the rate includes the spread (no separate network fee)'],
     ['Finality', L.finalityCopy ? L.finalityCopy() : 'Instant and final · pure Lightning, nothing on-chain to revert.'],
     ['If it stalls', 'Nothing moves · if it stalls, your funds are returned automatically.'],
   );
-  // Loud mismatch warning: the executed size is the offer's, so if the user typed something ~different,
-  // say so before they commit (this rail cannot fill a partial amount).
-  if (off && q.amount > 0){
+  // Loud mismatch warning — ONLY for the whole-offer-cap case (q.takeAtoms == null
+  // with an amount typed means typed >= the offer: the offer is all there is). A
+  // priced slice needs no warning: it EQUALS what the user typed.
+  if (off && q.amount > 0 && q.takeAtoms == null){
     const execUnits = q.side === 'buy' ? (Number(big(off.btcAtoms)) / Math.pow(10, qprec)) : (Number(big(off.assetAtoms)) / Math.pow(10, aprec));
     if (execUnits > 0 && Math.abs(execUnits - q.amount) / execUnits > 0.05)
       kv.push(['⚠ Note', `This fills ${q.side === 'buy' ? btcStr : assetStr} (the resting offer's size), which differs from the ${C.fmtAtoms(BigInt(Math.round(q.amount * Math.pow(10, q.side === 'buy' ? qprec : aprec))), q.side === 'buy' ? qprec : aprec)} ${q.side === 'buy' ? qtk : am.ticker} you entered.`]);
@@ -8060,13 +8142,10 @@ async function reviewLn(q){
       const counterNodeKey = q.assetAsset
         ? (L.assetNodeKey ? await L.assetNodeKey(q.quoteAsset) : undefined)
         : (L.btcNodeKey ? await L.btcNodeKey() : undefined);
-      // PIN the exact offer the user just reviewed: the LSP forwards offer_id/maker_pubkey to xpln so
-      // it lifts THIS resting offer, not a relay-arbitrary one at a different price.
-      const r = await L.swap({ side: q.side, asset: q.seqAsset, amount: q.amount,
-        quote_asset: q.assetAsset ? q.quoteAsset : undefined,   // asset<->asset: the real counter asset (BTC implied otherwise)
-        node_key: baseNodeKey, counter_node_key: counterNodeKey,
-        offer_id: (q.lnOffer && q.lnOffer.offer_id) || undefined,
-        maker_pubkey: (q.lnOffer && q.lnOffer.maker_pubkey) || undefined });
+      // ONE builder for the wire body (plnSwapBody): it pins the exact reviewed
+      // offer AND carries take_atoms when a slice was priced, so the sheet above
+      // and the POST can never drift (review == execution).
+      const r = await L.swap(plnSwapBody(q, baseNodeKey, counterNodeKey));
       const bm = C.assetMeta(r.asset || q.seqAsset);
       // Quote ticker for the receipt: the wallet's own asset metadata, never the LSP's echoed label —
       // the LSP may not know a ticker and then echoes the raw hex id, which must never reach the UI.
@@ -8965,6 +9044,9 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // Drive the FULL composer requote for the cross (chain/chain) + mixed (sub-asset) branches, so a headless
   // test can prove they render the SAME rail-blind preview (both source the offer/fill from bridgedTakePlan).
   requoteMixed, requoteCross, requoteLn,
+  // Pure-LN partial fills: the slice pricing (the exact Go-rounding mirror) + the
+  // wire-body builder, so review==execution is pinned headlessly.
+  plnSliceQuote, plnSwapBody,
   setSubassetBook: (hex, entry, quote) => { const k = String(hex).toLowerCase() + '|' + String(quote || 'BTC').toLowerCase(); if (entry == null) delete SUBASSET_BOOK[k]; else SUBASSET_BOOK[k] = entry; },
   // The priced/oriented quote the composer carries into Review -> startBuy/startSell. A headless test reads it to
   // prove the settlement handle (buyOffer/sellOffer) + the authoritative fill (takeAssetAtoms/takeBtcSats) are
