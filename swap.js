@@ -6189,6 +6189,24 @@ async function resolveVout(txid, spkHex){
 // place and fill would compute a different leaf and strand the order. CONFIG.minLotBps is display-only.
 function covenantMinLot(sellAtoms){ const s = BigInt(sellAtoms); const f = s / 1000n; return f > 0n ? f : 1n; }
 
+// BYTE ORDER — the one covenant conversion boundary. The wallet/UI/registry/relay-pair domain
+// speaks DISPLAY hex asset ids (reversed, like txids); the covenant leaf + CovenantTerms speak
+// INTERNAL byte order (as on-chain introspection returns them — the relay convention: pair =
+// display, terms = internal; see seqdex watcher.go reverseHex / covfill.go displayHex).
+function revHex(h){ return (String(h || '').match(/../g) || []).reverse().join(''); }
+
+// The asset ids a covenant's taptree is derived from, for a given record generation.
+//   idsInternal true  (every NEW record) -> flip the DISPLAY ids to INTERNAL byte order, so the
+//     leaf bakes the ids consensus introspection actually compares — the seeder-proven derivation.
+//   idsInternal false (LEGACY records, no marker) -> keep the DISPLAY ids: those covenants were
+//     funded against a display-order-derived spk (the old bug), and their cancel/REFUND must
+//     re-derive the SAME bug-compatible taptree or the locked funds become unreclaimable.
+// Records persist DISPLAY ids (rec.pay/rec.receive) in both generations; only the derivation flips.
+function covenantDerivationIds(payDisplay, receiveDisplay, idsInternal){
+  return idsInternal ? { assetA: revHex(payDisplay), assetB: revHex(receiveDisplay) }
+                     : { assetA: payDisplay, assetB: receiveDisplay };
+}
+
 async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
   opts = opts || {};
   const tip = C.wollet.tip().height();
@@ -6198,7 +6216,11 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
   ensureCompanion();                                      // so this wallet SEES the credit it is paid
   const minLot = covenantMinLot(payAtoms);                // PARTIAL-fillable (was all-or-nothing minLot==sell)
   const params = {
-    assetA: pay, assetB: receive, sellAtoms: BigInt(payAtoms),
+    // pay/receive arrive as DISPLAY hex (the UI/wallet domain); planPlaceOrder's contract is
+    // INTERNAL-order ids (they are baked into the fill leaf that on-chain introspection compares),
+    // so convert here — the boundary. Everything else in this function stays DISPLAY.
+    ...covenantDerivationIds(pay, receive, true),
+    sellAtoms: BigInt(payAtoms),
     rateNum, rateDen, minLot,                             // a taker may fill any lot >= minLot; the covenant re-rests the remainder
     expiryLocktime: orderExpiry(tip),
     makerProg: payout.program,                            // the taproot payout the FILL credits
@@ -6218,6 +6240,11 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
     sellAtoms: String(payAtoms), recvAtoms: String(recvAtoms),
     makerIndex: idx, covTxid: null, covVout: null, spkHex: plan.spkHex,
     expiry: params.expiryLocktime, created: Date.now(), posted: false,
+    // GENERATION MARKER (fund safety): this covenant's taptree was derived from INTERNAL-order
+    // asset ids (the fix). A record WITHOUT this marker predates the fix — its spk was derived
+    // from DISPLAY-order ids, and every re-derivation (repost/cancel/refund) must reproduce that
+    // bug-compatible taptree via covenantDerivationIds(.., .., false). Never migrate old records.
+    idsInternal: true,
     // SBTC silent peg: the covenant locks `pay` (SBTC) but was ADVERTISED as `advertiseOfferAssetAs`
     // (BTC). Tag it so the cancel/refund path knows to peg the reclaimed SBTC back OUT to real BTC
     // (the user paid BTC and expects BTC back). Absent for ordinary same-chain orders.
@@ -6422,7 +6449,9 @@ function isPeggedFillToRedeem(m){
   const ct = m.covenant || m.Covenant || {};
   const gotAsset = String(ct.asset_a || ct.assetA || '').toLowerCase();
   const sbtcHex = (sbtcAssetId() || '').toLowerCase();
-  if (!sbtcHex || gotAsset !== sbtcHex) return false;           // we didn't receive SBTC
+  // ct.asset_a is INTERNAL byte order (CovenantTerms convention); the registry's SBTC id is
+  // DISPLAY hex — compare in the terms' order.
+  if (!sbtcHex || gotAsset !== revHex(sbtcHex)) return false;   // we didn't receive SBTC
   const pair = m.pair || m.Pair || {};
   const advertisedBtc = String(pair.base_asset || pair.baseAsset || '') === 'BTC'
     || String(pair.quote_asset || pair.quoteAsset || '') === 'BTC';
@@ -6444,7 +6473,9 @@ export function covenantLocksAsset(offer, expectedAssetHex){
 // TRUE iff a BTC-advertised covenant genuinely locks SBTC (so it is safe to fill as a pegged-BTC bid and
 // auto-redeem the received SBTC to real BTC). Returns false when SBTC is unavailable on this network — a
 // covenant can then never be mis-sold as pegged BTC.
-function peggedCovenantLocksSbtc(offer){ return covenantLocksAsset(offer, sbtcAssetId()); }
+// covenant.asset_a in the offer's terms is INTERNAL byte order; the registry id is DISPLAY —
+// hand the guard the expected id in the terms' own order (empty stays empty: fail closed).
+function peggedCovenantLocksSbtc(offer){ const s = sbtcAssetId(); return covenantLocksAsset(offer, s ? revHex(s) : s); }
 
 // SBTC peg-OUT resume (F-FS3). pegOutReceivedSbtc broadcasts (sendSeqAsset), so a failure can leave the
 // received SBTC un-redeemed with no follow-up — the old "auto-redeem will retry" toast promised a retry
@@ -6479,7 +6510,9 @@ export async function resumePegOuts(){
 // coin-selected from THIS wallet's own B + fee UTXOs by the wasm assembler.
 function fillHooksFor(matched){
   const ct = matched.covenant || matched.Covenant || {};
-  const assetB = String(ct.asset_b || ct.assetB || '').toLowerCase();
+  // CovenantTerms carry INTERNAL-order ids; the fee/wallet domain (feeRateFor, coin selection,
+  // wasm AssetId) speaks DISPLAY hex — flip at the boundary.
+  const assetB = revHex(String(ct.asset_b || ct.assetB || '').toLowerCase());
   const feeAsset = assetB || C.POLICY_HEX;
   return makeCovenantHooks({
     wasm: C.wasm, wollet: C.wollet, network: C.network, mnemonic: C.mnemonic,
@@ -6511,7 +6544,11 @@ function orderFromPlaced(rec){
   const payout = makerPayout(C.signer, C.network, rec.makerIndex);
   const { rateNum, rateDen } = computeRate(BigInt(rec.sellAtoms), BigInt(rec.recvAtoms));
   const order = {
-    assetA: rec.pay, assetB: rec.receive,
+    // BYTE ORDER (fund safety): derive with the record's OWN generation. New records
+    // (rec.idsInternal) baked INTERNAL-order ids into the funded taptree; legacy records baked
+    // DISPLAY-order ids (the old bug) and their REFUND must re-derive that same taptree —
+    // "fixing" a legacy record here would strand its locked coins forever.
+    ...covenantDerivationIds(rec.pay, rec.receive, !!rec.idsInternal),
     // minLot MUST equal what placeCovenant committed into the funded covenant
     // (covenantMinLot(sellAtoms) = sellAtoms/1000), NOT the all-or-nothing sellAtoms:
     // minLot is pushed into the fill leaf, which sets the merkle root, the tweaked
@@ -9169,7 +9206,10 @@ async function repostCovenantOrder(rec){
   const { rateNum, rateDen } = computeRate(BigInt(rec.sellAtoms), BigInt(rec.recvAtoms));
   const minLot = covenantMinLot(BigInt(rec.sellAtoms));
   const plan = planPlaceOrder({
-    assetA: rec.pay, assetB: rec.receive, sellAtoms: BigInt(rec.sellAtoms),
+    // rec.pay/rec.receive are DISPLAY hex; derive with the record's OWN generation byte order
+    // (internal for new records, display for legacy pre-fix ones) so the spk guard below matches.
+    ...covenantDerivationIds(rec.pay, rec.receive, !!rec.idsInternal),
+    sellAtoms: BigInt(rec.sellAtoms),
     rateNum, rateDen, minLot, expiryLocktime: Number(rec.expiry),
     makerProg: payout.program, makerX: payout.internalKey,
   });
@@ -9488,6 +9528,11 @@ async function renderMyOrders(){
         const { order } = orderFromPlaced(rec);
         const payout = makerPayout(C.signer, C.network, rec.makerIndex);
         const recipe = covPlanRefund(order, { txid: rec.covTxid, vout: rec.covVout, locked: BigInt(rec.sellAtoms) });
+        // planRefund copies order.assetA into covenantAsset — INTERNAL byte order for a new
+        // (idsInternal) record. The refund host seam (wasm AssetId::from_str + fee-vs-covenant
+        // asset comparison) speaks DISPLAY hex, and rec.pay is display in BOTH generations, so
+        // hand it the display id explicitly. (Legacy records: order.assetA == rec.pay, a no-op.)
+        recipe.covenantAsset = rec.pay;
         recipe.makerKeyPath = payout.path;   // m/86'/coin'/0'/0/index — the leaf's key
         const tipHeight = C.wollet.tip().height();
         const out = await covCancel(id, { recipe, tipHeight, expiryLocktime: Number(rec.expiry) },
@@ -9616,6 +9661,9 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   postSupported, railSupported, applyAutoMode,
   // W5 — the SBTC mis-sell binding: a BTC-advertised covenant is only fillable as pegged BTC if it LOCKS SBTC.
   covenantLocksAsset,
+  // Covenant byte-order boundary: display<->internal id flip + the per-record-generation
+  // derivation ids (new records internal, legacy display — the refund-compatibility contract).
+  revHex, covenantDerivationIds,
   // RAIL-BLIND take + markets overview, for headless verification of the composer's rail-blindness.
   bridgedTakePlan, overviewPairs, renderMixedTake,
   // Speed-aware selection (routing honesty): the class predicate + the executed-amount price

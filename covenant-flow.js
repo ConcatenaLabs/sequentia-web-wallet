@@ -99,7 +99,9 @@ export function fillRestSplit(requestedAtoms, fillableAtoms, dustDen = 200n){
 // asset A (offer/base) for asset B (want), carrying the CovenantTerms in the
 // settlement oneof (field 23). swap.js signs it (seqob.signOffer / makerPriv) and
 // POSTs it (seqob.postCovenantOffer). Pure: ids/amounts in, plain object out.
-//   assetA/assetB  32-byte internal-order asset id hex
+//   assetA/assetB  32-byte DISPLAY-hex asset ids — they feed pair/offer_asset/want_asset, the
+//                  relay's matching domain (pair = display). The INTERNAL-order ids live only
+//                  inside `covenant` (CovenantTerms, from buildCovenantTerms) — never mix the two.
 //   sellAtoms      atoms of A locked in the covenant
 //   recvAtoms      atoms of B wanted for a full fill (== requiredBForFull)
 //   covenant       the CovenantTerms (from buildCovenantTerms)

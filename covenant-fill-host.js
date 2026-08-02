@@ -74,7 +74,15 @@ export function makeCovenantHooks(ctx){
     buildCovenantFillTx: async (recipe) => {
       const feeAsset = ctx.fee.asset;
       const feeAtoms = BigInt(ctx.fee.atoms);
-      const creditAsset = recipe.creditAsset;
+      // BYTE ORDER: the recipe's asset ids come straight from the relay's CovenantTerms and are
+      // INTERNAL byte order (as the leaf bakes them). Everything on THIS side of the seam —
+      // wallet coin selection (unblinded().asset().toString()) and the wasm assembler
+      // (AssetId::from_str) — speaks DISPLAY hex, so flip here, exactly like the Go settler's
+      // displayHex(order.AssetA) (seqdex covfill.go). The leaf/control-block/witness hexes are
+      // consensus bytes and are NOT touched.
+      const creditAsset = revHexStr(recipe.creditAsset);
+      const covenantAsset = revHexStr(recipe.covenantAsset);
+      const remainderAsset = recipe.remainderAsset ? revHexStr(recipe.remainderAsset) : recipe.remainderAsset;
       const creditValue = BigInt(recipe.creditValue);
 
       // How much of each asset the taker must fund: the maker credit (asset B) plus
@@ -83,7 +91,7 @@ export function makeCovenantHooks(ctx){
       const add = (asset, amt) => need.set(asset, (need.get(asset) || 0n) + amt);
       add(creditAsset, creditValue);
       add(feeAsset, feeAtoms);
-      if (need.has(recipe.covenantAsset))
+      if (need.has(covenantAsset))
         throw new Error('fee/credit asset must not be the covenant sold asset A');
 
       // Greedy largest-first coin selection over the wallet's own UTXOs, per asset.
@@ -123,16 +131,16 @@ export function makeCovenantHooks(ctx){
       const full = {
         covenantTxid: recipe.covenantTxid,
         covenantVout: recipe.covenantVout,
-        covenantAsset: recipe.covenantAsset,
+        covenantAsset,                      // DISPLAY hex (converted above) — wasm parses display ids
         covenantLocked: String(recipe.covenantLocked),
         fillLeafHex: recipe.fillLeafHex,
         controlBlockHex: recipe.controlBlockHex,
-        creditAsset: recipe.creditAsset,
+        creditAsset,                        // DISPLAY hex (converted above)
         creditProg: recipe.creditProg,
         creditProgVer: recipe.creditProgVer == null ? 1 : recipe.creditProgVer,
         creditValue: String(recipe.creditValue),
         partial: !!recipe.partial,
-        remainderAsset: recipe.remainderAsset,
+        remainderAsset,                     // DISPLAY hex (converted above; == covenantAsset when partial)
         remainderValue: recipe.partial ? String(recipe.remainderValue) : undefined,
         remainderSpkHex: recipe.remainderSpkHex,
         takerFundingUtxos,
@@ -150,6 +158,9 @@ export function makeCovenantHooks(ctx){
     // maker's fee funding, addresses, the network genesis hash, and the seed, then
     // call the wasm assembler to sign the CLTV script-path reclaim.
     buildCovenantRefundTx: async (recipe) => {
+      // BYTE ORDER: unlike the fill recipe (relay terms, always internal), a refund recipe is
+      // wallet-local and its covenantAsset byte order depends on the record generation — so the
+      // caller (swap.js cancel path) is responsible for handing a DISPLAY-hex id here. No flip.
       const covAsset = recipe.covenantAsset;
       const feeAsset = ctx.fee.asset;
       const feeAtoms = BigInt(ctx.fee.atoms);
@@ -227,3 +238,7 @@ export function makerPayout(signer, network, index = 0){
 }
 
 function bytesHex(u8){ let s=''; for (const b of u8) s += b.toString(16).padStart(2,'0'); return s; }
+
+// Reverse a hex string's byte order (INTERNAL <-> DISPLAY asset id). Exported for the
+// byte-order seam test; swap.js keeps its own copy (revHex) for the place/refund side.
+export function revHexStr(h){ return (String(h || '').match(/../g) || []).reverse().join(''); }
