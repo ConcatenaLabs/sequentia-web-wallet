@@ -2577,6 +2577,15 @@ function bestReceivePerPay(offers, pay, receive){
   const pm = metaOf(pay), rm = metaOf(receive);
   let best = 0;
   for (const o of (offers||[])){
+    // ORIENTATION GUARD: price ONLY a row that actually pays out the RECEIVE asset and takes
+    // the PAY asset. The caller's side-filtering normally guarantees this, but during a partial
+    // book load (REST unreachable, unified families mid-update) a wrong-direction row can reach
+    // this pool — and pricing it INVERTS the derivation: on a GOLD->EURX sell the composer
+    // derived receive = pay x (1/3846) and painted a dust amount, silently disabling Place.
+    // A row that names its legs and names them wrong is skipped; a legacy row without leg
+    // assets keeps the old behavior (the caller's filtering is all it ever had).
+    const oa = o.offer_asset ?? o.offerAsset, wa = o.want_asset ?? o.wantAsset;
+    if ((oa && oa !== receive) || (wa && wa !== pay)) continue;
     const recvU = Number(big(o.offer_amount||o.offerAmount)) / Math.pow(10, rm.precision||0);
     const payU  = Number(big(o.want_amount ||o.wantAmount )) / Math.pow(10, pm.precision||0);
     if (payU > 0){ const p = recvU/payU; if (p > best) best = p; }
@@ -3110,6 +3119,10 @@ async function requoteMixed(route, amtStr){
       LAST_QUOTE = null; setReviewEnabled(false);
       $('swRoute').textContent = '';
       $('swRate').textContent = 'No offers resting here yet.';
+      // A DERIVED amount from an earlier (different-route) quote must not sit in the
+      // untouched field looking like a live quote for THIS route - clear it (never a
+      // user-typed value; clearDerived refuses those by contract).
+      clearDerived(S.edited === 'pay' ? $('swRecvAmt') : $('swPayAmt'));
       paintFee('BTC', null, null);
       renderTiming(route);
       return;
@@ -3223,6 +3236,7 @@ async function requoteMixed(route, amtStr){
       LAST_QUOTE = null; setReviewEnabled(false);
       $('swRoute').textContent = '';
       $('swRate').textContent = 'No offers resting here yet.';
+      clearDerived(S.edited === 'pay' ? $('swRecvAmt') : $('swPayAmt'));   // same stale-derivation guard as above
       paintFee(qHex, null, null);
       renderTiming(route);
       return;
@@ -9697,7 +9711,7 @@ export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, 
   // derivation ids (new records internal, legacy display — the refund-compatibility contract).
   revHex, covenantDerivationIds,
   // RAIL-BLIND take + markets overview, for headless verification of the composer's rail-blindness.
-  bridgedTakePlan, overviewPairs, renderMixedTake,
+  bridgedTakePlan, overviewPairs, renderMixedTake, bestReceivePerPay,
   // Speed-aware selection (routing honesty): the class predicate + the executed-amount price
   // comparison, exposed so the "native wins ties / bridged only on strictly better" rule and
   // its rounding discipline are pinned headlessly. subswapStatusLine for the drive-time label.

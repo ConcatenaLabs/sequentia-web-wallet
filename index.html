@@ -3633,7 +3633,10 @@ function prettyErr(e){
   if(/lightning-rpc|connection refused|ECONNREFUSED/i.test(m))
     return 'Your Lightning node is not reachable right now, so nothing was sent. Reopen the wallet to reconnect it, then try again.';
   if(/timed? ?out|timeout|deadline exceeded/i.test(m))
-    return 'This took too long to complete and was stopped, so nothing was committed. Try again.';
+    // NEVER claim "nothing was committed" on a timeout: a timeout means the wallet stopped
+    // WAITING, not that the trade stopped HAPPENING. A pure-LN swap was observed settling on
+    // both legs seconds after this line told the user to try again - an invitation to buy twice.
+    return 'This is taking longer than expected, so the wallet stopped waiting. It may still complete in the background - check your balance and Recent trades before trying again.';
   // Anything not recognized as a plain, machinery-free sentence collapses to a safe default, so
   // no catch site can leak settlement internals even for an error we never anticipated.
   if(PRETTY_MACHINERY.test(m) || !looksPlain(m)){
