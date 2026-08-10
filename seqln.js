@@ -681,7 +681,12 @@ export function seqlnSwap({ side, asset, amount, take_atoms, quote_asset, payRai
   if (taker_asset_inbound != null) body.taker_asset_inbound = taker_asset_inbound;
   if (taker_btc_inbound != null) body.taker_btc_inbound = taker_btc_inbound;
   if (taker_seq_refund_pub) body.taker_seq_refund_pub = taker_seq_refund_pub;
-  return lspFetch('/swap', { method: 'POST', body: JSON.stringify(body) });
+  // The settle wait must OUTLAST a real settlement, not race it: live pure-LN swaps settle in
+  // 85-100s wall-clock (two hold registrations + two pays through the hub), and the default 90s
+  // lspFetch budget expired mid-settle on two consecutive live trades - the UI then declared
+  // failure while both legs completed seconds later. The LSP keeps driving after the client
+  // hangs up, so a short client budget here buys nothing and manufactures false failures.
+  return lspFetch('/swap', { method: 'POST', body: JSON.stringify(body), timeoutMs: 8 * 60_000 });
 }
 
 // W2 FRONT-BEFORE-FUND — a bridged SELL (taker sells the asset, receives BTC over Lightning): AFTER the
