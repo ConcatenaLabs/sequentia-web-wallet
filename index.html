@@ -1962,6 +1962,10 @@ const seqLeg = {
     const signed = signer.sign(pset);
     const finalized = wollet.finalize(signed);
     const txid = await client.broadcast(finalized);
+    // Apply our own tx to the wollet NOW: the scan cadence is minutes (and the scan cache is
+    // broken), so without this the very next build re-selects the inputs this tx just spent
+    // and the node rejects it with bad-txns-inputs-missingorspent.
+    try { wollet.applyTransaction(finalized); } catch {}
     return { txid: txid.toString ? txid.toString() : String(txid) };
   },
   // Poll the Sequentia esplora until the funding tx confirms; return the HTLC vout
@@ -2595,6 +2599,7 @@ async function lnSendDeposit({ chain, asset, amount, address }){
   const signed = signer.sign(pset);
   const finalized = wollet.finalize(signed);
   const txid = await client.broadcast(finalized);
+  try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
   return { txid: (txid && txid.toString) ? txid.toString() : String(txid) };
 }
 
@@ -3887,6 +3892,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       const signed = signer.sign(pset);
       const finalized = wollet.finalize(signed);
       const txid = await client.broadcast(finalized);
+      try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
       m.remove(); toast('Broadcast:', {href:'/explorer/tx/'+txid.toString(), label:txid.toString().slice(0,18)+'…'});
       if(onDone) onDone(txid); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }

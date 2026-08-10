@@ -234,6 +234,10 @@ export function makeCovenantHooks(ctx){
       const res = await ctx.esploraFetch('/tx', { method: 'POST', body: rawHex });
       const txt = (await res.text()).trim();
       if (!res.ok) throw new Error(`broadcast failed: ${txt}`);
+      // Apply our own tx to the wollet immediately (the scan is minutes stale): without this
+      // the next build re-selects the funding coins this fill just spent and the node rejects
+      // it with bad-txns-inputs-missingorspent.
+      try { if (ctx.wasm && ctx.wasm.Transaction) ctx.wollet.applyTransaction(new ctx.wasm.Transaction(rawHex)); } catch {}
       return txt;
     },
   };
