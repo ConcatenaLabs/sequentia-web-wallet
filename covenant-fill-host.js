@@ -95,11 +95,23 @@ export function makeCovenantHooks(ctx){
         throw new Error('fee/credit asset must not be the covenant sold asset A');
 
       // Greedy largest-first coin selection over the wallet's own UTXOs, per asset.
+      // EXPLICIT COINS ONLY: a covenant fill is an all-explicit transaction (the leaf
+      // introspects explicit amounts), so a CONFIDENTIAL input can never balance it —
+      // consensus compares the input's value commitment against the explicit output
+      // sum and rejects the tx with "value in != value out". The wallet unblinds its
+      // own coins, so a blinded UTXO looks identical to an explicit one through
+      // unblinded() unless we ask the secrets whether the on-chain form was explicit.
       const utxos = ctx.wollet.utxos();
       const byAsset = new Map();
+      const blindedHeld = new Map();   // per-asset value held in confidential outputs (unusable here)
       for (const u of utxos){
-        const asset = u.unblinded().asset().toString();
+        const sec = u.unblinded();
+        const asset = sec.asset().toString();
         if (!need.has(asset)) continue;
+        if (sec.isExplicit && !sec.isExplicit()){
+          blindedHeld.set(asset, (blindedHeld.get(asset) || 0n) + BigInt(sec.value()));
+          continue;
+        }
         if (!byAsset.has(asset)) byAsset.set(asset, []);
         byAsset.get(asset).push(u);
       }
@@ -124,8 +136,11 @@ export function makeCovenantHooks(ctx){
           });
           sum += BigInt(u.unblinded().value());
         }
-        if (sum < target)
-          throw new Error(`insufficient ${asset}: need ${target}, have ${sum}`);
+        if (sum < target){
+          const blinded = blindedHeld.get(asset) || 0n;
+          throw new Error(`insufficient transparent ${asset}: need ${target}, have ${sum}`
+            + (blinded > 0n ? ` (a further ${blinded} is held in confidential outputs, which an on-chain covenant fill cannot spend; send it to yourself at a transparent address first)` : ''));
+        }
       }
 
       const full = {
@@ -170,8 +185,11 @@ export function makeCovenantHooks(ctx){
       const extraFeeUtxos = [];
       if (feeAsset !== covAsset && feeAtoms > 0n){
         const utxos = ctx.wollet.utxos();
+        // Explicit coins only, same reason as the fill seam: the refund is an
+        // all-explicit spend, so a confidential fee input can never balance it.
         const cands = utxos
           .filter(u => u.unblinded().asset().toString() === feeAsset)
+          .filter(u => !(u.unblinded().isExplicit && !u.unblinded().isExplicit()))
           .sort((a,b) => (b.unblinded().value() > a.unblinded().value() ? 1 : -1));
         let sum = 0n;
         for (const u of cands){

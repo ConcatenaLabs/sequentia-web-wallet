@@ -706,6 +706,16 @@
                 </div>
               </div>
 
+              <!-- Confidential-receive toggle (spec §6.6): a COMPOSER control, so it lives inside
+                   the composer and hides with it — an earlier build placed it after the trades
+                   list (outside #swComposer), where it floated to the top of every in-flight
+                   trade view. Shown only when receiving a Sequentia asset ON-CHAIN; gated by
+                   paintConfControl(). -->
+              <label class="swconf hide" id="swConfWrap" style="align-items:center;gap:9px;margin-top:2px;font-size:12.5px;color:var(--dim);cursor:pointer">
+                <input type="checkbox" id="swConfChk" style="width:16px;height:16px;flex:0 0 auto">
+                <span>Receive this swap <b style="color:var(--txt);font-weight:650">confidentially</b> (a blinded address). Off by default: swaps receive to your transparent tb1 address, like the Receive tab.</span>
+              </label>
+
               <!-- PLACE -->
               <div class="swsec swsec-place">
                 <button class="primary swreview" id="swReview" disabled>Place order</button>
@@ -728,12 +738,6 @@
         <div id="swPairStats" style="margin-top:18px"></div>
         <div id="swTrades" style="margin-top:12px"></div>
 
-        <!-- Confidential-receive toggle: shown ONLY when receiving a Sequentia-issued asset ON-CHAIN
-             (blinded addresses don't apply to BTC or to a Lightning receive). Gated by updateConfToggle(). -->
-        <label class="swconf hide" id="swConfWrap" style="align-items:center;gap:9px;margin-top:12px;font-size:12.5px;color:var(--dim);cursor:pointer">
-          <input type="checkbox" id="swConfChk" style="width:16px;height:16px;flex:0 0 auto">
-          <span>Receive this swap <b style="color:var(--txt);font-weight:650">confidentially</b> (a blinded address). Off by default: swaps receive to your transparent tb1 address, like the Receive tab.</span>
-        </label>
       </div>
 
       <!-- cross-chain HTLC wizard host: hidden until Review routes a BTC swap here.
