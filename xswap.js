@@ -224,6 +224,82 @@ function loadSwap(){
   } catch (e){ SWAP = null; }
 }
 function clearSwap(){ SWAP = null; saveSwap(); }
+
+// ---- parked refund-only records --------------------------------------------
+// A swap that can no longer complete (BTC locked, no asset leg, courier gone) is REFUND-ONLY:
+// all it needs is one CLTV refund broadcast at T_btc. Holding the single in-flight slot hostage
+// for that — sometimes a day of testnet4 blocks — wedged the whole cross-buy rail, violating
+// spec §2 ("a canceled order never blocks the next order" in spirit: this one holds value, but
+// its only remaining action is mechanical). Parking moves the FULL record (keys, redeem script,
+// timeouts) into a keyed list, a background sweeper broadcasts the refund the moment the
+// timelock opens, and the slot frees immediately.
+const PARK_KEY = LS_KEY + '.parked';
+function listParkedRaw(){ try { return JSON.parse(localStorage.getItem(PARK_KEY) || '[]'); } catch { return []; } }
+function saveParked(list){ try { localStorage.setItem(PARK_KEY, JSON.stringify(list)); } catch {} }
+export function listParked(){ return listParkedRaw(); }
+// Park is offered ONLY for a record with nothing claimable: BTC committed, no asset leg. A swap
+// holding a maker's asset leg keeps its live stepper (claim beats refund; never park a claim).
+function parkEligible(){
+  return !!(SWAP && SWAP.btc_leg && SWAP.btc_leg.txid && !SWAP.seq_leg
+    && (SWAP.state === ST.PENDING || SWAP.state === ST.FAILED));
+}
+function onPark(){
+  loadSwap();
+  if (!parkEligible()) return;
+  const ser = JSON.parse(JSON.stringify(SWAP, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+  const list = listParkedRaw();
+  if (!list.some(p => p && p.btc_leg && p.btc_leg.txid === ser.btc_leg.txid)) list.push(ser);
+  saveParked(list);
+  // Verify the written copy really carries the reclaim material BEFORE dropping the live slot.
+  const back = listParkedRaw().find(p => p && p.btc_leg && p.btc_leg.txid === ser.btc_leg.txid);
+  if (!(back && back.btc_redeem_script && back.btc_locktime && (back.btc_refund_secret || back.btc_refund_pub))){
+    try { C.toast && C.toast('Could not park this trade safely - keeping it active.'); } catch {}
+    return;
+  }
+  clearSwap(); renderStepper();
+  try { C.toast && C.toast('Parked. The BTC refunds itself at block ' + back.btc_locktime + '; you can trade again now.'); } catch {}
+  if (C.onExit) C.onExit();
+}
+// Sweep the parked list: refund what has matured, drop what is done, keep (and retry) the rest.
+// Armed from renderXswap on a slow timer; every failure is retried on a later pass.
+let _parkTick = null;
+export async function resumeParkedRefunds(){
+  const list = listParkedRaw();
+  if (!list.length) return;
+  let tip = -1;
+  try { tip = await btcTipHeight(); } catch {}
+  if (!(tip > 0)) return;
+  const keep = [];
+  for (const p of list){
+    try {
+      if (!p || !p.btc_leg || !p.btc_leg.txid) continue;            // malformed: drop
+      if (p.btc_refund_txid) continue;                              // already refunded: drop
+      if (tip < Number(p.btc_locktime)){ keep.push(p); continue; }  // not mature yet
+      let vout = p.btc_leg.vout;
+      if (vout == null){
+        const f = await C.btcLeg.findFunding(p.btc_leg.txid, p.btc_redeem_script);
+        if (!f || f.vout == null){ keep.push(p); continue; }
+        vout = f.vout; p.btc_leg.vout = vout;
+      }
+      const txid = await C.btcLeg.refund({
+        txid: p.btc_leg.txid, vout, amount: big(p.btc_leg.amount),
+        redeem_script: p.btc_redeem_script, locktime: p.btc_locktime,
+        refund_secret: p.btc_refund_secret, refund_pub: p.btc_refund_pub,
+      });
+      p.btc_refund_txid = txid;
+      try { C.logTrade && C.logTrade({ id: 'xpark:' + p.btc_leg.txid, title: 'Buy refunded (parked)', detail: 'BTC refunded: ' + txid }); } catch {}
+      try { C.toast && C.toast('Parked BTC leg refunded: ' + String(txid).slice(0, 18) + '…'); } catch {}
+    } catch (e){ keep.push(p); }   // transient (mempool, fee, network): retry next pass
+  }
+  saveParked(keep);
+}
+function armParkSweeper(){
+  if (_parkTick || typeof setInterval !== 'function') return;
+  _parkTick = setInterval(() => { resumeParkedRefunds().catch(() => {}); }, 60000);
+  if (_parkTick && _parkTick.unref) _parkTick.unref();
+  resumeParkedRefunds().catch(() => {});
+}
+
 // Bounce a terminal START failure back to the composer WITH its reason. onExit() re-renders the composer
 // and hides #xswapErr (it lives inside the cross wrap), so the explanation must also land on the
 // composer's own #swErr — set AFTER onExit so the composer re-render doesn't wipe it.
@@ -248,6 +324,7 @@ export function initXswap(ctx){
     $('btnXRefund')  && ($('btnXRefund').onclick  = onRefundBtc);
     $('btnXAbandon') && ($('btnXAbandon').onclick = onAbandon);
   }
+  armParkSweeper();   // parked refund-only records keep refunding even with no swap in flight
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,6 +1855,14 @@ function renderStepper(){
     && SWAP.state !== ST.REFUNDED && SWAP.state !== ST.BTC_CLAIMED;
   const ab = el('button','ghost', (!_lockedNow && (isForwardComplete() || SWAP.state === ST.REFUNDED || SWAP.state === ST.FAILED)) ? 'Clear' : 'Abandon');
   ab.id = 'btnXAbandon'; ab.onclick = onAbandon; row.appendChild(ab);
+  // A refund-only record (BTC locked, no asset leg) can be PARKED: the reclaim material moves to
+  // the parked list, a sweeper refunds it at T_btc, and the trade slot frees now instead of being
+  // held hostage for the rest of the timelock (the wedge that blocked all cross buys for a day).
+  if (parkEligible()){
+    const pk = el('button','ghost', 'Park · refund runs itself');
+    pk.id = 'btnXPark'; pk.title = 'Free the trade slot now; the BTC leg refunds automatically at block ' + SWAP.btc_locktime + '.';
+    pk.onclick = onPark; row.appendChild(pk);
+  }
   ctl.appendChild(row);
   wrap.appendChild(ctl);
 
