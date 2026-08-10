@@ -5155,12 +5155,56 @@ function saveSubswap(){
 }
 function addSubswap(rec){ rec.id = rec.id || newTradeId(); SUBSWAPS.push(rec); saveSubswap(); return rec; }
 // Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
+// A FALSY rec is a NO-OP, never a wipe. The old no-arg branch erased EVERY record and
+// tombstoned the ids so the merge-save could not resurrect them from disk. Two resume
+// paths that meant "drop THIS dead record" called it bare, and the wipe took a SIBLING
+// record whose funded HTLC had no other copy of its redeem script — the maker's claim
+// key is random per session, so that script was unrecoverable and the locked asset is
+// permanently unspendable (seen live: 6.42 USDX at c2a994a9…:0, burned). No caller
+// legitimately wants "forget every trade"; one that did would write it explicitly.
 function clearSubswap(rec){
-  if (!rec){ for (const r of SUBSWAPS) if (r && r.id) _subswapTombstones.add(r.id); SUBSWAPS = []; saveSubswap(); return; }
+  if (!rec){ console.warn('[subswap] clearSubswap called without a record - refusing to wipe the store'); return; }
   if (rec.id) _subswapTombstones.add(rec.id);
   SUBSWAPS = SUBSWAPS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
+  // Retire any rescue copy: the trade is terminal, the side-channel must not resurrect it.
+  try {
+    const rescue = JSON.parse(localStorage.getItem('swk.rescue.subswaps') || 'null');
+    if (Array.isArray(rescue))
+      localStorage.setItem('swk.rescue.subswaps', JSON.stringify(rescue.filter((r) =>
+        r && !(rec.id && r.id === rec.id) && !(rec.hash_h && r.hash_h === rec.hash_h))));
+  } catch {}
   saveSubswap();
 }
+// RESCUE SIDE-CHANNEL for rail-crossing trades (mirror of 'swk.rescue.buys'): a copy of any
+// record that is about to commit (or has committed) an on-chain HTLC, written to a key nothing
+// else ever writes. The primary store proved clobberable while a leg was funded (see above) —
+// localStorage is the wallet's only ledger for this material, so it gets a second, independent
+// copy. Adopted at boot, retired when the record goes terminal.
+function rescueSubswapUpsert(b){
+  if (!(b && (b.hash_h || b.id))) return;
+  try {
+    let rescue = [];
+    try { const raw = JSON.parse(localStorage.getItem('swk.rescue.subswaps') || 'null'); if (Array.isArray(raw)) rescue = raw.filter(Boolean); } catch {}
+    const copy = JSON.parse(JSON.stringify(b));
+    const i = rescue.findIndex((r) => r && ((b.id && r.id === b.id) || (b.hash_h && r.hash_h === b.hash_h)));
+    if (i >= 0) rescue[i] = copy; else rescue.push(copy);
+    localStorage.setItem('swk.rescue.subswaps', JSON.stringify(rescue));
+  } catch {}
+}
+try {
+  const rescue = JSON.parse(localStorage.getItem('swk.rescue.subswaps') || 'null');
+  if (Array.isArray(rescue)){
+    const live = [];
+    for (const r of rescue){
+      if (!r) continue;
+      if (r.state === 'settled' || r.state === 'refunded' || r.state === 'failed') continue;
+      live.push(r);
+      const seen = SUBSWAPS.some((b) => b && ((r.id && b.id === r.id) || (r.hash_h && b.hash_h === r.hash_h)));
+      if (!seen){ if (!r.id) r.id = newTradeId(); SUBSWAPS.push(r); }
+    }
+    localStorage.setItem('swk.rescue.subswaps', JSON.stringify(live));
+  }
+} catch {}
 function subswapTerminal(b){ return !b || b.state === 'settled' || b.state === 'failed' || b.state === 'refunded'; }
 function activeSubswaps(){ return SUBSWAPS.filter((r) => !subswapTerminal(r)); }
 function subswapById(id){ return SUBSWAPS.find((r) => r && r.id === id) || null; }
@@ -5603,8 +5647,8 @@ async function driveSubswap(rec){
         // CRASH GAP: persist the leg outpoint + bolt11 + H + the 'paying' marker BEFORE the irreversible pay,
         // so resumeSubswap can RE-QUERY the node for a settled payment on H (idempotent) and recover P + claim
         // — never silently dropping a record that may already have paid.
-        onAboutToPay: (info) => { b.leg = info.leg; b.hash_h = info.hash_h; b.bolt11 = info.bolt11; b.state = 'paying'; saveSubswap(); },
-        onPaid: (preimage, leg) => { b.preimage = preimage; b.leg = leg; b.state = 'claiming'; saveSubswap(); },
+        onAboutToPay: (info) => { b.leg = info.leg; b.hash_h = info.hash_h; b.bolt11 = info.bolt11; b.state = 'paying'; saveSubswap(); rescueSubswapUpsert(b); },
+        onPaid: (preimage, leg) => { b.preimage = preimage; b.leg = leg; b.state = 'claiming'; saveSubswap(); rescueSubswapUpsert(b); },
         onClaimed: (txid) => { b.seq_claim_txid = txid; b.state = 'settled'; saveSubswap(); },
       };
       await runTakerReverseSubmarine(deps);
@@ -5640,8 +5684,8 @@ async function driveSubswap(rec){
         onAboutToFund: (info) => { b.hash_h = info.hash_h; b.preimage = info.preimage; b.seq_locktime = info.seq_locktime;
           b.refund_secret = info.refund_secret; b.btc_node_key = node_key;
           b.leg = { redeem_script: info.redeem, asset: info.asset, amount: info.atoms, locktime: info.seq_locktime };
-          b.state = 'funding'; saveSubswap(); },
-        onFunded: (rec) => { b.leg = rec.leg; b.hash_h = rec.hash_h; b.preimage = rec.preimage; b.seq_locktime = rec.seq_locktime; b.refund_secret = rec.refund_secret; b.state = 'settling'; saveSubswap(); },
+          b.state = 'funding'; saveSubswap(); rescueSubswapUpsert(b); },
+        onFunded: (rec) => { b.leg = rec.leg; b.hash_h = rec.hash_h; b.preimage = rec.preimage; b.seq_locktime = rec.seq_locktime; b.refund_secret = rec.refund_secret; b.state = 'settling'; saveSubswap(); rescueSubswapUpsert(b); },
         onSettled: () => { b.state = 'settled'; saveSubswap(); },
       };
       const r = await runTakerSubmarine(deps);
@@ -6030,7 +6074,7 @@ async function resumeOneSubswap(b){
       // it as PRE-COMMITMENT and DROP it cleanly: no dangling 'funding' record wedging the rail, and no
       // double-fund (nothing to fund; fundSeq is idempotent regardless). A transient/unreadable state is NOT
       // definitive -> keep it resumable and retry next boot (never a false drop of a real funded leg).
-      if (definitivelyEmpty){ clearSubswap(); return; }
+      if (definitivelyEmpty){ clearSubswap(b); return; }   // drop THIS record only — bare clearSubswap() was the store-wipe bug
       b.detail = 'Completing your trade · waiting for the asset to appear on-chain.'; saveSubswap();   // NEVER dropped on an unreadable/transient read
     } catch (e){ console.warn('[subswap] resume error:', e); b.detail = 'Completing your trade - your funds are safe.'; saveSubswap(); }
     return;
@@ -6065,7 +6109,7 @@ async function resumeOneSubswap(b){
   // Pre-commitment (no P, no funded leg, no in-flight payment): the live session cannot be resumed and nothing
   // was committed — drop it. (A 'paying' buy / 'held' payer-bridge / funded sell are all handled above and are
   // NEVER reached here, so a record that may have moved value is never silently dropped.)
-  clearSubswap();
+  clearSubswap(b);   // drop THIS record only — bare clearSubswap() was the store-wipe bug
 }
 
 // ONE review sheet at a time (task 19c): a double-click on Review stacked two identical
@@ -6205,6 +6249,7 @@ async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset){
   const finalized = C.wollet.finalize(signed);
   const t = await C.client.broadcast(finalized);
   try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+  try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
   const txid = (t && t.toString) ? t.toString() : String(t);
   const vout = await resolveVout(txid, spkHex);
   return { txid, vout };
@@ -6471,6 +6516,7 @@ async function sendSeqAsset(toAddr, assetHex, atoms){
   const finalized = C.wollet.finalize(signed);
   const t = await C.client.broadcast(finalized);
   try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+  try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
   return (t && t.toString) ? t.toString() : String(t);
 }
 
@@ -6562,7 +6608,7 @@ function fillHooksFor(matched){
   const feeAsset = assetB || C.POLICY_HEX;
   return makeCovenantHooks({
     wasm: C.wasm, wollet: C.wollet, network: C.network, mnemonic: C.mnemonic,
-    esploraFetch: C.esploraFetch,
+    esploraFetch: C.esploraFetch, noteOwnTx: C.noteOwnTx,
     receiveAddress: covReceiveAddr,   // transparent by default (#6); blinded only if the user opted in
     fee: { asset: feeAsset, atoms: covFeeAtoms(feeAsset) },
     onStatus: (m) => { try { C.toast && C.toast(m); } catch {} },
@@ -6619,7 +6665,7 @@ function refundHooksFor(){
   const feeAsset = C.POLICY_HEX;
   return makeCovenantHooks({
     wasm: C.wasm, wollet: C.wollet, network: C.network, mnemonic: C.mnemonic,
-    esploraFetch: C.esploraFetch,
+    esploraFetch: C.esploraFetch, noteOwnTx: C.noteOwnTx,
     receiveAddress: covReceiveAddr,   // transparent by default (#6); blinded only if the user opted in
     fee: { asset: feeAsset, atoms: covFeeAtoms(feeAsset) },
     onStatus: (m) => { try { C.toast && C.toast(m); } catch {} },
@@ -7120,7 +7166,9 @@ function saveSells(){
 function addSell(rec){ rec.id = rec.id || newTradeId(); SELLS.push(rec); saveSells(); return rec; }
 // Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
 function clearSell(rec){
-  if (!rec){ for (const r of SELLS) if (r && r.id) _sellTombstones.add(r.id); SELLS = []; saveSells(); return; }
+  // Falsy rec = NO-OP (see clearSubswap): the no-arg wipe-all branch is how a funded sibling's
+  // recovery material got erased. No caller wants "forget every trade".
+  if (!rec){ console.warn('[subswap] clearSell called without a record - refusing to wipe the store'); return; }
   if (rec.id) _sellTombstones.add(rec.id);
   SELLS = SELLS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
   saveSells();
@@ -7471,7 +7519,9 @@ function saveBuys(){
 function addBuy(rec){ rec.id = rec.id || newTradeId(); BUYS.push(rec); saveBuys(); return rec; }
 // Drop ONE record (by identity, falling back to id so a re-parsed copy still matches).
 function clearBuy(rec){
-  if (!rec){ for (const r of BUYS) if (r && r.id) _buyTombstones.add(r.id); BUYS = []; saveBuys(); return; }
+  // Falsy rec = NO-OP (see clearSubswap): the no-arg wipe-all branch is how a funded sibling's
+  // recovery material got erased. No caller wants "forget every trade".
+  if (!rec){ console.warn('[subswap] clearBuy called without a record - refusing to wipe the store'); return; }
   if (rec.id) _buyTombstones.add(rec.id);
   BUYS = BUYS.filter((r) => r !== rec && !(rec.id && r && r.id === rec.id));
   // Retire any rescue copy of this record: the trade is terminal, so the side-channel must not
@@ -8923,6 +8973,7 @@ async function liftOffer(q, onStatusArg){
     const finalized = C.wollet.finalize(finalPset);
     const txid = await C.client.broadcast(finalized);
     try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+    try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
     return { transaction: strippedB64, txid: (txid && txid.toString) ? txid.toString() : String(txid) };
   };
   // onStatus may be a DOM status element (legacy reviewSame call) or a plain callback (the market walk).

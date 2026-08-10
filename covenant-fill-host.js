@@ -236,8 +236,9 @@ export function makeCovenantHooks(ctx){
       if (!res.ok) throw new Error(`broadcast failed: ${txt}`);
       // Apply our own tx to the wollet immediately (the scan is minutes stale): without this
       // the next build re-selects the funding coins this fill just spent and the node rejects
-      // it with bad-txns-inputs-missingorspent.
-      try { if (ctx.wasm && ctx.wasm.Transaction) ctx.wollet.applyTransaction(new ctx.wasm.Transaction(rawHex)); } catch {}
+      // it with bad-txns-inputs-missingorspent. (ctx.wasm.Transaction was missing from this
+      // context until 2026-08-11, so this apply had silently never run.)
+      try { if (ctx.wasm && ctx.wasm.Transaction){ const t = new ctx.wasm.Transaction(rawHex); ctx.wollet.applyTransaction(t); if (ctx.noteOwnTx) ctx.noteOwnTx(t); } } catch {}
       return txt;
     },
   };

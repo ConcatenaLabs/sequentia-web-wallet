@@ -80,9 +80,14 @@ test('subswapTerminal reads the record it is given, not a global', () => {
   assert.equal(subswapTerminal(null), true, 'no record is trivially terminal');
 });
 
-test('clearing everything is still possible in one call', () => {
+test('clearing without a record is a refusal, never a wipe', () => {
+  // The old contract ("no arg = clear everything") is exactly how a funded sibling's recovery
+  // material got erased: two resume paths meant "drop THIS dead record" and called it bare. The
+  // redeem script of the wiped sibling's on-chain HTLC had no other copy (the maker's claim key
+  // is random per session), so the locked asset became permanently unspendable. A falsy record
+  // is now a no-op; wiping all trades would take an explicit, deliberate API.
   install();
   addSubswap(rec()); addSubswap(rec());
   clearSubswap(null);
-  assert.equal(subswapRecords().length, 0);
+  assert.equal(subswapRecords().length, 2, 'a bare clear must leave every record in place');
 });
