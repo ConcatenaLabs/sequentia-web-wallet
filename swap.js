@@ -4061,6 +4061,12 @@ function openPicker(side){
     S.payRail = null; S.recvRail = null;   // rails reset to unselected for the new pair (no default; user must pick)
     S.feeAsset = null; S.feeAssetTouched = false; S.priceFlip = false;   // fee default re-follows the new pay asset; a manual pick + display flip are per-pair, not global (D2/C-11)
     { const pe = C.$('swPriceAmt'); if (pe) { pe._userTyped = false; pe.value = ''; } }  // clear a held limit price on asset change (new frame -> re-placeholder from the new inside price)
+    // Clear BOTH amount fields on an asset change: a raw number is meaningless across units,
+    // and carrying it over turned "10" USDX into a 10-BTC pay field (~$640k) with a stale
+    // receive amount from the old pair still beside it. New pair, blank slate.
+    { const pa = C.$('swPayAmt'), ra = C.$('swRecvAmt');
+      if (pa) { pa._userTyped = false; pa.value = ''; }
+      if (ra) { ra._userTyped = false; ra.value = ''; } }
     LAST_QUOTE = null; setReviewEnabled(false);
     paintPanes();
     requote().catch(()=>{});
@@ -4821,7 +4827,7 @@ async function bridgedSteps(){
         // instantly until it expired. The on-chain cross path has had this retry
         // (xswap.js T4); the bridged path never got it.
         if (retryableHandshakeFailure(why) && advanceBridgeToNextOffer(b, why)) return;
-        b.state = 'failed'; b.detail = 'This trade could not be placed right now - try again shortly.'; saveBridge(); return;
+        b.state = 'failed'; b.detail = failDetail(why); saveBridge(); return;
       }
       await bsleep(3000);
     }
