@@ -196,8 +196,11 @@ export function makeProvisioner(opts) {
       `log-file=${path.join(dir, 'lightningd.log')}`,
       `subdaemon=hsmd:${CFG.hsmdProxy}`,
       // holdinvoice-seq: HODL invoices on a hash H so the DEVICE holds the preimage P and
-      // settles it out-of-band (non-custodial external-BTC BUY). Asset (seq) nodes only.
-      ...(chain === 'seq' ? ['plugin=/root/sequentia/seqln/contrib/holdinvoice-seq/holdinvoice.py'] : []),
+      // settles it out-of-band. EVERY node needs it, both chains: asset nodes for the
+      // non-custodial external-BTC BUY, and the BTC node for the p2p SELL (the taker mints
+      // the hold the maker pays; "Unknown command 'holdinvoice'" killed every such sell
+      // because this line used to add the plugin to seq nodes only).
+      'plugin=/root/sequentia/seqln/contrib/holdinvoice-seq/holdinvoice.py',
       ...(chainCfg.extra || []),
     ].join('\n') + '\n';
     fs.writeFileSync(path.join(dir, 'config'), config);

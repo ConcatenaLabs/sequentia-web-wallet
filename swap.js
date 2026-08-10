@@ -308,6 +308,18 @@ function showSettleCard(row, e){
   _settleCard = modal;
 }
 
+// A terminal-failure detail the user can actually act on: the reassurance sentence PLUS the
+// translated reason. Hiding the reason in the console ("technical detail stays in the console")
+// turned every distinct failure - maker busy, no route, refused terms - into the same opaque
+// sentence, which is exactly the discarded-reason bug class this wallet keeps re-fixing.
+function failDetail(e){
+  const base = 'This trade could not be completed - your funds are safe.';
+  try {
+    const why = e ? String(C.prettyErr ? C.prettyErr(e) : (e.message || e)) : '';
+    return why ? (base + ' Reason: ' + why) : base;
+  } catch { return base; }
+}
+
 // Same-chain DEX swaps receive TRANSPARENTLY by default (principle #6: transparent-by-default);
 // the user can OPT IN to a confidential (blinded) receive. The opt-in is SESSION-scoped, never
 // persisted: the control's own copy promises "off by default", and an earlier build that latched
@@ -4706,7 +4718,7 @@ function applyBridgeStatus(r){
       } catch {}
     }
   }
-  else if (r.status === 'failed' || (r.ok === false && !(r.poll || r.job_id))){ BRIDGE.state = 'failed'; if (r.error || r.reason){ try { console.warn('[bridge] failure detail:', r.error || r.reason); } catch {} } BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; }
+  else if (r.status === 'failed' || (r.ok === false && !(r.poll || r.job_id))){ BRIDGE.state = 'failed'; if (r.error || r.reason){ try { console.warn('[bridge] failure detail:', r.error || r.reason); } catch {} } BRIDGE.detail = failDetail(r.error || r.reason); }
   else if (BRIDGE.state === 'starting') BRIDGE.state = 'confirming';
 }
 
@@ -4739,7 +4751,7 @@ async function driveBridged(){
   if (!(L && L.swap && L.swapStatus)){ clearTimeout(_bridgePoll); _bridgePoll = setTimeout(driveBridged, 15000); return; }
   _bridgeDriving = true;
   try { await bridgedSteps(); }
-  catch (e){ console.warn('[bridge] drive error:', e); if (BRIDGE && !bridgeTerminal()){ BRIDGE.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); } }
+  catch (e){ console.warn('[bridge] drive error:', e); if (BRIDGE && !bridgeTerminal()){ BRIDGE.detail = failDetail(e); saveBridge(); } }
   finally { _bridgeDriving = false; }
   if (BRIDGE && bridgeTerminal()){
     if (BRIDGE.state === 'settled'){
@@ -4830,7 +4842,7 @@ async function bridgedSteps(){
     for (let i = 0; i < 40 && !b.fronted; i++){
       const j = await status();
       if (j && (j.status === 'settled' || j.settled)){ b.fronted = true; b.state = 'fronted'; saveBridge(); break; }
-      if (j && j.status === 'failed'){ console.warn('[bridge] front failed:', j.error); b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveBridge(); return; }
+      if (j && j.status === 'failed'){ console.warn('[bridge] front failed:', j.error); b.state = 'failed'; b.detail = failDetail(j.error); saveBridge(); return; }
       const fronted = j && (j.status === 'fronted');
       let held = false;
       try { const s = await L.invoiceStatus({ node_key: b.btc_node_key, payment_hash: b.hash_h }); held = !!(s && (s.held || s.settled)); } catch {}
@@ -5615,8 +5627,8 @@ async function driveSubswap(rec){
     console.warn('[subswap] drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
     // A failure AFTER learning P (buy) or funding the asset (sell) stays RESUMABLE (the claim/refund off-ramp
     // is still live); a failure before anything is committed is a clean terminal failure (nothing lost).
-    if (b.preimage || (b.leg && b.leg.txid)){ b.detail = 'This trade could not be completed - your funds are safe.'; if (b.state === 'starting' || b.state === 'verifying' || b.state === 'paying') b.state = b.preimage ? 'claiming' : b.state; saveSubswap(); }
-    else { b.state = 'failed'; b.detail = 'This trade could not be completed - your funds are safe.'; saveSubswap(); }
+    if (b.preimage || (b.leg && b.leg.txid)){ b.detail = failDetail(e); if (b.state === 'starting' || b.state === 'verifying' || b.state === 'paying') b.state = b.preimage ? 'claiming' : b.state; saveSubswap(); }
+    else { b.state = 'failed'; b.detail = failDetail(e); saveSubswap(); }
   } finally { _drivingIds.delete(b.id); }
   const settled = b.state === 'settled';
   // A WALK leg reports to the orchestrator instead of announcing itself: the user
@@ -5874,7 +5886,7 @@ async function driveLspPayerBridge(rec){
     await runLspPayerBridge(deps);
   } catch (e){
     console.warn('[subswap] payer-bridge drive error:', e);   // technical detail stays in the console; the UI shows only a plain sentence
-    if (b.preimage && b.leg && b.leg.txid){ b.detail = 'This trade could not be completed - your funds are safe.'; b.state = 'claiming'; saveSubswap(); }
+    if (b.preimage && b.leg && b.leg.txid){ b.detail = failDetail(e); b.state = 'claiming'; saveSubswap(); }
     else {
       // PRE-COMMITMENT: no preimage and no funded leg, so nothing of the user's moved
       // and a different maker may simply work. This is the LIVE payer-bridge path — the
@@ -6168,6 +6180,7 @@ async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset){
   const signed = C.signer.sign(pset);
   const finalized = C.wollet.finalize(signed);
   const t = await C.client.broadcast(finalized);
+  try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
   const txid = (t && t.toString) ? t.toString() : String(t);
   const vout = await resolveVout(txid, spkHex);
   return { txid, vout };
@@ -6433,6 +6446,7 @@ async function sendSeqAsset(toAddr, assetHex, atoms){
   const signed = C.signer.sign(pset);
   const finalized = C.wollet.finalize(signed);
   const t = await C.client.broadcast(finalized);
+  try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
   return (t && t.toString) ? t.toString() : String(t);
 }
 
@@ -8884,6 +8898,7 @@ async function liftOffer(q, onStatusArg){
     const finalPset = new wasm.Pset(strippedB64);
     const finalized = C.wollet.finalize(finalPset);
     const txid = await C.client.broadcast(finalized);
+    try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
     return { transaction: strippedB64, txid: (txid && txid.toString) ? txid.toString() : String(txid) };
   };
   // onStatus may be a DOM status element (legacy reviewSame call) or a plain callback (the market walk).
