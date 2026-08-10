@@ -160,21 +160,45 @@ test('REVERSE: the BTC leg is double-spent DURING the anchor wait — the asset 
 });
 
 // Same class, different symptom: the leg is still there but in a DIFFERENT block.
-// That is a reorg too, and it invalidates the anchor precondition we just satisfied
-// (which was measured against the old height), so it must fail closed.
-test('REVERSE: the BTC leg moves to a different block during the wait — the asset is never funded', async () => {
+// A fork resolution, not a theft: the outpoint, script and amount still verify at
+// the new height. The old contract failed the swap here, which on a bursty parent
+// chain (testnet4 re-mines the last block or two on every fork resolution) killed
+// three consecutive healthy takes at the finish line. The move DOES invalidate the
+// anchor precondition just satisfied, so the driver re-runs the anchor wait against
+// the height the leg ACTUALLY sits at, re-verifies, and only then funds — once.
+test('REVERSE: the BTC leg moves to a different block during the wait — the gate re-runs at the new height, then funds', async () => {
   installEnv();
   REV.setTiming({ anchorPollMs: 5 });
   const { session, failCalls } = scriptedSession([reverseBtcLockedMsg(Number(WANT_BTC), Number(TAKE))]);
   const { C, state } = reverseCtx(session, { anchorTip: CONF_H - 2 });
   REV.initXrswap(C); REV.clearSwap();
   setTimeout(() => { state.chain.btcLegHeight = CONF_H + 1; }, 30);
-  setTimeout(() => { state.chain.anchorTip = CONF_H + 8; }, 70);
+  setTimeout(() => { state.chain.anchorTip = CONF_H + 8; }, 70);   // clears the NEW height + 1 too
 
   await REV.driveReverse(reverseQuote(TAKE));
 
-  assert.equal(state.fundCalls.length, 0, 'a re-mined BTC leg must not be funded against');
-  assert.ok(failCalls.some(f => f.code === 'btc_leg_gone'), 'the maker is told the leg moved');
+  assert.equal(state.fundCalls.length, 1,
+    'a re-mined leg that still verifies is funded once the anchor clears its new height');
+  assert.ok(!failCalls.some(f => f.code === 'btc_leg_gone'),
+    'a mere re-mine must not be reported as a dead leg');
+  REV.setTiming(null);
+});
+
+// The companion bound: if the anchor never clears the NEW height before the
+// timelock, the re-run gate ends at the protocol deadline — nothing is funded.
+test('REVERSE: a re-mined leg whose new height the anchor never clears is not funded', async () => {
+  installEnv();
+  REV.setTiming({ anchorPollMs: 5 });
+  const { session } = scriptedSession([reverseBtcLockedMsg(Number(WANT_BTC), Number(TAKE))]);
+  const { C, state } = reverseCtx(session, { anchorTip: CONF_H - 2 });
+  REV.initXrswap(C); REV.clearSwap();
+  setTimeout(() => { state.chain.btcLegHeight = CONF_H + 3; }, 30);
+  setTimeout(() => { state.chain.anchorTip = CONF_H + 1; }, 50);        // clears the OLD height only
+  setTimeout(() => { state.chain.seqTip = T_SEQ - 120; }, 120);         // then the claim window runs down
+
+  await REV.driveReverse(reverseQuote(TAKE));
+
+  assert.equal(state.fundCalls.length, 0, 'nothing funded while the anchor sits below the re-mined height');
   REV.setTiming(null);
 });
 
