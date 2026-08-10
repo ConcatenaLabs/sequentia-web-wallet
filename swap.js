@@ -309,10 +309,14 @@ function showSettleCard(row, e){
 }
 
 // Same-chain DEX swaps receive TRANSPARENTLY by default (principle #6: transparent-by-default);
-// the user can OPT IN to a confidential (blinded) receive. Persisted wallet-wide.
+// the user can OPT IN to a confidential (blinded) receive. The opt-in is SESSION-scoped, never
+// persisted: the control's own copy promises "off by default", and an earlier build that latched
+// a single tick into localStorage forever turned one opt-in into a permanent silent default —
+// and quietly filled the wallet with blinded UTXOs that the all-explicit covenant paths cannot
+// spend. Purge that legacy key so old profiles come back to the documented default.
 let _confidentialReceive = false;
-try { _confidentialReceive = localStorage.getItem('swk.dex.confidentialReceive') === '1'; } catch {}
-export function setConfidentialReceive(on){ _confidentialReceive = !!on; try { localStorage.setItem('swk.dex.confidentialReceive', on ? '1' : '0'); } catch {} }
+try { localStorage.removeItem('swk.dex.confidentialReceive'); } catch {}
+export function setConfidentialReceive(on){ _confidentialReceive = !!on; }
 export function confidentialReceive(){ return _confidentialReceive; }
 // This wallet's own receive address for a same-chain DEX credit/refund: transparent (toUnconfidential)
 // by DEFAULT, blinded only when the user opted in. Was previously blinded unconditionally (a #6 bug).
@@ -1503,6 +1507,10 @@ function paintConfControl(){
   const wizardOwns = !!(comp && comp.classList.contains('hide'));
   const hide = wizardOwns || !S.receiveAsset || S.receiveAsset === 'BTC' || isConfBook() || recvOverLn;
   wrap.style.display = hide ? 'none' : 'flex';
+  // Re-sync the checkbox from the (session-scoped) state on every paint, like the offline
+  // toggle does — the one-time initSwapTab sync left a stale tick visible for a whole session.
+  const chk = C.$('swConfChk');
+  if (chk && chk.checked !== confidentialReceive()) chk.checked = confidentialReceive();
 }
 
 // TRUE when the user is PAYING real Bitcoin ON-CHAIN (as opposed to over Lightning, or paying a
