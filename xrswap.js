@@ -327,7 +327,10 @@ async function fundWindowClosed(){
 // it survives a re-render, and cleared the moment the wait resolves.
 function setWaitNote(msg){
   try {
-    if (SWAP){ SWAP.wait_note = msg || ''; saveSwap(); }
+    // drive_beat_ms is the LIVENESS HEARTBEAT of the take's linear driver: stamped on every
+    // wait iteration so resumeFundingPhase can tell a driver that is patiently waiting from
+    // one that died (renderer freeze, uncaught throw, reload) and left the record wedged.
+    if (SWAP){ SWAP.wait_note = msg || ''; SWAP.drive_beat_ms = Date.now(); saveSwap(); }
     const n = C && C.$ && C.$('xrStepStatus');
     if (n) n.textContent = msg || '';
   } catch {}
@@ -545,7 +548,14 @@ export function renderReverse(){
       // reclaim material. (resumeSeqLeg refuses to act without a txid, so it can never re-fund.)
       C.seqLeg.findFundingByAddress(SWAP.seq_redeem).then((f) => {
         if (f && f.txid){ SWAP.seq_fund_txid = f.txid; saveSwap(); resumeSeqLeg().then(() => driveSettle()).catch(() => {}); }
+        else resumeFundingPhase();   // nothing broadcast: the take's driver died pre-fund — re-drive it
       }).catch(() => {});
+    } else if (SWAP.state === ST.BTC_LOCKED && SWAP.btc_leg && SWAP.btc_leg.txid){
+      // PRE-FUNDING RESUME: the maker's BTC is locked and NOTHING of ours exists yet
+      // (no redeem, no broadcast). The take's linear driver is the only thing that
+      // would ever fund, and it does not survive a freeze/reload — re-drive it here
+      // (heartbeat-gated inside, so a live driver is never raced).
+      resumeFundingPhase();
     }
   }
 }
@@ -772,7 +782,7 @@ async function driveReverse(q){
 
     // 4. Wait for the maker's BTC leg to confirm on our OWN node before we fund
     //    the asset (so the Sequentia leg anchors at/above it).
-    const h = await waitMakerBtcConf(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script, tBtc);
+    let h = await waitMakerBtcConf(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script, tBtc);
     if (h == null) return;   // aborted (T_btc passed with no conf; nothing of ours spent)
     SWAP.btc_leg_height = h; SWAP.btc_leg.height = h; setPhase('funding');
 
@@ -786,32 +796,40 @@ async function driveReverse(q){
     //     Waiting here is free — nothing of ours has moved, and if we stop the maker
     //     simply refunds its BTC after T_btc. The wait ends only at the timelock (or
     //     when the user cancels), never on a wall clock.
-    {
+    // 4c (with 4b): the anchor wait and a FULL re-verify, repeated while the leg
+    //     RE-MINES. The wait is bounded by the timelock, not a clock, so it can run
+    //     long — and a BTC HTLC that was confirmed when we checked can be GONE by
+    //     the end of it: one parent-chain reorg is all the maker needs to
+    //     double-spend the input it funded with. Funding our asset against a dead
+    //     BTC leg is the one-sided loss this whole gate exists to prevent, so check
+    //     again immediately before we spend, and a leg that no longer verifies is a
+    //     refusal. A leg that merely MOVED to a different block is NOT dead — the
+    //     check just proved the same outpoint and amount at its new height (a
+    //     bursty parent chain re-mines the last block or two on every fork
+    //     resolution, and refusing on the move alone killed three healthy takes in
+    //     a row at this exact line). The move DOES invalidate the anchor
+    //     precondition, so re-run the wait against the height the leg actually
+    //     sits at, then verify again — bounded by the timelock window plus a
+    //     re-mine cap (the Go drivers carry the twin loop).
+    for (let remines = 0; ; remines++){
       const bad = await awaitAnchorReachesBtcLeg(h + 1);
       if (bad){ await failAbort(session, 'anchor_not_caught_up', bad); return; }
-    }
-
-    // 4c. RE-VERIFY THE MAKER'S BTC LEG. That wait is bounded by the timelock, not
-    //     by a clock, so it can run a long time — and a BTC HTLC that was confirmed
-    //     when we checked can be GONE by the end of it: one parent-chain reorg is
-    //     all the maker needs to double-spend the input it funded with. Funding our
-    //     asset against a dead BTC leg is the one-sided loss this whole gate exists
-    //     to prevent, so check it again immediately before we spend. A leg that
-    //     moved to a different height also invalidates the precondition we just
-    //     satisfied, so that is a refusal too.
-    {
       let f2 = null;
       try { f2 = await C.btcLeg.findFunding(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script); } catch { f2 = null; }
       if (!f2 || !f2.confirmed || BigInt(f2.value) < BigInt(SWAP.btc_amount)){
         await failAbort(session, 'btc_leg_gone', 'the maker’s BTC lock is no longer on chain with the agreed amount - your asset was NOT funded, nothing of yours was spent');
         return;
       }
-      if (Number(f2.height) !== h){
-        await failAbort(session, 'btc_leg_gone', `the maker’s BTC lock moved from block ${h} to ${f2.height} (a Bitcoin reorg) - your asset was NOT funded, nothing of yours was spent`);
-        return;
-      }
       const closed = await fundWindowClosed();
       if (closed){ await failAbort(session, 'seq_window_closed', closed); return; }
+      if (Number(f2.height) === h) break;
+      if (remines >= 10){
+        await failAbort(session, 'btc_leg_gone', `the maker’s BTC lock kept moving between blocks (last ${h} → ${f2.height}) - your asset was NOT funded, nothing of yours was spent`);
+        return;
+      }
+      setWaitNote(`The maker's BTC lock moved from block ${h} to ${f2.height} (a Bitcoin fork resolution) - it still verifies, so waiting for the anchor to clear the new height…`);
+      h = Number(f2.height);
+      SWAP.btc_leg_height = h; SWAP.btc_leg.height = h; saveSwap();
     }
 
     // 5. Fund our asset leg (real money moves here — the single consent above
@@ -932,6 +950,7 @@ async function waitMakerBtcConf(txid, redeemHex, tBtc){
   const t0 = Date.now();
   for (let i = 0; i < 600; i++){
     if (!SWAP || SWAP.state === ST.FAILED) return null;
+    try { if (SWAP){ SWAP.drive_beat_ms = Date.now(); saveSwap(); } } catch {}   // liveness heartbeat (see resumeFundingPhase)
     // Live block-aware wait line (task 21a) on the stepper's status slot.
     try {
       const el = C.$('xrStepStatus');
@@ -1003,6 +1022,69 @@ async function driveSettle(){
 // were per-session. The maker either already saw the leg, or it did not and we
 // refund after T_seq. Nothing here can be "submitted" to a daemon — that rail is
 // retired.
+// ---- resume: re-drive the PRE-FUNDING phase after the take's linear driver died ----
+// The take runs conf-wait -> anchor gate -> fund in ONE async function armed only at
+// Place time. A renderer freeze, an uncaught throw or a reload during those waits
+// leaves a healthy, claimable maker lock with NOTHING driving our side: the record
+// sat in BTC_LOCKED/'funding' for two hours live while the maker's settler would
+// have claimed the moment we funded. Everything the funding needs was persisted at
+// take time, and the announce is a courtesy (the maker rebuilds our redeem script
+// itself — see the post-funding note in driveReverse), so this needs no courier.
+//
+// LIVENESS: only steps in when the linear driver's heartbeat (drive_beat_ms, stamped
+// by every wait iteration) has been quiet for 90s — a driver that is merely waiting
+// beats every poll, so the two can never race a double-fund; belt-and-braces, the
+// fund is also adopt-first (findFundingByAddress) and keyed on seq_fund_txid.
+let RESUMING_FUND = false;
+async function resumeFundingPhase(){
+  if (RESUMING_FUND) return;
+  if (!SWAP || SWAP.state !== ST.BTC_LOCKED || SWAP.seq_fund_txid || SWAP.seq_leg) return;
+  if (!(SWAP.btc_leg && SWAP.btc_leg.txid && SWAP.hash_hex && SWAP.maker_seq_claim_pub
+        && SWAP.taker_seq_refund_pub && SWAP.seq_locktime && SWAP.market && SWAP.market.seq_asset)) return;
+  const lastBeat = Math.max(Number(SWAP.drive_beat_ms || 0), Number(SWAP.stage_since_ms || 0));
+  if (Date.now() - lastBeat < 90 * 1000) return;   // the take's own driver is (or may be) alive — let it drive
+  RESUMING_FUND = true;
+  try {
+    setPhase('funding');
+    // Verify the maker's lock NOW and adopt the height it ACTUALLY sits at — a
+    // re-mined leg is not a dead leg (twin of the take path's re-mine loop).
+    for (let remines = 0; ; remines++){
+      let f = null;
+      try { f = await C.btcLeg.findFunding(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script); } catch { f = null; }
+      if (!f || !f.confirmed || !(Number(f.height) > 0) || BigInt(f.value) < BigInt(SWAP.btc_amount)){
+        SWAP.detail = 'the maker’s BTC lock is not (or no longer) confirmed on chain with the agreed amount - nothing of yours was spent. If it never confirms, abandon this trade.';
+        saveSwap(); renderStepper(); return;
+      }
+      const h = Number(f.height);
+      SWAP.btc_leg_height = h; SWAP.btc_leg.height = h; saveSwap();
+      const bad = await awaitAnchorReachesBtcLeg(h + 1);
+      if (bad){ SWAP.detail = bad; saveSwap(); renderStepper(); return; }   // window closed; nothing spent
+      let f2 = null;
+      try { f2 = await C.btcLeg.findFunding(SWAP.btc_leg.txid, SWAP.btc_leg.redeem_script); } catch { f2 = null; }
+      if (f2 && f2.confirmed && BigInt(f2.value) >= BigInt(SWAP.btc_amount) && Number(f2.height) === h) break;
+      if (remines >= 10){
+        SWAP.detail = 'the maker’s BTC lock keeps moving between blocks - nothing of yours was spent.';
+        saveSwap(); renderStepper(); return;
+      }
+    }
+    const closed = await fundWindowClosed();
+    if (closed){ SWAP.detail = closed; saveSwap(); renderStepper(); return; }
+    const redeem = SWAP.seq_redeem || C.wasm.buildSeqHtlcRedeemScript(SWAP.hash_hex, SWAP.maker_seq_claim_pub, SWAP.taker_seq_refund_pub, SWAP.seq_locktime);
+    SWAP.seq_redeem = redeem; saveSwap();
+    // Adopt-first: never fund what is already funded (a lost broadcast response, or
+    // the dead driver got further than its record shows).
+    let txid = SWAP.seq_fund_txid;
+    if (!txid){ try { const found = await C.seqLeg.findFundingByAddress(redeem); if (found && found.txid) txid = found.txid; } catch {} }
+    if (!txid) txid = (await C.seqLeg.fund(redeem, SWAP.market.seq_asset, SWAP.seq_amount)).txid;
+    SWAP.seq_fund_txid = txid; saveSwap(); renderStepper();
+    await resumeSeqLeg();     // waits the confirmation + records seq_leg (the refund off-ramp's key)
+    driveSettle();            // watch for the maker's claim -> take the revealed secret -> claim the BTC
+  } catch (e){
+    try { console.warn('[xr] resumeFundingPhase:', e); } catch {}
+    if (SWAP && !SWAP.detail){ SWAP.detail = 'resuming this trade hit an error - it will retry on the next visit: ' + (C.prettyErr ? C.prettyErr(e) : String(e)); saveSwap(); }
+  } finally { RESUMING_FUND = false; try { renderStepper(); } catch {} }
+}
+
 async function resumeSeqLeg(){
   if (!SWAP) throw new Error('no in-flight swap');
   if (SWAP.seq_leg && SWAP.seq_leg.txid) return SWAP;
