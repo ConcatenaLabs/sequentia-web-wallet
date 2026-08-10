@@ -607,20 +607,23 @@ async function runForwardCourier(q){
       return;
     }
 
-    // Block-aware conf-wait line (task 21a): live "last block N min ago · M min elapsed"
-    // while C.btcLeg.fund blocks on the 1-confirmation wait.
-    const stopConfNarr = startConfWaitNarrative(`Locking your ${C.fmtAtoms(fq.btc_amount,8)} BTC`);
-    try {
-      // Pass the courier identity so lockBtcLeg persists it in the PENDING stub, before its confirmation
-      // wait — a reload during that wait then resumes on the courier path (see the stub in lockBtcLeg).
-      await lockBtcLeg(fq, { courier: true, offer_id: offer.offer_id || offer.offerId, maker_pubkey: offer.maker_pubkey || offer.makerPubkey });
-    } finally { stopConfNarr(); }
+    // Lock at 0-conf and announce IMMEDIATELY. The old flow blocked here on a 25-minute
+    // single-confirmation wait and only then sent BtcLegFunded — but the maker verifies the leg
+    // itself under its own -min-btc-conf policy (the fleet runs 0) and waits 2h for the announce,
+    // so gating the announce on our own conf bought nothing and let one slow testnet4 block kill a
+    // healthy swap (and left the courier WS idle long enough for any proxy to cut it). A background
+    // watcher fills in the mined height, which the anchor gate still strictly requires before claim.
+    setStepStatus('lock', `Locking your ${C.fmtAtoms(fq.btc_amount,8)} BTC…`, true);
+    // Pass the courier identity so lockBtcLeg persists it in the PENDING stub before broadcast —
+    // a reload at any later point then resumes on the courier path (see the stub in lockBtcLeg).
+    await lockBtcLeg(fq, { courier: true, zeroConf: true, offer_id: offer.offer_id || offer.offerId, maker_pubkey: offer.maker_pubkey || offer.makerPubkey });
     SWAP.courier = true;                  // re-assert in memory (lockBtcLeg already persisted these)
     SWAP.offer_id = offer.offer_id || offer.offerId;
     SWAP.maker_pubkey = offer.maker_pubkey || offer.makerPubkey;
     saveSwap(); renderStepper();
+    startBtcConfWatcher();                // fills btc_leg.height once the block lands (never gates)
 
-    setStepStatus('lock', 'BTC locked and confirmed. Sending the leg to the maker…', true);
+    setStepStatus('lock', 'BTC lock broadcast. Sending the leg to the maker…', true);
     await session.send({
       type: xc.XcType.BtcLegFunded,
       hash_h: SWAP.hash_hex,
@@ -638,8 +641,13 @@ async function runForwardCourier(q){
       },
     });
 
-    setStepStatus('seq', `Maker is locking ${C.fmtAtoms(SWAP.seq_amount, sm.precision)} ${sm.ticker} on Sequentia…`, true);
-    const locked = await session.recv(xc.XcType.SeqLegLocked, 900000);   // ~15 min budget
+    // Wait for the maker's asset lock with a RE-ARMED window, not a one-shot 15-minute budget: the
+    // maker may legitimately sit out its own anchor precondition (the Go reference taker re-arms the
+    // same wait, xdriver.go recvXcTypeWhile), so the only honest deadline is the timelocks themselves.
+    const stopSeqNarr = startSeqLockNarrative(sm);
+    let locked;
+    try { locked = await recvSeqLegLockedRearmed(session); }
+    finally { stopSeqNarr(); }
     if (!locked.leg) throw new Error('the maker sent no Sequentia leg');
     SWAP.seq_leg = normCourierSeqLeg(locked.leg);
     SWAP.state = ST.SEQ_LOCKED; saveSwap(); renderStepper();
@@ -691,9 +699,12 @@ async function runForwardCourier(q){
     if (session) { try { session.close(); } catch {} }
     if (SWAP && SWAP.btc_leg && SWAP.btc_leg.txid){
       // BTC is committed and persisted — the swap is recoverable (claim on resume
-      // if the asset was locked, else refund after T_btc).
+      // if the asset was locked, else refund after T_btc). Kick the recovery path
+      // shortly instead of waiting for a reload: it scans the chain for the maker's
+      // leg and reattaches the courier session (bounded retries) all by itself.
       renderStepper();
       if ($('xswapErr')) $('xswapErr').textContent = describeForwardFailure(e);
+      setTimeout(() => { try { resumeCourierStranded(); } catch {} }, 5000);
     } else {
       // Nothing spent yet — back to the composer with an explanation.
       const _m = 'Could not start the swap: ' + C.prettyErr(e) + ' - nothing was spent.';
@@ -835,12 +846,19 @@ async function resumeAnchorClaim(){
 //   TIER 1 (honest): no asset locked -> the swap cannot complete; the BTC is safe and refunds at T_btc.
 //     Say so plainly (SWAP.stranded) instead of a stepper that implies the maker is still "locking now".
 let _resumeStranded = false;
+let _strandedRetryTimer = null;
+const REATTACH_MAX = 8;   // bounded, not one-shot: a transient blip must not spend the only try
 async function resumeCourierStranded(){
   if (_resumeStranded) return;
   if (!SWAP || !SWAP.courier || SWAP.state !== ST.PENDING) return;
   const leg = SWAP.btc_leg;
-  if (!(leg && leg.txid && leg.vout != null && Number(leg.height) > 0)) return;  // not confirmed yet -> resumeFunding owns it
-  if (SWAP.seq_leg) return;                                                       // already have the asset leg
+  // An ANNOUNCED outpoint is enough to run recovery: the 0-conf courier flow hands the maker the
+  // outpoint at broadcast, so the maker may lock the asset while our funding is still unmined. The
+  // claim path stays safe regardless — verifyAnchor refuses until the lock has a mined height, and
+  // startBtcConfWatcher/resumeFunding fill that in.
+  if (!(leg && leg.txid && leg.vout != null)) return;   // no outpoint yet -> resumeFunding owns it
+  if (SWAP.seq_leg) return;                             // already have the asset leg
+  if (!(Number(leg.height) > 0)) startBtcConfWatcher();
   // Need the full terms to rebuild the maker's asset HTLC. A pre-handshake stub (locked BTC but never
   // reached Terms) lacks them — it is refund-only, handled by the honest branch below.
   const haveTerms = !!(SWAP.hash_hex && SWAP.seq_claim_pub && SWAP.maker_seq_refund_pub && SWAP.seq_locktime);
@@ -881,14 +899,36 @@ async function resumeCourierStranded(){
     // Without this, every interruption after the BTC lock was terminal: the user was told the swap
     // "can no longer complete" and had to wait out the CLTV for a refund, while the counterparty was
     // right there. The maker and relay have supported reattach the whole time.
-    if (SWAP.session_id && SWAP.sess_priv && SWAP.maker_pubkey && !SWAP.reattachTried){
-      SWAP.reattachTried = true; saveSwap();
+    // Migrate the old one-shot latch: it recorded exactly one spent attempt.
+    if (SWAP.reattachTried && !(Number(SWAP.reattachAttempts) > 0)){
+      SWAP.reattachAttempts = 1; delete SWAP.reattachTried; saveSwap();
+    }
+    if (SWAP.session_id && SWAP.sess_priv && SWAP.maker_pubkey && (Number(SWAP.reattachAttempts) || 0) < REATTACH_MAX){
+      SWAP.reattachAttempts = (Number(SWAP.reattachAttempts) || 0) + 1; saveSwap();
       try {
         const s2 = await xc.reattachCourierSession(SWAP.relay_url, SWAP.session_id,
           hexToBytesLocal(SWAP.sess_priv), SWAP.maker_pubkey);
         XSESSION = s2;
+        // Re-announce the funded leg when the maker never answered it: the maker is either still
+        // parked in its BtcLegFunded recv (the original announce died with our socket — this
+        // un-sticks it) or it already answered, in which case its SeqLegLocked is queued in the
+        // relay inbox for delivery below and this duplicate is simply never read.
+        try {
+          await s2.send({
+            type: xc.XcType.BtcLegFunded,
+            hash_h: SWAP.hash_hex,
+            taker_seq_claim_pub: SWAP.seq_claim_pub,
+            taker_btc_refund_pub: SWAP.btc_refund_pub,
+            seq_amount: Number(SWAP.seq_amount),
+            btc_amount: Number(SWAP.btc_amount),
+            leg: {
+              txid: SWAP.btc_leg.txid, vout: SWAP.btc_leg.vout, amount: Number(SWAP.btc_leg.amount),
+              redeem_script: SWAP.btc_redeem_script, locktime: SWAP.btc_locktime, height: Number(SWAP.btc_leg.height) || 0,
+            },
+          });
+        } catch { /* the recv below decides whether the session is actually dead */ }
         setStepStatus('seq', 'Reconnected to the maker · waiting for it to lock the asset…', true);
-        const locked = await s2.recv(xc.XcType.SeqLegLocked, 15 * 60 * 1000);
+        const locked = await recvSeqLegLockedRearmed(s2);
         if (locked && locked.leg){
           SWAP.seq_leg = normCourierSeqLeg(locked.leg);
           SWAP.state = ST.SEQ_LOCKED; SWAP.stranded = false; saveSwap(); renderStepper();
@@ -899,9 +939,24 @@ async function resumeCourierStranded(){
         try { console.warn('[xswap] reattach failed:', e && e.message); } catch {}
       }
     }
-    // No asset leg found and no way back into the session: the swap can no longer complete with the
-    // maker. Mark it so the stepper stops implying progress, and point at the refund. The BTC HTLC
-    // stays reclaimable after T_btc.
+    // Not recovered on this pass. The verdict below used to fire HERE, unconditionally — writing off
+    // a swap whose timelocks were still hours open and whose maker was often still reachable. Only
+    // say "can no longer complete" once the refund window is actually imminent; until then keep the
+    // record live, say what is happening, and retry (scan + bounded reattach) on a timer.
+    const btcTip = await btcTipHeight();
+    const marginGone = (btcTip >= 0 && SWAP.btc_locktime && btcTip >= (Number(SWAP.btc_locktime) - 6));
+    if (!marginGone){
+      SWAP.detail = 'Connection to the maker was interrupted; retrying. Your BTC stays refundable at block ' + SWAP.btc_locktime + ' either way.';
+      saveSwap(); renderStepper();
+      if (C.$('xswapErr')) C.$('xswapErr').textContent =
+        'Could not reach the maker just now. The wallet keeps retrying in the background; your BTC is safe and refunds at block ' + SWAP.btc_locktime + ' if the swap cannot complete.';
+      if (!_strandedRetryTimer){
+        _strandedRetryTimer = setTimeout(() => { _strandedRetryTimer = null; resumeCourierStranded(); }, 90000);
+      }
+      return;
+    }
+    // Refund window imminent: no asset leg on-chain and no session to hear one on. Say so plainly
+    // and point at the refund. The BTC HTLC stays reclaimable after T_btc.
     SWAP.stranded = true;
     SWAP.detail = 'Interrupted after your Bitcoin was locked; the maker did not lock the asset.';
     saveSwap(); renderStepper();
@@ -1024,11 +1079,16 @@ async function lockBtcLeg(q, courierCtx){
     maker_pubkey: courierCtx && courierCtx.maker_pubkey,
   };
   saveSwap();  // <- persisted BEFORE the broadcast, so an interrupted funding is never stranded
+  // courierCtx.zeroConf: hand the outpoint over at broadcast instead of blocking ~25 min for a
+  // confirmation the counterparty never asked for. The cross-maker fleet runs -min-btc-conf 0 and
+  // waits 2h for the announce; gating the announce on our own conf is what made slow testnet4
+  // blocks kill healthy swaps. Fund-safety is unchanged: refund material is persisted above, and
+  // the anchor gate refuses to claim until the lock has a real mined height (verifyAnchor).
   const funded = await C.btcLeg.fund(redeem, q.btc_amount, (txid) => {
-    // broadcast landed: capture the outpoint reference NOW, before the confirmation wait.
+    // broadcast landed: capture the outpoint reference NOW, before any confirmation wait.
     SWAP.btc_leg = { txid, vout: null, height: null, amount: big(q.btc_amount), asset_id: '', redeem_script: redeem };
     saveSwap();
-  });  // -> {txid, vout, height, amount, asset_id}
+  }, (courierCtx && courierCtx.zeroConf) ? { waitConf: false } : undefined);  // -> {txid, vout, height, amount, asset_id}
   SWAP.btc_leg = {
     txid: funded.txid, vout: funded.vout, height: funded.height,
     amount: big(funded.amount), asset_id: funded.asset_id || '', redeem_script: redeem,
@@ -1130,6 +1190,12 @@ function verifyAnchor(legAnchor){
   if (!SWAP || !SWAP.seq_leg) return { ok: false, reason: 'no Sequentia leg yet' };
   const a = Number(legAnchor);
   const bh = Number(SWAP.btc_leg.height);
+  // FUND-SAFETY: the ordering check is "asset-leg anchor >= OUR BTC lock's mined height". Since the
+  // courier flow announces the leg at broadcast (0-conf, the maker's own policy decides), our height
+  // is 0 until the block lands — and a >= 0 would read an UNCONFIRMED lock as deeply buried and wave
+  // any anchor through. Never claim against an unmined lock; wait for the conf watcher to fill it in.
+  if (!(bh > 0))
+    return { ok: false, anchor_height: a, btc_height: bh, unconfirmed: true, reason: 'your own BTC lock has not confirmed yet; the anchor ordering can only be checked against its mined height' };
   if (!Number.isFinite(a) || a < 0)
     return { ok: false, anchor_height: a, btc_height: bh, unconfirmed: true, reason: 'the maker’s Sequentia leg is not yet confirmed and anchored to Bitcoin' };
   if (!(a >= bh))
@@ -1255,7 +1321,9 @@ async function awaitAnchor(){
         return { ok: false, timedout: true, anchor_height: gate.anchor_height, btc_height: gate.btc_height,
           reason: `the maker's asset leg did not become claimable before its own Sequentia refund window (tip ${seqTip} ≥ T_seq ${SWAP.seq_locktime} − ${SEQ_REFUND_MARGIN}); refund the BTC leg after block ${SWAP.btc_locktime}` };
     }
-    setStepStatus('anchor', `Waiting for the maker's asset block to confirm and anchor to Bitcoin (needs anchor ≥ your BTC height ${gate.btc_height})…`, true);
+    setStepStatus('anchor', (Number(gate.btc_height) > 0
+      ? `Waiting for the maker's asset block to confirm and anchor to Bitcoin (needs anchor ≥ your BTC height ${gate.btc_height})…`
+      : `Waiting for your BTC lock to mine (the anchor ordering is checked against its mined height)…`), true);
     await sleep(20000);
   }
 }
@@ -1426,16 +1494,21 @@ async function onRefundBtc(){
 async function resumeFunding(){
   if (!SWAP || SWAP.state !== ST.PENDING) return;
   const leg = SWAP.btc_leg;
-  if (leg && leg.txid && leg.vout == null){
+  // Two shapes need the same repair: an interrupted legacy funding (vout null) and a 0-conf
+  // courier announce (vout known, height 0 until the block lands). Either way the mined height is
+  // the missing fact — verifyAnchor refuses to claim without it — so look it up and fill it in.
+  if (leg && leg.txid && (leg.vout == null || !(Number(leg.height) > 0))){
     try {
       const f = await C.btcLeg.findFunding(leg.txid, SWAP.btc_redeem_script);
       // Only advance the leg to usable once it is CONFIRMED with a real height. Recording an
       // unconfirmed leg as height 0 let a later anchor-ordering check ("SEQ leg anchored at/above
       // the BTC leg") pass against height 0 — treating an unconfirmed leg as deeply buried. If it
-      // is found but unconfirmed, keep vout null so the next reload retries; it stays refundable.
+      // is found but unconfirmed, leave it as-is so the next pass retries; it stays refundable.
       if (f && f.confirmed && f.height > 0){
-        SWAP.btc_leg = { ...leg, vout: f.vout, height: f.height, amount: big(f.value || leg.amount) };
+        SWAP.btc_leg = { ...leg, vout: (leg.vout != null ? leg.vout : f.vout), height: f.height, amount: big(f.value || leg.amount) };
         saveSwap(); renderStepper();
+      } else {
+        startBtcConfWatcher();   // keep polling in the background instead of waiting for a reload
       }
     } catch { /* not indexed yet — the leg is still refundable after T_btc; a later reload retries */ }
   } else if (!leg){
@@ -1526,31 +1599,105 @@ function stageLine(){
   return out;
 }
 // Task 21a — block-aware conf-wait line: "… waiting for 1 Bitcoin confirmation · last block
-// N min ago · M min elapsed". Tip time from the testnet4 esplora /blocks list (first row's
-// timestamp). When unreadable, the block-age clause is simply omitted (elapsed-only) —
-// never a fabricated figure. Returns a stop() the caller runs when the wait resolves.
+// N min ago · M min elapsed". When unreadable, the block-age clause is simply omitted
+// (elapsed-only) — never a fabricated figure.
+//
+// The age is measured from when THIS wallet last OBSERVED the tip height change, not from the
+// miner's header timestamp: testnet4 miners date headers up to ~2h in the FUTURE (the 20-minute
+// min-difficulty rule rewards it), so wall-clock minus header time is routinely negative and the
+// old Math.max(0, …) clamp printed a constant "0 min ago" for the whole wait. Until a change has
+// been observed (the first read is a baseline, not an arrival), fall back to the header timestamp
+// only when it computes to a sane [0, 180]-minute age; otherwise say nothing.
+const _tipWatch = { height: -1, sinceMs: 0, seenChange: false };
 async function btcLastBlockAgeMin(){
   try {
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
-    const r = await fetch(base + '/blocks', { signal: AbortSignal.timeout(6000) });
-    if (!r.ok) return null;
-    const arr = await r.json();
+    const r = await fetch(base + '/blocks/tip/height', { signal: AbortSignal.timeout(6000) });
+    if (r.ok){
+      const h = Number((await r.text()).trim());
+      if (Number.isFinite(h) && h > 0){
+        if (_tipWatch.height >= 0 && h > _tipWatch.height){ _tipWatch.sinceMs = Date.now(); _tipWatch.seenChange = true; }
+        else if (_tipWatch.height < 0){ _tipWatch.sinceMs = Date.now(); }
+        if (h > _tipWatch.height) _tipWatch.height = h;
+      }
+    }
+    if (_tipWatch.seenChange) return Math.max(0, Math.round((Date.now() - _tipWatch.sinceMs) / 60000));
+    const r2 = await fetch(base + '/blocks', { signal: AbortSignal.timeout(6000) });
+    if (!r2.ok) return null;
+    const arr = await r2.json();
     const ts = Array.isArray(arr) && arr[0] && Number(arr[0].timestamp);
-    return (ts > 0) ? Math.max(0, Math.round((Date.now() / 1000 - ts) / 60)) : null;
+    if (!(ts > 0)) return null;
+    const min = Math.round((Date.now() / 1000 - ts) / 60);
+    return (min >= 0 && min <= 180) ? (min || 0) : null;   // || 0 normalises Math.round's -0
   } catch { return null; }
 }
-function startConfWaitNarrative(prefix){
+// Background confirmation watcher for a 0-conf-announced BTC lock: fills btc_leg.vout/height the
+// moment the funding tx mines, so the anchor gate (which strictly requires a mined height) can pass.
+// It NEVER gates or aborts the swap — running out of budget only stops the polling; the resume path
+// (resumeFunding on reload) picks the height up later. Idempotent per funding txid.
+let _confWatchTxid = null;
+function startBtcConfWatcher(){
+  const leg = SWAP && SWAP.btc_leg;
+  if (!leg || !leg.txid || Number(leg.height) > 0) return;
+  if (_confWatchTxid === leg.txid) return;
+  _confWatchTxid = leg.txid;
+  const txid = leg.txid, redeem = SWAP.btc_redeem_script;
+  (async () => {
+    // ~3h at 20s: the maker waits 2h for the announce and the relay session lives 3h, so the
+    // watcher outlasts both. Each iteration re-checks the swap still owns this funding.
+    for (let i = 0; i < 540; i++){
+      await sleep(20000);
+      if (!SWAP || !SWAP.btc_leg || SWAP.btc_leg.txid !== txid) break;
+      if (Number(SWAP.btc_leg.height) > 0) break;
+      try {
+        const f = await C.btcLeg.findFunding(txid, redeem);
+        if (f && f.confirmed && f.height > 0){
+          SWAP.btc_leg = { ...SWAP.btc_leg, vout: (SWAP.btc_leg.vout != null ? SWAP.btc_leg.vout : f.vout), height: f.height };
+          saveSwap(); renderStepper();
+          break;
+        }
+      } catch { /* transient esplora read; keep polling */ }
+    }
+    if (_confWatchTxid === txid) _confWatchTxid = null;
+  })();
+}
+// Live narrative while waiting for the maker's asset lock: names the maker's step, states our own
+// lock's conf status honestly (broadcast vs mined), and carries the block-age/elapsed clauses.
+function startSeqLockNarrative(sm){
   const t0 = Date.now();
   const paint = async () => {
+    if (!SWAP || SWAP.seq_leg) return;
+    const mined = Number(SWAP.btc_leg && SWAP.btc_leg.height) > 0;
     const age = await btcLastBlockAgeMin();
     const mins = Math.round((Date.now() - t0) / 60000);
-    setStepStatus('lock', prefix + ' · waiting for 1 Bitcoin confirmation · usually ~20m on testnet4'
-      + (age != null ? ' · last block ' + age + ' min ago' : '')
+    setStepStatus('seq', 'Maker is locking ' + C.fmtAtoms(SWAP.seq_amount, sm.precision) + ' ' + sm.ticker + ' on Sequentia…'
+      + (mined ? ' · your BTC lock is mined' : ' · your BTC lock is broadcast (the maker sees it in the mempool)')
+      + (age != null ? ' · last Bitcoin block ' + age + ' min ago' : '')
       + (mins > 0 ? ' · ' + mins + ' min elapsed' : ''), true);
   };
   paint();
   const timer = setInterval(paint, 30000);
   return () => clearInterval(timer);
+}
+// Receive SeqLegLocked in re-armed 15-minute windows bounded ONLY by the timelocks (mirrors the Go
+// taker's recvXcTypeWhile): a window that expires while both T_btc and T_seq still leave margin is
+// re-armed, not fatal. A non-timeout error (socket close, relay refusal) is terminal for THIS
+// session — the bounded reattach in resumeCourierStranded is the recovery path.
+async function recvSeqLegLockedRearmed(sess){
+  const WINDOW_MS = 15 * 60 * 1000;
+  for (;;){
+    try { return await sess.recv(xc.XcType.SeqLegLocked, WINDOW_MS); }
+    catch (e){
+      if (!/timed out/i.test(String(e && e.message))) throw e;
+      const btcTip = await btcTipHeight();
+      if (btcTip >= 0 && SWAP && SWAP.btc_locktime && btcTip >= (Number(SWAP.btc_locktime) - 6)) throw e;
+      if (SWAP && SWAP.seq_locktime){
+        const seqTip = await seqTipHeight();
+        if (seqTip >= 0 && seqTip >= (Number(SWAP.seq_locktime) - SEQ_REFUND_MARGIN)) throw e;
+      }
+      if (!SWAP || SWAP.state !== ST.PENDING) throw e;
+    }
+  }
 }
 // Render the wizard body for the current SWAP (or the quote form if none).
 function renderStepper(){

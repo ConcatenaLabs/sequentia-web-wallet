@@ -883,20 +883,43 @@ async function failAbort(session, code, msg){
   if (C.$('xrswapErr')) C.$('xrswapErr').textContent = msg;
 }
 
-// Task 21a — block-aware conf-wait narrative. Tip time from the testnet4 esplora /blocks
-// list (first row's timestamp), cached ~30s. Unreadable -> null, and the caller simply
-// omits the block-age clause (elapsed-only) rather than fabricating a figure.
+// Task 21a — block-aware conf-wait narrative, cached ~30s. Unreadable -> null, and the caller
+// simply omits the block-age clause (elapsed-only) rather than fabricating a figure.
+//
+// The age is measured from when THIS wallet last OBSERVED the tip height change, not from the
+// miner's header timestamp: testnet4 miners date headers up to ~2h in the FUTURE (the 20-minute
+// min-difficulty rule rewards it), so wall-clock minus header time is routinely negative and the
+// old Math.max(0, …) clamp printed a constant "0 min ago" for the whole wait. Until a change has
+// been observed (the first read is a baseline, not an arrival), fall back to the header timestamp
+// only when it computes to a sane [0, 180]-minute age; otherwise say nothing.
 let _blkAge = { at: 0, min: null };
+const _tipWatch = { height: -1, sinceMs: 0, seenChange: false };
 async function btcLastBlockAgeMin(){
   if (Date.now() - _blkAge.at < 30000) return _blkAge.min;
   let min = null;
   try {
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
-    const r = await fetch(base + '/blocks', { signal: AbortSignal.timeout(6000) });
+    const r = await fetch(base + '/blocks/tip/height', { signal: AbortSignal.timeout(6000) });
     if (r.ok){
-      const arr = await r.json();
-      const ts = Array.isArray(arr) && arr[0] && Number(arr[0].timestamp);
-      if (ts > 0) min = Math.max(0, Math.round((Date.now() / 1000 - ts) / 60));
+      const h = Number((await r.text()).trim());
+      if (Number.isFinite(h) && h > 0){
+        if (_tipWatch.height >= 0 && h > _tipWatch.height){ _tipWatch.sinceMs = Date.now(); _tipWatch.seenChange = true; }
+        else if (_tipWatch.height < 0){ _tipWatch.sinceMs = Date.now(); }
+        if (h > _tipWatch.height) _tipWatch.height = h;
+      }
+    }
+    if (_tipWatch.seenChange){
+      min = Math.max(0, Math.round((Date.now() - _tipWatch.sinceMs) / 60000));
+    } else {
+      const r2 = await fetch(base + '/blocks', { signal: AbortSignal.timeout(6000) });
+      if (r2.ok){
+        const arr = await r2.json();
+        const ts = Array.isArray(arr) && arr[0] && Number(arr[0].timestamp);
+        if (ts > 0){
+          const m = Math.round((Date.now() / 1000 - ts) / 60);
+          if (m >= 0 && m <= 180) min = (m || 0);   // || 0 normalises Math.round's -0
+        }
+      }
     }
   } catch {}
   _blkAge = { at: Date.now(), min };
