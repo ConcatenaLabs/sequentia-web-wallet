@@ -9387,6 +9387,15 @@ function renderInFlightCard(){
   if (X && X.hasReverseInFlight && X.hasReverseInFlight()){
     rows.push({ view: 'reverse', need: true, title: 'Sell asset for BTC', status: 'in progress' });
   }
+  // Parked refund-only cross records: the trade slot is free, but the user should still see the
+  // pending refund (it broadcasts itself at maturity; nothing to click, nothing blocked).
+  if (X && X.listParked){
+    for (const p of X.listParked()){
+      if (!p || !p.btc_leg) continue;
+      rows.push({ view: null, need: false, title: 'Buy asset with BTC · parked',
+        status: p.btc_refund_txid ? 'BTC refunded' : ('BTC refunds itself at block ' + p.btc_locktime) });
+    }
+  }
   const hist = loadHist();
   if (!rows.length && !hist.length){ host.innerHTML = ''; return; }
   let html = '';
