@@ -182,6 +182,10 @@ export function logTrade(e){
     // as '<QUOTE> locked' (task 19b, seen live on the quote-shape sub-asset BUY).
     if (prevIdx >= 0 && !e.upgrade) return;
     const prev = prevIdx >= 0 ? h.splice(prevIdx, 1)[0] : null;
+    // A byte-identical re-log is the resume tick re-running an already-terminal path, not a new
+    // transition: keep the row fresh but never re-pop the settle card (it re-appeared over the
+    // composer minutes after every settle, swallowing clicks).
+    const identicalRelog = !!(prev && prev.status === (e.status || '') && prev.title === (e.title || ''));
     const at = (prev && prev.at) || e.at || Date.now();
     h.unshift({
       id: e.id, title: e.title || '', status: e.status || '',
@@ -199,7 +203,7 @@ export function logTrade(e){
     try { renderInFlightCard(); } catch {}   // surface the new receipt in the trades view immediately
     // Settle card (task 21b): a caller that marks a genuine settlement gets the one-shot
     // completion card. Opt-in by flag — the fund-time and refund rows must never pop one.
-    if (e.card){ try { showSettleCard(h[0], e); } catch {} }
+    if (e.card && !identicalRelog){ try { showSettleCard(h[0], e); } catch {} }
   } catch {}
 }
 // P5.1 — export the user's durable trade history as CSV or JSON (a file they keep). Reads the SAME
