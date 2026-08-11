@@ -1955,19 +1955,21 @@ const seqLeg = {
   // explicit output via the proven TxBuilder -> sign -> finalize -> broadcast path.
   async fund(redeemHex, assetHex, amountAtoms){
     const addr = new Address(this.htlcAddress(redeemHex));   // non-blinded HTLC P2SH; Address.parse() would reject it as non-blinded
-    const pset = network.txBuilder()
-      .addExplicitRecipient(addr, BigInt(amountAtoms), new AssetId(assetHex))
-      .feeRate(DEFAULT_FEERATE)
-      .finish(wollet);
-    const signed = signer.sign(pset);
-    const finalized = wollet.finalize(signed);
-    const txid = await client.broadcast(finalized);
-    // Apply our own tx to the wollet NOW: the scan cadence is minutes (and the scan cache is
-    // broken), so without this the very next build re-selects the inputs this tx just spent
-    // and the node rejects it with bad-txns-inputs-missingorspent.
-    try { wollet.applyTransaction(finalized); } catch {}
-    noteOwnTx(finalized);   // survive a stale scan Update clobbering the applied spend
-    return { txid: txid.toString ? txid.toString() : String(txid) };
+    return withWollet(async () => {   // exclusive: a scan racing this build throws "recursive use" mid-swap
+      const pset = network.txBuilder()
+        .addExplicitRecipient(addr, BigInt(amountAtoms), new AssetId(assetHex))
+        .feeRate(DEFAULT_FEERATE)
+        .finish(wollet);
+      const signed = signer.sign(pset);
+      const finalized = wollet.finalize(signed);
+      const txid = await client.broadcast(finalized);
+      // Apply our own tx to the wollet NOW: the scan cadence is minutes (and the scan cache is
+      // broken), so without this the very next build re-selects the inputs this tx just spent
+      // and the node rejects it with bad-txns-inputs-missingorspent.
+      try { wollet.applyTransaction(finalized); } catch {}
+      noteOwnTx(finalized);   // survive a stale scan Update clobbering the applied spend
+      return { txid: txid.toString ? txid.toString() : String(txid) };
+    });
   },
   // Poll the Sequentia esplora until the funding tx confirms; return the HTLC vout
   // (the output paying the P2SH), its height and block hash.
@@ -2116,14 +2118,25 @@ const seqLeg = {
 // falling back to a direct esplora /tx POST). Mirrors xswap.js's broadcastSeqTx.
 async function broadcastSeqRaw(rawHex){
   try{
-    const tx = new Transaction(rawHex);
-    const txid = await client.broadcastTx(tx);
+    const txid = await withWollet(async () => {   // exclusive vs scans (shared wasm client)
+      const tx = new Transaction(rawHex);
+      const t = await client.broadcastTx(tx);
+      // Spend-tracking for the cross-flow claims/refunds that broadcast raw hex: these spend
+      // wollet fee inputs too, and leaving the wollet ignorant of them is exactly how the next
+      // build re-selected a spent coin (seen live: a claim's fee input killed the next funding).
+      try { wollet.applyTransaction(tx); } catch {}
+      noteOwnTx(tx);
+      return t;
+    });
     return txid && txid.toString ? txid.toString() : String(txid);
   }catch(e){ /* fall through to esplora POST */ }
   const r = await fetch(`${ESPLORA}/tx`, { method:'POST', body: rawHex });
   const t = (await r.text()).trim();
   if(!r.ok) throw new Error(t || ('HTTP '+r.status));
   if(!/^[0-9a-fA-F]{64}$/.test(t)) throw new Error('unexpected broadcast response: '+t.slice(0,80));
+  // Only AFTER the POST succeeded: spend-tracking (applying a never-broadcast tx would mark
+  // live coins spent).
+  try { const tx = new Transaction(rawHex); withWollet(() => { try { wollet.applyTransaction(tx); } catch {} noteOwnTx(tx); }); } catch {}
   return t;
 }
 // Poll testnet4 for the HTLC funding tx's confirmation; resolve its vout+height.
@@ -2277,17 +2290,56 @@ function reapplyOwnTxs(){
   for (let i = _ownTxRing.length - 1; i >= 0; i--) if (_ownTxRing[i].at < cutoff) _ownTxRing.splice(i, 1);
   for (const e of _ownTxRing){ try { wollet.applyTransaction(new Transaction(e.hex)); } catch {} }
 }
+// SINGLE-FILE QUEUE for the shared wasm objects (wollet + esplora client). wasm-bindgen
+// forbids re-entrant mutable use of one object ("recursive use of an object detected which
+// would lead to unsafe aliasing in rust"), and this wallet now runs several concurrent
+// drivers — scans, cross-chain funders, covenant fills, sends — against ONE wollet and ONE
+// client. Seen live (2026-08-11): a background scan overlapping a funding build threw inside
+// the build and killed a funding driver mid-swap. Every outermost build→broadcast sequence
+// and every scan/apply now runs through this queue; helpers called INSIDE a queued block
+// (reapplyOwnTxs, noteOwnTx) must never re-enter it.
+let _wolletQ = Promise.resolve();
+function withWollet(fn){
+  const run = _wolletQ.then(fn, fn);
+  _wolletQ = run.then(() => {}, () => {});
+  return run;
+}
 function wolletKey(){ try{ return 'upd:'+wollet.descriptor().toString(); }catch{ return 'upd:default'; } }
+// THE CACHE IS ONLY USEFUL AS A FROM-EMPTY BASE. fullScan computes an Update RELATIVE to the
+// wollet's state at scan time, so an update persisted mid-session (incremental, relative to
+// whatever that session had already applied) can never apply to the fresh, empty wollet the
+// next boot builds. The old code overwrote the cache on EVERY sync, so the persisted update
+// was almost never the from-empty one — the restore failed on every load ("Update created on
+// a wallet with status X while current wallet has Y") and each boot paid a full multi-minute
+// main-thread rescan, which is where most of the frozen-renderer and stale-coin incidents of
+// the 2026-08-10 drive started. Persist exactly one kind of update — the one computed against
+// the EMPTY wollet (this session's first scan, when nothing was restored) — and keep it as
+// the stable base thereafter; later scans stay in memory. Age the base out weekly so the
+// incremental catch-up after restore stays bounded.
+let _cacheRestored = false;    // a base was applied at boot — do not overwrite it this session
+let _cachePersisted = false;   // this session already wrote its from-empty base
+const CACHE_BASE_MAX_AGE_MS = 7*24*60*60_000;
 async function restoreWolletState(){
   try{
+    const at = Number(await idbGet(wolletKey()+':at') || 0);
+    if (at && Date.now() - at > CACHE_BASE_MAX_AGE_MS){
+      await idbPut(wolletKey(), null); await idbPut(wolletKey()+':at', null);
+      return false;   // stale base: rebuild from a fresh full scan (which re-persists below)
+    }
     const b64=await idbGet(wolletKey()); if(!b64) return false;
     wollet.applyUpdate(Update.deserializeDecryptedBase64(b64, wollet.descriptor()));
     try { reapplyOwnTxs(); } catch {}
+    _cacheRestored = true;
     return true;
   }catch(e){ console.warn('[scan-cache] restore failed:', e?.message??e); return false; }
 }
 async function persistWolletState(update){
-  try{ if(update) await idbPut(wolletKey(), update.serializeEncryptedBase64(wollet.descriptor())); }
+  try{
+    if(!update || _cacheRestored || _cachePersisted) return;   // only the from-empty base is worth keeping
+    await idbPut(wolletKey(), update.serializeEncryptedBase64(wollet.descriptor()));
+    await idbPut(wolletKey()+':at', Date.now());
+    _cachePersisted = true;
+  }
   catch(e){ console.warn('[scan-cache] persist failed:', e?.message??e); }
 }
 
@@ -2620,6 +2672,7 @@ async function lnSendDeposit({ chain, asset, amount, address }){
   // Open fee market, no privileged coin (first-principle #3/#4). Movability is gated on this asset
   // being fee-priced, so feeRateFor() resolves; there is deliberately NO fallback to another asset.
   b = applyFee(b, asset);
+  return withWollet(async () => {   // exclusive vs scans/other builds (see withWollet)
   const pset = b.finish(wollet);
   const signed = signer.sign(pset);
   const finalized = wollet.finalize(signed);
@@ -2627,6 +2680,7 @@ async function lnSendDeposit({ chain, asset, amount, address }){
   try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
   noteOwnTx(finalized);
   return { txid: (txid && txid.toString) ? txid.toString() : String(txid) };
+  });
 }
 
 // Cache of the last /status so the Balance card + the pill share one poll.
@@ -2982,6 +3036,7 @@ function initSwapTab(){
     // they're passed alongside the classes here.
     wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction,
             generateSwapSecret, buildSeqHtlcRedeemScript, buildSeqHtlcClaimTx, buildSeqHtlcRefundTx },
+    noteOwnTx, withWollet,   // spend-tracking ring + the wollet/client wasm queue (claims spend fee inputs too)
     get wollet(){ return wollet; }, get signer(){ return signer; },
     get network(){ return network; }, get client(){ return client; },
     get POLICY(){ return POLICY; }, get POLICY_HEX(){ return POLICY_HEX; },
@@ -3004,6 +3059,7 @@ function initSwapTab(){
   // revealed secret (the btcLeg bridge's claim path).
   initXrswap({
     wasm: { buildSeqHtlcRedeemScript, buildSeqHtlcRefundTx, Transaction },
+    noteOwnTx, withWollet,   // spend-tracking ring + the wollet/client wasm queue
     get wollet(){ return wollet; }, get signer(){ return signer; },
     get network(){ return network; }, get client(){ return client; },
     get addrIndex(){ return addrIndex; },
@@ -3043,6 +3099,7 @@ function initSwapTab(){
     // it guarded on ctx.wasm.Transaction, which was missing here, so that apply silently never ran.
     wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction, scriptToAddress, buildCovenantFillTx, buildSeqHtlcRedeemScript, generateSwapSecret },
     noteOwnTx,   // spend-tracking ring: own broadcasts survive a stale scan Update (see reapplyOwnTxs)
+    withWollet,  // single-file queue for wollet/client wasm ops (see its definition) — wrap every build→broadcast
     // The SEQ-leg HTLC bridge (fund/waitConf/refundKey/refund) — the bridged SELL funds + (on a stall)
     // refunds its asset leg through this, identical to the native cross-chain reverse flow.
     seqLeg,
@@ -3258,8 +3315,8 @@ async function _syncImpl(){
   $('syncStatus').className='status'; $('syncStatus').innerHTML='<span class="spin"></span>Syncing…';
   try{
     // scan both chains + refresh fee-asset rates + restricted-asset balances in parallel
-    const [update] = await Promise.all([client.fullScan(wollet), btcScan(), fetchFeeRates(), oampRefreshBalances(), oampRefreshUser()]);
-    if(update){ wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} persistWolletState(update); }   // cache the scan so the next load is instant (best-effort, non-blocking); re-apply own broadcasts the scan may predate
+    const [update] = await Promise.all([withWollet(() => client.fullScan(wollet)), btcScan(), fetchFeeRates(), oampRefreshBalances(), oampRefreshUser()]);
+    if(update){ await withWollet(() => { wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }); persistWolletState(update); }   // exclusive apply + re-apply own broadcasts the scan may predate; persist only keeps the from-empty base
     _scannedOnce = true;   // the live balance is now authoritative — stop showing the cached snapshot
     // Rescan the covenant maker-credit companion wollet AFTER the main scan: it shares the same esplora
     // client, and wasm-bindgen forbids re-entrant &mut use of one object (a concurrent fullScan throws
@@ -3927,11 +3984,14 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Signing &amp; broadcasting…';
     try{
-      const signed = signer.sign(pset);
-      const finalized = wollet.finalize(signed);
-      const txid = await client.broadcast(finalized);
-      try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
-      noteOwnTx(finalized);
+      const txid = await withWollet(async () => {   // exclusive vs scans/other builds
+        const signed = signer.sign(pset);
+        const finalized = wollet.finalize(signed);
+        const t = await client.broadcast(finalized);
+        try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
+        noteOwnTx(finalized);
+        return t;
+      });
       m.remove(); toast('Broadcast:', {href:'/explorer/tx/'+txid.toString(), label:txid.toString().slice(0,18)+'…'});
       if(onDone) onDone(txid); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }

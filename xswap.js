@@ -1480,10 +1480,24 @@ function takerDestSpkHex(){
 // esplora `/tx` POST (the swap settles regardless of who relays the tx).
 async function broadcastSeqTx(rawHex){
   if (C.broadcastSeqTx) return C.broadcastSeqTx(rawHex);   // harness/override hook
+  // Spend-tracking (post-broadcast only): cross-flow claims spend wollet FEE inputs too, and a
+  // wollet left ignorant of them re-selects those coins in the very next build (seen live: a
+  // claim's fee input killed the following funding with bad-txns-inputs-missingorspent).
+  const track = () => { try {
+    if (!(C.wasm && C.wasm.Transaction)) return;
+    const tx = new C.wasm.Transaction(rawHex);
+    try { C.wollet && C.wollet.applyTransaction(tx); } catch {}
+    try { C.noteOwnTx && C.noteOwnTx(tx); } catch {}
+  } catch {} };
   if (C.wasm.Transaction && C.client && C.client.broadcastTx){
     try {
-      const tx = new C.wasm.Transaction(rawHex);
-      const txid = await C.client.broadcastTx(tx);
+      const exec = async () => {
+        const tx = new C.wasm.Transaction(rawHex);
+        const t = await C.client.broadcastTx(tx);
+        track();
+        return t;
+      };
+      const txid = C.withWollet ? await C.withWollet(exec) : await exec();   // exclusive vs scans
       return txid && txid.toString ? txid.toString() : String(txid);
     } catch (e){ /* fall through to the esplora POST */ }
   }
@@ -1492,6 +1506,7 @@ async function broadcastSeqTx(rawHex){
   const txt = (await r.text()).trim();
   if (!r.ok) throw new Error(txt || ('HTTP ' + r.status));
   if (!/^[0-9a-fA-F]{64}$/.test(txt)) throw new Error('unexpected broadcast response: ' + txt.slice(0,80));
+  if (C.withWollet) C.withWollet(track); else track();
   return txt;
 }
 async function onClaimSeq(){
