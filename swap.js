@@ -6259,7 +6259,10 @@ function ensureCompanion(){
 }
 async function scanCompanion(){
   const w = ensureCompanion(); if (!w) return;
-  try { const u = await C.client.fullScan(w); if (u) w.applyUpdate(u); } catch {}
+  // Exclusive: the companion shares the ONE wasm esplora client with the main wollet, and a
+  // concurrent fullScan on either throws "recursive use of an object detected".
+  const scan = async () => { try { const u = await C.client.fullScan(w); if (u) w.applyUpdate(u); } catch {} };
+  if (C.withWollet) await C.withWollet(scan); else await scan();
 }
 
 async function esplora(path, opts){ return C.esploraFetch(path, opts); }
@@ -6273,12 +6276,16 @@ async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset){
   // prices any asset — tSEQ included — from the feed, so the fee the user is shown ("Fee paid in: X") is
   // the fee actually charged. Falls back to the pay asset if no fee asset was resolved.
   const b = C.network.txBuilder().addExplicitRecipient(addr, BigInt(atoms), new C.wasm.AssetId(assetHex));
-  const pset = C.applyFee(b, feeAsset || assetHex).finish(C.wollet);
-  const signed = C.signer.sign(pset);
-  const finalized = C.wollet.finalize(signed);
-  const t = await C.client.broadcast(finalized);
-  try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
-  try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
+  const exec = async () => {
+    const pset = C.applyFee(b, feeAsset || assetHex).finish(C.wollet);
+    const signed = C.signer.sign(pset);
+    const finalized = C.wollet.finalize(signed);
+    const t = await C.client.broadcast(finalized);
+    try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+    try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
+    return t;
+  };
+  const t = C.withWollet ? await C.withWollet(exec) : await exec();   // exclusive vs scans (recursive-use class)
   const txid = (t && t.toString) ? t.toString() : String(t);
   const vout = await resolveVout(txid, spkHex);
   return { txid, vout };
@@ -6540,12 +6547,16 @@ async function postToCovRelay(offer){
 async function sendSeqAsset(toAddr, assetHex, atoms){
   const addr = new C.wasm.Address(toAddr);
   const b = C.network.txBuilder().addExplicitRecipient(addr, BigInt(atoms), new C.wasm.AssetId(assetHex));
-  const pset = C.applyFee(b, feeAssetPolicy().asset).finish(C.wollet);
-  const signed = C.signer.sign(pset);
-  const finalized = C.wollet.finalize(signed);
-  const t = await C.client.broadcast(finalized);
-  try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
-  try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
+  const exec = async () => {
+    const pset = C.applyFee(b, feeAssetPolicy().asset).finish(C.wollet);
+    const signed = C.signer.sign(pset);
+    const finalized = C.wollet.finalize(signed);
+    const t = await C.client.broadcast(finalized);
+    try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+    try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
+    return t;
+  };
+  const t = C.withWollet ? await C.withWollet(exec) : await exec();   // exclusive vs scans (recursive-use class)
   return (t && t.toString) ? t.toString() : String(t);
 }
 
@@ -8995,15 +9006,18 @@ async function liftOffer(q, onStatusArg){
   };
   const finalizeAccept = async (acc) => {
     const pset = new wasm.Pset(acc.transaction);
-    pset.addDetails(C.wollet);
-    const signed = C.signer.sign(pset);
-    const strippedB64 = stripBip32(signed.toString());
-    const finalPset = new wasm.Pset(strippedB64);
-    const finalized = C.wollet.finalize(finalPset);
-    const txid = await C.client.broadcast(finalized);
-    try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
-    try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
-    return { transaction: strippedB64, txid: (txid && txid.toString) ? txid.toString() : String(txid) };
+    const exec = async () => {
+      pset.addDetails(C.wollet);
+      const signed = C.signer.sign(pset);
+      const strippedB64 = stripBip32(signed.toString());
+      const finalPset = new wasm.Pset(strippedB64);
+      const finalized = C.wollet.finalize(finalPset);
+      const txid = await C.client.broadcast(finalized);
+      try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+      try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
+      return { transaction: strippedB64, txid: (txid && txid.toString) ? txid.toString() : String(txid) };
+    };
+    return C.withWollet ? await C.withWollet(exec) : await exec();   // exclusive vs scans (recursive-use class)
   };
   // onStatus may be a DOM status element (legacy reviewSame call) or a plain callback (the market walk).
   const onStatus = (typeof onStatusArg === 'function')
