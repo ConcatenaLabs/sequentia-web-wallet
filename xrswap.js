@@ -1211,7 +1211,12 @@ function onAbandon(){
   const lockedUnrefunded = !!(SWAP && ((SWAP.seq_leg && SWAP.seq_leg.txid) || (SWAP.seq_redeem && SWAP.taker_seq_refund_secret)))
     && !SWAP.btc_claim_txid && SWAP.state !== ST.REFUNDED && SWAP.state !== ST.BTC_CLAIMED;
   if (lockedUnrefunded){
-    try { C.toast && C.toast('Your asset is still locked in this swap. Refund it (after the timeout) before clearing — otherwise the reclaim data is lost.'); } catch {}
+    const why = 'Your asset may still be locked in this swap. Refund it (after the timeout) before clearing — otherwise the reclaim data is lost.';
+    // Say it WHERE the button is, not only in a transient toast: a clicked Abandon that
+    // visibly does nothing is indistinguishable from a broken button (watched live — the
+    // refusal toast had already faded and the button just… sat there).
+    try { const e = C.$ && C.$('xrswapErr'); if (e) e.textContent = why; } catch {}
+    try { C.toast && C.toast(why); } catch {}
     return;
   }
   stopPoll(); clearSwap(); renderStepper();
