@@ -3015,6 +3015,12 @@ function initSwapTab(){
     onExit: () => renderSwap(),
     XDEX: (typeof window!=='undefined' && window.SEQ_XDEX_BASE) || (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
   });
+  // BOOT RESUME for the reverse flow. renderReverse (which arms every reverse resume path,
+  // including the pre-funding resumeFundingPhase) used to run only behind the Active-trades
+  // "View" click — so a reload during a reverse take left a healthy maker BTC lock with
+  // nothing driving our side until someone happened to open the stepper. Kick it once at
+  // boot; it no-ops without an in-flight record and renders into its own (hidden) host.
+  try { renderReverse(); } catch {}
   // The cross-chain MAKER (post a cross offer + serve lifts over the courier). It
   // reuses the same BTC/SEQ leg bridges + HTLC-script binding as the takers; only
   // the maker orchestration + courier listen are new.
