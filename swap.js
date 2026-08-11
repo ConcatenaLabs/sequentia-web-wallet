@@ -4575,12 +4575,41 @@ async function reviewBridged(route, bp){
     modal.remove(); resetComposer(); await startBridged(route, bp, rails); };
 }
 
+// PARK-ON-REPLACE (fund-safety). The bridge store is a single slot, and startBridged used to
+// overwrite it unconditionally — a new take silently discarded a prior record that still held a
+// FUNDED, unrefunded asset leg, i.e. the only copy of its refund material (seen live: a new
+// bridged take clobbered a record whose 6.43 USDX leg had a refund maturing 30 blocks later;
+// the leg had to be rescued by hand from the maker's session file). Before the slot is reused,
+// any committed leg is converted into a per-record rail-crossing entry: the subswap resume
+// driver already owns exactly this shape (check the hold, else CLTV-refund after T_seq), and
+// the rescue side-channel keeps a second copy a store clobber cannot reach.
+function parkBridgeLegIfCommitted(old){
+  try {
+    if (!old) return;
+    const leg = old.seq_leg || null;
+    if (!(leg && leg.txid && old.taker_seq_refund_secret)) return;
+    if (old.state === 'settled' || old.state === 'refunded' || old.state === 'failed') return;
+    const lock = Number(leg.locktime || old.seq_locktime || 0);
+    const rec = { id: newTradeId(), kind: 'p2p-sell', state: 'settling',
+      asset: old.asset, asset_atoms: String(leg.amount || old.asset_atoms || ''),
+      btc_sats: String(old.btc_sats || ''),
+      hash_h: old.hash_h || null, seq_locktime: lock,
+      refund_secret: old.taker_seq_refund_secret, btc_node_key: old.btc_node_key || null,
+      leg: { txid: leg.txid, vout: leg.vout || 0, amount: String(leg.amount || ''),
+        asset: leg.asset || old.asset, redeem_script: leg.redeem_script, locktime: lock },
+      detail: 'Carried over from a replaced trade · settles or refunds itself after block ' + lock + '.' };
+    addSubswap(rec); rescueSubswapUpsert(rec);
+    try { console.warn('[bridge] parked the replaced record’s funded leg as', rec.id, '(refund at', lock + ')'); } catch {}
+  } catch {}
+}
+
 // Persist BEFORE the /swap POST (persist-before-broadcast): a lost 202 + retry (or a restart) re-POSTs
 // with the SAME swap_nonce, which the LSP dedupes to ONE job — never a second funded HTLC.
 async function startBridged(route, bp, rails){
   if (_bridgeStarting || !tradeSlotsFree()){ try { C.toast && C.toast(inFlightBlockMessage()); } catch {} return; }
   _bridgeStarting = true;
   try {
+    parkBridgeLegIfCommitted(BRIDGE);   // never let a new take discard a committed leg's refund material
     const asset = route.seqAsset;
     const swap_nonce = newSwapNonce();
     // P3.1 — persist the SIZED take (bp.takeAtoms/takeBtc), never the whole offer, so the /swap body,
