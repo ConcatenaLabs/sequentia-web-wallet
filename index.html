@@ -2333,12 +2333,25 @@ async function restoreWolletState(){
     return true;
   }catch(e){ console.warn('[scan-cache] restore failed:', e?.message??e); return false; }
 }
-async function persistWolletState(update){
+// The base MUST be an update created against a GENUINELY empty wollet, and the live
+// wollet is not one even at boot: resume drivers apply their own transactions before
+// the first scan starts, so an update captured off the live wollet binds a mutated
+// status and the next boot's fresh wollet rejects it ("Update created on a wallet
+// with status X while current wallet has Y" - the exact failure this cache had on
+// every load). So the base is built OFF-PATH: a throwaway Wollet on the same
+// descriptor, scanned once in the background, its update persisted, the wollet
+// dropped. Costs one extra background scan per session that boots without a cache;
+// buys an instant, applyable restore for every boot after.
+async function refreshScanCacheBase(){
+  if (_cacheRestored || _cachePersisted) return;
   try{
-    if(!update || _cacheRestored || _cachePersisted) return;   // only the from-empty base is worth keeping
-    await idbPut(wolletKey(), update.serializeEncryptedBase64(wollet.descriptor()));
+    const w2 = new Wollet(network, signer.wpkhSlip77Descriptor());
+    const u2 = await withWollet(() => client.fullScan(w2));   // shares the ONE wasm client - queue it
+    if (!u2) return;
+    await idbPut(wolletKey(), u2.serializeEncryptedBase64(w2.descriptor()));
     await idbPut(wolletKey()+':at', Date.now());
     _cachePersisted = true;
+    console.info('[scan-cache] from-empty base persisted');
   }
   catch(e){ console.warn('[scan-cache] persist failed:', e?.message??e); }
 }
@@ -3316,7 +3329,8 @@ async function _syncImpl(){
   try{
     // scan both chains + refresh fee-asset rates + restricted-asset balances in parallel
     const [update] = await Promise.all([withWollet(() => client.fullScan(wollet)), btcScan(), fetchFeeRates(), oampRefreshBalances(), oampRefreshUser()]);
-    if(update){ await withWollet(() => { wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }); persistWolletState(update); }   // exclusive apply + re-apply own broadcasts the scan may predate; persist only keeps the from-empty base
+    if(update){ await withWollet(() => { wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }); }   // exclusive apply + re-apply own broadcasts the scan may predate
+    refreshScanCacheBase();   // no-op once a base exists; off-path (throwaway wollet), never blocks this sync
     _scannedOnce = true;   // the live balance is now authoritative — stop showing the cached snapshot
     // Rescan the covenant maker-credit companion wollet AFTER the main scan: it shares the same esplora
     // client, and wasm-bindgen forbids re-entrant &mut use of one object (a concurrent fullScan throws
