@@ -39,7 +39,7 @@
 
 import * as seqob from './seqob.js';
 import * as xcourier from './xcourier.js';
-import { sha256 } from './btc.js';
+import { sha256, secp256k1 } from './btc.js';
 
 let C = null;            // injected app context (see index.html initSwapTab)
 let LAST_RQUOTE = null;  // the live reverse quote for the composer's selection
@@ -722,7 +722,23 @@ async function driveReverse(q){
   //    are past this point and every later failure is terminal for THIS swap (the maker locked BTC; we
   //    never silently retry and strand it), handled by failAbort/return below exactly as before.
   let session;
-  try { session = await (C.openCourierSession || xcourier.openCourierSession)(q.offer, takeSeq, '', {}); }
+  try {
+    // PERSIST THE SESSION KEY (mirror of xswap's forward flow). This flow used to open
+    // anonymously, so a reload/socket-drop after we funded the asset left NO way to rejoin
+    // the maker's session and re-announce the leg — the maker sat waiting for a message that
+    // could never come again while our funded asset waited for a claim that never came. The
+    // key authenticates a reattach; recorded here so reannounceSeqLeg can use it.
+    const sessPriv = (secp256k1.utils && secp256k1.utils.randomSecretKey)
+      ? secp256k1.utils.randomSecretKey() : crypto.getRandomValues(new Uint8Array(32));
+    session = await (C.openCourierSession || xcourier.openCourierSession)(q.offer, takeSeq, '', { sessPriv });
+    if (SWAP){
+      SWAP.sess_priv = bytesToHex(sessPriv);
+      SWAP.session_id = session.sessionId;
+      SWAP.relay_url = q.offer.relayUrl || q.offer._relay || null;
+      SWAP.maker_pubkey = q.offer.maker_pubkey || q.offer.makerPubkey || null;
+      saveSwap();
+    }
+  }
   catch { return 'retry'; }
   let locked;
   try {
@@ -1100,7 +1116,43 @@ async function resumeSeqLeg(){
   };
   SWAP.state = ST.SEQ_SUBMITTED;
   saveSwap();
+  reannounceSeqLeg();   // best-effort: rejoin the maker's session and re-send the funded leg
   return SWAP;
+}
+
+// REJOIN + RE-ANNOUNCE. The original driveReverse announces the funded leg inline over the
+// live socket; a resume (the driver died before it announced, or after a reload) reaches
+// here with the leg funded but the maker never told. If we persisted the session key, rejoin
+// the maker's session and re-send SeqLegFunded — the maker is either still parked in its recv
+// (the first announce died with our socket) or has moved on, in which case a duplicate is
+// harmless. Belt-and-braces with the maker-side on-chain discovery (seqdex): whichever reaches
+// the maker first settles it; the other is a no-op. Never throws into the caller.
+let _reannouncing = false;
+async function reannounceSeqLeg(){
+  if (_reannouncing) return;
+  if (!(SWAP && SWAP.courier !== false && SWAP.seq_leg && SWAP.seq_leg.txid && SWAP.seq_redeem)) return;
+  if (!(SWAP.session_id && SWAP.sess_priv && SWAP.maker_pubkey)) return;   // opened before this fix, or no key
+  if (SWAP.state === ST.BTC_CLAIMED || SWAP.state === ST.REFUNDED || SWAP.state === ST.FAILED) return;
+  const attempts = Number(SWAP.reannounceAttempts || 0);
+  if (attempts >= 8) return;
+  _reannouncing = true;
+  try {
+    SWAP.reannounceAttempts = attempts + 1; saveSwap();
+    const s2 = await xcourier.reattachCourierSession(SWAP.relay_url, SWAP.session_id, hexToBytes(SWAP.sess_priv), SWAP.maker_pubkey);
+    try {
+      // Anchor evidence for the leg's own block, computed the same way the inline announce does.
+      let legAnchor = null;
+      try { const ev = await legAnchorEvidence(SWAP.seq_leg.txid, SWAP.seq_leg.block_hash);
+        legAnchor = (ev.anchor >= 0 && ev.onActiveChain) ? ev.anchor : null; } catch {}
+      await s2.send({ type: xcourier.XcType.SeqLegFunded, leg: {
+        txid: SWAP.seq_leg.txid, vout: SWAP.seq_leg.vout, amount: Number(SWAP.seq_amount),
+        asset: SWAP.market.seq_asset, redeem_script: SWAP.seq_redeem, locktime: SWAP.seq_locktime,
+        block_hash: SWAP.seq_leg.block_hash || undefined, anchor_height: legAnchor == null ? undefined : legAnchor,
+      }});
+      try { console.info('[xr] re-announced the funded asset leg to the maker'); } catch {}
+    } finally { try { s2.close(); } catch {} }
+  } catch (e){ try { console.warn('[xr] re-announce failed (will retry; maker discovery backstops):', e && e.message); } catch {} }
+  finally { _reannouncing = false; }
 }
 
 // ---- step 5/6: poll for the revealed secret, then claim the BTC leg ----

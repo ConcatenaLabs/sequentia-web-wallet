@@ -146,10 +146,18 @@ export function setAssetHidden(hex, on){
 // — it comes back by itself the moment it holds a balance again, still hidden).
 // totalAtomsOf(hex) -> the row's combined total (on-chain + Lightning), as the
 // balance renderer computes it; BTC is never partitioned out.
-export function partitionHidden(keys, totalAtomsOf){
+// Split owned assets into the visible list and the collapsed "hidden" section. An asset is
+// hidden when the user hid it explicitly OR when autoHide(h) says so — the latter folds
+// UNLABELED dust (assets the wallet can't even name/scale, which the user never chose to
+// hold) out of the main list by default, so a handful of received-by-accident tokens no
+// longer bury the assets that matter. Both remain in the collapsed section, still labelable
+// and unhideable; hiding never changes accounting (the total already counts them).
+export function partitionHidden(keys, totalAtomsOf, autoHide){
   const s = hiddenAssets(), visible = [], hidden = [];
   for (const h of keys || []){
-    if (h !== 'BTC' && s.has(h)){
+    if (h === 'BTC'){ visible.push(h); continue; }
+    const hide = s.has(h) || (autoHide ? !!autoHide(h) : false);
+    if (hide){
       if (big(totalAtomsOf ? totalAtomsOf(h) : 1n) > 0n) hidden.push(h);
     } else visible.push(h);
   }
@@ -799,8 +807,18 @@ function paintPriceField(){
   const row = C.$('swPriceRow');
   const pay = S.payAsset, receive = S.receiveAsset;
   const show = !!(pay && receive);
-  if (row) row.classList.toggle('hide', !show);
-  if (!show){ el.value = ''; el._userTyped = false; setPriceHint(''); return; }
+  // ALWAYS PRESENT (spec §2.1/§6): the PRICE row is part of the composer's shape, not
+  // something that materialises once a pair is chosen — the field appearing mid-flow made
+  // the composer jump and hid a first-class control. Keep it visible; when no pair is
+  // chosen it is inert with a neutral unit + placeholder.
+  if (row) row.classList.remove('hide');
+  if (!show){
+    el.value = ''; el._userTyped = false; el.readOnly = true; el.disabled = true;
+    el.placeholder = '0.0';
+    const unit0 = C.$('swPriceUnit'); if (unit0) unit0.textContent = '—';
+    setPriceHint('Pick a pair to set a price.');
+    return;
+  }
   const { base, quote } = pairDir(pay, receive);
   const bm = metaOf(base), qm = metaOf(quote);
   const unit = C.$('swPriceUnit'); if (unit) unit.textContent = `${bm.ticker}/${qm.ticker}`;
@@ -1612,11 +1630,20 @@ function paintModeSeg(){
   if (!C) return;
   const wrap = C.$('swModeWrap'), seg = C.$('swModeSeg');
   const show = !!(S.payAsset && S.receiveAsset);
-  if (wrap) wrap.classList.toggle('hide', !show);
-  if (seg) seg.querySelectorAll('button[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m === S.mode));
+  // ALWAYS PRESENT (spec §2.1/§6): the Market/Limit toggle is a first-class control, shown on
+  // every state of the composer — not conjured once a pair is chosen. Before a pair it is
+  // visible but inert (the buttons can't do anything without a market to act on).
+  if (wrap) wrap.classList.remove('hide');
+  if (seg){
+    seg.querySelectorAll('button[data-m]').forEach(b => {
+      b.classList.toggle('on', b.dataset.m === S.mode);
+      b.disabled = !show;
+    });
+  }
   const hint = C.$('swModeHint');
   if (hint){
-    hint.classList.toggle('hide', !show);
+    hint.classList.remove('hide');
+    if (!show){ hint.textContent = 'Choose what you pay and receive, then set Market or Limit.'; }
     if (show){
       if (S.mode === 'post'){
         // P2.5: a Limit order must REST at the user's price, never silently take. Where a route can rest
