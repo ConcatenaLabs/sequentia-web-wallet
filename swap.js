@@ -1459,7 +1459,8 @@ function renderPairBar(){
   // not a last trade (a real last price needs the durable trade log; until then, don't call it "last").
   let midStr = '-';
   if (LAST_MID && LAST_MID.price != null && isFinite(LAST_MID.price) && LAST_MID.price > 0 && LAST_MID.base === base){
-    midStr = `${fmtPrice(LAST_MID.price)} ${qm.ticker}`;
+    // A crossed book's averaged mid is an absurdity, not a price (see renderLadder) - say so.
+    midStr = LAST_MID.crossed ? 'crossed' : `${fmtPrice(LAST_MID.price)} ${qm.ticker}`;
   }
   host.innerHTML = `<div class="swpairsel">${esc(bm.ticker)} <span class="swpair-car">/</span> ${esc(qm.ticker)}`
     + (isCross ? '' : ` <button type="button" class="swpairflip" id="swPairFlip" title="Flip price direction" aria-label="Flip price direction"`
@@ -2026,6 +2027,7 @@ function paintCostLine(){
   if (S.mode === 'post') return;                              // limit order: you set the price
   if (!LAST_QUOTE || !LAST_MID || !(LAST_MID.price > 0)) return;
   if (LAST_MID.oneSided) return;   // only one side of the book exists: "mid" is just top-of-book, so a "% vs mid" would be fake (C-4)
+  if (LAST_MID.crossed) return;    // crossed book: the averaged mid is an absurdity, so any "% vs mid" is too (seen live: "99.9% price impact" against a 1280x-off outlier mid)
   const payV = fieldUnits(C.$('swPayAmt'), S.payAsset), recvV = fieldUnits(C.$('swRecvAmt'), S.receiveAsset);
   if (!(payV > 0 && recvV > 0)) return;
   const cross = !!LAST_MID.cross, payIsBtc = S.payAsset === 'BTC';
@@ -3607,7 +3609,8 @@ function renderXBook(seqAsset, payIsBtc, forward, reverse, unified, quoteHex){
   const bestBid = bids.length ? Math.max(...bids.map(b => b.price)) : null;
   const mid = (bestAsk != null && bestBid != null) ? (bestAsk + bestBid) / 2 : (bestAsk != null ? bestAsk : bestBid);
   const spread = (bestAsk != null && bestBid != null) ? (bestAsk - bestBid) : null;
-  LAST_MID = { price: mid, cross: true, base: seqAsset, quote: qHex, oneSided: !(bestAsk != null && bestBid != null) };
+  LAST_MID = { price: mid, cross: true, base: seqAsset, quote: qHex, oneSided: !(bestAsk != null && bestBid != null),
+    crossed: (spread != null && spread < 0) };
   renderLadder(host, {
     asks: asks.slice(0, 8).reverse(), bids: bids.slice(0, 8), mid, spread,   // 8 BEST (lowest) asks, shown high->low near the mid
     priceLabel: `(${am.ticker}/${qTk})`, sizeLabel: am.ticker,
@@ -3636,8 +3639,15 @@ function renderLadder(host, o){
   const bidsHtml = bids.map((r, i) => rowHtml('bid', r, i)).join('');
   const hasRows = asks.length || bids.length;
   const cols = `<div class="swladder-cols"><span>Price ${esc(o.priceLabel || '')}</span><span>Size${o.sizeLabel ? ' (' + esc(o.sizeLabel) + ')' : ''}</span><span>Sum</span></div>`;
+  // A CROSSED book (best bid above best ask — a stale or mispriced resting outlier) has no
+  // meaningful mid: averaging the crossing pair printed absurdities as fact (a 0.04 outlier
+  // bid on a 0.0000156 market showed "mid 0.020008" with a negative spread, ~1280x reality).
+  // Say crossed, plainly; the composer still fills at the best EXECUTABLE price regardless.
+  const crossed = (o.spread != null && o.spread < 0);
   const midHtml = hasRows
-    ? `<div class="swlmid"><b>${o.mid != null ? esc(fmtPrice(o.mid)) : '-'}</b> <span class="sp">${o.spread != null ? 'spread ' + esc(fmtPrice(o.spread)) + ' · mid' : 'best price'}</span> <span>${esc(o.refMidStr || '')}</span></div>`
+    ? (crossed
+      ? `<div class="swlmid"><b>crossed</b> <span class="sp">a resting bid sits above the best ask · orders still fill at the best executable price</span> <span>${esc(o.refMidStr || '')}</span></div>`
+      : `<div class="swlmid"><b>${o.mid != null ? esc(fmtPrice(o.mid)) : '-'}</b> <span class="sp">${o.spread != null ? 'spread ' + esc(fmtPrice(o.spread)) + ' · mid' : 'best price'}</span> <span>${esc(o.refMidStr || '')}</span></div>`)
     : '';
   const empty = hasRows ? '' : `<div class="swladder-empty">${esc(o.emptyMsg || 'No resting offers yet.')}</div>`;
   host.innerHTML = `<div class="swladder">
@@ -3976,7 +3986,10 @@ function renderTiming(route){
     tx.innerHTML = '<b>Instant &amp; final</b> · both sides on Lightning, nothing on-chain to revert.';
   } else if (rr === 'ln' && pr === 'chain' && btcLegAtoms() <= frontCapAtoms()){
     el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
-    tx.innerHTML = `<b>Instant.</b> Your on-chain payment is fronted; you receive final ${tk} now.`;
+    // Name what the user actually RECEIVES: the asset on a buy, Bitcoin on a sell. This
+    // printed the asset ticker unconditionally, so a sell (pay USDX, receive BTC over
+    // Lightning) promised "you receive final USDX now" — the asset being PAID AWAY.
+    tx.innerHTML = `<b>Instant.</b> Your on-chain payment is fronted; you receive final ${route.payIsBtc ? tk : 'Bitcoin'} now.`;
   } else if (rr === 'ln' && pr === 'chain'){
     const { n, t } = onchainConf();
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
@@ -8946,6 +8959,12 @@ function resetComposer(){
   const pa = C.$('swPayAmt'), ra = C.$('swRecvAmt');
   pa.value = ''; ra.value = ''; pa._userTyped = false; ra._userTyped = false;
   LAST_QUOTE = null; setReviewEnabled(false);
+  // The rate/cost lines carry the LAST derivation's amounts; left standing over emptied
+  // fields they read as a live quote (seen live: "6.42 USDX -> 0.00009999 BTC" under two
+  // blank inputs). Blank them; the next requote repaints them from current state.
+  const rt = C.$('swRate'), co = C.$('swCost');
+  if (rt) rt.textContent = '';
+  if (co){ co.textContent = ''; co.title = ''; }
 }
 
 function amtRow(hex, atoms){ const m = C.assetMeta(hex); return C.fmtAtoms(atoms, m.precision) + ' ' + m.ticker; }
@@ -9238,7 +9257,8 @@ function renderBook(pay, receive){
   // aggregated size (P2.7: click-to-seed preserved, now level-based).
   const wire = (r) => { if (r.take) r.onClick = () => seedFromLevel(r.price, r.sizeAtoms); };
   asks.forEach(wire); bids.forEach(wire);
-  LAST_MID = { price: mid, cross: false, base, quote, oneSided: !(bestAsk != null && bestBid != null) };
+  LAST_MID = { price: mid, cross: false, base, quote, oneSided: !(bestAsk != null && bestBid != null),
+    crossed: (spread != null && spread < 0) };
   renderLadder(host, {
     asks, bids, mid, spread,
     priceLabel: `(${bm.ticker}/${qm.ticker})`, sizeLabel: bm.ticker,
@@ -9509,23 +9529,34 @@ function renderInFlightCard(){
   if (BRIDGE && (hasBridgeInFlight() || BRIDGE.state === 'failed')){
     const am = metaOf(BRIDGE.asset);
     rows.push({ view: null, need: BRIDGE.state !== 'failed',
-      title: (BRIDGE.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset'),
+      title: (BRIDGE.side === 'buy' ? 'Buy ' : 'Sell ') + esc(am.ticker || 'asset')
+        + (BRIDGE.side === 'buy' ? ' with Bitcoin' : ' for Bitcoin'),
       status: (BRIDGE.detail || ('' + (BRIDGE.state || 'in progress')))
         + (BRIDGE.state === 'failed' ? '' : stageNarrative(BRIDGE)),
       action: bridgeClearable(BRIDGE) ? 'clear-bridge' : null });
   }
+  // Name the ACTUAL pair off the persisted record - three "asset"-titled rows stacked with
+  // "action may be needed" told the user nothing about WHICH trades wanted attention.
+  const xRecTicker = (key) => {
+    try {
+      const r = JSON.parse(localStorage.getItem(key) || 'null');
+      const hex = r && ((r.market && r.market.seq_asset) || r.seq_asset || r.asset);
+      return (hex && (metaOf(hex).ticker)) || 'asset';
+    } catch { return 'asset'; }
+  };
   if (X && X.hasInFlight && X.hasInFlight()){
-    rows.push({ view: 'cross', need: true, title: 'Buy asset with BTC', status: 'in progress' });
+    rows.push({ view: 'cross', need: true, title: 'Buy ' + esc(xRecTicker('swk.sequentia.xswap')) + ' with Bitcoin', status: 'in progress' });
   }
   if (X && X.hasReverseInFlight && X.hasReverseInFlight()){
-    rows.push({ view: 'reverse', need: true, title: 'Sell asset for BTC', status: 'in progress' });
+    rows.push({ view: 'reverse', need: true, title: 'Sell ' + esc(xRecTicker('swk.sequentia.xrswap')) + ' for Bitcoin', status: 'in progress' });
   }
   // Parked refund-only cross records: the trade slot is free, but the user should still see the
   // pending refund (it broadcasts itself at maturity; nothing to click, nothing blocked).
   if (X && X.listParked){
     for (const p of X.listParked()){
       if (!p || !p.btc_leg) continue;
-      rows.push({ view: null, need: false, title: 'Buy asset with BTC · parked',
+      const ptk = (() => { try { const hex = (p.market && p.market.seq_asset) || p.seq_asset || p.asset; return (hex && metaOf(hex).ticker) || 'asset'; } catch { return 'asset'; } })();
+      rows.push({ view: null, need: false, title: 'Buy ' + esc(ptk) + ' with Bitcoin · parked',
         status: p.btc_refund_txid ? 'BTC refunded' : ('BTC refunds itself at block ' + p.btc_locktime) });
     }
   }
