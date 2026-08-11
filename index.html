@@ -957,7 +957,7 @@ import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address
   openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr }
   from './pkg/lwk_wasm.js';
 import { HDKey, mnemonicToSeedSync, btc, schnorr } from './btc.js';
-import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden } from './swap.js';
+import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -2473,12 +2473,19 @@ function lnStatusPill(){
   const activeChannels = (lnLastStatus && lnLastStatus.channels)
     ? lnLastStatus.channels.filter(c=>String(c.state||'').startsWith('CHANNELD')).length : 0;
   el.className = 'net lnpill ' + (activeChannels ? 'ln-ready' : (st.connected ? 'ln-ready' : (st.phase==='error' ? 'ln-err' : 'ln-warn')));
+  // ONE consistent vocabulary. This used to flip between a signer fraction ("LN 0/2") and a
+  // channel count ("LN 13 ch") — two different meanings wearing the same shape, so "0/2" read
+  // as "0 of 2 channels" when it meant "0 of 2 signers connected". The channel count is the
+  // only number shown; every pre-channel state is a WORD (connecting/ready/offline), never a
+  // fraction that mimics the "N ch" form. The signer detail lives in the tooltip.
   if(activeChannels){
     el.textContent = '⚡ LN '+activeChannels+' ch';
+  } else if (st.connected){
+    el.textContent = '⚡ LN ready';                 // signers up, no channel yet
+  } else if (st.phase==='error'){
+    el.textContent = '⚡ LN offline';
   } else {
-    // No channels yet: surface the device-signer connect progress (readiness to fund).
-    el.textContent = st.connected ? '⚡ LN ready'
-      : (st.enabledCount > 1 ? `⚡ LN ${st.connectedCount}/${st.enabledCount}` : '⚡ LN ' + (st.phase||'…'));
+    el.textContent = '⚡ LN connecting…';           // signers still connecting (count is in the tooltip)
   }
   const legs = ['asset','btc'].filter(n=>st.nodes[n].enabled)
     .map(n=>`${n}: ${st.nodes[n].connected?'serving':(st.nodes[n].phase||'…')}${st.nodes[n].detail?(' ('+st.nodes[n].detail+')'):''}`);
@@ -3482,7 +3489,11 @@ function renderBalance(){
   // leave the default asset-picker dropdowns but stay findable there by search (swap.js
   // pickerMatches). BTC (the parent chain) is never partitioned out.
   const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n);
-  const { visible: visKeys, hidden: hidKeys } = partitionHidden(keys, totalOf);
+  // Auto-fold UNLABELED assets (unknown precision — the wallet can't name/scale them, so the
+  // user never deliberately holds them) into the collapsed hidden section, so a few
+  // received-by-accident dust tokens no longer clutter the main balance list. Still labelable
+  // and unhideable from there.
+  const { visible: visKeys, hidden: hidKeys } = partitionHidden(keys, totalOf, (h)=>!precisionKnown(h));
   const lmap=labels();
   for(const h of visKeys){
     const meta=assetMeta(h);
@@ -3546,8 +3557,18 @@ function renderBalance(){
         const tb=trustBadge(h); if(tb) head.appendChild(tb);
         const mid=el('div','grow'); const sub=el('div');
         sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
-        const ub=el('button','ghost','Unhide'); ub.title='Show this asset in the balance list and the default asset pickers again.';
-        ub.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px'; ub.onclick=(ev)=>{ ev.stopPropagation(); setAssetHidden(h,false); renderBalance(); }; sub.appendChild(ub);
+        if(!known){
+          // Auto-folded unlabeled dust: keep it actionable — label it (ticker/name/precision)
+          // so it becomes readable + sendable, at which point it rejoins the main list.
+          const w=el('span','sub'); w.textContent=' · unlabeled'; w.style.cssText='color:var(--amber2);margin-left:6px'; sub.appendChild(w);
+          const lb=el('button','ghost','Label to send'); lb.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px'; lb.onclick=(ev)=>{ ev.stopPropagation(); labelAssetDialog(h); }; sub.appendChild(lb);
+        }
+        // Unhide only makes sense for an EXPLICITLY hidden asset; an auto-folded unlabeled one
+        // rejoins the list the moment it is labeled, so it needs the label button above, not Unhide.
+        if(isAssetHidden(h)){
+          const ub=el('button','ghost','Unhide'); ub.title='Show this asset in the balance list and the default asset pickers again.';
+          ub.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px'; ub.onclick=(ev)=>{ ev.stopPropagation(); setAssetHidden(h,false); renderBalance(); }; sub.appendChild(ub);
+        }
         mid.appendChild(sub); head.appendChild(mid);
         const totalAtoms=totalOf(h);
         const a=el('span','amt');
