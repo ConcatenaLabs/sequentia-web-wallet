@@ -615,7 +615,14 @@ function payerBridgeAdmission({ offerId, btcSats } = {}) {
 // --rpc-file=/root/... paths). Keep the last 6 non-empty lines but strip credentials + fs paths.
 const scrubDetail = (out) => String(out || '').split('\n').filter(Boolean).slice(-6).join(' | ')
   .replace(/(https?:\/\/)[^@\s/]+@/gi, '$1<redacted>@')
-  .replace(/\/root\/[^\s'"|]+/g, '<path>');
+  .replace(/\/root\/[^\s'"|]+/g, '<path>')
+  // execFile error messages echo the FULL argv, and the recoup/refund CLIs take raw key
+  // material as flags — a failed claim used to print the preimage AND the claim privkey
+  // into the journal (seen live on every recoup retry while the recoup wallet was
+  // unloaded). Mask the value after any secret-bearing flag.
+  .replace(/(-(?:preimage|claim-priv|refund-priv|maker-priv|secret|priv)[= ])[0-9a-fA-F]{8,}/g, '$1<redacted>');
+// In-flight front pays, keyed by hash (see frontLn's TOCTOU guard).
+const _frontInFlight = new Map();
 // A job served to a CLIENT must carry no LSP key material. legState is the driver's internal
 // per-leg state and holds the LSP's OWN private keys (lspRefundPriv / frontRefundPriv — the keys
 // that refund its fronted HTLCs); serving a job verbatim handed every polling client the key to
@@ -2518,7 +2525,14 @@ function makeBridgeIo({ match, body, job }) {
 
     // --- value-moving actions: compose the EXISTING primitives; FAIL CLOSED on missing handshake data ---
     // receiver leg: pay the receiver's hold invoice on H (this reveals P once they settle).
-    frontLn: async (leg) => {
+    frontLn: (leg) => {
+      // ONE front per hash at a time (TOCTOU guard). Two concurrent entries — a scheduler
+      // tick racing a re-observe — could both pass the adopt-prior check below before
+      // either's sendpay is indexed, and double-pay the taker's hold. The second caller
+      // awaits the first's promise instead of issuing its own pay.
+      const _fk = String(((st(leg.unit) || {}).hashH) || ('unit:' + (leg && leg.unit)));
+      if (_frontInFlight.has(_fk)) return _frontInFlight.get(_fk);
+      const _run = (async () => {
       const s = st(leg.unit);
       if (!s || !s.recvNodeId || !s.hashH || !(s.amountSat > 0)) throw new Error('front-ln blocked: taker node id / H / amount not established yet — fail closed (no LN fronted)');
       s.frontAttempted = true; persistJobs();
@@ -2630,6 +2644,10 @@ function makeBridgeIo({ match, body, job }) {
       markFronted();
       const w = await lnrpc('waitsendpay', [String(s.hashH)], lspRpc, CFG.mixedTimeoutMs);
       adoptP(w && (w.payment_preimage || w.preimage));
+      })();
+      _frontInFlight.set(_fk, _run);
+      _run.finally(() => _frontInFlight.delete(_fk)).catch(() => {});
+      return _run;
     },
     // payer leg (PAYER BRIDGE, fund-before-lock): (1) fund the maker's on-chain BTC HTLC (claim=maker w/ P,
     // refund=LSP), then (2) DRIVE the FORWARD maker — send XcBtcLegFunded, receive+VERIFY its XcSeqLegLocked
@@ -2968,7 +2986,19 @@ function fundBridgeHtlcBtc({ claimPub, hashH, amountSat, cltv, refundPriv, refun
     });
   });
 }
-function claimBridgeHtlcBtc({ htlc, preimage, claimPriv, refundPub }) {
+// bitcoind can drop a wallet from its loaded set (a restart without wallet= lines, a manual
+// unload) and every RPC against it then fails with -18 "Requested wallet does not exist or
+// is not loaded". Seen live: the recoup claim retried exactly that error for half an hour
+// while the LSP's fronted BTC sat unclaimed, until an operator loaded the wallet by hand.
+// Self-heal: on a -18, load the wallet over raw RPC and retry the claim once.
+async function btcLoadWallet(rpcUrl, wallet) {
+  const r = await fetch(rpcUrl, { method: 'POST',
+    body: JSON.stringify({ method: 'loadwallet', params: [String(wallet)] }) });
+  const j = await r.json().catch(() => null);
+  const msg = j && j.error && String(j.error.message || '');
+  if (msg && !/already loaded/i.test(msg)) throw new Error(`loadwallet ${wallet}: ${msg}`);
+}
+function claimBridgeHtlcBtc({ htlc, preimage, claimPriv, refundPub, _retried }) {
   return new Promise((resolve, reject) => {
     if (!CFG.subasBtcRpc) return reject(new Error('BTC HTLC claim not configured (SUBAS_BTC_RPC)'));
     const args = ['xsubas-claim-btc', '-btc-rpc', CFG.subasBtcRpc, '-btc-chain', CFG.subasBtcChain,
@@ -2978,7 +3008,14 @@ function claimBridgeHtlcBtc({ htlc, preimage, claimPriv, refundPub }) {
     const recoupWallet = CFG.bridgeRecoupWallet || CFG.subasBtcWallet;   // the LSP's own wallet receives the recoup
     if (recoupWallet) args.push('-btc-wallet', recoupWallet);
     execFile(CFG.seqobCli, args, { timeout: CFG.mixedTimeoutMs, maxBuffer: 4 << 20 }, (err, stdout) => {
-      if (err) return reject(new Error(`claim BTC HTLC: ${scrubDetail(err.message)}`));
+      if (err) {
+        if (!_retried && recoupWallet && /-18|does not exist or is not loaded/i.test(String(err.message))) {
+          return btcLoadWallet(CFG.subasBtcRpc, recoupWallet)
+            .then(() => claimBridgeHtlcBtc({ htlc, preimage, claimPriv, refundPub, _retried: true }))
+            .then(resolve, (e2) => reject(new Error(`claim BTC HTLC: ${scrubDetail(e2.message)}`)));
+        }
+        return reject(new Error(`claim BTC HTLC: ${scrubDetail(err.message)}`));
+      }
       resolve(String(stdout || '').trim());
     });
   });
