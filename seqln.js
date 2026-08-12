@@ -77,7 +77,7 @@ const nodeState = { asset: freshNode(), btc: freshNode() };
 
 function cloneCfg(src) {
   return {
-    lspUrl: src.lspUrl, token: src.token, sdkPath: src.sdkPath, sdk: src.sdk || null,
+    lspUrl: src.lspUrl, token: src.token, sdkPath: src.sdkPath, sdk: src.sdk || null, wsBase: src.wsBase || null,
     nodes: {
       asset: { ...src.nodes.asset },
       btc: { ...src.nodes.btc },
@@ -107,6 +107,7 @@ export function initSeqln(opts = {}) {
   if (opts.token != null) CFG.token = opts.token;
   if (opts.sdkPath != null) CFG.sdkPath = opts.sdkPath;
   if (opts.sdk != null) CFG.sdk = opts.sdk;
+  if (opts.wsBase != null) CFG.wsBase = opts.wsBase;
   if (opts.nodes) {
     for (const n of NODES) {
       if (opts.nodes[n]) CFG.nodes[n] = { ...CFG.nodes[n], ...opts.nodes[n] };
@@ -284,7 +285,10 @@ export async function deviceTransportPubkey(transportPrivkey) {
 // TLS front's per-node path). Deploy prerequisite: a Caddy wildcard mapping public_ws_path
 // -> the node's private ws port. Overridable via SEQ_LSP_WS_BASE for local/test wiring.
 function provWsUrl(publicWsPath) {
-  const base = W.SEQ_LSP_WS_BASE
+  // CFG.wsBase first: a page can fall back to location.origin, but an MV3
+  // service worker's origin is chrome-extension:// and useless as a ws base,
+  // so the extension passes the public base via initSeqln({ wsBase }).
+  const base = CFG.wsBase || W.SEQ_LSP_WS_BASE
     || (typeof location !== 'undefined' ? location.origin.replace(/^http/, 'ws') : 'ws://127.0.0.1');
   return base.replace(/\/$/, '') + publicWsPath;
 }
