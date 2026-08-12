@@ -55,6 +55,16 @@ const DEFAULTS = {
 
 const NODES = ['asset', 'btc'];
 
+// Resolve the signer SDK module. Environments where dynamic import() is
+// unavailable (MV3 extension service workers: the HTML spec disallows
+// import() on ServiceWorkerGlobalScope) pass the statically imported module
+// via initSeqln({ sdk }); everywhere else it is lazy-loaded from sdkPath so a
+// wallet with LN unconfigured never fetches the 1.5MB signer wasm.
+async function loadSdk() {
+  if (CFG.sdk) return CFG.sdk;
+  return await import(CFG.sdkPath);
+}
+
 let CFG = cloneCfg(DEFAULTS);
 let onChange = null;
 
@@ -67,7 +77,7 @@ const nodeState = { asset: freshNode(), btc: freshNode() };
 
 function cloneCfg(src) {
   return {
-    lspUrl: src.lspUrl, token: src.token, sdkPath: src.sdkPath,
+    lspUrl: src.lspUrl, token: src.token, sdkPath: src.sdkPath, sdk: src.sdk || null,
     nodes: {
       asset: { ...src.nodes.asset },
       btc: { ...src.nodes.btc },
@@ -96,6 +106,7 @@ export function initSeqln(opts = {}) {
   if (opts.lspUrl != null) CFG.lspUrl = opts.lspUrl;
   if (opts.token != null) CFG.token = opts.token;
   if (opts.sdkPath != null) CFG.sdkPath = opts.sdkPath;
+  if (opts.sdk != null) CFG.sdk = opts.sdk;
   if (opts.nodes) {
     for (const n of NODES) {
       if (opts.nodes[n]) CFG.nodes[n] = { ...CFG.nodes[n], ...opts.nodes[n] };
@@ -220,7 +231,7 @@ export async function connectDevice({
   if (s.signer) return s.nodeId;   // already connected/connecting for this node
 
   setPhase(node, 'connecting', 'loading signer');
-  const mod = await import(CFG.sdkPath);
+  const mod = await loadSdk();
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
     { channelStore: chStoreFor(node), onUntracked: onUntrackedFor(node), onReject: onRejectFor(node) });
@@ -264,7 +275,7 @@ const provNodes = {};   // assetId -> { signer, connected, nodeId, phase, detail
 // Device transport pubkey (33-byte compressed hex) for a privkey — what the hosted node
 // PINS (SEQLN_SIGNER_PEER_PUBKEY). Derived via the wasm SDK (same curve the node uses).
 export async function deviceTransportPubkey(transportPrivkey) {
-  const mod = await import(CFG.sdkPath);
+  const mod = await loadSdk();
   const S = mod.SeqlnSigner || mod.default;
   return S.devicePubkey(transportPrivkey);
 }
@@ -292,7 +303,7 @@ export async function connectProvisioned({ assetId, key, deviceSigningSeed, devi
   if (!deviceSigningSeed || !deviceTransportPrivkey) { s.phase = 'unconfigured'; s.detail = 'no device identity'; return null; }
   if (s.signer) return s.nodeId;
   s.phase = 'connecting';
-  const mod = await import(CFG.sdkPath);
+  const mod = await loadSdk();
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
     { channelStore: chStoreFor(mapKey), onUntracked: onUntrackedFor(mapKey), onReject: onRejectFor(mapKey) });
