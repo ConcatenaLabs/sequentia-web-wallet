@@ -506,7 +506,10 @@ function assetLabel(id) {
 function lnrpcKw(method, kv = [], rpc, timeoutMs = 0) {
   return new Promise((resolve, reject) => {
     if (!rpc) return reject(new Error(`internal: no rpc path for lnrpcKw '${method}'`));
-    execFile(CFG.lncli, [`--rpc-file=${rpc}`, '-k', method, ...kv],
+    // -N none: lightning-cli forwards pay/plugin NOTIFICATIONS into stdout,
+    // which breaks JSON.parse ("bad json") — seen live losing a completed pay's
+    // preimage, which cost a maker its settle. Suppress them at the source.
+    execFile(CFG.lncli, [`--rpc-file=${rpc}`, '-N', 'none', '-k', method, ...kv],
       { maxBuffer: 8 << 20, timeout: timeoutMs || undefined }, (err, stdout, stderr) => {
         if (err) {
           let detail = (stderr || '').trim();
@@ -523,7 +526,7 @@ function lnrpc(method, args = [], rpc, timeoutMs = 0) {
     // target the wrong node) or to a bare `lightning-rpc` in cwd. A falsy rpc here is a
     // programming/registry bug, so surface it clearly instead of hitting the wrong socket.
     if (!rpc) return reject(new Error(`internal: no rpc path for lnrpc '${method}' (node record is missing its rpc)`));
-    execFile(CFG.lncli, [`--rpc-file=${rpc}`, method, ...args],
+    execFile(CFG.lncli, [`--rpc-file=${rpc}`, '-N', 'none', method, ...args],
       { maxBuffer: 8 << 20, timeout: timeoutMs || undefined }, (err, stdout, stderr) => {
         if (err && err.killed) return reject(new Error(`${method}: timed out after ${Math.round(timeoutMs/1000)}s (is the device signer connected?)`));
         // lightning-cli prints the JSON-RPC error (with a human "message") to stdout
