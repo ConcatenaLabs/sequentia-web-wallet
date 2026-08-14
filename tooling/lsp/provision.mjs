@@ -28,7 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 
 // Derive a secp256k1 compressed pubkey (33-byte hex) from a 32-byte hex privkey, the
 // same Noise static-key form the device + host use. Uses Node's own EC (no wasm dep):
@@ -228,6 +228,29 @@ export function makeProvisioner(opts) {
       // A boot for this node is already in flight; don't spawn a second relay.
       return false;
     }
+    // Point rescan at a recent ABSOLUTE height on every boot. The template used
+    // to ship rescan=-1 (absolute block 1!), which made every FRESH node crawl
+    // the whole chain (~75 min) before it could serve; and a chain backend that
+    // transiently reported a low height during its own restart could rewind a
+    // HEALTHY node's block pointer into the same crawl (seen live: a node at
+    // 92382 re-adding blocks from 24k, deferring every HTLC commit meanwhile).
+    // A fresh absolute target at boot cures both. Best effort: on a failed
+    // height read the existing config stands.
+    try {
+      const chainCfg = CFG.chains[rec.chain] || CFG.chains.seq;
+      const tip = Number(execFileSync(chainCfg.cli, [
+        `-rpcconnect=${chainCfg.rpcConnect || '127.0.0.1'}`, `-rpcport=${chainCfg.rpcPort}`,
+        `-rpcuser=${chainCfg.rpcUser}`, `-rpcpassword=${chainCfg.rpcPass}`,
+        'getblockcount',
+      ], { timeout: 8000 }).toString().trim());
+      if (Number.isFinite(tip) && tip > 200) {
+        const cfgPath = path.join(rec.dir, 'config');
+        let c = fs.readFileSync(cfgPath, 'utf8');
+        const line = `rescan=-${tip - 50}`;
+        c = /^rescan=.*$/m.test(c) ? c.replace(/^rescan=.*$/m, line) : c + line + '\n';
+        fs.writeFileSync(cfgPath, c);
+      }
+    } catch { /* keep the existing config */ }
     bootedAt.set(rec.key, Date.now());
     const env = {
       ...process.env,
