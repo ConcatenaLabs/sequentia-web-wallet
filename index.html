@@ -1026,7 +1026,7 @@ async function loadRegistry(){
     const r = await fetch(REGISTRY_URL, {cache:'no-store'}); if(!r.ok) return;
     const idx = await r.json(); const m = {};            // { id: [domain, ticker, name, precision, verified] }
     const clean=(s,n)=> (typeof s==='string') ? s.replace(/[<>]/g,'').slice(0,n) : s;   // defense-in-depth: registry strings are display text
-    for(const [id,v] of Object.entries(idx)) if(Array.isArray(v)) m[id]={ticker:clean(v[1],16), name:clean(v[2],48), precision:v[3], domain:v[0], verified:!!v[4]};
+    for(const [id,v] of Object.entries(idx)) if(Array.isArray(v)) m[id]={ticker:clean(v[1],16), name:clean(v[2],48), precision:v[3], domain:v[0], verified:!!v[4], supervised:!!v[5]};
     REGISTRY_ASSETS = m;
     try { localStorage.setItem('swk.registryCache', JSON.stringify(m)); } catch {}   // cache for instant resolution next load
     try { if(typeof renderBalance==='function') renderBalance(); } catch {}   // refresh labels if the UI is already up
@@ -1049,6 +1049,30 @@ function assetVerified(hex){
 }
 // The registry domain that vouches for this asset (for a "verified by <domain>" tooltip), or ''.
 function assetDomain(hex){ const r = REGISTRY_ASSETS[hex]; return (r && r.domain) || ''; }
+// SEQUENTIA: whether this asset's issuer can freeze holders of it by consensus
+// rule (a "supervised" asset). This is a property of the asset's identity, not a
+// policy anyone can change: the issuer's freeze keys are committed in the asset
+// id, so an asset can never gain or lose it. Shown because it is the single most
+// important thing to know about an asset BEFORE accepting it, and because the
+// answer is not otherwise visible anywhere the holder looks.
+function assetSupervised(hex){
+  if(!hex || hex===POLICY_HEX || hex==='BTC') return false;
+  const r = REGISTRY_ASSETS[hex]; return !!(r && r.supervised);
+}
+// A distinct indicator from the trust badge, and deliberately not a warning
+// colour. A supervised stablecoin is not suspect; it is doing what a regulated
+// issuer must. What matters is that the holder knows, so this is neutral and
+// informative rather than alarming.
+function supervisionBadge(hex){
+  if(!assetSupervised(hex)) return null;
+  const b=el('span'); b.textContent='⊘';
+  b.title='Supervised asset: its issuer can freeze holdings at ordinary addresses, by consensus rule. '
+        + 'Funds in a Lightning channel or another shared contract are out of reach, and the issuer can never spend your coins. '
+        + 'This is part of the asset\'s identity and cannot be added or removed later.';
+  b.setAttribute('aria-label','supervised');
+  b.style.cssText='color:var(--amber2,#e0a800);margin-left:5px;font-size:11px;cursor:help';
+  return b;
+}
 // A small trust indicator to render next to a ticker (E1): a green ✓ for registry-verified assets
 // (tooltip names the vouching domain), an amber ⚠ for an id NOT in the registry (anyone can mint an
 // asset with any ticker, so an unregistered id is a potential impostor — warn before trusting it),
@@ -3404,6 +3428,7 @@ function renderBalance(){
     const head=el('div','arow-head');
     head.appendChild(el('span','tk', ticker));
     const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: verified ✓ / unregistered ⚠
+    const sb=supervisionBadge(kind); if(sb) head.appendChild(sb);   // issuer can freeze holders
     const mid=el('div','grow');
     if(nameNode){ const nd=el('div'); nd.appendChild(nameNode); mid.appendChild(nd); }
     head.appendChild(mid);
@@ -3555,6 +3580,7 @@ function renderBalance(){
         const head=el('div','arow-head');
         head.appendChild(el('span','tk', meta.ticker));
         const tb=trustBadge(h); if(tb) head.appendChild(tb);
+        const sb=supervisionBadge(h); if(sb) head.appendChild(sb);
         const mid=el('div','grow'); const sub=el('div');
         sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
         if(!known){
