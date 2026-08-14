@@ -620,7 +620,11 @@ const scrubDetail = (out) => String(out || '').split('\n').filter(Boolean).slice
   // material as flags — a failed claim used to print the preimage AND the claim privkey
   // into the journal (seen live on every recoup retry while the recoup wallet was
   // unloaded). Mask the value after any secret-bearing flag.
-  .replace(/(-(?:preimage|claim-priv|refund-priv|maker-priv|secret|priv)[= ])[0-9a-fA-F]{8,}/g, '$1<redacted>');
+  .replace(/(-(?:preimage|claim-priv|refund-priv|maker-priv|secret|priv)[= ])[0-9a-fA-F]{8,}/g, '$1<redacted>')
+  // xpln's key generator announces "generated key: priv=<hex> pub=<hex>" on stdout, and a
+  // failed swap's error tail carried that line to the WALLET (seen live in the extension's
+  // failure toast). The session key is ephemeral, but private keys never belong in errors.
+  .replace(/\bpriv=[0-9a-fA-F]{8,}/g, 'priv=<redacted>');
 // In-flight front pays, keyed by hash (see frontLn's TOCTOU guard).
 const _frontInFlight = new Map();
 // A job served to a CLIENT must carry no LSP key material. legState is the driver's internal
