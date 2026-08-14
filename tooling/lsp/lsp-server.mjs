@@ -1417,6 +1417,14 @@ async function closeChannel(body) {
 
 function runSwap({ side, asset, amount, take_atoms, offer_id, maker_pubkey, quote_asset, node_key, counter_node_key }) {
   return new Promise((resolve) => {
+    // A leaf node cannot re-dial its hub after an idle/ws-router drop: the hub
+    // dialed IN when it opened the JIT channel, so the leaf holds no address
+    // ("no address known for peer") and sendpay dies with "First peer not
+    // ready" (seen live killing swaps in ~100ms). Pre-connect each leg's node
+    // to its hub with the explicit address (fire-and-forget with its own
+    // timeout; a no-op when already connected — the ~50ms head start lands
+    // well before xpln's first payment).
+    const preconnect = (sock, peer) => { if (sock && peer) lnrpcKw('connect', ['id=' + peer], sock, 5000).catch(() => {}); };
     const assetId = resolveAsset(asset);
     if (side !== 'buy' && side !== 'sell') return resolve({ ok: false, error: "side must be 'buy' or 'sell'" });
     if (!assetId) return resolve({ ok: false, error: 'unknown asset (want GOLD or a 32-byte hex id)' });
@@ -1437,6 +1445,8 @@ function runSwap({ side, asset, amount, take_atoms, offer_id, maker_pubkey, quot
       ? targetFor('seq', quoteId, counter_node_key || null).rpc
       : targetFor('btc', null, counter_node_key || null).rpc;
     if (!baseSock || !quoteSock) return resolve({ ok: false, error: `no hosted Lightning node for ${assetAsset ? assetLabel(assetId) + '/' + assetLabel(quoteId) : assetLabel(assetId) + '/BTC'}` });
+    preconnect(baseSock, CFG.channelPeerAsset);
+    preconnect(quoteSock, assetAsset ? CFG.channelPeerAsset : CFG.channelPeerBtc);
     const args = [
       'xpln', '-side', side, '-relay', CFG.relay,
       '-asset', assetId,
