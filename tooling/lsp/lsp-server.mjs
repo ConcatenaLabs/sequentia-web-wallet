@@ -4362,10 +4362,38 @@ const server = http.createServer(async (req, res) => {
       const rec = PROV.getByKey(nodeKey);
       if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
       try {
-        const r = await lnrpcKw('pay', [`bolt11=${bolt11}`, 'retry_for=45'], rec.rpc);
+        const r = await lnrpcKw('pay', [`bolt11=${bolt11}`, 'retry_for=45'], rec.rpc, 60_000);
         return send(res, 200, { ok: true, paid: r.status === 'complete', preimage: r.payment_preimage || null,
           amount_msat: r.amount_msat != null ? Number(r.amount_msat) : null, destination: r.destination || null });
-      } catch (e) { return send(res, 502, { ok: false, error: `pay: ${e.message}` }); }
+      } catch (payErr) {
+        // FALLBACK: decode + direct-hop sendpay + waitsendpay. The hosted-leaf
+        // topology (private asset channels, no public gossip) defeats CLN pay's
+        // route search — seen live killing every wallet-maker lift at the
+        // outgoing leg. Mirrors the proven Go directHop (leg_lightning.go).
+        try {
+          const dec = await lnrpcKw('decode', [`string=${bolt11}`], rec.rpc, 8000);
+          const dest = String(dec.payee || dec.destination || '').toLowerCase();
+          const hash = String(dec.payment_hash || '').toLowerCase();
+          const amt = Math.round(Number(dec.amount_msat));
+          const secret = dec.payment_secret ? String(dec.payment_secret) : null;
+          if (!/^[0-9a-f]{66}$/.test(dest) || !/^[0-9a-f]{64}$/.test(hash) || !(amt > 0)) throw new Error('decode gave no dest/hash/amount');
+          const pc = await lnrpcKw('listpeerchannels', [`id=${dest}`], rec.rpc, 8000);
+          const ch = ((pc && pc.channels) || []).find((c) => c.peer_id === dest && c.state === 'CHANNELD_NORMAL'
+            && c.short_channel_id && Number(c.spendable_msat || 0) >= amt);
+          if (!ch) throw new Error('no route and no direct channel with enough spendable');
+          const route = [{ id: dest, channel: ch.short_channel_id, direction: ch.direction || 0,
+            amount_msat: amt, delay: 18, style: 'tlv' }];
+          const spArgs = [`route=${JSON.stringify(route)}`, `payment_hash=${hash}`];
+          if (secret) spArgs.push(`payment_secret=${secret}`);
+          if (bolt11) spArgs.push(`bolt11=${bolt11}`);
+          await lnrpcKw('sendpay', spArgs, rec.rpc, 15_000);
+          const w = await lnrpcKw('waitsendpay', [`payment_hash=${hash}`, 'timeout=90'], rec.rpc, 100_000);
+          return send(res, 200, { ok: true, paid: w.status === 'complete', preimage: w.payment_preimage || null,
+            amount_msat: amt, destination: dest, via: 'direct-hop' });
+        } catch (e2) {
+          return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))} (direct-hop fallback: ${scrubDetail(String((e2 && e2.message) || e2))})` });
+        }
+      }
     }
 
     // POST /node/payhash { node_key, node_id, hash, amount_msat, min_final_cltv, connect_hints? } -> { committed, status }.
