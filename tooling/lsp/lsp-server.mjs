@@ -1669,8 +1669,12 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   // caller's natural response is to retry, so every retry bought more capacity that was already on
   // its way. That is how a wallet accumulated fourteen GOLD channels while never having one large
   // enough. Report it as pending so the caller waits rather than buys again.
+  // AWAITING_UNILATERAL is a channel DYING, not opening — counting it here made
+  // a force-closing channel masquerade as "inbound already confirming" and the
+  // JIT open silently no-op'd (seen live: a buy proceeded with no deliverable
+  // channel and unwound at the maker). AWAITING_LOCKIN stays a legit opening state.
   const opening = (pc.channels || []).find(c => c.peer_id === lpId
-    && c.state !== 'CHANNELD_NORMAL' && !/CLOSE|ONCHAIN/i.test(String(c.state || ''))
+    && c.state !== 'CHANNELD_NORMAL' && !/CLOSE|ONCHAIN|UNILATERAL/i.test(String(c.state || ''))
     && Number(c.receivable_msat || 0) >= need);
   if (opening) {
     return { ok: true, already_had_inbound: true, pending: true, state: opening.state,
