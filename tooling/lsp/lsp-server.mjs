@@ -1470,6 +1470,9 @@ function runSwap({ side, asset, amount, take_atoms, offer_id, maker_pubkey, quot
         // (the remainder re-rested on the book). Whole fill -> no extra fields.
         ...partialFields(out),
       });
+      // Any non-settled run logs its FULL (scrubbed) trace: the response carries only the
+      // last lines, and every truncated tail so far has cost a live debugging round-trip.
+      console.error('[xpln-fail]', String(out || '').split('\n').filter(Boolean).map((l) => scrubDetail(l)).join('\n'));
       // RECONCILE before declaring nothing was spent. If xpln got as far as committing funds it
       // printed `paying maker hold on H=<hash>` (the taker pays the maker's hold: BTC for a buy, the
       // asset for a sell). A kill during that pay (e.g. the exec timeout firing mid-settle) leaves the
