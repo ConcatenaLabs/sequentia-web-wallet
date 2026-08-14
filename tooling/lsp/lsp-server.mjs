@@ -1460,6 +1460,9 @@ function runSwap({ side, asset, amount, take_atoms, offer_id, maker_pubkey, quot
     execFile(CFG.seqobCli, args, { timeout: CFG.swapTimeoutMs, maxBuffer: 8 << 20 }, async (err, stdout, stderr) => {
       const out = (stdout || '') + (stderr || '');
       const m = out.match(/PURE-LN SWAP SETTLED:\s+(bought|sold)\s+(\d+)\s+([0-9a-f]+)\s+for\s+(\d+)\s+BTC sats[^;]*;\s+preimage\s+([0-9a-f]+)/i);
+      // Trace EVERY outcome (the STAGE stopwatch lines especially): latency work
+      // on this path needs attributable time, not one opaque duration.
+      console.error('[xpln-trace]', String(out || '').split('\n').filter(Boolean).map((l) => scrubDetail(l)).join('\n'));
       if (m) return resolve({
         ok: true, side, direction: m[1], asset: m[3], asset_label: assetLabel(m[3]),
         base_amount: Number(m[2]), quote_amount: Number(m[4]),
