@@ -204,6 +204,24 @@ function encodeSameChain(s){
 // internal_key, merkle_path) are carried as HEX in the offer object and encoded
 // as raw bytes here for signing; convert to base64 for the grpc-gateway JSON POST
 // (covenantOfferForPost below).
+// LightningTerms (22): resting terms for the Lightning settlement families.
+// Absent bytes fields and zero scalars are omitted (proto3), so an offer whose
+// lightning carries only ln_direction encodes as a single varint field —
+// byte-identical to the Go relay's deterministic marshal. Before this existed,
+// EVERY offer with a lightning section failed JS signature verification.
+function encodeLightning(l){
+  if (!l) return null;
+  const w = new PW();
+  w.uint(1, O(l,'ln_direction','lnDirection'));
+  const hb = (v) => (v ? hexToBytes(v) : null);
+  const mcp = hb(O(l,'maker_claim_pub','makerClaimPub')); if (mcp && mcp.length) w.lenbytes(2, mcp);
+  const mrp = hb(O(l,'maker_refund_pub','makerRefundPub')); if (mrp && mrp.length) w.lenbytes(3, mrp);
+  w.uint(4, O(l,'onchain_cltv','onchainCltv'));
+  w.bool(5, O(l,'maker_issues_hold_invoice','makerIssuesHoldInvoice'));
+  w.uint(6, O(l,'max_0conf_amount','max0confAmount'));
+  return w.bytes();
+}
+
 function encodeCovenantTerms(c){
   if (!c) return null;
   const w = new PW();
@@ -279,10 +297,11 @@ export function canonicalOfferBytes(o){
   // oneof settlement, in field-number order: same_chain = 20, cross_chain = 21.
   // Only the set variant is present in a served offer, so exactly one emits; a
   // cross offer now verifies here too (was: cross offers could never verify).
-  // lightning = 22 is reserved and not yet encoded.
+  // lightning = 22 is encoded below (encodeLightning).
   w.msg(20, encodeSameChain(O(o,'same_chain','sameChain')));
   w.msg(21, encodeCrossChain(O(o,'cross_chain','crossChain')));
-  // lightning = 22 reserved. covenant = 23: passive-CLOB funded resting order.
+  w.msg(22, encodeLightning(O(o,'lightning')));
+  // covenant = 23: passive-CLOB funded resting order.
   w.msg(23, encodeCovenantTerms(O(o,'covenant')));
   // maker_sig (31) is deliberately omitted.
   return w.bytes();
@@ -395,6 +414,12 @@ function b64ToHex(s){
   catch { return s; }
 }
 export function normRelayOffer(o){
+  const ln = o && (o.lightning || o.Lightning);
+  if (ln){
+    for (const k of ['maker_claim_pub', 'makerClaimPub', 'maker_refund_pub', 'makerRefundPub']){
+      if (ln[k] != null && !/^[0-9a-fA-F]*$/.test(String(ln[k]))) ln[k] = b64ToHex(ln[k]);
+    }
+  }
   const cov = o && (o.covenant || o.Covenant);
   if (cov){
     for (const k of ['maker_prog', 'makerProg', 'maker_x', 'makerX', 'internal_key', 'internalKey']){
