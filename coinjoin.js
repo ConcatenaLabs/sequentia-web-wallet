@@ -26,7 +26,7 @@
 // key and throws unless the outputs paying us are exactly the ones the round owed. A round we refuse
 // simply never completes; the coins were never spent.
 
-import { runRound, chooseRound } from './coinjoin-protocol.js';
+import { runRound, chooseRound, verifyRoundOutputs } from './coinjoin-protocol.js';
 import { requestPegIn, requestPegOut } from './sbtc.js';
 
 // The coordinator lives behind a same-origin path, like /seqob and /sbtc: the reverse proxy owns
@@ -80,53 +80,10 @@ export async function availableLanes(){
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// THE GATE. Given what the wallet could unblind of the round transaction, decide whether it pays us
-// what we are owed. Pure, and exported, because this is the one function whose failure would cost
-// real money — it is unit-tested directly rather than only through a live round.
-//
-// Rules, in the order they matter:
-//   1. every mix address we registered must be present, for EXACTLY the denomination;
-//   2. the change output, if we asked for one, must be present for exactly the change;
-//   3. nothing else of ours may appear (an extra output of ours is not free money — it is a sign
-//      the round is not the one we agreed to);
-//   4. the totals must match. Belt and braces over (1)-(3), and the number the user is shown.
-// ---------------------------------------------------------------------------
-export function verifyRoundOutputs({ mine, mixScripts, changeScript, denom, change, asset }){
-  const byScript = new Map();
-  for (const o of mine){
-    const s = String(o.scriptPubkey || o.script_pubkey || '').toLowerCase();
-    if (byScript.has(s)) throw new Error('the round pays the same address of mine twice; refusing to sign');
-    byScript.set(s, o);
-  }
-  let credited = 0n;
-  for (const s of mixScripts){
-    const o = byScript.get(s.toLowerCase());
-    if (!o) throw new Error('one of my mixed outputs is missing from the round; refusing to sign');
-    if (String(o.asset) !== String(asset)) throw new Error('a mixed output of mine is in the wrong asset; refusing to sign');
-    if (BigInt(o.value) !== BigInt(denom)) {
-      throw new Error(`a mixed output of mine is ${o.value} atoms, not the ${denom} the round promised; refusing to sign`);
-    }
-    credited += BigInt(o.value);
-    byScript.delete(s.toLowerCase());
-  }
-  if (changeScript){
-    const o = byScript.get(changeScript.toLowerCase());
-    if (!o) throw new Error('my change output is missing from the round; refusing to sign');
-    if (String(o.asset) !== String(asset)) throw new Error('my change is in the wrong asset; refusing to sign');
-    if (BigInt(o.value) !== BigInt(change)) {
-      throw new Error(`my change is ${o.value} atoms, not the ${change} I registered; refusing to sign`);
-    }
-    credited += BigInt(o.value);
-    byScript.delete(changeScript.toLowerCase());
-  } else if (BigInt(change) !== 0n){
-    throw new Error('the round owes me change but no change address was registered; refusing to sign');
-  }
-  if (byScript.size) throw new Error('the round contains an output of mine I did not register; refusing to sign');
-  const owed = BigInt(denom) * BigInt(mixScripts.length) + BigInt(change);
-  if (credited !== owed) throw new Error(`the round credits me ${credited} atoms, not the ${owed} it owes; refusing to sign`);
-  return credited;
-}
+// The signing gate — `verifyRoundOutputs` — is imported from the vendored protocol module rather
+// than written here. It is the one function whose failure costs real money, so it lives in the file
+// both this wallet and Seqognito vendor, and is tested where it lives (seqcj/test/gate.test.mjs).
+// Re-exported below for this repo's own tests.
 
 // ---------------------------------------------------------------------------
 // Run one round for `assetId`, mixing `denominations` denominations.
@@ -256,4 +213,5 @@ export async function mixBitcoin({ sats, onStatus = () => {}, pollMs = 15000, ti
   return { round, btcTxid, btcDest, seqTxid, mixed_atoms: String(mixed) };
 }
 
+export { verifyRoundOutputs };
 export const __test__ = { verifyRoundOutputs, api, chooseRound };
