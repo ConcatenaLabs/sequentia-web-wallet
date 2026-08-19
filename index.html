@@ -5134,11 +5134,22 @@ function renderPools(){
   const list = $('poolList'); if(!list) return;
   list.innerHTML='';
   if(!POOLS || !POOLS.pools.length){
-    list.appendChild(el('div','muted', POOLS ? 'No pools are producing yet.' : 'Pool list unavailable right now.'));
+    list.appendChild(el('div','muted', POOLS ? 'No signers are producing yet.' : 'Pool list unavailable right now.'));
+    return;
+  }
+  // Only signers that DECLARED themselves a pool are offered. The feed carries
+  // every staker so the card can describe whichever one this wallet is lent to,
+  // but a staker producing for itself never asked for delegations and must not
+  // be presented as though it had.
+  const offered = POOLS.pools.filter(p => p.declared !== false);
+  if(!offered.length){
+    list.appendChild(el('div','muted','No pool has declared itself yet. '
+      + ((POOLS.stakers||0) + ' signer(s) are producing blocks for themselves; a staker becomes a pool by '
+      + 'committing a payout policy on-chain, and appears here when it does.')));
     return;
   }
   const total = Number(POOLS.network_weight)||0;
-  for(const p of POOLS.pools){
+  for(const p of offered){
     const item = el('div','item');
     item.style.cursor='pointer';
     if(DELEG_SEL===p.signer || (DELEG && DELEG.signer===p.signer)) item.style.outline='1px solid var(--gold, #f5b301)';
@@ -5190,7 +5201,10 @@ function renderDelegation(){
     warn('This pool is not on the board right now, so what it has committed to cannot be shown. Leaving always works.');
     return;
   }
-  if(!pool.policy_in_force){
+  if(pool.declared === false){
+    warn('This signer has not declared itself a pool: it has committed to no payout policy and never asked for '
+       + 'delegations. It keeps everything its blocks earn, and nothing on-chain obliges it to pay you.');
+  } else if(!pool.policy_in_force){
     warn('This pool has committed to no payout policy, so by default it keeps everything its blocks earn. Nothing on-chain obliges it to pay you.');
   } else if(pool.policy_in_force.mode==='direct'){
     warn('This pool pays a committed address. The chain stops it redirecting the reward silently, but does not check that address shares anything with you.');
