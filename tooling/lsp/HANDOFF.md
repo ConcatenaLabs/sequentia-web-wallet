@@ -16,7 +16,7 @@ The rail-blind LSP **leg-bridge** (non-custodial cross-rail atomic swaps: BTC �
 
 ## 1. DESIGN SPEC — the intended function / design of the DEX
 
-Canonical design docs live in the **node repo** (`Sequentia`), path `doc/sequentia/` — laptop `/home/aejkohl/SequentiaByClaude/doc/sequentia/`, box `/root/sequentia/SequentiaByClaude/doc/sequentia/`. The ones that define the DEX:
+Canonical design docs live in the **node repo** (`Sequentia`), path `doc/sequentia/` — laptop `/home/aejkohl/Sequentia/doc/sequentia/`, box `/root/sequentia/SequentiaByClaude/doc/sequentia/`. The ones that define the DEX:
 
 - **`seqdex-orderbook-design.md`** — the order-book DEX: resting signed intents, the matching model, the covenant CLOB.
 - **`cross-chain-orderbook-consolidation.md`** — the UNIFIED cross-chain (BTC↔asset) order book (what the bridge lifts).
@@ -40,7 +40,7 @@ All under `github.com/GracedEternalKingCabbageMan/*`. Deploy pipeline: **edit on
 | **sequentia-web-wallet** | `~/sequentia-web-wallet` | `/root/sequentia/sequentia-web-wallet` | `main` | the **LSP bridge** (`tooling/lsp/`), the web wallet, the courier (`xcourier.js`), the E2E harness |
 | **seqdex** | `~/seqdex` | `/root/sequentia/seqdex` | `phase3-pure-ln` | the **matching relay** (`seqobd`), the **cross maker** (`seqob-maker`), `seqob-cli`, the xchain swap primitives. `daemon/` is its OWN Go module (`github.com/aejkcs50/seqdex/daemon`) — build from `daemon/`. Go = `~/dev-tools/go/bin` (laptop), `/root/dev-tools/go/bin` (box). |
 | **seqln** | `~/seqln` | `/root/sequentia/seqln` | `sequentia-stable` | the CLN fork (lightningd + subdaemons + holdinvoice plugin). Go = `~/dev-tools/go/bin`. |
-| **Sequentia** (node) | `~/SequentiaByClaude` | `/root/SequentiaByClaude` (run) + git clone | `master` | elementsd/committee, price-server, docs |
+| **Sequentia** (node) | `~/Sequentia` | `/root/SequentiaByClaude` (run) + git clone | `master` | elementsd/committee, price-server, docs |
 
 Box access: `ssh seq` (never `ConnectionAttempts>1`). Box = `https://sequentiatestnet.com`.
 
