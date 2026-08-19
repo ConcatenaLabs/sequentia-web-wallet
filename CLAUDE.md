@@ -60,6 +60,13 @@ Root is flat: production modules and tests sit side by side.
   **but `settlement-router.mjs`, `unified-book.mjs` and `bridge-driver.mjs` are imported into the
   browser by `swap.js`.** They contain no `require`, no `node:` imports and no `process.` access by
   construction. Adding any of those to those three files breaks the shipped page.
+- `coinjoin.js` — the Mix tab's wallet side: coin selection, ownership proofs, blinded addresses and,
+  above all, `verifyRoundOutputs`, the check that decides whether to sign a transaction the
+  coordinator built. `blindsig.js` and `coinjoin-protocol.js` beside it are **vendored from the
+  [`seqcj`](https://github.com/GracedEternalKingCabbageMan/seqcj) repo** and must stay byte-identical
+  to their originals apart from the header and import path — the point of vendoring rather than
+  reimplementing is that the protocol proven by seqcj's end-to-end test is the protocol this wallet
+  runs. Signing and unblinding go through `coinjoinSignInputs` / `coinjoinUnblindOutputs` in wasm.
 - `btc.js`, `jsqr.js`, `noble-ciphers.js` — vendored libraries, checked in as single files. Do not
   edit them.
 - Modules expose an `export const __test__ = { ... }` hook for tests rather than exporting internals.
