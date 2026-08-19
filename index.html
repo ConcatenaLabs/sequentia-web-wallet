@@ -5208,6 +5208,8 @@ function renderDelegation(){
     warn('This pool has committed to no payout policy, so by default it keeps everything its blocks earn. Nothing on-chain obliges it to pay you.');
   } else if(pool.policy_in_force.mode==='direct'){
     warn('This pool pays a committed address. The chain stops it redirecting the reward silently, but does not check that address shares anything with you.');
+  } else if(pool.policy_in_force.mode==='split'){
+    warn('This pool shares rewards proportionally: they pool up on-chain and anyone can trigger the payout. Leaving forfeits your unclaimed share, so claim your rewards before you leave.');
   }
   for(const q of (pool.policy_pending||[])){
     const secs = q.blocks_away * (POOLS.block_seconds||60);
