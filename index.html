@@ -5003,34 +5003,88 @@ async function fetchPools(){
   return POOLS;
 }
 
-// Find this wallet's delegation record without any local bookkeeping.
+// Signers worth probing for a record of ours, beyond whatever the wallet's own
+// history turns up: every pool on the board, plus any signer this browser has
+// delegated to before. The remembered set is a HINT, never a source of truth: a
+// pool that commands no weight and has announced no policy is not on the board
+// at all, and a wallet that pasted such a key would otherwise have no way to
+// name it again.
+const DELEG_HINTS = 'swk.sequentia.signerHints';
+function delegHints(){ try{ return JSON.parse(localStorage.getItem(DELEG_HINTS)||'[]'); }catch{ return []; } }
+function rememberSigner(signer){
+  try{
+    const seen = delegHints();
+    if(seen.includes(signer)) return;
+    localStorage.setItem(DELEG_HINTS, JSON.stringify([signer, ...seen].slice(0, 20)));
+  }catch{}
+}
+
+// The Electrum-style scripthash this explorer indexes by: the FORWARD sha256 of
+// the scriptPubKey. Verified against the deployed esplora rather than assumed --
+// the reversed form is the more common convention and returns an empty list
+// here, which would look exactly like "you are not delegating", the worst
+// possible wrong answer for a feature whose whole promise is that you can
+// always leave.
+async function delegScriptHash(scriptHex){
+  const bytes = Uint8Array.from(scriptHex.match(/../g).map(b=>parseInt(b,16)));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+// Find this wallet's delegation record. Two ways of looking, because neither
+// alone is enough:
 //
-// The record is a bare script, so the wallet does not track it as its own coin
-// and a restored seed has no note of it. But the transaction that FUNDED it
-// spent this wallet's coins, so it is in the wallet's history: scan those
-// outputs for a script that parses as a record naming our staking key, then ask
-// the explorer whether it is still unspent. No index, no pool list, no state.
+//  * the wallet's own history finds the record it FUNDED, since that transaction
+//    spent this wallet's coins. It cannot find one created by a MOVE: that
+//    transaction spends only the old bare record and pays only the new one, so
+//    nothing in it belongs to this wallet and no scan will ever download it.
+//  * asking the explorer for unspent outputs at the record script for each
+//    candidate signer finds it whatever created it, and survives a restore onto
+//    a browser that has never seen any of this.
+//
+// The record is a bare script, so the wallet cannot answer either question by
+// itself.
 async function discoverDelegation(){
   let mine;
   try{ mine = signer.stakerPublicKey(); }catch{ return null; }
-  const candidates = [];
+  const byOutpoint = new Map();
+  const key = c => c.txid + ':' + c.vout;
+
   try{
     for(const wtx of wollet.transactions()){
       let hex; try{ hex = wtx.tx().toString(); }catch{ continue; }
       let found; try{ found = lwk.findDelegationRecords(hex, mine); }catch{ continue; }
       for(const f of found||[]){
-        candidates.push({txid: wtx.txid().toString(), vout: f.vout, signer: f.signer,
-                         atoms: BigInt(f.value), height: wtx.height()});
+        const c = {txid: wtx.txid().toString(), vout: f.vout, signer: f.signer,
+                   atoms: BigInt(f.value), height: wtx.height()};
+        byOutpoint.set(key(c), c);
       }
     }
-  }catch(e){ return null; }
+  }catch{ /* an unreadable history must not stop the explorer probe */ }
+
+  const probe = new Set(delegHints());
+  for(const p of (POOLS && POOLS.pools) || []) probe.add(p.signer);
+  for(const sg of probe){
+    let spk; try{ spk = lwk.sequentiaDelegationScript(mine, sg); }catch{ continue; }
+    try{
+      const r = await fetch(`${ESPLORA}/scripthash/${await delegScriptHash(spk)}/utxo`);
+      if(!r.ok) continue;
+      for(const u of await r.json()){
+        // These come back already filtered to UNSPENT, which is the question
+        // that matters.
+        const c = {txid: u.txid, vout: u.vout, signer: sg, atoms: BigInt(u.value),
+                   height: (u.status && u.status.confirmed) ? u.status.block_height : null,
+                   unspent: true};
+        byOutpoint.set(key(c), c);
+      }
+    }catch{ /* transient: the other signers still get their turn */ }
+  }
+
+  const candidates = [...byOutpoint.values()];
   if(!candidates.length) return null;
-  // Newest first: a move spends the old record and creates a new one, so the
-  // most recent unspent record is the one in force. An unconfirmed one sorts
-  // first, because it is the most recent thing that happened.
   // Unconfirmed first (it is the most recent thing that happened), then by
-  // height descending. Subtracting the heights directly would give NaN when two
-  // unconfirmed records met, and a NaN comparator makes the order arbitrary.
+  // height descending: a move spends the old record and creates a new one, so
+  // the most recent unspent record is the one in force.
   candidates.sort((a,b)=>{
     const au = a.height==null, bu = b.height==null;
     if(au !== bu) return au ? -1 : 1;
@@ -5039,15 +5093,16 @@ async function discoverDelegation(){
   });
   for(const c of candidates){
     try{
-      // Authoritative, and the one thing the wallet cannot answer itself: the
-      // record is a bare script, so a transaction spending it need not touch
-      // this wallet at all and may never be downloaded.
-      const r = await fetch(`${ESPLORA}/tx/${c.txid}/outspend/${c.vout}`);
-      if(!r.ok) continue;
-      const j = await r.json();
-      if(j && j.spent) continue;                       // superseded or already reclaimed
-      const st = await fetch(`${ESPLORA}/tx/${c.txid}/status`);
-      c.confirmed = st.ok ? !!(await st.json()).confirmed : false;
+      if(!c.unspent){
+        const r = await fetch(`${ESPLORA}/tx/${c.txid}/outspend/${c.vout}`);
+        if(!r.ok) continue;
+        const j = await r.json();
+        if(j && j.spent) continue;                 // superseded, or already reclaimed
+      }
+      if(c.height==null){
+        const st = await fetch(`${ESPLORA}/tx/${c.txid}/status`);
+        c.confirmed = st.ok ? !!(await st.json()).confirmed : false;
+      } else c.confirmed = true;
       return c;
     }catch{ /* transient: try the next candidate */ }
   }
@@ -5189,6 +5244,7 @@ $('btnDelegate').onclick=async()=>{
     const controller=signer.stakerPublicKey();
     if(target===controller) throw new Error('that is your own staking key; delegating to yourself is what already happens with no pool at all');
 
+    rememberSigner(target);
     if(DELEG){
       // Moving pools: spend the old record and create the new one in ONE
       // transaction. Consensus allows only one live record per staking key, so
