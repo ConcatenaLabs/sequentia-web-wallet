@@ -404,6 +404,7 @@
       <button data-tab="send">Send</button>
       <button data-tab="receive">Receive</button>
       <button data-tab="swap">Swap</button>
+      <button data-tab="mix">Mix</button>
       <button data-tab="assets">Issuance</button>
       <button data-tab="stake">Stake</button>
       <button data-tab="history">History</button>
@@ -789,6 +790,65 @@
     </section>
 
     <!-- assets -->
+    <!-- mix (CoinJoin) -->
+    <section data-panel="mix" class="hide">
+      <div class="card">
+        <label class="lbl">Mix</label>
+        <p class="sub" style="margin:0 0 10px">A mix spends your coins into one transaction together with other people's, so that
+          nobody watching the chain can say which coin came out of which. On Sequentia the amounts are hidden as well:
+          every output of the mix, your change included, is a blinded commitment. That is the part Bitcoin cannot do,
+          and it is why the change output here is not the give-away it is there.</p>
+        <div class="status" id="cjStatus">Looking for a coordinator…</div>
+        <details class="ln-note" id="cjNote" style="margin-top:10px">
+          <summary>What a mix does and does not hide</summary>
+          <p class="sub"><b>Hidden from the chain:</b> every amount in the round, and which asset each output holds.
+            An observer sees a transaction with many inputs and many commitments.</p>
+          <p class="sub"><b>Hidden from the coordinator:</b> which of your coins paid for which of your mixed outputs.
+            That is what the blind signatures buy, and it is all they buy.</p>
+          <p class="sub"><b>Not hidden from the coordinator:</b> your amounts, and the link between your coins and your
+            change. It is not a stranger to you.</p>
+          <p class="sub"><b>Not hidden by this page at all:</b> your IP address. Registering your coins and your mixed
+            addresses from the same browser hands the coordinator back the link the blind signature just removed.
+            A web page cannot route those two steps over separate Tor circuits &mdash; the desktop client, Seqognito, exists
+            for exactly that. Treat this tab as a working demonstration, not as protection against someone watching
+            the coordinator.</p>
+          <p class="sub"><b>Your anonymity set is the round.</b> Two participants means two.</p>
+        </details>
+      </div>
+
+      <div class="card hide" id="cjLaneCard">
+        <label class="lbl">What to mix</label>
+        <div class="row">
+          <select id="cjLane" style="flex:2 1 220px"></select>
+          <input id="cjCount" type="number" min="1" step="1" value="1" style="flex:1 1 90px" placeholder="how many">
+        </div>
+        <div class="sub" id="cjPlan" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="cjGo">Mix</button>
+          <button class="ghost" id="cjRefresh">Refresh rounds</button>
+        </div>
+        <div class="status" id="cjRunStatus"></div>
+      </div>
+
+      <div class="card hide" id="cjBtcCard">
+        <label class="lbl">Mix Bitcoin</label>
+        <p class="sub" style="margin:0 0 10px">Bitcoin has no confidential transactions, so parent-chain BTC is bridged to SBTC,
+          mixed here, and sent back out to a fresh Bitcoin address of yours. Be clear-eyed about the trade: the bridge is a
+          custodian for as long as your coins are pegged, and it sees the Bitcoin going in and the Bitcoin coming out. What the
+          mix removes is its ability to pair the two.</p>
+        <div class="row">
+          <input id="cjBtcAmt" placeholder="BTC to mix (e.g. 0.01)" style="flex:2 1 200px">
+          <button class="primary" id="cjBtcGo" style="flex:1 1 120px">Mix BTC</button>
+        </div>
+        <div class="status" id="cjBtcStatus"></div>
+      </div>
+
+      <div class="card">
+        <label class="lbl">Your mixes</label>
+        <div class="list" id="cjHistory"><div class="muted">No mixes yet.</div></div>
+      </div>
+    </section>
+
     <section data-panel="assets" class="hide">
       <div class="card">
         <label class="lbl">Issue a new asset</label>
@@ -954,9 +1014,11 @@
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
   generateSwapSecret, buildSeqHtlcRedeemScript, buildSeqHtlcClaimTx, buildSeqHtlcRefundTx,
   scriptToAddress, buildCovenantFillTx,
-  openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr }
+  openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr,
+  coinjoinSignInputs, coinjoinUnblindOutputs }
   from './pkg/lwk_wasm.js';
-import { HDKey, mnemonicToSeedSync, btc, schnorr } from './btc.js';
+import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256 } from './btc.js';
+import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse } from './xrswap.js';
@@ -2192,6 +2254,7 @@ function tab(name){
   if(name==='swap') renderActiveSwap();
   if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch{} }
   if(name==='assets') populateIssueFeeAssets();
+  if(name==='mix') try{ renderMix(); }catch(e){ console.error(e); }
   if(name==='balance') try{ renderBalance(); }catch{}   // render immediately (from cache pre-scan), don't wait for the scan
 }
 
@@ -4224,6 +4287,247 @@ async function registerIssuedAsset(assetId, contract, attempt=0){
 }
 
 // ---------- wiring ----------
+
+// ---------- Mix (CoinJoin) ----------
+// The coordinator is reached at a same-origin path, like /seqob and /sbtc. Everything privacy-
+// critical happens in coinjoin.js; this is the tab that drives it and, just as importantly, the
+// place the wallet tells the truth about what a mix from a browser can and cannot do.
+let cjLanes = [], cjBusy = false, cjAddrCursor = null, cjWired = false;
+const CJ_ADDR_KEY = 'swk.cj.addrIndex';
+const CJ_LOG_KEY  = 'swk.cj.history';
+
+// A fresh CONFIDENTIAL address, never reused. Reuse would be fatal here: two mixed outputs to one
+// address re-links them to each other, and the coordinator rejects the duplicate anyway. `address()`
+// alone returns the next UNUSED index, which is the same index every time until it is spent, so the
+// cursor is kept explicitly and survives a reload.
+function cjFreshAddress(){
+  if(cjAddrCursor===null){
+    const saved=Number(localStorage.getItem(CJ_ADDR_KEY)||'0')||0;
+    let next=0; try{ next=wollet.address(undefined).index(); }catch{}
+    cjAddrCursor=Math.max(saved, next);
+  }
+  const idx=cjAddrCursor++;
+  localStorage.setItem(CJ_ADDR_KEY, String(cjAddrCursor));
+  return wollet.address(idx).address().toString();   // blinded form on purpose — a mix output must be
+}
+
+// TRANSPARENT coins only. A confidential coin cannot be registered: blinding the round needs every
+// input's blinding factors, so spending one would mean handing the coordinator the key to that
+// coin's whole history. Sequentia is transparent by default, so this is the normal direction of
+// travel — plain coins in, blinded coins out.
+function cjUtxos(){
+  const out=[];
+  for(const u of wollet.utxos()){
+    const sec=u.unblinded();
+    if(sec.isExplicit && !sec.isExplicit()) continue;
+    const op=u.outpoint(), spk=u.scriptPubkey();
+    out.push({
+      txid:op.txid().toString(), vout:op.vout(),
+      atoms:BigInt(sec.value()), asset:sec.asset().toString(),
+      spkHex:(spk.toString?spk.toString():hexOfBytes(spk.bytes())),
+      chain:(u.extInt && String(u.extInt()).toLowerCase().includes('internal'))?1:0,
+      index:u.wildcardIndex(),
+    });
+  }
+  return out;
+}
+
+// The ownership proof: an ECDSA signature over a round-bound message with the coin's own key. The
+// Sequentia and Bitcoin sides share one derivation (m/84'/1'/0'/chain/i), which is why btcNode gives
+// the right key for a Sequentia coin.
+function cjSignOwnership(message, input){
+  const node=btcNode(input.chain?1:0, input.index);
+  const sig=derFromCompact(node.sign(sha256(new TextEncoder().encode(message))));
+  return { pubkey:hexOfBytes(node.publicKey), sig:hexOfBytes(sig) };
+}
+
+// A plain wallet send, through the same review dialog as every other send. Used for the peg-out leg
+// of a BTC mix; never blind-signed.
+async function cjSendAsset({address, asset, atoms}){
+  let feeHex=POLICY_HEX;
+  try{ feeRateFor(asset); feeHex=asset; }catch{}
+  const a=new Address(address);
+  const assetId = asset===POLICY_HEX ? POLICY : new AssetId(asset);
+  let b=network.txBuilder();
+  b = a.isBlinded()
+    ? (asset===POLICY_HEX ? b.addLbtcRecipient(a, atoms) : b.addRecipient(a, atoms, assetId))
+    : b.addExplicitRecipient(a, atoms, assetId);
+  if(feeHex!==POLICY_HEX) b=b.feeAsset(new AssetId(feeHex), feeRateFor(feeHex));
+  const pset=await withWollet(()=>b.finish(wollet));
+  return new Promise((res,rej)=>{
+    try{
+      reviewBroadcast(pset, 'Send mixed coins to the bridge', (txid)=>res(String(txid)), feeHex,
+        { rows:[{hex:asset, atoms, addr:address}] });
+    }catch(e){ rej(e); }
+  });
+}
+
+// A parent-chain BTC send, through the wallet's own BTC review dialog.
+function cjSendBtc({address, sats}){
+  return new Promise((res,rej)=>{
+    try{ btcReviewBroadcast([{address, amount:BigInt(sats)}], (txid)=>res(String(txid))); }
+    catch(e){ rej(e); }
+  });
+}
+
+function cjInit(){
+  if(cjWired) return;
+  cjWired=true;
+  setCoinjoinBase((typeof window!=='undefined' && window.SEQ_COINJOIN_URL) || (location.origin + '/coinjoin'));
+  initCoinJoin({
+    wasm:{ Transaction, Address, coinjoinSignInputs, coinjoinUnblindOutputs },
+    wollet:()=>wollet, network, withWollet,
+    descriptor: ()=> signer.wpkhSlip77Descriptor(),
+    mnemonic: ()=> (localStorage.getItem(KEY)||'').trim(),
+    utxos: cjUtxos,
+    signOwnership: cjSignOwnership,
+    freshAddress: cjFreshAddress,
+    sendAsset: cjSendAsset,
+    assetBalance: (asset)=>{ try{ return BigInt(balObj()[asset]||0); }catch{ return 0n; } },
+    // A FRESH Bitcoin address for the peg-out: reusing one would hand back exactly the link
+    // the mix just removed.
+    btc: { newAddress: ()=>btcAddr(false, unifiedNextUnused()), send: cjSendBtc },
+    record: (k,v)=>{ try{ localStorage.setItem('swk.'+k, JSON.stringify(v)); }catch{} },
+  });
+  $('cjRefresh').onclick = ()=>renderMix();
+  $('cjLane').onchange = cjPlan;
+  $('cjCount').oninput = cjPlan;
+  $('cjGo').onclick = cjRun;
+  $('cjBtcGo').onclick = cjRunBtc;
+}
+
+function cjLogRead(){ try{ return JSON.parse(localStorage.getItem(CJ_LOG_KEY)||'[]'); }catch{ return []; } }
+function cjLogAdd(rec){
+  const l=cjLogRead(); l.unshift(rec);
+  try{ localStorage.setItem(CJ_LOG_KEY, JSON.stringify(l.slice(0,50))); }catch{}
+  cjRenderHistory();
+}
+function cjRenderHistory(){
+  const box=$('cjHistory'); box.innerHTML='';
+  const l=cjLogRead();
+  if(!l.length){ box.appendChild(el('div','muted','No mixes yet.')); return; }
+  for(const r of l){
+    const m=assetMeta(r.asset);
+    const row=el('div','kv');
+    row.appendChild(el('span','k', new Date(r.at).toLocaleString()));
+    row.appendChild(el('span','v', `${r.denominations} × ${fmtAtoms(BigInt(r.denom_atoms), m.precision)} ${m.ticker}`));
+    box.appendChild(row);
+    const link=el('div','sub'); const a=document.createElement('a');
+    a.href='/explorer/tx/'+r.txid; a.target='_blank'; a.textContent=r.txid.slice(0,24)+'…';
+    link.appendChild(a); box.appendChild(link);
+  }
+}
+
+function cjPlan(){
+  const lane=cjLanes[Number($('cjLane').value)||0];
+  if(!lane){ $('cjPlan').textContent=''; return; }
+  const m=assetMeta(lane.asset);
+  const k=Math.max(1, Math.floor(Number($('cjCount').value)||1));
+  const held=cjUtxos().filter(u=>u.asset===lane.asset).reduce((s,u)=>s+u.atoms, 0n);
+  const cost=BigInt(k)*(lane.denom+lane.coordFee);
+  const fee=BigInt(k)*lane.coordFee;
+  const parts=[
+    `Mixing ${k} × ${fmtAtoms(lane.denom, m.precision)} ${m.ticker}`,
+    fee>0n ? `coordination fee ${fmtAtoms(fee, m.precision)} ${m.ticker}` : 'no coordination fee',
+    `you hold ${fmtAtoms(held, m.precision)} ${m.ticker} in transparent coins`,
+  ];
+  if(cost>held) parts.push('— not enough for that many; lower the count');
+  else parts.push(`change ${fmtAtoms(held-cost, m.precision)} ${m.ticker} comes back blinded`);
+  // The network fee is absent on purpose: the coordinator pays it, in its own fee asset, so mixing
+  // an asset never requires holding another one.
+  $('cjPlan').textContent=parts.join(' · ');
+  $('cjGo').disabled = cost>held || cjBusy;
+}
+
+async function renderMix(){
+  cjInit();
+  cjRenderHistory();
+  try{
+    const st=await cjStatusApi();
+    cjLanes=await availableLanes();
+    const sel=$('cjLane'); sel.innerHTML='';
+    cjLanes.forEach((l,i)=>{
+      const m=assetMeta(l.asset);
+      const o=document.createElement('option');
+      o.value=String(i);
+      o.textContent=`${m.ticker||l.label} — ${fmtAtoms(l.denom, m.precision)} per denomination · ${l.participants} waiting`;
+      sel.appendChild(o);
+    });
+    show('cjLaneCard', cjLanes.length>0);
+    show('cjBtcCard', !!(st.btc && st.btc.lane_asset && cjLanes.some(l=>l.asset===st.btc.lane_asset)));
+    $('cjStatus').className='status';
+    $('cjStatus').textContent = cjLanes.length
+      ? `Coordinator ready · ${cjLanes.length} open lane${cjLanes.length>1?'s':''} · ${st.recent?.length||0} recent round${(st.recent?.length||0)===1?'':'s'}`
+      : 'Coordinator reachable, but no round is open for registration right now.';
+    cjPlan();
+  }catch(e){
+    show('cjLaneCard', false); show('cjBtcCard', false);
+    $('cjStatus').className='status err';
+    $('cjStatus').textContent='No coordinator configured for this wallet ('+prettyErr(e)+').';
+  }
+}
+
+// Phase names the coordinator uses, said in words a person can act on.
+function cjSay(phase, detail){
+  const d=detail||{};
+  switch(phase){
+    case 'selecting':          return 'Choosing coins…';
+    case 'registering-inputs': return `Registering ${d.inputs} coin(s) for ${d.denominations} denomination(s)…`;
+    case 'waiting':            return d.phase==='output' ? 'Waiting for the round to open output registration…'
+                                : d.phase==='signing' ? 'Waiting for the round transaction…'
+                                : 'Waiting for other participants…';
+    case 'registering-outputs':return `Registering mixed address ${d.registered} of ${d.of} (anonymously)…`;
+    case 'verifying':          return 'Checking the round pays exactly what it promised…';
+    case 'signing':            return 'Signing my own coins…';
+    case 'signed':             return 'Signed. Waiting for everyone else…';
+    case 'pegging-in':         return 'Sending Bitcoin to the bridge…';
+    case 'waiting-for-peg-in': return 'Waiting for the bridge to credit SBTC (Bitcoin confirmations)…';
+    case 'pegged-in':          return 'SBTC credited. Joining a round…';
+    case 'pegging-out':        return 'Sending the mixed coins back through the bridge…';
+    case 'pegged-out':         return 'Done: Bitcoin sent to a fresh address of yours.';
+    default:                   return phase;
+  }
+}
+
+async function cjRun(){
+  if(cjBusy) return;
+  const lane=cjLanes[Number($('cjLane').value)||0];
+  if(!lane) return;
+  const k=Math.max(1, Math.floor(Number($('cjCount').value)||1));
+  cjBusy=true; $('cjGo').disabled=true;
+  const st=$('cjRunStatus'); st.className='status'; st.textContent='Starting…';
+  try{
+    const res=await cjMix({ assetId:lane.asset, denominations:k, onStatus:(p,d)=>{ st.textContent=cjSay(p,d); } });
+    st.className='status'; st.textContent='Mixed. Transaction '+res.txid.slice(0,20)+'…';
+    cjLogAdd({ at:Date.now(), asset:lane.asset, txid:res.txid, denominations:res.denominations,
+               denom_atoms:res.denom_atoms, change_atoms:res.change_atoms });
+    toast('Mixed:', {href:'/explorer/tx/'+res.txid, label:res.txid.slice(0,18)+'…'});
+    await sync();
+  }catch(e){
+    st.className='status err'; st.textContent='Mix failed: '+prettyErr(e);
+  }finally{ cjBusy=false; cjPlan(); }
+}
+
+async function cjRunBtc(){
+  if(cjBusy) return;
+  const amt=($('cjBtcAmt').value||'').trim();
+  let sats;
+  try{ sats=parseAtoms(amt, 8); }catch{ sats=0n; }
+  if(sats<=0n){ $('cjBtcStatus').className='status err'; $('cjBtcStatus').textContent='Enter an amount of BTC to mix.'; return; }
+  cjBusy=true; $('cjBtcGo').disabled=true;
+  const st=$('cjBtcStatus'); st.className='status'; st.textContent='Starting…';
+  try{
+    const res=await cjMixBtc({ sats, onStatus:(p,d)=>{ st.textContent=cjSay(p,d); } });
+    st.className='status'; st.textContent='Done. Mixed Bitcoin sent to '+res.btcDest;
+    cjLogAdd({ at:Date.now(), asset:res.round ? res.round.txid && cjLanes.find(l=>l.btcBacked)?.asset : null,
+               txid:res.round.txid, denominations:res.round.denominations,
+               denom_atoms:res.round.denom_atoms, change_atoms:res.round.change_atoms });
+    await sync();
+  }catch(e){
+    st.className='status err'; st.textContent='Bitcoin mix stopped: '+prettyErr(e);
+  }finally{ cjBusy=false; $('cjBtcGo').disabled=false; }
+}
+
 document.querySelectorAll('#tabs button').forEach(b=> b.onclick=()=>tab(b.dataset.tab));
 $('btnCreate').onclick=()=>{ const m=Mnemonic.fromRandom(12); window._pending=m.toString();
   const w=$('words'); w.innerHTML=''; window._pending.split(' ').forEach((x,i)=>{ const s=el('span'); s.innerHTML=`<b>${i+1}</b>${x}`; w.appendChild(s); });
