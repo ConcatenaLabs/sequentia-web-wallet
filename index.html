@@ -5062,22 +5062,38 @@ async function discoverDelegation(){
     }
   }catch{ /* an unreadable history must not stop the explorer probe */ }
 
-  const probe = new Set(delegHints());
-  for(const p of (POOLS && POOLS.pools) || []) probe.add(p.signer);
-  for(const sg of probe){
-    let spk; try{ spk = lwk.sequentiaDelegationScript(mine, sg); }catch{ continue; }
-    try{
-      const r = await fetch(`${ESPLORA}/scripthash/${await delegScriptHash(spk)}/utxo`);
-      if(!r.ok) continue;
-      for(const u of await r.json()){
-        // These come back already filtered to UNSPENT, which is the question
-        // that matters.
-        const c = {txid: u.txid, vout: u.vout, signer: sg, atoms: BigInt(u.value),
-                   height: (u.status && u.status.confirmed) ? u.status.block_height : null,
-                   unspent: true};
-        byOutpoint.set(key(c), c);
-      }
-    }catch{ /* transient: the other signers still get their turn */ }
+  // Two groups, tried in order: the signers this browser has used, then the
+  // rest of the board. The first is one or two keys and hits immediately in the
+  // ordinary case, where the whole sweep would cost one request per pool on
+  // every refresh; the second exists for a seed restored into a browser that
+  // remembers nothing.
+  const hints = delegHints(), seen = new Set(hints), rest = [];
+  for(const p of (POOLS && POOLS.pools) || []){
+    if(!seen.has(p.signer)){ seen.add(p.signer); rest.push(p.signer); }
+  }
+  const delegProbeGroups = [hints, rest];
+  let probed = 0;
+  for(const group of delegProbeGroups){
+    // Skip the wider sweep only when an EARLIER PROBE found something. Keying
+    // this off byOutpoint would skip it whenever the history pass found the
+    // record this wallet funded -- exactly the record a later move has spent.
+    if(probed) break;
+    for(const sg of group){
+      let spk; try{ spk = lwk.sequentiaDelegationScript(mine, sg); }catch{ continue; }
+      try{
+        const r = await fetch(`${ESPLORA}/scripthash/${await delegScriptHash(spk)}/utxo`);
+        if(!r.ok) continue;
+        for(const u of await r.json()){
+          // These come back already filtered to UNSPENT, which is the question
+          // that matters.
+          const c = {txid: u.txid, vout: u.vout, signer: sg, atoms: BigInt(u.value),
+                     height: (u.status && u.status.confirmed) ? u.status.block_height : null,
+                     unspent: true};
+          byOutpoint.set(key(c), c);
+          probed++;
+        }
+      }catch{ /* transient: the other signers still get their turn */ }
+    }
   }
 
   const candidates = [...byOutpoint.values()];
