@@ -4467,7 +4467,13 @@ async function renderMix(){
       const m=assetMeta(l.asset);
       const o=document.createElement('option');
       o.value=String(i);
-      o.textContent=`${m.ticker||l.label} — ${fmtAtoms(l.denom, m.precision)} per denomination · ${l.participants} waiting`;
+      // Say what the round is actually doing. "Waiting" with a participant count is the honest
+      // description of a round that has not started its clock yet, and it tells a user that showing
+      // up is what makes it happen rather than that something is broken.
+      const state = l.waiting
+        ? (l.participants >= 1 ? `${l.participants} here, needs ${l.minParticipants - l.participants} more` : 'nobody here yet — be the first')
+        : (l.deadlineMs != null ? `${l.participants} in, closes in ${Math.max(0, Math.round(l.deadlineMs/1000))}s` : `${l.participants} in`);
+      o.textContent=`${m.ticker||l.label} — ${fmtAtoms(l.denom, m.precision)} per denomination · ${state}`;
       sel.appendChild(o);
     });
     show('cjLaneCard', cjLanes.length>0);
@@ -4475,6 +4481,7 @@ async function renderMix(){
     $('cjStatus').className='status';
     $('cjStatus').textContent = cjLanes.length
       ? `Coordinator ready · ${cjLanes.length} open lane${cjLanes.length>1?'s':''} · ${st.recent?.length||0} recent round${(st.recent?.length||0)===1?'':'s'}`
+      + (cjLanes.every(l=>l.waiting) ? ' · a round starts when a second person joins, so registering is what gets it going' : '')
       : 'Coordinator reachable, but no round is open for registration right now.';
     cjPlan();
   }catch(e){
