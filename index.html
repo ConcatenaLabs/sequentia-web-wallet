@@ -1014,9 +1014,16 @@
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
   generateSwapSecret, buildSeqHtlcRedeemScript, buildSeqHtlcClaimTx, buildSeqHtlcRefundTx,
   scriptToAddress, buildCovenantFillTx,
-  openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr,
-  coinjoinSignInputs, coinjoinUnblindOutputs }
+  openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr }
   from './pkg/lwk_wasm.js';
+// The two coinjoin helpers are read off the module NAMESPACE rather than imported by name. A named
+// import of something the built `pkg/` does not export is a link-time error, and it does not fail
+// quietly: it takes the whole module graph down, so a wallet deployed against an older wasm build
+// would be a blank page rather than a wallet with one tab missing. Read this way, mixing simply
+// reports itself unavailable.
+import * as lwk from './pkg/lwk_wasm.js';
+const coinjoinSignInputs = lwk.coinjoinSignInputs;
+const coinjoinUnblindOutputs = lwk.coinjoinUnblindOutputs;
 import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256 } from './btc.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
@@ -4370,6 +4377,8 @@ function cjSendBtc({address, sats}){
   });
 }
 
+function cjSupported(){ return typeof coinjoinSignInputs === 'function' && typeof coinjoinUnblindOutputs === 'function'; }
+
 function cjInit(){
   if(cjWired) return;
   cjWired=true;
@@ -4440,6 +4449,14 @@ function cjPlan(){
 }
 
 async function renderMix(){
+  if(!cjSupported()){
+    // The signer this wallet was built against has no coinjoin support. Say so plainly instead of
+    // offering a button that cannot work.
+    show('cjLaneCard', false); show('cjBtcCard', false);
+    $('cjStatus').className='status err';
+    $('cjStatus').textContent='This build of the wallet\u2019s signer has no mixing support (pkg/ predates coinjoinSignInputs). Rebuild lwk_wasm from SWK.';
+    return;
+  }
   cjInit();
   cjRenderHistory();
   try{
