@@ -26,9 +26,9 @@ const ASSET = 'c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40'
 const SEQOB = '/root/sequentia/seqdex/bin/seqob-cli';
 const LNCLI = '/root/sequentia/seqln/cli/lightning-cli';
 const TAKER_LN = ['--lightning-dir=/root/sequentia/lsp/btc-maker', '--network=testnet4'];   // the taker's OWN BTC-LN node
-const SEQ_RPC = 'http://seq:seq@127.0.0.1:18300';
+const SEQ_RPC = process.env.SEQ_RPC || (() => { throw new Error('set SEQ_RPC=http://<rpcuser>:<rpcpassword>@127.0.0.1:<port>'); })();
 const TAKER_SEQ_WALLET = 'bridge-taker';
-const SEQ_RPC_FOR_OBSERVE = 'http://seq:seq@127.0.0.1:18300';
+const SEQ_RPC_FOR_OBSERVE = process.env.SEQ_RPC_FOR_OBSERVE || SEQ_RPC;
 
 const sha256 = (hex) => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -15,7 +15,8 @@ const [mbTxid, mbVout] = makerBtcRef.split(':');
 const SEQOB = '/root/sequentia/seqdex/bin/seqob-cli';
 const LNCLI = '/root/sequentia/seqln/cli/lightning-cli';
 const TAKER_LN = ['--lightning-dir=/root/sequentia/lsp/btc-maker', '--network=testnet4'];
-const SEQ_RPC = 'http://seq:seq@127.0.0.1:18300';
+const SEQ_RPC = process.env.SEQ_RPC || (() => { throw new Error('set SEQ_RPC=http://<rpcuser>:<rpcpassword>@127.0.0.1:<port>'); })();
+const BTC_RPC = process.env.BTC_RPC || (() => { throw new Error('set BTC_RPC=http://<rpcuser>:<rpcpassword>@127.0.0.1:48332'); })();
 const BTC = ['-rpcconnect=127.0.0.1', '-rpcport=48332', '-rpcuser=seq', '-rpcpassword=seq'];
 const TOKEN = 'b5b1-d848ec96d29c01d2ff1db6cf';
 const sha256 = (hex) => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex');
@@ -47,7 +48,7 @@ async function main() {
   // 3. Confirm the LSP recouped the maker's BTC HTLC with P + the job settled.
   let recouped = false;
   for (let i = 0; i < 40 && !recouped; i++) {
-    try { const o = JSON.parse(await run(SEQOB, ['xhtlc-observe', '-rpc', 'http://seq:seq@127.0.0.1:48332', '-txid', mbTxid, '-vout', String(mbVout || 0), '-hash', H])); if (o.spent) { recouped = true; log('maker BTC HTLC SPENT (LSP recoup)', o.spender_txid || '', o.preimage ? 'witness P=' + o.preimage : ''); } } catch {}
+    try { const o = JSON.parse(await run(SEQOB, ['xhtlc-observe', '-rpc', BTC_RPC, '-txid', mbTxid, '-vout', String(mbVout || 0), '-hash', H])); if (o.spent) { recouped = true; log('maker BTC HTLC SPENT (LSP recoup)', o.spender_txid || '', o.preimage ? 'witness P=' + o.preimage : ''); } } catch {}
     if (!recouped) await sleep(8000);
   }
   let fin = null; for (let i = 0; i < 30; i++) { fin = await job(); if (fin.status === 'settled' || fin.status === 'failed') break; await sleep(4000); }
