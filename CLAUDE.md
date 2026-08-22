@@ -26,16 +26,16 @@ ln -s ../SWK/lwk_wasm/pkg ./pkg
 ```
 
 `index.html` imports a default-exported `init` from `./pkg/lwk_wasm.js`, which only the
-`--target web` build produces. The README here omits `--target web`; SWK's README has it right.
+`--target web` build produces.
 
 ```sh
 python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-Note that the README's claim of "three suites" is long out of date — there are ~52 `*.test.mjs`
-files, and roughly twenty of them are **standalone scripts** with their own `check()` harness that
-`node --test` does not pick up. Run those directly (`node covenant-byteorder.test.mjs`).
+There are 56 `*.test.mjs` files (43 at the root, 13 under `tooling/lsp/`), and 23 of them are
+**standalone scripts** with their own `check()` harness that `node --test` does not pick up. Run
+those directly (`node covenant-byteorder.test.mjs`).
 
 Anything importing `swap.js` from Node needs a `localStorage` shim installed before the import;
 `swap.js` reads it at module load. Existing tests show the idiom.
@@ -129,8 +129,9 @@ token is a single shared token configured inline in `index.html`, not a per-user
 are documented in `README.md` and `docs/ARCHITECTURE.md`. Do not build anything that assumes
 otherwise, and do not add further secrets to the page.
 
-`docs/ARCHITECTURE.md` predates most of the covenant and bridge work; `tooling/lsp/HANDOFF.md` is
-an explicitly dated point-in-time handoff. Treat both as historical and verify against code.
+`docs/ARCHITECTURE.md` covers the module graph and the protocols at a high level and says little
+about the leg bridge; `tooling/lsp/HANDOFF.md` is an explicitly dated point-in-time handoff. Verify
+both against code.
 
 ## Working in this repo
 
