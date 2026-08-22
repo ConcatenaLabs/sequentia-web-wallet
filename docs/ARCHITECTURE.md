@@ -10,13 +10,25 @@ DOM-light or DOM-free and receives what it needs through an `init*(ctx)` call.
 ## Module graph
 
 ```
-index.html  (app shell: boot, tabs, balances, send/receive, fees, stake, history, OpenAMP, QR)
- ├─ pkg/lwk_wasm.js        SWK WASM: Signer/Wollet/EsploraClient/PSET + HTLC helpers (untracked)
+index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools, history, OpenAMP, Sign, QR)
+ ├─ pkg/lwk_wasm.js        SWK WASM: Signer/Wollet/EsploraClient/PSET + HTLC, covenant, delegation,
+ │                         CoinJoin and OpenAMP helpers (untracked)
  ├─ btc.js                 vendored @scure/btc-signer + bip32/bip39: the Bitcoin testnet4 leg
  ├─ jsqr.js                vendored jsQR (QR decoding; classic script, not a module)
- ├─ swap.js                Trade tab: composer, routing, Take/Post, same-chain settlement
- │   └─ seqob.js           order-book protocol: wire codec, offer sigs, Crypter, REST + WS lift
- │       └─ noble-ciphers.js  vendored @noble/ciphers (AES-256-GCM for the E2E layer)
+ ├─ swap.js                Trade tab: composer, routing, Market/Limit, covenant order placement
+ │   ├─ seqob.js           order-book protocol: wire codec, offer sigs, Crypter, REST + WS lift
+ │   │   └─ noble-ciphers.js  vendored @noble/ciphers (AES-256-GCM for the E2E layer)
+ │   ├─ covenant.js / covenant-order.js / covenant-flow.js / covenant-fill-host.js
+ │   │                     SeqOB passive-CLOB covenant: leaf + witness builders, place/watch flow,
+ │   │                     pure composer glue, raw-FILL seam into wasm
+ │   ├─ ln-rail.js         per-asset Lightning-rail gating (a rail is offered only with a real channel)
+ │   ├─ submarine.js       mixed-rail (submarine) swap state + persistence
+ │   ├─ subswap.js         P2P submarine taker + LSP leg-bridge client
+ │   ├─ sbtc.js            SBTC custody-bridge client (address allocation only)
+ │   └─ tooling/lsp/{settlement-router,unified-book,bridge-driver}.mjs   shared with the backend
+ ├─ coinjoin.js            Mix tab: coin selection, ownership proofs, verify-before-sign
+ │   ├─ blindsig.js        vendored from seqcj: Chaum RSA blind signatures
+ │   └─ coinjoin-protocol.js  vendored from seqcj: the participant half of the round protocol
  ├─ xswap.js               cross-chain taker, forward  (pay BTC  -> receive asset)
  ├─ xrswap.js              cross-chain taker, reverse  (pay asset -> receive BTC)
  ├─ xmaker.js              in-browser cross-chain maker (both directions)
@@ -50,8 +62,9 @@ sequence serves both. Confidential (`tsqb1...`) addresses are a per-toggle opt-i
 Receive tab only.
 
 HTLC keys for cross-chain swaps come from dedicated branches: the Sequentia side from
-`signer.htlcKeypair()` (also reused as the OpenAMP identity key), the Bitcoin side from
-`m/84'/1'/0'/2/{0,1}` (claim/refund).
+`signer.htlcKeypair()` (`m/3/0`; it was also the original OpenAMP identity, now kept read-only
+as a legacy AID), the Bitcoin side from `m/84'/1'/0'/2/{0,1}` (claim/refund). The current
+OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 
 ## Backend surface (all same-origin relative paths)
 
@@ -64,10 +77,13 @@ HTLC keys for cross-chain swaps come from dedicated branches: the Sequentia side
 | `/faucet` | index.html | POST, testnet funds to the current address |
 | `/registry/index.minimal.json` | index.html | asset-metadata index (override: `window.SEQ_REGISTRY_URL`) |
 | `/seqob` + `/seqob/v1/ws` | seqob.js, xcourier.js | order-book relay REST + the swap courier WebSocket |
-| `/dex` | swap.js, xswap.js | legacy RFQ daemon (market seeding; courier path has superseded the rest) |
+| `/dex` | swap.js, xswap.js | the SeqDEX daemon, market seeding only |
 | `/anchor/<blockhash>`, `/anchorstatus` | xmaker.js | anchor height / certification for the maker's reveal gate |
 | `/openamp` | index.html | OpenAMP REST (`/v1/users`, `/v1/assets`, `/v1/transfers`, balances, deposit addresses) |
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | seqln.js | hosted-SeqLN LSP HTTP API + per-node signer WebSockets |
+| `/coinjoin` | coinjoin.js | seqcj CoinJoin coordinator (override: `window.SEQ_COINJOIN_URL`); the Mix tab reports it missing |
+| `/sbtc` | sbtc.js | SBTC custody bridge: peg-in / peg-out address allocation for offline-resting BTC limit orders |
+| `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
 
 Every backend beyond the two Esplora APIs is optional at runtime: fetch failures degrade the
 corresponding feature instead of breaking the wallet.
@@ -80,8 +96,9 @@ deployment; everything else defaults to same-origin paths):
 | Global | Default | Meaning |
 |---|---|---|
 | `SEQ_SEQOB_URL` | `origin + '/seqob'` | order-book relay base |
-| `SEQ_DEX_BASE` | `origin + '/dex'` | legacy RFQ daemon base |
-| `SEQ_XDEX_BASE` | falls back to `SEQ_DEX_BASE` | legacy cross-chain daemon base |
+| `SEQ_DEX_BASE` | `origin + '/dex'` | SeqDEX daemon base (market seeding) |
+| `SEQ_XDEX_BASE` | falls back to `SEQ_DEX_BASE` | cross-chain daemon base (market seeding) |
+| `SEQ_COINJOIN_URL` | `origin + '/coinjoin'` | seqcj coordinator base |
 | `SEQ_REGISTRY_URL` | `/registry/index.minimal.json` | asset registry index |
 | `SEQ_LSP_URL` | `origin + '/lsp'` | LSP HTTP API |
 | `SEQ_LSP_TOKEN` | unset | LSP bearer token (interim shared demo token on the live page) |
@@ -107,9 +124,18 @@ integrity. Taking an offer (`seqob.lift`) opens the relay WebSocket, exchanges
 by ECDH between an ephemeral taker session key and the maker pubkey **from the signed offer**
 (a relay substituting keys aborts the session). Settlement is one PSET: the taker builds a
 `SwapRequest` via `wollet.seqdexSwapRequest(...)`, the maker co-signs, the taker finalizes,
-signs, and broadcasts. Posting an offer signs and rests it via `POST /v1/offers`; in-wallet
-co-signing of lifts against your own same-chain offer is not implemented yet, so those fills
-need an external maker process.
+signs, and broadcasts.
+
+Placing a same-chain order does not rest a signed intent that needs the maker back: it funds
+a SeqOB passive-CLOB **covenant** (`covenant.js` derives the tapscript leaf and scriptPubKey,
+`covenant-order.js` the place/watch-for-fill flow, `covenant-flow.js` the composer glue). The
+covenant enforces the price from transaction introspection, so anyone who crosses it fills it
+with one transaction, even while the wallet is closed. Filling from the browser goes through
+`covenant-fill-host.js`, which hands the byte-verified recipe to wasm `buildCovenantFillTx`
+(a taproot script-path input with no signature next to the taker's own key-path inputs);
+cancelling spends the covenant back with `buildCovenantRefundTx`. Asset ids cross a byte-order
+boundary here (display order in the wallet and relay pair, internal order in the leaf and
+`CovenantTerms`); `covenantDerivationIds()` in `swap.js` is the named conversion.
 
 The maker/session identity is a per-browser secp256k1 key in `localStorage['seqobMakerKey']`.
 It signs resting offers and derives courier session keys; it never controls funds.
@@ -165,6 +191,17 @@ rails are submarine swaps gated by the anchor rules like any on-chain leg. The b
 service, a browser-model device harness, a WS-to-TCP relay, and the key-provisioning tool
 live in [`tooling/lsp/`](../tooling/lsp/README.md).
 
+### CoinJoin (coinjoin.js + the seqcj coordinator)
+
+The Mix tab runs a seqcj round: `coinjoin-protocol.js` and `blindsig.js` are vendored from the
+seqcj repo and kept byte-identical, so the protocol the wallet runs is the one seqcj's own
+end-to-end test proves. `coinjoin.js` does the parts only a wallet can: choose the coins, prove
+ownership, hand out fresh blinded output addresses and, before signing, `verifyRoundOutputs`
+(unblinding with the wallet's blinding key through wasm `coinjoinUnblindOutputs`) to check
+the coordinator's transaction pays what was promised. Signing the wallet's own inputs is wasm
+`coinjoinSignInputs`; the coordinator merges the witnesses. Mix history lives under
+`swk.cj.*`.
+
 ## localStorage keys
 
 | Key | Contents |
@@ -176,14 +213,21 @@ live in [`tooling/lsp/`](../tooling/lsp/README.md).
 | `seqobMakerKey` | per-browser maker/session secp256k1 key (not a fund key) |
 | `swk.sequentia.xswap` / `swk.sequentia.xrswap` | in-flight cross-chain taker state |
 | `swk.sequentia.xmaker` | in-flight cross-chain maker sessions |
+| `swk.sequentia.submarine`, `swk.sequentia.subswap(s)`, `swk.subasset.*` | in-flight mixed-rail and sub-asset swap state |
+| `swk.sequentia.pegpending` / `swk.sequentia.pegoutpending`, `swk.sequentia.bridge` | pending SBTC peg-ins / peg-outs and leg-bridge jobs |
+| `swk.sequentia.walk` | an in-flight Market fill that walks several resting offers |
+| `swk.sequentia.oampTransfers`, `swk.sequentia.signerHints` | OpenAMP transfer log; pool signer keys this browser has delegated to |
+| `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |
+| `swk.balCache`, `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
+
+The fund-bearing keys are the mnemonic and the in-flight swap, walk, peg and bridge records;
+the rest can be cleared without loss.
 
 ## Known limitations
 
 - The receive QR encodes a `liquidnetwork:<address>` URI (inherited from upstream LWK's
   `qr.rs`); the visible and copied address is correct, but external scanners get the wrong
   scheme. The fix belongs in SWK (emit the bare address) plus a WASM rebuild.
-- Same-chain posted offers cannot be filled by the wallet itself yet (no in-wallet co-sign of
-  lifts on own offers).
 - Cross-chain makers serve offers only while the tab is open; reloads recover funds but do not
   resume serving automatically (offers must be re-posted).
 - The LSP API uses a single shared bearer token on the live deployment; per-wallet
@@ -194,8 +238,9 @@ live in [`tooling/lsp/`](../tooling/lsp/README.md).
 
 ## Testing
 
-`node --test` (Node 22+) runs the three DOM-free suites: `seqln.test.mjs`,
-`xcourier.test.mjs`, `xmaker.test.mjs`. The swap modules additionally export `__test__`
+`node --test` (Node 22+) runs the `node:test` suites (33 of the 56 `*.test.mjs` files); the
+other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
+standalone scripts run directly with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real
 WASM-signer-over-Noise path is proven by `tooling/lsp/device-harness.mjs` against a live
 backend.
