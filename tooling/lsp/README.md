@@ -2,7 +2,7 @@
 
 This is the backend the wallet's Lightning module (`../../seqln.js`) commands to
 deliver the **non-custodial instant-LN asset↔BTC DEX from a thin wallet**. It
-implements the LSP / hosted-SeqLN model of the UX audit §8.2 (Tier 2):
+implements the LSP / hosted-SeqLN model:
 
 - **We host** the SeqLN node (liquidity, channels, routing).
 - **The wallet holds the keys.** On unlock it brings an on-device wasm signer
@@ -17,15 +17,24 @@ implements the LSP / hosted-SeqLN model of the UX audit §8.2 (Tier 2):
 Auth: `Authorization: Bearer <LSP_TOKEN>` (production must use per-wallet auth —
 a RUNE / signed challenge bound to the device pubkey; the shared token is interim).
 
-| Method | Path | Body | Returns |
-| --- | --- | --- | --- |
-| `GET` | `/health` | — (no auth) | `{ok:true}` |
-| `GET` | `/status` | — | `{node_id, network, channels:[{peer_id, asset_label, spendable_units, receivable_units, state}]}` |
-| `POST` | `/swap` | `{side:'buy'|'sell', asset, amount}` | `{ok, preimage, base_amount, quote_amount, finality:'final', settled_ms}` |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | liveness, no auth |
+| `GET` | `/anchor` | anchor height and status of a Sequentia block, no auth (the wallet verifies a leg's real anchor instead of trusting the maker) |
+| `GET` | `/status` | `{node_id, network, channels:[{peer_id, asset_label, spendable_units, receivable_units, state}]}` |
+| `GET` | `/rails` | which settlement rails are usable per asset and side |
+| `GET` | `/book`, `/book/unified`, `/lnbook` | the on-chain cross book, the unified rail-agnostic book, the pure-LN book |
+| `POST` | `/offer` | relay a wallet-signed sub-asset offer (the LSP only forwards the bytes) |
+| `POST` / `GET` | `/swap`, `/swap/<id>` | execute a swap (`{side:'buy'|'sell', asset, amount}`); an over-cap, anchor-gated mixed swap runs asynchronously and is polled by id |
+| `POST` / `GET` | `/node/provision`, `/nodes/list`, `/node/list`, `/node/getinfo`, `/node/onchain` | per-device hosted-node provisioning and inspection |
+| `POST` / `GET` | `/node/invoice`, `/node/invoice-status`, `/node/settle`, `/node/receive`, `/node/pay`, `/node/payhash` | invoices and payments on the user's own hosted node (HODL buy path, plain receive, pay) |
+| `POST` / `GET` | `/channel/deposit`, `/channel/open`, `/channel/open/<id>`, `/channel/inbound/quote`, `/channel/inbound`, `/channel/close` | "Move to Lightning" channel funding, inbound-liquidity purchase (priced in the asset bought), cooperative close |
+| `POST` | `/bridge/front`, `/bridge/hold`, `/bridge/asset` | the rail-crossing leg bridge: the LSP fronts a BTC-LN leg against the maker's confirmed on-chain BTC HTLC |
 
 `asset` accepts a ticker (`GOLD`) or a 32-byte hex asset id. The pair is
-`<asset>/BTC`, where the BTC leg is a real Bitcoin-LN policy channel in
-production, or a second issued asset (`BTCX`) as a regtest stand-in.
+`<asset>/BTC`, where the BTC leg is a real Bitcoin-LN channel in production, or
+a second issued asset (the `BTCX` variable) as a regtest stand-in. The handler
+comments in `lsp-server.mjs` are the reference for request and response shapes.
 
 Pure-LN is the one settlement state honestly labelled **final** (nothing on-chain,
 no Bitcoin-reorg surface — DEX 0-conf policy + Principle 1).
@@ -34,13 +43,24 @@ no Bitcoin-reorg surface — DEX 0-conf policy + Principle 1).
 
 ```sh
 LNCLI=/path/to/lightning-cli \
-HOSTED_RPC=/path/to/hosted/<network>/lightning-rpc \
+HOSTED_ASSET_RPC=/path/to/hosted/asset-node/lightning-rpc \
+HOSTED_BTC_RPC=/path/to/hosted/btc-node/lightning-rpc \
 SEQOB_CLI=/path/to/seqob-cli \
 RELAY=http://127.0.0.1:9955 \
-GOLD=<gold asset id> BTCX=<btc-stand-in asset id> \
+GOLD=<gold asset id> \
 LSP_PORT=9981 LSP_TOKEN=<token> \
   node lsp-server.mjs
 ```
+
+`LNCLI`, `SEQOB_CLI` and `GOLD` are required; the server exits without them.
+`HOSTED_RPC` is a one-node fallback for both `HOSTED_*_RPC`. `RELAY` and
+`SEQOB_RELAY_URL` (the seqobd relay for the unified book) both default to
+`http://127.0.0.1:9955`; `LSP_PORT` defaults to 9981 and `LSP_TOKEN` to
+`devtoken-lsp`, so always set the token. `BTCX` names a second issued asset as
+a regtest stand-in for the BTC leg; leave it unset for real BTC-LN. The server
+reads some eighty further variables (`SEQ_RPC_*`, `BTC_RPC_*`, `SUBAS_*`,
+`INBOUND_*`, `LSP_PAYER_*`, `REFUND_*`, ...) for the bridge, sub-asset and
+inbound-liquidity paths; `lsp-server.mjs` is the reference for those.
 
 The service assumes the rest of the hosted backend is already up:
 
@@ -53,7 +73,7 @@ The service assumes the rest of the hosted backend is already up:
    fronting the proxy's TCP listener so the browser device can reach it over wss.
 4. **LP maker** `seqob-maker -mode pureln -side sell` with the GOLD leg and the
    BTC-stand-in **hold** leg on **separate peers** (avoids the same-peer
-   multi-asset misroute; capstone finding #1).
+   multi-asset misroute).
 5. **Announced** asset channels to the hosted node (GOLD inbound + BTC-stand-in
    pushed for outbound). Asset routing (`getroute asset=…`) only matches
    channels whose on-chain asset is in gossip, so the channels must be
@@ -69,9 +89,9 @@ wallet module loads (mirrors `window.SEQ_SEQOB_URL`):
 window.SEQ_LSP_URL               = 'https://host/lsp';   // this service (default: origin + '/lsp')
 window.SEQ_LSP_TOKEN             = '<bearer token>';
 // per-node WS↔TCP relay front + pinned host static pubkey:
-window.SEQ_LSP_WS_ASSET          = 'wss://host/lsp-signer-asset';
+window.SEQ_LSP_WS_ASSET          = 'wss://host/lsp-ws-asset';
 window.SEQ_LSP_HOST_PUBKEY_ASSET = '<hosted ASSET node host static pubkey>';
-window.SEQ_LSP_WS_BTC            = 'wss://host/lsp-signer-btc';
+window.SEQ_LSP_WS_BTC            = 'wss://host/lsp-ws-btc';
 window.SEQ_LSP_HOST_PUBKEY_BTC   = '<hosted BTC node host static pubkey>';
 ```
 
@@ -122,4 +142,6 @@ hosted node, opens the separate-peer asset channels, posts an LP offer, then
 `POST /swap buy` settles a pure-LN GOLD↔BTC-stand-in trade — the device serving
 `SIGN_REMOTE_COMMITMENT_TX`/`VALIDATE_COMMITMENT_TX`/`ECDH` during the swap, with
 **real per-asset movement** (GOLD in, BTC-stand-in out on the correct channels),
-not just a shared preimage. See the laptop harness noted in the build report.
+not just a shared preimage. `device-harness.mjs` in this directory is the
+device-signer half of that harness: it serves the hosted node's hsmd stream from
+the same vendored wasm signer the page uses.
