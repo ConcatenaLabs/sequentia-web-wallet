@@ -1,6 +1,8 @@
-# SeqDEX Cross-Rail Bridge — Session Handoff & Verification Guide
+_Historical (2026-07-22); see README.md for the current state._
 
-_Session `060d0669`, 2026-07-22. Author: agent "Saba". For a fresh session to verify the work and take over._
+# SeqDEX Cross-Rail Bridge — Handoff & Verification Guide
+
+_Written 2026-07-22 for whoever verifies the work and takes over._
 
 ---
 
@@ -16,7 +18,7 @@ The rail-blind LSP **leg-bridge** (non-custodial cross-rail atomic swaps: BTC �
 
 ## 1. DESIGN SPEC — the intended function / design of the DEX
 
-Canonical design docs live in the **node repo** (`Sequentia`), path `doc/sequentia/` — laptop `/home/aejkohl/Sequentia/doc/sequentia/`, box `/root/sequentia/Sequentia/doc/sequentia/`. The ones that define the DEX:
+Canonical design docs live in the **node repo** (`Sequentia`), path `doc/sequentia/` (on the box: `/root/sequentia/Sequentia/doc/sequentia/`). The ones that define the DEX:
 
 - **`seqdex-orderbook-design.md`** — the order-book DEX: resting signed intents, the matching model, the covenant CLOB.
 - **`cross-chain-orderbook-consolidation.md`** — the UNIFIED cross-chain (BTC↔asset) order book (what the bridge lifts).
@@ -25,9 +27,9 @@ Canonical design docs live in the **node repo** (`Sequentia`), path `doc/sequent
 - **SeqLN (Lightning):** `seqln-core-lightning-fork-spec.md`, `sequentia-lightning-cln-spec.md`, `seqln-step2-pure-ln-swaps-design.md`, `seqln-phase2-dex-integration.md`, `seqln-phase2-submarine-swaps.md`, `seqln-dex-instant-swap-latency.md`.
 - **Consensus (the anchor gate the maker's claim depends on):** `04-proof-of-stake.md`, `proof-of-stake.{html,pdf}`.
 
-**FIRST PRINCIPLES** (Bitcoin-anchoring supremacy; every wallet dual-chain; no privileged coin / open fee market; transparent-by-default; no inflation) are in the Theoretical Paper + white paper, distilled in the agent memory index `MEMORY.md`. The load-bearing one for THIS work: **Bitcoin anchoring is supreme consensus law** — the maker never reveals P until the asset leg is anchored at/above the BTC leg (`VerifySeqLegSafe`), and the whole system reorg-follows Bitcoin.
+**FIRST PRINCIPLES** (Bitcoin-anchoring supremacy; every wallet dual-chain; no privileged coin / open fee market; transparent-by-default; no inflation) are in the Theoretical Paper + white paper and the node repo's `doc/sequentia/`. The load-bearing one for THIS work: **Bitcoin anchoring is supreme consensus law** — the maker never reveals P until the asset leg is anchored at/above the BTC leg (`VerifySeqLegSafe`), and the whole system reorg-follows Bitcoin.
 
-**Rail-agnostic matching invariant** (agent memory `dex-rail-agnostic-matching`): match rail-blind; the LSP is a value-path counterparty ONLY on a genuine rail cross or a JIT-inbound open — never a coincidence. In-code spec lives at the top of `tooling/lsp/leg-bridge.mjs`, `bridge-driver.mjs`, `bridge-maker.mjs`.
+**Rail-agnostic matching invariant**: match rail-blind; the LSP is a value-path counterparty ONLY on a genuine rail cross or a JIT-inbound open — never a coincidence. In-code spec lives at the top of `tooling/lsp/leg-bridge.mjs`, `bridge-driver.mjs`, `bridge-maker.mjs`.
 
 ---
 
@@ -40,9 +42,9 @@ All under `github.com/GracedEternalKingCabbageMan/*`. Deploy pipeline: **edit on
 | **sequentia-web-wallet** | `~/sequentia-web-wallet` | `/root/sequentia/sequentia-web-wallet` | `main` | the **LSP bridge** (`tooling/lsp/`), the web wallet, the courier (`xcourier.js`), the E2E harness |
 | **seqdex** | `~/seqdex` | `/root/sequentia/seqdex` | `phase3-pure-ln` | the **matching relay** (`seqobd`), the **cross maker** (`seqob-maker`), `seqob-cli`, the xchain swap primitives. `daemon/` is its OWN Go module (`github.com/aejkcs50/seqdex/daemon`) — build from `daemon/`. Go = `~/dev-tools/go/bin` (laptop), `/root/dev-tools/go/bin` (box). |
 | **seqln** | `~/seqln` | `/root/sequentia/seqln` | `sequentia-stable` | the CLN fork (lightningd + subdaemons + holdinvoice plugin). Go = `~/dev-tools/go/bin`. |
-| **Sequentia** (node) | `~/Sequentia` | `/root/Sequentia` (run) + git clone | `master` | elementsd/committee, price-server, docs |
+| **Sequentia** (node) | `~/Sequentia` | `/root/Sequentia` (run) + git clone | `master` | the node (`sequentiad`)/committee, price-server, docs |
 
-Box access: `ssh seq` (never `ConnectionAttempts>1`). Box = `https://sequentiatestnet.com`.
+Box = `https://sequentiatestnet.com`.
 
 ---
 
@@ -72,13 +74,13 @@ Snapshot at handoff (pids are ephemeral — commands to re-check follow):
 - **Cross maker fleet** — ~148 `seqob-maker -mode cross`, launched by `/root/seqob-test/supervise-xmakers.sh` (churns ~50-70 min). They SHARE one `-xstate-dir /root/seqob-test/xmaker-sessions`.
 - **Cross-resume settler** — `/root/seqob-test/supervise-xresume.sh` (single dedicated `-mode cross -resume` loop, `timeout 240`/pass). This is the maker-claim-resumability fix. Check: `pgrep -f supervise-xresume.sh`; log `/root/seqob-test/run/xresume.log`.
 - **SeqLN nodes** — `btc-maker` + `btc-taker` (testnet4) UP (the bridge uses these). `ln-asset` (sequentia-testnet) DOWN — see §6.
-- **The E2E run `final8`** — harness `/tmp/bridge-e2e-final8.log`; poller task `bt7ol1x13`. Job `c0fc2b1b`, H=`8dc1e924…`, maker BTC HTLC `750cd4be…`. At handoff it is CORRECTLY waiting for that BTC HTLC to confirm on testnet4 before funding the asset.
+- **The E2E run `final8`** — harness `/tmp/bridge-e2e-final8.log`. Job `c0fc2b1b`, H=`8dc1e924…`, maker BTC HTLC `750cd4be…`. At handoff it is CORRECTLY waiting for that BTC HTLC to confirm on testnet4 before funding the asset.
 
 **Re-run the E2E to verify (the canonical test):**
 ```
-ssh seq
+# on the box
 # ensure taker wallet loaded + funded (its tSEQ locks into each run's HTLC; top up from xmm):
-curl -s --user seq:seq -H content-type:text/plain http://127.0.0.1:18300/ --data-binary '{"method":"loadwallet","params":["bridge-taker"]}'
+curl -s --user $RPCUSER:$RPCPASS -H content-type:text/plain http://127.0.0.1:18300/ --data-binary '{"method":"loadwallet","params":["bridge-taker"]}'
 # if trusted balance < ~140:  wallet/xmm sendtoaddress <a bridge-taker addr> 300  (wait 1 SEQ block)
 cd /root/sequentia/sequentia-web-wallet/tooling/lsp
 setsid /root/sequentia/downloads/node22/bin/node bridge-taker-harness.mjs >/tmp/bridge-e2e-fresh.log 2>&1 </dev/null &
@@ -120,16 +122,16 @@ It MUST run under **node22** (`/root/sequentia/downloads/node22/bin/node`) — n
 
 1. **Prove a full E2E settlement.** Watch `final8` / re-run (see §4). This is the one thing not yet witnessed. If it stalls: check the maker BTC HTLC confs (`getrawtransaction`) — a low-fee testnet4 HTLC may just be slow; the harness aborts no-loss after 75 min. If it settles: verify on-chain + `sha256(P)==H` and you're done.
 2. **Make Findings 4 & 5 live.** After (1) settles: `git pull` on the box, then `kill` the :9981 pid (supervisor relaunches from files). Re-run the E2E once to confirm the happy path still fronts (the new binds/gates could false-stall if wrong — they were written to degrade safely, but verify).
-3. **`ln-asset` seqln node — DOWN.** Crashes on startup: `lightning_channeld: bad version 'hsmd-proxy-revert-preRobustness-14-g6c50d2e'` — an INCONSISTENT seqln build (installed `lightningd` newer than its `channeld`). Fix per `[[seqln-robustness-binary-upgrade]]`: a consistent seqln rebuild+install + clean reboot. It does NOT block the cross bridge (that uses `btc-maker`/`btc-taker`, which are UP because they never restarted onto the mismatched binary — a full reinstall would need them cycled too). Config: `/root/sequentia/lsp/ln-asset/config`.
+3. **`ln-asset` seqln node — DOWN.** Crashes on startup: `lightning_channeld: bad version 'hsmd-proxy-revert-preRobustness-14-g6c50d2e'` — an INCONSISTENT seqln build (installed `lightningd` newer than its `channeld`). Fix: a consistent seqln rebuild+install + clean reboot. It does NOT block the cross bridge (that uses `btc-maker`/`btc-taker`, which are UP because they never restarted onto the mismatched binary — a full reinstall would need them cycled too). Config: `/root/sequentia/lsp/ln-asset/config`.
 4. **Consider whether the anchor-ordering wait belongs in the LSP, not the harness.** The harness is a test tool; the REAL wallet flow (`swap.js` bridged-take path) must also wait for the maker's BTC HTLC to confirm before funding the asset. Port the same guard there.
 5. **Relay session robustness (design).** The re-attach-by-session_id path is CLOSED (the relay binds each role to its WS connection; a fresh WS gets 403). So the long cross-chain session depends on the WS staying alive for hours. `ws.go` has no server-side ping/keepalive — worth adding for robustness on a real network (localhost held for now).
 
 ---
 
-## 7. NON-NEGOTIABLES (agent memory `MEMORY.md` — read it)
+## 7. NON-NEGOTIABLES
 
 - **Bitcoin anchoring is supreme** — the anchor gate blocking a claim is CORRECT, never "fix" it by ignoring anchors. The anchor-ordering wait exists BECAUSE of this.
 - **Fund-safety > speed.** Every value-move fails closed. Never commit secrets (repos are world-readable). Testnet has no real value — break-and-fix is fine, but the consent rails (never enter creds / trade for the user) and secret hygiene are inviolable.
 - **Every stalled swap this session was provable no-loss** (P never went public → nothing settled).
 
-Deeper detail + the running resume-point: agent memory `leg-bridge-fundsafety-and-e2e.md`, `dex-rail-agnostic-matching.md`, `sequentia-anchoring-supremacy.md`.
+Deeper detail: the node repo's `doc/sequentia/03-bitcoin-anchoring.md` and the in-code specs at the top of `leg-bridge.mjs`, `bridge-driver.mjs` and `bridge-maker.mjs`.

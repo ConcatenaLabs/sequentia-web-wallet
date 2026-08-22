@@ -2,7 +2,7 @@
 
 A proof-of-concept, non-custodial browser wallet for the Sequentia testnet, built on
 [SWK](https://github.com/GracedEternalKingCabbageMan/SWK) (Sequentia Wallet Kit), live at
-**https://sequentiatestnet.com/wallet**.
+**https://sequentiatestnet.com/wallet/**.
 
 It is a dual-chain wallet: one 12-word phrase drives both a **Bitcoin testnet4** wallet and a
 **Sequentia** wallet, and the same `tb1...` receive address works on both chains. BTC is a
@@ -21,7 +21,7 @@ fork of Blockstream Elements 23.3.3. The pieces this wallet talks to:
 
 | Repo | One-liner |
 |---|---|
-| [`Sequentia`](https://github.com/GracedEternalKingCabbageMan/Sequentia) | The Sequentia node (`elementsd` fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. |
+| [`Sequentia`](https://github.com/GracedEternalKingCabbageMan/Sequentia) | The Sequentia node, Sequentia Core (`sequentiad`, a fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. |
 | [`SWK`](https://github.com/GracedEternalKingCabbageMan/SWK) | Sequentia Wallet Kit: a fork of Blockstream LWK: Rust wallet library, CLI, and WASM bindings for building Sequentia (and Bitcoin testnet4) wallets. |
 | [`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex) | SeqDEX: non-custodial atomic-swap DEX: P2P order book (seqob), same-chain swaps, and cross-chain BTC↔asset swaps made safe by Bitcoin anchoring. |
 | [`seqln`](https://github.com/GracedEternalKingCabbageMan/seqln) | SeqLN: a Core Lightning fork that runs on Sequentia and Bitcoin from the same binary: asset channels, any-asset payments, pure-Lightning swaps. |
@@ -30,7 +30,7 @@ fork of Blockstream Elements 23.3.3. The pieces this wallet talks to:
 | [`sequentia-registry`](https://github.com/GracedEternalKingCabbageMan/sequentia-registry) | Sequentia Asset Registry service (asset metadata). |
 
 Protocol-level documentation (anchoring, proof of stake, the open fee market) lives in
-[`Sequentia/doc/sequentia/`](https://github.com/GracedEternalKingCabbageMan/Sequentia/tree/main/doc/sequentia).
+[`Sequentia/doc/sequentia/`](https://github.com/GracedEternalKingCabbageMan/Sequentia/tree/master/doc/sequentia).
 
 ## Status
 
@@ -39,12 +39,17 @@ Working today on the live deployment:
 - Wallet create / restore from a 12-word phrase; balances, send, receive on both chains
 - Portfolio and per-amount display in a user-chosen reference currency (USD, BTC, or any priced asset)
 - Any-asset fees on Sequentia transactions (open fee market), with fee-asset selection on every send
-- Trade tab: SeqDEX order book, taking and posting orders, same-chain atomic swaps
+- Trade tab: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
+  self-enforcing SeqOB covenants and fill without the wallet being open
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
+- Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
+  it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry
-- Staking the Sequence token (tSEQ) with the network-minimum CSV lock
+- Staking the Sequence token (tSEQ) with the network-minimum CSV lock, and staking-pool
+  delegation (join a pool, switch, or leave; the coins never move)
 - Transaction history on both chains with RBF fee bump, CPFP, and replace
-- OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed)
+- OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
+  Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
 
 Experimental / demo-grade:
@@ -52,18 +57,19 @@ Experimental / demo-grade:
 - The **Instant (Lightning)** trade rails. The client code is complete and enabled on the live
   page, but it depends on a hosted SeqLN LSP demo backend with an interim shared bearer token.
   See [Lightning](#lightning-experimental) below for an honest description.
-- Posting a **same-chain** resting order: the order rests on the book and is cancellable, but
-  filling it requires the maker to co-sign, and in-wallet co-signing of same-chain lifts is not
-  implemented yet (an external maker process fills them). Cross-chain posted orders ARE served
-  by the wallet itself while the tab stays open.
+- Resting **BTC limit orders** that must outlive the tab. Bitcoin has no covenants, so a
+  resting on-chain-BTC order either stays a native-BTC HTLC served by your own browser while
+  the tab is open, or (the default, "keep resting while offline") is pegged into SBTC through
+  the application-level SBTC custody bridge and rests in a covenant; the funds return as
+  regular BTC on fill or cancel. Market orders and Lightning legs never use the bridge.
 
 ## Using the wallet
 
-Open **https://sequentiatestnet.com/wallet** in a modern desktop or mobile browser
+Open **https://sequentiatestnet.com/wallet/** in a modern desktop or mobile browser
 (WebAssembly and `localStorage` required; the live QR camera additionally needs a secure
 context, which the live site is). Create a new wallet or restore one from a 12-word phrase.
 
-Get testnet funds from the **Assets** tab: one-click faucet buttons for tSEQ and the demo
+Get testnet funds from the **Issuance** tab: one-click faucet buttons for tSEQ and the demo
 assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com/faucet pays
 straight to your current address).
 
@@ -83,15 +89,25 @@ The tabs:
   Sequentia is transparent by default and confidentiality is opt-in. A separate panel appears
   for OpenAMP restricted-asset deposits once the wallet is registered with the enclave.
 - **Swap** (the Trade tab): see below.
-- **Assets**: faucet, issue a new asset (amount, precision 0-8, optional reissuance tokens),
+- **Mix**: a CoinJoin round through the seqcj coordinator. The wallet picks the coins, proves
+  it owns them, hands out fresh blinded addresses, and verifies the coordinator's transaction
+  pays it what was promised before signing its own inputs. A BTC lane, when the coordinator
+  opens one, pegs the BTC into SBTC through the custody bridge for the round and back out
+  afterwards. Without a reachable coordinator the tab shows a status line and no lanes.
+- **Issuance**: faucet, issue a new asset (amount, precision 0-8, optional reissuance tokens),
   reissue or burn an existing one, and label unknown assets. Metadata precedence: your local
   labels, then the Asset Registry, then built-in defaults for the public testnet demo assets.
 - **Stake**: bond tSEQ to a CSV-time-locked staking output. Minimum stake 40,000 tSEQ;
-  the wallet always uses the network-minimum unbonding lock (CSV 43200 blocks, about 15 days),
-  because stake weight equals the amount staked and a longer lock earns nothing extra.
+  the wallet always uses the network-minimum unbonding lock, a time-based CSV lock of about
+  15 days (43,200 × 30-second slot intervals), because stake weight equals the amount staked
+  and a longer lock earns nothing extra. The same tab delegates to a **staking pool**: a
+  small on-chain delegation record lends your weight to a pool signer, the coins stay where
+  they are, and "Leave this pool" reclaims the record at any time.
 - **History**: transactions on both chains, with explorer links, and rescue actions for stuck
   Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
   selection as a send.
+- **Sign**: sign an OpenAMP request (a login challenge or a document hash) with the wallet's
+  OpenAMP key. Tagged, non-spending signatures only; nothing here can authorize a spend.
 - **Settings**: backend endpoints, network, the policy asset id, reveal-phrase, and
   remove-wallet.
 
@@ -103,8 +119,10 @@ currency, and amount inputs can be flipped to be typed directly in the reference
 
 One symmetric composer: "You pay X" / "You receive Y". The route is inferred from the pair:
 
-- **Same-chain** (asset ↔ asset on Sequentia): a single atomic transaction co-signed by both
-  parties (PSET-based, no escrow, no intermediary), settled against the SeqDEX order book.
+- **Same-chain** (asset ↔ asset on Sequentia): the order funds a SeqOB tapscript covenant
+  that rests on-chain; a fill is one transaction that spends it under the script's own rules
+  (no co-signature, no escrow, no intermediary). Maker-signed relay offers, where one rests,
+  are still taken through the co-signed PSET lift.
 - **Cross-chain** (BTC ↔ asset): a hash-time-locked-contract (HTLC) atomic swap between
   Bitcoin testnet4 and Sequentia. Before revealing any secret the wallet verifies the
   counterparty leg on-chain AND checks that the Sequentia block anchors at or above the
@@ -114,16 +132,18 @@ One symmetric composer: "You pay X" / "You receive Y". The route is inferred fro
 - **Instant (Lightning)** and **mixed** rails for BTC ↔ asset appear when the Lightning
   backend is reachable (see below).
 
-Two modes, chosen automatically and switchable:
+Two price modes, always switchable:
 
-- **Take**: lift a resting order from the book at its price. Order authenticity is verified
-  client-side (each offer carries the maker's signature; forged relay rows are dropped), and
-  the swap handshake runs end-to-end encrypted through the relay, which only ever sees
-  ciphertext.
-- **Post**: rest a signed limit order at your own price. Cross-chain orders are served by your
-  own browser while the tab is open (the wallet acts as maker, with persisted fund-safety
-  watchers that resume after a reload). Same-chain orders rest on the book but need an
-  external maker process to co-sign fills for now.
+- **Market**: the other amount fills at the best executable price (a sweep estimate with a
+  slippage bound). Relay offers are verified client-side (each carries the maker's signature;
+  forged rows are dropped), and any swap handshake runs end-to-end encrypted through the
+  relay, which only ever sees ciphertext.
+- **Limit**: set your own price. A same-chain order funds a SeqOB covenant that rests on-chain
+  and is filled by anyone who crosses it, with no maker co-signature and no need for the wallet
+  to stay open; cancelling spends the covenant back to you. Cross-chain orders are served by
+  your own browser while the tab is open (the wallet acts as maker, with persisted fund-safety
+  watchers that resume after a reload), or, for the BTC-paying side, rest as SBTC through the
+  custody bridge (see Status above).
 
 The tab is honest about finality: on-chain settlement is described as anchor-bound ("reverts
 only if Bitcoin reverts"), nothing is called final at 0 confirmations, and only pure-Lightning
@@ -166,11 +186,16 @@ works normally without the restricted rows.
 
 | Path | What it is |
 |---|---|
-| `index.html` | The whole app shell and core wallet logic: boot, create/restore, tabs, balances, send/receive, fees, staking, history, OpenAMP, QR scanner. |
+| `index.html` | The whole app shell and core wallet logic: boot, create/restore, tabs, balances, send/receive, fees, staking and pool delegation, history, OpenAMP, the Sign tab, QR scanner. |
 | `pkg/` | **Not tracked.** The `lwk_wasm` WebAssembly bindings built from SWK (see below). |
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
-| `swap.js` | The Trade tab: composer, routing, Take/Post modes, same-chain settlement, fee selection. |
+| `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
+| `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow, the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
+| `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
+| `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
+| `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
+| `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/GracedEternalKingCabbageMan/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
 | `xcourier.js` | Cross-chain swap message transport: end-to-end-sealed courier sessions over the relay WebSocket. |
 | `xswap.js` / `xrswap.js` | Cross-chain HTLC taker, forward (pay BTC, receive asset) and reverse (pay asset, receive BTC). |
 | `xmaker.js` | In-browser cross-chain maker: builds, signs, rests, and serves offers in both directions. |
@@ -178,7 +203,7 @@ works normally without the restricted rows.
 | `lightning/` | The vendored SeqLN device-signer SDK + its WASM build (tracked, unlike `pkg/`). |
 | `noble-ciphers.js` | Vendored `@noble/ciphers` (MIT): AES-256-GCM for the end-to-end swap encryption. |
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
-| `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md). |
+| `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md). Three of its modules (`settlement-router.mjs`, `unified-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
 | `*.test.mjs` | Node test suites (no browser needed). |
 
 A deeper tour of the module graph, protocols, config globals, and storage keys is in
@@ -192,7 +217,7 @@ SWK with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
 ```sh
 git clone -b sequentia https://github.com/GracedEternalKingCabbageMan/SWK.git
 cd SWK/lwk_wasm
-wasm-pack build --release
+wasm-pack build --target web --release   # needs clang; --target web is required
 ```
 
 Then copy or symlink the output into the wallet checkout:
@@ -201,9 +226,10 @@ Then copy or symlink the output into the wallet checkout:
 ln -s ../SWK/lwk_wasm/pkg ./pkg
 ```
 
-Sequentia support (the `Network.sequentiaTestnet()` network, explicit-fee PSET building, the
-SeqDEX swap and HTLC helpers) is compiled in unconditionally on that branch via `lwk_wollet`'s
-`sequentia` feature, so no extra flags are needed.
+`index.html` imports a default-exported `init` from `./pkg/lwk_wasm.js`, which only the
+`--target web` build produces. Sequentia support (the `Network.sequentiaTestnet()` network,
+explicit-fee PSET building, the SeqDEX swap and HTLC helpers) is compiled in unconditionally
+on that branch via `lwk_wollet`'s `sequentia` feature, so no extra flags are needed.
 
 ### Running locally
 
@@ -228,10 +254,13 @@ a backend (the public testnet services work):
 | `/faucet` | Testnet faucet |
 | `/registry/index.minimal.json` | Asset Registry minimal index (asset metadata; overridable via `window.SEQ_REGISTRY_URL`) |
 | `/seqob` (+ WebSocket at `/seqob/v1/ws`) | SeqDEX order-book relay (`seqobd`) |
-| `/dex` | Legacy cross-chain DEX daemon (market seeding) |
+| `/dex` | The SeqDEX daemon, used only for market seeding |
 | `/anchor/<blockhash>`, `/anchorstatus` | Anchor lookups used by the cross-chain maker's safety gate |
 | `/openamp` | OpenAMP restricted-asset API (optional; wallet degrades gracefully) |
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | Hosted-SeqLN LSP + per-node signer WebSockets (optional; Lightning rails stay off without them) |
+| `/coinjoin` | seqcj CoinJoin coordinator (optional; the Mix tab reports it missing; override `window.SEQ_COINJOIN_URL`) |
+| `/sbtc` | SBTC custody bridge (optional; only the "keep resting while offline" BTC limit orders use it) |
+| `/pools/pools.json` | The staking pool board's feed, listing pools to delegate to |
 
 Missing optional backends never break the wallet; the corresponding features simply do not
 appear. Note that the live camera QR scanner requires https; over plain http the
@@ -246,15 +275,12 @@ install):
 node --test
 ```
 
-This runs `seqln.test.mjs` (LSP client, key derivation, two-leg availability logic against a
-mock SDK), `xcourier.test.mjs` (courier codec, sealed round-trips, maker listener,
-single-flight refusal), `xmaker.test.mjs` (maker happy paths in both directions plus the
-resume-after-reload fund-safety logic), `ln-rail.test.mjs` (HONEST per-asset Lightning-rail
-gating — the LN rail is offered for a leg only with a real usable channel of the right
-direction, from a mock `/status`), `submarine.test.mjs` (the mixed-rail submarine-swap state
-machine + localStorage persistence + resume + on-chain-HTLC refund path), and
-`swap-mixed.test.mjs` (the composer's submarine-swap resume glue against a mock stored state).
-All pass on Node v22.
+This runs the `node:test` suites (33 of the 56 `*.test.mjs` files, 43 at the root and 13
+under `tooling/lsp/`). The other 23 are standalone scripts with their own `check()` harness
+that `node --test` does not execute, among them `seqln.test.mjs`, `xcourier.test.mjs`,
+`xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the
+`covenant*.test.mjs` golden vectors; run those directly, for example
+`node covenant-byteorder.test.mjs`.
 
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see

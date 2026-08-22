@@ -1,4 +1,4 @@
-# Built lwk_wasm bindings (produced from ~/SWK: wasm-pack build --release, sequentia feature).
+# Built lwk_wasm bindings (produced from SWK's lwk_wasm: wasm-pack build --target web --release).
 # Symlinked/copied in at deploy; not tracked.
 pkg
 pkg/
