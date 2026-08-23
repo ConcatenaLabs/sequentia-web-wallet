@@ -921,6 +921,38 @@
         </div>
         <div class="status err" id="delegErr"></div>
       </div>
+      <div class="card">
+        <label class="lbl">Staking rewards</label>
+        <p class="sub" style="margin:0 0 12px">What staking has paid you, in whatever assets the fees were paid in. Sequentia has no block subsidy: a block earns its own transaction fees and nothing else, so rewards arrive in the assets the payers chose. Block rewards are spendable 100 blocks after they are earned; a pool payout is spendable at once.</p>
+        <div class="list" id="rewardList"><div class="muted">No staking rewards yet.</div></div>
+        <label class="lbl" style="margin-top:18px">Convert rewards automatically</label>
+        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing on SeqDEX, as the rewards arrive and whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting; nothing else in this wallet is ever spent, and your stake is never touched.</p>
+        <label class="row" style="gap:8px;align-items:center;margin:0 0 12px">
+          <input type="checkbox" id="acEnabled">
+          <span>Convert my staking rewards</span>
+        </label>
+        <div id="acSettings" style="display:none">
+          <div class="field"><label class="lbl">Convert into</label>
+            <select id="acTarget" class="mono"></select>
+            <p class="sub" style="margin:6px 0 0">Bitcoin is the parent chain's own coin, delivered to this wallet's Bitcoin address. Any other choice is a Sequentia asset, delivered here.</p>
+          </div>
+          <div class="field" style="margin-top:10px"><label class="lbl">Convert once a batch is worth at least</label>
+            <input id="acMin" class="mono" placeholder="0.0001">
+            <p class="sub" style="margin:6px 0 0">Smaller batches wait for the next reward rather than paying a swap's costs to convert dust.</p>
+          </div>
+          <div class="field" style="margin-top:10px"><label class="lbl">Refuse a price worse than</label>
+            <select id="acSlip">
+              <option value="50">0.5% off the reference price</option>
+              <option value="100">1%</option>
+              <option value="200" selected>2%</option>
+              <option value="500">5%</option>
+            </select>
+          </div>
+          <p class="sub" style="margin:12px 0 0">Rewards in the asset you convert into are left alone, and so is anything you have chosen to keep.</p>
+        </div>
+        <div class="list" id="acStatus" style="margin-top:12px"></div>
+        <div class="status err" id="acErr"></div>
+      </div>
     </section>
 
     <!-- history -->
@@ -1041,6 +1073,9 @@ import * as lwk from './pkg/lwk_wasm.js';
 const coinjoinSignInputs = lwk.coinjoinSignInputs;
 const coinjoinUnblindOutputs = lwk.coinjoinUnblindOutputs;
 import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256 } from './btc.js';
+import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoConvert,
+  conversions as rewardConversions, NATIVE_BTC as AC_BTC } from './rewards.js';
+import * as seqob from './seqob.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
@@ -2273,7 +2308,7 @@ function tab(name){
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
   if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch{} }
   if(name==='history') renderHistory();
-  if(name==='stake'){ refreshStakes(); refreshDelegation(); }
+  if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
   if(name==='swap') renderActiveSwap();
   if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch{} }
   if(name==='assets') populateIssueFeeAssets();
@@ -4953,6 +4988,267 @@ async function refreshStakes(){
   if(JSON.stringify(keep)!==before) localStorage.setItem(STAKES, JSON.stringify(keep));
   renderStake();
 }
+
+// ---------- staking rewards, and converting them ----------
+// The engine is rewards.js; the two decisions that must not differ between
+// wallets (which coins are rewards, which batches convert) are SWK's, reached
+// through the wasm bindings. Everything below is this wallet's half: gathering
+// the facts SWK needs, quoting the book, and showing what it decided.
+//
+// doc/sequentia/reward-autoconvert-design.md (node repo) is the specification.
+
+let _acDelegated = false;         // last known: is our weight lent to a pool?
+let _acLastReport = null;
+
+// A staking key is only a staking key if a reward can be PAID on it, which
+// means the P2WPKH the coinbase (or a pot claim) pays. scure's p2wpkh gives the
+// exact script bytes.
+function stakingKeysForRewards(){
+  let pub; try{ pub = signer.stakerPublicKey(); }catch{ return []; }
+  if(!pub) return [];
+  let scriptHex;
+  try{
+    const bytes = Uint8Array.from((pub.match(/../g)||[]).map(h=>parseInt(h,16)));
+    scriptHex = [...btc.p2wpkh(bytes).script].map(b=>b.toString(16).padStart(2,'0')).join('');
+  }catch{ return []; }
+  return [{ scriptPubkey: scriptHex, pubkey: pub, delegated: _acDelegated }];
+}
+
+// The wallet's transactions, reduced to the facts attribution depends on. Only
+// outputs this wallet owns AND can unblind are passed: consensus creates every
+// coinbase and pot-claim output explicit, so nothing real is dropped.
+function walletTxsForRewards(){
+  let txs; try{ txs = wollet.transactions(); }catch{ return []; }
+  const out = [];
+  for(const t of txs){
+    let outputs = [];
+    try{
+      for(const o of (t.outputs()||[])){
+        const w = o && o.get ? o.get() : null;
+        if(!w) continue;                       // not ours
+        let u; try{ u = w.unblinded(); }catch{ continue; }
+        outputs.push({
+          vout: Number(w.outpoint().vout()),
+          scriptPubkey: w.scriptPubkey().toString(),
+          asset: u.asset().toString(),
+          value: Number(u.value()),
+          spent: (typeof w.isSpent === 'function') ? !!w.isSpent() : false,
+        });
+      }
+    }catch{ outputs = []; }
+    if(!outputs.length) continue;
+    let isCoinbase = false;
+    try{ isCoinbase = (typeof t.isCoinbase === 'function') ? !!t.isCoinbase() : false; }catch{}
+    out.push({
+      txid: t.txid().toString(),
+      height: t.height() ?? null,
+      isCoinbase,
+      // A coinbase is never anyone's to send; off that path, "we sent it" is
+      // what excludes our own withdrawal or re-pointing, which pay back to the
+      // very staking key a pool payout would.
+      fromMe: !isCoinbase && t.txType() === 'outgoing',
+      ownedOutputs: outputs,
+    });
+  }
+  return out;
+}
+
+// What the book would pay for a batch. `null` is not an error: no market is the
+// ordinary case for a young pair, and the batch simply waits.
+async function rewardQuote({ asset, atoms, target }){
+  const want = BigInt(atoms);
+  if(want <= 0n) return null;
+  if(target === AC_BTC){
+    // Cross-chain: the asset is sold for parent-chain BTC.
+    let q; try{ q = await fetchXquote(asset, want); }catch{ return null; }
+    const recv = q && (q.btcSats ?? q.sats ?? q.receives);
+    if(recv == null) return null;
+    const ref = q && (q.referenceSats ?? q.refSats);
+    return { receives: Number(recv), reference: Number(ref ?? recv) };
+  }
+  // Same-chain: walk the covenant book for the pair.
+  let book; try{ book = await seqob.fetchBook(asset, target); }catch{ return null; }
+  const offers = (book && book.offers || []).filter(o => o && o._verified !== false);
+  if(!offers.length) return null;
+  let filled = 0n, got = 0n, best = null;
+  const rows = offers.map(o => ({
+    give: BigInt(o.base_amount ?? o.baseAmount ?? 0),
+    take: BigInt(o.quote_amount ?? o.quoteAmount ?? 0),
+  })).filter(r => r.give > 0n && r.take > 0n)
+     .sort((a,b) => (b.take * a.give > a.take * b.give ? 1 : -1));   // best price first
+  for(const r of rows){
+    if(filled >= want) break;
+    if(best == null) best = r;
+    const take = (want - filled) < r.give ? (want - filled) : r.give;
+    got += (r.take * take) / r.give;
+    filled += take;
+  }
+  if(filled < want || got <= 0n) return null;    // not enough depth to fill the batch
+  const reference = best ? (best.take * want) / best.give : got;
+  return { receives: Number(got), reference: Number(reference) };
+}
+
+// Sending is NOT yet unattended in this wallet: the take paths it would drive
+// are the interactive ones, and switching on a background seller that has never
+// been proven end to end on a live book is exactly the wrong order to do this
+// in. So the engine runs to a DECISION and stops, and the card shows what it
+// decided; the executor seam below is where a headless take drops in.
+const AC_HEADLESS = false;
+async function rewardExecute(){
+  return { ok: false, error: 'This wallet decides but does not yet send automatically.' };
+}
+
+function initRewardsEngine(){
+  initRewards({
+    engine: {
+      attributeStakingRewards: lwk.attributeStakingRewards,
+      planRewardBatches: lwk.planRewardBatches,
+      decideRewardConversion: lwk.decideRewardConversion,
+    },
+    walletTxs: walletTxsForRewards,
+    stakingKeys: stakingKeysForRewards,
+    tipHeight: () => { try{ return wollet.tip().height(); }catch{ return 0; } },
+    quoteFor: rewardQuote,
+    execute: rewardExecute,
+    store: localStorage,
+  });
+}
+
+function acTargetOptions(){
+  // Bitcoin first: the top seat is the whole of its privilege here, exactly as
+  // in the Send picker. Everything else is one row among equals.
+  const opts = [{ hex: AC_BTC, label: 'tBTC (Bitcoin)' }];
+  const seen = new Set([AC_BTC]);
+  let bal = {}; try{ bal = balObj(); }catch{}
+  for(const hex of Object.keys(bal)){
+    if(seen.has(hex)) continue; seen.add(hex);
+    const m = assetMeta(hex);
+    opts.push({ hex, label: `${m.ticker}${m.name && m.name!==m.ticker ? ' — '+m.name : ''}` });
+  }
+  return opts;
+}
+
+function renderAcSettings(){
+  const s = rewardSettings();
+  $('acEnabled').checked = !!s.enabled;
+  $('acSettings').style.display = s.enabled ? '' : 'none';
+  const sel = $('acTarget');
+  if(sel){
+    const opts = acTargetOptions();
+    sel.innerHTML = '';
+    for(const o of opts){
+      const e = document.createElement('option');
+      e.value = o.hex; e.textContent = o.label;
+      if(o.hex === s.target) e.selected = true;
+      sel.appendChild(e);
+    }
+    if(sel.selectedIndex < 0) sel.selectedIndex = 0;
+  }
+  const tgtPrec = s.target === AC_BTC ? 8 : (assetMeta(s.target).precision ?? 8);
+  try{ $('acMin').value = fmtAtoms(BigInt(s.minReceive), tgtPrec); }catch{ $('acMin').value = ''; }
+  $('acSlip').value = String(s.maxSlippageBp);
+}
+
+function acTargetTicker(t){ return t === AC_BTC ? 'tBTC' : (assetMeta(t).ticker || 'the target asset'); }
+
+async function refreshRewards(){
+  const list = $('rewardList'); if(!list) return;
+  $('acErr').textContent = '';
+  try{ initRewardsEngine(); }catch{}
+  try{ const d = await discoverDelegation(); _acDelegated = !!(d && d.signer); }catch{}
+
+  let scan;
+  try{ scan = scanRewards(); }
+  catch(e){
+    // An older wasm bundle has no attribution in it. Say so plainly and still
+    // let the settings render, rather than leaving a dead card.
+    list.innerHTML='';
+    list.appendChild(el('div','muted','Reward attribution is not in this build of the wallet yet.'));
+    renderAcSettings();
+    return;
+  }
+
+  list.innerHTML = '';
+  if(!scan.totals.length){
+    list.appendChild(el('div','muted','No staking rewards yet. A block pays its own fees, so rewards appear once a block you (or your pool) produced carried some.'));
+  } else {
+    for(const t of scan.totals){
+      const m = assetMeta(t.asset);
+      const item = el('div','item');
+      item.appendChild(el('span','badge b-in','reward'));
+      const mid = el('div','grow');
+      mid.appendChild(el('div', '', m.ticker));
+      const srcs = Object.entries(t.sources).map(([k,v]) => `${v}× ${k}`).join(' · ');
+      const pending = t.immature > 0n ? ` · ${fmtAtoms(t.immature, m.precision)} maturing` : '';
+      mid.appendChild(el('div','sub', srcs + pending));
+      item.appendChild(mid);
+      item.appendChild(el('span','amt', fmtAtoms(t.mature, m.precision) + ' ' + m.ticker));
+      list.appendChild(item);
+    }
+  }
+
+  renderAcSettings();
+  await refreshAcStatus();
+}
+
+// What the engine decided this pass, in the staker's own terms. "Nothing
+// happened" and "nothing should have happened" look identical otherwise, and
+// the second is by far the more common.
+async function refreshAcStatus(){
+  const box = $('acStatus'); if(!box) return;
+  box.innerHTML = '';
+  const s = rewardSettings();
+  if(!s.enabled) return;
+
+  let rep;
+  try{ rep = await runAutoConvert({ dryRun: !AC_HEADLESS }); }
+  catch(e){ $('acErr').textContent = 'Could not check the market: ' + prettyErr(e); return; }
+  _acLastReport = rep;
+
+  if(!rep.considered.length){
+    box.appendChild(el('div','muted','Nothing to convert right now. Rewards are gathered per asset until a batch is worth converting.'));
+    return;
+  }
+  for(const row of rep.considered){
+    const m = assetMeta(row.batch.asset);
+    const item = el('div','item');
+    const will = row.decision && row.decision.converts;
+    item.appendChild(el('span','badge ' + (will ? 'b-in' : 'b-iss'), will ? 'ready' : 'waiting'));
+    const mid = el('div','grow');
+    mid.appendChild(el('div','', `${fmtAtoms(BigInt(row.batch.value), m.precision)} ${m.ticker} → ${acTargetTicker(s.target)}`));
+    mid.appendChild(el('div','sub', will
+      ? `about ${fmtAtoms(BigInt(row.decision.receives), s.target===AC_BTC ? 8 : (assetMeta(s.target).precision ?? 8))} ${acTargetTicker(s.target)}`
+      : (row.decision && row.decision.reason) || 'waiting'));
+    item.appendChild(mid);
+    if(will && !AC_HEADLESS){
+      const b = el('button','ghost','Convert'); b.style.cssText='padding:4px 10px;font-size:12px';
+      b.onclick = () => { tab('swap'); toast(`Sell ${m.ticker} for ${acTargetTicker(s.target)} to convert this batch.`); };
+      item.appendChild(b);
+    }
+    box.appendChild(item);
+  }
+  if(!AC_HEADLESS && rep.considered.some(r => r.decision && r.decision.converts)){
+    box.appendChild(el('div','muted','This wallet works out what to convert and when; sending is still yours to confirm.'));
+  }
+}
+
+$('acEnabled').onchange = () => { setRewardSettings({ enabled: $('acEnabled').checked }); refreshRewards().catch(()=>{}); };
+$('acTarget').onchange = () => {
+  const t = $('acTarget').value;
+  const prec = t === AC_BTC ? 8 : (assetMeta(t).precision ?? 8);
+  // The floor is denominated in the TARGET, so a changed target has to restate
+  // it rather than silently reinterpret the old number in new units.
+  setRewardSettings({ target: t, minReceive: String(parseAtoms('0.0001', prec)) });
+  refreshRewards().catch(()=>{});
+};
+$('acMin').onchange = () => {
+  const s = rewardSettings();
+  const prec = s.target === AC_BTC ? 8 : (assetMeta(s.target).precision ?? 8);
+  try{ setRewardSettings({ minReceive: String(parseAtoms($('acMin').value || '0', prec)) }); }
+  catch{ $('acErr').textContent = 'That is not an amount.'; return; }
+  refreshAcStatus().catch(()=>{});
+};
+$('acSlip').onchange = () => { setRewardSettings({ maxSlippageBp: Number($('acSlip').value) }); refreshAcStatus().catch(()=>{}); };
 $('btnStake').onclick=async()=>{ $('stakeErr').textContent='';
   try{
     const csv=STAKE_CSV;
