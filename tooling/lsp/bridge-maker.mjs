@@ -61,7 +61,9 @@ export const BRIDGE_MAKER_DEFAULTS = Object.freeze({
 // leg-bridge fail-closed (no front, no loss).
 
 const OP = { IF: 0x63, ELSE: 0x67, ENDIF: 0x68, DROP: 0x75, EQUALVERIFY: 0x88, SHA256: 0xa8,
-  CHECKSIG: 0xac, CHECKLOCKTIMEVERIFY: 0xb1, HASH160: 0xa9, EQUAL: 0x87 };
+  CHECKSIG: 0xac, CHECKLOCKTIMEVERIFY: 0xb1, HASH160: 0xa9, EQUAL: 0x87, SIZE: 0x82 };
+// The preimage-size guard that opens the claim branch: OP_SIZE <32> OP_EQUALVERIFY (32 pushed as one data byte).
+const SIZE_GUARD = Uint8Array.from([OP.SIZE, 0x01, 0x20, OP.EQUALVERIFY]);
 
 // Read one canonical data push (opcodes 0x01..0x4b, plus OP_PUSHDATA1 0x4c) from buf at i.
 // Returns { data, next } or null if buf[i] is not a small push. HTLC scripts only use <=75-byte pushes.
@@ -84,14 +86,21 @@ function decodeScriptNum(data) {
 
 /**
  * Parse a Design-A HTLC redeemScript into its four bound parameters, or throw. PURE.
+ * Accepts the current form (claim branch opens with OP_SIZE <32> OP_EQUALVERIFY, pinning the preimage to the
+ * 32 bytes Lightning settles) and the pre-guard legacy form an older counterparty built; `guarded` says which.
  * @param {Uint8Array|Buffer} script
- * @returns {{ hashHex:string, claimPubHex:string, refundPubHex:string, locktime:number }}
+ * @returns {{ hashHex:string, claimPubHex:string, refundPubHex:string, locktime:number, guarded:boolean }}
  */
 export function parseHtlcRedeem(script) {
   const b = script instanceof Uint8Array ? script : Uint8Array.from(script);
   let i = 0;
   const need = (cond, why) => { if (!cond) throw new Error(`redeemScript is not a Design-A HTLC: ${why}`); };
   need(b[i++] === OP.IF, 'missing OP_IF');
+  let guarded = false;
+  if (b[i] === OP.SIZE) {
+    need(b[i + 1] === 0x01 && b[i + 2] === 0x20 && b[i + 3] === OP.EQUALVERIFY, 'malformed OP_SIZE guard (must be OP_SIZE <32> OP_EQUALVERIFY)');
+    i += SIZE_GUARD.length; guarded = true;
+  }
   need(b[i++] === OP.SHA256, 'missing OP_SHA256');
   const h = readPush(b, i); need(h && h.data.length === 32, 'hash push must be 32 bytes'); i = h.next;
   need(b[i++] === OP.EQUALVERIFY, 'missing OP_EQUALVERIFY');
@@ -114,7 +123,7 @@ export function parseHtlcRedeem(script) {
   need(b[i++] === OP.ENDIF, 'missing OP_ENDIF');
   need(i === b.length, 'trailing bytes after OP_ENDIF');
   return { hashHex: bytesToHex(h.data), claimPubHex: bytesToHex(cp.data),
-    refundPubHex: bytesToHex(rp.data), locktime };
+    refundPubHex: bytesToHex(rp.data), locktime, guarded };
 }
 
 // Minimal CScriptNum encode (the inverse of decodeScriptNum) — how btcd's ScriptBuilder.AddInt64 serialises a
@@ -133,16 +142,18 @@ function encodeScriptNum(nIn) {
 
 /**
  * Build a Design-A HTLC redeemScript from its four bound parameters — the exact byte-for-byte inverse of
- * parseHtlcRedeem, mirroring pkg/xchain/primitive.go's LockScript (OP_IF OP_SHA256 <H> OP_EQUALVERIFY <claimPub>
- * OP_CHECKSIG OP_ELSE <T> OP_CHECKLOCKTIMEVERIFY OP_DROP <refundPub> OP_CHECKSIG OP_ENDIF, all canonical <=75-byte
- * pushes). PURE. The LSP payer bridge uses it to PRE-COMPUTE the intended redeemScript for the BTC HTLC it is
+ * parseHtlcRedeem, mirroring pkg/xchain/primitive.go's LockScript (OP_IF OP_SIZE <32> OP_EQUALVERIFY OP_SHA256
+ * <H> OP_EQUALVERIFY <claimPub> OP_CHECKSIG OP_ELSE <T> OP_CHECKLOCKTIMEVERIFY OP_DROP <refundPub> OP_CHECKSIG
+ * OP_ENDIF, all canonical <=75-byte pushes). The size guard is what stops a counterparty revealing a
+ * non-32-byte preimage on-chain that can never settle the Lightning hold. `legacy: true` renders the pre-guard
+ * form for tests only; nothing new is funded with it. PURE. The LSP payer bridge uses it to PRE-COMPUTE the intended redeemScript for the BTC HTLC it is
  * about to fund — so it can persist its own refund key + the intended script BEFORE the irreversible funding
  * broadcast, and then VERIFY-NOT-TRUST that the funding CLI returned exactly this script (never record an HTLC it
  * cannot refund). Throws on a malformed pubkey/hash or a non-height locktime.
  * @param {{ hashHex:string, claimPubHex:string, refundPubHex:string, locktime:number }} a
  * @returns {string} redeemScript hex
  */
-export function buildHtlcRedeem({ hashHex, claimPubHex, refundPubHex, locktime }) {
+export function buildHtlcRedeem({ hashHex, claimPubHex, refundPubHex, locktime, legacy = false }) {
   const H = hexToBytes(hashHex); if (H.length !== 32) throw new Error('buildHtlcRedeem: hashHex must be 32-byte hex H');
   const claim = hexToBytes(claimPubHex); if (claim.length !== 33) throw new Error('buildHtlcRedeem: claimPubHex must be 33-byte compressed hex');
   const refund = hexToBytes(refundPubHex); if (refund.length !== 33) throw new Error('buildHtlcRedeem: refundPubHex must be 33-byte compressed hex');
@@ -158,6 +169,7 @@ export function buildHtlcRedeem({ hashHex, claimPubHex, refundPubHex, locktime }
   // correctness/robustness match, not a hot path — but a mismatch here fund-loses (broadcast-then-verify-throw).
   const pushLocktime = (t) => { if (t >= 1 && t <= 16) op(0x50 + t); else push(encodeScriptNum(t)); };
   op(OP.IF);
+  if (!legacy) for (const x of SIZE_GUARD) op(x);
   op(OP.SHA256); push(H); op(OP.EQUALVERIFY);
   push(claim); op(OP.CHECKSIG);
   op(OP.ELSE);
