@@ -17,7 +17,7 @@ const LNCLI = '/root/sequentia/seqln/cli/lightning-cli';
 const TAKER_LN = ['--lightning-dir=/root/sequentia/lsp/btc-maker', '--network=testnet4'];
 const SEQ_RPC = process.env.SEQ_RPC || (() => { throw new Error('set SEQ_RPC=http://<rpcuser>:<rpcpassword>@127.0.0.1:<port>'); })();
 const BTC_RPC = process.env.BTC_RPC || (() => { throw new Error('set BTC_RPC=http://<rpcuser>:<rpcpassword>@127.0.0.1:48332'); })();
-const BTC = ['-rpcconnect=127.0.0.1', '-rpcport=48332', '-rpcuser=seq', '-rpcpassword=seq'];
+const BTC = ['-rpcconnect=127.0.0.1', '-rpcport=48332', '-rpcuser=' + (process.env.BTC_RPC_USER || 'seq'), '-rpcpassword=' + (process.env.BTC_RPC_PASS || (() => { throw new Error('set BTC_RPC_PASS'); })())];
 const TOKEN = 'b5b1-d848ec96d29c01d2ff1db6cf';
 const sha256 = (hex) => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
