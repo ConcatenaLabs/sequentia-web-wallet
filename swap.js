@@ -37,7 +37,7 @@ import { secp256k1 } from './btc.js';
 import { planPlaceOrder, buildCovenantTerms, settleFill as covSettleFill, planRefund as covPlanRefund, cancel as covCancel } from './covenant-order.js';
 import { verifyAgainstSPK as covVerifyAgainstSPK } from './covenant.js';
 import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
-import { computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit } from './covenant-flow.js';
+import { computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits } from './covenant-flow.js';
 // HONEST per-asset Lightning-rail gating (offer LN only with a real usable channel).
 import { railAvailability } from './ln-rail.js';
 // Pure predicate only — LSP *transport* still reaches this module solely through the injected `L`
@@ -6377,6 +6377,14 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
   opts = opts || {};
   const tip = C.wollet.tip().height();
   const { rateNum, rateDen } = computeRate(payAtoms, recvAtoms);
+  // FUND-SAFETY (gate BEFORE broadcast): the on-chain FILL leaf evaluates
+  // locked*rateNum + rateDen-1 in signed 64-bit. computeRate only divides out the
+  // gcd, so a near-coprime pay/receive pair leaves rateNum ~ recvAtoms and a large
+  // order overflows it. The relay rejects such an offer — but funding is broadcast
+  // FIRST, so without this check the asset is locked in a covenant that can never
+  // rest and only the expiry refund gets it back. Refuse while it still costs nothing.
+  if (!leafProductFits(payAtoms, rateNum, rateDen))
+    throw new Error('This amount and price cannot be expressed as a covenant order — the on-chain fill arithmetic would overflow. Adjust the amount slightly (a rounder number needs a smaller rate) and try again.');
   const idx = nextMakerIndex();
   const payout = makerPayout(C.signer, C.network, idx);   // { program, spkHex, address, internalKey, descriptor }
   ensureCompanion();                                      // so this wallet SEES the credit it is paid
