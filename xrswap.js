@@ -681,7 +681,11 @@ async function onOpen(){
 // ---------------------------------------------------------------------------
 function setPhase(phase, detail){ if (SWAP){ SWAP.phase = phase; if (detail !== undefined) SWAP.detail = detail; saveSwap(); renderStepper(); } }
 
-async function driveReverse(q){
+// Exported for reward auto-conversion. driveReverse is already the auto-driver:
+// the single user confirmation lives in onOpen ABOVE it, and everything from the
+// terms request to claiming the BTC runs unattended. A conversion supplies its
+// own consent (the staker enabled it) and calls straight in here.
+export async function driveReverse(q){
   const btcClaim = C.btcLeg.claimKey();     // taker claims the maker BTC leg with the preimage
   const seqRefund = C.seqLeg.refundKey();   // taker refunds the asset leg after T_seq
 

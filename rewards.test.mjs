@@ -11,7 +11,8 @@ import assert from 'node:assert';
 import test from 'node:test';
 import {
   initRewards, rewardSettings, setRewardSettings, runAutoConvert, scanRewards,
-  totalsOf, conversions, convertedOutpoints, NATIVE_BTC, DEFAULT_SETTINGS,
+  totalsOf, conversions, convertedOutpoints, sliceForWholeHtlc,
+  NATIVE_BTC, DEFAULT_SETTINGS,
 } from './rewards.js';
 
 // A localStorage stand-in, per test.
@@ -248,6 +249,18 @@ test('a wallet with no staking keys and no coinbase does not bother the engine',
   const r = scanRewards();
   assert.deepEqual(r.rewards, []);
   assert.equal(engine.calls.attribute, 0);
+});
+
+test('a whole-HTLC offer is clamped to the batch, never the other way round', () => {
+  // The reverse rail picks the smallest offer that COVERS the request, so the
+  // offer is routinely bigger than what staking paid. Taking it whole would
+  // sell coins that were never rewards.
+  assert.equal(sliceForWholeHtlc(5000n, 1000n), 1000n, 'a big offer sells only the batch');
+  assert.equal(sliceForWholeHtlc(600n, 1000n), 600n, 'a small offer sells what it can; the rest waits');
+  assert.equal(sliceForWholeHtlc(1000n, 1000n), 1000n);
+  // Nothing to trade is NOT "take everything".
+  assert.equal(sliceForWholeHtlc(0n, 1000n), 0n);
+  assert.equal(sliceForWholeHtlc(5000n, 0n), 0n);
 });
 
 // The context the last two tests override one field of. Kept here rather than
