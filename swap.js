@@ -6884,7 +6884,10 @@ async function scripthashOf(spkHex){
 // Slippage is bounded: stop walking once an ask is worse than the market-slip below best. The bound
 // lives in CONFIG.marketSlip (P5.4a — one source of truth, /status-overridable, default 0.15) so the
 // walk floor here and the slippage line the composer shows (slippageHint) can never disagree.
-async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus){
+// Exported for reward auto-conversion, which needs exactly this and nothing
+// around it: a market sell that walks the book and settles, no modal, no user
+// step. The review sheet that normally precedes it is the CALLER's business.
+export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus){
   payAtoms = BigInt(payAtoms);
   // Re-fetch BOTH orientations so we cross the CURRENT resting offers, not a stale compose
   // snapshot — refreshed INTO the shared baseline so the walk renders the same union ladder as

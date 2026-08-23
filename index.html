@@ -926,7 +926,8 @@
         <p class="sub" style="margin:0 0 12px">What staking has paid you, in whatever assets the fees were paid in. Sequentia has no block subsidy: a block earns its own transaction fees and nothing else, so rewards arrive in the assets the payers chose. Block rewards are spendable 100 blocks after they are earned; a pool payout is spendable at once.</p>
         <div class="list" id="rewardList"><div class="muted">No staking rewards yet.</div></div>
         <label class="lbl" style="margin-top:18px">Convert rewards automatically</label>
-        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing on SeqDEX, as the rewards arrive and whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting; nothing else in this wallet is ever spent, and your stake is never touched.</p>
+        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing on SeqDEX, as the rewards arrive and whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting.</p>
+        <p class="sub" style="margin:0 0 10px"><strong>Once this is on, the wallet sells without asking again.</strong> It never converts more than staking has paid you, never touches your stake, and never converts what it cannot get a fair price for — but the selling itself is unattended, which is the point of it. Turn it off and it stops at the next check.</p>
         <label class="row" style="gap:8px;align-items:center;margin:0 0 12px">
           <input type="checkbox" id="acEnabled">
           <span>Convert my staking rewards</span>
@@ -1074,12 +1075,13 @@ const coinjoinSignInputs = lwk.coinjoinSignInputs;
 const coinjoinUnblindOutputs = lwk.coinjoinUnblindOutputs;
 import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256 } from './btc.js';
 import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoConvert,
-  conversions as rewardConversions, NATIVE_BTC as AC_BTC } from './rewards.js';
+  conversions as rewardConversions, sliceForWholeHtlc, NATIVE_BTC as AC_BTC } from './rewards.js';
 import * as seqob from './seqob.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
+import { takeMarketWalk } from './swap.js';
 import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
-import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse } from './xrswap.js';
+import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
@@ -2545,6 +2547,13 @@ async function openWallet(phrase){
   let _resumeTickBusy=false;
   setInterval(async ()=>{ if (_resumeTickBusy) return; _resumeTickBusy=true;
     try{ if (hasSubswapInFlight()) await resumeSubswap(); }catch{} finally{ _resumeTickBusy=false; } }, 2*60*1000);
+  // Reward auto-conversion: once at boot (a reward may have matured while the
+  // wallet was closed) and then on a slow tick. Rewards arrive at block pace at
+  // best, so there is nothing to gain from looking more often, and every pass
+  // reads the book.
+  try{ initRewardsEngine(); }catch{}
+  setTimeout(()=>{ acTick().catch(()=>{}); }, 20*1000);   // let the first scan land first
+  setInterval(()=>{ acTick().catch(()=>{}); }, 10*60*1000);
   // Finish a Move-to-Lightning that was interrupted after its deposit landed (funds on the user's
   // own node, never lost) — self-healing so a network blip / reload can't strand a deposit.
   try{ updateLnMoveBanner(); }catch{}   // show the in-flight banner immediately if a move is still pending from last session
@@ -5088,14 +5097,59 @@ async function rewardQuote({ asset, atoms, target }){
   return { receives: Number(got), reference: Number(reference) };
 }
 
-// Sending is NOT yet unattended in this wallet: the take paths it would drive
-// are the interactive ones, and switching on a background seller that has never
-// been proven end to end on a live book is exactly the wrong order to do this
-// in. So the engine runs to a DECISION and stops, and the card shows what it
-// decided; the executor seam below is where a headless take drops in.
-const AC_HEADLESS = false;
-async function rewardExecute(){
-  return { ok: false, error: 'This wallet decides but does not yet send automatically.' };
+// Execution. Both rails already have an unattended driver underneath their
+// review sheets, and a conversion supplies its own consent (the staker switched
+// it on), so this calls straight into them:
+//
+//   a Sequentia-asset target -> takeMarketWalk: walk the same-chain book and
+//     settle what crosses, best price first. Never rests a remainder.
+//   native BTC              -> fetchRQuote + driveReverse: the maker locks BTC
+//     first, we lock the asset, and the secret it reveals claims the BTC. Long-
+//     running by nature (Bitcoin confirmations) and resumable across reloads.
+//
+// What it must never do is convert MORE than staking actually paid. The batch
+// size is the bound; note that WHICH coins fund it is immaterial, because an
+// asset is fungible and the wallet's own stake, delegation and payout records
+// are bare scripts its coin selection cannot spend at all.
+const AC_HEADLESS = true;
+
+// True while any swap this wallet drives is live. A conversion must never race
+// one: both would select from the same coins.
+function acSwapInFlight(){
+  const any = (f) => { try { return !!f(); } catch { return false; } };
+  return any(hasSellInFlight) || any(hasBuyInFlight) || any(hasInFlight)
+      || any(hasReverseInFlight) || any(hasBridgeInFlight) || any(hasSubswapInFlight);
+}
+
+async function rewardExecute(plan){
+  if (acSwapInFlight()) return { ok: false, error: 'another swap is in flight; will try again' };
+  const atoms = BigInt(plan.atoms);
+  if (atoms <= 0n) return { ok: false, error: 'nothing to convert' };
+  const say = (m) => { try{ const b=$('acStatus'); if(b) b.dataset.note = m; }catch{} };
+
+  if (plan.target === AC_BTC){
+    let q;
+    try { q = await fetchRQuote(plan.asset, atoms); }
+    catch (e){ return { ok: false, error: prettyErr(e) }; }
+    if (!q || !q.offer) return { ok: false, error: 'no reverse offer' };
+    // The reverse rail is whole-HTLC and findReverseOffer deliberately prefers
+    // the smallest offer that COVERS the request — which can be far larger than
+    // the batch. Clamp the slice to what staking paid; driveReverse prices the
+    // slice from the offer's own ratio, so setting this is the whole of it.
+    // Selling less than the batch is fine: the remainder waits for the next pass.
+    q.seq_amount = sliceForWholeHtlc(q.seq_amount, atoms);
+    if (BigInt(q.seq_amount) <= 0n) return { ok: false, error: 'offer too small to price' };
+    const r = await driveReverse(q);
+    // 'retry' means no maker ever locked BTC: nothing was committed, so the
+    // coins are free again. Anything else has funded the asset leg, and the BTC
+    // claim finishes in the background (driveSettle, resumable).
+    if (r === 'retry') return { ok: false, error: 'no maker responded; nothing was spent' };
+    return { ok: true, txid: null, received: null };
+  }
+
+  const r = await takeMarketWalk(plan.asset, plan.target, atoms, BigInt(plan.expected || 0), say);
+  if (!r || !r.txids || !r.txids.length) return { ok: false, error: 'nothing on the book crossed' };
+  return { ok: true, txid: r.txids[r.txids.length - 1], received: r.gotRecv != null ? r.gotRecv.toString() : null };
 }
 
 function initRewardsEngine(){
@@ -5200,8 +5254,12 @@ async function refreshAcStatus(){
   const s = rewardSettings();
   if(!s.enabled) return;
 
+  // ALWAYS a dry run here. Rendering must not be the thing that starts a sale:
+  // a cross-chain conversion waits on Bitcoin confirmations and can take an
+  // hour, and a render that awaits it would hang the tab. acTick does the
+  // sending, in the background.
   let rep;
-  try{ rep = await runAutoConvert({ dryRun: !AC_HEADLESS }); }
+  try{ rep = await runAutoConvert({ dryRun: true }); }
   catch(e){ $('acErr').textContent = 'Could not check the market: ' + prettyErr(e); return; }
   _acLastReport = rep;
 
@@ -5220,15 +5278,45 @@ async function refreshAcStatus(){
       ? `about ${fmtAtoms(BigInt(row.decision.receives), s.target===AC_BTC ? 8 : (assetMeta(s.target).precision ?? 8))} ${acTargetTicker(s.target)}`
       : (row.decision && row.decision.reason) || 'waiting'));
     item.appendChild(mid);
-    if(will && !AC_HEADLESS){
-      const b = el('button','ghost','Convert'); b.style.cssText='padding:4px 10px;font-size:12px';
-      b.onclick = () => { tab('swap'); toast(`Sell ${m.ticker} for ${acTargetTicker(s.target)} to convert this batch.`); };
-      item.appendChild(b);
-    }
     box.appendChild(item);
   }
-  if(!AC_HEADLESS && rep.considered.some(r => r.decision && r.decision.converts)){
-    box.appendChild(el('div','muted','This wallet works out what to convert and when; sending is still yours to confirm.'));
+  if(_acRunning){
+    box.appendChild(el('div','muted','Converting now — a Bitcoin leg waits on confirmations and can take a while. It is safe to close this; it resumes on its own.'));
+  }
+  const recent = rewardConversions().filter(c => c.state === 'done').slice(0, 3);
+  for(const c of recent){
+    const m = assetMeta(c.asset);
+    const item = el('div','item');
+    item.appendChild(el('span','badge b-out','converted'));
+    const mid = el('div','grow');
+    mid.appendChild(el('div','', `${fmtAtoms(BigInt(c.value), m.precision)} ${m.ticker} → ${acTargetTicker(c.target)}`));
+    mid.appendChild(el('div','sub', new Date(c.at).toLocaleString()));
+    item.appendChild(mid);
+    box.appendChild(item);
+  }
+}
+
+// The unattended pass. Single-flight, never while another swap is live, and
+// never on a render path: a cross-chain conversion waits on Bitcoin and can run
+// for the better part of an hour.
+let _acRunning = false;
+async function acTick(){
+  if(_acRunning) return;
+  if(!rewardSettings().enabled) return;
+  if(!wollet || !signer) return;
+  if(acSwapInFlight()) return;
+  _acRunning = true;
+  try{
+    const rep = await runAutoConvert();
+    if(rep && rep.converted.length){
+      const n = rep.converted.length;
+      toast(`Converted ${n} staking reward${n===1?'':'s'}.`);
+      try{ await sync(); }catch{}
+    }
+  }catch(e){ console.warn('[rewards] conversion pass failed:', e?.message??e); }
+  finally{
+    _acRunning = false;
+    try{ await refreshRewards(); }catch{}
   }
 }
 

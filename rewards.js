@@ -283,6 +283,25 @@ function conversionId(batch){
   return `${batch.asset}:${(batch.inputs || []).slice().sort().join(',')}`;
 }
 
+/**
+ * How much of a batch a WHOLE-HTLC offer may take.
+ *
+ * The cross-chain reverse rail rests whole offers, and the offer picked is
+ * deliberately the smallest one that COVERS the request — which can be far
+ * larger than the batch. Taking it whole would sell much more than staking ever
+ * paid, so the slice is clamped to the batch. Selling LESS is fine and normal:
+ * the remainder waits for the next pass.
+ *
+ * Returns 0n when neither side has anything to trade, which the caller must
+ * treat as "no fill", never as "take everything".
+ */
+export function sliceForWholeHtlc(offerAtoms, batchAtoms){
+  const offer = BigInt(offerAtoms || 0n);
+  const batch = BigInt(batchAtoms || 0n);
+  if (offer <= 0n || batch <= 0n) return 0n;
+  return offer < batch ? offer : batch;
+}
+
 /** A sentence for a decision a wallet can show as-is. SWK supplies the text. */
 export function decisionText(decision){
   if (!decision) return '';
