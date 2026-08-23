@@ -531,8 +531,8 @@ export function seqlnNodeReceive({ node_key, amount, description }) {
 // the payment (a masqueraded hold invoice), the incoming HTLC fails back — refunding the taker — as EARLY as
 // possible instead of lingering to the invoice's requested delay. The wallet's client-side pre-pay gates
 // (payment_hash === H, amount == the offer price, min_final_cltv can't settle past T_seq) remain the PRIMARY
-// guard; these are forwarded best-effort. NOTE: the seqln /node/pay handler must be enhanced to enforce them —
-// until it is, they are advisory (a no-op the node ignores), and the client-side gates carry fund-safety.
+// guard; the /node/pay handler now ENFORCES them too: it refuses an invoice whose payment_hash, amount or
+// min_final_cltv disagree, and passes maxCltv to CLN as maxdelay (the direct-hop fallback is bounded alike).
 export function seqlnNodePay({ node_key, bolt11, wantHash, amountMsat, minFinalCltv, maxCltv }) {
   const body = { node_key, bolt11 };
   if (wantHash) body.wantHash = String(wantHash).toLowerCase();
