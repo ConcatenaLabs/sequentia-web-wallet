@@ -35,6 +35,20 @@ export function computeRate(sellAtoms, recvAtoms){
   return { rateNum: recv / g, rateDen: sell / g };
 }
 
+// The FILL leaf evaluates locked*rateNum + rateDen-1 in SIGNED 64-bit arithmetic
+// (daemon/pkg/covenant/order.go: CheckArithmetic, MaxLeafProduct = MaxInt64).
+// computeRate only divides out the gcd, so two NEAR-COPRIME atom counts leave
+// rateNum ~ recvAtoms and the product overflows on any large order. The relay
+// then rejects the offer — but by that point the browser has already broadcast
+// the covenant funding tx, locking the asset in an order that can never rest.
+// Every Go planner gates on this bound; gate here too, BEFORE funding.
+export const MAX_LEAF_PRODUCT = (1n << 63n) - 1n;
+export function leafProductFits(lockedAtoms, rateNum, rateDen){
+  const locked = BigInt(lockedAtoms), num = BigInt(rateNum), den = BigInt(rateDen);
+  if (num < 1n || den < 1n) return false;
+  return locked * num + den - 1n <= MAX_LEAF_PRODUCT;
+}
+
 // The absolute-locktime REFUND height baked into a resting order. The maker may
 // reclaim the locked A only after this height (until then the order can only be
 // filled at the pinned price). Default horizon ~1 day of Sequentia blocks.
@@ -147,4 +161,4 @@ export function buildCovenantOffer({ assetA, assetB, sellAtoms, recvAtoms, coven
   };
 }
 
-export const __test__ = { gcdBig, computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit };
+export const __test__ = { gcdBig, computeRate, leafProductFits, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit };
