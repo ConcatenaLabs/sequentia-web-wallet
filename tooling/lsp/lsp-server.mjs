@@ -4364,8 +4364,31 @@ const server = http.createServer(async (req, res) => {
       if (!nodeKey || !bolt11) return send(res, 400, { ok: false, error: 'body { node_key, bolt11 } required' });
       const rec = PROV.getByKey(nodeKey);
       if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
+      // The client sends wantHash / amount_msat / min_final_cltv / max_cltv so the node can BIND the
+      // payment to the swap and BOUND its timelock. These were advisory (ignored) until now; a maker
+      // paying its outgoing leg against an incoming hold needs the route capped below the hold's
+      // expiry, or a counterparty holding the outgoing HTLC can be settled after the incoming one
+      // has been failed back. Enforce them here, before anything is committed.
+      const wantHash = String((body && body.wantHash) || '').toLowerCase();
+      const wantMsat = body && body.amount_msat != null ? Math.round(Number(body.amount_msat)) : null;
+      const maxCltv = body && body.max_cltv != null ? Math.round(Number(body.max_cltv)) : null;
+      let decoded = null;
       try {
-        const r = await lnrpcKw('pay', [`bolt11=${bolt11}`, 'retry_for=45'], rec.rpc, 60_000);
+        decoded = await lnrpcKw('decode', [`string=${bolt11}`], rec.rpc, 8000);
+      } catch (e) {
+        return send(res, 400, { ok: false, error: `decode: ${scrubDetail(String((e && e.message) || e))}` });
+      }
+      const decHash = String((decoded && decoded.payment_hash) || '').toLowerCase();
+      const decMsat = decoded && decoded.amount_msat != null ? Math.round(Number(decoded.amount_msat)) : null;
+      const decFinal = Number((decoded && decoded.min_final_cltv_expiry) || 18);
+      if (wantHash && decHash !== wantHash) return send(res, 400, { ok: false, error: `invoice payment_hash ${decHash} is not the swap hash` });
+      if (wantMsat != null && decMsat != null && decMsat !== wantMsat) return send(res, 400, { ok: false, error: `invoice amount ${decMsat} msat != expected ${wantMsat}` });
+      if (maxCltv != null && !(maxCltv > 0)) return send(res, 400, { ok: false, error: 'max_cltv leaves no timelock room' });
+      if (maxCltv != null && decFinal > maxCltv) return send(res, 400, { ok: false, error: `invoice min_final_cltv ${decFinal} exceeds the ${maxCltv}-block cap` });
+      try {
+        const args = [`bolt11=${bolt11}`, 'retry_for=45'];
+        if (maxCltv != null) args.push(`maxdelay=${maxCltv}`);
+        const r = await lnrpcKw('pay', args, rec.rpc, 60_000);
         return send(res, 200, { ok: true, paid: r.status === 'complete', preimage: r.payment_preimage || null,
           amount_msat: r.amount_msat != null ? Number(r.amount_msat) : null, destination: r.destination || null });
       } catch (payErr) {
@@ -4384,8 +4407,9 @@ const server = http.createServer(async (req, res) => {
           const ch = ((pc && pc.channels) || []).find((c) => c.peer_id === dest && c.state === 'CHANNELD_NORMAL'
             && c.short_channel_id && Number(c.spendable_msat || 0) >= amt);
           if (!ch) throw new Error('no route and no direct channel with enough spendable');
+          // The direct hop uses exactly the invoice's final delay, already checked against max_cltv.
           const route = [{ id: dest, channel: ch.short_channel_id, direction: ch.direction || 0,
-            amount_msat: amt, delay: 18, style: 'tlv' }];
+            amount_msat: amt, delay: decFinal, style: 'tlv' }];
           const spArgs = [`route=${JSON.stringify(route)}`, `payment_hash=${hash}`];
           if (secret) spArgs.push(`payment_secret=${secret}`);
           if (bolt11) spArgs.push(`bolt11=${bolt11}`);
