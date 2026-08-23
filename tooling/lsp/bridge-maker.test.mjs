@@ -29,9 +29,9 @@ function encodeLocktime(locktime) {
   if (locktime >= 1 && locktime <= 16) return Uint8Array.from([0x50 + locktime]);
   return pushData(encScriptNum(locktime));
 }
-function buildHtlcRedeem(hashHex, claimPubHex, refundPubHex, locktime) {
+function buildHtlcRedeem(hashHex, claimPubHex, refundPubHex, locktime, { legacy = false } = {}) {
   return b2h(Uint8Array.from([
-    OP.IF, OP.SHA256, ...pushData(h2b(hashHex)), OP.EQUALVERIFY, ...pushData(h2b(claimPubHex)), OP.CHECKSIG,
+    OP.IF, ...(legacy ? [] : [0x82, 0x01, 0x20, OP.EQUALVERIFY]), OP.SHA256, ...pushData(h2b(hashHex)), OP.EQUALVERIFY, ...pushData(h2b(claimPubHex)), OP.CHECKSIG,
     OP.ELSE, ...encodeLocktime(locktime), OP.CLTV, OP.DROP, ...pushData(h2b(refundPubHex)), OP.CHECKSIG, OP.ENDIF,
   ]));
 }
@@ -86,6 +86,13 @@ test('verifyMakerBtcHtlc: TRUE only when claim==LSP, H, refund, CLTV all bind', 
   assert.equal(verifyMakerBtcHtlc({ redeemScriptHex: good, hashHex: 'cd'.repeat(32), lspClaimPubHex: LSP.pubHex, makerRefundPubHex: MAKER_REFUND, locktime: T_BTC }).ok, false);
   // wrong CLTV vs terms
   assert.equal(verifyMakerBtcHtlc({ redeemScriptHex: good, hashHex: H, lspClaimPubHex: LSP.pubHex, makerRefundPubHex: MAKER_REFUND, locktime: T_BTC + 1 }).ok, false);
+  // a maker that has not upgraded still funds the pre-guard form: accepted when every parameter binds
+  const legacy = buildHtlcRedeem(H, LSP.pubHex, MAKER_REFUND, T_BTC, { legacy: true });
+  assert.notEqual(legacy, good);
+  assert.equal(verifyMakerBtcHtlc({ redeemScriptHex: legacy, hashHex: H, lspClaimPubHex: LSP.pubHex, makerRefundPubHex: MAKER_REFUND, locktime: T_BTC }).ok, true);
+  // a guard with nothing after it (OP_SHA256 missing) is not a Design-A HTLC
+  const broken = '6382012088' + good.slice(12);
+  assert.equal(verifyMakerBtcHtlc({ redeemScriptHex: broken, hashHex: H, lspClaimPubHex: LSP.pubHex, makerRefundPubHex: MAKER_REFUND, locktime: T_BTC }).ok, false);
 });
 
 // --- W1-UNIT: the BTC-HTLC CLTV must be a BLOCK HEIGHT, never a UNIX timestamp ---
@@ -135,11 +142,17 @@ test('GOLDEN: buildHtlcRedeem byte-matches the Go xchain vectors (incl. locktime
   for (const v of vectors) {
     const got = buildHtlcRedeemExport({ hashHex: v.hash_h, claimPubHex: v.claim_pub, refundPubHex: v.refund_pub, locktime: v.t_btc });
     assert.equal(got, v.redeem_hex, `redeemScript mismatch vs Go at t_btc=${v.t_btc}`);
-    const p = parseHtlcRedeem(h2b(v.redeem_hex));
-    assert.equal(p.hashHex, v.hash_h);
-    assert.equal(p.claimPubHex, v.claim_pub);
-    assert.equal(p.refundPubHex, v.refund_pub);
-    assert.equal(p.locktime, v.t_btc);
+    assert.ok(typeof v.legacy_redeem_hex === 'string' && v.legacy_redeem_hex !== v.redeem_hex, 'fixture carries the legacy form');
+    // Both forms parse to the same parameters; only the current one is built by default.
+    for (const [hex, guarded] of [[v.redeem_hex, true], [v.legacy_redeem_hex, false]]) {
+      const p = parseHtlcRedeem(h2b(hex));
+      assert.equal(p.hashHex, v.hash_h);
+      assert.equal(p.claimPubHex, v.claim_pub);
+      assert.equal(p.refundPubHex, v.refund_pub);
+      assert.equal(p.locktime, v.t_btc);
+      assert.equal(p.guarded, guarded);
+    }
+    assert.equal(buildHtlcRedeemExport({ hashHex: v.hash_h, claimPubHex: v.claim_pub, refundPubHex: v.refund_pub, locktime: v.t_btc, legacy: true }), v.legacy_redeem_hex);
     seenLocktimes.add(v.t_btc);
   }
   // The edge cases that a naive always-data-push JS encoder would get wrong MUST be present in the fixture.
