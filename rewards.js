@@ -158,11 +158,18 @@ export function scanRewards(){
   // asking the engine would only spend time proving it.
   if (!keys.length && !txs.some(t => t.isCoinbase)) return { rewards: [], totals: [] };
 
+  // The maturity comes from the kit, never a literal here. Sequentia's is 1,000
+  // blocks, not Bitcoin's 100: the protection is a wall-clock one and this chain
+  // runs at 60 seconds. A wallet that guessed 100 would call a reward spendable
+  // 900 blocks early and then build a transaction the chain rejects.
+  const maturity = (C.engine.sequentiaCoinbaseMaturity
+    ? Number(C.engine.sequentiaCoinbaseMaturity())
+    : 1000);
   const rewards = C.engine.attributeStakingRewards(
     JSON.stringify(txs),
     JSON.stringify(keys),
     Number(C.tipHeight() || 0),
-    100,                       // COINBASE_MATURITY
+    maturity,
   ) || [];
 
   return { rewards, totals: totalsOf(rewards) };
