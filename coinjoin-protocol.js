@@ -1,4 +1,4 @@
-// VENDORED from the seqcj repository (https://github.com/GracedEternalKingCabbageMan/seqcj).
+// VENDORED from the seqcj repository (https://github.com/ConcatenaLabs/seqcj).
 // The source of truth is seqcj/client.mjs — keep this file byte-identical to it apart from this
 // header and the import path below, so the protocol the wallet runs is the protocol the
 // coordinator's end-to-end test proves.

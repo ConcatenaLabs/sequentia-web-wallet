@@ -35,7 +35,7 @@ Canonical design docs live in the **node repo** (`Sequentia`), path `doc/sequent
 
 ## 2. REPOS & THE ONE THING TO KNOW ABOUT EACH
 
-All under `github.com/GracedEternalKingCabbageMan/*`. Deploy pipeline: **edit on laptop → commit → push → `git pull` on the box → build ON the box.** Never edit source on the box. Commit author MUST be `GracedEternalKingCabbageMan <...@users.noreply.github.com>`.
+All under `github.com/ConcatenaLabs/*`. Deploy pipeline: **edit on laptop → commit → push → `git pull` on the box → build ON the box.** Never edit source on the box. Commit author MUST be `GracedEternalKingCabbageMan <...@users.noreply.github.com>`.
 
 | Repo | Laptop | Box clone | Branch | Holds |
 |---|---|---|---|---|
