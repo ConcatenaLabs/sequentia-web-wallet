@@ -35,7 +35,12 @@ function fakeEngine({ rewards = [], batches = [], decision = null } = {}){
   const calls = { attribute: 0, plan: 0, decide: 0, lastAlready: null, lastSettings: null };
   return {
     calls,
-    attributeStakingRewards(){ calls.attribute++; return rewards; },
+    sequentiaCoinbaseMaturity: () => 1000,
+    attributeStakingRewards(_txs, _keys, _tip, maturity){
+      calls.attribute++;
+      calls.lastMaturity = maturity;
+      return rewards;
+    },
     planRewardBatches(_rewardsJson, settingsJson, alreadyJson){
       calls.plan++;
       calls.lastAlready = JSON.parse(alreadyJson);
@@ -236,6 +241,23 @@ test('totals separate what is spendable from what is still maturing', () => {
   assert.equal(gold.outputs, 3, 'a spent reward is still history worth counting');
   const usdx = t.find(x => x.asset === USDX);
   assert.equal(usdx.sources.split, 1);
+});
+
+test("the coinbase maturity comes from the kit, not from a literal", () => {
+  // Sequentia's is 1,000 blocks, not Bitcoin's 100. A wallet that guessed would
+  // call a reward spendable 900 blocks early and then build a transaction the
+  // chain rejects -- which is exactly what this wallet did until a node on the
+  // live testnet reported 941 blocks to maturity at 60 confirmations.
+  const engine = fakeEngine({ rewards: [] });
+  const { ctx } = { ctx: null };
+  initRewards({
+    ...pluck(),
+    engine,
+    walletTxs: () => [{ txid: 'a'.repeat(64), height: 10, isCoinbase: true, fromMe: false, ownedOutputs: [] }],
+    stakingKeys: () => [{ scriptPubkey: '0014' + '11'.repeat(20), pubkey: '02' + '22'.repeat(32), delegated: false }],
+  });
+  scanRewards();
+  assert.equal(engine.calls.lastMaturity, 1000);
 });
 
 test('a wallet with no staking keys and no coinbase does not bother the engine', () => {
