@@ -7,3 +7,6 @@ pkg/
 # and ships with the wallet so the "Instant (Lightning)" route works.
 !lightning/pkg/
 !lightning/pkg/**
+
+# Agent worktrees and local agent state (never belongs in the repo).
+.claude/
