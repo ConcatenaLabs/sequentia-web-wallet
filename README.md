@@ -1,7 +1,7 @@
 # Sequentia web wallet
 
 A proof-of-concept, non-custodial browser wallet for the Sequentia testnet, built on
-[SWK](https://github.com/GracedEternalKingCabbageMan/SWK) (Sequentia Wallet Kit), live at
+[SWK](https://github.com/ConcatenaLabs/SWK) (Sequentia Wallet Kit), live at
 **https://sequentiatestnet.com/wallet/**.
 
 It is a dual-chain wallet: one 12-word phrase drives both a **Bitcoin testnet4** wallet and a
@@ -21,16 +21,16 @@ fork of Blockstream Elements 23.3.3. The pieces this wallet talks to:
 
 | Repo | One-liner |
 |---|---|
-| [`Sequentia`](https://github.com/GracedEternalKingCabbageMan/Sequentia) | The Sequentia node, Sequentia Core (`sequentiad`, a fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. |
-| [`SWK`](https://github.com/GracedEternalKingCabbageMan/SWK) | Sequentia Wallet Kit: a fork of Blockstream LWK: Rust wallet library, CLI, and WASM bindings for building Sequentia (and Bitcoin testnet4) wallets. |
-| [`seqdex`](https://github.com/GracedEternalKingCabbageMan/seqdex) | SeqDEX: non-custodial atomic-swap DEX: P2P order book (seqob), same-chain swaps, and cross-chain BTC↔asset swaps made safe by Bitcoin anchoring. |
-| [`seqln`](https://github.com/GracedEternalKingCabbageMan/seqln) | SeqLN: a Core Lightning fork that runs on Sequentia and Bitcoin from the same binary: asset channels, any-asset payments, pure-Lightning swaps. |
-| [`openamp`](https://github.com/GracedEternalKingCabbageMan/openamp) | OpenAMP: open-source restricted-asset issuance/transfer-approval service (an AMP2 equivalent) with opt-in confidentiality; zero consensus changes. |
-| [`sequentia-electrs`](https://github.com/GracedEternalKingCabbageMan/sequentia-electrs) | The electrs fork: Rust indexer + Esplora REST API for Sequentia and its Bitcoin testnet4 parent chain. |
-| [`sequentia-registry`](https://github.com/GracedEternalKingCabbageMan/sequentia-registry) | Sequentia Asset Registry service (asset metadata). |
+| [`Sequentia`](https://github.com/ConcatenaLabs/Sequentia) | The Sequentia node, Sequentia Core (`sequentiad`, a fork of Elements 23.3.3): consensus, anchoring, proof of stake, open fee market, plus the canonical protocol documentation in `doc/sequentia/`. |
+| [`SWK`](https://github.com/ConcatenaLabs/SWK) | Sequentia Wallet Kit: a fork of Blockstream LWK: Rust wallet library, CLI, and WASM bindings for building Sequentia (and Bitcoin testnet4) wallets. |
+| [`seqdex`](https://github.com/ConcatenaLabs/seqdex) | SeqDEX: non-custodial atomic-swap DEX: P2P order book (seqob), same-chain swaps, and cross-chain BTC↔asset swaps made safe by Bitcoin anchoring. |
+| [`seqln`](https://github.com/ConcatenaLabs/seqln) | SeqLN: a Core Lightning fork that runs on Sequentia and Bitcoin from the same binary: asset channels, any-asset payments, pure-Lightning swaps. |
+| [`openamp`](https://github.com/ConcatenaLabs/openamp) | OpenAMP: open-source restricted-asset issuance/transfer-approval service (an AMP2 equivalent) with opt-in confidentiality; zero consensus changes. |
+| [`sequentia-electrs`](https://github.com/ConcatenaLabs/sequentia-electrs) | The electrs fork: Rust indexer + Esplora REST API for Sequentia and its Bitcoin testnet4 parent chain. |
+| [`sequentia-registry`](https://github.com/ConcatenaLabs/sequentia-registry) | Sequentia Asset Registry service (asset metadata). |
 
 Protocol-level documentation (anchoring, proof of stake, the open fee market) lives in
-[`Sequentia/doc/sequentia/`](https://github.com/GracedEternalKingCabbageMan/Sequentia/tree/master/doc/sequentia).
+[`Sequentia/doc/sequentia/`](https://github.com/ConcatenaLabs/Sequentia/tree/master/doc/sequentia).
 
 ## Status
 
@@ -195,7 +195,7 @@ works normally without the restricted rows.
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
-| `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/GracedEternalKingCabbageMan/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
+| `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
 | `xcourier.js` | Cross-chain swap message transport: end-to-end-sealed courier sessions over the relay WebSocket. |
 | `xswap.js` / `xrswap.js` | Cross-chain HTLC taker, forward (pay BTC, receive asset) and reverse (pay asset, receive BTC). |
 | `xmaker.js` | In-browser cross-chain maker: builds, signs, rests, and serves offers in both directions. |
@@ -215,7 +215,7 @@ The only build product the wallet needs is `pkg/`, produced from the `sequentia`
 SWK with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
 
 ```sh
-git clone -b sequentia https://github.com/GracedEternalKingCabbageMan/SWK.git
+git clone -b sequentia https://github.com/ConcatenaLabs/SWK.git
 cd SWK/lwk_wasm
 wasm-pack build --target web --release   # needs clang; --target web is required
 ```
@@ -314,4 +314,4 @@ context from `index.html`).
 This repository does not yet declare a license of its own. Vendored components keep their
 upstream licenses: the `@scure`/`@noble` bundles (`btc.js`, `noble-ciphers.js`) are MIT, and
 `jsqr.js` is the jsQR project's build. SWK (which produces `pkg/`) carries upstream LWK's
-licensing; see [SWK](https://github.com/GracedEternalKingCabbageMan/SWK).
+licensing; see [SWK](https://github.com/ConcatenaLabs/SWK).

@@ -9,16 +9,16 @@ vendored single file. Keep it that way — that constraint is deliberate and is 
 wallet auditable by reading it.
 
 Node and consensus conventions live in the
-[`Sequentia`](https://github.com/GracedEternalKingCabbageMan/Sequentia) repo.
+[`Sequentia`](https://github.com/ConcatenaLabs/Sequentia) repo.
 
 ## Run and test
 
 The one thing that must be built is `pkg/`, the `lwk_wasm` bindings from
-[`SWK`](https://github.com/GracedEternalKingCabbageMan/SWK). It is untracked and symlinked or
+[`SWK`](https://github.com/ConcatenaLabs/SWK). It is untracked and symlinked or
 copied in:
 
 ```sh
-git clone -b sequentia https://github.com/GracedEternalKingCabbageMan/SWK.git
+git clone -b sequentia https://github.com/ConcatenaLabs/SWK.git
 cd SWK/lwk_wasm
 wasm-pack build --target web --release      # --target web is required
 cd -
@@ -63,7 +63,7 @@ Root is flat: production modules and tests sit side by side.
 - `coinjoin.js` — the Mix tab's wallet side: coin selection, ownership proofs, blinded addresses and,
   above all, `verifyRoundOutputs`, the check that decides whether to sign a transaction the
   coordinator built. `blindsig.js` and `coinjoin-protocol.js` beside it are **vendored from the
-  [`seqcj`](https://github.com/GracedEternalKingCabbageMan/seqcj) repo** and must stay byte-identical
+  [`seqcj`](https://github.com/ConcatenaLabs/seqcj) repo** and must stay byte-identical
   to their originals apart from the header and import path — the point of vendoring rather than
   reimplementing is that the protocol proven by seqcj's end-to-end test is the protocol this wallet
   runs. Signing and unblinding go through `coinjoinSignInputs` / `coinjoinUnblindOutputs` in wasm.
