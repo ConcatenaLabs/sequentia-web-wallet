@@ -32,9 +32,7 @@ fork of Blockstream Elements 23.3.3. The pieces this wallet talks to:
 Protocol-level documentation (anchoring, proof of stake, the open fee market) lives in
 [`Sequentia/doc/sequentia/`](https://github.com/ConcatenaLabs/Sequentia/tree/master/doc/sequentia).
 
-## Status
-
-Working today on the live deployment:
+## What the wallet does
 
 - Wallet create / restore from a 12-word phrase; balances, send, receive on both chains
 - Portfolio and per-amount display in a user-chosen reference currency (USD, BTC, or any priced asset)
@@ -52,7 +50,7 @@ Working today on the live deployment:
   Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
 
-Experimental / demo-grade:
+Experimental, and said so in the app:
 
 - The **Instant (Lightning)** trade rails. The client code is complete and enabled on the live
   page, but it depends on a hosted SeqLN LSP demo backend with an interim shared bearer token.
@@ -167,7 +165,7 @@ serving), "LN 1/2" (one leg up), or an error state; when Lightning is not config
 is hidden and the composer quietly uses the on-chain rails only.
 
 Honest caveats: this is a demo deployment. The live page ships a shared testnet-demo bearer
-token for the LSP API (per-wallet authentication is a known TODO), the backend is a single
+token for the LSP API rather than per-wallet authentication, the backend is a single
 hosted instance, and the rail's availability depends on it. Funds safety does not rest on the
 token: it rests on the hosted nodes being keyless, with your device as sole signer.
 
@@ -194,6 +192,7 @@ works normally without the restricted rows.
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
+| `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
 | `xcourier.js` | Cross-chain swap message transport: end-to-end-sealed courier sessions over the relay WebSocket. |
@@ -275,9 +274,9 @@ install):
 node --test
 ```
 
-This runs the `node:test` suites (33 of the 56 `*.test.mjs` files, 43 at the root and 13
-under `tooling/lsp/`). The other 23 are standalone scripts with their own `check()` harness
-that `node --test` does not execute, among them `seqln.test.mjs`, `xcourier.test.mjs`,
+This runs every `*.test.mjs` file that registers `node:test` cases, at the root and under
+`tooling/lsp/`. The rest are standalone scripts with their own `check()` harness that
+`node --test` does not execute, among them `seqln.test.mjs`, `xcourier.test.mjs`,
 `xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the
 `covenant*.test.mjs` golden vectors; run those directly, for example
 `node covenant-byteorder.test.mjs`.
@@ -311,7 +310,6 @@ context from `index.html`).
 
 ## License
 
-This repository does not yet declare a license of its own. Vendored components keep their
-upstream licenses: the `@scure`/`@noble` bundles (`btc.js`, `noble-ciphers.js`) are MIT, and
+MIT, see [LICENSE](LICENSE). Vendored components keep their own upstream licenses: the `@scure`/`@noble` bundles (`btc.js`, `noble-ciphers.js`) are MIT, and
 `jsqr.js` is the jsQR project's build. SWK (which produces `pkg/`) carries upstream LWK's
 licensing; see [SWK](https://github.com/ConcatenaLabs/SWK).
