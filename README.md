@@ -16,7 +16,7 @@ JavaScript ES modules, no framework, no bundler) around SWK's `lwk_wasm` WebAsse
 
 ## Where this fits in Sequentia
 
-Sequentia is a Bitcoin sidechain for asset tokenization and decentralized exchange, built as a
+Sequentia is a Bitcoin sidechain for asset tokenization and disintermediated exchanges, built as a
 fork of Blockstream Elements 23.3.3. The pieces this wallet talks to:
 
 | Repo | One-liner |
