@@ -49,6 +49,13 @@
   .field{margin-top:12px}
   .mono{font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;word-break:break-all;color:#c9d4df;
         background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px}
+  /* Inline code INSIDE a sentence. .mono above is a block panel — bordered and padded — so
+     putting it on a <span> inflated the line box and overlapped the lines around it. */
+  .icode{font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;color:#c9d4df;
+         background:var(--panel2);border-radius:5px;padding:1px 5px;white-space:nowrap}
+  /* A monospace VALUE that is a caption rather than a field: the derived address under an
+     input, where a panel would read as a second, disabled input. */
+  .monoline{font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--dim);overflow-wrap:anywhere}
   .words{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0}
   .words span{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:13px ui-monospace,monospace}
   .words span b{color:var(--dim);margin-right:7px;font-weight:500}
@@ -503,12 +510,18 @@
           <button class="ghost" id="btnXpub">Show xpub</button>
         </div>
         <div class="rec hide" id="xpubReveal">
-          <label class="lbl">Account extended public key</label>
-          <div class="mono" id="xpubText" style="word-break:break-all;margin-top:6px">—</div>
-          <p class="sub" style="margin:10px 0 0">Watch-only. It derives every address this wallet will ever
-            use — on Sequentia and on Bitcoin testnet4, which share this one account key — so anyone holding
-            it can follow your whole history on both chains. It cannot spend: only the recovery phrase can.</p>
-          <button class="ghost" id="btnXpubCopy" style="margin-top:10px">Copy xpub</button>
+          <label class="lbl">Account key</label>
+          <select id="xpubForm" style="margin-bottom:8px">
+            <option value="xpub">Extended public key</option>
+            <option value="wpkh">Descriptor — wpkh, this wallet's addresses</option>
+            <option value="pkh">Descriptor — pkh, the legacy form</option>
+          </select>
+          <div class="mono" id="xpubText" style="word-break:break-all;white-space:pre-wrap">—</div>
+          <p class="sub" id="xpubNote" style="margin:10px 0 0"></p>
+          <p class="sub" style="margin:8px 0 0">Watch-only either way. It derives every address this wallet
+            will ever use — on Sequentia and on Bitcoin testnet4, which share this one account key — so anyone
+            holding it can follow your whole history on both chains. It cannot spend: only the phrase can.</p>
+          <button class="ghost" id="btnXpubCopy" style="margin-top:10px">Copy</button>
         </div>
       </div>
       <div class="card hide" id="lnRecvCard">
@@ -1027,7 +1040,7 @@
       <div class="card">
         <label class="lbl">Sign a message with your wallet key</label>
         <p class="sub" style="margin:0 0 10px">The classic signature: made with the private key behind one of
-          your own addresses, and checkable by anyone running a node — <span class="mono">verifymessage</span>,
+          your own addresses, and checkable by anyone running a node — <span class="icode">verifymessage</span>,
           on Sequentia or on Bitcoin, with nothing to look up and no account id involved. Use it to prove an
           address is yours. Like the signature above it cannot move funds.</p>
         <div class="field">
@@ -1036,20 +1049,24 @@
         </div>
         <div class="field">
           <label class="lbl">Address to sign with</label>
-          <input id="keySignIndex" class="mono" type="number" min="0" step="1" value="0" style="width:110px">
-          <div class="mono sub" id="keySignAddr" style="margin-top:6px;word-break:break-all">—</div>
+          <div class="row">
+            <input id="keySignIndex" type="number" min="0" step="1" value="0" style="width:88px">
+            <div class="monoline" id="keySignAddr" style="flex:1;min-width:0">—</div>
+          </div>
         </div>
         <button class="primary" id="keySignBtn" style="margin-top:14px">Sign</button>
         <div class="status err" id="keySignErr"></div>
         <div class="rec hide" id="keySignResult">
           <label class="lbl">Signature</label>
           <div class="mono" id="keySignSig" style="word-break:break-all">—</div>
-          <button class="ghost" id="keySignCopySig" style="margin-top:6px">Copy signature</button>
           <label class="lbl" style="margin-top:12px">Verify against this address</label>
           <div class="mono" id="keySignVerifyAddr" style="word-break:break-all">—</div>
           <p class="sub" style="margin:6px 0 0">The same key as the address above, written the older way.
             A node accepts only that form here: it rejects a tb1 address whatever key stands behind it.</p>
-          <button class="ghost" id="keySignCopyCmd" style="margin-top:10px">Copy verify command</button>
+          <div class="row" style="margin-top:10px">
+            <button class="ghost" id="keySignCopySig">Copy signature</button>
+            <button class="ghost" id="keySignCopyCmd">Copy verify command</button>
+          </div>
         </div>
       </div>
     </section>
@@ -1127,6 +1144,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { signMessage, verifyAddress } from './signmessage.js';
+import { accountDescriptors } from './descriptor.js';
 
 const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
@@ -1151,6 +1169,7 @@ const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href
 
 let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false, showXpub = false;
 let keySignStarted = false;   // the Sign tab opens on the address the Receive tab is showing, once
+let lnApi = null;             // the hosted-Lightning API, wired once the wallet is open (see initSwap)
 
 // ---------- amount helpers (lwk takes u64 -> JS BigInt) ----------
 function fmtAtoms(atoms, d){ atoms = BigInt(atoms); const neg = atoms<0n; if(neg) atoms=-atoms;
@@ -2982,9 +3001,15 @@ function renderLightningBalance(){ return refreshLnStatus(); }
 
 // ---------- Lightning in the Send / Receive tabs ----------
 // Held, fee-rated assets can run (or already have) a hosted LN node, so they can send/receive over LN.
+// What this wallet can send and receive over Lightning. Native BTC leads: the LSP runs a
+// BTC leg of its own (connectBtcNode/btcNodeKey), and a wallet whose parent chain is
+// Bitcoin has no business hiding it — it is offered whether or not the wallet holds any,
+// exactly like the rest of the wallet treats the parent chain. A Sequentia asset needs a
+// published fee rate to be routable, so those stay gated on one.
 function lnCapableAssets(){
-  return Object.keys(balObj()).filter(h => feeRateEntry(h) && feeRateEntry(h).rate > 0)
+  const seq = Object.keys(balObj()).filter(h => feeRateEntry(h) && feeRateEntry(h).rate > 0)
     .map(h => ({ hex: h, ticker: assetMeta(h).ticker }));
+  return [{ hex: 'BTC', ticker: 'BTC' }, ...seq];
 }
 function fillLnAssetSelect(sel){
   if (!sel) return;
@@ -2994,11 +3019,19 @@ function fillLnAssetSelect(sel){
 }
 // Show the LN send/receive cards only when LN is deployed AND the wallet holds a fee-rated asset.
 function refreshLnSendReceive(){
-  const on = !!(typeof seqlnState === 'function' && seqlnState().deployed) && lnCapableAssets().length > 0;
+  const on = !!(typeof seqlnState === 'function' && seqlnState().deployed) && !!lnApi;
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
   if (sc) sc.classList.toggle('hide', !on);
   if (rc) rc.classList.toggle('hide', !on);
   if (on){ fillLnAssetSelect($('lnRecvAsset')); fillLnAssetSelect($('lnSendAsset')); }
+}
+// Bring the hosted node for one leg online and answer its node key. BTC and a Sequentia
+// asset are provisioned from different device identities, so this is the single place that
+// knows which pair of calls a leg takes.
+async function lnConnectLeg(asset){
+  if (asset === 'BTC'){ await lnApi.connectBtcNode(); return await lnApi.btcNodeKey(); }
+  await lnApi.connectNode(asset);
+  return await lnApi.assetNodeKey(asset);
 }
 let _lnSRWired = false;
 function initLnSendReceive(){
@@ -3012,12 +3045,16 @@ function initLnSendReceive(){
     if (!(amt > 0)){ st.className = 'status err'; st.textContent = 'Enter an amount.'; return; }
     recvBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
-      await L.connectNode(asset);
-      const node_key = await L.assetNodeKey(asset);
-      st.innerHTML = '<span class="spin"></span>Ensuring inbound liquidity…';
-      try { await L.channelInbound({ node_key, asset, amount: amt }); } catch(e){ /* best-effort JIT; a funded channel may already have inbound */ }
+      if (!lnApi) throw new Error('open your wallet first');
+      const node_key = await lnConnectLeg(asset);
+      // JIT inbound liquidity is a Sequentia-asset endpoint: POST /channel/inbound answers
+      // "asset must be a Sequentia asset id", so the BTC leg takes the channel it already has.
+      if (asset !== 'BTC'){
+        st.innerHTML = '<span class="spin"></span>Ensuring inbound liquidity…';
+        try { await lnApi.channelInbound({ node_key, asset, amount: amt }); } catch(e){ /* best-effort JIT; a funded channel may already have inbound */ }
+      }
       st.innerHTML = '<span class="spin"></span>Creating the invoice…';
-      const inv = await L.nodeReceive({ node_key, amount: amt, description: 'Receive ' + meta.ticker });
+      const inv = await lnApi.nodeReceive({ node_key, amount: amt, description: 'Receive ' + meta.ticker });
       if (!inv || !inv.bolt11) throw new Error((inv && inv.error) || 'no invoice returned');
       out.textContent = inv.bolt11; $('lnRecvCopy').classList.remove('hide');
       st.className = 'status'; st.textContent = 'Invoice ready. Share it to receive ' + esc($('lnRecvAmt').value) + ' ' + esc(meta.ticker) + '.';
@@ -3032,10 +3069,10 @@ function initLnSendReceive(){
     if (!bolt11){ st.className = 'status err'; st.textContent = 'Paste an invoice.'; return; }
     sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
-      await L.connectNode(asset);
-      const node_key = await L.assetNodeKey(asset);
+      if (!lnApi) throw new Error('open your wallet first');
+      const node_key = await lnConnectLeg(asset);
       st.innerHTML = '<span class="spin"></span>Paying over Lightning…';
-      const r = await L.nodePay({ node_key, bolt11 });
+      const r = await lnApi.nodePay({ node_key, bolt11 });
       if (r && r.paid){ st.className = 'status'; st.textContent = 'Paid ✓' + (r.preimage ? ' · preimage ' + String(r.preimage).slice(0, 16) + '…' : ''); $('lnSendBolt11').value = ''; try { renderLightningBalance(); } catch {} }
       else throw new Error((r && r.error) || 'payment did not complete');
     } catch(e){ st.className = 'status err'; st.textContent = 'Payment failed: ' + prettyErr(e); }
@@ -3303,6 +3340,141 @@ function initSwapTab(){
   // The symmetric Pay -> Receive composer (the single swap entry point). It
   // discovers same-chain markets itself, and reaches the cross-chain wizard
   // through the `xroute` bridge below (markets/quote/openFromComposer/hasInFlight).
+  // The hosted-Lightning API. A MODULE-scoped binding rather than an inline property of
+  // the initSwap argument, because the Send and Receive tabs' Lightning cards call it too.
+  // They reached for swap.js's own `L`, which is not in scope here, so every invoice died
+  // on "L is not defined" — inside a catch that reported it as a failed invoice rather
+  // than the missing binding it was.
+  lnApi = {
+    available: () => seqlnAvailable(),
+    // LN is DEPLOYED for this wallet (LSP + node config present) — distinct from available(),
+    // which additionally requires the SHARED hub nodes to be connected. The sub-asset rails pay
+    // from / receive into the user's OWN provisioned node and never touch the shared hub, so they
+    // gate on deployed(), not available() (which is false whenever a shared leg isn't up).
+    deployed: () => { try { return seqlnState().deployed; } catch { return false; } },
+    // Register THIS device's own provisioned-node keys before every /status read, so any caller
+    // (the Balance card AND the swap composer's refreshInstant) sees the wallet's own channels —
+    // not just whichever code path happened to register keys first. Idempotent (signature-cached),
+    // so this is cheap. Without it the composer raced key-registration and showed 0 Lightning.
+    status: async () => { try{ await refreshOwnLnNodeKeys(); }catch{} return seqlnGetStatus(); },
+    // The per-asset provisioned-node signer state — a provisioned-but-channel-less
+    // node informs the composer's "node ready, fund a channel" gating nuance.
+    provisioned: () => provisionedState(),
+    swap: (p) => seqlnSwap(p),
+    // Sub-asset order book: dynamic rail gating (sell_available/buy_available) + resting
+    // offers, and posting the wallet's own signed resting offer (LSP never signs).
+    book: (asset, quote) => seqlnBook(asset, quote),
+    // Unified book: every relay's offers merged, price-sorted, rail-tagged. The QUOTE
+    // asset must be forwarded — this wrapper used to take only `asset`, which silently
+    // dropped it and asked for the BTC-paired market whatever pair was on screen.
+    unifiedBook: (asset, quote) => seqlnUnifiedBook(asset, quote),
+    // PURE-LN book from the relay xpln actually lifts from — the composer prices + PINS off this so
+    // Review matches the settle (not the on-chain cross book, a different market).
+    lnBook: (asset, quote) => seqlnLnBook(asset, quote),
+    postOffer: (o) => seqlnPostOffer(o),
+    // Which of the device's candidate node keys are actually provisioned (registry-resolved, works
+    // for nodes blocked waiting for their signer). Used by the on-load reconnect to rediscover a
+    // node that /status can't see yet. Throws if the endpoint isn't deployed; the caller falls back.
+    listNodes: (keys) => seqlnListNodes(keys),
+    // Sub-asset BUY (pay BTC on-chain, receive asset over LN) — HODL primitives. The DEVICE holds
+    // P; the maker pays H by hash to the user's node; the device settles once held (see startBuy).
+    channelInbound: (p) => seqlnChannelInbound(p),
+    nodeInvoice: (p) => seqlnNodeInvoice(p),
+    invoiceStatus: (p) => seqlnInvoiceStatus(p),
+    nodeSettle: (p) => seqlnNodeSettle(p),
+    nodeReceive: (p) => seqlnNodeReceive(p),
+    nodePay: (p) => seqlnNodePay(p),
+    // BARE-HASH pay — the taker's OWN hosted BTC-LN node commits an HTLC to node_id on H (no bolt11), the
+    // LSP PAYER leg-bridge hold primitive (see subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
+    nodePayHash: (p) => seqlnNodePayHash(p),
+    // W2 FRONT-BEFORE-FUND bridged SELL: arm the LSP front (hold-ready) and, once fronted, hand it the
+    // funded asset leg to relay. The LSP fronts BEFORE the taker exposes any asset (see swap.js driveBridged).
+    bridgeFront: (p) => seqlnBridgeFront(p),
+    bridgeAsset: (p) => seqlnBridgeAsset(p),
+    // LSP PAYER leg-bridge (rail-crossing BUY vs an on-chain-only maker): the LSP issues a BTC-LN hold on
+    // the taker's H so the taker pays it HELD before the LSP funds the maker's on-chain BTC HTLC (see
+    // subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
+    bridgeHold: (p) => seqlnBridgeHold(p),
+    jobStatus: (pathOrId) => seqlnJobStatus(pathOrId),   // advisory async-job status (sub-asset HODL BUY)
+    // The same read that does NOT throw when the job has failed — a failed job
+    // answers ok:false, which lspFetch turns into an exception. Reconciliation
+    // needs the body, not the throw.
+    jobStatusRaw: (pathOrId) => seqlnJobStatusRaw(pathOrId),
+    // The submarine (mixed) async-job status — GET /swap/<id>, the SAME endpoint as jobStatus. Wiring
+    // this is what lets pollMixed advance an anchor-gated (over-0-conf) submarine past SETTLING; it was
+    // referenced by pollMixed but never defined, so those swaps could never learn they settled.
+    // RAW, deliberately. The bridge driver's own failure branch tests
+    // `j.status === 'failed'`, and a failed job answers ok:false — which the
+    // plain read turns into a throw that `.catch(() => null)` eats. Wiring the
+    // throwing read here made that branch unreachable, so a job the LSP had
+    // already failed left the record sitting in 'confirming' forever.
+    swapStatus: (pathOrId) => seqlnJobStatusRaw(pathOrId),
+    // The registry node_key for the user's OWN hosted LN node for `assetHex`
+    // (seq:<asset>:<deviceTransportPubkey>) — matches refreshOwnLnNodeKeys. Needed by the
+    // sub-asset sell/buy /swap calls to name which hosted node pays over Lightning.
+    assetNodeKey: async (assetHex) => {
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
+      const id = lnDeriveAsset(phrase, assetHex);
+      const pub = await deviceTransportPubkey(id.transportPrivkey);
+      return 'seq:' + assetHex.toLowerCase() + ':' + String(pub).toLowerCase();
+    },
+    // The user's OWN hosted BTC Lightning node key (`btc:<devicepub>`), the counterpart of assetNodeKey
+    // for the BTC leg of an asset<->BTC pure-LN swap. Same device-derived identity the BTC Move-to-Lightning
+    // and rail-candidate paths use (index.html: lnNodeIdentity(phrase,'btc')).
+    btcNodeKey: async () => {
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
+      const k = lnNodeIdentity(phrase, 'btc');
+      const pub = await deviceTransportPubkey(k.deviceTransportPrivkey);
+      return 'btc:' + String(pub).toLowerCase();
+    },
+    // Bring the on-device signer for the user's OWN hosted asset node ONLINE (idempotent —
+    // re-attaches to the existing provisioned node without re-funding). A per-user node's signer
+    // is NOT auto-connected on load, so this is required before a sub-asset SELL: the LSP commands
+    // that node to pay the asset over Lightning, which needs the device signer serving it.
+    connectNode: async (assetHex) => {
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
+      return await provisionAndConnect({ chain:'seq', assetId: assetHex, label: assetMeta(assetHex).ticker, policy: lnPolicy(),
+        deriveIdentity: (id) => lnDeriveAsset(phrase, id) });
+    },
+    // Bring the user's OWN hosted BTC Lightning node online (the SAME device identity Move-to-Lightning
+    // BTC uses). A bridged SELL RECEIVES BTC over Lightning, so its BTC node must be provisioned + its
+    // device signer serving before the LSP fronts the hold. Idempotent (re-attaches without re-funding).
+    connectBtcNode: async () => {
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
+      return await provisionAndConnect({ chain:'btc', label:'BTC', policy: lnPolicy(),
+        deriveIdentity: () => { const k = lnNodeIdentity(phrase, 'btc'); return { transportPrivkey: k.deviceTransportPrivkey, signingSeed: k.deviceSigningSeed }; } });
+    },
+    finalityCopy: () => lnFinalityCopy(),
+    // Open a Lightning channel for a leg INLINE — the SAME non-custodial provision+fund flow as
+    // the Balance-tab Move-to-Lightning (moveToLightningDialog), exposed so the Swap composer can
+    // create a channel on Place-order instead of blocking the Lightning rail. { chain:'btc'|'seq',
+    // asset?, ticker?, amount(atoms), onProgress(text) } -> the funded-channel result; throws with
+    // a clear message on failure (never a silent hang).
+    provisionChannel: async ({ chain, asset, ticker, amount, onProgress }) => {
+      const say = (t) => { try { onProgress && onProgress(t); } catch {} };
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
+      say(chain === 'btc' ? 'Provisioning your Lightning BTC node…' : 'Provisioning your ' + (ticker || 'asset') + ' Lightning node…');
+      const prov = chain === 'btc'
+        ? await provisionAndConnect({ chain: 'btc', label: 'BTC', policy: lnPolicy(),
+            deriveIdentity: () => { const k = lnNodeIdentity(phrase, 'btc'); return { transportPrivkey: k.deviceTransportPrivkey, signingSeed: k.deviceSigningSeed }; } })
+        : await provisionAndConnect({ chain: 'seq', assetId: asset, label: ticker, policy: lnPolicy(),
+            deriveIdentity: (id) => lnDeriveAsset(phrase, id) });
+      if (!(prov && prov.connected)) throw new Error('Could not bring your device signer online for your Lightning node.');
+      say('Preparing your Lightning node (booting and syncing)…');
+      await waitNodeReady({ nodeKey: prov.key, onProgress: () => say('Preparing your Lightning node (booting and syncing)…') });
+      const phaseCopy = { 'deposit-address': 'Getting your hosted node deposit address…', 'sending': 'Signing and sending the on-chain deposit…', 'sent': 'Deposit sent; waiting for confirmation…', 'pending_deposit': 'Waiting for the deposit to confirm on-chain…', 'opening': 'Opening the Lightning channel (your device is co-signing)…', 'awaiting_lockin': 'Channel funding broadcast; waiting for it to confirm…' };
+      say('Your Lightning node is ready. Preparing the on-chain deposit…');
+      const res = await fundChannel({ chain, asset: asset || undefined, amount: Number(amount), node: prov.key, sendOnchain: lnSendDeposit, onProgress: (e) => { if (phaseCopy[e.phase]) say(phaseCopy[e.phase]); } });
+      try { renderLightningBalance(); } catch {}
+      return res;
+    },
+  };
+
   initSwap({
     // scriptToAddress + buildCovenantFillTx are module-level pkg exports; they ride
     // alongside the classes so the passive-CLOB covenant flow (place + FILL) can reach them.
@@ -3373,138 +3545,7 @@ function initSwapTab(){
     // with the Lightning-revealed preimage (device claim key — the LSP never sees it). Without this
     // in the composer context C.btcLeg is undefined and startSell fails its claim-service guard.
     btcLeg,
-    // Instant Lightning (pure-LN) rail: the composer's "Instant (Lightning)"
-    // route for a BTC<->asset pair. Non-custodial via the hosted-signer LSP (the
-    // device co-signs; the LSP commands the hosted node to take a pure-LN offer).
-    ln: {
-      available: () => seqlnAvailable(),
-      // LN is DEPLOYED for this wallet (LSP + node config present) — distinct from available(),
-      // which additionally requires the SHARED hub nodes to be connected. The sub-asset rails pay
-      // from / receive into the user's OWN provisioned node and never touch the shared hub, so they
-      // gate on deployed(), not available() (which is false whenever a shared leg isn't up).
-      deployed: () => { try { return seqlnState().deployed; } catch { return false; } },
-      // Register THIS device's own provisioned-node keys before every /status read, so any caller
-      // (the Balance card AND the swap composer's refreshInstant) sees the wallet's own channels —
-      // not just whichever code path happened to register keys first. Idempotent (signature-cached),
-      // so this is cheap. Without it the composer raced key-registration and showed 0 Lightning.
-      status: async () => { try{ await refreshOwnLnNodeKeys(); }catch{} return seqlnGetStatus(); },
-      // The per-asset provisioned-node signer state — a provisioned-but-channel-less
-      // node informs the composer's "node ready, fund a channel" gating nuance.
-      provisioned: () => provisionedState(),
-      swap: (p) => seqlnSwap(p),
-      // Sub-asset order book: dynamic rail gating (sell_available/buy_available) + resting
-      // offers, and posting the wallet's own signed resting offer (LSP never signs).
-      book: (asset, quote) => seqlnBook(asset, quote),
-      // Unified book: every relay's offers merged, price-sorted, rail-tagged. The QUOTE
-      // asset must be forwarded — this wrapper used to take only `asset`, which silently
-      // dropped it and asked for the BTC-paired market whatever pair was on screen.
-      unifiedBook: (asset, quote) => seqlnUnifiedBook(asset, quote),
-      // PURE-LN book from the relay xpln actually lifts from — the composer prices + PINS off this so
-      // Review matches the settle (not the on-chain cross book, a different market).
-      lnBook: (asset, quote) => seqlnLnBook(asset, quote),
-      postOffer: (o) => seqlnPostOffer(o),
-      // Which of the device's candidate node keys are actually provisioned (registry-resolved, works
-      // for nodes blocked waiting for their signer). Used by the on-load reconnect to rediscover a
-      // node that /status can't see yet. Throws if the endpoint isn't deployed; the caller falls back.
-      listNodes: (keys) => seqlnListNodes(keys),
-      // Sub-asset BUY (pay BTC on-chain, receive asset over LN) — HODL primitives. The DEVICE holds
-      // P; the maker pays H by hash to the user's node; the device settles once held (see startBuy).
-      channelInbound: (p) => seqlnChannelInbound(p),
-      nodeInvoice: (p) => seqlnNodeInvoice(p),
-      invoiceStatus: (p) => seqlnInvoiceStatus(p),
-      nodeSettle: (p) => seqlnNodeSettle(p),
-      nodeReceive: (p) => seqlnNodeReceive(p),
-      nodePay: (p) => seqlnNodePay(p),
-      // BARE-HASH pay — the taker's OWN hosted BTC-LN node commits an HTLC to node_id on H (no bolt11), the
-      // LSP PAYER leg-bridge hold primitive (see subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
-      nodePayHash: (p) => seqlnNodePayHash(p),
-      // W2 FRONT-BEFORE-FUND bridged SELL: arm the LSP front (hold-ready) and, once fronted, hand it the
-      // funded asset leg to relay. The LSP fronts BEFORE the taker exposes any asset (see swap.js driveBridged).
-      bridgeFront: (p) => seqlnBridgeFront(p),
-      bridgeAsset: (p) => seqlnBridgeAsset(p),
-      // LSP PAYER leg-bridge (rail-crossing BUY vs an on-chain-only maker): the LSP issues a BTC-LN hold on
-      // the taker's H so the taker pays it HELD before the LSP funds the maker's on-chain BTC HTLC (see
-      // subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
-      bridgeHold: (p) => seqlnBridgeHold(p),
-      jobStatus: (pathOrId) => seqlnJobStatus(pathOrId),   // advisory async-job status (sub-asset HODL BUY)
-      // The same read that does NOT throw when the job has failed — a failed job
-      // answers ok:false, which lspFetch turns into an exception. Reconciliation
-      // needs the body, not the throw.
-      jobStatusRaw: (pathOrId) => seqlnJobStatusRaw(pathOrId),
-      // The submarine (mixed) async-job status — GET /swap/<id>, the SAME endpoint as jobStatus. Wiring
-      // this is what lets pollMixed advance an anchor-gated (over-0-conf) submarine past SETTLING; it was
-      // referenced by pollMixed but never defined, so those swaps could never learn they settled.
-      // RAW, deliberately. The bridge driver's own failure branch tests
-      // `j.status === 'failed'`, and a failed job answers ok:false — which the
-      // plain read turns into a throw that `.catch(() => null)` eats. Wiring the
-      // throwing read here made that branch unreachable, so a job the LSP had
-      // already failed left the record sitting in 'confirming' forever.
-      swapStatus: (pathOrId) => seqlnJobStatusRaw(pathOrId),
-      // The registry node_key for the user's OWN hosted LN node for `assetHex`
-      // (seq:<asset>:<deviceTransportPubkey>) — matches refreshOwnLnNodeKeys. Needed by the
-      // sub-asset sell/buy /swap calls to name which hosted node pays over Lightning.
-      assetNodeKey: async (assetHex) => {
-        const phrase = (localStorage.getItem(KEY) || '').trim();
-        if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
-        const id = lnDeriveAsset(phrase, assetHex);
-        const pub = await deviceTransportPubkey(id.transportPrivkey);
-        return 'seq:' + assetHex.toLowerCase() + ':' + String(pub).toLowerCase();
-      },
-      // The user's OWN hosted BTC Lightning node key (`btc:<devicepub>`), the counterpart of assetNodeKey
-      // for the BTC leg of an asset<->BTC pure-LN swap. Same device-derived identity the BTC Move-to-Lightning
-      // and rail-candidate paths use (index.html: lnNodeIdentity(phrase,'btc')).
-      btcNodeKey: async () => {
-        const phrase = (localStorage.getItem(KEY) || '').trim();
-        if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
-        const k = lnNodeIdentity(phrase, 'btc');
-        const pub = await deviceTransportPubkey(k.deviceTransportPrivkey);
-        return 'btc:' + String(pub).toLowerCase();
-      },
-      // Bring the on-device signer for the user's OWN hosted asset node ONLINE (idempotent —
-      // re-attaches to the existing provisioned node without re-funding). A per-user node's signer
-      // is NOT auto-connected on load, so this is required before a sub-asset SELL: the LSP commands
-      // that node to pay the asset over Lightning, which needs the device signer serving it.
-      connectNode: async (assetHex) => {
-        const phrase = (localStorage.getItem(KEY) || '').trim();
-        if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
-        return await provisionAndConnect({ chain:'seq', assetId: assetHex, label: assetMeta(assetHex).ticker, policy: lnPolicy(),
-          deriveIdentity: (id) => lnDeriveAsset(phrase, id) });
-      },
-      // Bring the user's OWN hosted BTC Lightning node online (the SAME device identity Move-to-Lightning
-      // BTC uses). A bridged SELL RECEIVES BTC over Lightning, so its BTC node must be provisioned + its
-      // device signer serving before the LSP fronts the hold. Idempotent (re-attaches without re-funding).
-      connectBtcNode: async () => {
-        const phrase = (localStorage.getItem(KEY) || '').trim();
-        if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
-        return await provisionAndConnect({ chain:'btc', label:'BTC', policy: lnPolicy(),
-          deriveIdentity: () => { const k = lnNodeIdentity(phrase, 'btc'); return { transportPrivkey: k.deviceTransportPrivkey, signingSeed: k.deviceSigningSeed }; } });
-      },
-      finalityCopy: () => lnFinalityCopy(),
-      // Open a Lightning channel for a leg INLINE — the SAME non-custodial provision+fund flow as
-      // the Balance-tab Move-to-Lightning (moveToLightningDialog), exposed so the Swap composer can
-      // create a channel on Place-order instead of blocking the Lightning rail. { chain:'btc'|'seq',
-      // asset?, ticker?, amount(atoms), onProgress(text) } -> the funded-channel result; throws with
-      // a clear message on failure (never a silent hang).
-      provisionChannel: async ({ chain, asset, ticker, amount, onProgress }) => {
-        const say = (t) => { try { onProgress && onProgress(t); } catch {} };
-        const phrase = (localStorage.getItem(KEY) || '').trim();
-        if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
-        say(chain === 'btc' ? 'Provisioning your Lightning BTC node…' : 'Provisioning your ' + (ticker || 'asset') + ' Lightning node…');
-        const prov = chain === 'btc'
-          ? await provisionAndConnect({ chain: 'btc', label: 'BTC', policy: lnPolicy(),
-              deriveIdentity: () => { const k = lnNodeIdentity(phrase, 'btc'); return { transportPrivkey: k.deviceTransportPrivkey, signingSeed: k.deviceSigningSeed }; } })
-          : await provisionAndConnect({ chain: 'seq', assetId: asset, label: ticker, policy: lnPolicy(),
-              deriveIdentity: (id) => lnDeriveAsset(phrase, id) });
-        if (!(prov && prov.connected)) throw new Error('Could not bring your device signer online for your Lightning node.');
-        say('Preparing your Lightning node (booting and syncing)…');
-        await waitNodeReady({ nodeKey: prov.key, onProgress: () => say('Preparing your Lightning node (booting and syncing)…') });
-        const phaseCopy = { 'deposit-address': 'Getting your hosted node deposit address…', 'sending': 'Signing and sending the on-chain deposit…', 'sent': 'Deposit sent; waiting for confirmation…', 'pending_deposit': 'Waiting for the deposit to confirm on-chain…', 'opening': 'Opening the Lightning channel (your device is co-signing)…', 'awaiting_lockin': 'Channel funding broadcast; waiting for it to confirm…' };
-        say('Your Lightning node is ready. Preparing the on-chain deposit…');
-        const res = await fundChannel({ chain, asset: asset || undefined, amount: Number(amount), node: prov.key, sendOnchain: lnSendDeposit, onProgress: (e) => { if (phaseCopy[e.phase]) say(phaseCopy[e.phase]); } });
-        try { renderLightningBalance(); } catch {}
-        return res;
-      },
-    },
+    ln: lnApi,
     // Route the user to Move-to-Lightning (the Balance tab's Lightning card) when a leg
     // has no usable channel — the honest fix for an unavailable LN rail.
     gotoLightning: () => { tab('balance'); const c=$('assetList'); if(c && c.scrollIntoView) try{ c.scrollIntoView({behavior:'smooth', block:'center'}); }catch{} },
@@ -3849,6 +3890,26 @@ function accountXpub(){
   }catch(e){ console.warn('[xpub] hd:', e?.message??e); }
   return '';
 }
+// The account key in the form the user picked: the bare extended key, or the pair of
+// descriptors (receive then change) that another wallet imports. The descriptors need the
+// KEYORIGIN prefix to be importable — a bare tpub would import as an unrelated key with no
+// path — so they are only offered when the signer gives us one.
+const XPUB_NOTES = {
+  xpub: 'The account key with its origin path, which is what a watch-only import asks for.',
+  wpkh: 'Import both lines: the first derives your receive addresses, the second your change. These are the tb1 addresses this wallet hands out — the same ones on Sequentia and on Bitcoin testnet4.',
+  pkh:  'The legacy form of the same key. Nothing is paid to these addresses; it is the form a node takes for verifymessage, so it is what someone imports to check a signature made on the Sign tab.',
+};
+function renderXpubForm(){
+  const form = $('xpubForm').value, ko = accountXpub();
+  $('xpubNote').textContent = XPUB_NOTES[form] || '';
+  if(!ko){ $('xpubText').textContent = 'Unavailable — unlock the wallet and try again.'; return; }
+  if(form === 'xpub'){ $('xpubText').textContent = ko; return; }
+  if(!ko.startsWith('[')){
+    $('xpubText').textContent = 'Unavailable — this build reports the account key without its origin path, which a descriptor needs.';
+    return;
+  }
+  $('xpubText').textContent = accountDescriptors(ko, form).join('\n');
+}
 function renderReceive(){
   const a = currentAddress();
   $('addr').textContent = a.toString();   // the shown/copied text is ALWAYS the bare tb1/tsqb1 address (correct on both chains)
@@ -3863,7 +3924,7 @@ function renderReceive(){
   $('btnConf').textContent = showConf ? 'Show non-confidential' : 'Show confidential';
   $('btnXpub').textContent = showXpub ? 'Hide xpub' : 'Show xpub';
   $('xpubReveal').classList.toggle('hide', !showXpub);
-  if(showXpub){ const x = accountXpub(); $('xpubText').textContent = x || 'Unavailable — unlock the wallet and try again.'; }
+  if(showXpub) renderXpubForm();
   $('recvTip').textContent = showConf
     ? 'Confidential (tsqb1…): amounts and assets are hidden on-chain. A separate, opt-in private receive; the Bitcoin side always uses the non-confidential form.'
     : 'Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.';
@@ -4756,6 +4817,7 @@ $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
+$('xpubForm').onchange=()=>renderXpubForm();
 $('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXpubCopy'));
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 

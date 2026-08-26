@@ -59,9 +59,11 @@ Because Sequentia's default addresses are unblinded and use Bitcoin's bech32 for
 `tb1...` string is valid on both chains. The receive index is cycled jointly: after each sync
 the next index is the max of the next-unused index on either chain, so one shared address
 sequence serves both. Confidential (`tsqb1...`) addresses are a per-toggle opt-in on the
-Receive tab only. The same tab reveals the shared account xpub, `keyoriginXpub(Bip.bip84())`
+Receive tab only. The same tab reveals the shared account key — `keyoriginXpub(Bip.bip84())`
 off the wasm `Signer`, falling back to the `btc.js` account node when a `pkg/` build predates
-`Bip`.
+`Bip` — as an extended key or as a checksummed descriptor pair (`descriptor.js`). The pair is
+emitted as `/0/*` and `/1/*` rather than one multipath `<0;1>` descriptor, which sequentiad
+rejects.
 
 HTLC keys for cross-chain swaps come from dedicated branches: the Sequentia side from
 `signer.htlcKeypair()` (`m/3/0`; it was also the original OpenAMP identity, now kept read-only
@@ -240,7 +242,7 @@ the rest can be cleared without loss.
 
 ## Testing
 
-`node --test` (Node 22+) runs the `node:test` suites (37 of the 60 `*.test.mjs` files); the
+`node --test` (Node 22+) runs the `node:test` suites (38 of the 61 `*.test.mjs` files); the
 other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts run directly with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real
