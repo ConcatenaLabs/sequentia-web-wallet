@@ -3037,10 +3037,18 @@ function lnDeadline(p, ms){
   ]);
 }
 const LN_INBOUND_MS = 20000;   // the JIT inbound step may be opening a channel on-chain behind it
-async function lnConnectLeg(asset){
-  if (asset === 'BTC'){ await lnApi.connectBtcNode(); return await lnApi.btcNodeKey(); }
-  await lnApi.connectNode(asset);
-  return await lnApi.assetNodeKey(asset);
+async function lnConnectLeg(asset, say){
+  let node_key;
+  if (asset === 'BTC'){ await lnApi.connectBtcNode(); node_key = await lnApi.btcNodeKey(); }
+  else { await lnApi.connectNode(asset); node_key = await lnApi.assetNodeKey(asset); }
+  // A node the LSP had to (re)start is not answerable yet: a keyless one cannot serve until
+  // this device's signer has attached, and a cold boot re-scans the chain first. Without
+  // this wait the FIRST attempt after any restart always failed — the user saw "your node
+  // is not reachable" and a second attempt, a minute later, worked. Waiting is the honest
+  // version of what they were doing by hand.
+  if (say) say('Preparing your Lightning node (it may be starting up)…');
+  await waitNodeReady({ nodeKey: node_key, onProgress: () => { if (say) say('Preparing your Lightning node (booting and syncing)…'); } });
+  return node_key;
 }
 let _lnSRWired = false;
 function initLnSendReceive(){
@@ -3055,7 +3063,7 @@ function initLnSendReceive(){
     recvBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
       if (!lnApi) throw new Error('open your wallet first');
-      const node_key = await lnConnectLeg(asset);
+      const node_key = await lnConnectLeg(asset, (t) => { st.innerHTML = '<span class="spin"></span>' + esc(t); });
       // JIT inbound liquidity is a Sequentia-asset endpoint: POST /channel/inbound answers
       // "asset must be a Sequentia asset id", so the BTC leg takes the channel it already has.
       if (asset !== 'BTC'){
@@ -3084,7 +3092,7 @@ function initLnSendReceive(){
     sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
       if (!lnApi) throw new Error('open your wallet first');
-      const node_key = await lnConnectLeg(asset);
+      const node_key = await lnConnectLeg(asset, (t) => { st.innerHTML = '<span class="spin"></span>' + esc(t); });
       st.innerHTML = '<span class="spin"></span>Paying over Lightning…';
       const r = await lnApi.nodePay({ node_key, bolt11 });
       if (r && r.paid){ st.className = 'status'; st.textContent = 'Paid ✓' + (r.preimage ? ' · preimage ' + String(r.preimage).slice(0, 16) + '…' : ''); $('lnSendBolt11').value = ''; try { renderLightningBalance(); } catch {} }
