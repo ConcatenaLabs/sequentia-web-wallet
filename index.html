@@ -3028,6 +3028,15 @@ function refreshLnSendReceive(){
 // Bring the hosted node for one leg online and answer its node key. BTC and a Sequentia
 // asset are provisioned from different device identities, so this is the single place that
 // knows which pair of calls a leg takes.
+// Wait no longer than `ms` for `p`. Used where a step is a nicety rather than a
+// requirement: a hosted node that never answers must not hold the whole action.
+function lnDeadline(p, ms){
+  let t; return Promise.race([
+    Promise.resolve(p).finally(() => clearTimeout(t)),
+    new Promise((_, rej) => { t = setTimeout(() => rej(new Error('the hosted node did not answer in time')), ms); }),
+  ]);
+}
+const LN_INBOUND_MS = 20000;   // the JIT inbound step may be opening a channel on-chain behind it
 async function lnConnectLeg(asset){
   if (asset === 'BTC'){ await lnApi.connectBtcNode(); return await lnApi.btcNodeKey(); }
   await lnApi.connectNode(asset);
@@ -3051,7 +3060,12 @@ function initLnSendReceive(){
       // "asset must be a Sequentia asset id", so the BTC leg takes the channel it already has.
       if (asset !== 'BTC'){
         st.innerHTML = '<span class="spin"></span>Ensuring inbound liquidity…';
-        try { await lnApi.channelInbound({ node_key, asset, amount: amt }); } catch(e){ /* best-effort JIT; a funded channel may already have inbound */ }
+        // Best-effort: a funded channel may already have inbound, and an invoice is worth
+        // having either way. It is also the step most likely to stall — the LSP can be
+        // opening a channel on-chain behind it — so it gets a deadline rather than the
+        // spinner it used to leave on screen for minutes.
+        try { await lnDeadline(lnApi.channelInbound({ node_key, asset, amount: amt }), LN_INBOUND_MS); }
+        catch(e){ console.warn('[ln] inbound liquidity (continuing anyway):', e?.message ?? e); }
       }
       st.innerHTML = '<span class="spin"></span>Creating the invoice…';
       const inv = await lnApi.nodeReceive({ node_key, amount: amt, description: 'Receive ' + meta.ticker });
@@ -3474,6 +3488,10 @@ function initSwapTab(){
       return res;
     },
   };
+  // The Send/Receive Lightning cards gate on this binding existing, and the wallet can
+  // already be sitting on one of those tabs by the time it does. Refresh them here so
+  // the card appears when the API arrives rather than on the next tab switch.
+  try{ refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); }
 
   initSwap({
     // scriptToAddress + buildCovenantFillTx are module-level pkg exports; they ride
@@ -4038,6 +4056,11 @@ function prettyErr(e){
     return 'The other side of that offer has gone offline, so it can no longer be filled - reload the market and take a current one.';
   if(/insufficient (funds|balance|capacity)|not enough (funds|liquidity)/i.test(m))
     return 'There is not enough balance or Lightning capacity to complete this at the size requested. Try a smaller amount.';
+  // The LSP relays its node's failures verbatim, e.g. "invoice: Command failed: <path>
+  // --rpc-file=<path> -N none -k invoice amount_msat=...". That is machinery, and it
+  // reached the user unedited because it names nothing the catch-all recognises.
+  if(/Command failed:|--rpc-file|lightningd/i.test(m))
+    return 'Your hosted Lightning node did not complete that request, so nothing was created. It may still be starting up — try again shortly, or with a smaller amount.';
   if(/lightning-rpc|connection refused|ECONNREFUSED/i.test(m))
     return 'Your Lightning node is not reachable right now, so nothing was sent. Reopen the wallet to reconnect it, then try again.';
   if(/timed? ?out|timeout|deadline exceeded/i.test(m))
