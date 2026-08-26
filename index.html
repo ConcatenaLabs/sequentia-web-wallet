@@ -1024,6 +1024,34 @@
           <div class="status" id="oampSignCallbackStatus"></div>
         </div>
       </div>
+      <div class="card">
+        <label class="lbl">Sign a message with your wallet key</label>
+        <p class="sub" style="margin:0 0 10px">The classic signature: made with the private key behind one of
+          your own addresses, and checkable by anyone running a node — <span class="mono">verifymessage</span>,
+          on Sequentia or on Bitcoin, with nothing to look up and no account id involved. Use it to prove an
+          address is yours. Like the signature above it cannot move funds.</p>
+        <div class="field">
+          <label class="lbl">Message</label>
+          <textarea id="keySignMsg" rows="3" placeholder="the text you want to sign"></textarea>
+        </div>
+        <div class="field">
+          <label class="lbl">Address to sign with</label>
+          <input id="keySignIndex" class="mono" type="number" min="0" step="1" value="0" style="width:110px">
+          <div class="mono sub" id="keySignAddr" style="margin-top:6px;word-break:break-all">—</div>
+        </div>
+        <button class="primary" id="keySignBtn" style="margin-top:14px">Sign</button>
+        <div class="status err" id="keySignErr"></div>
+        <div class="rec hide" id="keySignResult">
+          <label class="lbl">Signature</label>
+          <div class="mono" id="keySignSig" style="word-break:break-all">—</div>
+          <button class="ghost" id="keySignCopySig" style="margin-top:6px">Copy signature</button>
+          <label class="lbl" style="margin-top:12px">Verify against this address</label>
+          <div class="mono" id="keySignVerifyAddr" style="word-break:break-all">—</div>
+          <p class="sub" style="margin:6px 0 0">The same key as the address above, written the older way.
+            A node accepts only that form here: it rejects a tb1 address whatever key stands behind it.</p>
+          <button class="ghost" id="keySignCopyCmd" style="margin-top:10px">Copy verify command</button>
+        </div>
+      </div>
     </section>
 
     <!-- settings -->
@@ -1098,6 +1126,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
+import { signMessage, verifyAddress } from './signmessage.js';
 
 const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
@@ -1121,6 +1150,7 @@ const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h
 const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href); a.target='_blank'; a.rel='noopener'; a.textContent=label; return a; };
 
 let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false, showXpub = false;
+let keySignStarted = false;   // the Sign tab opens on the address the Receive tab is showing, once
 
 // ---------- amount helpers (lwk takes u64 -> JS BigInt) ----------
 function fmtAtoms(atoms, d){ atoms = BigInt(atoms); const neg = atoms<0n; if(neg) atoms=-atoms;
@@ -2318,6 +2348,7 @@ function tab(name){
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
   if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
+  if(name==='sign' && !keySignStarted){ keySignStarted=true; $('keySignIndex').value = addrIndex ?? 0; renderKeySign(); }
   if(name==='history') renderHistory();
   if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
   if(name==='swap') renderActiveSwap();
@@ -4721,28 +4752,11 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     }
   }catch(e){ $('sendErr').textContent=e?.message??String(e); } };
 
-// Copy `text`, reporting on the button itself. Plain HTTP is a non-secure context, where
-// navigator.clipboard does not exist at all, so the textarea path is a real fallback here.
-async function copyFromButton(btn, text){
-  if(!btn || !text || text==='—') return;
-  const label=btn.textContent;
-  let ok=false;
-  try{ if(navigator.clipboard?.writeText){ await navigator.clipboard.writeText(text); ok=true; } }catch{}
-  if(!ok){
-    const ta=document.createElement('textarea'); ta.value=text;
-    ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
-    document.body.appendChild(ta); ta.focus(); ta.select();
-    try{ ok=document.execCommand('copy'); }catch{}
-    document.body.removeChild(ta);
-  }
-  btn.textContent = ok ? 'Copied!' : 'Copy failed';
-  setTimeout(()=>{ btn.textContent=label; }, 1200);
-}
-$('btnCopy').onclick=()=>copyFromButton($('btnCopy'), $('addr').textContent);
+$('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
-$('btnXpubCopy').onclick=()=>copyFromButton($('btnXpubCopy'), $('xpubText').textContent);
+$('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXpubCopy'));
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
 $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
@@ -5839,6 +5853,37 @@ $('oampSignBtn').onclick=async()=>{
   }catch(e){ $('oampSignErr').textContent=e?.message??String(e); }
 };
 $('oampSignCopySig').onclick=()=>copyToClipboard($('oampSignSig').textContent, $('oampSignCopySig'));
+
+// ---------- classic message signing ----------
+// The key-derived counterpart to the OpenAMP card: an ordinary signed message over the
+// key behind one of this wallet's own addresses, in the format `verifymessage` accepts.
+// It proves control of an ADDRESS, where the tagged OpenAMP signature proves control of
+// an enclave account id — and it needs no enclave, no registration and no explorer.
+// Signing keys come from the shared BIP84 branch (m/84'/1'/0'/0/i), the same keys behind
+// the Receive tab's addresses on both chains.
+function keySignIndex(){ const v = Math.floor(Number($('keySignIndex').value)); return Number.isFinite(v) && v >= 0 ? v : 0; }
+function renderKeySign(){
+  let a = '—'; try{ a = btcAddr(false, keySignIndex()); }catch(e){ console.warn('[sign] address:', e?.message??e); }
+  $('keySignAddr').textContent = a;
+}
+$('keySignIndex').oninput = renderKeySign;
+$('keySignBtn').onclick = () => {
+  $('keySignErr').textContent = '';
+  try{
+    if(!btcRoot) throw new Error('open your wallet first');
+    const msg = $('keySignMsg').value;
+    if(!msg) throw new Error('enter the message you want to sign');
+    const node = btcNode(false, keySignIndex());
+    const sig = signMessage(node.privateKey, msg);
+    const addr = verifyAddress(node.publicKey, btc.TEST_NETWORK);
+    $('keySignSig').textContent = sig;
+    $('keySignVerifyAddr').textContent = addr;
+    show('keySignResult', true);
+    $('keySignCopyCmd').onclick = () =>
+      copyToClipboard(`verifymessage "${addr}" "${sig}" "${msg.replace(/"/g, '\\"')}"`, $('keySignCopyCmd'));
+  }catch(e){ $('keySignErr').textContent = e?.message ?? String(e); }
+};
+$('keySignCopySig').onclick = () => copyToClipboard($('keySignSig').textContent, $('keySignCopySig'));
 
 // ---------- OpenAMP restricted-transfer history (WW-6, spec 1.5(b), 1.7) ----------
 // openampd exposes no per-holder history endpoint (spec 0.5(2)): the wallet tracks its OWN sent
