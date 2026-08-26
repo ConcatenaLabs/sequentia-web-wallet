@@ -9155,7 +9155,7 @@ async function postOfferReview(q){
 // order-book rendering (resting offers + your own orders)
 // ---------------------------------------------------------------------------
 function short(s){ s = s || ''; return s.length > 14 ? s.slice(0,8) + '…' + s.slice(-4) : s; }
-function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+export function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
 // Same-chain SeqOB book, rendered as the shared ladder. Prices are PAY per 1 RECEIVE
 // (the conventional quote, matching the mid). ASKS are the offers we can take (give

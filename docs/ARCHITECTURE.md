@@ -238,7 +238,7 @@ the rest can be cleared without loss.
 
 ## Testing
 
-`node --test` (Node 22+) runs the `node:test` suites (33 of the 56 `*.test.mjs` files); the
+`node --test` (Node 22+) runs the `node:test` suites (36 of the 59 `*.test.mjs` files); the
 other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts run directly with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real

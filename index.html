@@ -1079,7 +1079,7 @@ import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoCon
 import * as seqob from './seqob.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
-import { initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
+import { esc, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -2308,11 +2308,11 @@ function views(active){ for(const v of ['welcome','createView','importView','app
 function tab(name){
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
-  if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch{} }
+  if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='history') renderHistory();
   if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
   if(name==='swap') renderActiveSwap();
-  if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch{} }
+  if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='assets') populateIssueFeeAssets();
   if(name==='mix') try{ renderMix(); }catch(e){ console.error(e); }
   if(name==='balance') try{ renderBalance(); }catch{}   // render immediately (from cache pre-scan), don't wait for the scan
@@ -2926,7 +2926,7 @@ async function refreshOwnLnNodeKeys(){
 // renderBalance renders synchronously from the cache, so there is no render loop.
 async function refreshLnStatus(){
   const note=$('lnHelpNote');
-  try{ initLnSendReceive(); refreshLnSendReceive(); }catch{}   // wire + refresh the LN send/receive cards
+  try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); }   // wire + refresh the LN send/receive cards
   if(!seqlnState().deployed){ if(note) note.classList.add('hide'); try{ renderBalance(); }catch{} try{ lnStatusPill(); }catch{} return; }
   if(note) note.classList.remove('hide');
   try{ await refreshOwnLnNodeKeys(); }catch{}   // so /status includes this device's own nodes across reloads
