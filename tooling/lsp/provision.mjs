@@ -39,6 +39,52 @@ function pubkeyOf(privHex) {
   return ecdh.getPublicKey('hex', 'compressed');
 }
 
+// The processes belonging to ONE node dir, picked out of a /proc-style listing. A node's
+// lightningd, its hsmd proxy subdaemon and any hung lightning-cli all carry the node's own
+// directory in their command line, which is what makes this safe: nothing is ever matched by
+// a loose pattern, only by the exact directory the caller owns.
+export function matchNodeProcs(entries, dir) {
+  const out = { lightningd: [], related: [] };
+  if (!dir) return out;
+  for (const { pid, cmdline } of entries) {
+    if (!cmdline || !cmdline.includes(dir)) continue;
+    if (cmdline.includes('--lightning-dir=' + dir)) out.lightningd.push(pid);
+    else out.related.push(pid);
+  }
+  return out;
+}
+
+// Whether a ws relay is already serving this node's ws port. bootNode used to spawn one
+// unconditionally, so every re-boot of a node whose relay was still alive left a corpse
+// logging "listen EADDRINUSE" forever — thousands of lines in relay.out, and a real relay
+// failure indistinguishable from the noise.
+export function relayRunning(entries, wsPort) {
+  const want = String(wsPort);
+  return entries.some(({ cmdline }) => {
+    if (!cmdline || !cmdline.includes('seqln-ws-relay')) return false;
+    // Whole ARGUMENT, not a substring: port 1891 must not match a relay on 18915.
+    const argv = cmdline.split(/\s+/);
+    const i = argv.indexOf('--ws-port');
+    return i >= 0 && argv[i + 1] === want;
+  });
+}
+
+// Read the process table as [{pid, cmdline}]. /proc directly, so there is no dependency on
+// pgrep/ss and no chance of matching this process's own command line.
+export function readProcTable(procDir = '/proc') {
+  const out = [];
+  let pids;
+  try { pids = fs.readdirSync(procDir); } catch { return out; }
+  for (const name of pids) {
+    if (!/^[0-9]+$/.test(name)) continue;
+    try {
+      const raw = fs.readFileSync(path.join(procDir, name, 'cmdline'), 'utf8');
+      if (raw) out.push({ pid: Number(name), cmdline: raw.replace(/\0/g, ' ').trim() });
+    } catch { /* the process exited between readdir and read — ignore */ }
+  }
+  return out;
+}
+
 // A provisioning context, built once from the LSP env.
 export function makeProvisioner(opts) {
   const CFG = {
@@ -160,7 +206,15 @@ export function makeProvisioner(opts) {
       }
       const info = await getinfo(rec);
       if (info) { rec.node_id = info.id; rec.status = 'running'; save(reg); return rec; }
-      // Node dir exists but lightningd is down -> re-boot it (crash-safe: same dir/keys).
+      // RPC did not answer. Either the node is DOWN, or it is UP and WEDGED — the second
+      // case is the one that used to be unrecoverable. A keyless node cannot answer RPC
+      // without a device signer attached, and the hsmd proxy accepts only the FIRST signer
+      // session per lightningd: once that session ends, every later one is handshaken and
+      // dropped (519 bytes out, 1303 back, closed), so the node can never serve again.
+      // Booting another lightningd on top only trips the PID lock and leaves a corpse, so
+      // the node stayed wedged forever while the wallet showed "could not create the
+      // invoice". Kill the wedged instance first; the fresh one's signer slot is clean.
+      await reviveIfWedged(rec);
       bootNode(rec, deviceTransportPubkey);
       rec.status = 'booting'; save(reg);
       return rec;
@@ -219,6 +273,29 @@ export function makeProvisioner(opts) {
     return rec;
   }
 
+  // Kill a lightningd that is running but unable to serve, together with the hsmd proxy and
+  // any hung lightning-cli in its directory. Only processes whose command line carries THIS
+  // node's directory are touched — never a pattern kill. A no-op when nothing is running,
+  // which is the ordinary "node is simply down" case.
+  async function reviveIfWedged(rec) {
+    const procs = matchNodeProcs(readProcTable(), rec.dir);
+    const pids = [...procs.lightningd, ...procs.related];
+    if (!procs.lightningd.length) return false;   // nothing wedged: a plain cold boot follows
+    for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+    await new Promise((r) => setTimeout(r, 4000));
+    // Whatever is left after the grace period goes down hard — the proxy included. It holds
+    // the signer port, so a proxy that outlives its lightningd makes the next boot come up
+    // deaf: the port is taken, and the device's session reaches nothing that can sign.
+    const left = matchNodeProcs(readProcTable(), rec.dir);
+    for (const pid of [...left.lightningd, ...left.related]) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+    bootedAt.delete(rec.key);   // a revive MUST be followed by a boot; don't let the debounce eat it
+    console.log(`[prov] revived wedged node ${rec.label} (${rec.dir}): killed ${pids.join(',')}`);
+    return true;
+  }
+
   // Boot (or re-boot) lightningd + the ws relay for a node record, detached.
   // IDEMPOTENT: coalesces a boot race for the same key (see bootedAt above) so we
   // never spawn a duplicate relay/lightningd. Returns true if it actually booted.
@@ -271,12 +348,19 @@ export function makeProvisioner(opts) {
     ld.unref();
     // The relay: ws front -> the proxy's Noise responder. --tcp-retry-ms rides out the
     // gap before lightningd execs the proxy (which binds the responder at startup).
-    const relayLog = fs.openSync(path.join(rec.dir, 'relay.out'), 'a');
-    const rl = spawn(CFG.node,
-      [CFG.wsRelay, '--ws-port', String(rec.wsPort), '--tcp', `127.0.0.1:${rec.signerPort}`, '--tcp-retry-ms', '120000'],
-      { detached: true, stdio: ['ignore', relayLog, relayLog] });
-    rl.unref();
-    rec.pids = { lightningd: ld.pid, relay: rl.pid };
+    // Only if one is not already serving this port. The relay is keyless and outlives a
+    // lightningd restart quite happily, so re-booting a node whose relay is alive used to
+    // spawn a second one that could do nothing but log "listen EADDRINUSE" on a loop.
+    let relayPid = (rec.pids && rec.pids.relay) || null;
+    if (!relayRunning(readProcTable(), rec.wsPort)) {
+      const relayLog = fs.openSync(path.join(rec.dir, 'relay.out'), 'a');
+      const rl = spawn(CFG.node,
+        [CFG.wsRelay, '--ws-port', String(rec.wsPort), '--tcp', `127.0.0.1:${rec.signerPort}`, '--tcp-retry-ms', '120000'],
+        { detached: true, stdio: ['ignore', relayLog, relayLog] });
+      rl.unref();
+      relayPid = rl.pid;
+    }
+    rec.pids = { lightningd: ld.pid, relay: relayPid };
     return true;
   }
 
