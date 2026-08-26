@@ -442,6 +442,7 @@
         <!-- Lightning is folded INTO each asset row now (on-chain + Lightning split + the
              move/close actions). This note just explains the non-custodial mechanism; shown
              only when an LSP is configured. -->
+        <div class="warn hide" id="lnStrandNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
           <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it, so only you can move the funds. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
@@ -2757,6 +2758,31 @@ function ownLnLegs(){ try{ return JSON.parse(localStorage.getItem(_ownLnLegsKey)
 function rememberOwnLnLeg(leg){ if(!leg) return; const s=new Set(ownLnLegs()); if(s.has(leg)) return; s.add(leg); try{ localStorage.setItem(_ownLnLegsKey, JSON.stringify([...s])); }catch{} }
 const _lnReconnectedLegs = new Set();
 const _lnStrandRecovered = new Set();   // nodes whose stranded deposit we've already completed this session
+const STRAND_BLOCKED = 'swk.ln.strandBlocked';   // { [nodeKey]: { at, reason } } — recoveries not to retry
+function strandBlocked(){ try{ return JSON.parse(localStorage.getItem(STRAND_BLOCKED)||'{}'); }catch{ return {}; } }
+// Record a stranded-deposit recovery that must NOT be retried, and why.
+//
+// A recovery the DEVICE refused is not a transient failure: the same deposit produces the
+// same commitment and the same refusal every time, and each attempt costs the node its
+// signer session — lightningd drops the connection when a signer says no. Retrying it on
+// every reconnect sweep therefore made the node permanently unusable: every twelve seconds
+// something tore its signer down, so no invoice, no payment and no channel could ever
+// complete on it. Seen live on an asset node that had been unusable for hours.
+//
+// The refusal itself is correct and stays: a device that signs a commitment paying a
+// non-channel script is a device that can be talked out of its own funds.
+function blockStrandRecovery(nodeKey, reason){
+  try{
+    const all = strandBlocked();
+    all[nodeKey] = { at: Date.now(), reason: String(reason || '').slice(0, 300) };
+    localStorage.setItem(STRAND_BLOCKED, JSON.stringify(all));
+  }catch{}
+}
+// A refusal by this device's own signer, as opposed to a network blip worth retrying.
+function isSignerRefusal(e){
+  const m = (e && (e.message || e)) ? String(e.message || e) : '';
+  return /refus|policy|not a channel|non-channel/i.test(m);
+}
 const _lnLegNodeKey = {};               // leg ('btc' | assethex) -> resolved LSP registry key, for liveness checks
 let _lnDiscoveryDone = false;   // the registry discovery pass runs once (per successful call) per session
 let _reconnectInFlight = false; // single-flight: the /status poll and the wake/interval driver can call concurrently
@@ -2813,7 +2839,7 @@ async function reconnectOwnNodes(){
     // node). Detect via /node/onchain (registry-safe, waits for the node to boot + rescan) and
     // complete it from the landed deposit (no re-deposit). Guarded so it runs once per node.
     for(const k of readyKeys){
-      if(k==='btc' || !/^seq:/i.test(k) || _lnStrandRecovered.has(k)) continue;
+      if(k==='btc' || !/^seq:/i.test(k) || _lnStrandRecovered.has(k) || strandBlocked()[k]) continue;
       try{
         let info=null;
         for(let i=0;i<10;i++){ try{ info = await seqlnNodeOnchain(k); }catch{ info=null; } if(info && info.node_up) break; await new Promise(r=>setTimeout(r,3000)); }
@@ -2829,10 +2855,32 @@ async function reconnectOwnNodes(){
             try{ lnLastStatus = await seqlnGetStatus(); renderBalance(); lnStatusPill(); }catch{}
           }
         }
-      }catch(e){ _lnStrandRecovered.delete(k); console.warn('[ln] strand recovery (will retry next open):', e?.message??e); }
+      }catch(e){
+        if(isSignerRefusal(e)){
+          blockStrandRecovery(k, e?.message ?? e);
+          console.warn('[ln] strand recovery REFUSED by this device; not retrying:', e?.message ?? e);
+        } else {
+          _lnStrandRecovered.delete(k);
+          console.warn('[ln] strand recovery (will retry next open):', e?.message ?? e);
+        }
+        try{ renderStrandBlocked(); }catch{}
+      }
     }
   }
   } finally { _reconnectInFlight = false; }
+}
+
+// Say so when a stranded deposit could not be completed. The funds are on the node and
+// still the user's; what cannot happen is this wallet quietly signing its way to them.
+function renderStrandBlocked(){
+  const host = $('lnStrandNote'); if(!host) return;
+  const all = strandBlocked(), keys = Object.keys(all);
+  if(!keys.length){ host.classList.add('hide'); return; }
+  const names = keys.map(k => assetMeta((k.split(':')[1]||'').toLowerCase()).ticker).join(', ');
+  host.classList.remove('hide');
+  host.textContent = 'A deposit on your ' + names + ' Lightning node could not be finished: your device '
+    + 'refused to sign it, because the transaction it was asked for did not pay into the channel. The '
+    + 'funds are still on that node. Nothing will retry automatically.';
 }
 
 // Liveness sweep for THIS wallet's own hosted-node signers. Two failure modes to survive:
@@ -2985,6 +3033,7 @@ async function refreshOwnLnNodeKeys(){
 // renderBalance renders synchronously from the cache, so there is no render loop.
 async function refreshLnStatus(){
   const note=$('lnHelpNote');
+  try{ renderStrandBlocked(); }catch(e){ console.warn('[ln] strand note:', e?.message??e); }
   try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); }   // wire + refresh the LN send/receive cards
   if(!seqlnState().deployed){ if(note) note.classList.add('hide'); try{ renderBalance(); }catch{} try{ lnStatusPill(); }catch{} return; }
   if(note) note.classList.remove('hide');
