@@ -1141,7 +1141,7 @@ import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resu
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
-  seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState,
+  seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { signMessage, verifyAddress } from './signmessage.js';
@@ -2874,13 +2874,28 @@ async function reconnectOwnNodes(){
 // still the user's; what cannot happen is this wallet quietly signing its way to them.
 function renderStrandBlocked(){
   const host = $('lnStrandNote'); if(!host) return;
+  const lines = [];
   const all = strandBlocked(), keys = Object.keys(all);
-  if(!keys.length){ host.classList.add('hide'); return; }
-  const names = keys.map(k => assetMeta((k.split(':')[1]||'').toLowerCase()).ticker).join(', ');
+  if(keys.length){
+    const names = keys.map(k => assetMeta((k.split(':')[1]||'').toLowerCase()).ticker).join(', ');
+    lines.push('A deposit on your ' + names + ' Lightning node could not be finished: your device refused '
+      + 'to sign it, because the transaction it was asked for did not pay into the channel. The funds are '
+      + 'still on that node. Nothing will retry automatically.');
+  }
+  // A node whose STARTUP asks for a refused signature never finishes starting, and every
+  // other card then reports it as unreachable — true, but not the reason. Say the reason.
+  try{
+    for(const [label, r] of signerRefusals()){
+      const hex = (String(label).split(':')[1] || '').toLowerCase();
+      const who = hex ? assetMeta(hex).ticker : String(label);
+      lines.push('Your ' + who + ' Lightning node asked this device to sign ' + esc(r.name) + ', and it '
+        + 'refused: ' + esc(r.reason) + '. That is the device protecting your funds, and it is also why the '
+        + 'node will not start — it keeps asking for the same signature.');
+    }
+  }catch(e){ console.warn('[ln] refusal note:', e?.message??e); }
+  if(!lines.length){ host.classList.add('hide'); return; }
   host.classList.remove('hide');
-  host.textContent = 'A deposit on your ' + names + ' Lightning node could not be finished: your device '
-    + 'refused to sign it, because the transaction it was asked for did not pay into the channel. The '
-    + 'funds are still on that node. Nothing will retry automatically.';
+  host.textContent = lines.join(' ');
 }
 
 // Liveness sweep for THIS wallet's own hosted-node signers. Two failure modes to survive:

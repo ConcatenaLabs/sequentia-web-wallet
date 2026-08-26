@@ -194,8 +194,16 @@ function chStoreFor(storageKey) {
 // A policy refusal kills the channel it was for (channeld exits, every later HTLC
 // on it fails with "unowned"), so the REASON must reach the log — otherwise the
 // wallet reports a generic Lightning failure for a decision the device made.
+// The last refusal per node, so the WALLET can say what happened rather than reporting the
+// node as unreachable. A refusal is not a transient failure: lightningd drops the signer
+// session when a signer says no, and if the request comes from the node's startup the node
+// never finishes starting — it looks exactly like a node that is down, and stays that way.
+const _lastRefusal = new Map();
+export function signerRefusals() { return new Map(_lastRefusal); }
+export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
 function onRejectFor(label) {
   return ({ name, reason }) => {
+    _lastRefusal.set(label, { name, reason, at: Date.now() });
     console.warn(`seqln[${label}]: the signer REFUSED ${name} — ${reason}`);
   };
 }
