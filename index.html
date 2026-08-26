@@ -500,6 +500,15 @@
           <button id="btnCopy">Copy</button>
           <button id="btnNewAddr">New address</button>
           <button class="ghost" id="btnConf">Show confidential</button>
+          <button class="ghost" id="btnXpub">Show xpub</button>
+        </div>
+        <div class="rec hide" id="xpubReveal">
+          <label class="lbl">Account extended public key</label>
+          <div class="mono" id="xpubText" style="word-break:break-all;margin-top:6px">—</div>
+          <p class="sub" style="margin:10px 0 0">Watch-only. It derives every address this wallet will ever
+            use — on Sequentia and on Bitcoin testnet4, which share this one account key — so anyone holding
+            it can follow your whole history on both chains. It cannot spend: only the recovery phrase can.</p>
+          <button class="ghost" id="btnXpubCopy" style="margin-top:10px">Copy xpub</button>
         </div>
       </div>
       <div class="card hide" id="lnRecvCard">
@@ -1111,7 +1120,7 @@ const $ = id => document.getElementById(id);
 const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.textContent=h; return e;};
 const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href); a.target='_blank'; a.rel='noopener'; a.textContent=label; return a; };
 
-let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false;
+let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false, showXpub = false;
 
 // ---------- amount helpers (lwk takes u64 -> JS BigInt) ----------
 function fmtAtoms(atoms, d){ atoms = BigInt(atoms); const neg = atoms<0n; if(neg) atoms=-atoms;
@@ -3788,6 +3797,27 @@ function currentAddress(){
   const r = wollet.address(addrIndex==null?undefined:addrIndex); addrIndex=r.index();
   const a = r.address(); return showConf ? a : a.toUnconfidential();
 }
+// The account extended public key, in the keyorigin form a watch-only import wants:
+// "[fingerprint/84h/1h/0h]tpub...". One key covers BOTH chains — the Sequentia and
+// Bitcoin sides derive from the same m/84'/1'/0' account, which is why they share an
+// address. Bip is read off the module NAMESPACE rather than imported by name: a named
+// import of something an older pkg/ build does not export takes the whole wallet down,
+// and this is a display convenience, not a reason to lose the page.
+const TESTNET_BIP32_VERSIONS = { private: 0x04358394, public: 0x043587cf };   // tprv/tpub
+function accountXpub(){
+  try{ if(lwk.Bip && signer) return signer.keyoriginXpub(lwk.Bip.bip84()); }
+  catch(e){ console.warn('[xpub] signer:', e?.message??e); }
+  // Fallback: the same account node, from the BTC side. btcRoot carries scure-bip32's
+  // DEFAULT version bytes, which serialize as a mainnet "xpub..." — wrong for a testnet
+  // wallet and wrong in a way a reader would not catch, so re-derive with the testnet
+  // versions rather than reserialize btcRoot.
+  try{
+    const phrase=(localStorage.getItem(KEY)||'').trim();
+    if(phrase) return HDKey.fromMasterSeed(mnemonicToSeedSync(phrase), TESTNET_BIP32_VERSIONS)
+      .derive("m/84'/1'/0'").publicExtendedKey;
+  }catch(e){ console.warn('[xpub] hd:', e?.message??e); }
+  return '';
+}
 function renderReceive(){
   const a = currentAddress();
   $('addr').textContent = a.toString();   // the shown/copied text is ALWAYS the bare tb1/tsqb1 address (correct on both chains)
@@ -3800,6 +3830,9 @@ function renderReceive(){
   // Until then the visible/copied address above is correct; only the encoded QR carries the scheme.
   try{ $('qr').src = a.QRCodeUri(); }catch{ $('qr').removeAttribute('src'); }
   $('btnConf').textContent = showConf ? 'Show non-confidential' : 'Show confidential';
+  $('btnXpub').textContent = showXpub ? 'Hide xpub' : 'Show xpub';
+  $('xpubReveal').classList.toggle('hide', !showXpub);
+  if(showXpub){ const x = accountXpub(); $('xpubText').textContent = x || 'Unavailable — unlock the wallet and try again.'; }
   $('recvTip').textContent = showConf
     ? 'Confidential (tsqb1…): amounts and assets are hidden on-chain. A separate, opt-in private receive; the Bitcoin side always uses the non-confidential form.'
     : 'Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.';
@@ -4688,12 +4721,14 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     }
   }catch(e){ $('sendErr').textContent=e?.message??String(e); } };
 
-$('btnCopy').onclick=async()=>{
-  const text=$('addr').textContent; if(!text||text==='—') return;
-  const btn=$('btnCopy'), old=btn.textContent;
+// Copy `text`, reporting on the button itself. Plain HTTP is a non-secure context, where
+// navigator.clipboard does not exist at all, so the textarea path is a real fallback here.
+async function copyFromButton(btn, text){
+  if(!btn || !text || text==='—') return;
+  const label=btn.textContent;
   let ok=false;
   try{ if(navigator.clipboard?.writeText){ await navigator.clipboard.writeText(text); ok=true; } }catch{}
-  if(!ok){ // plain HTTP is a non-secure context: navigator.clipboard is unavailable, fall back
+  if(!ok){
     const ta=document.createElement('textarea'); ta.value=text;
     ta.style.cssText='position:fixed;top:0;left:0;opacity:0';
     document.body.appendChild(ta); ta.focus(); ta.select();
@@ -4701,10 +4736,13 @@ $('btnCopy').onclick=async()=>{
     document.body.removeChild(ta);
   }
   btn.textContent = ok ? 'Copied!' : 'Copy failed';
-  setTimeout(()=>{ btn.textContent=old; }, 1200);
-};
+  setTimeout(()=>{ btn.textContent=label; }, 1200);
+}
+$('btnCopy').onclick=()=>copyFromButton($('btnCopy'), $('addr').textContent);
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
+$('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
+$('btnXpubCopy').onclick=()=>copyFromButton($('btnXpubCopy'), $('xpubText').textContent);
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
 $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
