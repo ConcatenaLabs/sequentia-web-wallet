@@ -39,17 +39,21 @@ function pubkeyOf(privHex) {
   return ecdh.getPublicKey('hex', 'compressed');
 }
 
-// The processes belonging to ONE node dir, picked out of a /proc-style listing. A node's
-// lightningd, its hsmd proxy subdaemon and any hung lightning-cli all carry the node's own
-// directory in their command line, which is what makes this safe: nothing is ever matched by
-// a loose pattern, only by the exact directory the caller owns.
+// The processes belonging to ONE node dir, picked out of a /proc-style listing: its
+// lightningd, the hsmd proxy that holds the signer port, and any lightning-cli hung on its
+// socket. Two things keep this safe to kill from a server. The directory must be the node's
+// own — never a loose pattern. And carrying that directory is NOT enough: speculad, the
+// keyless watchtower, watches a node's netdir and is nobody's subdaemon, so a node revive
+// must leave it alone (it does have a systemd unit to bring it back, but a watchtower that
+// is restarted every time a node is revived is a watchtower that is not watching).
+const NODE_PROC = /(^|\/)(lightning_hsmd|lightning-cli|lightningd)/;
 export function matchNodeProcs(entries, dir) {
   const out = { lightningd: [], related: [] };
   if (!dir) return out;
   for (const { pid, cmdline } of entries) {
     if (!cmdline || !cmdline.includes(dir)) continue;
-    if (cmdline.includes('--lightning-dir=' + dir)) out.lightningd.push(pid);
-    else out.related.push(pid);
+    if (cmdline.includes('--lightning-dir=' + dir)) { out.lightningd.push(pid); continue; }
+    if (NODE_PROC.test(cmdline.split(/\s+/)[0] || '')) out.related.push(pid);
   }
   return out;
 }

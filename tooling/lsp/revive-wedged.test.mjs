@@ -21,6 +21,9 @@ const table = [
   { pid: 30, cmdline: '/usr/bin/node /root/sequentia/sequentia-web-wallet/tooling/lsp/lsp-server.mjs' },
   { pid: 40, cmdline: '/root/Sequentia/src/sequentiad -datadir=/root/seq-testnet/node000' },
   { pid: 50, cmdline: '/usr/bin/node seqln-ws-relay.mjs --ws-port 18915 --tcp 127.0.0.1:9915' },
+  // The keyless watchtower. It watches THIS node's netdir, so it carries the directory —
+  // and it is nobody's subdaemon. A revive killed it live once; it must not again.
+  { pid: 60, cmdline: `/root/sequentia/seqln/speculad/speculad --netdir=${DIR}/sequentia-testnet --network=sequentia-testnet` },
 ];
 
 test('a node claims its own lightningd, proxy and hung CLIs — and nothing else', () => {
@@ -33,6 +36,11 @@ test('another node, the LSP itself and the chain node are never touched', () => 
   const m = matchNodeProcs(table, DIR);
   const claimed = new Set([...m.lightningd, ...m.related]);
   for (const pid of [20, 30, 40]) assert.ok(!claimed.has(pid), `pid ${pid} must be left alone`);
+});
+
+test('the watchtower watching this node survives its revive', () => {
+  const m = matchNodeProcs(table, DIR);
+  assert.ok(![...m.lightningd, ...m.related].includes(60), 'speculad must not be killed by a node revive');
 });
 
 test('a node with nothing running is a cold boot, not a revive', () => {
