@@ -59,7 +59,9 @@ Because Sequentia's default addresses are unblinded and use Bitcoin's bech32 for
 `tb1...` string is valid on both chains. The receive index is cycled jointly: after each sync
 the next index is the max of the next-unused index on either chain, so one shared address
 sequence serves both. Confidential (`tsqb1...`) addresses are a per-toggle opt-in on the
-Receive tab only.
+Receive tab only. The same tab reveals the shared account xpub, `keyoriginXpub(Bip.bip84())`
+off the wasm `Signer`, falling back to the `btc.js` account node when a `pkg/` build predates
+`Bip`.
 
 HTLC keys for cross-chain swaps come from dedicated branches: the Sequentia side from
 `signer.htlcKeypair()` (`m/3/0`; it was also the original OpenAMP identity, now kept read-only

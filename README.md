@@ -84,7 +84,9 @@ The tabs:
 - **Receive**: one address for both chains. The default is the non-confidential `tb1...` form,
   which is Bitcoin-compatible: the same address receives parent-chain BTC and Sequentia assets.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
-  Sequentia is transparent by default and confidentiality is opt-in. A separate panel appears
+  Sequentia is transparent by default and confidentiality is opt-in. **Show xpub** reveals the
+  account extended public key (`[fingerprint/84h/1h/0h]tpub...`) for a watch-only import — one
+  key for both chains, since they share the `m/84'/1'/0'` account. A separate panel appears
   for OpenAMP restricted-asset deposits once the wallet is registered with the enclave.
 - **Swap** (the Trade tab): see below.
 - **Mix**: a CoinJoin round through the seqcj coordinator. The wallet picks the coins, proves
