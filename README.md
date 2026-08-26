@@ -86,9 +86,13 @@ The tabs:
   which is Bitcoin-compatible: the same address receives parent-chain BTC and Sequentia assets.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
   Sequentia is transparent by default and confidentiality is opt-in. **Show xpub** reveals the
-  account extended public key (`[fingerprint/84h/1h/0h]tpub...`) for a watch-only import — one
-  key for both chains, since they share the `m/84'/1'/0'` account. A separate panel appears
-  for OpenAMP restricted-asset deposits once the wallet is registered with the enclave.
+  account key for a watch-only import — one key for both chains, since they share the
+  `m/84'/1'/0'` account — as the extended public key
+  (`[fingerprint/84h/1h/0h]tpub...`) or as an importable descriptor pair, receive and change,
+  in either the `wpkh(...)` form that matches this wallet's addresses or the legacy `pkh(...)`
+  form that `verifymessage` uses. A separate panel appears for OpenAMP restricted-asset
+  deposits once the wallet is registered with the enclave. A Lightning card generates an
+  invoice against the hosted node for native BTC or any fee-rated asset.
 - **Swap** (the Trade tab): see below.
 - **Mix**: a CoinJoin round through the seqcj coordinator. The wallet picks the coins, proves
   it owns them, hands out fresh blinded addresses, and verifies the coordinator's transaction
@@ -201,6 +205,7 @@ works normally without the restricted rows.
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
+| `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |

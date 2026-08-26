@@ -510,12 +510,18 @@
           <button class="ghost" id="btnXpub">Show xpub</button>
         </div>
         <div class="rec hide" id="xpubReveal">
-          <label class="lbl">Account extended public key</label>
-          <div class="mono" id="xpubText" style="word-break:break-all;margin-top:6px">—</div>
-          <p class="sub" style="margin:10px 0 0">Watch-only. It derives every address this wallet will ever
-            use — on Sequentia and on Bitcoin testnet4, which share this one account key — so anyone holding
-            it can follow your whole history on both chains. It cannot spend: only the recovery phrase can.</p>
-          <button class="ghost" id="btnXpubCopy" style="margin-top:10px">Copy xpub</button>
+          <label class="lbl">Account key</label>
+          <select id="xpubForm" style="margin-bottom:8px">
+            <option value="xpub">Extended public key</option>
+            <option value="wpkh">Descriptor — wpkh, this wallet's addresses</option>
+            <option value="pkh">Descriptor — pkh, the legacy form</option>
+          </select>
+          <div class="mono" id="xpubText" style="word-break:break-all;white-space:pre-wrap">—</div>
+          <p class="sub" id="xpubNote" style="margin:10px 0 0"></p>
+          <p class="sub" style="margin:8px 0 0">Watch-only either way. It derives every address this wallet
+            will ever use — on Sequentia and on Bitcoin testnet4, which share this one account key — so anyone
+            holding it can follow your whole history on both chains. It cannot spend: only the phrase can.</p>
+          <button class="ghost" id="btnXpubCopy" style="margin-top:10px">Copy</button>
         </div>
       </div>
       <div class="card hide" id="lnRecvCard">
@@ -1138,6 +1144,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { signMessage, verifyAddress } from './signmessage.js';
+import { accountDescriptors } from './descriptor.js';
 
 const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
@@ -3883,6 +3890,26 @@ function accountXpub(){
   }catch(e){ console.warn('[xpub] hd:', e?.message??e); }
   return '';
 }
+// The account key in the form the user picked: the bare extended key, or the pair of
+// descriptors (receive then change) that another wallet imports. The descriptors need the
+// KEYORIGIN prefix to be importable — a bare tpub would import as an unrelated key with no
+// path — so they are only offered when the signer gives us one.
+const XPUB_NOTES = {
+  xpub: 'The account key with its origin path, which is what a watch-only import asks for.',
+  wpkh: 'Import both lines: the first derives your receive addresses, the second your change. These are the tb1 addresses this wallet hands out — the same ones on Sequentia and on Bitcoin testnet4.',
+  pkh:  'The legacy form of the same key. Nothing is paid to these addresses; it is the form a node takes for verifymessage, so it is what someone imports to check a signature made on the Sign tab.',
+};
+function renderXpubForm(){
+  const form = $('xpubForm').value, ko = accountXpub();
+  $('xpubNote').textContent = XPUB_NOTES[form] || '';
+  if(!ko){ $('xpubText').textContent = 'Unavailable — unlock the wallet and try again.'; return; }
+  if(form === 'xpub'){ $('xpubText').textContent = ko; return; }
+  if(!ko.startsWith('[')){
+    $('xpubText').textContent = 'Unavailable — this build reports the account key without its origin path, which a descriptor needs.';
+    return;
+  }
+  $('xpubText').textContent = accountDescriptors(ko, form).join('\n');
+}
 function renderReceive(){
   const a = currentAddress();
   $('addr').textContent = a.toString();   // the shown/copied text is ALWAYS the bare tb1/tsqb1 address (correct on both chains)
@@ -3897,7 +3924,7 @@ function renderReceive(){
   $('btnConf').textContent = showConf ? 'Show non-confidential' : 'Show confidential';
   $('btnXpub').textContent = showXpub ? 'Hide xpub' : 'Show xpub';
   $('xpubReveal').classList.toggle('hide', !showXpub);
-  if(showXpub){ const x = accountXpub(); $('xpubText').textContent = x || 'Unavailable — unlock the wallet and try again.'; }
+  if(showXpub) renderXpubForm();
   $('recvTip').textContent = showConf
     ? 'Confidential (tsqb1…): amounts and assets are hidden on-chain. A separate, opt-in private receive; the Bitcoin side always uses the non-confidential form.'
     : 'Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.';
@@ -4790,6 +4817,7 @@ $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
+$('xpubForm').onchange=()=>renderXpubForm();
 $('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXpubCopy'));
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
