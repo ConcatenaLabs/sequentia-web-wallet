@@ -23,19 +23,36 @@ const table = [
   { pid: 50, cmdline: '/usr/bin/node seqln-ws-relay.mjs --ws-port 18915 --tcp 127.0.0.1:9915' },
   // The keyless watchtower. It watches THIS node's netdir, so it carries the directory —
   // and it is nobody's subdaemon. A revive killed it live once; it must not again.
-  { pid: 60, cmdline: `/root/sequentia/seqln/speculad/speculad --netdir=${DIR}/sequentia-testnet --network=sequentia-testnet` },
+  { pid: 60, cmdline: `/root/sequentia/seqln/speculad/speculad --netdir=${DIR}/sequentia-testnet --network=sequentia-testnet`,
+    // The watchtower's environment can mention the node directory too. Being pointed at a
+    // node is not what makes a process ours to kill.
+    environ: `SEQLN=/root/sequentia/seqln\nOLDPWD=${DIR}\n` },
+  // The orphan that caused all of this: an hsmd proxy whose lightningd is gone, reparented
+  // to init, still holding the signer port. Its command line names NO directory, so it is
+  // findable only through its environment.
+  { pid: 70, cmdline: '/root/sequentia/seqln/lightningd/lightning_hsmd_proxy --developer',
+    environ: `SEQLN_SIGNER_LISTEN=127.0.0.1:9915\nSEQLN_HOST_PRIVKEY_FILE=${DIR}/host_priv\n` },
+  // The same binary, serving a DIFFERENT node.
+  { pid: 71, cmdline: '/root/sequentia/seqln/lightningd/lightning_hsmd_proxy --developer',
+    environ: `SEQLN_SIGNER_LISTEN=127.0.0.1:9917\nSEQLN_HOST_PRIVKEY_FILE=${OTHER}/host_priv\n` },
 ];
 
-test('a node claims its own lightningd, proxy and hung CLIs — and nothing else', () => {
+test('a node claims its own lightningd, proxies and hung CLIs — and nothing else', () => {
   const m = matchNodeProcs(table, DIR);
   assert.deepStrictEqual(m.lightningd, [10]);
-  assert.deepStrictEqual(m.related.sort(), [11, 12]);
+  assert.deepStrictEqual(m.related.sort((a, b) => a - b), [11, 12, 70]);
 });
 
 test('another node, the LSP itself and the chain node are never touched', () => {
   const m = matchNodeProcs(table, DIR);
   const claimed = new Set([...m.lightningd, ...m.related]);
   for (const pid of [20, 30, 40]) assert.ok(!claimed.has(pid), `pid ${pid} must be left alone`);
+});
+
+test('an orphaned signer proxy is found through its environment, not its command line', () => {
+  const m = matchNodeProcs(table, DIR);
+  assert.ok(m.related.includes(70), 'the orphan holding this node\'s signer port must be cleared');
+  assert.ok(!m.related.includes(71), 'another node\'s proxy must be left alone');
 });
 
 test('the watchtower watching this node survives its revive', () => {

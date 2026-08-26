@@ -50,10 +50,18 @@ const NODE_PROC = /(^|\/)(lightning_hsmd|lightning-cli|lightningd)/;
 export function matchNodeProcs(entries, dir) {
   const out = { lightningd: [], related: [] };
   if (!dir) return out;
-  for (const { pid, cmdline } of entries) {
-    if (!cmdline || !cmdline.includes(dir)) continue;
-    if (cmdline.includes('--lightning-dir=' + dir)) { out.lightningd.push(pid); continue; }
-    if (NODE_PROC.test(cmdline.split(/\s+/)[0] || '')) out.related.push(pid);
+  for (const { pid, cmdline, environ } of entries) {
+    const argv0 = (cmdline || '').split(/\s+/)[0] || '';
+    if (cmdline && cmdline.includes('--lightning-dir=' + dir)) { out.lightningd.push(pid); continue; }
+    // A node process is claimed only if it BOTH looks like one of the node's own binaries
+    // and points at this node's directory. The hsmd proxy names no directory on its command
+    // line at all — it is just "lightning_hsmd_proxy --developer" — so it is found through
+    // its environment, which carries SEQLN_HOST_PRIVKEY_FILE=<dir>/host_priv. The binary
+    // check is what keeps that safe: speculad's environment can mention a node directory
+    // too, and the watchtower is not ours to kill.
+    if (!NODE_PROC.test(argv0)) continue;
+    const points = (cmdline && cmdline.includes(dir)) || (environ && environ.includes(dir + '/'));
+    if (points) out.related.push(pid);
   }
   return out;
 }
@@ -83,7 +91,12 @@ export function readProcTable(procDir = '/proc') {
     if (!/^[0-9]+$/.test(name)) continue;
     try {
       const raw = fs.readFileSync(path.join(procDir, name, 'cmdline'), 'utf8');
-      if (raw) out.push({ pid: Number(name), cmdline: raw.replace(/\0/g, ' ').trim() });
+      if (!raw) continue;
+      // The environment as well: the hsmd proxy is only identifiable there.
+      let environ = '';
+      try { environ = fs.readFileSync(path.join(procDir, name, 'environ'), 'utf8').replace(/\0/g, '\n'); }
+      catch { /* not readable (another user's process) — cmdline alone then */ }
+      out.push({ pid: Number(name), cmdline: raw.replace(/\0/g, ' ').trim(), environ });
     } catch { /* the process exited between readdir and read — ignore */ }
   }
   return out;
@@ -284,7 +297,12 @@ export function makeProvisioner(opts) {
   async function reviveIfWedged(rec) {
     const procs = matchNodeProcs(readProcTable(), rec.dir);
     const pids = [...procs.lightningd, ...procs.related];
-    if (!procs.lightningd.length) return false;   // nothing wedged: a plain cold boot follows
+    // Either a wedged lightningd, or an ORPHANED hsmd proxy left holding the signer port
+    // after its lightningd died — reparented to init, listening, and answering every device
+    // session with a handshake and a hangup because there is nothing behind it. That orphan
+    // also makes the NEXT boot fail: the fresh proxy cannot bind the port, and lightningd
+    // dies with "HSM sent unknown message type". Clear both.
+    if (!pids.length) return false;   // nothing of ours is running: a plain cold boot follows
     for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
     await new Promise((r) => setTimeout(r, 4000));
     // Whatever is left after the grace period goes down hard — the proxy included. It holds
@@ -296,7 +314,8 @@ export function makeProvisioner(opts) {
     }
     await new Promise((r) => setTimeout(r, 1000));
     bootedAt.delete(rec.key);   // a revive MUST be followed by a boot; don't let the debounce eat it
-    console.log(`[prov] revived wedged node ${rec.label} (${rec.dir}): killed ${pids.join(',')}`);
+    const what = procs.lightningd.length ? 'wedged node' : 'orphaned signer proxy of';
+    console.log(`[prov] cleared ${what} ${rec.label} (${rec.dir}): killed ${pids.join(',')}`);
     return true;
   }
 
