@@ -522,7 +522,10 @@
           <p class="sub" style="margin:8px 0 0">Watch-only either way. It derives every address this wallet
             will ever use — on Sequentia and on Bitcoin testnet4, which share this one account key — so anyone
             holding it can follow your whole history on both chains. It cannot spend: only the phrase can.</p>
-          <button class="ghost" id="btnXpubCopy" style="margin-top:10px">Copy</button>
+          <div class="row" style="margin-top:10px">
+            <button class="ghost" id="btnXpubCopy">Copy</button>
+            <button class="ghost hide" id="btnXpubCopyRecv">Copy the receive line</button>
+          </div>
         </div>
       </div>
       <div class="card hide" id="lnRecvCard">
@@ -4000,6 +4003,10 @@ const XPUB_NOTES = {
 function renderXpubForm(){
   const form = $('xpubForm').value, ko = accountXpub();
   $('xpubNote').textContent = XPUB_NOTES[form] || '';
+  // Some importers take ONE descriptor and only ever want the receive branch — SeqPal's
+  // wallet-link is one. Copying the whole box then hands them the change line as often as
+  // not, so offer the receive line on its own rather than leaving it to a careful selection.
+  $('btnXpubCopyRecv').classList.toggle('hide', form === 'xpub');
   if(!ko){ $('xpubText').textContent = 'Unavailable — unlock the wallet and try again.'; return; }
   if(form === 'xpub'){ $('xpubText').textContent = ko; return; }
   if(!ko.startsWith('[')){
@@ -4922,6 +4929,7 @@ $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
 $('xpubForm').onchange=()=>renderXpubForm();
 $('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXpubCopy'));
+$('btnXpubCopyRecv').onclick=()=>copyToClipboard(($('xpubText').textContent||'').split('\n')[0], $('btnXpubCopyRecv'));
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
 $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
