@@ -48,6 +48,7 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Transaction history on both chains with RBF fee bump, CPFP, and replace
 - OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
   Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
+- Classic signed messages over a wallet address key, in the format `verifymessage` accepts
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
 
 Experimental, and said so in the app:
@@ -106,8 +107,13 @@ The tabs:
 - **History**: transactions on both chains, with explorer links, and rescue actions for stuck
   Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
   selection as a send.
-- **Sign**: sign an OpenAMP request (a login challenge or a document hash) with the wallet's
-  OpenAMP key. Tagged, non-spending signatures only; nothing here can authorize a spend.
+- **Sign**: two kinds of signature, neither able to authorize a spend. An OpenAMP request (a
+  login challenge or a document hash) signed with the wallet's OpenAMP key, tagged so it can
+  never stand in for a spend authorization; and a classic message signed with the key behind
+  one of the wallet's own addresses, which proves that address is yours to anyone with a node.
+  The classic one is the "Bitcoin Signed Message" format, so `verifymessage` checks it on
+  Sequentia and on Bitcoin alike — against the legacy form of the address, the only form that
+  RPC accepts.
 - **Settings**: backend endpoints, network, the policy asset id, reveal-phrase, and
   remove-wallet.
 
@@ -194,6 +200,7 @@ works normally without the restricted rows.
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
+| `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
