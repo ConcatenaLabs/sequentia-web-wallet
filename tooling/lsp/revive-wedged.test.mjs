@@ -8,7 +8,7 @@
 // a loose pattern, only by the node's own directory.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { matchNodeProcs, relayRunning } from './provision.mjs';
+import { matchNodeProcs, relayRunning, shouldClearNode } from './provision.mjs';
 
 const DIR = '/root/sequentia/lsp/prov/node-USDX-15';
 const OTHER = '/root/sequentia/lsp/prov/node-USDX-17';
@@ -78,4 +78,33 @@ test('a live relay is recognised, so re-booting a node stops spawning EADDRINUSE
   assert.strictEqual(relayRunning(table, 18920), false);
   // The port must match as a whole argument, not as a prefix of a longer one.
   assert.strictEqual(relayRunning(table, 1891), false);
+});
+
+// Telling a WEDGED node from one that is simply STILL STARTING. A keyless node cannot answer
+// RPC until its device signer attaches, and a boot re-scans the chain besides — so "no RPC"
+// is the normal state of a young node. Killing it for that put the node in a restart loop:
+// the wallet retried, the LSP killed it again, and it never got far enough to serve.
+test('a node that is still starting is left alone', () => {
+  assert.strictEqual(shouldClearNode({ lightningdAges: [12] }), false);
+  assert.strictEqual(shouldClearNode({ lightningdAges: [179] }), false);
+});
+
+test('a node that has been unresponsive past the grace period is cleared', () => {
+  assert.strictEqual(shouldClearNode({ lightningdAges: [181] }), true);
+  assert.strictEqual(shouldClearNode({ lightningdAges: [5000] }), true);
+});
+
+test('a process whose age cannot be read is treated as old, not as newborn', () => {
+  // Erring the other way would make an unreadable /proc entry an excuse to never recover.
+  assert.strictEqual(shouldClearNode({ lightningdAges: [null] }), true);
+});
+
+test('a duplicate boot is cleared if EITHER instance is past the grace period', () => {
+  assert.strictEqual(shouldClearNode({ lightningdAges: [4, 900] }), true);
+  assert.strictEqual(shouldClearNode({ lightningdAges: [4, 9] }), false);
+});
+
+test('an orphaned proxy with no lightningd is cleared at any age', () => {
+  assert.strictEqual(shouldClearNode({ lightningdAges: [], hasOrphanProxy: true }), true);
+  assert.strictEqual(shouldClearNode({ lightningdAges: [], hasOrphanProxy: false }), false);
 });

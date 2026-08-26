@@ -102,6 +102,35 @@ export function readProcTable(procDir = '/proc') {
   return out;
 }
 
+// How old a process is, in seconds, from /proc/<pid>/stat field 22 (its start time in
+// clock ticks since boot) against /proc/uptime. Returns null when the process is gone.
+export function procAgeSeconds(pid, procDir = '/proc') {
+  try {
+    const uptime = Number(fs.readFileSync(path.join(procDir, 'uptime'), 'utf8').split(/\s+/)[0]);
+    const stat = fs.readFileSync(path.join(procDir, String(pid), 'stat'), 'utf8');
+    // Field 2 is the executable name in parentheses and may itself contain spaces, so the
+    // fields after it are counted from the LAST ')'.
+    const after = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/);
+    const startTicks = Number(after[19]);                  // field 22 overall
+    if (!Number.isFinite(uptime) || !Number.isFinite(startTicks)) return null;
+    return uptime - startTicks / 100;                      // USER_HZ is 100 on Linux
+  } catch { return null; }
+}
+
+// Whether a node that is not answering RPC should be cleared and re-booted, or left alone.
+// A node that is STILL BOOTING does not answer RPC either — a keyless one cannot answer at
+// all until its device signer has attached, and a boot re-scans the chain besides. Killing
+// it because of that turned every attempt into a fresh restart, so the node never got far
+// enough to serve: the wallet retried, the LSP killed it again, and around it went.
+export function shouldClearNode({ lightningdAges = [], hasOrphanProxy = false, graceSeconds = 180 }) {
+  if (lightningdAges.length) {
+    // Any instance old enough to have finished booting means this node is wedged, not young.
+    return lightningdAges.some((age) => age === null || age > graceSeconds);
+  }
+  // No lightningd at all: only an orphaned proxy holding the signer port needs clearing.
+  return hasOrphanProxy;
+}
+
 // A provisioning context, built once from the LSP env.
 export function makeProvisioner(opts) {
   const CFG = {
@@ -143,6 +172,10 @@ export function makeProvisioner(opts) {
   // no-op (the first boot is still coming up). Keyed per provisioner (LSP process).
   const bootedAt = new Map();
   const BOOT_DEBOUNCE_MS = 20000;
+  // How long a lightningd is allowed to be unresponsive before it counts as wedged rather
+  // than starting. A cold boot re-scans the chain and waits for its device signer, which is
+  // comfortably more than a few seconds and well under this.
+  const BOOT_GRACE_S = Number(process.env.LSP_BOOT_GRACE_S || 180);
 
   // A MISSING registry means a fresh install (default to empty). A CORRUPT registry must NOT silently
   // default to empty: this is the single source of truth for all hosted user funds, and an empty
@@ -297,6 +330,15 @@ export function makeProvisioner(opts) {
   async function reviveIfWedged(rec) {
     const procs = matchNodeProcs(readProcTable(), rec.dir);
     const pids = [...procs.lightningd, ...procs.related];
+    const decide = {
+      lightningdAges: procs.lightningd.map((pid) => procAgeSeconds(pid)),
+      hasOrphanProxy: !procs.lightningd.length && procs.related.length > 0,
+      graceSeconds: BOOT_GRACE_S,
+    };
+    if (!shouldClearNode(decide)) {
+      if (procs.lightningd.length) console.log(`[prov] ${rec.label} is still starting (${Math.round(Math.max(...decide.lightningdAges.map((a) => a ?? 0)))}s); leaving it alone`);
+      return false;
+    }
     // Either a wedged lightningd, or an ORPHANED hsmd proxy left holding the signer port
     // after its lightningd died — reparented to init, listening, and answering every device
     // session with a handshake and a hangup because there is nothing behind it. That orphan
