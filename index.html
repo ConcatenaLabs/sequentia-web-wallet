@@ -3984,10 +3984,18 @@ function accountXpub(){
 // descriptors (receive then change) that another wallet imports. The descriptors need the
 // KEYORIGIN prefix to be importable — a bare tpub would import as an unrelated key with no
 // path — so they are only offered when the signer gives us one.
+// Why a descriptor view shows TWO lines is the first thing anyone asks, so every
+// descriptor form says it rather than only the first one. A descriptor covers one branch
+// of the keychain: /0/* is receive, /1/* is change. A wallet given only the first sees
+// incoming payments and none of the change.
+const DESCRIPTOR_PAIR = 'Two lines, because a descriptor covers one branch: the first derives your '
+  + 'receive addresses, the second your change. Import both — a wallet given only the first would '
+  + 'miss every change output. They come as a pair rather than one combined <0;1> descriptor '
+  + 'because this network\'s node refuses that form.';
 const XPUB_NOTES = {
   xpub: 'The account key with its origin path, which is what a watch-only import asks for.',
-  wpkh: 'Import both lines: the first derives your receive addresses, the second your change. These are the tb1 addresses this wallet hands out — the same ones on Sequentia and on Bitcoin testnet4.',
-  pkh:  'The legacy form of the same key. Nothing is paid to these addresses; it is the form a node takes for verifymessage, so it is what someone imports to check a signature made on the Sign tab.',
+  wpkh: DESCRIPTOR_PAIR + ' These are the tb1 addresses this wallet hands out — the same ones on Sequentia and on Bitcoin testnet4.',
+  pkh:  DESCRIPTOR_PAIR + ' This is the legacy form of the same key: nothing is paid to these addresses, but it is the form a node takes for verifymessage, so it is what someone imports to check a signature made on the Sign tab.',
 };
 function renderXpubForm(){
   const form = $('xpubForm').value, ko = accountXpub();
