@@ -297,6 +297,11 @@ This runs every `*.test.mjs` file that registers `node:test` cases, at the root 
 `covenant*.test.mjs` golden vectors; run those directly, for example
 `node covenant-byteorder.test.mjs`.
 
+`node tooling/sign-tab-probe.mjs` opens the wallet in a headless Chromium, creates a wallet,
+signs a message with the staking key from the Sign tab, and recovers a key from the signature
+the way a verifier does; it has to be the staking key the tab shows. Given a URL it probes a
+deployed wallet instead of this checkout. It needs a Chromium (`CHROMIUM=/path/to/chrome`).
+
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see
 [`tooling/lsp/README.md`](tooling/lsp/README.md).
