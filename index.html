@@ -1006,18 +1006,19 @@
          transaction digest (spec 0.4(3)). No platform branding. -->
     <section data-panel="sign" class="hide">
       <div class="card">
-        <label class="lbl">Sign an OpenAMP request</label>
-        <p class="sub" style="margin:0 0 10px">Sign a tagged, non-spending request with your account id (AID): a wallet-link or login challenge, or a document hash. This can never move funds or authorize a transfer.</p>
+        <label class="lbl">Sign a request</label>
+        <p class="sub" style="margin:0 0 10px">Sign a non-spending request: an OpenAMP wallet-link or login challenge, a document hash, or a message with your staking key, which is how you sign in to a site that reads your stake, such as Levo. This can never move funds or authorize a transfer.</p>
         <div class="warn hide" id="oampSignOriginWarn"></div>
         <div class="field">
           <label class="lbl">What are you signing</label>
           <select id="oampSignMode">
-            <option value="challenge">A challenge (wallet link or login)</option>
+            <option value="challenge">An OpenAMP challenge (wallet link or login)</option>
             <option value="document">A document hash (e-signature)</option>
+            <option value="staker">A message with my staking key (Levo sign-in)</option>
           </select>
         </div>
         <div class="field" id="oampSignChallengeField">
-          <label class="lbl">Challenge string</label>
+          <label class="lbl" id="oampSignChallengeLabel">Challenge string</label>
           <textarea id="oampSignChallenge" rows="2" placeholder="the challenge text you were given"></textarea>
         </div>
         <div class="field hide" id="oampSignDocField">
@@ -1031,10 +1032,12 @@
           <label class="lbl">Signature</label>
           <div class="mono" id="oampSignSig" style="word-break:break-all">—</div>
           <button class="ghost" id="oampSignCopySig" style="margin-top:6px">Copy signature</button>
-          <label class="lbl" style="margin-top:12px">Your x-only pubkey</label>
+          <label class="lbl" style="margin-top:12px" id="oampSignPubkeyLabel">Your x-only pubkey</label>
           <div class="mono" id="oampSignPubkey" style="word-break:break-all">—</div>
-          <label class="lbl" style="margin-top:12px">Your account id (AID)</label>
-          <div class="mono" id="oampSignAid" style="word-break:break-all">—</div>
+          <div id="oampSignAidRow">
+            <label class="lbl" style="margin-top:12px">Your account id (AID)</label>
+            <div class="mono" id="oampSignAid" style="word-break:break-all">—</div>
+          </div>
           <div class="row hide" id="oampSignCallbackRow" style="margin-top:14px">
             <button class="primary" id="oampSignSendCallback">Send to <span id="oampSignCallbackOrigin"></span></button>
           </div>
@@ -5974,8 +5977,14 @@ async function copyToClipboard(text, btn){
   return ok;
 }
 $('oampSignMode').onchange=()=>{
-  const doc=$('oampSignMode').value==='document';
+  const mode=$('oampSignMode').value;
+  const doc=mode==='document';
   show('oampSignChallengeField', !doc); show('oampSignDocField', doc);
+  // A site that reads stake (Levo) issues a message and wants it signed by the
+  // key the stake is bonded to, exactly as `sequentia-cli signmessage` would
+  // sign it: a recoverable signature over the Bitcoin signed-message digest.
+  $('oampSignChallengeLabel').textContent = mode==='staker' ? 'Message to sign (paste it whole, exactly as issued)' : 'Challenge string';
+  $('oampSignChallenge').placeholder = mode==='staker' ? 'the message the site asked you to sign' : 'the challenge text you were given';
 };
 $('oampSignBtn').onclick=async()=>{
   $('oampSignErr').textContent='';
@@ -5985,6 +5994,25 @@ $('oampSignBtn').onclick=async()=>{
     let sig;
     // Only two tagged, non-spending modes exist here (spec 0.4(2)): there is no third path that
     // takes a bare digest, so this card structurally cannot become an enclave-spend authorization.
+    if(mode==='staker'){
+      // Not tagged, and not the OpenAMP identity: the STAKING key (m/2/0),
+      // signing the way a node's signmessage does, so a site that reads the
+      // stake behind a key recovers this key and finds the stake. The text is
+      // signed exactly as pasted: a site's challenge over even slightly
+      // different bytes recovers to a key nobody holds.
+      const m=$('oampSignChallenge').value;
+      if(!m) throw new Error('paste the message the site asked you to sign');
+      const sig=signer.signMessageWithStakerKey(m);
+      const pub=signer.stakerPublicKey();
+      $('oampSignSig').textContent=sig;
+      $('oampSignPubkeyLabel').textContent='Your staking key (the site recovers this from the signature)';
+      $('oampSignPubkey').textContent=pub;
+      show('oampSignAidRow', false);
+      show('oampSignResult', true);
+      show('oampSignCallbackRow', false);
+      $('oampSignCallbackStatus').className='status'; $('oampSignCallbackStatus').textContent='';
+      return;
+    }
     if(mode==='challenge'){
       const c=$('oampSignChallenge').value;
       if(!c || !c.trim()) throw new Error('enter the challenge text');
@@ -6000,8 +6028,10 @@ $('oampSignBtn').onclick=async()=>{
     const xonly=signer.openampXonlyPubkey();
     const aid=openampComputeAid([xonly]);
     $('oampSignSig').textContent=sig;
+    $('oampSignPubkeyLabel').textContent='Your x-only pubkey';
     $('oampSignPubkey').textContent=xonly;
     $('oampSignAid').textContent=aid;
+    show('oampSignAidRow', true);
     show('oampSignResult', true);
     $('oampSignCallbackStatus').className='status'; $('oampSignCallbackStatus').textContent='';
     // Consent-gated transport: the callback is never POSTed here. It is only reachable through the
