@@ -48,7 +48,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Transaction history on both chains with RBF fee bump, CPFP, and replace
 - OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
   Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
-- Classic signed messages over a wallet address key, in the format `verifymessage` accepts
+- Classic signed messages over a wallet address key, in the format `verifymessage` accepts,
+  and, from the same Sign tab, a message signed with the staking key, which is how a site
+  that reads your stake -- Levo -- signs you in: paste its message, sign, paste the signature back
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
 
 Experimental, and said so in the app:
