@@ -2762,6 +2762,40 @@ function initLightning(phrase){
 const _ownLnLegsKey = 'swk.ln.ownLegs.v1';
 function ownLnLegs(){ try{ return JSON.parse(localStorage.getItem(_ownLnLegsKey)||'[]')||[]; }catch{ return []; } }
 function rememberOwnLnLeg(leg){ if(!leg) return; const s=new Set(ownLnLegs()); if(s.has(leg)) return; s.add(leg); try{ localStorage.setItem(_ownLnLegsKey, JSON.stringify([...s])); }catch{} }
+// What to SAY at each phase of a Move to Lightning. ONE map for both callers (the Balance-tab
+// dialog and the Swap composer's provisionChannel), which each carried their own copy and had
+// each drifted from what the LSP actually reports.
+//
+// Both copies were missing the phases the server passes through BETWEEN the deposit and the
+// channel — 'syncing' and 'connecting' — and both callers spoke only when the map had an entry.
+// So a job parked in 'syncing' (the node is up but not answering, typically because it is waiting
+// on this device's signer) left the PREVIOUS line on screen untouched: the wallet went on saying
+// "Waiting for the deposit to confirm on-chain…" for the full hour of the server's watch, telling
+// the user to wait on the chain when the deposit had confirmed in the next block and the thing
+// that needed them was their own wallet. Every phase now has words, and an unrecognised one still
+// moves the line instead of freezing it, so a future phase degrades to vague rather than to a lie.
+const LN_MOVE_PHASE = {
+  'deposit-address': 'Getting your hosted node deposit address…',
+  'sending':         'Signing and sending the on-chain deposit…',
+  'sent':            'Deposit sent; waiting for confirmation…',
+  'opening-request': 'Asking your Lightning node to open the channel…',
+  'pending_deposit': 'Waiting for the deposit to confirm on-chain…',
+  'syncing':         'Waiting for your Lightning node to answer — keep this wallet open and unlocked, it needs your device to sign…',
+  'connecting':      'Connecting your node to the routing peer (your device co-signs the handshake)…',
+  'opening':         'Opening the Lightning channel (your device is co-signing the funding)…',
+  'awaiting_lockin': 'Channel funding broadcast; waiting for it to confirm…',
+  'reconnecting':    'Connection hiccup — reconnecting (your deposit is safe; this will finish)…',
+  'active':          'Channel active.',
+};
+// The line for a phase, or null to leave the current line alone. 'failed' returns null on purpose:
+// fundChannel reports it and then throws, and the thrown error carries the real reason — a generic
+// line here would replace it for the instant before the catch runs.
+function lnMovePhaseCopy(phase){
+  const p = String(phase==null ? '' : phase);
+  if(!p || p==='failed') return null;
+  if(Object.prototype.hasOwnProperty.call(LN_MOVE_PHASE, p)) return LN_MOVE_PHASE[p];
+  return 'Working on your Lightning channel ('+p+')…';
+}
 const _lnReconnectedLegs = new Set();
 const _lnStrandRecovered = new Set();   // nodes whose stranded deposit we've already completed this session
 const STRAND_BLOCKED = 'swk.ln.strandBlocked';   // { [nodeKey]: { at, reason } } — recoveries not to retry
@@ -3269,9 +3303,6 @@ function moveToLightningDialog(leg){
     if(leg.chain==='btc' && atoms < 546n){ st.className='status err'; st.textContent='Minimum channel is 546 sats (the dust limit).'; return; }
     ok.disabled=true; no.disabled=true;
     const say=(txt)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+txt; };
-    const phaseCopy={ 'deposit-address':'Getting your hosted node deposit address…', 'sending':'Signing and sending the on-chain deposit…',
-      'sent':'Deposit sent; waiting for confirmation…', 'pending_deposit':'Waiting for the deposit to confirm on-chain…',
-      'opening':'Opening the Lightning channel (your device is co-signing the funding)…', 'awaiting_lockin':'Channel funding broadcast; waiting for it to confirm…' };
     try{
       const phrase=(localStorage.getItem(KEY)||'').trim();
       if(!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
@@ -3314,8 +3345,8 @@ function moveToLightningDialog(leg){
             no.onclick=()=>{ backgrounded=true; m.remove();
               try{ toast('Deposit sent. Your '+leg.ticker+' Lightning channel is opening in the background. Keep using the wallet; we’ll let you know when it’s ready.'); }catch{} };
           }
-          if(e.phase==='reconnecting'){ say('Connection hiccup — reconnecting (your deposit is safe; this will finish)…'); return; }
-          if(phaseCopy[e.phase]) say(phaseCopy[e.phase]);
+          const copy = lnMovePhaseCopy(e.phase);
+          if(copy) say(copy);
         },
       });
       try{ clearMoveState(); }catch{}   // channel opened — the move is complete
@@ -3559,9 +3590,8 @@ function initSwapTab(){
       if (!(prov && prov.connected)) throw new Error('Could not bring your device signer online for your Lightning node.');
       say('Preparing your Lightning node (booting and syncing)…');
       await waitNodeReady({ nodeKey: prov.key, onProgress: () => say('Preparing your Lightning node (booting and syncing)…') });
-      const phaseCopy = { 'deposit-address': 'Getting your hosted node deposit address…', 'sending': 'Signing and sending the on-chain deposit…', 'sent': 'Deposit sent; waiting for confirmation…', 'pending_deposit': 'Waiting for the deposit to confirm on-chain…', 'opening': 'Opening the Lightning channel (your device is co-signing)…', 'awaiting_lockin': 'Channel funding broadcast; waiting for it to confirm…' };
       say('Your Lightning node is ready. Preparing the on-chain deposit…');
-      const res = await fundChannel({ chain, asset: asset || undefined, amount: Number(amount), node: prov.key, sendOnchain: lnSendDeposit, onProgress: (e) => { if (phaseCopy[e.phase]) say(phaseCopy[e.phase]); } });
+      const res = await fundChannel({ chain, asset: asset || undefined, amount: Number(amount), node: prov.key, sendOnchain: lnSendDeposit, onProgress: (e) => { const copy = lnMovePhaseCopy(e.phase); if (copy) say(copy); } });
       try { renderLightningBalance(); } catch {}
       return res;
     },
