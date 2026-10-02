@@ -1,8 +1,9 @@
 // FINALITY MUST MEAN WHAT THE UI SAYS IT MEANS.
 //
-// The wallet tells the user: "Appears immediately, final in ~1 block · reverts only if
-// Bitcoin reverts." That is the chain's actual model — a Sequentia block is final the
-// moment it exists and names a Bitcoin block.
+// The wallet tells the user: "Appears immediately, confirmed in ~1 block · final once its
+// Bitcoin anchor is buried." That is the chain's actual model — a confirmed Sequentia
+// block reverts only if its Bitcoin anchor is reorged, and is final once that anchor is
+// buried.
 //
 // The code did not implement it. anchorDepthVerdict read
 //
@@ -24,7 +25,7 @@ import { anchorDepthVerdict } from './subswap.js';
 
 test('THE BUG: an explicit 0 must not become 3', () => {
   const v = anchorDepthVerdict({ anchorHeight: 900000, btcTip: 900000, minAnchorDepth: 0 });
-  assert.equal(v.ok, true, 'a 0-depth offer settles on Sequentia finality alone');
+  assert.equal(v.ok, true, 'a 0-depth offer settles on Sequentia confirmation alone');
   assert.equal(v.zeroConf, true);
   assert.match(v.reason, /reverts only if Bitcoin reverts/);
 });

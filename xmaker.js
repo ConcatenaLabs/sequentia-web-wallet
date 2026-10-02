@@ -244,7 +244,7 @@ async function fundWindowClosed({ seqLocktime, btcLocktime }){
   } catch {}
   return null;
 }
-// Whether a Sequentia block is quorum-certified (immediately final). Returns
+// Whether a Sequentia block is quorum-certified (final unless its Bitcoin anchor is reorged). Returns
 // null when the node/endpoint predates the poscertified field (feature-detect:
 // the caller then keeps anchor-only, matching the daemon's VerifySeqLegSafe).
 async function posCertifiedOf(blockHash){

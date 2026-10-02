@@ -995,7 +995,7 @@
       </div>
       <div class="card">
         <label class="lbl">Restricted transfers (OpenAMP)</label>
-        <p class="sub" style="margin:0 0 6px">Transfers you've sent on the OpenAMP enclave ledger from this wallet, tracked here until they confirm. Nothing is final at 0-conf; depth is the Bitcoin block the transfer's Sequentia block anchors to.</p>
+        <p class="sub" style="margin:0 0 6px">Transfers you've sent on the OpenAMP enclave ledger from this wallet, tracked here until they confirm. A confirmed transfer is final once its Bitcoin anchor is buried; depth is that anchor's Bitcoin confirmation count.</p>
         <div class="list" id="oampHistList"><div class="muted">No restricted transfers yet.</div></div>
       </div>
     </section>
@@ -6123,7 +6123,7 @@ $('keySignCopySig').onclick = () => copyToClipboard($('keySignSig').textContent,
 // transfers locally (mirrors the STAKES pattern above) and polls the Sequentia explorer for
 // confirmation + the Bitcoin anchor depth, the same self-derived /anchor + testnet4-tip pattern
 // the cross-chain swap watchers use (xmaker.js anchorHeightOf/tipHeight). Nothing here is ever
-// labelled final at 0-conf.
+// labelled final: a confirmed transfer shows its anchor depth, and is final once that anchor is buried.
 function oampLoadTransfers(){ try{ return JSON.parse(localStorage.getItem(OAMP_XFERS)||'[]'); }catch{ return []; } }
 function oampSaveTransfers(list){ try{ localStorage.setItem(OAMP_XFERS, JSON.stringify(list)); }catch{} }
 function oampRecordTransfer(rec){
@@ -6149,7 +6149,7 @@ function renderOampHistory(){
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+x.txid, x.txid.slice(0,18)+'…')); mid.appendChild(_d); }
     let when = new Date(x.time).toLocaleString()+' · to '+x.recipient_aid.slice(0,10)+'…';
     if(x.confirmed) when += x.anchorDepth!=null ? (' · Bitcoin anchor depth '+x.anchorDepth) : ' · confirmed, anchor depth pending';
-    else when += ' · pending, not final at 0-conf';
+    else when += ' · pending, not yet confirmed';
     mid.appendChild(el('div','sub', when));
     item.appendChild(mid);
     item.appendChild(el('span','amt', fmtAtoms(BigInt(x.atoms), x.precision)+' '+x.ticker));

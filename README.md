@@ -157,9 +157,9 @@ Two price modes, always switchable:
   watchers that resume after a reload), or, for the BTC-paying side, rest as SBTC through the
   custody bridge (see Status above).
 
-The tab is honest about finality: on-chain settlement is described as anchor-bound ("reverts
-only if Bitcoin reverts"), nothing is called final at 0 confirmations, and only pure-Lightning
-settlement (nothing on-chain) is labelled final.
+The tab is honest about finality: on-chain settlement is described as confirmed in about one
+block and final once its Bitcoin anchor is buried, since until then a Bitcoin reorg can still
+remove it. Only pure-Lightning settlement (nothing on-chain) is labelled final at once.
 
 ### Lightning (experimental)
 

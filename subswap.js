@@ -485,14 +485,13 @@ export function anchorDepthVerdict({ anchorHeight, btcTip, minAnchorDepth, legAt
   // represent the two values that matter: `0 || 3` turns an explicit 0 into 3, and the
   // floor of 2 makes 1 unreachable. Every offer on the book advertises
   // min_anchor_depth: 0, so the wallet was silently overriding every maker and waiting
-  // 3 BITCOIN blocks — roughly half an hour — behind a UI that says "final in ~1 block".
+  // 3 BITCOIN blocks — roughly half an hour — behind a UI that says "confirmed in ~1 block".
   //
-  // Depth here counts BITCOIN blocks burying the SEQ block's anchor. Requiring any is a
-  // deliberate departure from how this chain is supposed to work: a Sequentia block is
-  // final the moment it exists and names a Bitcoin block, and reverts only if Bitcoin
-  // reverts. Demanding 3 Bitcoin confirmations on top does not make the trade safer
-  // against anything except a Bitcoin reorg — which is the one risk the model already
-  // states plainly and accepts.
+  // Depth here counts BITCOIN blocks burying the SEQ block's anchor. A confirmed Sequentia
+  // block reverts only if its Bitcoin anchor is reorged, and it is final once that anchor
+  // is buried. Demanding 3 Bitcoin confirmations before claiming does not make the trade
+  // safer against anything except a Bitcoin reorg — which the UI states plainly ("final
+  // once its Bitcoin anchor is buried") and the taker accepts.
   //
   // So the offer's own figure is the authority, 0 included. An offer that genuinely
   // wants burial can still ask for it; the taker is never forced into a wait its
@@ -501,7 +500,7 @@ export function anchorDepthVerdict({ anchorHeight, btcTip, minAnchorDepth, legAt
   const min = Number.isFinite(minRaw) && minRaw > 0 ? Math.floor(minRaw) : 0;
   if (min === 0)
     return { ok: true, depth: 0, zeroConf: true,
-      reason: 'the offer asks for no anchor burial: Sequentia finality, reverts only if Bitcoin reverts' };
+      reason: 'the offer asks for no anchor burial: confirmed on Sequentia, reverts only if Bitcoin reverts' };
   // Read STRICTLY. Number(null) is 0 — which is finite — so a null tip slipped past the
   // "unreadable" guard and came out as "depth 0 < required N": still fail-closed, but
   // reporting a shallow anchor when the truth was that we could not read the chain at
