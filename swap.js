@@ -26,7 +26,7 @@
 //  • SEQ/tSEQ equal standing — just one searchable row in the asset pickers.
 //  • Open fee market — a first-class fee-asset selector, valued in native-equiv + ref.
 //  • Reference currency — every amount (pay/receive/fee/rate) carries an "≈ <ref>" value.
-//  • Anchor-aware finality — "settles in ~1 block · anchor-bound to Bitcoin"; never "instant".
+//  • Anchor-aware finality — "confirmed in ~1 block · final once its Bitcoin anchor is buried"; never "instant".
 // ---------------------------------------------------------------------------
 
 import * as seqob from './seqob.js';
@@ -3970,7 +3970,7 @@ function capDisplay(route){
   return C.fmtAtoms(cap, 8) + ' BTC';
 }
 // Anchor-honest wording reused across the on-chain-receipt cases.
-const ANCHOR_FINAL = 'reverts only if Bitcoin reverts';
+const ANCHOR_FINAL = 'final once its Bitcoin anchor is buried';
 
 // Render the timing banner for the current route. The matrix is keyed off the RECEIVE
 // leg (an on-chain RECEIPT is never made instant by the CAP; the CAP only fronts an
@@ -4002,7 +4002,7 @@ function renderTiming(route){
   if (route.kind === 'same'){
     // Same-chain atomic swap: on-chain receipt (no LN option here), anchor-bound.
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
-    tx.innerHTML = `Appears immediately, final in <b>~1 block</b> · ${ANCHOR_FINAL}.`;
+    tx.innerHTML = `Appears immediately, confirmed in <b>~1 block</b> · ${ANCHOR_FINAL}.`;
     return;
   }
   // BTC pair: the exact 4-case matrix keyed off the receive leg.
@@ -4030,7 +4030,7 @@ function renderTiming(route){
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
     // Offer "switch Receive to Lightning" only when the RECEIVE leg has a usable channel.
     const canFixRecv = ra.recvLn.ok;
-    tx.innerHTML = `Appears immediately, final in <b>~1 block</b> · ${ANCHOR_FINAL}.`
+    tx.innerHTML = `Appears immediately, confirmed in <b>~1 block</b> · ${ANCHOR_FINAL}.`
       + (canFixRecv ? ` To receive instantly &amp; finally, <span class="swfix" data-fix="recv">switch Receive to Lightning</span>.` : '');
     if (canFixRecv) wireFix();
   }
@@ -5141,8 +5141,9 @@ function subCommonDeps(){
     // THE OFFER decides how much Bitcoin burial it wants, and 0 is the default every
     // maker on the book actually advertises. A hardcoded 3 here overrode all of them and
     // made a trade wait ~3 Bitcoin blocks — half an hour — behind copy promising
-    // "final in ~1 block". A Sequentia block is final once it names a Bitcoin block; it
-    // reverts only if Bitcoin reverts, and extra burial guards against nothing else.
+    // "confirmed in ~1 block". A confirmed Sequentia block reverts only if its Bitcoin
+    // anchor is reorged; it is final once that anchor is buried, and extra burial guards
+    // against nothing else.
     // Callers that hold the offer pass its figure; this is the floor for the ones that
     // do not, and the floor is what the makers ask for.
     minAnchorDepth: 0,
@@ -6967,7 +6968,7 @@ async function takeCovenantWalkReview(q){
     ['Price', payAtoms > 0n ? 'Market · ' + ratePerPayToLine(pay, receive, Number(recvAtoms) / Number(payAtoms)).str : '-'],
     ['Network fee', amtRow(feeAsset, covFeeAtoms(feeAsset)) + '  (estimate, per fill)'],
     ['How it fills', `Walks the order book now and fills what crosses your price, best price first. Any part that can't fill is NOT rested — a market order never leaves a resting order behind (switch to Limit for that). Each fill settles on-chain; consensus rejects any underpay or redirect.`],
-    ['Finality', 'Each fill settles in ~1 block · reverts only if Bitcoin reverts.'],
+    ['Finality', 'Each fill confirms in ~1 block · final once its Bitcoin anchor is buried.'],
     ['Settlement', 'Each fill settles in full or not at all.'],
   ];
   // CTA stays modalRows' default 'Confirm & sign' (task 19c): every rail's review sheet uses
@@ -7022,7 +7023,7 @@ async function placeCovenantReview(q){
       : `Rests on-chain at your price and fills · fully or partially · whenever someone crosses it, even while this wallet is closed. A partial fill settles that part and leaves the rest resting. Consensus rejects any underpay or redirect.`],
     ['You can close the wallet', `The order rests on-chain; when it fills you are credited to a payout address only this wallet controls. Reopen any time to see it.`],
     ['If it does not fill', `Cancel any time to delist it. After the order expires the locked ${pm.ticker} is reclaimable on-chain.`],
-    ['Finality', 'Settles in ~1 block · reverts only if Bitcoin reverts.'],
+    ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
   ];
   // Market order bigger than the resting book at this price: show the fill-now / rest split honestly.
   const split = isMarket ? marketFillSplit(payAtoms, recvAtoms) : null;
@@ -8118,7 +8119,7 @@ function renderMixedSwap(){
     [sub.ST.SETTLING]:  'Completing your trade · confirming on Bitcoin.',
     [sub.ST.REFUNDING]: 'Refunding your trade…',
     [sub.ST.REFUNDED]:  'Refund sent · your funds return once it confirms.',
-    [sub.ST.SETTLED]:   'Settled · reverts only if Bitcoin reverts.',
+    [sub.ST.SETTLED]:   'Settled · the on-chain leg is final once its Bitcoin anchor is buried.',
     [sub.ST.FAILED]:    MIXED.htlc ? 'Could not complete · refund below to get your funds back.' : 'Could not complete · nothing was spent.',
   }[MIXED.state] || MIXED.state;
   const dir = MIXED.side === 'buy'
@@ -8479,7 +8480,7 @@ async function reviewSame(q){
     ['You receive', amtRow(q.assetR, q.amountR) + refSuffix(q.assetR, q.amountR)],
     ['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'],
     ['Fee paid in', fm.ticker],
-    ['Finality', 'Settles in ~1 block · reverts only if Bitcoin reverts.'],
+    ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
     ['Settlement', 'Settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
@@ -8496,7 +8497,7 @@ async function reviewSame(q){
         fee: (q.feeAmount != null ? Number(big(q.feeAmount)) / Math.pow(10, C.assetMeta(q.feeAsset).precision || 0) : null),
         feeTicker: q.feeAsset ? C.assetMeta(q.feeAsset).ticker : null,
         ...tradeMeta(q.assetP, q.assetR, q.amountP, q.amountR) });
-      C.toast('Swap settled (reverts only if Bitcoin reverts):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast('Swap sent · confirms in ~1 block, final once its Bitcoin anchor is buried:', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
       resetComposer();
       await C.sync();
       renderSwap();
@@ -9105,7 +9106,7 @@ async function postOfferReview(q){
     ['Price', payU>0 ? ratePerPayToLine(pay, receive, recvU/payU).str : '-'],
     ['Filling', 'Someone can fill it from the other side. This needs your wallet open to complete; for now the offer rests publicly and you can cancel it anytime.'],
     ['Expires', 'In 1 hour (re-post to refresh).'],
-    ['Finality', 'Settles in ~1 block · reverts only if Bitcoin reverts.'],
+    ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Start this market', kv });
   if (ok) ok.textContent = 'Post offer';
