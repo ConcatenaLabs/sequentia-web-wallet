@@ -101,7 +101,7 @@ import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, ve
 import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair, relayTakerAssetLeg, runForwardBridgeTerms, sendForwardBtcLegFunded, openForwardBridgeSession, checkMakerAssetLegObserved, buildHtlcRedeem } from './bridge-maker.mjs';
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
-import { consolidateToOwn } from './consolidate.mjs';
+import { fundFromNode } from './consolidate.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -1075,23 +1075,11 @@ async function runChannelOpen(job) {
     await sleep(3000);   // poll briskly: the deposit is the user's own tx, seen within seconds
   }
 
-  // 1b. Coins already on the node may include a close output, which the device sends only to
-  //     its own scripts: move them all to the node's own address first; the funding then
-  //     spends that (unconfirmed, minconf=0). Signed by the device; a refusal fails the job.
-  if (job.consolidate) {
-    job.status = 'consolidating';
-    const c = await consolidateToOwn({ call: (m, a, r) => lnrpcKw(m, a, r, SIGNER_RPC_TIMEOUT_MS * 3),
-      rpc, chain: job.chain, assetId: job.chain === 'seq' ? job.asset_id : null });
-    job.consolidate_txid = c.txid;
-  }
-
-  // 2. Connect to the routing peer + fundchannel. The funding tx SIGN_WITHDRAWAL is
-  //    served by the DEVICE over the hsmd proxy; a missing device fails this closed.
-  job.status = 'connecting';
-  // Reliable connect w/ retry + verify. NEVER proceed to fundchannel peerless (that stranded a
-  // user's 5 USDX once): ensurePeer throws a clear error and the job fails cleanly, funds intact.
-  await ensurePeer(rpc, peerId, peerAddr, job);
-  job.status = 'opening';
+  // 1b-2. Fund the channel from the node's coins (fundFromNode): with `consolidate`, every coin of
+  //    the asset first moves to a new address of the node's own, and the funding spends that coin
+  //    (unconfirmed, minconf=0); then connect to the routing peer and fundchannel. Every signature is
+  //    the DEVICE's over the hsmd proxy; a refusal or a missing device fails the job, funds intact.
+  //
   // fundchannel with the seqln fork's `asset` parameter, so the channel AND its on-chain
   // funding fee are denominated in the DEPOSITED asset — NOT the policy asset (tSEQ). This
   // is the crux: stock fundchannel funds in the policy asset, so on a single-asset node it
@@ -1111,13 +1099,19 @@ async function runChannelOpen(job) {
   // assets the node can fund — consistent by construction.
   const FEE_RESERVE = 20000; // asset atoms held back for the in-asset on-chain fee (~1 atom)
   const fundAmount = Math.max(1, (job.confirmed_units || need) - FEE_RESERVE);
-  // minconf=0 so we can fund from the user's just-broadcast (0-conf) deposit immediately —
-  // it's their own money funding their own channel, so 0-conf carries no counterparty risk.
-  const fcArgs = [`id=${peerId}`, `amount=${fundAmount}`, 'announce=true', 'minconf=0'];
-  if (job.chain === 'seq' && job.asset_id) fcArgs.push(`asset=${job.asset_id}`);
-  const fc = await lnrpc('fundchannel', fcArgs, rpc);
-  job.funding_txid = fc.txid || (fc.txids && fc.txids[0]) || null;
-  job.channel_id = fc.channel_id || null;
+  const funded = await fundFromNode({
+    consolidate: job.consolidate,
+    call: (m, a, r) => lnrpcKw(m, a, r, SIGNER_RPC_TIMEOUT_MS * 3),
+    fund: (args) => lnrpc('fundchannel', args, rpc),
+    // Reliable connect w/ retry + verify. NEVER proceed to fundchannel peerless (that stranded a
+    // user's 5 USDX once): ensurePeer throws a clear error and the job fails cleanly, funds intact.
+    connect: () => ensurePeer(rpc, peerId, peerAddr, job),
+    rpc, chain: job.chain, assetId: job.chain === 'seq' ? job.asset_id : null, peerId, amount: fundAmount,
+    onStatus: (st) => { job.status = st; },
+  });
+  if (funded.consolidate_txid) job.consolidate_txid = funded.consolidate_txid;
+  job.funding_txid = funded.funding_txid;
+  job.channel_id = funded.channel_id;
   } // end if(!existingCh): skip connect+fundchannel when a channel already exists (A10)
 
   // 3. Watch the channel to CHANNELD_NORMAL.
@@ -1167,9 +1161,9 @@ function startChannelOpen(body) {
   const job = { ok: true, job_id: jobId, chain, asset_id: assetId, node_key: nodeKey,
     asset_label: assetId ? assetLabel(assetId) : (chain === 'btc' ? 'BTC' : null),
     requested_amount: amount, peer_id: peer.split('@')[0], status: 'pending_deposit',
-    // Funding from coins already on the node (a stranded deposit, or what a channel's close
-    // paid it): move them to the node's own address first, so no close output is spent into
-    // the funding output (consolidate.mjs).
+    // Funding from coins already on the node (an interrupted deposit, or what a channel's close
+    // paid it): move them to a new address of the node's own first, then fund from that coin
+    // (fundFromNode in consolidate.mjs).
     consolidate: body.consolidate === true,
     state: null, funding_txid: null, short_channel_id: null, started_ms: Date.now() };
   channelJobs.set(jobId, job);
@@ -1403,14 +1397,14 @@ function startSubasBuyHodl(body) {
     note: 'Sub-asset HODL buy: poll GET /swap/<job_id>; when held:true, settle via /node/settle to release P and let the maker claim your BTC.' };
 }
 
-// POST /channel/close {chain, asset?, node?, scid?, destination}. The INVERSE of Move-to-Lightning:
-// cooperatively close a channel on the user's OWN hosted node and send the reclaimed funds straight
-// to `destination` (the wallet's own on-chain address), so nothing is left parked on the hosted node
-// and no separate asset-sweep is needed. Device-signed and fail-closed: the keyless node's closing tx
-// SIGN is served by the DEVICE (like the funding SIGN_WITHDRAWAL), so the LSP can command the close
-// but cannot redirect the funds — and if no device signer is connected, the close simply times out
-// rather than moving anything. `unilateraltimeout` gives the cooperative path a window before falling
-// back to a (still device-signed) unilateral force-close.
+// POST /channel/close {chain, asset?, node?, scid?, destination?}: close a channel on the user's OWN
+// hosted node cooperatively, paying this side's balance to the node's own wallet (or to
+// `destination` when one is named). Device-signed and fail-closed: the keyless node's closing tx is
+// signed by the DEVICE, which signs a cooperative close only when it pays this side's balance to the
+// device's own scripts, so the LSP can command the close but cannot redirect the funds; and if no
+// device signer is connected, the close times out rather than moving anything. A `destination`
+// outside the device's scripts therefore ends in the unilateral fallback. `unilateraltimeout` gives
+// the cooperative path a window before falling back to a (still device-signed) unilateral close.
 async function closeChannel(body) {
   const chain = CHAINS[String(body.chain || '').toLowerCase()];
   if (!chain) return { ok: false, error: "chain must be 'btc' or 'seq'" };
@@ -1422,8 +1416,10 @@ async function closeChannel(body) {
   const nodeKey = body.node || null;
   const { rpc } = targetFor(chain, assetId, nodeKey);
   if (!rpc) return { ok: false, error: `no hosted Lightning node for ${chain === 'btc' ? 'BTC' : assetLabel(assetId)}` };
+  // Where the close pays this side: the node's own wallet unless a destination is named. A
+  // keyless node's device signs a cooperative close only when it pays this side's balance to the
+  // device's own scripts, so a named destination outside them ends in the unilateral fallback.
   const dest = String(body.destination || '').trim();
-  if (!dest) return { ok: false, error: 'destination (your on-chain address) is required so the reclaimed funds return to your wallet' };
   // Pick the channel to close: the named scid, else the node's single open channel.
   const pc = await lnrpc('listpeerchannels', [], rpc).catch(() => ({ channels: [] }));
   const open = (pc.channels || []).filter((c) => String(c.state || '').startsWith('CHANNELD'));
@@ -1433,9 +1429,9 @@ async function closeChannel(body) {
   // close <id> <unilateraltimeout> <destination>: cooperative first (funds -> destination), then a
   // device-signed unilateral fallback. Bounded by an execFile timeout so a missing device fails fast.
   const uni = Number.isFinite(Number(body.unilateraltimeout)) ? Math.max(1, Number(body.unilateraltimeout)) : 60;
-  const r = await lnrpc('close', [id, String(uni), dest], rpc, (uni + 30) * 1000);
+  const r = await lnrpc('close', dest ? [id, String(uni), dest] : [id, String(uni)], rpc, (uni + 30) * 1000);
   return { ok: true, closing_txid: r.txid || (r.txids && r.txids[0]) || null, type: r.type || null,
-    scid: ch.short_channel_id || null, destination: dest, asset_label: assetId ? assetLabel(assetId) : 'BTC' };
+    scid: ch.short_channel_id || null, destination: dest || null, asset_label: assetId ? assetLabel(assetId) : 'BTC' };
 }
 
 function runSwap({ side, asset, amount, take_atoms, offer_id, maker_pubkey, quote_asset, node_key, counter_node_key }) {
@@ -4586,13 +4582,22 @@ const server = http.createServer(async (req, res) => {
       // Probe reachability first: a keyless node blocked at HSM init (no device signer) can't
       // answer RPC, so onchain would read 0 — which is "unknown", NOT "no deposit". node_up lets
       // the wallet say "keep your wallet open so the signer connects" instead of "nothing here".
-      let channels = 0, node_up = false;
+      let channels = 0, node_up = false, channel_states = null;
       try { const ns = await nodeStatus(rec.rpc, 'prov'); channels = ns.channels.length; node_up = true; } catch { /* down/booting/awaiting-signer */ }
+      // Every channel the node lists, by funding outpoint and state (closed ones included): the
+      // wallet says a channel is closed only once the node reports it so (lnupgrade.js).
+      if (node_up) {
+        try {
+          const pc = await lnrpc('listpeerchannels', [], rec.rpc, STATUS_RPC_TIMEOUT_MS);
+          channel_states = (pc.channels || []).map((c) => ({ funding_txid: c.funding_txid || null,
+            funding_outnum: c.funding_outnum ?? null, state: c.state || null }));
+        } catch { /* left null: the wallet then says nothing about the node's channels */ }
+      }
       const on = node_up
         ? await onchainForReport(rec.rpc, chain, chain === 'btc' ? null : rec.asset_id).catch(() => ({ onchain_msat: 0, outputs: [] }))
         : { onchain_msat: 0, outputs: [] };
       return send(res, 200, { ok: true, node_key: rec.key, node_id: rec.node_id, asset_id: rec.asset_id,
-        chain, node_up, onchain_msat: on.onchain_msat, outputs: on.outputs || [], channels,
+        chain, node_up, onchain_msat: on.onchain_msat, outputs: on.outputs || [], channels, channel_states,
         stranded: node_up && on.onchain_msat > 0 && channels === 0 });
     }
     // List the provisioned per-device nodes (with a live node-id refresh). Refresh by KEY:

@@ -55,10 +55,12 @@ const srv = http.createServer((req, res) => {
     }
     if (u.pathname === '/node/provision' && req.method === 'POST') {
       const body = JSON.parse(b || '{}');
-      // Mirror the real LSP registry keying: a btc node is device-keyed (`btc:<pub>`),
-      // a seq node is asset-keyed. The wallet threads this `key` into fundChannel.
+      // Mirror the real LSP registry keying (provision.mjs keyOf): a btc node is device-keyed
+      // (`btc:<pub>`), a seq node asset- and device-keyed (`seq:<asset>:<pub>`). The wallet
+      // threads this `key` into fundChannel.
       const isBtc = body.chain === 'btc';
-      const key = isBtc ? `btc:${String(body.device_transport_pubkey).toLowerCase()}` : body.asset;
+      const pub = String(body.device_transport_pubkey).toLowerCase();
+      const key = isBtc ? `btc:${pub}` : `seq:${String(body.asset).toLowerCase()}:${pub}`;
       return res.end(JSON.stringify({ ok: true, chain: isBtc ? 'btc' : 'seq', key,
         asset_id: isBtc ? 'btc' : body.asset, label: body.label || 'X',
         status: 'booting', node_id: null, host_pubkey: 'ee'.repeat(33),
@@ -385,7 +387,7 @@ const res = await provisionAndConnect({
 });
 assert.ok(res.node && res.node.host_pubkey, 'provisionAndConnect returned the provisioned node wiring');
 assert.ok(res.connected && /^node-/.test(res.nodeId), 'the provisioned signer connected and derived a node id');
-assert.equal(provisionedState()[ASSET_A].connected, true, 'provisioned-node state reflects the live signer');
+assert.equal(provisionedState()[res.key].connected, true, 'provisioned-node state reflects the live signer');
 // It POSTed the provision with the derived device pubkey and connected to that node's ws.
 const provPost = seen.filter((s) => s.method === 'POST' && s.path === '/node/provision').at(-1);
 assert.equal(JSON.parse(provPost.body).asset, ASSET_A, 'provisionAndConnect provisioned the right asset');
@@ -403,13 +405,13 @@ console.log('ok: provisionAndConnect provisions a per-asset node keyed to the de
 // /channel/open so the deposit + device-co-signed funding target the user's node.
 initSeqln({ lspUrl: `http://127.0.0.1:${port}`, token: 'T0KEN', sdkPath: MOCK });
 
-// (a) A SEQ provision returns the asset id as its routing key; provision resolves BEFORE
+// (a) A SEQ provision returns its seq:<asset>:<pub> routing key; provision resolves BEFORE
 //     we fund (the caller awaits it), and the signer is connected at that point.
 globalThis.__seqlnMockConnects = [];
 const seqProv = await provisionAndConnect({
   chain: 'seq', assetId: 'de'.repeat(32), deriveIdentity: (id) => lnDeriveAsset(PHRASE, id), label: 'USDX',
 });
-assert.equal(seqProv.key, 'de'.repeat(32), 'seq provisionAndConnect returns the asset id as the routing key');
+assert.ok(seqProv.key.startsWith('seq:' + 'de'.repeat(32) + ':'), 'seq provisionAndConnect returns the device-keyed seq:<asset>:<pub> routing key');
 assert.ok(seqProv.connected, 'the user node is CONNECTED before any funding is attempted (ordering)');
 console.log('ok: provisionAndConnect connects the user node and returns its routing key BEFORE funding');
 
@@ -498,28 +500,29 @@ assert.ok((st7.provisioned_nodes || []).some((n) => n.key === ownProv.key), '/st
 console.log('ok: seqlnGetStatus reports the device\'s own provisioned-node channels (Balance card readback)');
 
 // ===========================================================================
-// Part 8 — "Move back to chain": closeChannelLsp posts the close request (2c inverse)
+// Part 8 — "Close channel": closeChannelLsp posts the close request (2c inverse)
 // ===========================================================================
-// The wallet closes a channel on its own hosted node and names the destination address, so the
-// reclaimed funds return on-chain. Verify the POST body carries chain/asset/node/scid/destination
-// and the closing txid comes back.
+// The wallet closes a channel on its own hosted node. It names no destination: the close pays
+// this side's balance to the node's own address, the only one its device signs a close to.
+// Verify the POST body carries chain/asset/node/scid and no destination, and the closing txid
+// comes back.
 const before8 = seen.length;
-const close8 = await closeChannelLsp({ chain: 'seq', asset: 'aa'.repeat(32), node: 'seq:' + 'aa'.repeat(32) + ':' + '02'.repeat(33), scid: '111x2x0', destination: 'tb1qexampledest' });
+const close8 = await closeChannelLsp({ chain: 'seq', asset: 'aa'.repeat(32), node: 'seq:' + 'aa'.repeat(32) + ':' + '02'.repeat(33), scid: '111x2x0' });
 const closeReq = seen.slice(before8).find((s) => s.path === '/channel/close' && s.method === 'POST');
 assert.ok(closeReq, 'closeChannelLsp POSTs to /channel/close');
 const cbody = JSON.parse(closeReq.body || '{}');
 assert.equal(cbody.scid, '111x2x0', 'close request carries the channel scid');
-assert.equal(cbody.destination, 'tb1qexampledest', 'close request carries the wallet destination address');
+assert.equal(cbody.destination, undefined, 'close request names no destination: the node\'s own address');
 assert.ok(cbody.node && cbody.node.startsWith('seq:'), 'close request names the device node key');
 assert.equal(close8.closing_txid, 'fc'.repeat(32), 'closeChannelLsp returns the closing txid');
-console.log('ok: closeChannelLsp drives a device-signed channel close back to the wallet address (Move back to chain)');
+console.log('ok: closeChannelLsp drives a device-signed channel close to the node\'s own address (Close channel)');
 
 // ===========================================================================
-// Part 9 — channels from the device's old store, closed at the network upgrade
+// Part 9 — channels from the device's old store, not carried over
 // ===========================================================================
 // The SDK reports the channels a store from a device that validated nothing held; the wallet
-// keeps them per node until a new channel is open, and the new channel is funded after the
-// node's coins move to its own address (consolidate), since they include what the close paid.
+// keeps them per node until the user dismisses them, and a new channel is funded from the
+// node's coins after they move to a new address of the node's own (consolidate).
 if (!globalThis.localStorage) {
   const m = new Map();
   globalThis.localStorage = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)),
@@ -537,9 +540,15 @@ const open9 = seen.slice(before9).find((x) => x.method === 'POST' && x.path === 
 assert.deepEqual(JSON.parse(open9.body), { chain: 'seq', amount: 2999000, asset: 'dd'.repeat(32), node: upg.key, consolidate: true },
   'a channel funded from the node\'s own coins asks the LSP to consolidate them first');
 assert.equal(job9.status, 'active');
+assert.ok(upg.key.startsWith('seq:' + 'dd'.repeat(32) + ':'), 'the node is keyed seq:<asset>:<pub>, as the LSP keys it');
 dismissPredating(upg.key);
-assert.equal(predatingChannels()[upg.key], undefined, 'dismissed once the new channel is open');
-console.log('ok: channels from the old store are reported per node; the new channel consolidates first');
+assert.equal(predatingChannels()[upg.key], undefined, 'dismissed');
+// The SDK reports the old store's channels again after every restore: a dismissed one stays dismissed.
+globalThis.__seqlnMockPredating = [OLD_CHAN];
+await provisionAndConnect({ chain: 'seq', assetId: 'dd'.repeat(32), deriveIdentity: (id) => lnDeriveAsset(PHRASE, id), label: 'UPG' });
+globalThis.__seqlnMockPredating = null;
+assert.equal(predatingChannels()[upg.key], undefined, 'a restore brings no dismissed channel back');
+console.log('ok: channels from the old store are reported per node, stay dismissed, and the new channel consolidates first');
 
 srv.close();
 console.log('\nALL PASS');

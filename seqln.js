@@ -33,6 +33,8 @@
 // `ln` bridge (beside xswap/xrswap/xmaker).
 // ---------------------------------------------------------------------------
 
+import { makeNoteStore, channelFate } from './lnupgrade.js';
+
 const W = (typeof window !== 'undefined') ? window : {};
 
 const DEFAULTS = {
@@ -224,33 +226,33 @@ function signerOpts(key) {
 }
 
 // Channels the device found in a store its predecessor wrote, which validated nothing: the
-// device signs no step of them, and their hub closes them. Kept per node (by its label) so
-// the wallet can say so until the user has seen it. Each { peerId, dbid, fundingTxid,
-// fundingOutnum, fundingSats }.
-const PREDATING_KEY = 'swk.ln.predating';
-function readPredating() {
-  try { return JSON.parse(localStorage.getItem(PREDATING_KEY) || '{}') || {}; } catch { return {}; }
-}
+// device signs no step of them. Kept per node (by its label), minus what the user dismissed, for
+// the note the wallet builds from what the node reports (lnupgrade.js). Each { peerId, dbid,
+// fundingTxid, fundingOutnum, fundingSats }.
+const noteStore = makeNoteStore({
+  getItem: (k) => localStorage.getItem(k),
+  setItem: (k, v) => localStorage.setItem(k, v),
+});
 function onPredatingFor(label) {
   return (channels) => {
-    const all = readPredating();
-    const have = all[label] || [];
-    for (const c of channels || []) {
-      if (!have.some((h) => h.fundingTxid === c.fundingTxid && h.fundingOutnum === c.fundingOutnum)) have.push(c);
-    }
-    all[label] = have;
-    try { localStorage.setItem(PREDATING_KEY, JSON.stringify(all)); } catch {}
-    console.warn(`seqln[${label}]: ${have.length} channel(s) from the device's old store are not carried over`);
+    // The SDK reports them again after every store restore: a dismissed channel stays dismissed.
+    if (!noteStore.record(label, channels)) return;
+    console.warn(`seqln[${label}]: channel(s) from the device's old store are not carried over`);
     if (onChange) { try { onChange(seqlnState()); } catch {} }
   };
 }
-// { [label]: [channel, ...] } for the channels closed at the network upgrade.
-export function predatingChannels() { return readPredating(); }
-export function dismissPredating(label) {
-  const all = readPredating();
-  delete all[label];
-  try { localStorage.setItem(PREDATING_KEY, JSON.stringify(all)); } catch {}
+// { [label]: [channel, ...] }: what each node's device found in an old store, not dismissed.
+export function predatingChannels() { return noteStore.channels(); }
+// Dismiss the note for node `label`: all of its old channels, or with `closedOnly` those the
+// node (`node`, its /node/onchain answer) reports closed; and the line about its coins outside
+// a channel while they stay at `onchainMsat` (or the node's reported amount).
+export function dismissPredating(label, { closedOnly = false, node = null, onchainMsat = null } = {}) {
+  const list = noteStore.channels()[label] || [];
+  const channels = closedOnly ? list.filter((c) => channelFate(c, node) === 'closed') : list;
+  const msat = onchainMsat != null ? onchainMsat : (node && node.node_up ? node.onchain_msat : null);
+  noteStore.dismiss(label, { channels, onchainMsat: msat });
 }
+export function idleDismissed(label, onchainMsat) { return noteStore.idleDismissed(label, onchainMsat); }
 
 function onRejectFor(label) {
   return ({ name, reason }) => {

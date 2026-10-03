@@ -1163,9 +1163,10 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
-  predatingChannels, dismissPredating,
+  predatingChannels, dismissPredating, idleDismissed,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
+import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
 import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 
@@ -2814,32 +2815,8 @@ function lnMovePhaseCopy(phase){
   return 'Working on your Lightning channel ('+p+')…';
 }
 const _lnReconnectedLegs = new Set();
-const _lnStrandRecovered = new Set();   // nodes whose stranded deposit we've already completed this session
 const STRAND_BLOCKED = 'swk.ln.strandBlocked';   // { [nodeKey]: { at, reason } } — recoveries not to retry
 function strandBlocked(){ try{ return JSON.parse(localStorage.getItem(STRAND_BLOCKED)||'{}'); }catch{ return {}; } }
-// Record a stranded-deposit recovery that must NOT be retried, and why.
-//
-// A recovery the DEVICE refused is not a transient failure: the same deposit produces the
-// same commitment and the same refusal every time, and each attempt costs the node its
-// signer session — lightningd drops the connection when a signer says no. Retrying it on
-// every reconnect sweep therefore made the node permanently unusable: every twelve seconds
-// something tore its signer down, so no invoice, no payment and no channel could ever
-// complete on it. Seen live on an asset node that had been unusable for hours.
-//
-// The refusal itself is correct and stays: a device that signs a commitment paying a
-// non-channel script is a device that can be talked out of its own funds.
-function blockStrandRecovery(nodeKey, reason){
-  try{
-    const all = strandBlocked();
-    all[nodeKey] = { at: Date.now(), reason: String(reason || '').slice(0, 300) };
-    localStorage.setItem(STRAND_BLOCKED, JSON.stringify(all));
-  }catch{}
-}
-// A refusal by this device's own signer, as opposed to a network blip worth retrying.
-function isSignerRefusal(e){
-  const m = (e && (e.message || e)) ? String(e.message || e) : '';
-  return /refus|policy|not a channel|non-channel/i.test(m);
-}
 const _lnLegNodeKey = {};               // leg ('btc' | assethex) -> resolved LSP registry key, for liveness checks
 let _lnDiscoveryDone = false;   // the registry discovery pass runs once (per successful call) per session
 let _reconnectInFlight = false; // single-flight: the /status poll and the wake/interval driver can call concurrently
@@ -2891,88 +2868,101 @@ async function reconnectOwnNodes(){
     for(const k of readyKeys){ try{ await waitNodeReady({ nodeKey:k, onProgress:()=>{} }); }catch{} }
     try{ lnLastStatus = await seqlnGetStatus(); }catch{}
     try{ renderBalance(); lnStatusPill(); }catch{}
-    // Finish any STRANDED deposit: a node that booted with on-chain funds but no channel — a Move
-    // interrupted before the open (e.g. one from before the persistence existed, like a recovered
-    // node). Detect via /node/onchain (registry-safe, waits for the node to boot + rescan) and
-    // complete it from the landed deposit (no re-deposit). Guarded so it runs once per node.
+    // A node that booted holding coins on chain and no channel (a Move to Lightning cut short
+    // before the open, or what a channel's close paid it): read what it reports, and say so in
+    // the note with an "Open a new channel" button. Nothing opens a channel unasked: an
+    // interrupted Move the user started is finished by resumeMove from its own record.
     for(const k of readyKeys){
-      if(k==='btc' || !/^seq:/i.test(k) || _lnStrandRecovered.has(k) || strandBlocked()[k]) continue;
+      if(!/^(seq|btc):/i.test(k)) continue;
       try{
         let info=null;
         for(let i=0;i<10;i++){ try{ info = await seqlnNodeOnchain(k); }catch{ info=null; } if(info && info.node_up) break; await new Promise(r=>setTimeout(r,3000)); }
-        if(info && info.node_up && info.stranded){
-          _lnStrandRecovered.add(k);
-          const assetHex = (k.split(':')[1]||'').toLowerCase();
-          const amount = Math.floor(Number(info.onchain_msat||0)/1000);
-          if(assetHex && amount>0){
-            console.log('[ln] completing a stranded deposit on', assetMeta(assetHex).ticker, amount);
-            // consolidate: the node's coins may include what a channel's close paid it, which its
-            // device sends only to its own address: they move there first, then fund the channel.
-            await resumeFundChannel({ chain:'seq', asset: assetHex, amount, node: k, consolidate: true, onProgress:()=>{} });
-            try{ rememberOwnLnLeg(assetHex); }catch{}
-            try{ toast('Finished moving '+assetMeta(assetHex).ticker+' to Lightning'); }catch{}
-            try{ lnLastStatus = await seqlnGetStatus(); renderBalance(); lnStatusPill(); }catch{}
-          }
-        }
-      }catch(e){
-        if(isSignerRefusal(e)){
-          blockStrandRecovery(k, e?.message ?? e);
-          console.warn('[ln] strand recovery REFUSED by this device; not retrying:', e?.message ?? e);
-        } else {
-          _lnStrandRecovered.delete(k);
-          console.warn('[ln] strand recovery (will retry next open):', e?.message ?? e);
-        }
-        try{ renderStrandBlocked(); }catch{}
-      }
+        if(info){ _lnNodeInfo[k] = { at: Date.now(), info }; }
+      }catch(e){ console.warn('[ln] node on-chain report:', e?.message ?? e); }
     }
+    try{ renderUpgradeNote(); }catch{}
   }
   } finally { _reconnectInFlight = false; }
 }
 
-// Channels the device found in its old store, which validated nothing: they were closed at
-// the network upgrade and are not carried over. Say so once per node, and offer a new one.
+// The note about each own node's coins outside a channel, and about the channels its device
+// found in an older device's store (lnupgrade.js). Built from what the node reports
+// (/node/onchain, cached here per node), never from the old store alone; a dismissed note stays
+// dismissed; one open at a time per node, and only when the user asks.
+const _lnNodeInfo = {};                 // label -> { at, info } (/node/onchain)
+const _lnOpenGuard = makeOpenGuard();
+let _lnNoteFetch = false;
+async function refreshNodeNotes(){
+  if(_lnNoteFetch) return;
+  _lnNoteFetch = true;
+  try{
+    for(const label of Object.keys(predatingChannels())){
+      const c = _lnNodeInfo[label];
+      if(c && Date.now() - c.at < 20000) continue;
+      try{ _lnNodeInfo[label] = { at: Date.now(), info: await seqlnNodeOnchain(label) }; }catch{}
+    }
+  } finally { _lnNoteFetch = false; }
+  try{ renderUpgradeNote(); }catch{}
+}
+function nodeTicker(label){
+  if(/^btc(:|$)/i.test(label)) return 'BTC';
+  const hex = (String(label).split(':')[1] || '').toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(hex)) return '';
+  const t = assetMeta(hex).ticker;
+  return /…$/.test(t) ? '' : t;
+}
+function nodeAmountText(label, msat){
+  const atoms = BigInt(Math.floor(Number(msat || 0) / 1000));
+  if(/^btc(:|$)/i.test(label)) return fmtAtoms(atoms, 8);
+  const hex = (String(label).split(':')[1] || '').toLowerCase();
+  return fmtAtoms(atoms, assetMeta(hex).precision || 0);
+}
 function renderUpgradeNote(){
   const host = $('lnUpgradeNote'); if(!host) return;
-  const all = predatingChannels(), labels = Object.keys(all).filter(l => (all[l]||[]).length);
+  const old = predatingChannels();
+  const labels = [...new Set([...Object.keys(old), ...Object.keys(_lnNodeInfo)])];
   host.textContent = '';
-  if(!labels.length){ host.classList.add('hide'); return; }
+  let any = false;
   for(const label of labels){
-    const n = all[label].length;
-    const isBtc = /^btc(:|$)/i.test(label);
-    const hex = isBtc ? '' : ((String(label).split(':')[1] || '').toLowerCase());
-    const who = isBtc ? 'BTC' : (hex ? assetMeta(hex).ticker : 'Lightning');
-    const p = el('p', null, n === 1
-      ? 'Your ' + who + ' Lightning channel was closed at the network upgrade. Its balance is back on chain,'
-        + ' held by your own keys on your Lightning node. Open a new channel to use it in Lightning again.'
-      : 'Your ' + n + ' ' + who + ' Lightning channels were closed at the network upgrade. Their balance is back'
-        + ' on chain, held by your own keys on your Lightning node. Open a new channel to use it in Lightning again.');
-    host.appendChild(p);
-    // Only this device's own nodes (registry keys) can be funded from here.
-    if(/^(seq|btc):/i.test(label)){
-      const b = el('button', 'primary', 'Open a new channel');
-      b.onclick = () => openAfterUpgrade(label, b);
-      host.appendChild(b);
+    const info = (_lnNodeInfo[label] || {}).info || null;
+    const note = noteFor({ label, ticker: nodeTicker(label), channels: old[label] || [], node: info,
+      amountText: info ? nodeAmountText(label, info.onchain_msat) : '', opening: _lnOpenGuard.text(label),
+      idleDismissed: info ? idleDismissed(label, info.onchain_msat) : false });
+    if(!note) continue;
+    any = true;
+    for(const t of note.paragraphs) host.appendChild(el('p', null, t));
+    const row = el('div', 'row');
+    if(note.canOpen){
+      const b = el('button', 'primary', note.opening || 'Open a new channel');
+      b.disabled = !!note.opening;
+      b.onclick = () => openAfterUpgrade(label);
+      row.appendChild(b);
     }
+    const d = el('button', 'ghost', 'Dismiss');
+    d.disabled = !!note.opening;
+    d.onclick = () => { dismissPredating(label, { onchainMsat: info ? info.onchain_msat : null }); renderUpgradeNote(); };
+    row.appendChild(d);
+    host.appendChild(row);
   }
-  host.classList.remove('hide');
+  host.classList.toggle('hide', !any);
 }
-async function openAfterUpgrade(label, btn){
-  btn.disabled = true;
-  const chain = /^btc:/i.test(label) ? 'btc' : 'seq';
-  const asset = chain === 'seq' ? (String(label).split(':')[1] || '').toLowerCase() : undefined;
+async function openAfterUpgrade(label){
+  const info = (_lnNodeInfo[label] || {}).info;
+  if(!(info && info.node_up && Number(info.onchain_msat) > 0)) return;
+  if(!_lnOpenGuard.start(label, 'Opening…')) return;     // an open for this node already runs
+  renderUpgradeNote();
   try{
-    const info = await seqlnNodeOnchain(label);
-    const amount = Math.floor(Number((info && info.onchain_msat) || 0) / 1000);
-    if(!(info && info.node_up)) throw new Error('your Lightning node is starting; keep this page open and try again in a minute');
-    if(!(amount > 0)) throw new Error('nothing is on chain on your Lightning node yet: the close needs a block first');
-    await resumeFundChannel({ chain, asset, amount, node: label, consolidate: true,
-      onProgress: (p) => { const t = lnMovePhaseCopy(p && p.phase); if(t) btn.textContent = t; } });
-    dismissPredating(label);
-    toast('New Lightning channel open');
+    const job = await resumeFundChannel({ ...openRequest(label, info),
+      onProgress: (p) => { const t = lnMovePhaseCopy(p && p.phase); if(t){ _lnOpenGuard.progress(label, t); renderUpgradeNote(); } } });
+    // The closed channels and the coins this note was about are dealt with.
+    dismissPredating(label, { closedOnly: true, node: info });
+    delete _lnNodeInfo[label];
+    toast(job && job.reused_existing ? 'Your Lightning channel is already open' : 'New Lightning channel open');
     try{ lnLastStatus = await seqlnGetStatus(); renderBalance(); lnStatusPill(); }catch{}
   }catch(e){
     toast('Could not open the channel: ' + String((e && e.message) || e).slice(0, 200));
   }finally{
+    _lnOpenGuard.end(label);
     try{ renderUpgradeNote(); }catch{}
   }
 }
@@ -3156,7 +3146,7 @@ async function refreshOwnLnNodeKeys(){
 async function refreshLnStatus(){
   const note=$('lnHelpNote');
   try{ renderStrandBlocked(); }catch(e){ console.warn('[ln] strand note:', e?.message??e); }
-  try{ renderUpgradeNote(); }catch(e){ console.warn('[ln] upgrade note:', e?.message??e); }
+  try{ renderUpgradeNote(); refreshNodeNotes(); }catch(e){ console.warn('[ln] upgrade note:', e?.message??e); }
   try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); }   // wire + refresh the LN send/receive cards
   if(!seqlnState().deployed){ if(note) note.classList.add('hide'); try{ renderBalance(); }catch{} try{ lnStatusPill(); }catch{} return; }
   if(note) note.classList.remove('hide');
@@ -3273,21 +3263,22 @@ function initLnSendReceive(){
     finally { sendBtn.disabled = false; }
   };
 }
-// Modal: "Move back to chain" — the inverse of Move-to-Lightning. Reconnects the device signer to
-// the user's own hosted node, then cooperatively closes the channel, sending the reclaimed funds
-// straight to a fresh wallet address. Device-signed + non-custodial: the LSP drives the close but the
-// closing tx is signed by the device, so it can only pay the user's own address.
+// Modal: "Close channel". Reconnects the device signer to the user's own hosted node, then closes
+// the channel cooperatively. The close pays the channel balance to the hosted node's own address:
+// the device signs a close only when it pays this side's balance to its own scripts, and moves the
+// node's coins only to its own addresses or into a channel. Sending them to any other address,
+// this wallet's included, waits for a way to approve that address on the device.
 function closeToChainDialog(leg, own){
   const chan = own[0];   // one channel per own node in practice; scid names it exactly
   const m=el('div','modal'); const c=el('div','card');
-  c.appendChild(el('label','lbl','Move '+leg.ticker+' back on-chain'));
-  c.appendChild(el('div','sub','This closes your '+leg.ticker+' Lightning channel and returns the funds to your wallet on-chain. Your device signs the closing transaction only if it pays your channel balance to this wallet. A cooperative close is near-instant; if the routing peer is offline it falls back to a slower unilateral close.'));
+  c.appendChild(el('label','lbl','Close your '+leg.ticker+' Lightning channel'));
+  c.appendChild(el('div','sub','This closes your '+leg.ticker+' Lightning channel. Its balance goes on chain to your Lightning node\'s own address, from where you can open a new channel. Your device moves your node\'s coins only to the node\'s own addresses or into a channel: sending them to any other address, this wallet\'s included, waits for a way to approve that address on your device. A cooperative close is near-instant; if the routing peer is offline it falls back to a slower unilateral close.'));
   const inLn=el('div','sub'); inLn.style.marginTop='8px';
   inLn.textContent='In Lightning: '+fmtAtoms(BigInt(Math.round(chan.spendable_units||0)), leg.precision)+' '+leg.ticker+' (channel '+(chan.scid||'')+')';
   c.appendChild(inLn);
   const st=el('div','sub'); st.style.marginTop='8px';
   const row=el('div','row'); row.style.marginTop='10px';
-  const go=el('button','primary','Move to chain'); const cancel=el('button','ghost','Cancel');
+  const go=el('button','primary','Close the channel'); const cancel=el('button','ghost','Cancel');
   cancel.onclick=()=>m.remove();
   go.onclick=async()=>{
     go.disabled=true; cancel.disabled=true;
@@ -3303,12 +3294,10 @@ function closeToChainDialog(leg, own){
         : await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: leg.ticker, policy:lnPolicy(),
             deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
       if(!(prov && prov.connected)) throw new Error('Could not bring your device signer online. Check your connection and try again.');
-      // 2. A fresh on-chain address of ours = where the reclaimed funds land.
-      const dest = wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential().toString();
-      // 3. Ask the LSP to cooperatively close, paying our address.
+      // 2. Ask the LSP to close cooperatively, paying the node's own address.
       say('Closing the channel (your device is co-signing)…');
-      const res = await closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||chan.node_key, scid: chan.scid, destination: dest });
-      say('Done. Closing transaction '+(res.closing_txid? res.closing_txid.slice(0,16)+'…':'broadcast')+'. Your '+leg.ticker+' will return on-chain once it confirms.');
+      const res = await closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||chan.node_key, scid: chan.scid });
+      say('Done. Closing transaction '+(res.closing_txid? res.closing_txid.slice(0,16)+'…':'broadcast')+'. Your '+leg.ticker+' is on chain at your Lightning node\'s own address once it confirms.');
       go.textContent='Close'; go.disabled=false; go.onclick=()=>m.remove(); cancel.style.display='none';
       setTimeout(async()=>{ try{ await sync(); renderBalance(); renderLightningBalance(); }catch{} }, 1500);
     }catch(e){ say('Failed: '+prettyErr(e)); go.disabled=false; cancel.disabled=false; }
@@ -3862,8 +3851,8 @@ function renderBalance(){
         acts.appendChild(btn);
       }
       if(own.length){   // Move-to-chain only for the user's OWN provisioned channels (carry a node_key)
-        const cb=el('button','ghost','Move to chain');
-        cb.title='Close your '+ticker+' Lightning channel and move the funds back on-chain to your wallet';
+        const cb=el('button','ghost','Close channel');
+        cb.title='Close your '+ticker+' Lightning channel: its balance goes on chain to your Lightning node\'s own address';
         cb.onclick=()=>closeToChainDialog(leg, own);
         acts.appendChild(cb);
       }

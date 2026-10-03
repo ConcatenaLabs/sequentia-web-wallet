@@ -1,13 +1,11 @@
-// Move a hosted node's coins of one asset to a fresh address of the node's own wallet,
-// before a channel is funded from them.
+// Move a hosted node's coins of one asset to a fresh address of the node's own wallet, and
+// fund a channel from them.
 //
-// What a channel close paid a hosted node (the output its peer's commitment pays it, or
-// what a mutual close paid it) is a close output. The node's device signs a spend of one
-// only when every output pays the device's own scripts: a channel's funding output is not
-// one of them, so a channel cannot be funded from a close output directly, and
-// `fundchannel` would fail with the funding transaction unsigned. A spend of every coin
-// to the node's own new address is signed; what it creates is an ordinary wallet coin,
-// which then funds the channel (fundchannel takes it unconfirmed, minconf=0).
+// A hosted node's device moves the node's coins only to the node's own addresses or into a
+// channel the node opens. A channel funded from the node's coins (an interrupted deposit, or
+// what a channel's close paid the node) is funded in two steps, each one the device signs: every
+// coin of the asset goes to a new address of the node's own (consolidateToOwn), and the funding
+// spends that coin (fundchannel takes it unconfirmed, minconf=0).
 //
 //   call(method, keywordArgs, rpc) -> result   (the LSP's lnrpcKw: lightning-cli -k)
 //
@@ -26,4 +24,30 @@ export async function consolidateToOwn({ call, rpc, chain, assetId }) {
   const w = await call('withdraw', args, rpc);
   if (!w || !w.txid) throw new Error('withdraw gave no txid');
   return { txid: w.txid, address };
+}
+
+// Fund a channel from the node's coins: with `consolidate`, consolidateToOwn first; then
+// connect to the routing peer and fundchannel `amount` (in the asset, named, on Sequentia),
+// spending unconfirmed coins (minconf=0). A refusal at either step is the job's error, and the
+// funding is never asked for after a consolidation that failed.
+//
+//   fund(args) -> fundchannel's result; connect() -> resolves once the peer is connected;
+//   onStatus(status): 'consolidating', 'connecting', 'opening'.
+//
+// Returns { consolidate_txid, funding_txid, channel_id }.
+export async function fundFromNode({ consolidate, call, fund, connect, rpc, chain, assetId, peerId, amount, onStatus }) {
+  const status = (s) => { try { onStatus && onStatus(s); } catch {} };
+  let consolidateTxid = null;
+  if (consolidate) {
+    status('consolidating');
+    consolidateTxid = (await consolidateToOwn({ call, rpc, chain, assetId })).txid;
+  }
+  status('connecting');
+  await connect();
+  status('opening');
+  const args = [`id=${peerId}`, `amount=${amount}`, 'announce=true', 'minconf=0'];
+  if (chain === 'seq' && assetId) args.push(`asset=${assetId}`);
+  const fc = await fund(args);
+  return { consolidate_txid: consolidateTxid, funding_txid: fc.txid || (fc.txids && fc.txids[0]) || null,
+    channel_id: fc.channel_id || null };
 }

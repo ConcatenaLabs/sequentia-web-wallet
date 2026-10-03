@@ -47,6 +47,11 @@ function serverPhases() {
   // startChannelOpen seeds the job (and its reply to the wallet) with this one.
   const seed = src.slice(b).match(/status:\s*'([a-z_]+)'/);
   if (seed) out.add(seed[1]);
+  // The worker funds through fundFromNode (consolidate.mjs), whose steps set the job's status.
+  assert.match(worker, /onStatus: \(st\) => \{ job\.status = st; \}/, 'runChannelOpen no longer takes fundFromNode\'s statuses');
+  const cons = read('./tooling/lsp/consolidate.mjs');
+  const f = cons.slice(cons.indexOf('export async function fundFromNode('));
+  for (const m of f.matchAll(/status\('([a-z_]+)'\)/g)) out.add(m[1]);
   return out;
 }
 
