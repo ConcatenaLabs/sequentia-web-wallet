@@ -172,7 +172,8 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   WebSocket Noise_XK (BOLT-8) link. Every commitment update is co-signed on your device. The
   device signs only commitments it has validated, signs a close only if it pays this wallet its
   channel balance, and approves each payment only within its payment limit for the asset
-  (`window.SEQ_LN_PAYMENT_LIMITS`, below). That does not protect you from an operator who runs
+  (`window.SEQ_LN_PAYMENT_LIMITS` in `index.html`, described in
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)). That does not protect you from an operator who runs
   both your hosted node and the node your channel is with: the hosted node collects the
   device's signature on each commitment before the device revokes it, so the two together can
   broadcast a revoked commitment and take the channel's funds.

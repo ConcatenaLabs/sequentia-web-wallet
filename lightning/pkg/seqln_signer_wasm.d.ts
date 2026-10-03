@@ -93,6 +93,18 @@ export class Signer {
      */
     setEnforce(enforce: boolean): void;
     /**
+     * Set the payment limit, in atoms per period, for one asset (`asset` a
+     * display-order asset id or `"btc"`) or, with `asset` undefined, the
+     * default for every asset. `atoms` undefined or null: no limit. The
+     * default is 10,000,000 atoms of each asset per day.
+     */
+    setPaymentLimit(asset?: string | null, atoms?: number | null): void;
+    /**
+     * Set the period the payment limits apply over, in seconds (default a
+     * day).
+     */
+    setPaymentPeriod(seconds: number): void;
+    /**
      * The store changed since last asked (take-and-clear) — the cue to
      * persist `exportChannels`.
      */
@@ -152,6 +164,8 @@ export interface InitOutput {
     readonly signer_new: (a: number, b: number) => [number, number, number];
     readonly signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
     readonly signer_setEnforce: (a: number, b: number) => void;
+    readonly signer_setPaymentLimit: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly signer_setPaymentPeriod: (a: number, b: number) => [number, number];
     readonly signer_takeChannelsDirty: (a: number) => number;
     readonly signer_takeLastUntracked: (a: number) => [number, number];
     readonly signer_walletSweepScript: (a: number, b: number, c: number) => [number, number];
