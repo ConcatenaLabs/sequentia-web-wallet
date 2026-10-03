@@ -223,6 +223,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.sequentia.walk` | an in-flight Market fill that walks several resting offers |
 | `swk.sequentia.oampTransfers`, `swk.sequentia.signerHints` | OpenAMP transfer log; pool signer keys this browser has delegated to |
 | `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |
+| `swk.ln.predating` | per hosted node, the channels its device found in an older device's store: closed at the network upgrade, not carried over |
 | `swk.balCache`, `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
 The fund-bearing keys are the mnemonic and the in-flight swap, walk, peg and bridge records;
@@ -243,7 +244,7 @@ the rest can be cleared without loss.
 
 ## Testing
 
-`node --test` (Node 22+) runs the `node:test` suites (40 of the 63 `*.test.mjs` files); the
+`node --test` (Node 22+) runs the `node:test` suites (42 of the 65 `*.test.mjs` files); the
 other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts run directly with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real

@@ -101,6 +101,7 @@ import { checkBridgeLocktimeOrdering, requiredTakerHold, frontHtlcMintTarget, ve
 import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair, relayTakerAssetLeg, runForwardBridgeTerms, sendForwardBtcLegFunded, openForwardBridgeSession, checkMakerAssetLegObserved, buildHtlcRedeem } from './bridge-maker.mjs';
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
+import { consolidateToOwn } from './consolidate.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -1074,6 +1075,16 @@ async function runChannelOpen(job) {
     await sleep(3000);   // poll briskly: the deposit is the user's own tx, seen within seconds
   }
 
+  // 1b. Coins already on the node may include a close output, which the device sends only to
+  //     its own scripts: move them all to the node's own address first; the funding then
+  //     spends that (unconfirmed, minconf=0). Signed by the device; a refusal fails the job.
+  if (job.consolidate) {
+    job.status = 'consolidating';
+    const c = await consolidateToOwn({ call: (m, a, r) => lnrpcKw(m, a, r, SIGNER_RPC_TIMEOUT_MS * 3),
+      rpc, chain: job.chain, assetId: job.chain === 'seq' ? job.asset_id : null });
+    job.consolidate_txid = c.txid;
+  }
+
   // 2. Connect to the routing peer + fundchannel. The funding tx SIGN_WITHDRAWAL is
   //    served by the DEVICE over the hsmd proxy; a missing device fails this closed.
   job.status = 'connecting';
@@ -1156,6 +1167,10 @@ function startChannelOpen(body) {
   const job = { ok: true, job_id: jobId, chain, asset_id: assetId, node_key: nodeKey,
     asset_label: assetId ? assetLabel(assetId) : (chain === 'btc' ? 'BTC' : null),
     requested_amount: amount, peer_id: peer.split('@')[0], status: 'pending_deposit',
+    // Funding from coins already on the node (a stranded deposit, or what a channel's close
+    // paid it): move them to the node's own address first, so no close output is spent into
+    // the funding output (consolidate.mjs).
+    consolidate: body.consolidate === true,
     state: null, funding_txid: null, short_channel_id: null, started_ms: Date.now() };
   channelJobs.set(jobId, job);
   runChannelOpen(job)

@@ -443,6 +443,7 @@
              move/close actions). This note just explains the non-custodial mechanism; shown
              only when an LSP is configured. -->
         <div class="warn hide" id="lnStrandNote" style="margin-bottom:10px"></div>
+        <div class="warn hide" id="lnUpgradeNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
           <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it; it cannot protect a channel from a service that runs both your hosted node and the node the channel is with. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
@@ -1162,6 +1163,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
+  predatingChannels, dismissPredating,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { signMessage, verifyAddress } from './signmessage.js';
@@ -2740,7 +2742,7 @@ function lnStatusPill(){
 }
 function initLightning(phrase){
   initSeqln();                       // reads window.SEQ_LSP_URL/_TOKEN + per-node _WS_ASSET/_BTC + _HOST_PUBKEY_ASSET/_BTC (legacy _WS/_HOST_PUBKEY -> asset)
-  onSeqlnStatus(() => lnStatusPill());
+  onSeqlnStatus(() => { lnStatusPill(); try{ renderUpgradeNote(); }catch{} });
   lnStatusPill();
   const nodes = lnEnabledNodes();
   if (!nodes.length) return;         // LN not deployed here; composer stays on-chain-only
@@ -2789,6 +2791,7 @@ function rememberOwnLnLeg(leg){ if(!leg) return; const s=new Set(ownLnLegs()); i
 // that needed them was their own wallet. Every phase now has words, and an unrecognised one still
 // moves the line instead of freezing it, so a future phase degrades to vague rather than to a lie.
 const LN_MOVE_PHASE = {
+  'consolidating':   'Moving the coins on your Lightning node to its own address first…',
   'deposit-address': 'Getting your hosted node deposit address…',
   'sending':         'Signing and sending the on-chain deposit…',
   'sent':            'Deposit sent; waiting for confirmation…',
@@ -2903,7 +2906,9 @@ async function reconnectOwnNodes(){
           const amount = Math.floor(Number(info.onchain_msat||0)/1000);
           if(assetHex && amount>0){
             console.log('[ln] completing a stranded deposit on', assetMeta(assetHex).ticker, amount);
-            await resumeFundChannel({ chain:'seq', asset: assetHex, amount, node: k, onProgress:()=>{} });
+            // consolidate: the node's coins may include what a channel's close paid it, which its
+            // device sends only to its own address: they move there first, then fund the channel.
+            await resumeFundChannel({ chain:'seq', asset: assetHex, amount, node: k, consolidate: true, onProgress:()=>{} });
             try{ rememberOwnLnLeg(assetHex); }catch{}
             try{ toast('Finished moving '+assetMeta(assetHex).ticker+' to Lightning'); }catch{}
             try{ lnLastStatus = await seqlnGetStatus(); renderBalance(); lnStatusPill(); }catch{}
@@ -2922,6 +2927,54 @@ async function reconnectOwnNodes(){
     }
   }
   } finally { _reconnectInFlight = false; }
+}
+
+// Channels the device found in its old store, which validated nothing: they were closed at
+// the network upgrade and are not carried over. Say so once per node, and offer a new one.
+function renderUpgradeNote(){
+  const host = $('lnUpgradeNote'); if(!host) return;
+  const all = predatingChannels(), labels = Object.keys(all).filter(l => (all[l]||[]).length);
+  host.textContent = '';
+  if(!labels.length){ host.classList.add('hide'); return; }
+  for(const label of labels){
+    const n = all[label].length;
+    const isBtc = /^btc(:|$)/i.test(label);
+    const hex = isBtc ? '' : ((String(label).split(':')[1] || '').toLowerCase());
+    const who = isBtc ? 'BTC' : (hex ? assetMeta(hex).ticker : 'Lightning');
+    const p = el('p', null, n === 1
+      ? 'Your ' + who + ' Lightning channel was closed at the network upgrade. Its balance is back on chain,'
+        + ' held by your own keys on your Lightning node. Open a new channel to use it in Lightning again.'
+      : 'Your ' + n + ' ' + who + ' Lightning channels were closed at the network upgrade. Their balance is back'
+        + ' on chain, held by your own keys on your Lightning node. Open a new channel to use it in Lightning again.');
+    host.appendChild(p);
+    // Only this device's own nodes (registry keys) can be funded from here.
+    if(/^(seq|btc):/i.test(label)){
+      const b = el('button', 'primary', 'Open a new channel');
+      b.onclick = () => openAfterUpgrade(label, b);
+      host.appendChild(b);
+    }
+  }
+  host.classList.remove('hide');
+}
+async function openAfterUpgrade(label, btn){
+  btn.disabled = true;
+  const chain = /^btc:/i.test(label) ? 'btc' : 'seq';
+  const asset = chain === 'seq' ? (String(label).split(':')[1] || '').toLowerCase() : undefined;
+  try{
+    const info = await seqlnNodeOnchain(label);
+    const amount = Math.floor(Number((info && info.onchain_msat) || 0) / 1000);
+    if(!(info && info.node_up)) throw new Error('your Lightning node is starting; keep this page open and try again in a minute');
+    if(!(amount > 0)) throw new Error('nothing is on chain on your Lightning node yet: the close needs a block first');
+    await resumeFundChannel({ chain, asset, amount, node: label, consolidate: true,
+      onProgress: (p) => { const t = lnMovePhaseCopy(p && p.phase); if(t) btn.textContent = t; } });
+    dismissPredating(label);
+    toast('New Lightning channel open');
+    try{ lnLastStatus = await seqlnGetStatus(); renderBalance(); lnStatusPill(); }catch{}
+  }catch(e){
+    toast('Could not open the channel: ' + String((e && e.message) || e).slice(0, 200));
+  }finally{
+    try{ renderUpgradeNote(); }catch{}
+  }
 }
 
 // Say so when a stranded deposit could not be completed. The funds are on the node and
@@ -3103,6 +3156,7 @@ async function refreshOwnLnNodeKeys(){
 async function refreshLnStatus(){
   const note=$('lnHelpNote');
   try{ renderStrandBlocked(); }catch(e){ console.warn('[ln] strand note:', e?.message??e); }
+  try{ renderUpgradeNote(); }catch(e){ console.warn('[ln] upgrade note:', e?.message??e); }
   try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); }   // wire + refresh the LN send/receive cards
   if(!seqlnState().deployed){ if(note) note.classList.add('hide'); try{ renderBalance(); }catch{} try{ lnStatusPill(); }catch{} return; }
   if(note) note.classList.remove('hide');

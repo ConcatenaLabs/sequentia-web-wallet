@@ -19,6 +19,7 @@ import {
 import { lnDeriveNode, lnDeriveAll, lnDeriveAsset, LN_PATHS, LN_ASSET_BRANCH } from './seqln-keys.js';
 import {
   connectProvisioned, provisionAndConnect, provisionedState, nodeGetinfo, waitNodeReady, closeChannelLsp,
+  predatingChannels, dismissPredating, resumeFundChannel,
 } from './seqln.js';
 
 let seen = [];
@@ -206,7 +207,10 @@ globalThis.__seqlnMockConnects = [];
 const MOCK_SRC = `
 globalThis.__seqlnMockConnects = globalThis.__seqlnMockConnects || [];
 export class SeqlnSigner {
-  static async fromMnemonic(seed, opts){ const s = new SeqlnSigner(); s._seed = seed; s._opts = opts || {}; return s; }
+  static async fromMnemonic(seed, opts){ const s = new SeqlnSigner(); s._seed = seed; s._opts = opts || {};
+    // As the real SDK does after restoring a store from a device that validated nothing.
+    if (globalThis.__seqlnMockPredating && s._opts.onPredating) s._opts.onPredating(globalThis.__seqlnMockPredating);
+    return s; }
   static async devicePubkey(priv){ return '02' + String(priv).slice(0, 64).padEnd(64, '0'); }
   setPolicy(m){ this._policy = m; return this; }
   async connect({ wsUrl, hostStaticPubkey, deviceStaticPrivkey }){
@@ -509,6 +513,33 @@ assert.equal(cbody.destination, 'tb1qexampledest', 'close request carries the wa
 assert.ok(cbody.node && cbody.node.startsWith('seq:'), 'close request names the device node key');
 assert.equal(close8.closing_txid, 'fc'.repeat(32), 'closeChannelLsp returns the closing txid');
 console.log('ok: closeChannelLsp drives a device-signed channel close back to the wallet address (Move back to chain)');
+
+// ===========================================================================
+// Part 9 — channels from the device's old store, closed at the network upgrade
+// ===========================================================================
+// The SDK reports the channels a store from a device that validated nothing held; the wallet
+// keeps them per node until a new channel is open, and the new channel is funded after the
+// node's coins move to its own address (consolidate), since they include what the close paid.
+if (!globalThis.localStorage) {
+  const m = new Map();
+  globalThis.localStorage = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k) };
+}
+const OLD_CHAN = { peerId: '02' + 'ab'.repeat(32), dbid: 4, fundingTxid: 'ef'.repeat(32), fundingOutnum: 0, fundingSats: 10000000 };
+globalThis.__seqlnMockPredating = [OLD_CHAN];
+const upg = await provisionAndConnect({ chain: 'seq', assetId: 'dd'.repeat(32), deriveIdentity: (id) => lnDeriveAsset(PHRASE, id), label: 'UPG' });
+globalThis.__seqlnMockPredating = null;
+const pred = predatingChannels();
+assert.deepEqual(pred[upg.key], [OLD_CHAN], 'the old store\'s channel is recorded under the node\'s key');
+const before9 = seen.length;
+const job9 = await resumeFundChannel({ chain: 'seq', asset: 'dd'.repeat(32), amount: 2999000, node: upg.key, consolidate: true, pollMs: 1 });
+const open9 = seen.slice(before9).find((x) => x.method === 'POST' && x.path === '/channel/open');
+assert.deepEqual(JSON.parse(open9.body), { chain: 'seq', amount: 2999000, asset: 'dd'.repeat(32), node: upg.key, consolidate: true },
+  'a channel funded from the node\'s own coins asks the LSP to consolidate them first');
+assert.equal(job9.status, 'active');
+dismissPredating(upg.key);
+assert.equal(predatingChannels()[upg.key], undefined, 'dismissed once the new channel is open');
+console.log('ok: channels from the old store are reported per node; the new channel consolidates first');
 
 srv.close();
 console.log('\nALL PASS');

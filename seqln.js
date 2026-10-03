@@ -217,9 +217,39 @@ export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
 // The options every device signer is built with: its persisted channel store, the
 // refusal hooks, and the configured payment limits.
 function signerOpts(key) {
-  const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key) };
+  const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key),
+    onPredating: onPredatingFor(key) };
   if (CFG.paymentLimits) o.paymentLimits = CFG.paymentLimits;
   return o;
+}
+
+// Channels the device found in a store its predecessor wrote, which validated nothing: the
+// device signs no step of them, and their hub closes them. Kept per node (by its label) so
+// the wallet can say so until the user has seen it. Each { peerId, dbid, fundingTxid,
+// fundingOutnum, fundingSats }.
+const PREDATING_KEY = 'swk.ln.predating';
+function readPredating() {
+  try { return JSON.parse(localStorage.getItem(PREDATING_KEY) || '{}') || {}; } catch { return {}; }
+}
+function onPredatingFor(label) {
+  return (channels) => {
+    const all = readPredating();
+    const have = all[label] || [];
+    for (const c of channels || []) {
+      if (!have.some((h) => h.fundingTxid === c.fundingTxid && h.fundingOutnum === c.fundingOutnum)) have.push(c);
+    }
+    all[label] = have;
+    try { localStorage.setItem(PREDATING_KEY, JSON.stringify(all)); } catch {}
+    console.warn(`seqln[${label}]: ${have.length} channel(s) from the device's old store are not carried over`);
+    if (onChange) { try { onChange(seqlnState()); } catch {} }
+  };
+}
+// { [label]: [channel, ...] } for the channels closed at the network upgrade.
+export function predatingChannels() { return readPredating(); }
+export function dismissPredating(label) {
+  const all = readPredating();
+  delete all[label];
+  try { localStorage.setItem(PREDATING_KEY, JSON.stringify(all)); } catch {}
 }
 
 function onRejectFor(label) {
@@ -936,12 +966,15 @@ export async function fundChannel({ chain, asset, amount, node, sendOnchain, onP
 // (re)start the LSP's fundchannel-from-existing-balance job and poll it to completion. Used to
 // recover a move that was interrupted after the deposit but before the channel opened (the
 // "stranded deposit" case) — the funds are on the user's own node, this finishes moving them.
-export async function resumeFundChannel({ chain, asset, amount, node, onProgress, pollMs = 5000, timeoutMs = 3_600_000 } = {}) {
+// `consolidate`: the node's coins move to its own address first (they may include what a
+// channel's close paid it, which its device sends only to its own scripts).
+export async function resumeFundChannel({ chain, asset, amount, node, consolidate = false, onProgress, pollMs = 5000, timeoutMs = 3_600_000 } = {}) {
   const emit = (phase, extra) => { try { onProgress && onProgress({ phase, ...extra }); } catch {} };
   emit('opening-request');
   const body = { chain, amount };
   if (asset) body.asset = asset;
   if (node) body.node = node;
+  if (consolidate) body.consolidate = true;
   const started = await lspFetch('/channel/open', { method: 'POST', body: JSON.stringify(body) });
   const jobUrl = started.poll || `/channel/open/${started.job_id}`;
   const deadline = Date.now() + timeoutMs;
