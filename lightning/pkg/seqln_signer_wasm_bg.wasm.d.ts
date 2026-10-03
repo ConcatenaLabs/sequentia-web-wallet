@@ -18,6 +18,7 @@ export const signer_hasChannel: (a: number, b: number, c: number, d: bigint) => 
 export const signer_importChannels: (a: number, b: number, c: number) => [number, number, number];
 export const signer_lastReject: (a: number) => [number, number];
 export const signer_new: (a: number, b: number) => [number, number, number];
+export const signer_predatingChannels: (a: number) => [number, number];
 export const signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
 export const signer_setEnforce: (a: number, b: number) => void;
 export const signer_setPaymentLimit: (a: number, b: number, c: number, d: number, e: number) => [number, number];

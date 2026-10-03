@@ -6,9 +6,9 @@
 // wasm, connects OUT over a (W)WebSocket to the hosted node's Noise_XK responder
 // (behind the WS<->TCP relay), authenticates with BOLT-8 Noise_XK, and then
 // SERVES the hosted lightningd's stream of hsmd sign-requests for the life of
-// the connection. The host can never move the user's funds; it only asks the
-// device to co-sign, and (in enforce mode) the device refuses theft-shaped
-// requests.
+// the connection. The host holds no key: every signature comes from this
+// device, which in enforce mode checks what it signs and refuses what it
+// cannot account for (the signer README, "What enforce mode checks").
 //
 //   const s = await SeqlnSigner.fromMnemonic(mnemonic);   // wasm signer on device
 //   s.onStatus  = (st)  => render(st);                    // connecting/serving/...
@@ -141,6 +141,9 @@ export class SeqlnSigner {
     this.onUntracked = opts.onUntracked || null;
     // Fires with { type, name, reason } whenever the signer refuses a request.
     this.onReject = opts.onReject || null;
+    // Fires once, after the persisted store is restored, with the channels
+    // that predate validation (see predatingChannels()), when there are any.
+    this.onPredating = opts.onPredating || null;
     // TEST-ONLY hook (opt-in; null in production). A Set of hsmd wire types to
     // reject ONCE each: the first time such a type is seen the serve loop sends
     // the zero-length error sentinel instead of the wasm reply, then serves it
@@ -188,6 +191,14 @@ export class SeqlnSigner {
       if (blob && blob.length) {
         const n = this._inner.importChannels(blob instanceof Uint8Array ? blob : new Uint8Array(blob));
         if (n) console.log(`seqln-signer: restored ${n} channel(s) from the persisted store`);
+        // A store from a device that validated nothing: its channels are not
+        // carried over. Persist the store as this device keeps it, so the
+        // mark survives a reload.
+        const old = this.predatingChannels();
+        if (old.length) {
+          this._persistChannels();
+          if (this.onPredating) { try { this.onPredating(old); } catch {} }
+        }
       }
     } catch (e) {
       // A bad blob must never block the signer: it is refused whole (MAC) and
@@ -230,6 +241,12 @@ export class SeqlnSigner {
     return added;
   }
   hasChannel(peerId, dbid) { return this._inner.hasChannel(hexToBytes(peerId), BigInt(dbid)); }
+  // The channels that predate validation: they came from the store of a
+  // device that validated nothing, so this device signs no commitment step for
+  // them, and their peer closes them; what the close pays the node, the
+  // device sends only to its own addresses. Each { peerId, dbid, fundingTxid
+  // (display order), fundingOutnum, fundingSats }.
+  predatingChannels() { return JSON.parse(this._inner.predatingChannels()); }
   // Compute the transport pubkey a host must pin for a given device privkey,
   // without constructing a signer (handy for provisioning UIs).
   static async devicePubkey(privkey, opts = {}) {
@@ -361,18 +378,19 @@ export class SeqlnSigner {
           // which every payment on that channel fails with a message that
           // names neither the channel nor the reason. The wasm signer records
           // the reason; surface it here (onReject + a console warning) so the
-          // host can say WHY it refused instead of leaving a dead channel.
-          if (reply.length === 4) {
-            let why = null;
-            try { why = this._inner.lastReject; } catch {}
-            if (why) {
-              console.warn(`seqln-signer: REFUSED ${hsmdName(type)} — ${why}`);
-              if (this.onReject) { try { this.onReject({ type, name: hsmdName(type), reason: why }); } catch {} }
-            }
+          // host can say WHY it refused instead of leaving a dead channel. A
+          // withdrawal the device declines is answered with the transaction
+          // unsigned, not the sentinel, and carries a reason too.
+          let why = null;
+          try { why = this._inner.lastReject; } catch {}
+          const refused = reply.length === 4 || !!why;
+          if (refused && why) {
+            console.warn(`seqln-signer: REFUSED ${hsmdName(type)} — ${why}`);
+            if (this.onReject) { try { this.onReject({ type, name: hsmdName(type), reason: why }); } catch {} }
           }
           if (this.onRequest) {
             try {
-              this.onRequest({ seq, type, name: hsmdName(type), replyBytes: reply.length - 4, rejected: reply.length === 4 });
+              this.onRequest({ seq, type, name: hsmdName(type), replyBytes: reply.length - 4, rejected: refused });
             } catch {}
           }
           // Persist the channel store if this frame changed it (setup/forget),

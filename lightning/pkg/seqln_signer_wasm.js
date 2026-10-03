@@ -261,7 +261,8 @@ export class Signer {
      * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
      * byte-for-byte what the native serve loop writes back. Throws only on a
      * libhsmd-fatal condition (which closes the transport natively).
-     * The reason the last request was refused (cleared by the next successful one).
+     * The reason the last request was refused, or answered without the
+     * signature it asked for (cleared by the next request).
      * @returns {string | undefined}
      */
     get lastReject() {
@@ -289,6 +290,26 @@ export class Signer {
         this.__wbg_ptr = ret[0];
         SignerFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * The channels that predate validation (they came from the store of a
+     * device that validated nothing, and this device signs no commitment
+     * step for them; their peer closes them), as JSON: an array of
+     * `{peerId, dbid, fundingTxid, fundingOutnum, fundingSats}`, the txid in
+     * display order, hex strings throughout. `[]` when there are none.
+     * @returns {string}
+     */
+    predatingChannels() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.signer_predatingChannels(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * @param {Uint8Array} frame_bytes

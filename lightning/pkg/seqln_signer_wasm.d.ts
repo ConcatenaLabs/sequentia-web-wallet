@@ -86,6 +86,14 @@ export class Signer {
      * malformed / unsupported secret.
      */
     constructor(hsm_secret_bytes: Uint8Array);
+    /**
+     * The channels that predate validation (they came from the store of a
+     * device that validated nothing, and this device signs no commitment
+     * step for them; their peer closes them), as JSON: an array of
+     * `{peerId, dbid, fundingTxid, fundingOutnum, fundingSats}`, the txid in
+     * display order, hex strings throughout. `[]` when there are none.
+     */
+    predatingChannels(): string;
     processFrame(frame_bytes: Uint8Array): Uint8Array;
     /**
      * Turn the M4 validating policy on (`enforce`) or off (`permissive`). The
@@ -130,7 +138,8 @@ export class Signer {
      * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
      * byte-for-byte what the native serve loop writes back. Throws only on a
      * libhsmd-fatal condition (which closes the transport natively).
-     * The reason the last request was refused (cleared by the next successful one).
+     * The reason the last request was refused, or answered without the
+     * signature it asked for (cleared by the next request).
      */
     readonly lastReject: string | undefined;
 }
@@ -162,6 +171,7 @@ export interface InitOutput {
     readonly signer_importChannels: (a: number, b: number, c: number) => [number, number, number];
     readonly signer_lastReject: (a: number) => [number, number];
     readonly signer_new: (a: number, b: number) => [number, number, number];
+    readonly signer_predatingChannels: (a: number) => [number, number];
     readonly signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
     readonly signer_setEnforce: (a: number, b: number) => void;
     readonly signer_setPaymentLimit: (a: number, b: number, c: number, d: number, e: number) => [number, number];
