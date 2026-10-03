@@ -8,7 +8,12 @@ implements the LSP / hosted-SeqLN model:
 - **The wallet holds the keys.** On unlock it brings an on-device wasm signer
   online over a wss Noise_XK link (the vendored SDK in `../../lightning/`). The
   hosted node has **no `hsm_secret`**: every commitment update is co-signed by
-  the device, so the LSP can command routing but can never move channel funds.
+  the device. The device signs only commitments it has validated and approves
+  each payment only within its payment limit for the asset. That does not
+  protect a user from an operator who runs both the hosted node and its channel
+  peer: the node collects the device's signature on each commitment before the
+  device revokes it (the preempt slot), so the two together can broadcast a
+  revoked commitment and take the channel's funds.
 - **The wallet commands** swaps via this thin HTTP API; the hosted node takes a
   pure-LN order-book offer (`seqob-cli xpln`) while the device signs.
 
@@ -27,9 +32,19 @@ a RUNE / signed challenge bound to the device pubkey; the shared token is interi
 | `POST` | `/offer` | relay a wallet-signed sub-asset offer (the LSP only forwards the bytes) |
 | `POST` / `GET` | `/swap`, `/swap/<id>` | execute a swap (`{side:'buy'|'sell', asset, amount}`); an over-cap, anchor-gated mixed swap runs asynchronously and is polled by id |
 | `POST` / `GET` | `/node/provision`, `/nodes/list`, `/node/list`, `/node/getinfo`, `/node/onchain` | per-device hosted-node provisioning and inspection |
-| `POST` / `GET` | `/node/invoice`, `/node/invoice-status`, `/node/settle`, `/node/receive`, `/node/pay`, `/node/payhash` | invoices and payments on the user's own hosted node (HODL buy path, plain receive, pay) |
+| `POST` / `GET` | `/node/invoice`, `/node/invoice-status`, `/node/settle`, `/node/receive`, `/node/pay`, `/node/payhash` | invoices and payments on the user's own hosted node (HODL buy path, plain receive, pay); a payment the device declines is answered `403 {ok:false, declined:true, error}` before any HTLC exists |
 | `POST` / `GET` | `/channel/deposit`, `/channel/open`, `/channel/open/<id>`, `/channel/inbound/quote`, `/channel/inbound`, `/channel/close` | "Move to Lightning" channel funding, inbound-liquidity purchase (priced in the asset bought), cooperative close |
 | `POST` | `/bridge/front`, `/bridge/hold`, `/bridge/asset` | the rail-crossing leg bridge: the LSP fronts a BTC-LN leg against the maker's confirmed on-chain BTC HTLC |
+
+Every payment a hosted node makes is approved by its device first. `pay` asks
+for the approval itself; before each bare-hash `sendpay` (`/node/payhash`, the
+`/node/pay` direct-hop fallback, and the bridge's fronted legs) the LSP calls
+`preapproveinvoice` or `preapprovekeysend`. Without it a keyless node's device
+refuses the commitment and the channel has no owning daemon until the peer
+reconnects. The device approves a payment only within its payment limit for the
+asset, which the wallet sets (`window.SEQ_LN_PAYMENT_LIMITS`, below). A hosted
+node pays in the asset it was provisioned for, named in every `pay` and
+`getroute`.
 
 `asset` accepts a ticker (`GOLD`) or a 32-byte hex asset id. The pair is
 `<asset>/BTC`, where the BTC leg is a real Bitcoin-LN channel in production, or
@@ -93,7 +108,17 @@ window.SEQ_LSP_WS_ASSET          = 'wss://host/lsp-ws-asset';
 window.SEQ_LSP_HOST_PUBKEY_ASSET = '<hosted ASSET node host static pubkey>';
 window.SEQ_LSP_WS_BTC            = 'wss://host/lsp-ws-btc';
 window.SEQ_LSP_HOST_PUBKEY_BTC   = '<hosted BTC node host static pubkey>';
+// optional: the device's payment limits, in each asset's own atoms per period
+window.SEQ_LN_PAYMENT_LIMITS     = { default: 10000000, period: 86400,
+                                     assets: { '<asset id>': 5000000, btc: 2000000 } };
 ```
+
+The payment limits are enforced by the device signer, not by this service: the
+device approves a payment only when its amount, with a routing-fee allowance,
+fits in what the limit leaves for the period, and charges every HTLC it signs to
+its channel's asset. `null` means no limit; with the global unset the device's
+default applies (10,000,000 atoms of each asset per day). Set a limit for each
+asset to suit its value.
 
 The wallet derives TWO device identities from the user's ONE mnemonic
 (`../../seqln-keys.js`, single source of truth) and brings up a device signer for
@@ -133,6 +158,8 @@ node device-harness.mjs btc   <SEQ_LSP_WS_BTC>   <out>/btc.hsm_secret   <SEQ_LSP
 The node id each harness prints is that hosted node's identity — provision the
 node keyless and pin the matching transport pubkey. The browser reaches the same
 identity via `SeqlnSigner.fromMnemonic(signingSeed)` (byte-identical hsm_secret).
+The harness takes the device's payment limits from `SEQ_LN_PAYMENT_LIMITS` in
+its environment, as JSON in the shape of `window.SEQ_LN_PAYMENT_LIMITS`.
 
 ## Proof
 

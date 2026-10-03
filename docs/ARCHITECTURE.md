@@ -109,7 +109,8 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LSP_WS_ASSET` / `SEQ_LSP_HOST_PUBKEY_ASSET` | unset | asset-node signer WebSocket + pinned Noise responder key |
 | `SEQ_LSP_WS_BTC` / `SEQ_LSP_HOST_PUBKEY_BTC` | unset | btc-node signer WebSocket + pinned key |
 | `SEQ_LSP_SDK` | `./lightning/seqln-signer-sdk.js` | signer SDK path (dynamic import) |
-| `SEQ_LSP_POLICY` | `permissive` | device-signer policy (`enforce` refuses non-co-signed movement) |
+| `SEQ_LSP_POLICY` | `enforce` | device-signer policy (`permissive` is the kill-switch that signs without the custody checks) |
+| `SEQ_LN_PAYMENT_LIMITS` | the device's default, 10,000,000 atoms of each asset per day | device payment limits: `{default, period, assets: {<asset id>\|'btc': atoms}}`, each in the asset's own atoms, `null` for none |
 | `SEQ_LSP_FRONT_CAP` | `0.0005` BTC | LSP instant-front cap for mixed swaps |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'~10 min'}` | on-chain confirmation estimate for the timing banner |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |

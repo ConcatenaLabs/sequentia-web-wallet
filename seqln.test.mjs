@@ -206,13 +206,14 @@ globalThis.__seqlnMockConnects = [];
 const MOCK_SRC = `
 globalThis.__seqlnMockConnects = globalThis.__seqlnMockConnects || [];
 export class SeqlnSigner {
-  static async fromMnemonic(seed){ const s = new SeqlnSigner(); s._seed = seed; return s; }
+  static async fromMnemonic(seed, opts){ const s = new SeqlnSigner(); s._seed = seed; s._opts = opts || {}; return s; }
   static async devicePubkey(priv){ return '02' + String(priv).slice(0, 64).padEnd(64, '0'); }
   setPolicy(m){ this._policy = m; return this; }
   async connect({ wsUrl, hostStaticPubkey, deviceStaticPrivkey }){
     this._nodeId = 'node-' + String(deviceStaticPrivkey).slice(0, 16);
     globalThis.__seqlnMockConnects.push({ seed: this._seed, policy: this._policy,
-      priv: deviceStaticPrivkey, wsUrl, hostPub: hostStaticPubkey, nodeId: this._nodeId });
+      priv: deviceStaticPrivkey, wsUrl, hostPub: hostStaticPubkey, nodeId: this._nodeId,
+      paymentLimits: this._opts.paymentLimits });
     if (this.onStatus) this.onStatus({ state: 'node_id', nodeId: this._nodeId });
   }
   async whenNodeId(){ return this._nodeId; }
@@ -266,6 +267,24 @@ console.log('ok: two device signers connected — distinct keys, seeds, endpoint
 disconnectDevice();
 assert.equal(seqlnAvailable(), false, 'disconnect() drops both legs');
 console.log('ok: disconnectDevice() tears down both legs and the rail goes unavailable');
+
+// The device's payment limits come from configuration (window.SEQ_LN_PAYMENT_LIMITS, or
+// initSeqln's paymentLimits) and reach the SDK when the signer is built; unset, none are passed
+// and the device keeps its own default.
+const LIMITS = { default: 10000000, period: 86400, assets: { ['ab'.repeat(32)]: 5000000, btc: 2000000 } };
+initSeqln({ lspUrl: `http://127.0.0.1:${port}`, token: 'T0KEN', sdkPath: MOCK, paymentLimits: LIMITS,
+  nodes: { asset: { wsUrl: 'ws://asset.local/lsp-signer', hostPubkey: 'aa'.repeat(33) } } });
+globalThis.__seqlnMockConnects.length = 0;
+await connectDevice({ node: 'asset', deviceSigningSeed: asset.signingSeed, deviceTransportPrivkey: asset.transportPrivkey });
+assert.deepEqual(globalThis.__seqlnMockConnects[0].paymentLimits, LIMITS, 'the configured limits reach the device signer');
+disconnectDevice();
+initSeqln({ lspUrl: `http://127.0.0.1:${port}`, token: 'T0KEN', sdkPath: MOCK,
+  nodes: { asset: { wsUrl: 'ws://asset.local/lsp-signer', hostPubkey: 'aa'.repeat(33) } } });
+globalThis.__seqlnMockConnects.length = 0;
+await connectDevice({ node: 'asset', deviceSigningSeed: asset.signingSeed, deviceTransportPrivkey: asset.transportPrivkey });
+assert.equal(globalThis.__seqlnMockConnects[0].paymentLimits, undefined, 'no limits configured: none passed, the device default applies');
+disconnectDevice();
+console.log('ok: the configured payment limits reach the device signer');
 
 // ===========================================================================
 // Part 3 — "Move to Lightning" channel funding (fundChannel + seqlnChannels)

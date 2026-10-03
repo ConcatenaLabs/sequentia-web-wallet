@@ -445,7 +445,7 @@
         <div class="warn hide" id="lnStrandNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
-          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it, so only you can move the funds. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
+          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it; it cannot protect a channel from a service that runs both your hosted node and the node the channel is with. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
         </details>
       </div>
       <div class="card">
@@ -1108,8 +1108,8 @@
 <script>
   // Cross-chain Lightning rail (Tier-2 hosted SeqLN) — the deployed demo backend.
   // The wallet derives BOTH hosted-node device identities from the user's ONE
-  // mnemonic (seqln-keys.js) and co-signs each keyless node over these wss links,
-  // so the LSP can route but never move the user's channel funds. NO key or
+  // mnemonic (seqln-keys.js) and co-signs each keyless node over these wss links
+  // (what the device does and does not protect against: seqln.js). NO key or
   // mnemonic is placed here: the browser derives the two device keys from the
   // phrase the user types. The host pubkeys are the hosted proxies' pinned Noise
   // responder identities; the bearer token is an interim shared testnet-demo token.
@@ -3213,7 +3213,7 @@ function closeToChainDialog(leg, own){
   const chan = own[0];   // one channel per own node in practice; scid names it exactly
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Move '+leg.ticker+' back on-chain'));
-  c.appendChild(el('div','sub','This closes your '+leg.ticker+' Lightning channel and returns the funds to your wallet on-chain. Your device co-signs the closing transaction, so only you can move these funds. A cooperative close is near-instant; if the routing peer is offline it falls back to a slower unilateral close.'));
+  c.appendChild(el('div','sub','This closes your '+leg.ticker+' Lightning channel and returns the funds to your wallet on-chain. Your device signs the closing transaction only if it pays your channel balance to this wallet. A cooperative close is near-instant; if the routing peer is offline it falls back to a slower unilateral close.'));
   const inLn=el('div','sub'); inLn.style.marginTop='8px';
   inLn.textContent='In Lightning: '+fmtAtoms(BigInt(Math.round(chan.spendable_units||0)), leg.precision)+' '+leg.ticker+' (channel '+(chan.scid||'')+')';
   c.appendChild(inLn);
@@ -3284,7 +3284,7 @@ function moveToLightningDialog(leg){
   const avail = BigInt(leg.onchain||0n);
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Move '+leg.ticker+' to Lightning'));
-  c.appendChild(el('div','sub','Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it. Non-custodial: only your device can spend these funds. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
+  c.appendChild(el('div','sub','Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it. Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. A service that runs both your hosted node and the node the channel is with could still take the channel\'s funds. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
   c.appendChild(el('div','sub','Available on-chain: '+fmtAtoms(avail, leg.precision)+' '+leg.ticker));

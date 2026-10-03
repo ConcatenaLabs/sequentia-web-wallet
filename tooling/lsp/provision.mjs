@@ -8,7 +8,7 @@
 // A provisioned node mirrors the demo nodes exactly (verified against demo-asset):
 //   * a keyless lightningd (--network=sequentia-testnet) whose hsmd is the Noise-proxy
 //     subdaemon (subdaemon=hsmd:lightning_hsmd_proxy) — NO local hsm_secret. The only
-//     signer is the user's device, so the LSP can command but never move funds.
+//     signer is the user's device: the LSP commands the node but cannot sign for it.
 //   * the proxy's Noise responder listens on SEQLN_SIGNER_LISTEN (a private TCP port);
 //     SEQLN_HOST_PRIVKEY_FILE is the node's Noise static key (its pubkey is what the
 //     device pins); SEQLN_SIGNER_PEER_PUBKEY is the DEVICE's transport pubkey the host
