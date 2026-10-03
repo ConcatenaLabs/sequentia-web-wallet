@@ -22,6 +22,10 @@
 // The device transport privkey may be given as 64-hex or as a path to a file
 // holding that hex (preferred: the secret never lands in argv/ps).
 //
+// SEQ_LN_PAYMENT_LIMITS (JSON, the shape of the wallet's window.SEQ_LN_PAYMENT_LIMITS:
+// {"default": atoms|null, "period": seconds, "assets": {"<asset id>"|"btc": atoms|null}})
+// sets the device's payment limits; unset, the device's default applies.
+//
 // It prints the transport pubkey the host must pin, the Noise result, the derived
 // node id (NODE_ID <hex> on stdout for the parent to compare against getinfo), a
 // live per-request co-sign log, and a periodic tally, then serves until the link
@@ -63,7 +67,12 @@ const NAME = {
 };
 
 const secret = new Uint8Array(readFileSync(secretPath));
-const signer = await SeqlnSigner.fromHsmSecret(secret, { wasm: WASM });
+let paymentLimits = null;
+if (process.env.SEQ_LN_PAYMENT_LIMITS) {
+  try { paymentLimits = JSON.parse(process.env.SEQ_LN_PAYMENT_LIMITS); }
+  catch { console.error(`[${label}] SEQ_LN_PAYMENT_LIMITS is not JSON`); process.exit(2); }
+}
+const signer = await SeqlnSigner.fromHsmSecret(secret, paymentLimits ? { wasm: WASM, paymentLimits } : { wasm: WASM });
 signer.setPolicy(enforce ? 'enforce' : 'permissive');   // enforce by default; --permissive opts out
 
 signer.onStatus = (st) => {

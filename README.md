@@ -163,14 +163,19 @@ remove it. Only pure-Lightning settlement (nothing on-chain) is labelled final a
 
 ### Lightning (experimental)
 
-The Lightning rails use a hosted-SeqLN LSP model that keeps the wallet non-custodial:
+The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your device:
 
 - The server hosts two **keyless** SeqLN nodes (an asset node on Sequentia, a BTC node on
   testnet4). Neither has an `hsm_secret`.
 - The browser derives two device identities from your one mnemonic (hardened `m/1017'/...`
   paths, see `seqln-keys.js`) and runs an on-device WASM signer per node, connected over a
-  WebSocket Noise_XK (BOLT-8) link. Every commitment update is co-signed on your device, so
-  the LSP can route payments but can never move channel funds.
+  WebSocket Noise_XK (BOLT-8) link. Every commitment update is co-signed on your device. The
+  device signs only commitments it has validated, signs a close only if it pays this wallet its
+  channel balance, and approves each payment only within its payment limit for the asset
+  (`window.SEQ_LN_PAYMENT_LIMITS`, below). That does not protect you from an operator who runs
+  both your hosted node and the node your channel is with: the hosted node collects the
+  device's signature on each commitment before the device revokes it, so the two together can
+  broadcast a revoked commitment and take the channel's funds.
 - A trade with both rails set to Lightning settles both legs atomically on one preimage, fully
   off-chain. A mixed rail (one leg on-chain, one Lightning) is a submarine swap.
 

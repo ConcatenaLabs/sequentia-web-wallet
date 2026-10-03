@@ -11,8 +11,13 @@
 //   * an ASSET node (holds the GOLD channel on Sequentia), and
 //   * a BTC node    (holds the BTC channel on testnet4).
 // The two legs settle atomically on one preimage. Both hosted nodes are KEYLESS
-// (no hsm_secret): the browser device is the sole signer for BOTH, so the LSP can
-// command routing but can never move the user's channel funds. The wallet's job
+// (no hsm_secret): the browser device is the sole signer for BOTH. It signs only
+// commitments it has validated and approves each payment only within its payment
+// limit for the asset (SEQ_LN_PAYMENT_LIMITS). That does not protect the user
+// from an operator who runs both the hosted node and its channel peer: the node
+// still collects the device's signature on each commitment before the device
+// revokes it (the preempt slot), so the two together could broadcast a revoked
+// commitment. The wallet's job
 // on the swap path is simply to keep BOTH device signers serving so the two
 // hosted nodes can co-sign their legs; the LSP (`POST /swap`) drives both legs.
 //
@@ -51,6 +56,12 @@ const DEFAULTS = {
   // The wasm signer SDK (vendored under /lightning). Dynamic-imported so a wallet
   // with LN unconfigured never loads the 1.5MB wasm.
   sdkPath: W.SEQ_LSP_SDK || './lightning/seqln-signer-sdk.js',
+  // The device's payment limits: { default: atoms|null, period: seconds,
+  // assets: { <asset id>|'btc': atoms|null } }, each in the asset's own atoms,
+  // null for no limit. The device approves a payment only within what its
+  // limit leaves for the period. Unset, the device's own default applies
+  // (10,000,000 atoms of each asset per day).
+  paymentLimits: W.SEQ_LN_PAYMENT_LIMITS || null,
 };
 
 const NODES = ['asset', 'btc'];
@@ -78,6 +89,7 @@ const nodeState = { asset: freshNode(), btc: freshNode() };
 function cloneCfg(src) {
   return {
     lspUrl: src.lspUrl, token: src.token, sdkPath: src.sdkPath, sdk: src.sdk || null, wsBase: src.wsBase || null,
+    paymentLimits: src.paymentLimits || null,
     nodes: {
       asset: { ...src.nodes.asset },
       btc: { ...src.nodes.btc },
@@ -108,6 +120,7 @@ export function initSeqln(opts = {}) {
   if (opts.sdkPath != null) CFG.sdkPath = opts.sdkPath;
   if (opts.sdk != null) CFG.sdk = opts.sdk;
   if (opts.wsBase != null) CFG.wsBase = opts.wsBase;
+  if (opts.paymentLimits !== undefined) CFG.paymentLimits = opts.paymentLimits;
   if (opts.nodes) {
     for (const n of NODES) {
       if (opts.nodes[n]) CFG.nodes[n] = { ...CFG.nodes[n], ...opts.nodes[n] };
@@ -201,6 +214,14 @@ function chStoreFor(storageKey) {
 const _lastRefusal = new Map();
 export function signerRefusals() { return new Map(_lastRefusal); }
 export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
+// The options every device signer is built with: its persisted channel store, the
+// refusal hooks, and the configured payment limits.
+function signerOpts(key) {
+  const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key) };
+  if (CFG.paymentLimits) o.paymentLimits = CFG.paymentLimits;
+  return o;
+}
+
 function onRejectFor(label) {
   return ({ name, reason }) => {
     _lastRefusal.set(label, { name, reason, at: Date.now() });
@@ -243,7 +264,7 @@ export async function connectDevice({
   const mod = await loadSdk();
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
-    { channelStore: chStoreFor(node), onUntracked: onUntrackedFor(node), onReject: onRejectFor(node) });
+    signerOpts(node));
   signer.setPolicy(policy);
   s.signer = signer;
   signer.onStatus = (st) => {
@@ -318,7 +339,7 @@ export async function connectProvisioned({ assetId, key, deviceSigningSeed, devi
   const mod = await loadSdk();
   const SeqlnSigner = mod.SeqlnSigner || mod.default;
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
-    { channelStore: chStoreFor(mapKey), onUntracked: onUntrackedFor(mapKey), onReject: onRejectFor(mapKey) });
+    signerOpts(mapKey));
   signer.setPolicy(policy);
   s.signer = signer;
   signer.onStatus = (st) => {
@@ -839,8 +860,8 @@ export async function waitNodeReady({ nodeKey, onProgress, timeoutMs = 180_000, 
 // the user's hosted node. NON-CUSTODIAL: the wallet signs the on-chain deposit itself
 // (via the `sendOnchain` hook the wallet supplies, so this module never depends on the
 // wallet's signer), and the channel funding tx is co-signed by the on-device signer
-// (the hosted node is keyless), so the LSP orchestrates fundchannel but can never move
-// the funds. The device signer for this chain's leg MUST be serving.
+// (the hosted node is keyless), so the LSP orchestrates fundchannel but cannot sign
+// the funding transaction itself. The device signer for this chain's leg MUST be serving.
 //
 //   chain        'btc' | 'seq'
 //   asset        (seq only) 'GOLD' or a 32-byte hex id — the asset to fund the channel with

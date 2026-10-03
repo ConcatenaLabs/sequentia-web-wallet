@@ -1,11 +1,13 @@
 // The hosted-SeqLN LSP HTTP service (Tier-2, "we run SeqLN for the user").
 //
-// The backend the wallet's Lightning module (seqln.js) commands. It is NOT
-// custodial of the user's keys: the wallet's on-device wasm signer co-signs the
-// hosted node's commitment updates over a wss Noise link, so the hosted node has
-// no hsm_secret and this service can command routing but can never move the
-// user's channel funds. It only tells the hosted node to take a pure-LN
-// order-book offer via `seqob-cli xpln`.
+// The backend the wallet's Lightning module (seqln.js) commands. It holds none of
+// the user's keys: the wallet's on-device wasm signer co-signs the hosted node's
+// commitment updates over a wss Noise link, so the hosted node has no hsm_secret.
+// The device signs only commitments it has validated and approves each payment
+// only within its payment limit for the asset (every sendpay here asks it first:
+// preapprovePayment). That does not protect a user from an operator who runs both
+// the hosted node and its channel peer (the preempt slot; seqln.js). It tells the
+// hosted node to take a pure-LN order-book offer via `seqob-cli xpln`.
 //
 //   POST /swap  {side:'buy'|'sell', asset, amount, payRail?, recvRail?}
 //        payRail/recvRail each 'ln' | 'chain' (default ln/ln):
@@ -237,7 +239,7 @@ const CFG = {
   // The routing peer each hosted node opens its channel TO (id@host:port). The channel
   // is funded from the hosted node's OWN on-chain wallet, whose only signer is the user's
   // device (keyless node + hsmd proxy), so the funding tx is device-co-signed: the LSP
-  // orchestrates fundchannel but can never move the funds. Blank => that chain can't open.
+  // orchestrates fundchannel but cannot sign it. Blank => that chain can't open.
   channelPeerBtc: process.env.CHANNEL_PEER_BTC || '',
   channelPeerAsset: process.env.CHANNEL_PEER_ASSET || '',
   // How long POST /channel/open watches for the on-chain deposit to confirm + the
@@ -512,9 +514,11 @@ function lnrpcKw(method, kv = [], rpc, timeoutMs = 0) {
     execFile(CFG.lncli, [`--rpc-file=${rpc}`, '-N', 'none', '-k', method, ...kv],
       { maxBuffer: 8 << 20, timeout: timeoutMs || undefined }, (err, stdout, stderr) => {
         if (err) {
-          let detail = (stderr || '').trim();
-          try { const j = JSON.parse(stdout); if (j && j.message) detail = j.message; } catch { /* not json */ }
-          return reject(new Error(`${method}: ${detail || scrubDetail(err.message)}`));
+          let detail = (stderr || '').trim(), code;
+          try { const j = JSON.parse(stdout); if (j && j.message) detail = j.message; if (j && j.code != null) code = j.code; } catch { /* not json */ }
+          const e = new Error(`${method}: ${detail || scrubDetail(err.message)}`);
+          if (code != null) e.rpcCode = Number(code);   // e.g. 213/214: the signer declined the payment
+          return reject(e);
         }
         try { resolve(JSON.parse(stdout)); } catch { reject(new Error(`${method}: bad json`)); }
       });
@@ -532,9 +536,11 @@ function lnrpc(method, args = [], rpc, timeoutMs = 0) {
         // lightning-cli prints the JSON-RPC error (with a human "message") to stdout
         // even on a non-zero exit, so surface that instead of the bare "Command failed".
         if (err) {
-          let detail = (stderr || '').trim();
-          try { const j = JSON.parse(stdout); if (j && j.message) detail = j.message; } catch { /* not json */ }
-          return reject(new Error(`${method}: ${detail || scrubDetail(err.message)}`));
+          let detail = (stderr || '').trim(), code;
+          try { const j = JSON.parse(stdout); if (j && j.message) detail = j.message; if (j && j.code != null) code = j.code; } catch { /* not json */ }
+          const e = new Error(`${method}: ${detail || scrubDetail(err.message)}`);
+          if (code != null) e.rpcCode = Number(code);   // e.g. 213/214: the signer declined the payment
+          return reject(e);
         }
         try { resolve(JSON.parse(stdout)); } catch { reject(new Error(`${method}: bad json`)); }
       });
@@ -842,9 +848,8 @@ async function status(deviceKeys = []) {
 //      on-chain wallet, then calls `fundchannel` to the routing peer. Because the
 //      hosted node is KEYLESS (subdaemon=hsmd proxy -> the device's wasm signer),
 //      the funding transaction's SIGN_WITHDRAWAL is served by the DEVICE. The LSP
-//      can command fundchannel but cannot produce the funding signature, so it can
-//      never move the deposited funds. Fail-closed: no device signer -> no funding
-//      signature -> no channel.
+//      can command fundchannel but cannot produce the funding signature.
+//      Fail-closed: no device signer -> no funding signature -> no channel.
 //   4. GET /channel/open/<id> reports pending_deposit -> opening -> awaiting_lockin
 //      -> active (CHANNELD_NORMAL), at which point /status shows spendable_msat.
 // ---------------------------------------------------------------------------
@@ -1786,6 +1791,48 @@ function pubkeyHex(v) {
   } catch { return null; }
 }
 
+// ══ THE DEVICE APPROVES EVERY PAYMENT BEFORE ITS HTLC EXISTS ═════════════════
+//
+// A keyless hosted node's device signs a commitment that adds an HTLC we offer only
+// for a payment hash it approved, and it approves a payment only within its payment
+// limit for the asset (atoms per period, set on the device). `pay` and `keysend` ask
+// for that approval themselves (preapproveinvoice / preapprovekeysend). A bare
+// `sendpay` does not, so every sendpay here asks first: without it the device refuses
+// the commitment, the payee is never paid, and the channel has no owning daemon until
+// the peer reconnects. A decline comes before any HTLC exists, so nothing is sent and
+// the channel is untouched; it reaches the user as PaymentDeclined, which names the
+// amount and asset. A node with its own hsm_secret approves every payment.
+//
+// The approval request names no asset (the hsmd message has no field for one); the
+// device checks the amount against the smallest allowance left among its channels'
+// assets and charges the HTLC to its channel's asset when it signs the commitment.
+// The asset is pinned by the route, which every caller builds in the payment's asset.
+class PaymentDeclined extends Error {
+  constructor(message) { super(message); this.name = 'PaymentDeclined'; this.declined = true; }
+}
+function isDeclined(e) {
+  return !!e && (e.rpcCode === 213 || e.rpcCode === 214 || /\bwas declined\b/.test(String(e.message || '')));
+}
+function declinedMessage({ amountMsat, assetId }) {
+  const atoms = Math.ceil(Number(amountMsat) / 1000);
+  const what = assetId ? `${atoms} atoms of ${assetLabel(assetId)}` : `${atoms} sats`;
+  return `Your device declined this payment of ${what}: it is more than your device's payment limit `
+    + `for ${assetId ? assetLabel(assetId) : 'Bitcoin'} still allows in this period. Nothing was sent and your channel is unchanged.`;
+}
+// preapprovePayment asks the paying node's signer to approve one payment: by its
+// invoice when there is one, else by destination, hash and amount. Throws
+// PaymentDeclined on a decline; any other failure is rethrown as it came.
+async function preapprovePayment(rpc, { bolt11, destination, paymentHash, amountMsat, assetId }) {
+  try {
+    if (bolt11) await lnrpcKw('preapproveinvoice', [`bolt11=${bolt11}`], rpc, SIGNER_RPC_TIMEOUT_MS);
+    else await lnrpcKw('preapprovekeysend', [`destination=${destination}`, `payment_hash=${paymentHash}`,
+      `amount_msat=${Math.floor(Number(amountMsat))}`], rpc, SIGNER_RPC_TIMEOUT_MS);
+  } catch (e) {
+    if (isDeclined(e)) throw new PaymentDeclined(declinedMessage({ amountMsat, assetId }));
+    throw e;
+  }
+}
+
 // ══ DELIVER AN ASSET OVER LIGHTNING, PAID BY BARE HASH ═══════════════════════
 //
 // The bridge could front the BTC leg over Lightning and the asset leg ON-CHAIN, but
@@ -1825,13 +1872,16 @@ async function payAssetHoldByHash({ rpc, assetId, destNodeId, amountMsat, hashH,
       const pc = await lnrpcKw('listpeerchannels', [`id=${destNodeId}`], rpc, SIGNER_RPC_TIMEOUT_MS);
       chans = (pc && pc.channels) || [];
     } catch (e) { throw new Error(`asset-over-LN delivery: no route to ${destNodeId} and listpeerchannels failed: ${scrubDetail(String((e && e.message) || e))}`); }
+    // listpeerchannels names a channel's asset in `channel_asset`, and only when it is
+    // not the Sequence token; a channel that names another asset is never this one.
     const live = chans.find((c) => String(c.state || '').startsWith('CHANNELD_NORMAL') && c.short_channel_id
-      && (!assetId || String(c.asset || '').toLowerCase() === String(assetId).toLowerCase()));
+      && !(assetId && c.channel_asset && String(c.channel_asset).toLowerCase() !== String(assetId).toLowerCase()));
     if (!live) throw new Error(`asset-over-LN delivery: no usable channel to ${destNodeId} for asset ${assetId || '(btc)'} — cannot deliver`);
     route = [{ id: destNodeId, channel: live.short_channel_id, direction: Number(live.direction || 0),
       amount_msat: Math.floor(Number(amountMsat)), delay: Math.max(1, Math.floor(Number(finalCltv) || 18)), style: 'tlv' }];
   }
 
+  await preapprovePayment(rpc, { destination: destNodeId, paymentHash: hashH, amountMsat, assetId });
   await lnrpcKw('sendpay', [`route=${JSON.stringify(route)}`, `payment_hash=${hashH}`], rpc, SIGNER_RPC_TIMEOUT_MS);
   const w = await lnrpc('waitsendpay', [String(hashH)], rpc, CFG.mixedTimeoutMs);
   const P = w && (w.payment_preimage || w.preimage);
@@ -2665,6 +2715,7 @@ function makeBridgeIo({ match, body, job }) {
       const actualDelay = Number(route.route[route.route.length - 1] && route.route[route.route.length - 1].delay);
       const routeCheck = verifyFrontRouteExpiry({ clnBlockheight, actualDelay, tSeqCoverHeight: mint.tSeqCoverHeight, absoluteExpiryHeight: mint.absoluteExpiryHeight });
       if (!routeCheck.ok) throw new Error(`front-ln blocked (fail closed, no LN fronted): ${routeCheck.reason}`);
+      await preapprovePayment(lspRpc, { destination: String(s.recvNodeId), paymentHash: String(s.hashH), amountMsat: amtMsat });
       await lnrpc('sendpay', [JSON.stringify(route.route), String(s.hashH)], lspRpc, SIGNER_RPC_TIMEOUT_MS);
       // sendpay has committed the HTLC toward the taker's hold (it now shows as pending) — the front is live.
       // Mark it CONFIRMED before waitsendpay blocks, so the taker sees 'fronted' and may safely fund its asset.
@@ -4244,10 +4295,12 @@ const server = http.createServer(async (req, res) => {
       // The BRIDGED-SELL taker registers a HODL hold on H at its own BTC-LN node so the LSP's front (a
       // bare-hash sendpay on H) lands HELD there — that node is a BTC node, not an asset node, so an asset
       // id is neither present nor meaningful (the amount is BTC sats). Require an asset only for a Sequentia
-      // asset node (the sub-asset HODL buy); a BTC node holds by hash with no asset. The holdinvoice call is
-      // asset-agnostic either way (it takes only H + amount msat).
+      // asset node (the sub-asset HODL buy); a BTC node holds by hash with no asset. On a Sequentia node the
+      // hold and the invoice name the asset, so only an HTLC in it is taken: the node's own asset, which the
+      // caller's must match.
       const assetId = (rec.chain === 'btc') ? null : resolveAsset(body && body.asset);
       if (!nodeKey || !(amount > 0) || (rec.chain !== 'btc' && !assetId)) return send(res, 400, { ok: false, error: 'body { node_key, amount (sats), payment_hash? | preimage?, asset (Sequentia asset nodes only) } required' });
+      if (assetId && String(rec.asset_id || '').toLowerCase() !== assetId) return send(res, 400, { ok: false, error: `this hosted node holds ${assetLabel(String(rec.asset_id || ''))}, not ${assetLabel(assetId)}` });
       const amtMsat = String(Math.round(amount) * 1000);           // asset sats -> asset msat
       const label = 'buy-' + crypto.randomUUID();
       const H = body && body.payment_hash ? String(body.payment_hash).toLowerCase() : null;
@@ -4260,10 +4313,12 @@ const server = http.createServer(async (req, res) => {
           // W2 HOLD-LIFE vs T_seq — the BRIDGED-SELL taker passes `expiry` (seconds) so its hold on H stays
           // valid until strictly AFTER the maker's latest asset claim (T_seq) + margin; without a long-enough
           // expiry the maker could wait for a short hold to lapse, then reveal P and take the asset. Absent
-          // (the sub-asset HODL buy) => the plugin default. holdinvoice: [H, amount_msat, label, desc, expiry?].
-          const holdArgs = [H, amtMsat, label, 'asset buy (HODL)'];
-          if (Number(body && body.expiry) > 0) holdArgs.push(String(Math.ceil(Number(body.expiry))));
-          inv = await lnrpc('holdinvoice', holdArgs, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+          // (the sub-asset HODL buy) => the plugin default. The plugin's fifth parameter is `cltv`, which it
+          // reports and does not enforce.
+          const holdArgs = [`payment_hash=${H}`, `amount_msat=${amtMsat}`, `label=${label}`, 'description=asset buy (HODL)'];
+          if (Number(body && body.expiry) > 0) holdArgs.push(`cltv=${Math.ceil(Number(body.expiry))}`);
+          if (assetId) holdArgs.push(`asset=${assetId}`);
+          inv = await lnrpcKw('holdinvoice', holdArgs, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
           const ni = await lnrpc('getinfo', [], rec.rpc, SIGNER_RPC_TIMEOUT_MS).catch(() => ({}));
           return send(res, 200, { ok: true, bolt11: null, payment_hash: H, hodl: true, node_id: ni.id || rec.node_id || null, amount_msat: Number(amtMsat) });
         } else {
@@ -4271,6 +4326,7 @@ const server = http.createServer(async (req, res) => {
           // positional padding: lightning-cli -k invoice amount_msat=.. label=.. preimage=..
           const kv = [`amount_msat=${amtMsat}`, `label=${label}`, 'description=asset buy'];
           if (P) kv.push(`preimage=${P}`);
+          if (assetId) kv.push(`asset=${assetId}`);
           inv = await lnrpcKw('invoice', kv, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         }
         return send(res, 200, { ok: true, bolt11: inv.bolt11, payment_hash: inv.payment_hash, hodl: !!H });
@@ -4347,15 +4403,20 @@ const server = http.createServer(async (req, res) => {
       const amtMsat = String(Math.round(amount) * 1000);
       const label = 'recv-' + crypto.randomUUID();
       const desc = (body && body.description) ? String(body.description).slice(0, 128) : 'Lightning receive';
+      // A Sequentia node's invoice names its asset, so it is paid only in that asset.
+      const recvAsset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
       try {
-        const inv = await lnrpcKw('invoice', [`amount_msat=${amtMsat}`, `label=${label}`, `description=${desc}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+        const kvr = [`amount_msat=${amtMsat}`, `label=${label}`, `description=${desc}`];
+        if (recvAsset) kvr.push(`asset=${recvAsset}`);
+        const inv = await lnrpcKw('invoice', kvr, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         return send(res, 200, { ok: true, bolt11: inv.bolt11, payment_hash: inv.payment_hash, amount_msat: Number(amtMsat) });
       } catch (e) { return send(res, 502, { ok: false, error: `invoice: ${e.message}` }); }
     }
 
     // POST /node/pay { node_key, bolt11 } -> { paid, preimage, amount_msat, destination }. The user's
-    // hosted node PAYS a Lightning invoice (device co-signs every HTLC). Non-custodial: the LSP commands
-    // `pay` but cannot sign it. retry_for bounds the routing attempt so a dead route can't hang forever.
+    // hosted node PAYS a Lightning invoice in its own asset (named, never left to a default). The device
+    // approves the payment first and signs every commitment; a decline is answered 403 { declined: true }
+    // before any HTLC exists. retry_for bounds the routing attempt so a dead route can't hang forever.
     if (req.method === 'POST' && url.pathname === '/node/pay') {
       if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
       const body = await readBody(req);
@@ -4385,13 +4446,22 @@ const server = http.createServer(async (req, res) => {
       if (wantMsat != null && decMsat != null && decMsat !== wantMsat) return send(res, 400, { ok: false, error: `invoice amount ${decMsat} msat != expected ${wantMsat}` });
       if (maxCltv != null && !(maxCltv > 0)) return send(res, 400, { ok: false, error: 'max_cltv leaves no timelock room' });
       if (maxCltv != null && decFinal > maxCltv) return send(res, 400, { ok: false, error: `invoice min_final_cltv ${decFinal} exceeds the ${maxCltv}-block cap` });
+      // The node's asset: a Sequentia node pays in the asset it was provisioned for, named explicitly; a
+      // Bitcoin node has no assets.
+      const payAsset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
+      if ((rec.chain || 'seq') !== 'btc' && !payAsset) return send(res, 500, { ok: false, error: 'this hosted node has no asset on record, so it cannot pay' });
+      const declined = (amountMsat) => send(res, 403, { ok: false, declined: true, error: declinedMessage({ amountMsat, assetId: payAsset }) });
       try {
         const args = [`bolt11=${bolt11}`, 'retry_for=45'];
         if (maxCltv != null) args.push(`maxdelay=${maxCltv}`);
+        if (payAsset) args.push(`asset=${payAsset}`);
         const r = await lnrpcKw('pay', args, rec.rpc, 60_000);
         return send(res, 200, { ok: true, paid: r.status === 'complete', preimage: r.payment_preimage || null,
           amount_msat: r.amount_msat != null ? Number(r.amount_msat) : null, destination: r.destination || null });
       } catch (payErr) {
+        // The device declined it (over its payment limit): final, and nothing was sent. The direct
+        // hop below would only be declined again.
+        if (isDeclined(payErr)) return declined(decMsat != null ? decMsat : wantMsat);
         // FALLBACK: decode + direct-hop sendpay + waitsendpay. The hosted-leaf
         // topology (private asset channels, no public gossip) defeats CLN pay's
         // route search — seen live killing every wallet-maker lift at the
@@ -4405,7 +4475,8 @@ const server = http.createServer(async (req, res) => {
           if (!/^[0-9a-f]{66}$/.test(dest) || !/^[0-9a-f]{64}$/.test(hash) || !(amt > 0)) throw new Error('decode gave no dest/hash/amount');
           const pc = await lnrpcKw('listpeerchannels', [`id=${dest}`], rec.rpc, 8000);
           const ch = ((pc && pc.channels) || []).find((c) => c.peer_id === dest && c.state === 'CHANNELD_NORMAL'
-            && c.short_channel_id && Number(c.spendable_msat || 0) >= amt);
+            && c.short_channel_id && Number(c.spendable_msat || 0) >= amt
+            && !(payAsset && c.channel_asset && String(c.channel_asset).toLowerCase() !== payAsset));
           if (!ch) throw new Error('no route and no direct channel with enough spendable');
           // The direct hop uses exactly the invoice's final delay, already checked against max_cltv.
           const route = [{ id: dest, channel: ch.short_channel_id, direction: ch.direction || 0,
@@ -4413,11 +4484,13 @@ const server = http.createServer(async (req, res) => {
           const spArgs = [`route=${JSON.stringify(route)}`, `payment_hash=${hash}`];
           if (secret) spArgs.push(`payment_secret=${secret}`);
           if (bolt11) spArgs.push(`bolt11=${bolt11}`);
+          await preapprovePayment(rec.rpc, { bolt11, amountMsat: amt, assetId: payAsset });
           await lnrpcKw('sendpay', spArgs, rec.rpc, 15_000);
           const w = await lnrpcKw('waitsendpay', [`payment_hash=${hash}`, 'timeout=90'], rec.rpc, 100_000);
           return send(res, 200, { ok: true, paid: w.status === 'complete', preimage: w.payment_preimage || null,
             amount_msat: amt, destination: dest, via: 'direct-hop' });
         } catch (e2) {
+          if (e2 instanceof PaymentDeclined) return send(res, 403, { ok: false, declined: true, error: e2.message });
           return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))} (direct-hop fallback: ${scrubDetail(String((e2 && e2.message) || e2))})` });
         }
       }
@@ -4432,7 +4505,8 @@ const server = http.createServer(async (req, res) => {
     // instant the HTLC is committed ('pending'); it MUST NOT waitsendpay (that blocks until settle, deadlocking
     // the taker's own verify+claim step that reveals P). A route/commit failure exposes nothing — the taker's
     // BTC is only ever in an in-flight HTLC that refunds at its final-hop CLTV if never settled. The DEVICE
-    // co-signs every HTLC; the LSP commands sendpay but cannot sign it (non-custodial).
+    // approves the payment first (a decline is answered 403 { declined: true } with nothing sent) and signs
+    // every commitment; the route is built in the node's own asset.
     if (req.method === 'POST' && url.pathname === '/node/payhash') {
       if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
       const body = await readBody(req);
@@ -4454,16 +4528,25 @@ const server = http.createServer(async (req, res) => {
         // final-hop CLTV delta = min_final_cltv so the committed incoming HTLC at the LSP stays settleable past
         // T_seq (the LSP re-verifies the ACTUAL committed CLTV via listhtlcs before it funds the maker BTC leg).
         const finalCltv = minFinalCltv > 0 ? minFinalCltv : 18;
-        const route = await lnrpc('getroute', [dest, String(amtMsat), '10', String(finalCltv)], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+        // Route in the node's own asset: named for a Sequentia node, none for a Bitcoin node.
+        const hashAsset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
+        if ((rec.chain || 'seq') !== 'btc' && !hashAsset) return send(res, 500, { ok: false, error: 'this hosted node has no asset on record, so it cannot pay' });
+        const rArgs = [`id=${dest}`, `amount_msat=${amtMsat}`, 'riskfactor=10', `cltv=${finalCltv}`];
+        if (hashAsset) rArgs.push(`asset=${hashAsset}`);
+        const route = await lnrpcKw('getroute', rArgs, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         if (!route || !Array.isArray(route.route) || !route.route.length)
           return send(res, 502, { ok: false, error: 'no route from your Bitcoin Lightning node to the service hold node — move Bitcoin to Lightning first (a channel with the service), then retry' });
         // FIRE the HTLC on the BARE HASH; do NOT waitsendpay (see the fund-safety note above). It is HELD at the
         // LSP the instant sendpay returns 'pending'; the driver then verifies the maker's asset leg + self-claims.
+        await preapprovePayment(rec.rpc, { destination: dest, paymentHash: hash, amountMsat: amtMsat, assetId: hashAsset });
         const sp = await lnrpc('sendpay', [JSON.stringify(route.route), hash], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         const status = (sp && sp.status) || 'pending';
         return send(res, 200, { ok: true, committed: status === 'pending' || status === 'complete', status,
           payment_hash: hash, amount_msat: amtMsat });
-      } catch (e) { return send(res, 502, { ok: false, error: `payhash: ${scrubDetail(String((e && e.message) || e))}` }); }
+      } catch (e) {
+        if (e instanceof PaymentDeclined) return send(res, 403, { ok: false, declined: true, committed: false, error: e.message });
+        return send(res, 502, { ok: false, error: `payhash: ${scrubDetail(String((e && e.message) || e))}` });
+      }
     }
 
     if (req.method === 'GET' && url.pathname === '/node/getinfo') {
