@@ -1120,19 +1120,16 @@
   window.SEQ_LSP_HOST_PUBKEY_ASSET = '0295374d947dc7e27382a83b2034a10b3d51b6f2fdf7e7da490893e3995141523b';
   window.SEQ_LSP_WS_BTC            = 'wss://sequentiatestnet.com/lsp-ws-btc';
   window.SEQ_LSP_HOST_PUBKEY_BTC   = '020a749af93e2a5a4d67ad28585cec31b55a146969eb77ca3d076eb59ff111ed51';
-  // What each device signer approves in payments per day, in each asset's own
-  // atoms (display-order asset ids, as the registry lists them). Each limit
-  // matches the largest channel the hosted service sells in that asset,
-  // 10,000,000 atoms, so a day's payments can never move more than one such
-  // channel holds. Any other asset gets the same default.
+  // The page's defaults for a day's spending through each device signer, in each
+  // asset's own atoms (display-order asset ids; precision 8). A channel can hold more.
   window.SEQ_LN_PAYMENT_LIMITS     = { default: 10000000, period: 86400, assets: {
-    'c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40': 10000000,   // tSEQ
-    '2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de': 10000000,   // USDX
-    'e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13': 10000000,   // EURX
-    '3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1': 10000000,   // GOLD
-    '57dfa6b0eff594cc3ef1de5555e0526d1eb5590289e014e7663b292edcd63f48': 10000000,   // SILVR
-    '4dfe69c334a9cdf4005ddf3889bba1bc397703fa8da669254877f3209caf7c8f': 10000000,   // OILX
-    btc: 10000000,                                                                  // BTC, in sats
+    'c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40': 25000000000,   // tSEQ   250
+    '2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de': 10000000000,   // USDX   100
+    'e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13': 9000000000,    // EURX   90
+    '3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1': 2500000,       // GOLD   0.025
+    '57dfa6b0eff594cc3ef1de5555e0526d1eb5590289e014e7663b292edcd63f48': 160000000,     // SILVR  1.6
+    '4dfe69c334a9cdf4005ddf3889bba1bc397703fa8da669254877f3209caf7c8f': 110000000,     // OILX   1.1
+    btc: 120000,                                                                       // BTC    120,000 sats
   } };
 </script>
 <script type="module">
