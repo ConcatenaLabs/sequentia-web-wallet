@@ -261,7 +261,8 @@ export class Signer {
      * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
      * byte-for-byte what the native serve loop writes back. Throws only on a
      * libhsmd-fatal condition (which closes the transport natively).
-     * The reason the last request was refused (cleared by the next successful one).
+     * The reason the last request was refused, or answered without the
+     * signature it asked for (cleared by the next request).
      * @returns {string | undefined}
      */
     get lastReject() {
@@ -291,6 +292,26 @@ export class Signer {
         return this;
     }
     /**
+     * The channels that predate validation (they came from the store of a
+     * device that validated nothing, and this device signs no commitment
+     * step for them; their peer closes them), as JSON: an array of
+     * `{peerId, dbid, fundingTxid, fundingOutnum, fundingSats}`, the txid in
+     * display order, hex strings throughout. `[]` when there are none.
+     * @returns {string}
+     */
+    predatingChannels() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.signer_predatingChannels(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * @param {Uint8Array} frame_bytes
      * @returns {Uint8Array}
      */
@@ -312,6 +333,33 @@ export class Signer {
      */
     setEnforce(enforce) {
         wasm.signer_setEnforce(this.__wbg_ptr, enforce);
+    }
+    /**
+     * Set the payment limit, in atoms per period, for one asset (`asset` a
+     * display-order asset id or `"btc"`) or, with `asset` undefined, the
+     * default for every asset. `atoms` undefined or null: no limit. The
+     * default is 10,000,000 atoms of each asset per day.
+     * @param {string | null} [asset]
+     * @param {number | null} [atoms]
+     */
+    setPaymentLimit(asset, atoms) {
+        var ptr0 = isLikeNone(asset) ? 0 : passStringToWasm0(asset, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.signer_setPaymentLimit(this.__wbg_ptr, ptr0, len0, !isLikeNone(atoms), isLikeNone(atoms) ? 0 : atoms);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Set the period the payment limits apply over, in seconds (default a
+     * day).
+     * @param {number} seconds
+     */
+    setPaymentPeriod(seconds) {
+        const ret = wasm.signer_setPaymentPeriod(this.__wbg_ptr, seconds);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * The store changed since last asked (take-and-clear) — the cue to
@@ -383,6 +431,10 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
+        __wbg_now_c2901efeb3ef4d50: function() {
+            const ret = Date.now();
+            return ret;
+        },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
             const offset = table.grow(4);
@@ -421,6 +473,10 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
 }
 
 function passArray8ToWasm0(arg, malloc) {

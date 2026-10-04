@@ -170,9 +170,13 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
 - The browser derives two device identities from your one mnemonic (hardened `m/1017'/...`
   paths, see `seqln-keys.js`) and runs an on-device WASM signer per node, connected over a
   WebSocket Noise_XK (BOLT-8) link. Every commitment update is co-signed on your device. The
-  device signs only commitments it has validated, signs a close only if it pays this wallet its
-  channel balance, and approves each payment only within its payment limit for the asset
-  (`window.SEQ_LN_PAYMENT_LIMITS`, below). That does not protect you from an operator who runs
+  device signs only commitments it has validated, signs a close only if it pays your channel
+  balance to the node's own address, and approves each payment only within its payment limit for
+  the asset (`window.SEQ_LN_PAYMENT_LIMITS` in `index.html`, described in
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)). It moves the node's coins only to the node's own
+  addresses or into a channel the node opens, with the fee held to that limit: sending them to any
+  other address, this wallet's included, waits for a way to approve that address on the device.
+  That does not protect you from an operator who runs
   both your hosted node and the node your channel is with: the hosted node collects the
   device's signature on each commitment before the device revokes it, so the two together can
   broadcast a revoked commitment and take the channel's funds.
@@ -295,11 +299,11 @@ install):
 node --test
 ```
 
-This runs every `*.test.mjs` file that registers `node:test` cases, at the root and under
-`tooling/lsp/`. The rest are standalone scripts with their own `check()` harness that
-`node --test` does not execute, among them `seqln.test.mjs`, `xcourier.test.mjs`,
+This runs every `*.test.mjs` file, at the root and under `tooling/lsp/`. Most register
+`node:test` cases. The rest are standalone scripts with their own `check()` harness, which
+`node --test` runs as one test each, among them `seqln.test.mjs`, `xcourier.test.mjs`,
 `xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the
-`covenant*.test.mjs` golden vectors; run those directly, for example
+`covenant*.test.mjs` golden vectors; each also runs on its own, for example
 `node covenant-byteorder.test.mjs`.
 
 `node tooling/sign-tab-probe.mjs` opens the wallet in a headless Chromium, creates a wallet,

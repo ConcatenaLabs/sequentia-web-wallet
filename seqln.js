@@ -33,6 +33,8 @@
 // `ln` bridge (beside xswap/xrswap/xmaker).
 // ---------------------------------------------------------------------------
 
+import { makeNoteStore, channelFate } from './lnupgrade.js';
+
 const W = (typeof window !== 'undefined') ? window : {};
 
 const DEFAULTS = {
@@ -217,10 +219,40 @@ export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
 // The options every device signer is built with: its persisted channel store, the
 // refusal hooks, and the configured payment limits.
 function signerOpts(key) {
-  const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key) };
+  const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key),
+    onPredating: onPredatingFor(key) };
   if (CFG.paymentLimits) o.paymentLimits = CFG.paymentLimits;
   return o;
 }
+
+// Channels the device found in a store its predecessor wrote, which validated nothing: the
+// device signs no step of them. Kept per node (by its label), minus what the user dismissed, for
+// the note the wallet builds from what the node reports (lnupgrade.js). Each { peerId, dbid,
+// fundingTxid, fundingOutnum, fundingSats }.
+const noteStore = makeNoteStore({
+  getItem: (k) => localStorage.getItem(k),
+  setItem: (k, v) => localStorage.setItem(k, v),
+});
+function onPredatingFor(label) {
+  return (channels) => {
+    // The SDK reports them again after every store restore: a dismissed channel stays dismissed.
+    if (!noteStore.record(label, channels)) return;
+    console.warn(`seqln[${label}]: channel(s) from the device's old store are not carried over`);
+    if (onChange) { try { onChange(seqlnState()); } catch {} }
+  };
+}
+// { [label]: [channel, ...] }: what each node's device found in an old store, not dismissed.
+export function predatingChannels() { return noteStore.channels(); }
+// Dismiss the note for node `label`: all of its old channels, or with `closedOnly` those the
+// node (`node`, its /node/onchain answer) reports closed; and the line about its coins outside
+// a channel while they stay at `onchainMsat` (or the node's reported amount).
+export function dismissPredating(label, { closedOnly = false, node = null, onchainMsat = null } = {}) {
+  const list = noteStore.channels()[label] || [];
+  const channels = closedOnly ? list.filter((c) => channelFate(c, node) === 'closed') : list;
+  const msat = onchainMsat != null ? onchainMsat : (node && node.node_up ? node.onchain_msat : null);
+  noteStore.dismiss(label, { channels, onchainMsat: msat });
+}
+export function idleDismissed(label, onchainMsat) { return noteStore.idleDismissed(label, onchainMsat); }
 
 function onRejectFor(label) {
   return ({ name, reason }) => {
@@ -936,12 +968,15 @@ export async function fundChannel({ chain, asset, amount, node, sendOnchain, onP
 // (re)start the LSP's fundchannel-from-existing-balance job and poll it to completion. Used to
 // recover a move that was interrupted after the deposit but before the channel opened (the
 // "stranded deposit" case) — the funds are on the user's own node, this finishes moving them.
-export async function resumeFundChannel({ chain, asset, amount, node, onProgress, pollMs = 5000, timeoutMs = 3_600_000 } = {}) {
+// `consolidate`: the node's coins move to its own address first (they may include what a
+// channel's close paid it, which its device sends only to its own scripts).
+export async function resumeFundChannel({ chain, asset, amount, node, consolidate = false, onProgress, pollMs = 5000, timeoutMs = 3_600_000 } = {}) {
   const emit = (phase, extra) => { try { onProgress && onProgress({ phase, ...extra }); } catch {} };
   emit('opening-request');
   const body = { chain, amount };
   if (asset) body.asset = asset;
   if (node) body.node = node;
+  if (consolidate) body.consolidate = true;
   const started = await lspFetch('/channel/open', { method: 'POST', body: JSON.stringify(body) });
   const jobUrl = started.poll || `/channel/open/${started.job_id}`;
   const deadline = Date.now() + timeoutMs;

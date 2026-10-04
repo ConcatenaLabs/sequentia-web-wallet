@@ -86,12 +86,32 @@ export class Signer {
      * malformed / unsupported secret.
      */
     constructor(hsm_secret_bytes: Uint8Array);
+    /**
+     * The channels that predate validation (they came from the store of a
+     * device that validated nothing, and this device signs no commitment
+     * step for them; their peer closes them), as JSON: an array of
+     * `{peerId, dbid, fundingTxid, fundingOutnum, fundingSats}`, the txid in
+     * display order, hex strings throughout. `[]` when there are none.
+     */
+    predatingChannels(): string;
     processFrame(frame_bytes: Uint8Array): Uint8Array;
     /**
      * Turn the M4 validating policy on (`enforce`) or off (`permissive`). The
      * browser build has no env, so this is how a caller selects enforce mode.
      */
     setEnforce(enforce: boolean): void;
+    /**
+     * Set the payment limit, in atoms per period, for one asset (`asset` a
+     * display-order asset id or `"btc"`) or, with `asset` undefined, the
+     * default for every asset. `atoms` undefined or null: no limit. The
+     * default is 10,000,000 atoms of each asset per day.
+     */
+    setPaymentLimit(asset?: string | null, atoms?: number | null): void;
+    /**
+     * Set the period the payment limits apply over, in seconds (default a
+     * day).
+     */
+    setPaymentPeriod(seconds: number): void;
     /**
      * The store changed since last asked (take-and-clear) — the cue to
      * persist `exportChannels`.
@@ -118,7 +138,8 @@ export class Signer {
      * (`u32 len | hsmd_reply`, a zero-length body being the error sentinel) —
      * byte-for-byte what the native serve loop writes back. Throws only on a
      * libhsmd-fatal condition (which closes the transport natively).
-     * The reason the last request was refused (cleared by the next successful one).
+     * The reason the last request was refused, or answered without the
+     * signature it asked for (cleared by the next request).
      */
     readonly lastReject: string | undefined;
 }
@@ -150,8 +171,11 @@ export interface InitOutput {
     readonly signer_importChannels: (a: number, b: number, c: number) => [number, number, number];
     readonly signer_lastReject: (a: number) => [number, number];
     readonly signer_new: (a: number, b: number) => [number, number, number];
+    readonly signer_predatingChannels: (a: number) => [number, number];
     readonly signer_processFrame: (a: number, b: number, c: number) => [number, number, number, number];
     readonly signer_setEnforce: (a: number, b: number) => void;
+    readonly signer_setPaymentLimit: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly signer_setPaymentPeriod: (a: number, b: number) => [number, number];
     readonly signer_takeChannelsDirty: (a: number) => number;
     readonly signer_takeLastUntracked: (a: number) => [number, number];
     readonly signer_walletSweepScript: (a: number, b: number, c: number) => [number, number];
