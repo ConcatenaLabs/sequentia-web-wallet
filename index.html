@@ -3840,28 +3840,66 @@ function sync(){
   _syncInFlight = _syncImpl().finally(() => { _syncInFlight = null; });
   return _syncInFlight;
 }
+// WHAT A SYNC IS DOING, while it does it. A first scan of a wallet takes tens of seconds, and a bare
+// "Syncing…" spinner for that long reads as a frozen wallet. The parallel parts are listed with a
+// tick (and their time) as each one finishes, under a running count of seconds, so it is visible
+// that work is progressing and which part is the slow one.
+function syncProgress(parts){
+  const box=$('syncStatus'), t0=Date.now(), state=parts.map(()=>null);
+  const paint=()=>{
+    const secs=Math.round((Date.now()-t0)/1000);
+    box.className='status';
+    box.innerHTML='';
+    const head=el('div'); head.innerHTML='<span class="spin"></span>';
+    head.appendChild(document.createTextNode('Syncing… '+secs+' s'));
+    box.appendChild(head);
+    const line=el('div','sub'); line.style.marginTop='4px';
+    line.textContent=parts.map((p,i)=> state[i]==null ? (p.label+' …') : (p.label+' ✓ '+state[i]+' s')).join('  ·  ');
+    box.appendChild(line);
+  };
+  const timer=setInterval(paint, 1000); paint();
+  const track=(p)=>{ const i=parts.length-1; return Promise.resolve(p.run).finally(()=>{ state[i]=Math.max(1, Math.round((Date.now()-t0)/1000)); try{ paint(); }catch{} }); };
+  const wrapped=parts.map((p,i)=> Promise.resolve(p.run).finally(()=>{ state[i]=Math.max(1, Math.round((Date.now()-t0)/1000)); try{ paint(); }catch{} }));
+  return { all: Promise.all(wrapped), done: ()=> clearInterval(timer),
+           // A later step, shown in the same line (it starts after the parallel ones).
+           add: (p)=>{ parts.push({label:p.label}); state.push(null); paint(); return track(p); } };
+}
 async function _syncImpl(){
   const btn=$('btnSync'); if(btn) btn.disabled=true;
   $('syncStatus').className='status'; $('syncStatus').innerHTML='<span class="spin"></span>Syncing…';
+  let progress=null;
   try{
     // scan both chains + refresh fee-asset rates + restricted-asset balances in parallel
-    const [update] = await Promise.all([withWollet(() => client.fullScan(wollet)), btcScan(), fetchFeeRates(), oampRefreshBalances(), oampRefreshUser()]);
+    progress = syncProgress([
+      { label: 'Sequentia', run: withWollet(() => client.fullScan(wollet)) },
+      { label: 'Bitcoin', run: btcScan() },
+      { label: 'fee rates', run: fetchFeeRates() },
+      { label: 'restricted assets', run: Promise.all([oampRefreshBalances(), oampRefreshUser()]) },
+    ]);
+    const [update] = await progress.all;
     if(update){ await withWollet(() => { wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }); }   // exclusive apply + re-apply own broadcasts the scan may predate
     refreshScanCacheBase();   // no-op once a base exists; off-path (throwaway wollet), never blocks this sync
     _scannedOnce = true;   // the live balance is now authoritative — stop showing the cached snapshot
+    // Show what the main scan found NOW. Balances and history used to wait for the companion scan
+    // below as well, which on a fresh load is as slow as the main one (19 s + 18 s measured): a
+    // coin that had already been found sat invisible behind a spinner for another twenty seconds.
+    const paintFound = () => {
+      // Cross-chain address cycling: advance the shared receive address past anything
+      // that's been used on either chain (never backward, so a manual "New address" sticks).
+      addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
+      renderBalance(); renderHistory(); renderReceive(); refreshStakes(); populateFeeAssets(); refreshRecipientAssets();
+      const t = wollet.tip();
+      $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
+    };
+    paintFound();
     // Rescan the covenant maker-credit companion wollet AFTER the main scan: it shares the same esplora
     // client, and wasm-bindgen forbids re-entrant &mut use of one object (a concurrent fullScan throws
     // "recursive use of an object detected"), so it must run sequentially, not inside the Promise.all above.
-    try { if (typeof scanCovenantCompanion==='function') await scanCovenantCompanion(); } catch {}
-    // Cross-chain address cycling: advance the shared receive address past anything
-    // that's been used on either chain (never backward, so a manual "New address" sticks).
-    addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
-    renderBalance(); renderHistory(); renderReceive(); refreshStakes(); populateFeeAssets(); refreshRecipientAssets();
-    const t = wollet.tip();
-    $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
+    try { if (typeof scanCovenantCompanion==='function') await progress.add({ label: 'order payouts', run: scanCovenantCompanion() }); } catch {}
+    paintFound();   // the companion can add order credits to what is shown
     $('syncStatus').className='status ok'; $('syncStatus').textContent='Up to date.';
   }catch(e){ $('syncStatus').className='status err'; $('syncStatus').textContent='Sync failed: '+(e?.message??e); }
-  finally{ if(btn) btn.disabled=false; }
+  finally{ if(progress) progress.done(); if(btn) btn.disabled=false; }
 }
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
