@@ -43,8 +43,8 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry
-- Staking the Sequence token (tSEQ) with the network-minimum CSV lock, and staking-pool
-  delegation (join a pool, switch, or leave; the coins never move)
+- Staking the Sequence token (tSEQ) with the network-minimum CSV lock, unbonding it, and
+  staking-pool delegation (join a pool, switch, or leave; the coins never move)
 - Transaction history on both chains with RBF fee bump, CPFP, and replace
 - OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
   Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
@@ -107,9 +107,15 @@ The tabs:
 - **Stake**: bond tSEQ to a CSV-time-locked staking output. Minimum stake 40,000 tSEQ;
   the wallet always uses the network-minimum unbonding lock, a time-based CSV lock of about
   15 days (43,200 × 30-second slot intervals), because stake weight equals the amount staked
-  and a longer lock earns nothing extra. The same tab delegates to a **staking pool**: a
+  and a longer lock earns nothing extra. Once a stake's lock has passed, **Unbond** takes it
+  out of staking at once, and **Claim** returns it to the wallet 2,016 Bitcoin blocks (about
+  two weeks) after the unbond's anchor. The same tab delegates to a **staking pool**: a
   small on-chain delegation record lends your weight to a pool signer, the coins stay where
-  they are, and "Leave this pool" reclaims the record at any time.
+  they are, and "Leave this pool" reclaims the record at any time. Joining is two
+  transactions mined together: the wallet pays its own staking key the record's value, and
+  the record's transaction spends that coin, which is what authorises it. Every spend of a
+  stake record is signed for the height of the block it enters, so the wallet refuses to
+  build one when it cannot read the chain tip.
 - **History**: transactions on both chains, with explorer links, and rescue actions for stuck
   Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
   selection as a send.
@@ -217,6 +223,7 @@ works normally without the restricted rows.
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
+| `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record and drives the transactions SWK builds over the staking key's bare scripts. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
@@ -310,6 +317,13 @@ This runs every `*.test.mjs` file, at the root and under `tooling/lsp/`. Most re
 signs a message with the staking key from the Sign tab, and recovers a key from the signature
 the way a verifier does; it has to be the staking key the tab shows. Given a URL it probes a
 deployed wallet instead of this checkout. It needs a Chromium (`CHROMIUM=/path/to/chrome`).
+
+`SEQUENTIAD=/path/to/sequentiad node tooling/stake-records-regtest.mjs` runs
+`stake-records.js` with this checkout's `pkg/` against a real node: two fresh proof-of-stake
+`elementsregtest` chains, each anchored to a second node playing the parent chain, with an
+Esplora shim over the node's RPC. It bonds, joins a pool, finds the record, moves, leaves,
+unbonds and claims, each transaction confirmed in a block, and checks that a spend built on
+one side of the height where stake record signatures change is rebuilt on the other.
 
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see

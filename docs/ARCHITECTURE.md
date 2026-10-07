@@ -11,6 +11,7 @@ DOM-light or DOM-free and receives what it needs through an `init*(ctx)` call.
 
 ```
 index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools, history, OpenAMP, Sign, QR)
+ ├─ stake-records.js       pool join (two transactions) / move / leave, unbond + claim, record discovery
  ├─ pkg/lwk_wasm.js        SWK WASM: Signer/Wollet/EsploraClient/PSET + HTLC, covenant, delegation,
  │                         CoinJoin and OpenAMP helpers (untracked)
  ├─ btc.js                 vendored @scure/btc-signer + bip32/bip39: the Bitcoin testnet4 leg
@@ -213,7 +214,8 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 |---|---|
 | `swk.sequentia.mnemonic` | the recovery phrase, plaintext (see README security notes) |
 | `swk.sequentia.assets` | user asset labels `{assetHex: {name,ticker,precision}}` |
-| `swk.sequentia.stakes` | tracked stake outputs (re-verified against the chain each sync) |
+| `swk.sequentia.stakes` | tracked stake outputs (re-verified against the chain each sync, unbond and claim read from it) |
+| `swk.sequentia.pendingDelegation` | a pool join in flight: both signed transactions, kept until the record confirms |
 | `seqRefCcy` | chosen reference currency |
 | `seqobMakerKey` | per-browser maker/session secp256k1 key (not a fund key) |
 | `swk.sequentia.xswap` / `swk.sequentia.xrswap` | in-flight cross-chain taker state |
@@ -226,7 +228,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.ln.predating`, `swk.ln.predating.dismissed` | per hosted node, the channels its device found in an older device's store, which it does not carry over; and the notes about them, and about coins on the node outside a channel, that the user dismissed |
 | `swk.balCache`, `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
-The fund-bearing keys are the mnemonic and the in-flight swap, walk, peg and bridge records;
+The fund-bearing keys are the mnemonic, the pool join in flight, and the in-flight swap, walk, peg and bridge records;
 the rest can be cleared without loss.
 
 ## Known limitations
@@ -244,10 +246,10 @@ the rest can be cleared without loss.
 
 ## Testing
 
-`node --test` (Node 22+) runs all 66 `*.test.mjs` files: 43 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 67 `*.test.mjs` files: 44 hold `node:test` suites, and the
 other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real
 WASM-signer-over-Noise path is proven by `tooling/lsp/device-harness.mjs` against a live
-backend.
+backend. `tooling/stake-records-regtest.mjs` runs the staking flows against a real node.

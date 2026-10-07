@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 66 `*.test.mjs` files (51 at the root, 15 under `tooling/lsp/`), and `node --test` runs
+There are 67 `*.test.mjs` files (52 at the root, 15 under `tooling/lsp/`), and `node --test` runs
 every one of them. 23 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -48,6 +48,12 @@ Do not confuse it with `pkg/`.
 Root is flat: production modules and tests sit side by side.
 
 - `index.html` — the wallet core: boot, balances, send/receive, fees, staking, history, OpenAMP, QR.
+- `stake-records.js` — joining, moving and leaving a staking pool, and unbonding: every
+  transaction over a bare script of the staking key, built and signed by SWK for the height of the
+  block it enters. It refuses to sign without a chain tip, because the signature a stake record
+  spend needs changes at the chain's `pos_records_v2_height`. A join is two transactions (the
+  wallet pays its own staking key, the record spends that coin), persisted before either is
+  broadcast. `tooling/stake-records-regtest.mjs` runs it against a real node.
 - `swap.js` — the Trade tab core and by far the largest file: the symmetric Pay/Receive composer.
   Routing is derived from the chosen assets. It imports the rail modules (`seqob.js`, `btc.js`,
   `covenant*.js`, `ln-rail.js`, `seqln.js`, `submarine.js`, `sbtc.js`, `subswap.js`) and three
