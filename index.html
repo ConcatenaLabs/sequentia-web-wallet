@@ -929,7 +929,7 @@
       </div>
       <div class="card">
         <label class="lbl">Your stakes</label>
-        <p class="sub" style="margin:0 0 6px">Bonded from this wallet. Unbonding (spending after the delay matures) is coming in a later update.</p>
+        <p class="sub" id="stakeNote" style="margin:0 0 6px">Bonded from this wallet. Once a stake's lock has passed it can be unbonded: it stops counting as stake at once, and 2,016 Bitcoin blocks (about two weeks) later it can be claimed back into this wallet.</p>
         <div class="list" id="stakeList"><div class="muted">No stakes yet.</div></div>
       </div>
       <div class="card">
@@ -1166,6 +1166,7 @@ import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
 import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
+import * as stakeRecords from './stake-records.js';
 
 const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
@@ -1180,6 +1181,14 @@ const OAMP_XFERS = 'swk.sequentia.oampTransfers';   // [{asset,ticker,precision,
 // wallet always uses the minimum.
 const STAKE_CSV = 43200;
 const STAKE_PERIOD_LABEL = '~15 days (network minimum)';
+// The height from which the testnet signs stake record spends the
+// second-generation way (the node's consensus.pos_records_v2_height for the
+// testnet in src/chainparams.cpp). SWK carries the same value for this network;
+// passing it keeps the wallet's choice visible where it is made.
+const POS_RECORDS_V2_HEIGHT = 163000;
+// Bitcoin blocks an unbonding output waits, past the anchor of the block that
+// confirmed the unbond, before it can be claimed (consensus.pos_unbond_anchor_depth).
+const UNBOND_ANCHOR_DEPTH = 2016;
 // Chain minimum stake: 40,000 tSEQ = 4e12 atoms (tSEQ precision 8). Mirrors the desktop wallet.
 const STAKE_MIN_ATOMS = 4000000000000n;
 const $ = id => document.getElementById(id);
@@ -5272,42 +5281,154 @@ async function doReplace(txid, addr, assetHex, amtStr, feeAssetHex, feeRateVb){
 }
 
 // ---------- stake ----------
+// Where each bonded stake stands, by its bond txid, as last read from the chain
+// (stake-records.js stakeState). Re-read on every refresh, never sticky.
+const STAKE_STATES = new Map();
+const BLOCK_SECONDS = 60;
+
+function stakeLine(s, st){
+  const base = `${s.period} · bonded ${new Date(s.time).toLocaleDateString()}`;
+  if(!st) return base;
+  switch(st.state){
+    case 'bonded': {
+      const left = Math.max(0, st.maturesAt - (st.tip||0) - 1);
+      return `${base} · can be unbonded from block ${st.maturesAt.toLocaleString()} (${left.toLocaleString()} blocks, about ${Math.ceil(left*BLOCK_SECONDS/86400)} days)`;
+    }
+    case 'unbondable': return `${base} · its lock has passed: unbonding takes it out of staking, and ${UNBOND_ANCHOR_DEPTH.toLocaleString()} Bitcoin blocks later it can be claimed`;
+    case 'unbonding': {
+      if(st.claimableAt==null) return 'Unbonding · waiting for the unbond to confirm';
+      const left = st.spendAnchor!=null ? Math.max(0, st.claimableAt-st.spendAnchor) : null;
+      return `Unbonding · claimable once the chain is anchored at Bitcoin block ${st.claimableAt.toLocaleString()}`
+        + (left!=null ? ` (${left.toLocaleString()} blocks to go, about ${Math.ceil(left/144)} days)` : '');
+    }
+    case 'claimable': return 'Unbonded · ready to claim back into this wallet';
+    case 'claiming': return 'Claim sent, waiting to confirm';
+    case 'left': return base+' · spent by another transaction; no longer staked';
+    default: return base;
+  }
+}
+
 function renderStake(){
   try{ $('stPubkey').textContent = signer.stakerPublicKey(); }catch{ $('stPubkey').textContent='—'; }
   const list=$('stakeList'); list.innerHTML='';
   let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }
+  const canUnbond = stakeRecords.unbondingSupported(lwk);
+  // A page deployed against an older pkg/ cannot unbond; say so rather than promise it.
+  if(!canUnbond) $('stakeNote').textContent='Bonded from this wallet. Unbonding needs a newer wallet build; reload, or update this wallet.';
   if(!st.length){ list.appendChild(el('div','muted','No stakes yet.')); return; }
   for(const s of st.slice().reverse()){
+    const state = STAKE_STATES.get(s.txid);
     const item=el('div','item');
     const pending = s.confirmed===false;
-    const badge = el('span','badge b-iss', pending?'pending':'staked');
-    if(pending) badge.style.opacity='.55';
+    const label = !state ? (pending?'pending':'staked')
+      : ({unbonding:'unbonding', claimable:'unbonded', claiming:'claiming', left:'spent', pending:'pending'}[state.state] || 'staked');
+    const badge = el('span','badge b-iss', label);
+    if(label!=='staked') badge.style.opacity='.55';
     item.appendChild(badge);
     const mid=el('div','grow');
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+s.txid, s.txid.slice(0,18)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub', `${s.period} · bonded ${new Date(s.time).toLocaleDateString()}`));
+    mid.appendChild(el('div','sub', stakeLine(s, state)));
+    if(canUnbond && state && (state.state==='unbondable' || state.state==='claimable')){
+      const b = el('button', null, state.state==='unbondable' ? 'Unbond' : 'Claim');
+      b.style.marginTop='6px';
+      b.onclick = () => (state.state==='unbondable' ? reviewUnbond(s, state) : reviewClaim(s, state))
+        .catch(e => { $('stakeErr').textContent = prettyErr(e); });
+      mid.appendChild(b);
+    }
     item.appendChild(mid);
     item.appendChild(el('span','amt', fmtAtoms(s.atoms,8)+' tSEQ'));
     list.appendChild(item);
   }
 }
-// Re-check each tracked stake against the chain: mark pending vs confirmed, and drop any
-// whose tx is no longer on-chain (reorged away or never confirmed) once past a grace window,
-// so the list stops tracking stakes that don't exist anymore.
+// Re-check each tracked stake against the chain: whether its bond confirmed,
+// whether it can be unbonded or claimed yet. Drop any whose bond is no longer
+// on chain (reorged away or never confirmed) once past a grace window, and any
+// whose claim has confirmed: those coins are back in the wallet.
 async function refreshStakes(){
   let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }
   if(!st.length){ renderStake(); return; }
   const GRACE=10*60*1000, before=JSON.stringify(st), keep=[];
+  const ctx = stakeCtx();
+  const tip = await tipHeight();
   for(const s of st){
     try{
       const r=await fetch(`/api/tx/${s.txid}/status`);
       if(r.status===404){ if(Date.now()-(s.time||0) > GRACE) continue; s.confirmed=false; keep.push(s); continue; }
       if(r.ok){ const j=await r.json(); s.confirmed=!!j.confirmed; }
+      if(s.confirmed && tip>0 && stakeRecords.unbondingSupported(lwk)){
+        try{
+          const state = await stakeRecords.stakeState(ctx, s, tip);
+          state.tip = tip;
+          if(state.state==='claimed'){ STAKE_STATES.delete(s.txid); continue; }
+          STAKE_STATES.set(s.txid, state);
+        }catch{ /* transient: keep the last reading */ }
+      }
       keep.push(s);
     }catch{ keep.push(s); }   // transient/network error — keep, don't drop on a blip
   }
-  if(JSON.stringify(keep)!==before) localStorage.setItem(STAKES, JSON.stringify(keep));
+  // Re-read before writing: an unbond or claim recorded while this ran must
+  // not be overwritten by the copy read at the start.
+  if(JSON.stringify(keep)!==before){
+    let cur; try{ cur=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ cur=[]; }
+    const kept = new Map(keep.map(s=>[s.txid, s]));
+    const dropped = new Set(st.filter(s=>!kept.has(s.txid)).map(s=>s.txid));
+    const merged = cur.filter(s=>!dropped.has(s.txid)).map(s=>kept.has(s.txid) ? {...s, confirmed: kept.get(s.txid).confirmed} : s);
+    localStorage.setItem(STAKES, JSON.stringify(merged));
+  }
   renderStake();
+}
+
+// Unbonding, step 1: the stake leaves staking for its unbonding output, still
+// under this wallet's staking key alone, and stops counting at once.
+async function reviewUnbond(s, state){
+  $('stakeErr').textContent='';
+  const ctx = stakeCtx();
+  const built = await stakeRecords.buildUnbond(ctx, state);
+  const fee = BigInt(state.stake.value) - BigInt(built.unbondingValue);
+  const {m, ok, st} = modalRows({title:'Unbond this stake', kv:[
+    ['Network', 'Sequentia (testnet); not parent-chain BTC'],
+    ['Stake', tSEQ(state.stake.value)],
+    ['Network fee', tSEQ(fee)+' (out of the stake)'],
+    ['Then', `it stops counting as stake at once, and can be claimed back into this wallet ${UNBOND_ANCHOR_DEPTH.toLocaleString()} Bitcoin blocks (about two weeks) after this confirms`],
+  ]});
+  ok.onclick = async () => {
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Broadcasting…';
+    try{
+      const txid = await stakeRecords.broadcastStep(ctx, s.txid, 'unbond', built);
+      m.remove(); toast('Unbonding:', {href:'/explorer/tx/'+txid, label:txid.slice(0,18)+'…'});
+      await refreshStakes();
+    }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
+  };
+}
+
+// Unbonding, step 2: the unbonding output back into this wallet.
+async function reviewClaim(s, state){
+  $('stakeErr').textContent='';
+  const ctx = stakeCtx();
+  const addr = wollet.address(undefined).address().toUnconfidential().toString();
+  const built = await stakeRecords.buildClaim(ctx, state, addr);
+  const fee = BigInt(state.unbonding.value) - BigInt(built.outValue);
+  const {m, ok, st} = modalRows({title:'Claim unbonded stake', kv:[
+    ['Network', 'Sequentia (testnet); not parent-chain BTC'],
+    ['→ '+addr, tSEQ(built.outValue)],
+    ['Network fee', tSEQ(fee)],
+  ]});
+  ok.onclick = async () => {
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Broadcasting…';
+    try{
+      const txid = await stakeRecords.broadcastStep(ctx, s.txid, 'claim', built);
+      m.remove(); toast('Claiming:', {href:'/explorer/tx/'+txid, label:txid.slice(0,18)+'…'});
+      await refreshStakes(); sync().catch(()=>{});
+    }catch(e){
+      st.className='status err';
+      // A Bitcoin reorg, or a node reading an older tip than the explorer,
+      // can still find it early; the node says so in so many words.
+      st.textContent = /bad-unbond-premature/.test(String(e?.message??e))
+        ? 'Not yet: the chain is not anchored that deep in Bitcoin. Try again in a few minutes.'
+        : 'Failed: '+prettyErr(e);
+      ok.disabled=false;
+    }
+  };
 }
 
 // ---------- staking rewards, and converting them ----------
@@ -5716,110 +5837,78 @@ function rememberSigner(signer){
   }catch{}
 }
 
-// The Electrum-style scripthash this explorer indexes by: the FORWARD sha256 of
-// the scriptPubKey. Verified against the deployed esplora rather than assumed --
-// the reversed form is the more common convention and returns an empty list
-// here, which would look exactly like "you are not delegating", the worst
-// possible wrong answer for a feature whose whole promise is that you can
-// always leave.
-async function delegScriptHash(scriptHex){
-  const bytes = Uint8Array.from(scriptHex.match(/../g).map(b=>parseInt(b,16)));
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('');
+// The context the stake record flows run in (stake-records.js): this
+// wallet's keys, explorer, broadcast path and fee rate.
+function stakeCtx(){
+  return {
+    lwk, network,
+    mnemonic: delegMnemonic,
+    stakerPublicKey: () => signer.stakerPublicKey(),
+    stakerScript: () => {
+      const pub = signer.stakerPublicKey();
+      const bytes = Uint8Array.from((pub.match(/../g)||[]).map(h=>parseInt(h,16)));
+      return [...btc.p2wpkh(bytes).script].map(b=>b.toString(16).padStart(2,'0')).join('');
+    },
+    esplora: (path) => fetch(ESPLORA + path, {cache:'no-store'}),
+    broadcast: broadcastSeqRaw,
+    signAuthorization,
+    walletTxs: () => {
+      const out = [];
+      let txs = []; try{ txs = wollet.transactions(); }catch{}
+      for(const wtx of txs){
+        try{ out.push({ txid: wtx.txid().toString(), hex: wtx.tx().toString(), height: wtx.height() ?? null }); }catch{}
+      }
+      return out;
+    },
+    tipHeight,
+    recordsV2Height: POS_RECORDS_V2_HEIGHT,
+    feeRate: DEFAULT_FEERATE,
+    // Signers worth probing for a record of ours, in two groups tried in
+    // order: the ones this browser has used (one or two keys, which hit at
+    // once in the ordinary case), then the rest of the board (for a seed
+    // restored into a browser that remembers nothing).
+    hints: () => {
+      const hints = delegHints(), seen = new Set(hints), rest = [];
+      for(const p of (POOLS && POOLS.pools) || []){
+        if(!seen.has(p.signer)){ seen.add(p.signer); rest.push(p.signer); }
+      }
+      return [hints, rest];
+    },
+    anchorHeightOf: async (blockHash) => {
+      const a = await fetch(location.origin+'/anchor/'+blockHash).then(r=>r.ok?r.json():null);
+      return a && a.anchorheight!=null ? Number(a.anchorheight) : null;
+    },
+    spendAnchorHeight: async () => {
+      const r = await fetch(`${ESPLORA}/blocks/tip/hash`, {cache:'no-store'});
+      if(!r.ok) return null;
+      const a = await fetch(location.origin+'/anchor/'+(await r.text()).trim()).then(r=>r.ok?r.json():null);
+      return a && a.anchorheight!=null ? Number(a.anchorheight) : null;
+    },
+    unbondDepth: UNBOND_ANCHOR_DEPTH,
+    store: localStorage,
+    stakesKey: STAKES,
+  };
 }
 
-// Find this wallet's delegation record. Two ways of looking, because neither
-// alone is enough:
-//
-//  * the wallet's own history finds the record it FUNDED, since that transaction
-//    spent this wallet's coins. It cannot find one created by a MOVE: that
-//    transaction spends only the old bare record and pays only the new one, so
-//    nothing in it belongs to this wallet and no scan will ever download it.
-//  * asking the explorer for unspent outputs at the record script for each
-//    candidate signer finds it whatever created it, and survives a restore onto
-//    a browser that has never seen any of this.
-//
-// The record is a bare script, so the wallet cannot answer either question by
-// itself.
+// This wallet's delegation record, from the chain (stake-records.js says where
+// it looks: the staking key's P2WPKH history, the record script for every known
+// pool, and the join this browser has in flight). The record is a bare script,
+// so the wallet's own history cannot answer by itself.
 async function discoverDelegation(){
-  let mine;
-  try{ mine = signer.stakerPublicKey(); }catch{ return null; }
-  const byOutpoint = new Map();
-  const key = c => c.txid + ':' + c.vout;
+  return stakeRecords.findDelegation(stakeCtx());
+}
 
-  try{
-    for(const wtx of wollet.transactions()){
-      let hex; try{ hex = wtx.tx().toString(); }catch{ continue; }
-      let found; try{ found = lwk.findDelegationRecords(hex, mine); }catch{ continue; }
-      for(const f of found||[]){
-        const c = {txid: wtx.txid().toString(), vout: f.vout, signer: f.signer,
-                   atoms: BigInt(f.value), height: wtx.height()};
-        byOutpoint.set(key(c), c);
-      }
-    }
-  }catch{ /* an unreadable history must not stop the explorer probe */ }
-
-  // Two groups, tried in order: the signers this browser has used, then the
-  // rest of the board. The first is one or two keys and hits immediately in the
-  // ordinary case, where the whole sweep would cost one request per pool on
-  // every refresh; the second exists for a seed restored into a browser that
-  // remembers nothing.
-  const hints = delegHints(), seen = new Set(hints), rest = [];
-  for(const p of (POOLS && POOLS.pools) || []){
-    if(!seen.has(p.signer)){ seen.add(p.signer); rest.push(p.signer); }
-  }
-  const delegProbeGroups = [hints, rest];
-  let probed = 0;
-  for(const group of delegProbeGroups){
-    // Skip the wider sweep only when an EARLIER PROBE found something. Keying
-    // this off byOutpoint would skip it whenever the history pass found the
-    // record this wallet funded -- exactly the record a later move has spent.
-    if(probed) break;
-    for(const sg of group){
-      let spk; try{ spk = lwk.sequentiaDelegationScript(mine, sg); }catch{ continue; }
-      try{
-        const r = await fetch(`${ESPLORA}/scripthash/${await delegScriptHash(spk)}/utxo`);
-        if(!r.ok) continue;
-        for(const u of await r.json()){
-          // These come back already filtered to UNSPENT, which is the question
-          // that matters.
-          const c = {txid: u.txid, vout: u.vout, signer: sg, atoms: BigInt(u.value),
-                     height: (u.status && u.status.confirmed) ? u.status.block_height : null,
-                     unspent: true};
-          byOutpoint.set(key(c), c);
-          probed++;
-        }
-      }catch{ /* transient: the other signers still get their turn */ }
-    }
-  }
-
-  const candidates = [...byOutpoint.values()];
-  if(!candidates.length) return null;
-  // Unconfirmed first (it is the most recent thing that happened), then by
-  // height descending: a move spends the old record and creates a new one, so
-  // the most recent unspent record is the one in force.
-  candidates.sort((a,b)=>{
-    const au = a.height==null, bu = b.height==null;
-    if(au !== bu) return au ? -1 : 1;
-    if(au) return 0;
-    return b.height - a.height;
+// The wallet's half of a join: pay this wallet's own staking key the record's
+// value and fee, signed and finalized but not broadcast. The record's
+// transaction spends that coin, which is what authorises it.
+async function signAuthorization(pubkey, atoms){
+  return withWollet(async () => {
+    const pset = network.txBuilder().addRecordAuthorization(pubkey, atoms).feeRate(DEFAULT_FEERATE).finish(wollet);
+    const finalized = wollet.finalize(signer.sign(pset));
+    const tx = finalized.extractTx();
+    let fee = null; try{ fee = BigInt(tx.fee(POLICY)); }catch{}
+    return { hex: tx.toString(), txid: tx.txid().toString(), fee };
   });
-  for(const c of candidates){
-    try{
-      if(!c.unspent){
-        const r = await fetch(`${ESPLORA}/tx/${c.txid}/outspend/${c.vout}`);
-        if(!r.ok) continue;
-        const j = await r.json();
-        if(j && j.spent) continue;                 // superseded, or already reclaimed
-      }
-      if(c.height==null){
-        const st = await fetch(`${ESPLORA}/tx/${c.txid}/status`);
-        c.confirmed = st.ok ? !!(await st.json()).confirmed : false;
-      } else c.confirmed = true;
-      return c;
-    }catch{ /* transient: try the next candidate */ }
-  }
-  return null;
 }
 
 function poolPayoutLine(p){
@@ -5920,7 +6009,7 @@ function renderDelegation(){
 }
 
 async function refreshDelegation(){
-  if(!delegSupported()){
+  if(!stakeRecords.delegationSupported(lwk)){
     // A wallet deployed against an older pkg/ cannot spend a record, and
     // offering "join a pool" without "leave a pool" would be a one-way door.
     const st=$('delegStatus');
@@ -5930,34 +6019,16 @@ async function refreshDelegation(){
     return;
   }
   await fetchPools();
+  // A join this browser started and did not see through (a closed tab between
+  // its two broadcasts) is finished first, so the record it creates is found.
+  try{ await stakeRecords.resumeJoin(stakeCtx()); }catch{}
   try{ DELEG = await discoverDelegation(); }catch{ DELEG = null; }
   renderPools();
   renderDelegation();
 }
 
-// The record's own value. It has to clear the dust floor and then pay the fee
-// each time it is re-pointed, so it is sized for a handful of moves rather than
-// exactly one. It all comes back when the delegation is reclaimed.
-const DELEG_RECORD_ATOMS = 100000n;   // 0.001 tSEQ
-
-// The fee for spending a record: its shape is fixed (one bare input, one output,
-// one fee output, about 230 vB), priced at the same rate every other transaction
-// this wallet builds uses, so it moves with that rate instead of drifting.
-const DELEG_SPEND_VBYTES = 230n;
-function delegSpendFee(){
-  const atoms = (DELEG_SPEND_VBYTES * BigInt(DEFAULT_FEERATE) + 999n) / 1000n;
-  return atoms > 0n ? atoms : 1n;
-}
-
-// Delegation needs wasm entry points a wallet deployed against an older pkg/
-// will not have. Say so plainly rather than failing inside a click handler.
-function delegSupported(){
-  return typeof lwk.findDelegationRecords === 'function'
-      && typeof lwk.buildDelegationSpendTx === 'function';
-}
-
 // The seed, from where every other signing flow in this wallet reads it. A
-// watch-only wallet has none, and cannot spend a record: say so rather than
+// watch-only wallet has none, and cannot sign a record: say so rather than
 // failing inside the builder.
 function delegMnemonic(){
   const m=(localStorage.getItem(KEY)||'').trim();
@@ -5965,46 +6036,53 @@ function delegMnemonic(){
   return m;
 }
 
+const tSEQ = (atoms) => fmtAtoms(BigInt(atoms), 8)+' tSEQ';
+
+// Joining is two transactions, broadcast together and mined together: the
+// wallet pays its own staking key the record's value and fee, and the record's
+// transaction spends that coin. Both are built and shown before either is
+// signed into the chain.
+async function reviewJoin(target){
+  const ctx = stakeCtx();
+  const p = await stakeRecords.prepareJoin(ctx, target);
+  const kv = [
+    ['Network', 'Sequentia (testnet); not parent-chain BTC'],
+    ['Pool signer', p.signer],
+    ['1. Pays your staking key', tSEQ(p.recordAtoms + p.createFee)],
+    ['2. Creates the delegation record', tSEQ(p.recordAtoms)+' (comes back when you leave)'],
+    ['Network fees', (p.authFee!=null ? tSEQ(p.authFee)+' + ' : '')+tSEQ(p.createFee)],
+    ['Your stake', 'does not move; the pool can never spend it'],
+  ];
+  const {m, ok, st} = modalRows({title:'Delegate to a staking pool', kv});
+  ok.onclick = async () => {
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Broadcasting…';
+    try{
+      const r = await stakeRecords.commitJoin(ctx, p);
+      m.remove();
+      toast('Delegating:', {href:'/explorer/tx/'+r.createTxid, label:r.createTxid.slice(0,18)+'…'});
+      $('delegSigner').value=''; DELEG_SEL=null;
+      await refreshDelegation(); sync().catch(()=>{});
+    }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
+  };
+}
+
 $('btnDelegate').onclick=async()=>{
   $('delegErr').textContent='';
   try{
     const target=($('delegSigner').value||'').trim().toLowerCase();
     if(!/^0[23][0-9a-f]{64}$/.test(target)) throw new Error('pick a pool above, or paste its 66-character signer key');
-    const controller=signer.stakerPublicKey();
-    if(target===controller) throw new Error('that is your own staking key; delegating to yourself is what already happens with no pool at all');
-
+    if(target===signer.stakerPublicKey()) throw new Error('that is your own staking key; delegating to yourself is what already happens with no pool at all');
     rememberSigner(target);
     if(DELEG){
-      // Moving pools: spend the old record and create the new one in ONE
-      // transaction. Consensus allows only one live record per staking key, so
-      // two separate transactions could be mined in the order that invalidates
-      // a block.
-      if(DELEG.signer===target) throw new Error('you are already delegating to that pool');
-      if(!DELEG.confirmed) throw new Error('your last delegation change has not confirmed yet; wait for it');
-      const fee = delegSpendFee();
-      const built = lwk.buildDelegationSpendTx({
-        mnemonic: delegMnemonic(),
-        recordTxid: DELEG.txid, recordVout: DELEG.vout,
-        recordValue: DELEG.atoms.toString(),
-        currentSigner: DELEG.signer,
-        rotateTo: target,
-        feeAtoms: fee.toString(),
-        locktime: await tipHeight(),
-      }, network);
+      // Moving pools: the old record is spent and the new one created in ONE
+      // transaction, paid for out of the record.
+      const built = await stakeRecords.buildMove(stakeCtx(), DELEG, target);
       const txid = await broadcastSeqRaw(built.rawHex);
       toast('Moving to the new pool:', {href:'/explorer/tx/'+txid, label:txid.slice(0,18)+'…'});
       await refreshDelegation();
       return;
     }
-
-    const pset = network.txBuilder()
-      .addDelegationOutput(controller, target, DELEG_RECORD_ATOMS)
-      .feeRate(DEFAULT_FEERATE)
-      .finish(wollet);
-    await reviewBroadcast(pset, 'Delegate to a staking pool', async ()=>{
-      $('delegSigner').value=''; DELEG_SEL=null;
-      await refreshDelegation();
-    }, POLICY_HEX, {rows:[{atoms:DELEG_RECORD_ATOMS, hex:POLICY_HEX}], feeAssetHex:POLICY_HEX});
+    await reviewJoin(target);
   }catch(e){ $('delegErr').textContent = e?.message ?? String(e); }
 };
 
@@ -6012,31 +6090,22 @@ $('btnUndelegate').onclick=async()=>{
   $('delegErr').textContent='';
   try{
     if(!DELEG) throw new Error('you are not delegating');
-    if(!DELEG.confirmed) throw new Error('your last delegation change has not confirmed yet; wait for it');
     // Explicit, not confidential: the record spend creates an unblinded output.
     const addr = wollet.address(undefined).address().toUnconfidential().toString();
-    const fee = delegSpendFee();
-    const built = lwk.buildDelegationSpendTx({
-      mnemonic: delegMnemonic(),
-      recordTxid: DELEG.txid, recordVout: DELEG.vout,
-      recordValue: DELEG.atoms.toString(),
-      currentSigner: DELEG.signer,
-      reclaimAddress: addr,
-      feeAtoms: fee.toString(),
-      locktime: await tipHeight(),
-    }, network);
+    const built = await stakeRecords.buildLeave(stakeCtx(), DELEG, addr);
     const txid = await broadcastSeqRaw(built.rawHex);
     toast('Leaving the pool:', {href:'/explorer/tx/'+txid, label:txid.slice(0,18)+'…'});
     await refreshDelegation();
   }catch(e){ $('delegErr').textContent = e?.message ?? String(e); }
 };
 
-// nLockTime for the record spends: the current tip, so the transaction cannot be
-// mined into a block before it was made (anti fee-sniping), and never a height
-// in the future, which would make it unminable.
+// The chain tip, for the nLockTime of record spends (the transaction cannot be
+// mined into a block before it was made, and never a height in the future) and
+// for the signature they carry. 0 when it cannot be read, which every stake
+// record flow refuses rather than guessing.
 async function tipHeight(){
   try{
-    const r = await fetch(`${ESPLORA}/blocks/tip/height`);
+    const r = await fetch(`${ESPLORA}/blocks/tip/height`, {cache:'no-store'});
     if(r.ok){ const h = parseInt((await r.text()).trim(), 10); if(Number.isFinite(h) && h>=0) return h; }
   }catch{}
   return 0;
