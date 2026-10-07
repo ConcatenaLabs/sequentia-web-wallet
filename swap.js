@@ -4157,10 +4157,30 @@ function popover(anchorEl, items, onPick){
   sb.appendChild(inp); pop.appendChild(sb);
   const listEl = el('div','swpop-list'); pop.appendChild(listEl);
   document.body.appendChild(pop);
-  // Position under the anchor, clamped to viewport.
-  const r = anchorEl.getBoundingClientRect();
-  pop.style.top = Math.min(r.bottom + 6, window.innerHeight - 40) + 'px';
-  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+  // Position against the anchor, inside the viewport. It used to open under the
+  // anchor at its LEFT edge with a 60vh cap: under the Receive picker, on the
+  // right of the card, that hung past the card and ran below the window, so the
+  // rows after the first few could not be reached. Now it lines up with the
+  // anchor's right edge when the anchor sits on the right, opens upward when
+  // there is more room above, and never takes more height than there is.
+  // Re-placed on scroll and resize, because it is position:fixed and the
+  // anchor is not.
+  const place = () => {
+    const r = anchorEl.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight, gap = 6, edge = 8;
+    const below = vh - r.bottom - gap - edge, above = r.top - gap - edge;
+    // The height the list wants (capped at 60vh); open upward when it does not fit
+    // below and there is more room above.
+    pop.style.maxHeight = (vh * 0.6) + 'px';
+    const want = pop.offsetHeight;
+    const up = below < want && above > below;
+    pop.style.maxHeight = Math.max(160, Math.min(vh * 0.6, up ? above : below)) + 'px';
+    const h = pop.offsetHeight, w = pop.offsetWidth;
+    pop.style.top = (up ? Math.max(edge, r.top - gap - h) : Math.min(r.bottom + gap, vh - edge - h)) + 'px';
+    const rightSide = r.left + r.width / 2 > vw / 2;
+    const left = rightSide ? r.right - w : r.left;
+    pop.style.left = Math.max(edge, Math.min(left, vw - w - edge)) + 'px';
+  };
 
   const ALL_CAP = 40;   // don't render a whole (potentially huge) registry eagerly — search finds the rest
   let kbdIdx = -1, shown = [], optEls = [];
@@ -4218,7 +4238,7 @@ function popover(anchorEl, items, onPick){
     optEls.forEach((c,i)=>c.classList.toggle('kbd', i===kbdIdx));
     const cur = optEls[kbdIdx]; if (cur && cur.scrollIntoView) cur.scrollIntoView({ block:'nearest' });
   };
-  inp.addEventListener('input', () => draw(inp.value.trim()));
+  inp.addEventListener('input', () => { draw(inp.value.trim()); place(); });   // fewer rows: an upward popover must stay against its anchor
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown'){ e.preventDefault(); kbdIdx = Math.min(shown.length-1, kbdIdx+1); markKbd(); }
     else if (e.key === 'ArrowUp'){ e.preventDefault(); kbdIdx = Math.max(0, kbdIdx-1); markKbd(); }
@@ -4226,13 +4246,20 @@ function popover(anchorEl, items, onPick){
     else if (e.key === 'Escape'){ closePopover(); anchorEl.focus(); }
   });
   draw('');
+  place();
   setTimeout(() => inp.focus(), 0);
-  _pop = { pop, anchorEl, onDoc:(ev)=>{ if (!pop.contains(ev.target) && ev.target !== anchorEl) closePopover(); } };
+  // A scroll inside the list itself must not move the popover.
+  const onMove = (ev) => { if (!ev || !pop.contains(ev.target)) place(); };
+  _pop = { pop, anchorEl, onMove, onDoc:(ev)=>{ if (!pop.contains(ev.target) && ev.target !== anchorEl) closePopover(); } };
   setTimeout(() => document.addEventListener('mousedown', _pop.onDoc), 0);
+  window.addEventListener('scroll', onMove, true);
+  window.addEventListener('resize', onMove);
 }
 function closePopover(){
   if (!_pop) return;
   document.removeEventListener('mousedown', _pop.onDoc);
+  window.removeEventListener('scroll', _pop.onMove, true);
+  window.removeEventListener('resize', _pop.onMove);
   _pop.anchorEl.setAttribute('aria-expanded', 'false');
   _pop.pop.remove(); _pop = null;
 }
