@@ -42,6 +42,7 @@ index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools,
  │     (all three ride xcourier.js: sealed courier sessions over the relay
  │      WebSocket, keyed with seqob's Crypter)
  ├─ seqln.js               Lightning: LSP HTTP client + device-signer orchestration
+ │   ├─ bolt11.js          invoice reader: network, amount, hash, final CLTV, the asset (`a`)
  │   ├─ seqln-keys.js      m/1017'/... derivation of the two device identities
  │   └─ lightning/seqln-signer-sdk.js + lightning/pkg/   vendored SeqLN device signer (WASM, tracked)
  └─ tooling/lsp/           the hosted-SeqLN LSP backend + provisioning/harness scripts (Node)

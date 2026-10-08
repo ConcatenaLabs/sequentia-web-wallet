@@ -33,8 +33,8 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 69 `*.test.mjs` files (54 at the root, 15 under `tooling/lsp/`), and `node --test` runs
-every one of them. 23 are **standalone scripts** with their own `check()` harness: `node --test`
+There are 71 `*.test.mjs` files (55 at the root, 16 under `tooling/lsp/`), and `node --test` runs
+every one of them. 24 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
 Anything importing `swap.js` from Node needs a `localStorage` shim installed before the import;

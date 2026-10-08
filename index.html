@@ -508,7 +508,7 @@
         <label class="lbl">⚡ Pay a Lightning invoice</label>
         <p class="sub" style="margin:0 0 10px">Your hosted node pays the invoice and your device co-signs. Pick the asset to pay from.</p>
         <select id="lnSendAsset" style="width:100%"></select>
-        <textarea id="lnSendBolt11" class="mono" placeholder="Paste a BOLT11 invoice (lnbc…)" style="width:100%;margin-top:8px;min-height:64px;resize:vertical"></textarea>
+        <textarea id="lnSendBolt11" class="mono" placeholder="Paste a Lightning invoice (lntsqt… or lntb…)" style="width:100%;margin-top:8px;min-height:64px;resize:vertical"></textarea>
         <button class="primary" id="lnSendBtn" style="margin-top:10px">Pay invoice</button>
         <div class="status" id="lnSendStatus" style="margin-top:8px"></div>
       </div>
@@ -1179,6 +1179,7 @@ import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoCon
 import * as seqob from './seqob.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
+import { decodeBolt11 } from './bolt11.js';
 import { esc, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
@@ -3338,11 +3339,34 @@ function initLnSendReceive(){
     finally { recvBtn.disabled = false; }
   };
   if (copyBtn) copyBtn.onclick = () => { try { navigator.clipboard.writeText($('lnRecvBolt11').textContent || ''); toast('Invoice copied.'); } catch {} };
+  // An invoice names what it is paid in: bitcoin, or on Sequentia the asset in its `a` field. The
+  // node that pays it must hold that asset, so pasting one selects it, and paying from another is
+  // refused before any node is asked.
+  const lnInvoiceAsset = (bolt11) => {
+    const d = decodeBolt11(bolt11);
+    if (!d.ok) return { error: 'This is not an invoice the wallet can pay: ' + d.error + '.' };
+    const want = d.chain === 'btc' ? 'BTC' : d.asset;
+    const name = want === 'BTC' ? 'BTC' : (assetMeta(want).ticker || want.slice(0, 8) + '…');
+    if (!lnCapableAssets().some(o => o.hex === want)) return { want, name, error: 'This invoice is paid in ' + name + ', which this wallet holds no Lightning balance in.' };
+    return { want, name };
+  };
+  const bolt11El = $('lnSendBolt11');
+  if (bolt11El) bolt11El.addEventListener('input', () => {
+    const bolt11 = (bolt11El.value || '').trim(), st = $('lnSendStatus');
+    if (!bolt11) return;
+    const r = lnInvoiceAsset(bolt11);
+    if (r.error){ st.className = 'status err'; st.textContent = r.error; return; }
+    $('lnSendAsset').value = r.want;
+    st.className = 'status'; st.textContent = 'This invoice is paid in ' + r.name + '.';
+  });
   if (sendBtn) sendBtn.onclick = async () => {
     const asset = $('lnSendAsset').value, meta = assetMeta(asset);
     const bolt11 = ($('lnSendBolt11').value || '').trim();
     const st = $('lnSendStatus');
     if (!bolt11){ st.className = 'status err'; st.textContent = 'Paste an invoice.'; return; }
+    const inv = lnInvoiceAsset(bolt11);
+    if (inv.error){ st.className = 'status err'; st.textContent = inv.error; return; }
+    if (inv.want !== asset){ st.className = 'status err'; st.textContent = 'This invoice is paid in ' + inv.name + '; choose ' + inv.name + ' to pay it.'; return; }
     sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
       if (!lnApi) throw new Error('open your wallet first');

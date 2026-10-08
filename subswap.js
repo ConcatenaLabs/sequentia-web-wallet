@@ -51,6 +51,8 @@ import { openCourierSession } from './xcourier.js';
 import { chooseSettlementPath, planSettlement } from './tooling/lsp/settlement-router.mjs';
 import { matchFromTake, makerRailsFromOffer, crossingShapeSupported } from './tooling/lsp/bridge-driver.mjs';
 import { requiredTakerHold, HOLD_LIFE_DEFAULTS } from './tooling/lsp/leg-bridge.mjs';
+import { bolt11AmountMsat, bolt11PaymentHash, bolt11MinFinalCltv, bolt11Asset } from './bolt11.js';
+export { bolt11AmountMsat, bolt11PaymentHash, bolt11MinFinalCltv, bolt11Asset };
 
 // DEFAULT_NODE_MAX_CLTV — the CLN default --max-cltv-expiry (blocks). Our OWN hosted BTC-LN node cannot route a
 // payment whose final-hop CLTV exceeds this, so it is the hard ceiling on any hold CLTV we could ever commit;
@@ -102,101 +104,8 @@ function _big(v) { try { return BigInt(v == null ? 0 : v); } catch { return 0n; 
 // maker is NEVER underpaid (a floored BTC would demand less than the maker's own ceil-proportional need).
 function _ceilDiv(n, d) { n = _big(n); d = _big(d); return d > 0n ? (n + d - 1n) / d : 0n; }
 
-// bolt11AmountMsat — the invoice amount in msat from a bolt11's human-readable part, or null when the
-// amount is absent / not confidently parseable (an amountless invoice, an unknown currency prefix, or a
-// sub-msat `p` amount). CONSERVATIVE by design: it returns null rather than guess, so the overpay guard it
-// feeds (below) NEVER false-rejects a valid invoice — it only refuses a confidently-parsed OVERPAY. The
-// amount encoding is `<digits><multiplier>` right after the `ln<currency>` prefix: m=1e-3, u=1e-6, n=1e-9,
-// p=1e-12 BTC; msat = BTC * 1e11. (bcrt is matched before bc so `lnbcrt…` parses.)
-export function bolt11AmountMsat(bolt11) {
-  if (typeof bolt11 !== 'string') return null;
-  const m = /^ln(bcrt|tbs|tsb|bc|tb|sb)(\d*)([munp]?)/i.exec(bolt11.trim());
-  if (!m || !m[2]) return null;   // no prefix match, or an amountless invoice
-  let n; try { n = BigInt(m[2]); } catch { return null; }
-  switch ((m[3] || '').toLowerCase()) {
-    case 'm': return n * 100000000n;         // milli-BTC  * 1e8 msat
-    case 'u': return n * 100000n;            // micro-BTC  * 1e5 msat
-    case 'n': return n * 100n;               // nano-BTC   * 1e2 msat
-    case 'p': return (n % 10n === 0n) ? n / 10n : null;   // pico-BTC = 0.1 msat units; sub-msat -> unparseable
-    case '':  return n * 100000000000n;      // whole BTC  * 1e11 msat
-    default:  return null;
-  }
-}
-
-// bolt11PaymentHash — the invoice's `p` (payment_hash) tagged field, decoded from the bech32 data part, as
-// 32-byte lowercased hex, or null when it cannot be confidently extracted. This is the CLIENT-SIDE mirror of
-// the Go driver's clnLNLeg.Pay(bolt11, wantHash): the taker MUST prove the invoice it is about to pay is
-// bound to the SAME secret hash H as the on-chain asset HTLC it verified — otherwise paying yields a preimage
-// P' with sha256(P') != H that opens NOTHING, and the taker loses BTC-LN with no asset (the single worst
-// fund-loss on the reverse-submarine buy). The gate that consumes this fails CLOSED on null (an un-decodable
-// invoice is never paid). Pure — no I/O. bech32: 5-bit groups; layout = timestamp(7) + tagged fields +
-// signature(104) + checksum(6); a tagged field is type(1) + length(2, big-endian 5-bit) + data(length).
-const _BECH32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-function _fiveBitToHex(groups, nbytes) {
-  let acc = 0, bits = 0; const out = [];
-  for (const g of groups) {
-    acc = (acc << 5) | g; bits += 5;
-    while (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); if (out.length === nbytes) break; }
-    if (out.length === nbytes) break;
-  }
-  return out.length === nbytes ? out.map((x) => x.toString(16).padStart(2, '0')).join('') : null;
-}
-export function bolt11PaymentHash(bolt11) {
-  if (typeof bolt11 !== 'string') return null;
-  const s = bolt11.trim().toLowerCase();
-  const sep = s.lastIndexOf('1');                       // bech32 separator (the data part uses no '1')
-  if (sep < 1) return null;
-  const data = s.slice(sep + 1);
-  const vals = [];
-  for (const ch of data) { const v = _BECH32.indexOf(ch); if (v < 0) return null; vals.push(v); }
-  if (vals.length < 7 + 104 + 6) return null;           // too short to hold timestamp + signature + checksum
-  const end = vals.length - 104 - 6;                    // tagged fields end here (before the 104-group signature)
-  let i = 7, payHash = null;
-  while (i + 3 <= end) {
-    const type = vals[i];
-    const len = (vals[i + 1] << 5) | vals[i + 2];
-    i += 3;
-    if (i + len > end) break;                           // malformed length -> stop (payHash stays whatever we found)
-    if (type === 1 && len === 52) payHash = _fiveBitToHex(vals.slice(i, i + 52), 32);   // 'p' = payment_hash (52 groups = 260 bits -> 32 bytes)
-    i += len;
-  }
-  return payHash;
-}
-
-// bolt11MinFinalCltv — the invoice's `c` (min_final_cltv_expiry) tagged field as a Number, or the BOLT11
-// DEFAULT of 18 when the field is ABSENT (a plain invoice carries none), or null when the invoice cannot be
-// parsed at all (the CLTV gate then fails closed). A bolt11 HOLD invoice is BYTE-IDENTICAL to a plain one, so
-// this value is the ONLY on-invoice signal of how long the recipient could keep an incoming payment HELD
-// (settleable) — the reverse-submarine taker gates on it (holdCltvSafeVsTseq below) so a masquerading maker
-// cannot hold the taker's payment past T_seq, refund the asset, then settle the hold. Pure — no I/O. bech32
-// layout identical to bolt11PaymentHash; the `c` field (type 24) is a big-endian integer over its 5-bit data
-// groups. Per BOLT11 the FIRST `c` is authoritative (it is what a spec-compliant payer commits as the incoming
-// HTLC's final CLTV), so decode the first and ignore any later decoy.
-export function bolt11MinFinalCltv(bolt11) {
-  if (typeof bolt11 !== 'string') return null;
-  const s = bolt11.trim().toLowerCase();
-  const sep = s.lastIndexOf('1');
-  if (sep < 1) return null;
-  const data = s.slice(sep + 1);
-  const vals = [];
-  for (const ch of data) { const v = _BECH32.indexOf(ch); if (v < 0) return null; vals.push(v); }
-  if (vals.length < 7 + 104 + 6) return null;
-  const end = vals.length - 104 - 6;
-  let i = 7, cltv = null;
-  while (i + 3 <= end) {
-    const type = vals[i];
-    const len = (vals[i + 1] << 5) | vals[i + 2];
-    i += 3;
-    if (i + len > end) break;
-    if (type === 24 && cltv === null) {                 // 'c' = min_final_cltv_expiry (first occurrence wins)
-      let acc = 0;
-      for (let k = 0; k < len; k++) acc = acc * 32 + vals[i + k];   // big-endian 5-bit integer
-      cltv = acc;
-    }
-    i += len;
-  }
-  return cltv === null ? 18 : cltv;                     // absent -> BOLT11 default 18
-}
+// The invoice readers (amount, payment hash, final CLTV, asset) live in bolt11.js, shared with the
+// page and the extension; they are re-exported here for this module's callers and tests.
 
 // holdCltvSafeVsTseq — the HOLD-INVOICE MASQUERADE gate (fund-loss), pure. A bolt11 hold invoice is byte-
 // identical to a plain one, so a malicious interactive reverse-submarine maker can hand the taker a HOLD

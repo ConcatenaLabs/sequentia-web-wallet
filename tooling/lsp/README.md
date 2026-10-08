@@ -44,7 +44,13 @@ refuses the commitment and the channel has no owning daemon until the peer
 reconnects. The device approves a payment only within its payment limit for the
 asset, which the wallet sets (`window.SEQ_LN_PAYMENT_LIMITS`, below). A hosted
 node pays in the asset it was provisioned for, named in every `pay` and
-`getroute`.
+`getroute`. An invoice on a Sequentia network names the asset it is paid in (its
+`a` field), so `/node/pay` answers `400` to one in another asset before anything
+is sent. The invoices a hosted Sequentia node makes (`/node/receive`, and
+`/node/invoice` without a payment hash) name its asset and are made with
+`allow_unfunded=true`: the node refuses an invoice in an asset with no channel
+open or opening, and the inbound channel is the LSP's to open, which the wallet
+asks for just before. The rules are in `invoice-asset.mjs`.
 
 `asset` accepts a ticker (`GOLD`) or a 32-byte hex asset id. The pair is
 `<asset>/BTC`, where the BTC leg is a real Bitcoin-LN channel in production, or

@@ -299,6 +299,7 @@ works normally without the restricted rows.
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
+| `bolt11.js` | What the wallet reads from a Lightning invoice: its network, amount, payment hash, final CLTV and, on Sequentia, the asset it is paid in (field `a`, which a Sequentia invoice must carry). Copied into the browser extension's `vendor/`. |
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record and drives the transactions SWK builds over the staking key's bare scripts. |

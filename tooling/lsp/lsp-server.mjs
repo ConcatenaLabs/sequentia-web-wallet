@@ -102,6 +102,7 @@ import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair,
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
+import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -4335,9 +4336,11 @@ const server = http.createServer(async (req, res) => {
         } else {
           // NORMAL invoice. Use keyword args so the optional `preimage` can be set without
           // positional padding: lightning-cli -k invoice amount_msat=.. label=.. preimage=..
+          // On a Sequentia node the invoice names the node's asset, with allow_unfunded: the inbound
+          // channel is the LSP's to open and may still be opening (invoice-asset.mjs).
           const kv = [`amount_msat=${amtMsat}`, `label=${label}`, 'description=asset buy'];
           if (P) kv.push(`preimage=${P}`);
-          if (assetId) kv.push(`asset=${assetId}`);
+          kv.push(...hostedInvoiceArgs(rec));
           inv = await lnrpcKw('invoice', kv, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         }
         return send(res, 200, { ok: true, bolt11: inv.bolt11, payment_hash: inv.payment_hash, hodl: !!H });
@@ -4414,18 +4417,19 @@ const server = http.createServer(async (req, res) => {
       const amtMsat = String(Math.round(amount) * 1000);
       const label = 'recv-' + crypto.randomUUID();
       const desc = (body && body.description) ? String(body.description).slice(0, 128) : 'Lightning receive';
-      // A Sequentia node's invoice names its asset, so it is paid only in that asset.
-      const recvAsset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
+      // A Sequentia node's invoice names its asset, so it is paid only in that asset, and is made with
+      // allow_unfunded: the wallet asks for the inbound channel just before, and the LSP may still be
+      // opening it (invoice-asset.mjs).
       try {
-        const kvr = [`amount_msat=${amtMsat}`, `label=${label}`, `description=${desc}`];
-        if (recvAsset) kvr.push(`asset=${recvAsset}`);
+        const kvr = [`amount_msat=${amtMsat}`, `label=${label}`, `description=${desc}`, ...hostedInvoiceArgs(rec)];
         const inv = await lnrpcKw('invoice', kvr, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         return send(res, 200, { ok: true, bolt11: inv.bolt11, payment_hash: inv.payment_hash, amount_msat: Number(amtMsat) });
       } catch (e) { return send(res, 502, { ok: false, error: `invoice: ${e.message}` }); }
     }
 
     // POST /node/pay { node_key, bolt11 } -> { paid, preimage, amount_msat, destination }. The user's
-    // hosted node PAYS a Lightning invoice in its own asset (named, never left to a default). The device
+    // hosted node PAYS a Lightning invoice in its own asset (named, never left to a default); an invoice
+    // that names another asset is answered 400 before anything is sent. The device
     // approves the payment first and signs every commitment; a decline is answered 403 { declined: true }
     // before any HTLC exists. retry_for bounds the routing attempt so a dead route can't hang forever.
     if (req.method === 'POST' && url.pathname === '/node/pay') {
@@ -4457,6 +4461,10 @@ const server = http.createServer(async (req, res) => {
       if (wantMsat != null && decMsat != null && decMsat !== wantMsat) return send(res, 400, { ok: false, error: `invoice amount ${decMsat} msat != expected ${wantMsat}` });
       if (maxCltv != null && !(maxCltv > 0)) return send(res, 400, { ok: false, error: 'max_cltv leaves no timelock room' });
       if (maxCltv != null && decFinal > maxCltv) return send(res, 400, { ok: false, error: `invoice min_final_cltv ${decFinal} exceeds the ${maxCltv}-block cap` });
+      // The invoice names the asset it is paid in, and the node pays only in its own: one in another
+      // asset is refused here, before the device is asked or anything is sent.
+      const av = payAssetVerdict({ rec, decoded, bolt11, label: assetLabel });
+      if (!av.ok) return send(res, 400, { ok: false, error: av.error });
       // The node's asset: a Sequentia node pays in the asset it was provisioned for, named explicitly; a
       // Bitcoin node has no assets.
       const payAsset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
