@@ -53,7 +53,8 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   that reads your stake -- Levo -- signs you in: paste its message, sign, paste the signature back
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
 - Developer mode (a setting, off by default): coins held as leaves of an operator's tree, with
-  the balance per rail, boarding, receive requests and payments, settle now, and an exit drill
+  the balance per rail, boarding, receive requests and payments, settle now, and an exit drill;
+  and contract spends, shown and signed under the five-point rule
 
 Experimental, and said so in the app:
 
@@ -182,6 +183,34 @@ mnemonic. It holds what the mnemonic cannot rebuild, which leaves were spent off
 which forfeits were signed among them, so clearing the site's data loses it. One tab at a time
 can hold it.
 
+### Developer mode: contract spends
+
+With developer mode on, a **Contracts** tab spends a contract written with
+[`sequentia-contracts`](https://github.com/ConcatenaLabs/sequentia-contracts): a template (a
+descriptor and its programs) and an instance of it (the template's values on this chain). The
+kit's contract engine does the work; the tab asks it and shows what it answers.
+
+- **Template**: one the kit carries (`sequentia/one-key`, `sequentia/one-key-exit`,
+  `sequentia/faucet-drip`), or a descriptor pasted with its sources (each with its includes
+  resolved, as `seqc expand` prints it). The engine checks a pasted template with the
+  contracts' own reader and pinned compiler, and only then adds it to this wallet's list. The
+  tab shows this wallet's contract key (`m/8383h/1h/0h/0/0`), the key a template names for it.
+- **Instance**: the instance record; the engine recomputes its address, which the tab shows.
+- **Coin and path**: the explicit coins the address holds, and the way to spend.
+- **Spend**: for the faucet drip covenant's drip, the recipient (this wallet by default), the
+  amount and a fee rate in the dripped asset's own units; for any other path, the request
+  written by hand (its outputs, each saying whether it returns to the contract, pays this
+  wallet, pays someone, or is the fee).
+
+**Review** shows the approval: the template by the registry's name (looked up by the wallet,
+never taken from the template), else its commitment root; the path, who can take it and what it
+does; every parameter by role; this wallet's balance change in every asset; where the coins
+go; and what was checked. The wallet signs only when the template is on its list, the engine
+recomputed the output, it ran the program against the final transaction, and the key is a
+contract key. **Sign and broadcast** signs the digest of exactly the screen shown. A spend
+the engine refuses (a relative lock not yet passed, an amount the program forbids, an output
+it cannot account for) is refused before anything is signed, in the engine's words.
+
 ### The Trade tab
 
 One symmetric composer: "You pay X" / "You receive Y". The route is inferred from the pair:
@@ -274,6 +303,7 @@ works normally without the restricted rows.
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record and drives the transactions SWK builds over the staking key's bare scripts. |
 | `leaves.js` | Developer mode: the setting and the Leaves tab, which shows what the leaf wallet answers. |
+| `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
@@ -299,8 +329,12 @@ SWK with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
 ```sh
 git clone -b sequentia https://github.com/ConcatenaLabs/SWK.git
 cd SWK/lwk_wasm
-wasm-pack build --target web --release   # needs clang; --target web is required
+./build-web.sh   # wasm-pack build --target web --release, the build machine's paths remapped; needs clang
 ```
+
+`--target web` is required, and the script uses it. It also fails if the `.wasm` still names
+the machine that built it. A `pkg/` built before SWK carried its contract engine still works,
+but the Contracts tab then says it needs a newer build.
 
 Then copy or symlink the output into the wallet checkout:
 
@@ -375,6 +409,15 @@ deployed wallet instead of this checkout. It needs a Chromium (`CHROMIUM=/path/t
 Esplora shim over the node's RPC. It bonds, joins a pool, finds the record, moves, leaves,
 unbonds and claims, each transaction confirmed in a block, and checks that a spend built on
 one side of the height where stake record signatures change is rebuilt on the other.
+
+`SEQUENTIA_BIN=<Sequentia>/src node tooling/contracts-regtest.mjs <evidence-dir>` drives the
+Contracts tab in a headless Chromium against a private regtest chain: a faucet drip covenant
+whose faucet key is the page's contract key is funded, dripped from through the approval
+screen and confirmed, and a drip before the interval, one above the tier and one whose
+successor is not the covenant are each refused before signing. The tab runs there on
+`tooling/contracts-harness.html`, which mounts the same module on the regtest network, since
+`index.html` is bound to the testnet. `node tooling/contracts-tab-probe.mjs` checks the tab in
+`index.html` itself: hidden with developer mode off, shown with it on, reading a template.
 
 `node tooling/leaves-drive.mjs <evidence-dir>` drives developer mode in a headless Chromium
 against a local regtest operator: it joins, funds and boards, receives a payment through the

@@ -20,7 +20,7 @@ copied in:
 ```sh
 git clone -b sequentia https://github.com/ConcatenaLabs/SWK.git
 cd SWK/lwk_wasm
-wasm-pack build --target web --release      # --target web is required
+./build-web.sh      # wasm-pack build --target web --release, build paths remapped
 cd -
 ln -s ../SWK/lwk_wasm/pkg ./pkg
 ```
@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 68 `*.test.mjs` files (53 at the root, 15 under `tooling/lsp/`), and `node --test` runs
+There are 69 `*.test.mjs` files (54 at the root, 15 under `tooling/lsp/`), and `node --test` runs
 every one of them. 23 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -50,6 +50,12 @@ requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in
 `leaves.js` shows what the library answers, refusals in the library's own words, and nothing
 in it may decide anything the library decides. The page's copy never names the operator
 protocol: developer mode speaks of leaves, rounds and the operator.
+
+`contracts.js` is developer mode's Contracts tab. The same rule holds: the kit's contract engine
+(`ContractTemplate`, `ContractInstance`, `ContractSpend`, `ContractApproval` in `pkg/`) reads,
+checks, builds, runs and signs; the module renders the approval it returns and signs the
+digest of what it rendered. Never compute an amount, a script or a verdict about a contract in
+JavaScript. The browser extension copies this file into its `vendor/`; change it here first.
 
 ## The shape of the code
 
