@@ -7,6 +7,10 @@ pkg/
 # and ships with the wallet so the "Instant (Lightning)" route works.
 !lightning/pkg/
 !lightning/pkg/**
+# EXCEPTION: the vendored leaf wallet (the operator wallet library built for a browser
+# worker; developer mode's Leaves tab) IS tracked, for the same reason.
+!leaves/pkg/
+!leaves/pkg/**
 
 # Agent worktrees and local agent state (never belongs in the repo).
 .claude/

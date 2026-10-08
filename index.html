@@ -64,6 +64,16 @@
   .ok{color:var(--green)} .err{color:var(--red)}
   a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
+  /* developer mode: leaves (leaves.js) */
+  .leaf-rails{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  .leaf-rails th{text-align:left;color:var(--dim);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;padding:6px 6px 6px 0}
+  .leaf-rails td{border-top:1px solid var(--line);padding:7px 6px 7px 0;vertical-align:top;overflow-wrap:anywhere}
+  .leaf-coin,.leaf-participation,.leaf-drill-run{border-top:1px solid var(--line);padding:10px 0}
+  .leaf-coin .kv,.leaf-participation .kv{font-size:13px;padding:4px 0}
+  .mono-inline{font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;text-align:right}
+  .leaf-result{max-height:260px;overflow:auto;white-space:pre-wrap;font-size:12px}
+  .leaf-refusal{color:#f0a39b}
+  .leaf-split{font-size:12.5px;color:var(--dim);margin-top:2px}
   /* tabs */
   .tabs{display:flex;flex-wrap:wrap;gap:4px;margin-top:18px;background:var(--panel);border:1px solid var(--line);
         border-radius:12px;padding:4px}
@@ -416,6 +426,7 @@
       <button data-tab="stake">Stake</button>
       <button data-tab="history">History</button>
       <button data-tab="sign">Sign</button>
+      <button data-tab="leaves" id="tabLeaves" class="hide">Leaves</button>
       <button data-tab="settings">Settings</button>
     </div>
 
@@ -1079,8 +1090,14 @@
       </div>
     </section>
 
+    <!-- developer mode: leaves (leaves.js) -->
+    <section data-panel="leaves" class="hide">
+      <div id="leavesRoot"></div>
+    </section>
+
     <!-- settings -->
     <section data-panel="settings" class="hide">
+      <div id="devModeRoot"></div>
       <div class="card">
         <label class="lbl">Backend</label>
         <div class="kv"><span class="k">Explorer API</span><span class="v" id="setApi"></span></div>
@@ -1167,6 +1184,7 @@ import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
 import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
+import { mountLeaves, devModeOn } from './leaves.js';
 
 const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
@@ -2405,6 +2423,7 @@ function tab(name){
   if(name==='assets') populateIssueFeeAssets();
   if(name==='mix') try{ renderMix(); }catch(e){ console.error(e); }
   if(name==='balance') try{ renderBalance(); }catch{}   // render immediately (from cache pre-scan), don't wait for the scan
+  if(name==='leaves') try{ leavesApi && leavesApi.render(); }catch{}
 }
 
 // ---------- deep-link routing (OpenAMP: WW-2 sign card, WW-3 send handoff) ----------
@@ -2599,6 +2618,9 @@ async function openWallet(phrase){
   // (the wallet is usable while sync() below just refreshes). Best-effort; falls back to a full scan.
   await restoreWolletState();
   addrIndex=null; views('app'); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
+  // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
+  // on at any time; the leaf wallet starts only while the mode is on.
+  try{ initLeaves(); }catch(e){ console.warn('[leaves] init failed:', e?.message??e); }
   // Register the OpenAMP identity + load restricted-asset metadata before the first sync, so
   // restricted rows/balances can render in the same pass. Non-fatal if the enclave is unreachable.
   await oampInit();
@@ -2656,6 +2678,29 @@ async function openWallet(phrase){
   // a signer, so this runs after openWallet() rather than at boot() before a wallet exists.
   walletReady=true;
   try{ handleDeepLinkRoute(); }catch(e){ console.warn('[deeplink] route handling failed:', e?.message??e); }
+}
+
+// ---------- developer mode: leaves ----------
+// leaves.js holds the panels and talks to the leaf wallet's worker (leaves/worker.js),
+// which runs the operator wallet library compiled to wasm. Off by default.
+let leavesApi = null;
+function initLeaves(){
+  if(leavesApi) return;
+  const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
+  leavesApi = mountLeaves({
+    makeWorker: ()=> new Worker(new URL('./leaves/worker.js', import.meta.url), { type:'module' }),
+    store: localStorage,
+    mnemonic: ()=> localStorage.getItem(KEY),
+    el, assetMeta, fmtAtoms, refValueStr,
+    btcOnchain: ()=> btcBalance || 0n,
+    lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
+    lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
+    onChange: ()=>{ try{ renderBalance(); }catch{} },
+    onModeChange: (on)=>{ show('tabLeaves', on); if(!on && document.querySelector('#tabs button.active')?.dataset.tab==='leaves') tab('balance'); try{ renderBalance(); }catch{} },
+    tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
+  }, $('leavesRoot'), $('devModeRoot'));
+  show('tabLeaves', devModeOn(localStorage));
+  if(devModeOn(localStorage)) leavesApi.start();
 }
 
 // ---------- Lightning (hosted-SeqLN LSP, two-node cross-chain rail) ----------
@@ -3818,7 +3863,8 @@ function renderBalance(){
     const lnAtoms = lnOn ? lnAtomsFor(kind) : 0n;
     const chans   = lnOn ? lnChansFor(kind) : 0;
     const own     = lnOn ? ownChansFor(kind) : [];
-    const totalAtoms = (onchainAtoms||0n) + lnAtoms;
+    const leafAtoms = (kind!=='BTC' && leavesApi && devModeOn(localStorage)) ? leavesApi.leafAtoms(kind) : 0n;
+    const totalAtoms = (onchainAtoms||0n) + lnAtoms + leafAtoms;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
@@ -3838,6 +3884,10 @@ function renderBalance(){
     if(ref) a.appendChild(el('div','sub', ref));
     head.appendChild(a);
     r.appendChild(head);
+    // Developer mode: every rail of the asset on one line (leaves.js holds the leaf figure).
+    if(kind!=='BTC' && leavesApi && devModeOn(localStorage) && known){
+      r.appendChild(el('div','leaf-split', fmtAtoms(onchainAtoms||0n, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning'));
+    }
     // Lightning metacard: only when there is an own Lightning balance, or on-chain funds that could
     // be moved in — never an empty "Not in Lightning yet" card on a zero row (e.g. a fresh BTC).
     if(lnOn && leg && (chans>0 || own.length || (movable && (onchainAtoms||0n) > 0n))){
@@ -3871,6 +3921,8 @@ function renderBalance(){
   // The Sequentia assets to show: everything held on-chain PLUS anything that still has a live
   // Lightning channel even at 0 on-chain (so a fully-moved asset stays visible).
   const seqKeys = new Set(Object.keys(b));
+  // Developer mode: an asset held only as leaves still has its row.
+  if(leavesApi && devModeOn(localStorage)) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
   if(lnLastStatus && lnLastStatus.channels){
     for(const c of lnLastStatus.channels){
       const isBtc=(c.asset_label==='BTC'||c.leg==='btc');
@@ -3884,7 +3936,8 @@ function renderBalance(){
   let total=0, totalRef=null, anyPriced=false, allPriced=true;
   const addToTotal=(refKey, atoms)=>{ const rv=refValue(refKey, atoms); if(rv){ total+=rv.v; totalRef=rv.ref; anyPriced=true; } else if((atoms||0n)>0n) allPriced=false; };
   addToTotal('BTC', btcBal + (lnOn?lnAtomsFor('BTC'):0n));
-  for(const h of seqKeys) addToTotal(h, BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n));
+  const leafFor = (h)=> (leavesApi && devModeOn(localStorage)) ? leavesApi.leafAtoms(h) : 0n;
+  for(const h of seqKeys) addToTotal(h, BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h));
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
   // (WW-4 / spec 1.5(a)). Keyed 'oamp:'+id so assetMeta/priceTicker resolve the real ticker+precision;
   // an unpriced restricted asset falls into the allPriced=false path like any other unpriced asset.
@@ -3913,7 +3966,7 @@ function renderBalance(){
   // move to the collapsed "Hidden assets" section at the bottom of the list; they also
   // leave the default asset-picker dropdowns but stay findable there by search (swap.js
   // pickerMatches). BTC (the parent chain) is never partitioned out.
-  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n);
+  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h);
   // Auto-fold UNLABELED assets (unknown precision — the wallet can't name/scale them, so the
   // user never deliberately holds them) into the collapsed hidden section, so a few
   // received-by-accident dust tokens no longer clutter the main balance list. Still labelable
