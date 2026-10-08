@@ -2496,11 +2496,16 @@ function handleDeepLinkRoute(){
 }
 
 // ---------- boot ----------
+// How many indexer requests a scan keeps in flight. It was 1: a wallet's first scan walks every
+// used address plus the 20-address gap on each chain, and the main scan plus the order-payout scan
+// came to ~85 requests one after another. SWK applies this to transactions and headers, and from
+// its concurrent address-history fetch on, to the address histories that make up most of a scan.
+const ESPLORA_CONCURRENCY = 8;
 async function boot(){
   await init();
   network = Network.sequentiaTestnet();
   POLICY = network.policyAsset(); POLICY_HEX = POLICY.toString();
-  client = new EsploraClient(network, ESPLORA, false, 1, false);
+  client = new EsploraClient(network, ESPLORA, false, ESPLORA_CONCURRENCY, false);
   $('net').textContent = network.toString();
   $('setApi').textContent = ESPLORA; $('setNet').textContent = network.toString(); $('setPolicy').textContent = POLICY_HEX;
   show('boot', false);
