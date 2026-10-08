@@ -16,6 +16,8 @@ index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools,
  │   │                     sync on the schedule, settle now, exit drill, refusals)
  │   └─ leaves/worker.js   dedicated worker running leaves/pkg/ (the operator wallet library, WASM,
  │                         tracked): blocking HTTP as synchronous XHR, its SQLite store on OPFS
+ ├─ contracts.js           developer mode: the Contracts tab (template, instance, coin, path, the
+ │                         approval screen); every check and signature is the kit's contract engine
  ├─ pkg/lwk_wasm.js        SWK WASM: Signer/Wollet/EsploraClient/PSET + HTLC, covenant, delegation,
  │                         CoinJoin and OpenAMP helpers (untracked)
  ├─ btc.js                 vendored @scure/btc-signer + bip32/bip39: the Bitcoin testnet4 leg
@@ -233,6 +235,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |
 | `swk.ln.predating`, `swk.ln.predating.dismissed` | per hosted node, the channels its device found in an older device's store, which it does not carry over; and the notes about them, and about coins on the node outside a channel, that the user dismissed |
 | `swk.devMode` | `1` while developer mode is on; absent (off) by default |
+| `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
 | `swk.balCache`, `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
@@ -256,12 +259,13 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 68 `*.test.mjs` files: 45 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 69 `*.test.mjs` files: 46 hold `node:test` suites, and the
 other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real
 WASM-signer-over-Noise path is proven by `tooling/lsp/device-harness.mjs` against a live
 backend. `tooling/stake-records-regtest.mjs` runs the staking flows against a real node.
-`tooling/leaves-drive.mjs` drives developer mode's Leaves tab in a headless Chromium against a
+`tooling/contracts-regtest.mjs` drives developer mode's Contracts tab against a private regtest
+chain (see the README). `tooling/leaves-drive.mjs` drives developer mode's Leaves tab in a headless Chromium against a
 local regtest operator (see the README).
