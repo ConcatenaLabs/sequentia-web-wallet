@@ -85,10 +85,16 @@ export class Page {
     writeFileSync(file, Buffer.from(r.data, 'base64'))
   }
 
-  stop () {
+  // Ends Chromium and waits for it to exit, so its profile can be removed after.
+  async stop () {
     try { this.ws?.close() } catch {}
-    try { this.proc?.kill() } catch {}
+    const p = this.proc
+    if (!p || p.exitCode !== null || p.signalCode !== null) return
+    const gone = new Promise((ok) => p.once('exit', ok))
+    try { p.kill() } catch {}
+    await Promise.race([gone, new Promise((ok) => setTimeout(ok, 10000))])
   }
 
-  remove () { if (this.dir) try { rmSync(this.dir, { recursive: true, force: true }) } catch {} }
+  // Removes the temporary profile; call after stop() has resolved.
+  remove () { if (this.dir) try { rmSync(this.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch {} }
 }

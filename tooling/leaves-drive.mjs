@@ -265,7 +265,7 @@ async function main () {
 
 try { await main() } catch (e) { failures++; note('FAIL ' + e.message); try { await shot('failure') } catch {} } finally {
   try { writeFileSync(join(out, 'console.log'), page.console.join('\n')) } catch {}
-  page.stop(); page.remove(); srv.kill()
+  await page.stop(); page.remove(); srv.kill()
   try { rmSync(cliDir, { recursive: true, force: true }) } catch {}
 }
 note(failures ? `${failures} failed` : 'all passed')
