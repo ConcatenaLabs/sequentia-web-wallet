@@ -12,6 +12,10 @@ DOM-light or DOM-free and receives what it needs through an `init*(ctx)` call.
 ```
 index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools, history, OpenAMP, Sign, QR)
  ├─ stake-records.js       pool join (two transactions) / move / leave, unbond + claim, record discovery
+ ├─ leaves.js              developer mode: the Leaves tab and its setting (rails, board, receive, send,
+ │   │                     sync on the schedule, settle now, exit drill, refusals)
+ │   └─ leaves/worker.js   dedicated worker running leaves/pkg/ (the operator wallet library, WASM,
+ │                         tracked): blocking HTTP as synchronous XHR, its SQLite store on OPFS
  ├─ pkg/lwk_wasm.js        SWK WASM: Signer/Wollet/EsploraClient/PSET + HTLC, covenant, delegation,
  │                         CoinJoin and OpenAMP helpers (untracked)
  ├─ btc.js                 vendored @scure/btc-signer + bip32/bip39: the Bitcoin testnet4 leg
@@ -88,6 +92,7 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | seqln.js | hosted-SeqLN LSP HTTP API + per-node signer WebSockets |
 | `/coinjoin` | coinjoin.js | seqcj CoinJoin coordinator (override: `window.SEQ_COINJOIN_URL`); the Mix tab reports it missing |
 | `/sbtc` | sbtc.js | SBTC custody bridge: peg-in / peg-out address allocation for offline-resting BTC limit orders |
+| the operator's server, the node's JSON-RPC | leaves/worker.js | developer mode only: the URLs the user enters when joining an operator. Each is fetched with a synchronous XHR from the worker, so a server on another origin must answer CORS |
 | `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
 
 Every backend beyond the two Esplora APIs is optional at runtime: fetch failures degrade the
@@ -114,6 +119,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LN_PAYMENT_LIMITS` | the device's default, 10,000,000 atoms of each asset per day | device payment limits: `{default, period, assets: {<asset id>\|'btc': atoms}}`, each in the asset's own atoms, `null` for none |
 | `SEQ_LSP_FRONT_CAP` | `0.0005` BTC | LSP instant-front cap for mixed swaps |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'~10 min'}` | on-chain confirmation estimate for the timing banner |
+| `SEQ_LEAVES_TICK_MS` | `60000` | how often developer mode reads the leaf wallet's schedule (it syncs when the schedule is due, and every 30 s at most while something is in flight) |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |
 
 A Lightning leg is **enabled** only when both its WS URL and host pubkey are set; with neither
@@ -226,10 +232,14 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.sequentia.oampTransfers`, `swk.sequentia.signerHints` | OpenAMP transfer log; pool signer keys this browser has delegated to |
 | `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |
 | `swk.ln.predating`, `swk.ln.predating.dismissed` | per hosted node, the channels its device found in an older device's store, which it does not carry over; and the notes about them, and about coins on the node outside a channel, that the user dismissed |
+| `swk.devMode` | `1` while developer mode is on; absent (off) by default |
+| `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
 | `swk.balCache`, `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
 The fund-bearing keys are the mnemonic, the pool join in flight, and the in-flight swap, walk, peg and bridge records;
-the rest can be cleared without loss.
+the rest can be cleared without loss. The leaf wallet's store is not in `localStorage`: it is a SQLite file in the
+origin's private file system (OPFS), one per mnemonic, and it holds what the mnemonic cannot rebuild (which leaves
+were spent off-chain, forfeits signed, the operator's record heads). Clearing the site's data loses it.
 
 ## Known limitations
 
@@ -246,10 +256,12 @@ the rest can be cleared without loss.
 
 ## Testing
 
-`node --test` (Node 22+) runs all 67 `*.test.mjs` files: 44 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 68 `*.test.mjs` files: 45 hold `node:test` suites, and the
 other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real
 WASM-signer-over-Noise path is proven by `tooling/lsp/device-harness.mjs` against a live
 backend. `tooling/stake-records-regtest.mjs` runs the staking flows against a real node.
+`tooling/leaves-drive.mjs` drives developer mode's Leaves tab in a headless Chromium against a
+local regtest operator (see the README).

@@ -52,6 +52,8 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   and, from the same Sign tab, a message signed with the staking key, which is how a site
   that reads your stake -- Levo -- signs you in: paste its message, sign, paste the signature back
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
+- Developer mode (a setting, off by default): coins held as leaves of an operator's tree, with
+  the balance per rail, boarding, receive requests and payments, settle now, and an exit drill
 
 Experimental, and said so in the app:
 
@@ -126,12 +128,59 @@ The tabs:
   The classic one is the "Bitcoin Signed Message" format, so `verifymessage` checks it on
   Sequentia and on Bitcoin alike — against the legacy form of the address, the only form that
   RPC accepts.
-- **Settings**: backend endpoints, network, the policy asset id, reveal-phrase, and
-  remove-wallet.
+- **Settings**: developer mode, backend endpoints, network, the policy asset id, reveal-phrase,
+  and remove-wallet.
 
 A wallet-wide **"Show values in"** selector picks the reference currency (USD by default, BTC
 or any priced asset optional). Every amount field carries a live approximate value in that
 currency, and amount inputs can be flipped to be typed directly in the reference currency.
+
+### Developer mode: leaves
+
+Developer mode is one setting under **Settings**, off by default. It adds a **Leaves** tab for
+coins held as leaves of an operator's tree, and shows every step by hand. On the Balance tab
+each asset row then reads "X on-chain · Y in leaves · Z on Lightning", and the headline total
+counts the leaves too.
+
+The Leaves tab first asks to **join an operator**: its server URL and the URL of a node's
+JSON-RPC (with a user and password if that node needs them). The node must validate its
+Bitcoin anchors (`-validateanchor`) and keep a transaction index (`-txindex`). Joining pins the
+node's chain and the operator's key, and shows the key to compare with the one the operator
+publishes; the wallet then refuses any server that names another. A server on another origin
+must answer CORS. The tab then has:
+
+- **Balances per rail**: one row per asset, BTC first and always. On-chain (as the leaf wallet
+  reads it from its node), leaves by state, and Lightning. A tree on Sequentia holds no BTC. A
+  coin received out of round and not yet refreshed is *operator-confirmed*: it relies on the
+  operator and its sender not colluding until a round settles it.
+- **Board**: brings an on-chain coin into the tree. **Show an on-chain address** gives an
+  address of the same keys on the leaf wallet's chain, to pay a coin to board or a fee coin. The
+  fee is paid in the asset boarded unless another is named.
+- **Receive**: a single-use receive request (`arca:…`). A payment arrives in the mailbox, which
+  sync reads.
+- **Send to a receive request**: pays it out of round, in the asset named.
+- **Sync and schedule**: the chain's median time, when the schedule next asks for a sync and
+  why, and every unpaid receive request with when it lapses. While the page is open it reads
+  the schedule every minute and syncs when it is due, and every 30 seconds at most while a
+  board, a payment, a participation or an exit is in flight. **Sync now** runs one at once.
+- **Leaves and their dates**: every leaf with its state, kind, expiry, exit deadline, and the
+  dates sync keeps for it (synced daily from, refreshed from, taken home from, exit by), and
+  the fee coin its exit needs, if any. **Settle now** gives a leaf up for one new leaf in the
+  next round: the operator's fee is shown coin by coin first, and nothing is signed unless the
+  fee is the one shown. The participation is then followed by the page's own sync until it is
+  released and the new leaf is held. **Exit drill** takes one leaf on-chain from its record
+  alone, without the operator: each run shows what it broadcast, with every fee, and what comes
+  next; run it again until the claim is final.
+- **Participations** and **Refusals**: every participation and where it stands, and every
+  refusal the leaf wallet made.
+
+Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
+library itself (the same code as the operator's command-line wallet), compiled to WebAssembly
+and run in a dedicated worker (`leaves/`), so nothing about a leaf is computed by the page.
+Its store is a SQLite file in the browser's private file system for this site, one per
+mnemonic. It holds what the mnemonic cannot rebuild, which leaves were spent off-chain and
+which forfeits were signed among them, so clearing the site's data loses it. One tab at a time
+can hold it.
 
 ### The Trade tab
 
@@ -224,6 +273,8 @@ works normally without the restricted rows.
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record and drives the transactions SWK builds over the staking key's bare scripts. |
+| `leaves.js` | Developer mode: the setting and the Leaves tab, which shows what the leaf wallet answers. |
+| `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
@@ -324,6 +375,17 @@ deployed wallet instead of this checkout. It needs a Chromium (`CHROMIUM=/path/t
 Esplora shim over the node's RPC. It bonds, joins a pool, finds the record, moves, leaves,
 unbonds and claims, each transaction confirmed in a block, and checks that a spend built on
 one side of the height where stake record signatures change is rebuilt on the other.
+
+`node tooling/leaves-drive.mjs <evidence-dir>` drives developer mode in a headless Chromium
+against a local regtest operator: it joins, funds and boards, receives a payment through the
+mailbox, sends one, shows refusals, settles a leaf into a round, runs the exit drill through to
+a final claim, and checks that the page syncs by itself when a leaf's refresh window opens.
+Each step is a DOM assertion and a screenshot, and each on-chain effect is checked at the node.
+It needs the operator repository's harness running
+(`ARCA_OPERATOR_CONTROL=127.0.0.1:18640 cargo test -p arca-cli --test arca_operator_for_browsers -- --ignored`,
+with what that repository's tests need) and its command-line wallet as the counterparty
+(`ARCA_CLI=/path/to/arca`). `tooling/leaves-dev-server.mjs` serves this checkout with that
+operator and its node behind the same origin, for working on the tab by hand.
 
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see

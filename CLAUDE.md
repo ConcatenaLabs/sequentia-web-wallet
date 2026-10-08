@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 67 `*.test.mjs` files (52 at the root, 15 under `tooling/lsp/`), and `node --test` runs
+There are 68 `*.test.mjs` files (53 at the root, 15 under `tooling/lsp/`), and `node --test` runs
 every one of them. 23 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -41,7 +41,15 @@ Anything importing `swap.js` from Node needs a `localStorage` shim installed bef
 `swap.js` reads it at module load. Existing tests show the idiom.
 
 `lightning/pkg/` is a *different* wasm artifact (the SeqLN on-device signer) and **is** tracked.
-Do not confuse it with `pkg/`.
+Do not confuse it with `pkg/`. So is `leaves/pkg/`, the leaf wallet of developer mode: the
+operator wallet library (`bark::arca` in `ConcatenaLabs/arca`) built from that repository's
+`wallet-wasm/` with `wasm-pack build --target web --release --out-name leaf_wallet`; copy
+`leaf_wallet.js`, `leaf_wallet_bg.wasm` and `leaf_wallet.d.ts` into `leaves/pkg/`. It runs only
+inside `leaves/worker.js`, a dedicated worker, because the library blocks on synchronous
+requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in JavaScript:
+`leaves.js` shows what the library answers, refusals in the library's own words, and nothing
+in it may decide anything the library decides. The page's copy never names the operator
+protocol: developer mode speaks of leaves, rounds and the operator.
 
 ## The shape of the code
 
