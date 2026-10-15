@@ -134,7 +134,7 @@ export function buildCovenantOffer({ assetA, assetB, sellAtoms, recvAtoms, coven
   // The SETTLEMENT asset (what the covenant actually locks) is always assetA. The ADVERTISED asset
   // differs ONLY for the SBTC silent peg: a covenant that locks SBTC advertises itself as BTC so it
   // rests in the asset/BTC market — routing by the SELECTED asset, not the locked one (see
-  // sbtc-peg-design.md §5.1). SBTC == BTC 1:1, so the advertised amount equals the locked amount, and
+  // the SBTC DESIGN.md §5.1). SBTC == BTC 1:1, so the advertised amount equals the locked amount, and
   // the relay accepts it (the covenant validator skips the BTC sentinel and never binds offer_asset
   // to covenant.asset_a). Defaults to assetA, so every existing same-chain caller is unchanged.
   const advOffer = advertiseOfferAssetAs || assetA;

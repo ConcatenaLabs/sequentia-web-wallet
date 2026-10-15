@@ -6446,7 +6446,7 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
 // ---------------------------------------------------------------------------
 // SBTC silent peg — rest an on-chain-BTC LIMIT order while the wallet is offline
 // ---------------------------------------------------------------------------
-// The ONE place SBTC touches the DEX (spec §5, sbtc-peg-design.md). Used ONLY for BUY-with-BTC LIMIT
+// The ONE place SBTC touches the DEX (spec §5, the SBTC DESIGN.md). Used ONLY for BUY-with-BTC LIMIT
 // orders with "keep resting while offline" ON. Everything else (market orders, any Lightning leg,
 // selling an asset for BTC) stays pure native BTC on the interactive cross rail.
 

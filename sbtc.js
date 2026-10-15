@@ -1,5 +1,5 @@
 // sbtc.js — the wallet's thin client for the SBTC bridge (the application-level BTC<->SBTC custody
-// peg). See ../sbtc-bridge/bridge.mjs and doc/sequentia/sbtc-peg-design.md.
+// peg). See bridge.mjs and DESIGN.md in the sbtc-bridge repository.
 //
 // The bridge is reached at a SAME-ORIGIN path (default /sbtc), exactly like the seqob relay's
 // /seqob: the reverse proxy (Caddy) forwards /sbtc -> the bridge and owns exposure/auth, so the
