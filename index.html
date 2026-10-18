@@ -1647,6 +1647,34 @@ function policyFeeRate(){
   const pr = Number(feeRateFor(POLICY_HEX));   // throws if this node does not price the policy asset
   return Math.max(1, Math.ceil(DEFAULT_FEERATE * EXCHANGE_RATE_SCALE / pr));
 }
+// A fee rate as people read it: whole units of the fee asset per vByte ("0.0000005 OILX/vB"). SWK
+// takes it two ways: for the policy asset as atoms of that asset per 1000 vB, for any other asset
+// as reference units per 1000 vB plus the asset's published rate, from which it converts back.
+// Every fee field goes through applyFeeUnits, so the number typed is the number paid. Before it,
+// the Send tab ran the policy asset through the second formula, so a typed tSEQ rate paid that rate
+// times tSEQ's price in the reference unit (0.37 of it with the reference in dollars), and the
+// rescue dialogs handed their field to SWK unconverted, in a unit that changed with the asset.
+function applyFeeUnits(b, feeHex, unitsPerVb){
+  if(!(unitsPerVb > 0)) throw new Error('enter a fee rate above zero');
+  const prec = assetMeta(feeHex).precision ?? 8;
+  const atomsPerKvb = unitsPerVb * Math.pow(10, prec) * 1000;
+  if(feeHex === POLICY_HEX) return b.feeRate(atomsPerKvb);
+  const R = Number(feeRateFor(feeHex));
+  return b.feeRate(atomsPerKvb * R / EXCHANGE_RATE_SCALE).feeAsset(new AssetId(feeHex), BigInt(R));
+}
+// A rate in reference atoms per vByte (DEFAULT_FEERATE/1000 is one) as whole units of `feeHex` per vByte.
+function refRateToUnits(feeHex, refPerVb){
+  const prec = assetMeta(feeHex).precision ?? 8;
+  return refPerVb * EXCHANGE_RATE_SCALE / Number(feeRateFor(feeHex)) / Math.pow(10, prec);
+}
+// What `atoms` of `hex` are worth in reference atoms, at the published fee rate.
+function refAtomsOf(hex, atoms){ return Number(atoms) * Number(feeRateFor(hex)) / EXCHANGE_RATE_SCALE; }
+// A small rate written out in full (no "1.4e-7"), three significant digits.
+function fmtUnits(x){
+  if(!(x > 0)) return '0';
+  const d = Math.min(14, Math.max(0, 2 - Math.floor(Math.log10(x))));
+  return x.toFixed(d).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
 // Apply the fee for the chosen `feeHex` to builder `b`, targeting the reference feerate for ANY
 // asset including the policy asset (open fee market, no privileged coin). Callers must NOT pre-set
 // feeRate — this sets it.
@@ -4032,6 +4060,9 @@ function setSyncStatus(state, err){
 // in the wallet queue, which a running scan can hold for seconds. Until it lands they are shown at
 // the top of History as outgoing and taken off the balances they came from.
 let _pendingSends = [];   // [{txid, at, title, out:[{hex, atoms}], fee:{hex, atoms}|null}]
+// The chain tip each of this session's own transactions was broadcast at. Until a block arrives after
+// it, a payment is not late, and offering to rescue it only invites paying twice for nothing.
+const _sentAtTip = new Map();   // txid -> tip height at broadcast
 function livePending(){
   if(!_pendingSends.length) return _pendingSends;
   let known; try{ known=new Set(wollet.transactions().map(t=>t.txid().toString())); }catch{ known=new Set(); }
@@ -4777,15 +4808,10 @@ function buildSendPset(rows){
   // sat/vB, which is a Bitcoin unit and only applies to an actual BTC send. Convert it to the
   // internal rate lwk needs: r * 10^precision * R / 1e5, where R is the asset's published rate
   // (tSEQ, the native asset, uses EXCHANGE_RATE_SCALE). Blank leaves it at the network default.
-  const feeR=Number(feeRateFor(feeHex));   // policy asset uses its OWN published rate, no 1:1 privilege
-  const feePrec=assetMeta(feeHex).precision||0;   // genuine 0-precision asset must not be treated as 8 (would inflate the rate 1e8x)
-  b=b.feeRate(fr ? (parseFloat(fr)*Math.pow(10,feePrec)*feeR/1e5) : (feeHex===POLICY_HEX ? policyFeeRate() : DEFAULT_FEERATE));
   // Pay the fee in whatever asset the user chose, at this node's published rate. There is no 1:1
   // fallback — a fabricated rate yields a wrong fee, so an unpriced asset is a hard error
   // (feeRateFor throws). The selectors already gate unpriced assets out; this is the last guard.
-  if(fa && fa!==POLICY_HEX){
-    b=b.feeAsset(new AssetId(fa), feeRateFor(fa));
-  }
+  b = fr ? applyFeeUnits(b, feeHex, parseFloat(fr)) : applyFee(b, feeHex);
   return b.finish(wollet);
 }
 
@@ -4841,7 +4867,7 @@ function showSent(m, { title, kv, txid, explorer = '/explorer/tx/', statusUrl = 
 // old "Ready to sign" blind-signing trap). `review` = { rows:[{addr?, atoms, hex, ref?}], feeAssetHex? }
 //   ref (optional, ⇄ mode): { typed, ccy } — the reference amount the user typed.
 // psetDetails is kept only as a best-effort fee cross-check inside its own try/catch.
-async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
+async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeSign){
   const endReview = timer('send › review sheet', { count:false });
   // Read now: signing takes the Pset by value, and its outputs cannot be read after that.
   const builtFee = psetFee(pset);
@@ -4859,6 +4885,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       if(r.ref && r.ref.typed!=null && r.ref.ccy)
         kv.push(['You entered', 'You typed '+r.ref.typed+' '+r.ref.ccy+' -> sending '+fmtAtoms(r.atoms,m.precision)+' '+m.ticker]);
     }
+    for(const line of (review.extra || [])) kv.push(line);
     if(feeAssetHex!==undefined) kv.push(['Fee paid in', (feeAssetHex && feeAssetHex!==POLICY_HEX) ? assetMeta(feeAssetHex).ticker : 'tSEQ']);
     // The fee is read off the transaction's own fee output: psetDetails throws on Sequentia's
     // explicit outputs, and a review that silently dropped the fee line asked people to sign a
@@ -4900,6 +4927,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       // and the broadcast goes through a client of its own. Only spend-tracking writes to the
       // wollet, so only that takes a turn, after this payment is already on its way; the own-tx
       // ring re-applies it after any scan that predates it.
+      if(beforeSign) await beforeSign();   // a rescue's last look: was the stuck transaction confirmed meanwhile?
       const endSign = timer('send › sign + finalize', { count:false });
       const finalized = wollet.finalize(signer.sign(pset));
       endSign();
@@ -4907,6 +4935,9 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       const txid = await broadcastClient.broadcast(finalized);
       endCast();
       noteOwnTx(finalized);
+      // The wallet's tip is as old as its last scan; the explorer's is the chain's now.
+      { const id=txid.toString(); try{ _sentAtTip.set(id, wollet.tip().height()); }catch{}
+        fetch(ESPLORA+'/blocks/tip/height').then(r=>r.text()).then(h=>{ const n=parseInt(h,10); if(n>0) _sentAtTip.set(id, Math.max(n, _sentAtTip.get(id)||0)); }).catch(()=>{}); }
       { const fee=builtFee, rows=(review && review.rows) || [];
         const to=rows.find(r=>r.addr);
         addPendingSend({ txid:txid.toString(), at:Date.now(),
@@ -4921,7 +4952,10 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       endConfirm();
       showSent(m, { title, kv, txid: txid.toString() });
       if(onDone) onDone(txid); await sync();
-    }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
+    }catch(e){
+      if(e && e.settled){ st.className='status ok'; st.textContent=e.message; return; }   // nothing signed: the rescue is no longer needed
+      st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false;
+    }
   };
 }
 
@@ -5533,7 +5567,10 @@ function renderHistory(){
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+txid, txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub', when));
     // Rescues act on the live wollet, so they are offered only once this session has synced.
-    if(live && !r.height && (type==='outgoing' || type==='incoming')){
+    let tipNow = 0; try{ tipNow = wollet.tip().height(); }catch{}
+    const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
+    if(live && !r.height && fresh) mid.appendChild(el('div','sub','Waiting for the next block. If it misses one, speed-up options appear here.'));
+    else if(live && !r.height && (type==='outgoing' || type==='incoming')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
       const mk=(label,fn)=>{ const x=el('button','ghost',label); x.style.cssText='padding:4px 10px;font-size:12px'; x.onclick=fn; return x; };
       if(type==='outgoing'){
@@ -5607,14 +5644,6 @@ async function renderBtcHistory(){
 //    producer-accepted asset (default tSEQ) — NOT confined to the pinned output's asset. For a
 //    parent stuck on too low a fee; CPFP can't rescue a wrong-fee-asset stranding (use Replace).
 // RBF is on by default (every send signals it), so any send is replaceable.
-function feeAssetSelect(){
-  const sel=el('select'); sel.style.marginTop='8px';
-  const add=(v,l)=>{ const o=el('option'); o.value=v; o.textContent=l; sel.appendChild(o); };
-  add(POLICY_HEX, 'tSEQ');                       // the protocol's default-accepted asset — always available
-  // Only priced assets: an unpriced asset has no valid fee rate (feeRateFor would throw).
-  for(const h of Object.keys(balObj())){ if(h!==POLICY_HEX && feeRateEntry(h) && feeRateEntry(h).rate>0) add(h, assetMeta(h).ticker); }
-  return sel;
-}
 // Add one recipient to a builder, mirroring buildSendPset's blinded/explicit + policy/asset handling.
 function addOneRecipient(b, addrStr, assetHex, amtStr){
   const a=new Address(addrStr);
@@ -5625,106 +5654,207 @@ function addOneRecipient(b, addrStr, assetHex, amtStr){
   if(a.isBlinded()) return assetHex===POLICY_HEX ? b.addLbtcRecipient(a, sats) : b.addRecipient(a, sats, assetId);
   return b.addExplicitRecipient(a, sats, assetId);
 }
-function bumpFeeDialog(txid){
-  const m=el('div','modal'); const c=el('div','card');
-  c.appendChild(el('label','lbl','Replace with a higher fee (RBF)'));
-  c.appendChild(el('div','sub','Re-broadcasts the same payment at a higher fee. Pay the bump in any asset; confirmation depends on the producer that mines it accepting that asset.'));
-  c.appendChild(el('label','lbl','Pay the bump fee in'));
-  const sel=feeAssetSelect(); c.appendChild(sel);
-  const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
-  const setRl=()=>{ rl.textContent='New fee rate ('+feeUnitOf(sel.value)+'/vB)'; }; setRl(); sel.onchange=setRl;
-  const rate=el('input'); rate.type='number'; rate.min='1'; rate.step='1'; rate.value=String(BUMP_FEERATE/1000); rate.style.marginTop='4px';
-  c.appendChild(rate);
-  c.appendChild(el('div','sub',"Must exceed the original's fee rate (in reference value), or the network rejects the replacement."));
-  const act=el('div','row'); act.style.marginTop='14px';
-  const ok=el('button','primary','Replace'); const no=el('button','ghost','Cancel');
+// What the rescue dialogs know about a stuck transaction: its size, the fee it pays and in which
+// asset, read from the wallet's own copy. The size comes from SWK's CPFP estimate, which is
+// target × (parent + 1100) / 1100, solved for the parent.
+function stuckTx(txid){
+  const t = wollet.transactions().find(x => x.txid().toString() === txid);
+  if(!t) throw new Error('this transaction is not in the wallet any more; refresh and try again');
+  const T = 10000;
+  let vsize = 250;
+  try{ vsize = Math.max(60, (wollet.cpfpSuggestedFeerate(new Txid(txid), T) / T - 1) * 1100); }catch{}
+  let feeHex = null, feeAtoms = 0n;
+  try{
+    const tx = t.tx();
+    for(const h of Object.keys(feeRates).filter(k => /^[0-9a-f]{64}$/.test(k)).concat([POLICY_HEX])){
+      const f = tx.fee(new AssetId(h)); if(f > 0n){ feeHex = h; feeAtoms = f; break; }
+    }
+    if(!feeHex) for(const h of Object.keys(balObj())){ const f = tx.fee(new AssetId(h)); if(f > 0n){ feeHex = h; feeAtoms = f; break; } }
+  }catch{}
+  const priced = feeHex && feeRateEntry(feeHex) && feeRateEntry(feeHex).rate > 0;
+  return { vsize, feeHex, feeAtoms, priced, feeRef: priced ? refAtomsOf(feeHex, feeAtoms) : 0 };
+}
+// Assets this wallet can pay a rescue fee in: held, above zero, and priced by the network. Most
+// valuable holding first; no asset is listed ahead of the others for what it is.
+function rescueFeeAssets(){
+  return Object.entries(balObj())
+    .filter(([h, v]) => BigInt(v || 0) > 0n && feeRateEntry(h) && feeRateEntry(h).rate > 0)
+    .map(([h, v]) => ({ hex: h, ticker: assetMeta(h).ticker, value: refAtomsOf(h, v) }))
+    .sort((a, b) => b.value - a.value);
+}
+// The fee half of every rescue dialog: the asset, the rate in that asset's own units per vByte,
+// suggested from `targetRef` (reference atoms per vByte) and re-suggested when the asset changes,
+// and a line saying what it comes to, written by `describe(hex, units)`.
+function rescueFeeSection(c, { preferHex, targetRef, describe }){
+  const choices = rescueFeeAssets();
+  if(!choices.length) throw new Error('you hold no asset a block producer accepts for fees');
+  c.appendChild(el('label','lbl','Pay the fee in'));
+  const sel = el('select'); sel.style.marginTop = '4px';
+  for(const o of choices){ const op = el('option'); op.value = o.hex; op.textContent = o.ticker; sel.appendChild(op); }
+  sel.value = choices.some(o => o.hex === preferHex) ? preferHex : choices[0].hex;
+  c.appendChild(sel);
+  const rl = el('label','lbl',''); rl.style.marginTop = '10px'; c.appendChild(rl);
+  const rate = el('input'); rate.type = 'text'; rate.inputMode = 'decimal'; rate.style.marginTop = '4px'; c.appendChild(rate);
+  const info = el('div','sub'); info.style.marginTop = '6px'; c.appendChild(info);
+  const update = () => { try{ info.textContent = describe(sel.value, parseFloat(rate.value)) || ''; }catch(e){ info.textContent = prettyErr(e); } };
+  const suggest = () => {
+    rl.textContent = 'Fee rate ('+assetMeta(sel.value).ticker+' per vByte)';
+    rate.value = fmtUnits(refRateToUnits(sel.value, targetRef(sel.value)));
+    update();
+  };
+  sel.onchange = suggest; rate.oninput = update;
+  suggest();
+  return { get hex(){ return sel.value; }, get units(){ return parseFloat(rate.value); } };
+}
+function feeLine(hex, atoms){
+  const a = BigInt(Math.ceil(Number(atoms))), m = assetMeta(hex), rv = refValueStr(hex, a);
+  return fmtAtoms(a, m.precision)+' '+m.ticker+(rv ? ' ('+rv+')' : '');
+}
+// The last look before signing a rescue: a transaction a block took meanwhile needs no rescue, and a
+// replacement or child of a confirmed transaction would only be refused.
+async function stillUnconfirmed(txid){
+  try{
+    const r = await fetch(ESPLORA+'/tx/'+txid+'/status');
+    if(r.ok){ const st = await r.json();
+      if(st && st.confirmed){ const e = new Error('No need: it was confirmed in block '+st.block_height+' meanwhile.'); e.settled = true; throw e; } }
+  }catch(e){ if(e && e.settled) throw e; }
+}
+const RESCUE_TARGET_REF = BUMP_FEERATE/1000;   // reference atoms per vByte a rescue aims the pair (or the replacement) at
+function minRef(){ return DEFAULT_FEERATE/1000; }
+// A reference rate as a multiple of the network's minimum, the one comparison that reads the same
+// in every asset: "0.00000000101 OILX per vByte" says nothing, "5× the minimum" does.
+function timesMin(refPerVb){ const x = refPerVb / minRef(); return (x >= 10 ? Math.round(x) : Math.round(x*10)/10)+'× the network minimum'; }
+function stuckLine(stuck, noun){
+  let t = noun+' pays '+feeLine(stuck.feeHex, stuck.feeAtoms)+' for about '+Math.round(stuck.vsize)+' vB';
+  if(!stuck.priced) return t+', in an asset no producer prices: a fee in that asset buys nothing.';
+  const r = stuck.feeRef / stuck.vsize;
+  t += ', '+timesMin(r)+'.';
+  if(r >= 0.9 * minRef()) t += ' At that rate it is normally in the next block; a faster fee helps only when blocks are full.';
+  return t;
+}
+function bumpFeeDialog(txid){ return rbfDialog(txid, false); }
+function replaceDialog(txid){ return rbfDialog(txid, true); }
+// Replace with a higher fee (RBF). One dialog for both: a bump keeps the payment as it is, a replace
+// takes new recipient, amount and asset. Either way the new transaction must pay more than the one
+// it replaces, and the dialog says what both pay.
+function rbfDialog(txid, replace){
+  let stuck; try{ stuck = stuckTx(txid); }catch(e){ toast(prettyErr(e)); return; }
+  const m = el('div','modal'), c = el('div','card');
+  c.appendChild(el('label','lbl', replace ? 'Replace transaction (RBF)' : 'Replace with a higher fee (RBF)'));
+  c.appendChild(el('div','sub', replace
+    ? 'Keeps this transaction’s inputs but sends new outputs, replacing it before it confirms. The new fee must be higher than the one it replaces.'
+    : 'Sends the same payment again at a higher fee. The fee can be paid in any asset you hold that producers accept.'));
+  if(stuck.feeHex) c.appendChild(el('div','sub', stuckLine(stuck, 'It')));
+  let addr, amt, asset;
+  if(replace){
+    c.appendChild(el('label','lbl','Send to'));
+    addr = el('input'); addr.type = 'text'; addr.placeholder = 'Sequentia address (tb1… or tsqb1…)'; addr.style.marginTop = '4px'; c.appendChild(addr);
+    c.appendChild(el('label','lbl','Amount'));
+    const arow = el('div','row'); arow.style.cssText = 'gap:8px;margin-top:4px';
+    amt = el('input'); amt.type = 'text'; amt.placeholder = '0.0'; amt.style.flex = '1';
+    asset = el('select');
+    for(const [h, v] of Object.entries(balObj())){ if(BigInt(v || 0) > 0n){ const o = el('option'); o.value = h; o.textContent = assetMeta(h).ticker; asset.appendChild(o); } }
+    arow.appendChild(amt); arow.appendChild(asset); c.appendChild(arow);
+    const updRH = attachRefHint(amt, () => asset.value); asset.addEventListener('change', updRH);
+  }
+  let fee;
+  try{
+    fee = rescueFeeSection(c, {
+      preferHex: stuck.priced ? stuck.feeHex : null,
+      // above both the target and a quarter more than what the stuck one pays per vB
+      targetRef: () => Math.max(RESCUE_TARGET_REF, stuck.feeRef / stuck.vsize * 1.25 + minRef()),
+      describe: (hex, units) => {
+        if(!(units > 0)) return 'Enter a rate above zero.';
+        const atoms = units * Math.pow(10, assetMeta(hex).precision ?? 8) * stuck.vsize;
+        const newRef = refAtomsOf(hex, atoms);
+        const verdict = newRef <= stuck.feeRef ? ' That is not more than the transaction it replaces pays, so the network would refuse it.' : '';
+        return 'The replacement pays about '+feeLine(hex, atoms)+', '+timesMin(newRef / stuck.vsize)+'.'+verdict;
+      },
+    });
+  }catch(e){ toast(prettyErr(e)); return; }
+  const act = el('div','row'); act.style.marginTop = '14px';
+  const ok = el('button','primary','Review'), no = el('button','ghost','Cancel');
   act.appendChild(ok); act.appendChild(no); c.appendChild(act);
   m.appendChild(c); document.body.appendChild(m);
-  no.onclick=()=>m.remove();
-  ok.onclick=()=>{ m.remove(); doBump(txid, sel.value, parseFloat(rate.value)); };
+  no.onclick = () => m.remove();
+  ok.onclick = () => {
+    const args = { hex: fee.hex, units: fee.units };
+    const target = replace ? { addr: addr.value.trim(), assetHex: asset.value, amtStr: assetAmountOf(amt, asset.value) } : null;
+    m.remove(); doRbf(txid, args, target);
+  };
 }
-async function doBump(txid, feeAssetHex, feeRateVb){
+async function doRbf(txid, fee, target){
   try{
     await afterRecordedSpends();
-    const kvb = Math.max(1, feeRateVb || (BUMP_FEERATE/1000)) * 1000;   // sat/vB → sat/kvB; user can raise it above the original
-    let b = wollet.bumpFeeOf(new Txid(txid)).feeRate(kvb);
-    if(feeAssetHex && feeAssetHex!==POLICY_HEX){
-      b = b.feeAsset(new AssetId(feeAssetHex), feeRateFor(feeAssetHex));
+    await stillUnconfirmed(txid);
+    if(target){
+      if(!target.addr) throw new Error('enter a recipient address');
+      const b = applyFeeUnits(addOneRecipient(wollet.replaceTxOf(new Txid(txid)), target.addr, target.assetHex, target.amtStr), fee.hex, fee.units);
+      const atoms = parseAtoms(target.amtStr, sendPrecision(target.assetHex));
+      await reviewBroadcast(b.finish(wollet), 'Replacement payment', null, fee.hex,
+        { rows:[{ addr:target.addr, atoms, hex:target.assetHex }], feeAssetHex:fee.hex, extra:[['Replaces', txid.slice(0,12)+'…'+txid.slice(-6)]] }, () => stillUnconfirmed(txid));
+    } else {
+      const b = applyFeeUnits(wollet.bumpFeeOf(new Txid(txid)), fee.hex, fee.units);
+      await reviewBroadcast(b.finish(wollet), 'Fee-bump (RBF replacement)', null, fee.hex,
+        { rows:[], feeAssetHex:fee.hex, extra:[['Replaces', txid.slice(0,12)+'…'+txid.slice(-6)+', same payment']] }, () => stillUnconfirmed(txid));
     }
-    await reviewBroadcast(b.finish(wollet), 'Fee-bump (RBF replacement)', null, feeAssetHex);
-  }catch(e){ toast('Fee-bump failed: '+(e?.message??e)); }
+  }catch(e){ toast(e && e.settled ? e.message : (target ? 'Replace' : 'Fee-bump')+' failed: '+prettyErr(e)); }
 }
-// CPFP: pick the asset to pay the child fee in (default tSEQ, which producers always mine) and a
-// fee rate; the suggested rate is sized from the parent's vsize so the {parent, child} package
-// clears the target as a whole.
+// CPFP: a child spends an output of the stuck transaction and pays enough for the PAIR to clear,
+// since a producer weighs the two together. The child pays more for its parent; it cannot change
+// the asset the parent paid in, so a parent stuck on an asset no producer prices is replaced, not
+// accelerated.
 function cpfpDialog(txid){
-  const m=el('div','modal'); const c=el('div','card');
-  c.appendChild(el('label','lbl','Speed up (child-pays-for-parent)'));
-  c.appendChild(el('div','sub','Attaches a child transaction whose high fee lifts this one into a block. Works when the parent is just under-priced, not when its fee asset is one producers reject (use Replace for that).'));
-  c.appendChild(el('label','lbl','Pay the child fee in'));
-  const sel=feeAssetSelect(); c.appendChild(sel);
-  const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
-  const setRl=()=>{ rl.textContent='Child fee rate ('+feeUnitOf(sel.value)+'/vB)'; }; setRl(); sel.onchange=setRl;
-  let sug = BUMP_FEERATE/1000;
-  try{ sug = Math.max(1, Math.ceil(wollet.cpfpSuggestedFeerate(new Txid(txid), BUMP_FEERATE)/1000)); }catch(e){}
-  const rate=el('input'); rate.type='number'; rate.min='1'; rate.step='1'; rate.value=String(sug); rate.style.marginTop='4px';
-  c.appendChild(rate);
-  c.appendChild(el('div','sub','Suggested rate already accounts for the parent’s size, so the package clears as a whole.'));
-  const act=el('div','row'); act.style.marginTop='14px';
-  const ok=el('button','primary','Speed up'); const no=el('button','ghost','Cancel');
+  let stuck; try{ stuck = stuckTx(txid); }catch(e){ toast(prettyErr(e)); return; }
+  // The child's size, from a draft of the child itself in the asset that will pay: SWK's estimate
+  // assumes a confidential child and made an explicit one overpay several times over, and a fee in
+  // another asset than the spent output's adds an input and a change output.
+  const childSizes = {};
+  const childV = (hex) => {
+    if(childSizes[hex]) return childSizes[hex];
+    let v = 300;
+    try{
+      const draft = applyFeeUnits(wollet.cpfpOf(new Txid(txid)), hex, refRateToUnits(hex, minRef())).finish(wollet);
+      v = draft.extractTx().bytes().length + 27 * Math.max(1, draft.inputs().length);   // + a P2WPKH witness per input
+    }catch{}
+    return (childSizes[hex] = v);
+  };
+  const m = el('div','modal'), c = el('div','card');
+  c.appendChild(el('label','lbl','Speed up (child pays for parent)'));
+  c.appendChild(el('div','sub','Sends a small transaction to yourself that spends this one and pays a higher fee, so a producer takes both together.'));
+  if(stuck.feeHex) c.appendChild(el('div','sub', stuckLine(stuck, 'The stuck transaction')));
+  if(stuck.feeHex && !stuck.priced){
+    c.appendChild(el('div','err','It pays its fee in an asset no producer prices, so no child can make it worth mining. Use Replace and pay the fee in another asset.'));
+  }
+  let fee;
+  try{
+    fee = rescueFeeSection(c, {
+      preferHex: stuck.priced ? stuck.feeHex : null,
+      // the child rate that brings the pair to the target, never under the network minimum
+      targetRef: (hex) => Math.max(minRef(), (RESCUE_TARGET_REF * (stuck.vsize + childV(hex)) - stuck.feeRef) / childV(hex)),
+      describe: (hex, units) => {
+        if(!(units > 0)) return 'Enter a rate above zero.';
+        const atoms = units * Math.pow(10, assetMeta(hex).precision ?? 8) * childV(hex);
+        const pairRef = (stuck.feeRef + refAtomsOf(hex, atoms)) / (stuck.vsize + childV(hex));
+        return 'This speed-up pays about '+feeLine(hex, atoms)+'. With it, the two together pay '+timesMin(pairRef)+'.';
+      },
+    });
+  }catch(e){ toast(prettyErr(e)); return; }
+  const act = el('div','row'); act.style.marginTop = '14px';
+  const ok = el('button','primary','Review'), no = el('button','ghost','Cancel');
   act.appendChild(ok); act.appendChild(no); c.appendChild(act);
   m.appendChild(c); document.body.appendChild(m);
-  no.onclick=()=>m.remove();
-  ok.onclick=()=>{ m.remove(); doCpfp(txid, sel.value, parseFloat(rate.value)); };
+  no.onclick = () => m.remove();
+  ok.onclick = () => { const f = { hex: fee.hex, units: fee.units }; m.remove(); doCpfp(txid, f); };
 }
-async function doCpfp(parentTxid, feeAssetHex, feeRateVb){
+async function doCpfp(parentTxid, fee){
   try{
     await afterRecordedSpends();
-    const kvb = Math.max(1, feeRateVb || (BUMP_FEERATE/1000)) * 1000;   // sat/vB → sat/kvB
-    let b = wollet.cpfpOf(new Txid(parentTxid)).feeRate(kvb);
-    if(feeAssetHex && feeAssetHex!==POLICY_HEX){
-      b = b.feeAsset(new AssetId(feeAssetHex), feeRateFor(feeAssetHex));
-    }
-    await reviewBroadcast(b.finish(wollet), 'Speed up (child-pays-for-parent)', null, feeAssetHex);
-  }catch(e){ toast('Speed up failed: '+prettyErr(e)); }
-}
-// Replace: same inputs, brand-new outputs. Correct a still-unconfirmed payment.
-function replaceDialog(txid){
-  const m=el('div','modal'); const c=el('div','card');
-  c.appendChild(el('label','lbl','Replace transaction (RBF)'));
-  c.appendChild(el('div','sub','Keeps this transaction’s inputs but sends entirely new outputs, replacing the original before it confirms. The new fee must still exceed the original’s.'));
-  c.appendChild(el('label','lbl','Send to'));
-  const addr=el('input'); addr.type='text'; addr.placeholder='Sequentia address (tb1… or tsqb1…)'; addr.style.marginTop='4px'; c.appendChild(addr);
-  c.appendChild(el('label','lbl','Amount'));
-  const arow=el('div','row'); arow.style.cssText='gap:8px;margin-top:4px';
-  const amt=el('input'); amt.type='text'; amt.placeholder='0.0'; amt.style.flex='1';
-  const asset=el('select'); const addA=(v,l)=>{ const o=el('option'); o.value=v; o.textContent=l; asset.appendChild(o); };
-  addA(POLICY_HEX,'tSEQ'); for(const h of Object.keys(balObj())){ if(h!==POLICY_HEX) addA(h, assetMeta(h).ticker); }
-  arow.appendChild(amt); arow.appendChild(asset); c.appendChild(arow);
-  const updRH=attachRefHint(amt, ()=>asset.value); asset.addEventListener('change', updRH);   // ≈ ref under the amount
-  c.appendChild(el('label','lbl','Pay the fee in')); const fsel=feeAssetSelect(); c.appendChild(fsel);
-  const rl=el('label','lbl',''); rl.style.marginTop='10px'; c.appendChild(rl);
-  const setRl=()=>{ rl.textContent='Fee rate ('+feeUnitOf(fsel.value)+'/vB)'; }; setRl(); fsel.onchange=setRl;
-  const rate=el('input'); rate.type='number'; rate.min='1'; rate.step='1'; rate.value=String(BUMP_FEERATE/1000); rate.style.marginTop='4px'; c.appendChild(rate);
-  const act=el('div','row'); act.style.marginTop='14px';
-  const ok=el('button','primary','Replace'); const no=el('button','ghost','Cancel');
-  act.appendChild(ok); act.appendChild(no); c.appendChild(act);
-  m.appendChild(c); document.body.appendChild(m);
-  no.onclick=()=>m.remove();
-  ok.onclick=()=>{ m.remove(); doReplace(txid, addr.value.trim(), asset.value, assetAmountOf(amt, asset.value), fsel.value, parseFloat(rate.value)); };
-}
-async function doReplace(txid, addr, assetHex, amtStr, feeAssetHex, feeRateVb){
-  try{
-    await afterRecordedSpends();
-    if(!addr) throw new Error('enter a recipient address');
-    const kvb = Math.max(1, feeRateVb || (BUMP_FEERATE/1000)) * 1000;
-    let b = addOneRecipient(wollet.replaceTxOf(new Txid(txid)), addr, assetHex, amtStr).feeRate(kvb);
-    if(feeAssetHex && feeAssetHex!==POLICY_HEX){
-      b = b.feeAsset(new AssetId(feeAssetHex), feeRateFor(feeAssetHex));
-    }
-    const atoms=parseAtoms(amtStr, sendPrecision(assetHex));
-    await reviewBroadcast(b.finish(wollet), 'Confirm Sequentia payment', null, feeAssetHex, {rows:[{addr, atoms, hex:assetHex}], feeAssetHex});
-  }catch(e){ toast('Replace failed: '+prettyErr(e)); }
+    await stillUnconfirmed(parentTxid);
+    const b = applyFeeUnits(wollet.cpfpOf(new Txid(parentTxid)), fee.hex, fee.units);
+    await reviewBroadcast(b.finish(wollet), 'Speed up (child pays for parent)', null, fee.hex,
+      { rows:[], feeAssetHex:fee.hex, extra:[['Speeds up', parentTxid.slice(0,12)+'…'+parentTxid.slice(-6)]] }, () => stillUnconfirmed(parentTxid));
+  }catch(e){ toast(e && e.settled ? e.message : 'Speed up failed: '+prettyErr(e)); }
 }
 
 // ---------- stake ----------
