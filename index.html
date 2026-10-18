@@ -1002,13 +1002,17 @@
     <!-- history -->
     <section data-panel="history" class="hide">
       <div class="card">
-        <label class="lbl">Sequentia history</label>
-        <div class="list" id="histList"><div class="muted">No transactions yet.</div></div>
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:2px">
+          <label class="lbl" style="margin:0">Sequentia history</label>
+          <button id="btnHistSync">Refresh</button>
+        </div>
+        <div class="status" id="histStatus"></div>
+        <div class="list" id="histList"><div class="muted">Syncing your history…</div></div>
       </div>
       <div class="card">
         <label class="lbl">Bitcoin (testnet4) history</label>
         <p class="sub" style="margin:0 0 6px">Parent-chain BTC on the shared tb1 address. Links open the testnet4 explorer.</p>
-        <div class="list" id="btcHistList"><div class="muted">No Bitcoin transactions yet.</div></div>
+        <div class="list" id="btcHistList"><div class="muted">Loading…</div></div>
       </div>
       <div class="card">
         <label class="lbl">Restricted transfers (OpenAMP)</label>
@@ -2695,6 +2699,7 @@ async function refreshScanCacheBase(){
 async function openWallet(phrase){
   const endOpen = timer('open wallet');
   buildWollet(phrase);
+  loadSnapshot();
   localStorage.setItem(KEY, phrase.trim().replace(/\s+/g,' '));
   // Restore the last scan BEFORE first render, so the balance + UTXOs are live immediately
   // (the wallet is usable while sync() below just refreshes). Best-effort; falls back to a full scan.
@@ -3929,6 +3934,86 @@ function initSwapTab(){
 function renderActiveSwap(){ renderSwap(); }
 
 // ---------- sync + balance ----------
+// ---------- what the wallet knew, and when ----------
+// The last completed sync, kept per wallet (keyed by its descriptor, so a different wallet opened
+// in this browser never shows these figures): balances on both chains, the Sequentia history rows
+// and the time. Until this session's first sync completes, Balance and History show it with its
+// age; a sync that fails leaves it on screen with the time it is from. A dated figure reads as
+// "not updated yet", an empty list as money gone. Display only: nothing is built, selected or
+// signed from it.
+let _snap = null;
+let _lastSyncOk = 0;   // when this session last completed a sync
+function snapKey(){ return 'swk.snapshot:'+wolletKey(); }
+function loadSnapshot(){
+  try{ _snap = JSON.parse(localStorage.getItem(snapKey())||'null'); }catch{ _snap = null; }
+  if(!_snap){   // the balances-only cache this replaces, so a wallet opened after the upgrade still opens on figures
+    try{ const c=JSON.parse(localStorage.getItem('swk.balCache')||'null'); if(c) _snap={ at:0, seq:c.seq||{}, btc:String(c.btc||'0'), hist:null }; }catch{}
+  }
+  return _snap;
+}
+function saveSnapshot(){
+  try{
+    _snap = { at: Date.now(), tip: wollet.tip().height(), seq: balObj(), btc: (btcBalance||0n).toString(), hist: historyRows() };
+    localStorage.setItem(snapKey(), JSON.stringify(_snap));
+    localStorage.removeItem('swk.balCache');   // not keyed by wallet: it showed one wallet's balance on another's first paint
+  }catch(e){ console.warn('[snapshot] not saved:', e?.message??e); }
+}
+function agoText(ms){
+  const m=Math.round(ms/60000); if(m<1) return 'just now'; if(m<60) return m+' min ago';
+  const h=Math.round(m/60); return h<48 ? h+' h ago' : Math.round(h/24)+' days ago';
+}
+function whenText(at){
+  const d=new Date(at), today=new Date().toDateString()===d.toDateString();
+  return (today ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+                : d.toLocaleString([], {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}))+' ('+agoText(Date.now()-at)+')';
+}
+// The status line of Balance and History, kept identical on both: whether the figures are live,
+// being read, or the last ones known and from when.
+function setSyncStatus(state, err){
+  let cls='status', html='';
+  const snapAt = !_scannedOnce && _snap && _snap.at ? _snap.at : 0;
+  if(state==='syncing'){
+    html='<span class="spin"></span>'+(snapAt ? 'Syncing… showing your wallet as of '+esc(whenText(snapAt))+'.' : 'Syncing…');
+  } else if(state==='ok'){ cls='status ok'; html='Up to date.'; }
+  else {
+    cls='status err';
+    const since = _lastSyncOk || snapAt;
+    html='Sync failed: '+esc(err)+(since ? '. Showing your wallet as of '+esc(whenText(since))+'.' : '');
+  }
+  for(const id of ['syncStatus','histStatus']){ const n=$(id); if(n){ n.className=cls; n.innerHTML=html; } }
+}
+// Sends this wallet has broadcast that the wollet has not recorded yet: the record takes its turn
+// in the wallet queue, which a running scan can hold for seconds. Until it lands they are shown at
+// the top of History as outgoing and taken off the balances they came from.
+let _pendingSends = [];   // [{txid, at, title, out:[{hex, atoms}], fee:{hex, atoms}|null}]
+function livePending(){
+  if(!_pendingSends.length) return _pendingSends;
+  let known; try{ known=new Set(wollet.transactions().map(t=>t.txid().toString())); }catch{ known=new Set(); }
+  _pendingSends=_pendingSends.filter(p=>!known.has(p.txid) && Date.now()-p.at < 60*60_000);
+  return _pendingSends;
+}
+function addPendingSend(p){ _pendingSends.push(p); try{ renderHistory(); renderBalance(); }catch{} }
+// Whether an address is one of this wallet's receive addresses, issued or within the gap after them.
+function isOwnAddress(addrStr){
+  try{
+    const unconf=(a)=>(a.toUnconfidential ? a.toUnconfidential() : a).toString();
+    const want=unconf(new Address(addrStr));
+    let next=0; try{ next=wollet.address(undefined).index(); }catch{}
+    const top=Math.max(next, addrIndex ?? 0)+20;
+    for(let i=0;i<=top;i++) if(unconf(wollet.address(i).address())===want) return true;
+  }catch{}
+  return false;
+}
+// The fee a built transaction pays: its explicit fee output (the one with an empty script).
+function psetFee(pset){
+  try{
+    for(const o of pset.outputs()){
+      const spk=o.scriptPubkey(); const script = spk ? String(spk.toString()) : '';
+      if(script==='' && o.asset() && o.amount()!=null) return { hex:o.asset().toString(), atoms:BigInt(o.amount()) };
+    }
+  }catch{}
+  return null;
+}
 let _syncInFlight = null;
 let _scannedOnce = false;   // false until the first live scan completes; gates the cached-balance snapshot
 // Coalesce concurrent sync() calls. The covenant relay replays every resting order on
@@ -3941,8 +4026,8 @@ function sync(){
   return _syncInFlight;
 }
 async function _syncImpl(){
-  const btn=$('btnSync'); if(btn) btn.disabled=true;
-  $('syncStatus').className='status'; $('syncStatus').innerHTML='<span class="spin"></span>Syncing…';
+  const btns=[$('btnSync'), $('btnHistSync')].filter(Boolean); for(const x of btns) x.disabled=true;
+  setSyncStatus('syncing');
   const endSync = timer('sync');
   const part = (name, p) => { const end = timer('sync › '+name, { count:false }); return Promise.resolve(p).finally(() => end()); };
   try{
@@ -3972,9 +4057,10 @@ async function _syncImpl(){
     renderBalance(); renderHistory(); renderReceive(); refreshStakes(); populateFeeAssets(); refreshRecipientAssets();
     const t = wollet.tip();
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
-    $('syncStatus').className='status ok'; $('syncStatus').textContent='Up to date.';
-  }catch(e){ $('syncStatus').className='status err'; $('syncStatus').textContent='Sync failed: '+(e?.message??e); }
-  finally{ if(btn) btn.disabled=false; endSync(); }
+    _lastSyncOk = Date.now(); saveSnapshot();
+    setSyncStatus('ok');
+  }catch(e){ setSyncStatus('err', e?.message??String(e)); }
+  finally{ for(const x of btns) x.disabled=false; endSync(); }
 }
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
@@ -3987,13 +4073,18 @@ function renderBalance(){
   try{ populateFeeAssets(); populateIssueFeeAssets(); }catch{}   // keep the fee pickers in sync as balances load
   let live = {}; try{ live = balObj(); }catch{}   // wollet.balance() can throw before the first scan
   let b = live, btcBal = btcBalance;
-  // Whole-wallet caching, gated STRICTLY on _scannedOnce (an unscanned wollet can report an empty or
-  // all-zero balance map — never treat that as authoritative). Before the first scan, ALWAYS show the
-  // cached snapshot; only after a real scan do we cache the live balances and render them.
-  if(_scannedOnce){
-    try{ localStorage.setItem('swk.balCache', JSON.stringify({seq:live, btc:(btcBalance||0n).toString()})); }catch{}
-  } else {
-    try{ const c=JSON.parse(localStorage.getItem('swk.balCache')||'null'); if(c){ if(c.seq) b=c.seq; if(c.btc!=null) btcBal=BigInt(c.btc); } }catch{}
+  // Before this session's first sync an unscanned wollet can report an empty or all-zero balance
+  // map: never treat that as authoritative. Show the snapshot of the last completed sync instead,
+  // dated on the status line (saveSnapshot keeps it, after every sync that completes).
+  if(!_scannedOnce && _snap){ if(_snap.seq) b=_snap.seq; if(_snap.btc!=null) btcBal=BigInt(_snap.btc); }
+  // A send already broadcast but not yet recorded by the wollet comes off the balance it was paid
+  // from now, not when a running scan lets the record through.
+  const pend=livePending();
+  if(pend.length){
+    b={...b};
+    for(const pd of pend) for(const o of [...pd.out, ...(pd.fee?[pd.fee]:[])]){
+      const left=BigInt(b[o.hex]||0)-BigInt(o.atoms); b[o.hex]=(left>0n?left:0n).toString();
+    }
   }
   const list=$('assetList'); list.innerHTML='';
   // Equal-standing + dual-chain: a headline portfolio total across BTC (parent chain) and
@@ -4670,6 +4761,8 @@ function modalRows(rows){
 // psetDetails is kept only as a best-effort fee cross-check inside its own try/catch.
 async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
   const endReview = timer('send › review sheet', { count:false });
+  // Read now: signing takes the Pset by value, and its outputs cannot be read after that.
+  const builtFee = psetFee(pset);
   const kv=[];
   // First line: this is a Sequentia (testnet) payment, NOT a parent-chain BTC one.
   kv.push(['Network', 'Sequentia (testnet); not parent-chain BTC']);
@@ -4685,13 +4778,12 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
         kv.push(['You entered', 'You typed '+r.ref.typed+' '+r.ref.ccy+' -> sending '+fmtAtoms(r.atoms,m.precision)+' '+m.ticker]);
     }
     if(feeAssetHex!==undefined) kv.push(['Fee paid in', (feeAssetHex && feeAssetHex!==POLICY_HEX) ? assetMeta(feeAssetHex).ticker : 'tSEQ']);
-    // Best-effort fee cross-check only — never the source of truth, never blocks the review.
-    try{ const fee=wollet.psetDetails(pset).balance().fee(); if(fee!=null){
-      const fa=(feeAssetHex && feeAssetHex!==POLICY_HEX)?feeAssetHex:POLICY_HEX;
-      const tk=(fa===POLICY_HEX)?'tSEQ':assetMeta(fa).ticker, dec=(fa===POLICY_HEX)?8:assetMeta(fa).precision;
-      const rv=refValueStr(fa, fee);
-      kv.push(['Network fee (est.)', fmtAtoms(fee,dec)+' '+tk+(rv?('  ('+rv+')'):'')]);
-    } }catch{}
+    // The fee is read off the transaction's own fee output: psetDetails throws on Sequentia's
+    // explicit outputs, and a review that silently dropped the fee line asked people to sign a
+    // payment without saying what it cost.
+    const fee=builtFee;
+    if(fee){ const fm=assetMeta(fee.hex), rv=refValueStr(fee.hex, fee.atoms);
+      kv.push(['Network fee', fmtAtoms(fee.atoms, fm.precision)+' '+fm.ticker+(rv?('  ('+rv+')'):'')]); }
   } else {
     // No structured rows supplied (issuance, etc.): keep the psetDetails best-effort, then a clear note.
     try{
@@ -4706,7 +4798,10 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
         const tk=(fa===POLICY_HEX)?'tSEQ':assetMeta(fa).ticker, dec=(fa===POLICY_HEX)?8:assetMeta(fa).precision;
         kv.push(['Network fee', fmtAtoms(bal.fee(), dec)+' '+tk]); }
     }catch{
-      kv.push(['Note', 'Non-confidential transfer; amounts are as entered, and a network fee applies.']);
+      kv.push(['Note', 'Non-confidential transfer; amounts are as entered.']);
+      if(builtFee){ const fm=assetMeta(builtFee.hex), rv=refValueStr(builtFee.hex, builtFee.atoms);
+        kv.push(['Network fee', fmtAtoms(builtFee.atoms, fm.precision)+' '+fm.ticker+(rv?('  ('+rv+')'):'')]); }
+      else kv.push(['Network fee', 'applies; the wallet could not read it from this transaction']);
     }
     if(feeAssetHex && feeAssetHex!==POLICY_HEX) kv.push(['Fee paid in', assetMeta(feeAssetHex).ticker]);
   }
@@ -4730,9 +4825,17 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
       const txid = await broadcastClient.broadcast(finalized);
       endCast();
       noteOwnTx(finalized);
+      { const fee=builtFee, rows=(review && review.rows) || [];
+        const to=rows.find(r=>r.addr);
+        addPendingSend({ txid:txid.toString(), at:Date.now(),
+          title: to ? 'to '+to.addr.slice(0,10)+'…'+to.addr.slice(-4)+(rows.length>1 ? ' and '+(rows.length-1)+' more' : '') : title,
+          // a payment to one of this wallet's own addresses comes back: only its fee leaves the balance
+          out: rows.filter(r=>!(r.addr && isOwnAddress(r.addr))).map(r=>({ hex:r.hex, atoms:String(r.atoms) })),
+          fee: fee ? { hex:fee.hex, atoms:String(fee.atoms) } : null }); }
       _spendsPending++;
       _spendsRecorded = Promise.all([_spendsRecorded,
-        queued('send › record the spend', () => { try { wollet.applyTransaction(finalized); } catch {} }).finally(() => { _spendsPending--; })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
+        queued('send › record the spend', () => { try { wollet.applyTransaction(finalized); } catch {} })
+          .finally(() => { _spendsPending--; try{ renderBalance(); renderHistory(); }catch{} })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
       endConfirm();
       m.remove(); toast('Broadcast:', {href:'/explorer/tx/'+txid.toString(), label:txid.toString().slice(0,18)+'…'});
       if(onDone) onDone(txid); await sync();
@@ -5197,6 +5300,7 @@ async function requestFaucet(asset){
 }
 document.querySelectorAll('#faucetBtns button').forEach(b=>{ b.onclick=()=>requestFaucet(b.dataset.faucet); });
 $('btnAddRec').onclick=addRecipientRow;
+$('btnHistSync').onclick=()=>sync();
 $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
   // Say at once that the click landed: the build below is synchronous wasm and can hold the page.
   const btn=$('btnReview'), label=btn.textContent;
@@ -5291,16 +5395,13 @@ $('btnReveal').onclick=()=>{ $('seedReveal').textContent=localStorage.getItem(KE
 $('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make sure you have your recovery phrase.')){ localStorage.removeItem(KEY); location.reload(); } };
 
 // ---------- history ----------
-function renderHistory(){
-  renderBtcHistory().catch(()=>{});   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
-  renderOampHistory(); refreshOampHistory().catch(()=>{});   // WW-6: restricted-transfer history + confirmation/anchor chips
-  const list=$('histList'); if(!wollet){ return; } list.innerHTML='';
-  let txs; try{ txs=wollet.transactions(); }catch(e){ list.appendChild(el('div','err','History error: '+(e?.message??e))); return; }
-  if(!txs.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+// The Sequentia history as rows of plain data: what renderHistory draws and what the snapshot keeps.
+function historyRows(){
+  const txs=wollet.transactions();
   txs.sort((a,b)=>(b.height()??9e9)-(a.height()??9e9));
-  for(const t of txs.slice(0,60)){
+  return txs.slice(0,60).map(t=>{
     const txid=t.txid().toString();
-    const delta=t.balance().toJSON(); const ts=t.timestamp();
+    const delta=t.balance().toJSON();
     // lwk returns "unknown" when the policy asset nets to 0 (e.g. an asset send that pays its
     // fee in that asset and passes tSEQ through), so classify from the NON-ZERO deltas.
     const nz=Object.entries(delta).filter(([,v])=>BigInt(v)!==0n);
@@ -5308,14 +5409,49 @@ function renderHistory(){
     if(type==='unknown' && nz.length){
       type = nz.every(([,v])=>BigInt(v)<0n) ? 'outgoing' : nz.every(([,v])=>BigInt(v)>0n) ? 'incoming' : 'unknown';
     }
+    // Show the most significant NON-ZERO asset delta (not a passed-through 0 tSEQ).
+    const absBig=(x)=>x<0n?-x:x;
+    const amt = nz.reduce((best,e)=> best && absBig(BigInt(best[1]))>=absBig(BigInt(e[1])) ? best : e, null) || [POLICY_HEX, delta[POLICY_HEX]??'0'];
+    return { txid, height:t.height()||0, ts:t.timestamp()||0, type, hex:amt[0], atoms:String(amt[1]) };
+  });
+}
+function renderHistory(){
+  renderBtcHistory().catch(()=>{});   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
+  renderOampHistory(); refreshOampHistory().catch(()=>{});   // WW-6: restricted-transfer history + confirmation/anchor chips
+  const list=$('histList'); if(!wollet){ return; }
+  // Before this session's first sync the wollet may hold nothing yet, and "No transactions yet"
+  // would be a claim about the chain that nobody has checked: show the last snapshot (dated, on
+  // the status line above), or say the history is being read.
+  let rows, live=_scannedOnce;
+  if(live){ try{ rows=historyRows(); }catch(e){ list.innerHTML=''; list.appendChild(el('div','err','History error: '+(e?.message??e))); return; } }
+  else if(_snap && Array.isArray(_snap.hist)) rows=_snap.hist;
+  else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your history…')); return; }
+  list.innerHTML='';
+  const pending=livePending();
+  if(!rows.length && !pending.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  // Sends this wallet has broadcast and the wollet has not recorded yet, newest first, on top.
+  for(const p of pending.slice().reverse()){
+    const item=el('div','item');
+    item.appendChild(el('span','badge b-out','outgoing'));
+    const mid=el('div','grow');
+    { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+p.txid, p.txid.slice(0,20)+'…')); mid.appendChild(_d); }
+    mid.appendChild(el('div','sub', 'sending · '+p.title));
+    item.appendChild(mid);
+    const o=p.out[0] || p.fee;
+    if(o){ const am=assetMeta(o.hex); item.appendChild(el('span','amt neg', '-'+fmtAtoms(o.atoms,am.precision)+' '+am.ticker)); }
+    list.appendChild(item);
+  }
+  for(const r of rows){
+    const txid=r.txid, type=r.type;
     const item=el('div','item');
     const bcls = type==='incoming'?'b-in':(type==='outgoing'||type==='burn')?'b-out':'b-iss';
     item.appendChild(el('span','badge '+bcls, type));
     const mid=el('div','grow');
-    const when = t.height()? (ts? new Date(ts*1000).toLocaleString() : 'block '+t.height()) : 'unconfirmed';
+    const when = r.height ? (r.ts ? new Date(r.ts*1000).toLocaleString() : 'block '+r.height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+txid, txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub', when));
-    if(!t.height() && (type==='outgoing' || type==='incoming')){
+    // Rescues act on the live wollet, so they are offered only once this session has synced.
+    if(live && !r.height && (type==='outgoing' || type==='incoming')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
       const mk=(label,fn)=>{ const x=el('button','ghost',label); x.style.cssText='padding:4px 10px;font-size:12px'; x.onclick=fn; return x; };
       if(type==='outgoing'){
@@ -5326,11 +5462,8 @@ function renderHistory(){
       mid.appendChild(acts);
     }
     item.appendChild(mid);
-    // Show the most significant NON-ZERO asset delta (not a passed-through 0 tSEQ).
-    const absBig=(x)=>x<0n?-x:x;
-    const amt = nz.reduce((best,e)=> best && absBig(BigInt(best[1]))>=absBig(BigInt(e[1])) ? best : e, null) || [POLICY_HEX, delta[POLICY_HEX]??'0'];
-    const am=assetMeta(amt[0]); const aneg=BigInt(amt[1])<0n;
-    item.appendChild(el('span','amt '+(aneg?'neg':'pos'), fmtAtoms(amt[1],am.precision)+' '+am.ticker));
+    const am=assetMeta(r.hex); const aneg=BigInt(r.atoms)<0n;
+    item.appendChild(el('span','amt '+(aneg?'neg':'pos'), fmtAtoms(r.atoms,am.precision)+' '+am.ticker));
     list.appendChild(item);
   }
 }
