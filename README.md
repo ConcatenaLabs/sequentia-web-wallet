@@ -121,7 +121,10 @@ The tabs:
   build one when it cannot read the chain tip.
 - **History**: transactions on both chains, with explorer links, and rescue actions for stuck
   Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
-  selection as a send.
+  selection as a send. They appear once a payment has missed a block. Each dialog says what the
+  stuck transaction pays, as a multiple of the network's minimum rate, suggests a rate in the
+  chosen asset's own units, and says what the rescue comes to; it checks again before signing
+  that the transaction is still unconfirmed.
 - **Sign**: two kinds of signature, neither able to authorize a spend. An OpenAMP request (a
   login challenge or a document hash) signed with the wallet's OpenAMP key, tagged so it can
   never stand in for a spend authorization; and a classic message signed with the key behind
