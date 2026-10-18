@@ -3751,7 +3751,7 @@ function paintFee(feeAssetHex, feeAtoms, noteOverride){
   }
   const fm = C.assetMeta(feeAssetHex);
   $('swFeeTk').textContent = fm.ticker;
-  $('swFeeAmt').textContent = (feeAtoms != null) ? (C.fmtAtoms(feeAtoms, fm.precision) + ' ' + fm.ticker) : '-';
+  $('swFeeAmt').textContent = (feeAtoms != null) ? (C.fmtAtoms(feeAtoms, fm.precision) + ' ' + fm.ticker) : 'shown with a price';
   const ref = (feeAtoms != null) ? (C.refValueStr(feeAssetHex, feeAtoms) || '') : '';
   $('swFeeRef').textContent = ref;
   $('swFeeNote').textContent = noteOverride || pol.note;
@@ -3763,11 +3763,29 @@ function paintFee(feeAssetHex, feeAtoms, noteOverride){
   const noFee = pol.locked || quoteLocked || !pol.options.length;
   $('swFeePick').disabled = !!noFee;
   $('swFeePick').style.opacity = noFee ? '.5' : '';
+  // When the rate already includes the cost there is no fee to pick or show: a greyed picker beside
+  // a "-" read as a broken control. The note says what applies.
+  for (const id of ['swFeePick', 'swFeeAmt', 'swFeeRef']) $(id).style.display = quoteLocked ? 'none' : '';
   if (pol.why) $('swFeePick').title = pol.why;
   else if (noFee) $('swFeePick').title = 'The fee asset is set by how this trade settles.';
   else $('swFeePick').removeAttribute('title');
 }
 
+// Why the Lightning service could not open a channel to receive into, said in the asset's own units.
+// The service answers with Core Lightning's own error ("fundchannel: Could not afford 172968839sat
+// using all 2 available UTXOs: 162992508sat short"), in which "sat" means base units of whatever the
+// channel is in: shown as it was, it told a USDX buyer about satoshis. The raw text stays in the console.
+function inboundRefusal(e, rm, want){
+  const msg = String((e && e.message) || e || '');
+  console.warn('[ln] inbound channel refused:', msg);
+  const amt = (a) => C.fmtAtoms(BigInt(a), rm.precision || 0) + ' ' + rm.ticker;
+  const short = /([0-9]+)\s*sat short/i.exec(msg);
+  const what = short
+    ? `the Lightning service does not hold enough ${rm.ticker} to open a channel to you right now (it is ${amt(short[1])} short)`
+    : `the Lightning service could not open a channel to you right now`;
+  return `To receive ${amt(want)} over Lightning you need a channel with room for it, and ${what}. `
+    + `Take this offer receiving ${rm.ticker} on-chain instead, or take a smaller one.`;
+}
 // An asset is acceptable for fees if, and only if, the node publishes a rate for
 // it. BTC is never one: it is not a Sequentia-issued asset, so no Sequentia fee
 // can be denominated in it.
@@ -4003,6 +4021,26 @@ function renderTiming(route){
     // Same-chain atomic swap: on-chain receipt (no LN option here), anchor-bound.
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
     tx.innerHTML = `Appears immediately, confirmed in <b>~1 block</b> · ${ANCHOR_FINAL}.`;
+    return;
+  }
+  // Mixed SAME-CHAIN, paying on-chain and receiving over Lightning: the on-chain leg is a Sequentia
+  // asset, so this banner used to quote Bitcoin's "~1 confirmation (~10 min)" and a cap in BTC. The
+  // payment confirms in about a Sequentia block, but the side paying over Lightning waits until that
+  // block's Bitcoin anchor is buried (subswap.js anchorDepthVerdict, the makers' default depth 2)
+  // unless the leg is under the 0-conf cap, which is counted in the on-chain leg's own atoms.
+  if (route.kind === 'mixed' && route.mixedSame && route.payRail === 'chain' && route.recvRail === 'ln'){
+    const pm = C.assetMeta(S.payAsset) || {}, ptk = esc(pm.ticker || 'the asset');
+    let leg = 0n; try { leg = C.parseAtoms((C.$('swPayAmt').value || '').trim(), pm.precision || 0); } catch {}
+    const cap = frontCapAtoms();
+    const rtk = esc((C.assetMeta(S.receiveAsset) || {}).ticker || 'the asset');
+    if (leg > 0n && leg <= cap){
+      el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
+      tx.innerHTML = `<b>Instant.</b> Your on-chain ${ptk} payment is fronted; you receive ${rtk} over Lightning now.`;
+    } else {
+      el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
+      tx.innerHTML = `<b>About 20 minutes:</b> your ${ptk} payment confirms on Sequentia in about a minute, and the ${rtk} over Lightning`
+        + ` is released once that block's Bitcoin anchor is two blocks deep. Trade up to ${esc(C.fmtAtoms(cap, pm.precision || 0))} ${ptk} to be fronted instantly.`;
+    }
     return;
   }
   // BTC pair: the exact 4-case matrix keyed off the receive leg.
@@ -8837,7 +8875,7 @@ async function reviewLn(q){
       $('swStatus').textContent = '';
     } catch (e){
       $('swStatus').textContent = '';
-      $('swErr').textContent = `Your ${rm.ticker} Lightning node has no room to receive ${C.fmtAtoms(want, rm.precision || 0)} ${rm.ticker}, and the service could not open it: ${(e && e.message) || e} · take this offer with your receive leg on-chain, or take a smaller offer.`;
+      $('swErr').textContent = inboundRefusal(e, rm, want);
       return;
     }
     LNSTATUS = await L.status().catch(() => LNSTATUS);   // the fresh inbound must be visible to railAvail below
