@@ -1180,7 +1180,7 @@ import * as seqob from './seqob.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
-import { esc, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, scanCovenantCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
+import { esc, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -1204,6 +1204,42 @@ const KEY = 'swk.sequentia.mnemonic';
 const LBL = 'swk.sequentia.assets';      // { assetHex: {name,ticker,precision} }
 const DEFAULT_FEERATE = 2000;            // sat/kvB (2 sat/vB) — above the network min relay fee
 const BUMP_FEERATE = 10000;              // sat/kvB (10 sat/vB) — rescue rate for RBF/CPFP; the node arbitrates BIP125 in reference value
+
+// ---------- timing ----------
+// Where the seconds go: one "[timing]" console line per phase of the boot, of every sync and of
+// every send, with the HTTP requests the phase made. The browser keeps only 250 resource timings
+// unless told otherwise, and opening the wallet alone makes more than that, so the buffer is
+// raised first: a full buffer stops recording and every later count would read zero.
+try{ performance.setResourceTimingBufferSize(10000); }catch{}
+function reqCount(){ try{ return performance.getEntriesByType('resource').length; }catch{ return 0; } }
+// timer(label) starts a phase and returns its end(detail). `count:false` for phases that run
+// alongside others, whose request count would include their neighbours'.
+function timer(label, { count = true } = {}){
+  const t0 = performance.now(), r0 = reqCount();
+  return (detail)=>{
+    const ms = Math.round(performance.now() - t0);
+    console.info('[timing] '+label+': '+ms+' ms'+(count ? ', '+(reqCount()-r0)+' requests' : '')+(detail ? ' · '+detail : ''));
+    return ms;
+  };
+}
+// A reviewed send records its spend on the wollet in a queued turn AFTER its broadcast (see
+// reviewBroadcast), so a build made before that turn has run could select coins the send already
+// spent. Builds a person starts wait for those records first. They wait only when a scan held the
+// queue as the previous send went out, and then for the rest of that scan.
+let _spendsRecorded = Promise.resolve(), _spendsPending = 0;
+function afterRecordedSpends(){ return _spendsRecorded; }
+// A queued wallet operation, timed, with the wait for the queue reported apart from the work:
+// a sign that "takes" eight seconds because a scan held the queue for seven is a different fault
+// from a slow signature.
+function queued(label, fn){
+  const tq = performance.now();
+  return withWollet(async ()=>{
+    const waited = Math.round(performance.now() - tq);
+    const end = timer(label, { count:false });
+    try{ return await fn(); }
+    finally{ end(waited >= 50 ? 'after '+waited+' ms waiting for the wallet' : ''); }
+  });
+}
 const STAKES = 'swk.sequentia.stakes';   // [{pubkey,csv,period,atoms,txid,time}]
 const OAMP_XFERS = 'swk.sequentia.oampTransfers';   // [{asset,ticker,precision,recipient_aid,atoms,txid,time,confirmed,blockHash,anchorDepth}] (WW-6)
 // Network minimum unbonding (~15 days, height-based csv=43200). Bonding longer
@@ -1228,6 +1264,8 @@ const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h
 const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href); a.target='_blank'; a.rel='noopener'; a.textContent=label; return a; };
 
 let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false, showXpub = false;
+let companionClient;   // the sync's second client: scans the covenant companion beside the primary wallet (see _syncImpl)
+let broadcastClient;   // broadcasts a reviewed send without waiting for a scan to free the shared client (see reviewBroadcast)
 let keySignStarted = false;   // the Sign tab opens on the address the Receive tab is showing, once
 let lnApi = null;             // the hosted-Lightning API, wired once the wallet is open (see initSwap)
 
@@ -1412,6 +1450,12 @@ async function oampInit(){
       OAMP_LEGACY_XONLY=(kp.public_key||'').slice(2);
       if(OAMP_LEGACY_XONLY.length===64) OAMP_LEGACY_AID=openampComputeAid([OAMP_LEGACY_XONLY]);
     }catch(e){ OAMP_LEGACY_AID=''; }
+    // Most wallets never registered the legacy identity. Ask once whether it exists, rather than
+    // asking for its balance in every restricted asset on every sync and reading a 404 each time.
+    if(OAMP_LEGACY_AID && OAMP_LEGACY_AID!==localAid){
+      try{ const r=await fetch(OPENAMP+'/v1/users/'+encodeURIComponent(OAMP_LEGACY_AID)); if(r.status===404) OAMP_LEGACY_AID=''; }
+      catch{ /* unreachable: keep it, the balance refresh tolerates failures */ }
+    }
     await oampLoadAssets();
     await oampRefreshUser();
     return true;
@@ -1433,14 +1477,26 @@ async function oampLoadAssets(){
 }
 // Balance per restricted asset for this AID. atoms parsed to BigInt so it slots into the same
 // fmtAtoms/refValue machinery as on-chain rows.
+// When the enclave fails every balance query of a refresh, it is the service that is down, not one
+// asset: wait this long before asking again instead of repeating one request per restricted asset
+// on every sync, and keep showing the last balances read.
+const OAMP_RETRY_MS = 5*60_000;
+let oampBalancesRetryAt = 0;
 async function oampRefreshBalances(){
   if(!OAMP_AID){ oampBalances={}; oampLegacyBalances={}; return; }
-  const next={};
-  await Promise.all(Object.keys(oampAssets).map(async id=>{
+  if(Date.now() < oampBalancesRetryAt) return;
+  const next={}, ids=Object.keys(oampAssets);
+  let failed=0;
+  await Promise.all(ids.map(async id=>{
     try{ const j=await oampFetch('/v1/users/'+encodeURIComponent(OAMP_AID)+'/balance?asset='+encodeURIComponent(id));
       next[id]={ atoms: BigInt(j.atoms||0), utxos: j.utxos }; }
-    catch{ /* leave this asset out on error rather than fail the whole refresh */ }
+    catch{ failed++; /* leave this asset out on error rather than fail the whole refresh */ }
   }));
+  if(ids.length && failed===ids.length){
+    oampBalancesRetryAt = Date.now() + OAMP_RETRY_MS;
+    console.warn('[openamp] every balance query failed; next attempt in '+(OAMP_RETRY_MS/60_000)+' min');
+    return;
+  }
   oampBalances=next;
   // Legacy m/3/0 balances, READ-ONLY (shown under a "legacy identity" note; no migration here).
   const legacy={};
@@ -2498,10 +2554,17 @@ function handleDeepLinkRoute(){
 
 // ---------- boot ----------
 async function boot(){
+  const endInit = timer('boot › wasm init');
   await init();
+  endInit();
   network = Network.sequentiaTestnet();
   POLICY = network.policyAsset(); POLICY_HEX = POLICY.toString();
-  client = new EsploraClient(network, ESPLORA, false, 1, false);
+  // Concurrency applies to the transaction and header downloads of a scan (SWK walks the
+  // address histories one at a time whatever this says); 1 fetched a wallet's history
+  // one transaction per round trip.
+  client = new EsploraClient(network, ESPLORA, false, 4, false);
+  companionClient = new EsploraClient(network, ESPLORA, false, 4, false);
+  broadcastClient = new EsploraClient(network, ESPLORA, false, 1, false);
   $('net').textContent = network.toString();
   $('setApi').textContent = ESPLORA; $('setNet').textContent = network.toString(); $('setPolicy').textContent = POLICY_HEX;
   show('boot', false);
@@ -2612,8 +2675,14 @@ async function restoreWolletState(){
 async function refreshScanCacheBase(){
   if (_cacheRestored || _cachePersisted) return;
   try{
+    const end = timer('cache base scan', { count:false });
+    // Its own client, outside the wallet queue: w2 is private to this function and the shared
+    // client is the only thing it would contend for, so queueing it bought nothing and held every
+    // queued operation (a send's Confirm & sign included) behind a whole extra scan.
+    const c2 = new EsploraClient(network, ESPLORA, false, 4, false);
     const w2 = new Wollet(network, signer.wpkhSlip77Descriptor());
-    const u2 = await withWollet(() => client.fullScan(w2));   // shares the ONE wasm client - queue it
+    const u2 = await c2.fullScan(w2);
+    end();
     if (!u2) return;
     await idbPut(wolletKey(), u2.serializeEncryptedBase64(w2.descriptor()));
     await idbPut(wolletKey()+':at', Date.now());
@@ -2624,11 +2693,14 @@ async function refreshScanCacheBase(){
 }
 
 async function openWallet(phrase){
+  const endOpen = timer('open wallet');
   buildWollet(phrase);
   localStorage.setItem(KEY, phrase.trim().replace(/\s+/g,' '));
   // Restore the last scan BEFORE first render, so the balance + UTXOs are live immediately
   // (the wallet is usable while sync() below just refreshes). Best-effort; falls back to a full scan.
-  await restoreWolletState();
+  const endRestore = timer('open wallet › restore cached scan', { count:false });
+  const restored = await restoreWolletState();
+  endRestore(restored ? 'restored' : 'nothing to restore');
   addrIndex=null; views('app'); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
   // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
   // on at any time; the leaf wallet starts only while the mode is on.
@@ -2636,13 +2708,17 @@ async function openWallet(phrase){
   try{ initContracts(); }catch(e){ console.warn('[contracts] init failed:', e?.message??e); }
   // Register the OpenAMP identity + load restricted-asset metadata before the first sync, so
   // restricted rows/balances can render in the same pass. Non-fatal if the enclave is unreachable.
+  const endOamp = timer('open wallet › OpenAMP init');
   await oampInit();
+  endOamp();
   await sync();
+  endOpen('wallet usable');
   // T11: after the wallet is up, re-launch any maker settlement/refund watcher that a prior session
   // persisted mid-flow (fund-loss safety) and surface the interrupted swap for recovery.
   try{ resumeCrossMakers(); }catch(e){ console.warn('[resume] cross-maker resume failed:', e?.message??e); }
   // Passive-CLOB covenant orders rest ON-CHAIN and can fill while the tab is closed;
-  // rehydrate them, rescan the maker-credit companion wollet, and re-arm the fill watcher.
+  // rehydrate them and re-arm the fill watcher (the sync just awaited has rescanned the
+  // maker-credit companion wollet).
   try{ resumeCovenantOrders(); }catch(e){ console.warn('[resume] covenant-order resume failed:', e?.message??e); }
   // SBTC silent peg: a BUY-with-BTC bid mid peg-in when the wallet last closed resumes to post its
   // covenant once the SBTC credit lands (funds are safe at the bridge meanwhile — see resumePegIns).
@@ -3867,16 +3943,29 @@ function sync(){
 async function _syncImpl(){
   const btn=$('btnSync'); if(btn) btn.disabled=true;
   $('syncStatus').className='status'; $('syncStatus').innerHTML='<span class="spin"></span>Syncing…';
+  const endSync = timer('sync');
+  const part = (name, p) => { const end = timer('sync › '+name, { count:false }); return Promise.resolve(p).finally(() => end()); };
   try{
-    // scan both chains + refresh fee-asset rates + restricted-asset balances in parallel
-    const [update] = await Promise.all([withWollet(() => client.fullScan(wollet)), btcScan(), fetchFeeRates(), oampRefreshBalances(), oampRefreshUser()]);
-    if(update){ await withWollet(() => { wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }); }   // exclusive apply + re-apply own broadcasts the scan may predate
-    refreshScanCacheBase();   // no-op once a base exists; off-path (throwaway wollet), never blocks this sync
+    // The primary wallet and the covenant maker-credit companion are scanned in ONE queued turn, side
+    // by side, each on its own client. wasm-bindgen forbids re-entrant use of one object ("recursive
+    // use of an object detected"), so two scans may never share a client; two clients over two
+    // wollets touch nothing in common. Holding the queue across both scans and both applies keeps
+    // every other user of either wollet out meanwhile. SWK walks each wallet's addresses one request
+    // at a time, so scanning the two in turn used to cost the sum of both walks.
+    const scans = queued('sync › Sequentia scans', async () => {
+      const comp = companionWollet();
+      const [update, compUpdate] = await Promise.all([
+        part('primary scan', client.fullScan(wollet)),
+        comp ? part('companion scan', companionClient.fullScan(comp).catch(e => { console.warn('[sync] companion scan:', e?.message??e); return null; })) : null,
+      ]);
+      if(update){ wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }   // re-apply own broadcasts the scan may predate
+      try { applyCompanionUpdate(compUpdate); } catch(e){ console.warn('[sync] companion apply:', e?.message??e); }
+    });
+    // ...alongside the other chain, the fee-asset rates and the restricted-asset balances
+    await Promise.all([scans, part('Bitcoin scan', btcScan()), part('fee rates', fetchFeeRates()),
+      part('OpenAMP balances', oampRefreshBalances()), part('OpenAMP user', oampRefreshUser())]);
+    refreshScanCacheBase();   // no-op once a base exists; off-path (throwaway wollet, own client), never blocks this sync
     _scannedOnce = true;   // the live balance is now authoritative — stop showing the cached snapshot
-    // Rescan the covenant maker-credit companion wollet AFTER the main scan: it shares the same esplora
-    // client, and wasm-bindgen forbids re-entrant &mut use of one object (a concurrent fullScan throws
-    // "recursive use of an object detected"), so it must run sequentially, not inside the Promise.all above.
-    try { if (typeof scanCovenantCompanion==='function') await scanCovenantCompanion(); } catch {}
     // Cross-chain address cycling: advance the shared receive address past anything
     // that's been used on either chain (never backward, so a manual "New address" sticks).
     addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
@@ -3885,7 +3974,7 @@ async function _syncImpl(){
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
     $('syncStatus').className='status ok'; $('syncStatus').textContent='Up to date.';
   }catch(e){ $('syncStatus').className='status err'; $('syncStatus').textContent='Sync failed: '+(e?.message??e); }
-  finally{ if(btn) btn.disabled=false; }
+  finally{ if(btn) btn.disabled=false; endSync(); }
 }
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
@@ -4580,6 +4669,7 @@ function modalRows(rows){
 //   ref (optional, ⇄ mode): { typed, ccy } — the reference amount the user typed.
 // psetDetails is kept only as a best-effort fee cross-check inside its own try/catch.
 async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
+  const endReview = timer('send › review sheet', { count:false });
   const kv=[];
   // First line: this is a Sequentia (testnet) payment, NOT a parent-chain BTC one.
   kv.push(['Network', 'Sequentia (testnet); not parent-chain BTC']);
@@ -4621,17 +4711,29 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
     if(feeAssetHex && feeAssetHex!==POLICY_HEX) kv.push(['Fee paid in', assetMeta(feeAssetHex).ticker]);
   }
   const {m, ok, st} = modalRows({title, kv});
+  endReview();
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Signing &amp; broadcasting…';
+    const endConfirm = timer('send › confirm to broadcast');
     try{
-      const txid = await withWollet(async () => {   // exclusive vs scans/other builds
-        const signed = signer.sign(pset);
-        const finalized = wollet.finalize(signed);
-        const t = await client.broadcast(finalized);
-        try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
-        noteOwnTx(finalized);
-        return t;
-      });
+      // Signing and broadcasting do not wait for the wallet queue. A sync holds it for a whole
+      // scan (seconds, one request per address), and the user who pressed Confirm sat behind it
+      // for all of that while the button said it was signing. Nothing here needs the queue: the
+      // signer is its own object, finalize only reads the wollet (a running scan only reads it too),
+      // and the broadcast goes through a client of its own. Only spend-tracking writes to the
+      // wollet, so only that takes a turn, after this payment is already on its way; the own-tx
+      // ring re-applies it after any scan that predates it.
+      const endSign = timer('send › sign + finalize', { count:false });
+      const finalized = wollet.finalize(signer.sign(pset));
+      endSign();
+      const endCast = timer('send › broadcast', { count:false });
+      const txid = await broadcastClient.broadcast(finalized);
+      endCast();
+      noteOwnTx(finalized);
+      _spendsPending++;
+      _spendsRecorded = Promise.all([_spendsRecorded,
+        queued('send › record the spend', () => { try { wollet.applyTransaction(finalized); } catch {} }).finally(() => { _spendsPending--; })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
+      endConfirm();
       m.remove(); toast('Broadcast:', {href:'/explorer/tx/'+txid.toString(), label:txid.toString().slice(0,18)+'…'});
       if(onDone) onDone(txid); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
@@ -5096,7 +5198,13 @@ async function requestFaucet(asset){
 document.querySelectorAll('#faucetBtns button').forEach(b=>{ b.onclick=()=>requestFaucet(b.dataset.faucet); });
 $('btnAddRec').onclick=addRecipientRow;
 $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
+  // Say at once that the click landed: the build below is synchronous wasm and can hold the page.
+  const btn=$('btnReview'), label=btn.textContent;
+  btn.disabled=true; btn.textContent=_spendsPending ? 'Recording your previous payment…' : 'Preparing…';
   try{
+    await afterRecordedSpends();
+    btn.textContent='Preparing…';
+    await new Promise(r=>setTimeout(r,16));   // one frame, so 'Preparing…' is painted before the build runs
     const rows=collectRows();
     if(!rows.length) throw new Error('add at least one recipient');
     const reset=()=>{ $('recipients').innerHTML=''; addRecipientRow(); };
@@ -5130,12 +5238,15 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       await btcReviewBroadcast(outputs, reset);
     } else {
       const faHex = $('feeAsset') ? $('feeAsset').value : POLICY_HEX;
+      const endBuild = timer('send › build', { count:false });
       const pset = buildSendPset(rows);
+      endBuild();
       // Structured review rows (recipient, resolved atoms, asset, ⇄ ref details) — never blind-sign.
       const reviewRows = rows.map(r=>({ addr:r.addr, atoms:parseAtoms(r.amtS, sendPrecision(r.asset)), hex:r.asset, ref:r.ref }));
       await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex});
     }
-  }catch(e){ $('sendErr').textContent=e?.message??String(e); } };
+  }catch(e){ $('sendErr').textContent=e?.message??String(e); }
+  finally{ btn.disabled=false; btn.textContent=label; } };
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
@@ -5147,7 +5258,7 @@ $('btnXpubCopyRecv').onclick=()=>copyToClipboard(($('xpubText').textContent||'')
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
 $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
-  try{ const {pset, meta}=buildIssuePset();
+  try{ await afterRecordedSpends(); const {pset, meta}=buildIssuePset();
     await reviewBroadcast(pset, `Issue ${meta.ticker}`, ()=>{
       const assetId=meta.assetId;   // captured pre-broadcast in buildIssuePset
       if(assetId) saveLabel(assetId, meta);
@@ -5156,7 +5267,7 @@ $('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
   }catch(e){ $('issueErr').textContent=e?.message??String(e); } };
 
 $('btnReissue').onclick=async()=>{ $('raErr').textContent='';
-  try{ const asset=$('raAsset').value.trim();
+  try{ await afterRecordedSpends(); const asset=$('raAsset').value.trim();
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — throws 'label it before sending' rather than mis-scaling at precision 0 (the 1e8 trap)
     const input=$('raAmount');
     const amt=parseAtoms(assetAmountOf(input, asset), prec);   // honours ⇄ ref-input mode
@@ -5166,7 +5277,7 @@ $('btnReissue').onclick=async()=>{ $('raErr').textContent='';
     await reviewBroadcast(pset, 'Confirm Sequentia payment', null, rb.feeHex, {rows:[{atoms:amt, hex:asset, ref}], feeAssetHex:rb.feeHex});
   }catch(e){ $('raErr').textContent=e?.message??String(e); } };
 $('btnBurn').onclick=async()=>{ $('raErr').textContent='';
-  try{ const asset=$('raAsset').value.trim();
+  try{ await afterRecordedSpends(); const asset=$('raAsset').value.trim();
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — never burn a mis-scaled amount on an unlabeled asset
     const input=$('raAmount');
     const amt=parseAtoms(assetAmountOf(input, asset), prec);   // honours ⇄ ref-input mode
@@ -5319,6 +5430,7 @@ function bumpFeeDialog(txid){
 }
 async function doBump(txid, feeAssetHex, feeRateVb){
   try{
+    await afterRecordedSpends();
     const kvb = Math.max(1, feeRateVb || (BUMP_FEERATE/1000)) * 1000;   // sat/vB → sat/kvB; user can raise it above the original
     let b = wollet.bumpFeeOf(new Txid(txid)).feeRate(kvb);
     if(feeAssetHex && feeAssetHex!==POLICY_HEX){
@@ -5352,6 +5464,7 @@ function cpfpDialog(txid){
 }
 async function doCpfp(parentTxid, feeAssetHex, feeRateVb){
   try{
+    await afterRecordedSpends();
     const kvb = Math.max(1, feeRateVb || (BUMP_FEERATE/1000)) * 1000;   // sat/vB → sat/kvB
     let b = wollet.cpfpOf(new Txid(parentTxid)).feeRate(kvb);
     if(feeAssetHex && feeAssetHex!==POLICY_HEX){
@@ -5387,6 +5500,7 @@ function replaceDialog(txid){
 }
 async function doReplace(txid, addr, assetHex, amtStr, feeAssetHex, feeRateVb){
   try{
+    await afterRecordedSpends();
     if(!addr) throw new Error('enter a recipient address');
     const kvb = Math.max(1, feeRateVb || (BUMP_FEERATE/1000)) * 1000;
     let b = addOneRecipient(wollet.replaceTxOf(new Txid(txid)), addr, assetHex, amtStr).feeRate(kvb);
@@ -5891,6 +6005,7 @@ $('acMin').onchange = () => {
 $('acSlip').onchange = () => { setRewardSettings({ maxSlippageBp: Number($('acSlip').value) }); refreshAcStatus().catch(()=>{}); };
 $('btnStake').onclick=async()=>{ $('stakeErr').textContent='';
   try{
+    await afterRecordedSpends();
     const csv=STAKE_CSV;
     const pubkey=signer.stakerPublicKey();
     const input=$('stAmount');
