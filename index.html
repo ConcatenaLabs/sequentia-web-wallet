@@ -462,19 +462,19 @@
         <div class="warn hide" id="lnUpgradeNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
-          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it; it cannot protect a channel from a service that runs both your hosted node and the node the channel is with. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
+          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
         </details>
       </div>
       <div class="card">
         <label class="lbl">Testnet faucet</label>
-        <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to your wallet. Network fees are payable in any asset you hold, all on equal footing; tSEQ is additionally what you stake to help produce blocks.</p>
+        <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to your wallet. Network fees are payable in any asset you hold, all on equal footing.</p>
         <div class="row" id="faucetBtns">
-          <button data-faucet="">tSEQ</button>
           <button data-faucet="USDX">USDX</button>
           <button data-faucet="EURX">EURX</button>
           <button data-faucet="GOLD">GOLD</button>
           <button data-faucet="SILVR">SILVR</button>
           <button data-faucet="OILX">OILX</button>
+          <button data-faucet="">tSEQ</button>
         </div>
         <div class="status" id="faucetStatus" style="margin-top:10px"></div>
       </div>
@@ -2557,7 +2557,27 @@ function handleDeepLinkRoute(){
 }
 
 // ---------- boot ----------
+// Held for the life of the tab; a second tab of this origin finds it taken and stops before it
+// loads a wallet. Without the API (an old browser) the wallet opens as before.
+function holdOnlyTab(){
+  if(!(typeof navigator!=='undefined' && navigator.locks && navigator.locks.request)) return Promise.resolve(true);
+  return new Promise(resolve=>{
+    navigator.locks.request('swk.wallet.open', { ifAvailable:true }, lock=>{
+      if(!lock){ resolve(false); return; }
+      resolve(true);
+      return new Promise(()=>{});   // never settles: the lock is released when the tab closes
+    }).catch(()=>resolve(true));
+  });
+}
 async function boot(){
+  if(!(await holdOnlyTab())){
+    show('boot', false);
+    const c=el('div','card'); c.style.cssText='max-width:560px;margin:40px auto';
+    c.appendChild(el('label','lbl','The wallet is open in another tab'));
+    c.appendChild(el('div','sub','Use that tab, or close it and reload this one. One tab at a time keeps a single device signing for your Lightning channels.'));
+    document.body.appendChild(c);
+    return;
+  }
   const endInit = timer('boot › wasm init');
   await init();
   endInit();
@@ -2882,7 +2902,7 @@ function lnStatusPill(){
   // dynamic (N), never a hardcoded leg total. Fall back to signer-connect progress
   // while there are no channels yet.
   const activeChannels = (lnLastStatus && lnLastStatus.channels)
-    ? lnLastStatus.channels.filter(c=>String(c.state||'').startsWith('CHANNELD')).length : 0;
+    ? lnLastStatus.channels.filter(c=>c.node_key && String(c.state||'').startsWith('CHANNELD')).length : 0;
   el.className = 'net lnpill ' + (activeChannels ? 'ln-ready' : (st.connected ? 'ln-ready' : (st.phase==='error' ? 'ln-err' : 'ln-warn')));
   // ONE consistent vocabulary. This used to flip between a signer fraction ("LN 0/2") and a
   // channel count ("LN 13 ch") — two different meanings wearing the same shape, so "0/2" read
@@ -3250,6 +3270,16 @@ async function lnSendDeposit({ chain, asset, amount, address }){
   });
 }
 
+// The asset a channel from /status is in, as a display-order id. The LSP reports the policy asset
+// the Elements way, as 'policy' in both `asset` and `asset_label`, and every other asset by id: read
+// both, so the policy asset's channels land on its row like every other asset's.
+function lnChannelAsset(c){
+  const a=String(c.asset||'').toLowerCase(), l=String(c.asset_label||'').toLowerCase();
+  if(a==='policy' || l==='policy' || l==='policy…') return String(POLICY_HEX).toLowerCase();
+  if(/^[0-9a-f]{64}$/.test(a)) return a;
+  for(const h of Object.keys(balObj())) if(assetMeta(h).ticker.toLowerCase()===l) return h.toLowerCase();
+  return a;
+}
 // Cache of the last /status so the Balance card + the pill share one poll.
 let lnLastStatus = null;
 // Sum in-channel spendable (send-side) balance, in base units, for a chain/asset. BTC
@@ -3264,7 +3294,7 @@ function lnSpendableFor(kind /* 'BTC' | assetHex */){
                                 // wallet must show nothing in Lightning). This is what guarantees the
                                 // "balance in a channel this wallet didn't open" case can never arise.
     const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
-    const match = kind==='BTC' ? isBtc : (!isBtc && (c.asset===kind || c.asset_label===assetMeta(kind).ticker));
+    const match = kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase());
     if(match && String(c.state||'').startsWith('CHANNELD')){ units += Number(c.spendable_units||0); n++; }
   }
   return { units, channels: n };
@@ -3277,7 +3307,7 @@ function lnOwnChannelsFor(kind /* 'BTC' | assetHex */){
   for(const c of chs){
     if(!c.node_key) continue;                                   // only the device's OWN provisioned nodes are closable here
     const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
-    const match = kind==='BTC' ? isBtc : (!isBtc && (c.asset===kind || c.asset_label===assetMeta(kind).ticker));
+    const match = kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase());
     if(match && String(c.state||'').startsWith('CHANNELD')) out.push({ scid:c.short_channel_id, node_key:c.node_key, spendable_units:Number(c.spendable_units||0) });
   }
   return out;
@@ -3342,14 +3372,20 @@ function renderLightningBalance(){ return refreshLnStatus(); }
 // Bitcoin has no business hiding it — it is offered whether or not the wallet holds any,
 // exactly like the rest of the wallet treats the parent chain. A Sequentia asset needs a
 // published fee rate to be routable, so those stay gated on one.
-function lnCapableAssets(){
-  const seq = Object.keys(balObj()).filter(h => feeRateEntry(h) && feeRateEntry(h).rate > 0)
-    .map(h => ({ hex: h, ticker: assetMeta(h).ticker }));
+function lnCapableAssets({ receive = false } = {}){
+  const priced = h => feeRateEntry(h) && feeRateEntry(h).rate > 0;
+  const ids = new Set(Object.entries(balObj()).filter(([h, v]) => BigInt(v || 0) > 0n && priced(h)).map(([h]) => h.toLowerCase()));
+  if (receive){
+    const funding = (lnLastStatus && lnLastStatus.funding && lnLastStatus.funding.assets) || [];
+    for (const a of funding){ const id = String(a.id || '').toLowerCase(); if (/^[0-9a-f]{64}$/.test(id)) ids.add(id); }
+  }
+  const seq = [...ids].map(h => ({ hex: h, ticker: assetMeta(h).ticker }))
+    .sort((x, y) => x.ticker.localeCompare(y.ticker, undefined, { sensitivity: 'base' }));
   return [{ hex: 'BTC', ticker: 'BTC' }, ...seq];
 }
-function fillLnAssetSelect(sel){
+function fillLnAssetSelect(sel, receive = false){
   if (!sel) return;
-  const cur = sel.value, opts = lnCapableAssets();
+  const cur = sel.value, opts = lnCapableAssets({ receive });
   sel.innerHTML = opts.map(o => `<option value="${o.hex}">${esc(o.ticker)}</option>`).join('');
   if (cur && opts.some(o => o.hex === cur)) sel.value = cur;
 }
@@ -3359,7 +3395,7 @@ function refreshLnSendReceive(){
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
   if (sc) sc.classList.toggle('hide', !on);
   if (rc) rc.classList.toggle('hide', !on);
-  if (on){ fillLnAssetSelect($('lnRecvAsset')); fillLnAssetSelect($('lnSendAsset')); }
+  if (on){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); }
 }
 // Bring the hosted node for one leg online and answer its node key. BTC and a Sequentia
 // asset are provisioned from different device identities, so this is the single place that
@@ -3409,7 +3445,11 @@ function initLnSendReceive(){
         // opening a channel on-chain behind it — so it gets a deadline rather than the
         // spinner it used to leave on screen for minutes.
         try { await lnDeadline(lnApi.channelInbound({ node_key, asset, amount: amt }), LN_INBOUND_MS); }
-        catch(e){ console.warn('[ln] inbound liquidity (continuing anyway):', e?.message ?? e); }
+        catch(e){
+          if (!lnOwnChannelsFor(asset).length)
+            throw new Error('no Lightning channel can receive ' + meta.ticker + ' yet (' + prettyErr(e) + '). Nothing was created; try again in a minute, or receive on-chain with the address above');
+          console.warn('[ln] inbound liquidity (continuing over the existing channel):', e?.message ?? e);
+        }
       }
       st.innerHTML = '<span class="spin"></span>Creating the invoice…';
       const inv = await lnApi.nodeReceive({ node_key, amount: amt, description: 'Receive ' + meta.ticker });
@@ -3538,7 +3578,7 @@ function moveToLightningDialog(leg){
   const avail = BigInt(leg.onchain||0n);
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Move '+leg.ticker+' to Lightning'));
-  c.appendChild(el('div','sub','Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it. Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. A service that runs both your hosted node and the node the channel is with could still take the channel\'s funds. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
+  c.appendChild(el('div','sub','Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it. Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
   c.appendChild(el('div','sub','Available on-chain: '+fmtAtoms(avail, leg.precision)+' '+leg.ticker));
@@ -4059,6 +4099,7 @@ async function _syncImpl(){
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
     _lastSyncOk = Date.now(); saveSnapshot();
     setSyncStatus('ok');
+    try{ if(seqlnState().deployed) refreshLnStatus().catch(()=>{}); }catch{}
   }catch(e){ setSyncStatus('err', e?.message??String(e)); }
   finally{ for(const x of btns) x.disabled=false; endSync(); }
 }
