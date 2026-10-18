@@ -142,6 +142,12 @@
   .modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
   .modal .card{margin:0;max-width:480px;width:100%;max-height:88vh;overflow:auto}
   .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+  .sent-head{display:flex;align-items:center;gap:12px;margin:2px 0 14px}
+  .sent-check{width:40px;height:40px;border-radius:50%;background:#10241a;border:1px solid #1f4d33;color:var(--green);
+    display:flex;align-items:center;justify-content:center;font-size:22px;flex:none}
+  .sent-title{font-size:18px;font-weight:600}
+  .sent-state{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px}
+  .kv .v.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
   .kv:first-child{border-top:none} .kv .k{color:var(--dim);flex:0 0 auto;white-space:nowrap} .kv .v{text-align:right;overflow-wrap:anywhere;min-width:0;font:13px ui-monospace,monospace}
   /* toast */
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d242d;border:1px solid var(--line);
@@ -2005,7 +2011,7 @@ async function btcReviewBroadcast(outputs, onDone){
       if(!r.ok) throw new Error(txt||('HTTP '+r.status));
       if(!/^[0-9a-fA-F]{64}$/.test(txt)) throw new Error('unexpected broadcast response: '+txt.slice(0,80));
       if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);  // advance only on a confirmed broadcast
-      m.remove(); toast('Sent BTC:', {href:'/testnet4/tx/'+txt, label:txt.slice(0,18)+'…'});
+      showSent(m, { title:'Bitcoin (testnet4) payment', kv, txid:txt, explorer:'/testnet4/tx/', statusUrl:T4_API+'/tx/' });
       if(onDone) onDone(txt); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
@@ -4795,6 +4801,41 @@ function modalRows(rows){
   no.onclick=()=>m.remove();
   return {m, ok, st};
 }
+// What a person sees once the network has accepted their transaction: a green check, the same
+// lines they reviewed and signed, the transaction id, and where it stands, refreshed until a block
+// includes it. A toast that faded in three seconds was the only confirmation before, and it said
+// "Broadcast:" next to half a txid.
+function showSent(m, { title, kv, txid, explorer = '/explorer/tx/', statusUrl = ESPLORA+'/tx/' }){
+  const c = m.querySelector('.card'); c.innerHTML = '';
+  const head = el('div','sent-head'); head.appendChild(el('div','sent-check','✓'));
+  const ht = el('div'); ht.appendChild(el('div','sent-title','Sent'));
+  ht.appendChild(el('div','sub', String(title).replace(/^Confirm\s+/i,''))); head.appendChild(ht); c.appendChild(head);
+  for(const [k,v] of kv){ if(k==='Network') continue; const d=el('div','kv'); d.appendChild(el('span','k',k)); d.appendChild(el('span','v',v)); c.appendChild(d); }
+  { const d=el('div','kv'); d.appendChild(el('span','k','Transaction'));
+    const v=el('span','v mono'); v.appendChild(txLink(explorer+txid, txid.slice(0,12)+'…'+txid.slice(-8))); d.appendChild(v); c.appendChild(d); }
+  const state = el('div','sent-state'); c.appendChild(state);
+  const say = (html, cls) => { state.className = 'sent-state'+(cls ? ' '+cls : ''); state.innerHTML = html; };
+  say('<span class="spin"></span>Accepted by the network. Waiting for the next block…');
+  const act = el('div','row'); act.style.marginTop = '16px';
+  const done = el('button','primary','Done'), hist = el('button','ghost','View in history'), copy = el('button','ghost','Copy transaction id');
+  act.appendChild(done); act.appendChild(hist); act.appendChild(copy); c.appendChild(act);
+  let timer = null;
+  const close = () => { if(timer) clearTimeout(timer); m.remove(); };
+  done.onclick = close;
+  hist.onclick = () => { close(); tab('history'); };
+  copy.onclick = () => copyToClipboard(txid, copy);
+  // Ask the explorer where the transaction is until a block has it, or the card is closed.
+  const poll = async () => {
+    if(!document.body.contains(m)) return;
+    try{
+      const r = await fetch(statusUrl+txid+'/status');
+      if(r.ok){ const st = await r.json();
+        if(st && st.confirmed){ say('✓ Confirmed in block '+esc(String(st.block_height))+'.', 'ok'); return; } }
+    }catch{}
+    timer = setTimeout(poll, 5000);
+  };
+  timer = setTimeout(poll, 4000);
+}
 // Render a Sequentia review from the STRUCTURED rows the caller already has, NOT from
 // wollet.psetDetails (which throws on Sequentia's explicit/non-confidential outputs, leaving the
 // old "Ready to sign" blind-signing trap). `review` = { rows:[{addr?, atoms, hex, ref?}], feeAssetHex? }
@@ -4878,7 +4919,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review){
         queued('send › record the spend', () => { try { wollet.applyTransaction(finalized); } catch {} })
           .finally(() => { _spendsPending--; try{ renderBalance(); renderHistory(); }catch{} })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
       endConfirm();
-      m.remove(); toast('Broadcast:', {href:'/explorer/tx/'+txid.toString(), label:txid.toString().slice(0,18)+'…'});
+      showSent(m, { title, kv, txid: txid.toString() });
       if(onDone) onDone(txid); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
