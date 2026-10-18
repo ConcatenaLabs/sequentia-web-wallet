@@ -89,10 +89,19 @@
   .item:first-child{border-top:none}
   .badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
   .b-in{color:var(--green);border-color:#1f4d33;background:#10241a}
-  .b-out{color:var(--amber2);border-color:#5a4412;background:#241c0a}
+  .b-out{color:var(--red);border-color:#5a2420;background:#2a1110}
   .b-iss{color:var(--blue);border-color:#244a63;background:#0d1f2a}
   .amt{margin-left:auto;font-weight:700;font:14px ui-monospace,monospace;white-space:nowrap}
-  .amt.pos{color:var(--green)} .amt.neg{color:var(--amber2)}
+  .amts{margin-left:auto;text-align:right;display:flex;flex-direction:column;gap:2px}
+  .amts .amt{margin-left:0}
+  .amts .fee{font:12px ui-monospace,monospace;color:var(--dim);white-space:nowrap}
+  .item.child{padding-left:22px;border-top:1px dashed var(--line)}
+  .item.replaced{opacity:.55}
+  .item.replaced .amt{text-decoration:line-through}
+  .kind{font-size:12px;color:var(--dim)}
+  .amt.pos{color:var(--green)} .amt.neg{color:var(--red)}
+  .badge.dir{font-size:10px;letter-spacing:.04em;padding:1px 0;min-width:44px;text-align:center}
+  .sub.unconf{color:var(--amber2)}
   .bal-total{margin:2px 0 14px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--card2,rgba(255,255,255,.02))}
   .bal-total:empty{display:none}
   .bal-total-label{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
@@ -2592,15 +2601,20 @@ function handleDeepLinkRoute(){
 
 // ---------- boot ----------
 // Held for the life of the tab; a second tab of this origin finds it taken and stops before it
-// loads a wallet. Without the API (an old browser) the wallet opens as before.
+// loads a wallet. A reload's new page can ask before the old one has let go, so it waits a few
+// seconds before concluding another tab holds it. Without the API (an old browser) the wallet
+// opens as before.
+const ONLY_TAB_WAIT_MS = 4000;
 function holdOnlyTab(){
   if(!(typeof navigator!=='undefined' && navigator.locks && navigator.locks.request)) return Promise.resolve(true);
   return new Promise(resolve=>{
-    navigator.locks.request('swk.wallet.open', { ifAvailable:true }, lock=>{
-      if(!lock){ resolve(false); return; }
+    const ctl = new AbortController();
+    const timer = setTimeout(()=>ctl.abort(), ONLY_TAB_WAIT_MS);
+    navigator.locks.request('swk.wallet.open', { signal: ctl.signal }, ()=>{
+      clearTimeout(timer);
       resolve(true);
       return new Promise(()=>{});   // never settles: the lock is released when the tab closes
-    }).catch(()=>resolve(true));
+    }).catch(e=>resolve(!(e && e.name==='AbortError')));
   });
 }
 async function boot(){
@@ -4060,9 +4074,26 @@ function setSyncStatus(state, err){
 // in the wallet queue, which a running scan can hold for seconds. Until it lands they are shown at
 // the top of History as outgoing and taken off the balances they came from.
 let _pendingSends = [];   // [{txid, at, title, out:[{hex, atoms}], fee:{hex, atoms}|null}]
+// What this wallet knows about its own transactions that the chain does not say: that one is a
+// speed-up of another, or replaced another. Recorded when they are broadcast, kept per wallet so
+// History can still say it after a reload. [txid] -> { kind:'speedup'|'bump'|'replace', of:txid }
+function kindsKey(){ return 'swk.txKinds:'+wolletKey(); }
+function txKinds(){ try{ return JSON.parse(localStorage.getItem(kindsKey())||'{}')||{}; }catch{ return {}; } }
+function noteTxKind(txid, kind){
+  try{ const k=txKinds(); k[txid]=kind; const ids=Object.keys(k); for(const id of ids.slice(0, Math.max(0, ids.length-200))) delete k[id];
+    localStorage.setItem(kindsKey(), JSON.stringify(k)); }catch{}
+}
 // The chain tip each of this session's own transactions was broadcast at. Until a block arrives after
 // it, a payment is not late, and offering to rescue it only invites paying twice for nothing.
-const _sentAtTip = new Map();   // txid -> tip height at broadcast
+// Kept per wallet in localStorage, so a reload does not make a payment look late.
+const _sentAtTip = {
+  key(){ return 'swk.sentAtTip:'+wolletKey(); },
+  all(){ try{ return JSON.parse(localStorage.getItem(this.key())||'{}')||{}; }catch{ return {}; } },
+  has(id){ return id in this.all(); },
+  get(id){ return this.all()[id]; },
+  set(id, h){ try{ const m=this.all(); m[id]=h; const ids=Object.keys(m); for(const x of ids.slice(0, Math.max(0, ids.length-100))) delete m[x];
+    localStorage.setItem(this.key(), JSON.stringify(m)); }catch{} },
+};   // txid -> tip height at broadcast
 function livePending(){
   if(!_pendingSends.length) return _pendingSends;
   let known; try{ known=new Set(wollet.transactions().map(t=>t.txid().toString())); }catch{ known=new Set(); }
@@ -4935,6 +4966,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
       const txid = await broadcastClient.broadcast(finalized);
       endCast();
       noteOwnTx(finalized);
+      if(review && review.kind) noteTxKind(txid.toString(), review.kind);
       // The wallet's tip is as old as its last scan; the explorer's is the chain's now.
       { const id=txid.toString(); try{ _sentAtTip.set(id, wollet.tip().height()); }catch{}
         fetch(ESPLORA+'/blocks/tip/height').then(r=>r.text()).then(h=>{ const n=parseInt(h,10); if(n>0) _sentAtTip.set(id, Math.max(n, _sentAtTip.get(id)||0)); }).catch(()=>{}); }
@@ -5518,6 +5550,21 @@ function historyRows(){
   return txs.slice(0,60).map(t=>{
     const txid=t.txid().toString();
     const delta=t.balance().toJSON();
+    // The fee this transaction paid and in which asset (Sequentia's fee can be any priced asset):
+    // read from its fee output, trying the assets it moved first.
+    let fee=null;
+    try{
+      const tx=t.tx();
+      for(const h of [...Object.keys(delta), POLICY_HEX]){ const f=tx.fee(new AssetId(h)); if(f>0n){ fee={ hex:h, atoms:f.toString() }; break; } }
+    }catch{}
+    // What moved, without the fee: when this wallet paid the fee, its delta in the fee asset includes it.
+    const moved={};
+    for(const [h,v] of Object.entries(delta)) moved[h]=BigInt(v);
+    const wePaid = fee && (moved[fee.hex]||0n) < 0n;
+    if(wePaid) moved[fee.hex] += BigInt(fee.atoms);
+    const legs=Object.entries(moved).filter(([,v])=>v!==0n)
+      .sort((a,b)=>{ const x=a[1]<0n?-a[1]:a[1], y=b[1]<0n?-b[1]:b[1]; return y>x?1:y<x?-1:0; })
+      .map(([h,v])=>({ hex:h, atoms:v.toString() }));
     // lwk returns "unknown" when the policy asset nets to 0 (e.g. an asset send that pays its
     // fee in that asset and passes tSEQ through), so classify from the NON-ZERO deltas.
     const nz=Object.entries(delta).filter(([,v])=>BigInt(v)!==0n);
@@ -5525,10 +5572,9 @@ function historyRows(){
     if(type==='unknown' && nz.length){
       type = nz.every(([,v])=>BigInt(v)<0n) ? 'outgoing' : nz.every(([,v])=>BigInt(v)>0n) ? 'incoming' : 'unknown';
     }
-    // Show the most significant NON-ZERO asset delta (not a passed-through 0 tSEQ).
-    const absBig=(x)=>x<0n?-x:x;
-    const amt = nz.reduce((best,e)=> best && absBig(BigInt(best[1]))>=absBig(BigInt(e[1])) ? best : e, null) || [POLICY_HEX, delta[POLICY_HEX]??'0'];
-    return { txid, height:t.height()||0, ts:t.timestamp()||0, type, hex:amt[0], atoms:String(amt[1]) };
+    if(wePaid && !legs.length) type='self';   // only the fee left: a payment to this wallet itself
+    const main = legs[0] || (fee ? { hex:fee.hex, atoms:'-'+fee.atoms } : { hex:POLICY_HEX, atoms:'0' });
+    return { txid, height:t.height()||0, ts:t.timestamp()||0, type, hex:main.hex, atoms:main.atoms, legs, fee: wePaid ? fee : null };
   });
 }
 function renderHistory(){
@@ -5548,32 +5594,56 @@ function renderHistory(){
   // Sends this wallet has broadcast and the wollet has not recorded yet, newest first, on top.
   for(const p of pending.slice().reverse()){
     const item=el('div','item');
-    item.appendChild(el('span','badge b-out','outgoing'));
+    item.appendChild(el('span','badge dir b-out','OUT'));
     const mid=el('div','grow');
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+p.txid, p.txid.slice(0,20)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub', 'sending · '+p.title));
+    mid.appendChild(el('div','sub unconf', 'sending · '+p.title));
     item.appendChild(mid);
     const o=p.out[0] || p.fee;
     if(o){ const am=assetMeta(o.hex); item.appendChild(el('span','amt neg', '-'+fmtAtoms(o.atoms,am.precision)+' '+am.ticker)); }
     list.appendChild(item);
   }
+  // A speed-up is drawn right under the transaction it speeds up; a transaction a bump or replace
+  // superseded is marked so, and the one that replaced it says what it replaced.
+  const kinds=txKinds(), byId=new Map(rows.map(r=>[r.txid, r]));
+  const replacedBy=new Map();
+  for(const [id,k] of Object.entries(kinds)) if(k && (k.kind==='bump'||k.kind==='replace') && byId.has(id)) replacedBy.set(k.of, id);
+  const ordered=[];
   for(const r of rows){
-    const txid=r.txid, type=r.type;
-    const item=el('div','item');
+    const k=kinds[r.txid];
+    if(k && k.kind==='speedup' && byId.has(k.of)) continue;   // placed under its parent below
+    ordered.push(r);
+    for(const [id,kk] of Object.entries(kinds)) if(kk && kk.kind==='speedup' && kk.of===r.txid && byId.has(id)) ordered.push({ ...byId.get(id), _child:true });
+  }
+  const short=(id)=>id.slice(0,8)+'…';
+  const spedUp=new Set(Object.values(kinds).filter(k=>k && k.kind==='speedup').map(k=>k.of));
+  for(const r of ordered){
+    const txid=r.txid, type=r.type, k=kinds[txid];
+    const replaced = !r.height && replacedBy.has(txid);
+    const item=el('div','item'+(r._child?' child':'')+(replaced?' replaced':''));
+    // A short direction label; what kind of transaction it is goes on its own line below.
+    const label = type==='incoming' ? 'IN' : (type==='outgoing'||type==='burn') ? 'OUT' : type==='self' ? 'SELF'
+      : type==='issuance' ? 'ISSUE' : type==='reissuance' ? 'REISSUE' : String(type).toUpperCase();
+    // Green in, red out; a payment to oneself is neither, so it takes the neutral blue.
     const bcls = type==='incoming'?'b-in':(type==='outgoing'||type==='burn')?'b-out':'b-iss';
-    item.appendChild(el('span','badge '+bcls, type));
+    item.appendChild(el('span','badge dir '+bcls, label));
     const mid=el('div','grow');
     const when = r.height ? (r.ts ? new Date(r.ts*1000).toLocaleString() : 'block '+r.height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+txid, txid.slice(0,20)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub', when));
+    mid.appendChild(el('div','sub'+(r.height?'':' unconf'), when));
+    if(type==='self' && !k) mid.appendChild(el('div','kind','To yourself: only the fee left the wallet'));
+    if(k && k.kind==='speedup') mid.appendChild(el('div','kind','Speeds up '+short(k.of)));
+    else if(k && k.kind==='bump') mid.appendChild(el('div','kind','Same payment as '+short(k.of)+', at a higher fee'));
+    else if(k && k.kind==='replace') mid.appendChild(el('div','kind','Replaces '+short(k.of)));
+    if(replaced) mid.appendChild(el('div','kind','Replaced by '+short(replacedBy.get(txid))+'; it will not confirm'));
     // Rescues act on the live wollet, so they are offered only once this session has synced.
     let tipNow = 0; try{ tipNow = wollet.tip().height(); }catch{}
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
-    if(live && !r.height && fresh) mid.appendChild(el('div','sub','Waiting for the next block. If it misses one, speed-up options appear here.'));
-    else if(live && !r.height && (type==='outgoing' || type==='incoming')){
+    if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
+    else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
       const mk=(label,fn)=>{ const x=el('button','ghost',label); x.style.cssText='padding:4px 10px;font-size:12px'; x.onclick=fn; return x; };
-      if(type==='outgoing'){
+      if(type==='outgoing' || type==='self'){
         acts.appendChild(mk('Bump fee', ()=>bumpFeeDialog(txid)));   // RBF: same payment, higher fee
         acts.appendChild(mk('Replace…', ()=>replaceDialog(txid)));   // RBF: same inputs, new outputs
       }
@@ -5581,8 +5651,15 @@ function renderHistory(){
       mid.appendChild(acts);
     }
     item.appendChild(mid);
-    const am=assetMeta(r.hex); const aneg=BigInt(r.atoms)<0n;
-    item.appendChild(el('span','amt '+(aneg?'neg':'pos'), fmtAtoms(r.atoms,am.precision)+' '+am.ticker));
+    // Every asset the transaction moved for this wallet, then the fee it paid, in its asset and in
+    // the reference currency. Snapshot rows from before these fields carry only hex/atoms.
+    const box=el('div','amts');
+    const legs = Array.isArray(r.legs) ? r.legs : [{ hex:r.hex, atoms:r.atoms }];
+    for(const l of legs){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n;
+      const a=el('span','amt '+(neg?'neg':'pos'), (neg?'':'+')+fmtAtoms(l.atoms,am.precision)+' '+am.ticker); box.appendChild(a); }
+    if(r.fee){ const fm=assetMeta(r.fee.hex), rv=refValueStr(r.fee.hex, BigInt(r.fee.atoms));
+      box.appendChild(el('span','fee','fee '+fmtAtoms(r.fee.atoms,fm.precision)+' '+fm.ticker+(rv?' · '+rv:''))); }
+    item.appendChild(box);
     list.appendChild(item);
   }
 }
@@ -5619,12 +5696,12 @@ async function renderBtcHistory(){
     const delta = outSum - inSum;
     const incoming = delta >= 0n;
     const item=el('div','item');
-    item.appendChild(el('span','badge '+(incoming?'b-in':'b-out'), incoming?'incoming':'outgoing'));
+    item.appendChild(el('span','badge dir '+(incoming?'b-in':'b-out'), incoming?'IN':'OUT'));
     const mid=el('div','grow');
     const conf = t.status && t.status.confirmed;
     const when = conf ? (t.status.block_time ? new Date(t.status.block_time*1000).toLocaleString() : 'block '+t.status.block_height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/testnet4/tx/'+t.txid, t.txid.slice(0,20)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub', when+' · Bitcoin testnet4'));
+    mid.appendChild(el('div','sub'+(conf?'':' unconf'), when+' · Bitcoin testnet4'));
     item.appendChild(mid);
     const mag = delta<0n ? -delta : delta;
     item.appendChild(el('span','amt '+(incoming?'pos':'neg'), (incoming?'':'-')+fmtAtoms(mag,8)+' BTC'));
@@ -5792,11 +5869,11 @@ async function doRbf(txid, fee, target){
       const b = applyFeeUnits(addOneRecipient(wollet.replaceTxOf(new Txid(txid)), target.addr, target.assetHex, target.amtStr), fee.hex, fee.units);
       const atoms = parseAtoms(target.amtStr, sendPrecision(target.assetHex));
       await reviewBroadcast(b.finish(wollet), 'Replacement payment', null, fee.hex,
-        { rows:[{ addr:target.addr, atoms, hex:target.assetHex }], feeAssetHex:fee.hex, extra:[['Replaces', txid.slice(0,12)+'…'+txid.slice(-6)]] }, () => stillUnconfirmed(txid));
+        { rows:[{ addr:target.addr, atoms, hex:target.assetHex }], feeAssetHex:fee.hex, kind:{ kind:'replace', of:txid }, extra:[['Replaces', txid.slice(0,12)+'…'+txid.slice(-6)]] }, () => stillUnconfirmed(txid));
     } else {
       const b = applyFeeUnits(wollet.bumpFeeOf(new Txid(txid)), fee.hex, fee.units);
       await reviewBroadcast(b.finish(wollet), 'Fee-bump (RBF replacement)', null, fee.hex,
-        { rows:[], feeAssetHex:fee.hex, extra:[['Replaces', txid.slice(0,12)+'…'+txid.slice(-6)+', same payment']] }, () => stillUnconfirmed(txid));
+        { rows:[], feeAssetHex:fee.hex, kind:{ kind:'bump', of:txid }, extra:[['Replaces', txid.slice(0,12)+'…'+txid.slice(-6)+', same payment']] }, () => stillUnconfirmed(txid));
     }
   }catch(e){ toast(e && e.settled ? e.message : (target ? 'Replace' : 'Fee-bump')+' failed: '+prettyErr(e)); }
 }
@@ -5853,7 +5930,7 @@ async function doCpfp(parentTxid, fee){
     await stillUnconfirmed(parentTxid);
     const b = applyFeeUnits(wollet.cpfpOf(new Txid(parentTxid)), fee.hex, fee.units);
     await reviewBroadcast(b.finish(wollet), 'Speed up (child pays for parent)', null, fee.hex,
-      { rows:[], feeAssetHex:fee.hex, extra:[['Speeds up', parentTxid.slice(0,12)+'…'+parentTxid.slice(-6)]] }, () => stillUnconfirmed(parentTxid));
+      { rows:[], feeAssetHex:fee.hex, kind:{ kind:'speedup', of:parentTxid }, extra:[['Speeds up', parentTxid.slice(0,12)+'…'+parentTxid.slice(-6)]] }, () => stillUnconfirmed(parentTxid));
   }catch(e){ toast(e && e.settled ? e.message : 'Speed up failed: '+prettyErr(e)); }
 }
 
