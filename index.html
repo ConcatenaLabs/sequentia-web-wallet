@@ -95,9 +95,10 @@
   .more-list button.active{background:#1d242d;color:var(--amber2)}
   .more-list .dev{color:var(--dim)}
   .more-list .dev:first-of-type{border-top:1px solid var(--line);margin-top:4px;border-radius:0 0 6px 6px}
-  .gear{margin-left:8px;flex:none;width:34px;height:32px;border:1px solid var(--line);background:transparent;color:var(--dim);
-    border-radius:8px;font-size:17px;line-height:1;cursor:pointer}
-  .gear:hover{color:var(--txt)} .gear.active{color:var(--amber2);border-color:var(--amber)}
+  .gear{margin-left:6px;flex:none;width:36px;height:36px;padding:0;border:none;background:transparent;color:var(--dim);
+    border-radius:50%;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+  .gear svg{width:21px;height:21px;display:block}
+  .gear:hover{color:var(--txt);background:#1d242d} .gear.active{color:var(--amber2)}
   /* lists */
   .list{margin-top:6px}
   .item{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
@@ -422,7 +423,7 @@
     <h1>Sequentia Wallet</h1>
     <span class="net" id="net">testnet</span>
     <span class="net lnpill hide" id="lnStatus" title="Lightning device signer status">⚡ LN</span>
-    <button class="gear hide" id="btnGear" title="Settings" aria-label="Settings">⚙</button>
+    <button class="gear hide" id="btnGear" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.33 4.32c.43-1.76 2.91-1.76 3.34 0a1.72 1.72 0 0 0 2.57 1.07c1.54-.94 3.3.82 2.37 2.37a1.72 1.72 0 0 0 1.06 2.57c1.76.43 1.76 2.91 0 3.34a1.72 1.72 0 0 0-1.07 2.57c.94 1.54-.82 3.3-2.37 2.37a1.72 1.72 0 0 0-2.57 1.06c-.43 1.76-2.91 1.76-3.34 0a1.72 1.72 0 0 0-2.57-1.07c-1.54.94-3.3-.82-2.37-2.37a1.72 1.72 0 0 0-1.06-2.57c-1.76-.43-1.76-2.91 0-3.34a1.72 1.72 0 0 0 1.07-2.57c-.94-1.54.82-3.3 2.37-2.37 1 .61 2.3.07 2.57-1.06z"/><circle cx="12" cy="12" r="3"/></svg></button>
   </div>
   <div class="sub" id="tipline">A self-custodial wallet powered by SWK (Sequentia Wallet Kit), running entirely in your browser.</div>
 
