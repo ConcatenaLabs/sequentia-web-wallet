@@ -79,10 +79,25 @@
   .leaf-refusal{color:#f0a39b}
   .leaf-split{font-size:12.5px;color:var(--dim);margin-top:2px}
   /* tabs */
-  .tabs{display:flex;flex-wrap:wrap;gap:4px;margin-top:18px;background:var(--panel);border:1px solid var(--line);
-        border-radius:12px;padding:4px}
-  .tabs button{flex:1 1 auto;border:none;background:transparent;color:var(--dim);padding:9px 12px;font-size:13.5px;border-radius:8px;white-space:nowrap;cursor:pointer}
-  .tabs button.active{background:#1d242d;color:var(--txt)}
+  .tabs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:18px;padding:0 0 12px;border-bottom:1px solid var(--line)}
+  .tabs > button,.more-btn{flex:0 0 auto;border:none;background:transparent;color:var(--dim);padding:8px 15px;font-size:14px;
+    border-radius:999px;white-space:nowrap;cursor:pointer}
+  .tabs > button:hover,.more-btn:hover{color:var(--txt)}
+  .tabs > button.active,.more-btn.active{background:var(--amber);color:#1a1300;font-weight:600}
+  .more{position:relative}
+  .more-btn{border:1px solid var(--line)}
+  .more-btn.active{border-color:var(--amber)}
+  .more-list{position:absolute;top:calc(100% + 6px);left:0;min-width:190px;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:6px;z-index:40;display:flex;flex-direction:column;box-shadow:0 8px 24px #0008}
+  .more-list.hide{display:none}
+  .more-list button{border:none;background:transparent;color:var(--txt);text-align:left;padding:9px 12px;border-radius:6px;font-size:14px;cursor:pointer}
+  .more-list button:hover{background:#1d242d}
+  .more-list button.active{background:#1d242d;color:var(--amber2)}
+  .more-list .dev{color:var(--dim)}
+  .more-list .dev:first-of-type{border-top:1px solid var(--line);margin-top:4px;border-radius:0 0 6px 6px}
+  .gear{margin-left:8px;flex:none;width:34px;height:32px;border:1px solid var(--line);background:transparent;color:var(--dim);
+    border-radius:8px;font-size:17px;line-height:1;cursor:pointer}
+  .gear:hover{color:var(--txt)} .gear.active{color:var(--amber2);border-color:var(--amber)}
   /* lists */
   .list{margin-top:6px}
   .item{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
@@ -378,6 +393,18 @@
   .swtrust svg{flex:0 0 auto;color:var(--amber2);margin-top:1px} .swtrust b{color:var(--txt);font-weight:650}
   /* Below the desk breakpoint the book stacks above the composer (single column). */
   @media (max-width:860px){ .swdesk{grid-template-columns:1fr;gap:16px} }
+  /* Phones: the menu keeps one row where it can, the header wraps under the title, and a history
+     row puts its amounts under the transaction instead of pushing them off the screen. */
+  @media (max-width:560px){
+    .top{flex-wrap:wrap}
+    .tabs{gap:4px}
+    .tabs > button,.more-btn{padding:7px 10px;font-size:13px}
+    .item{flex-wrap:wrap}
+    .item .grow{min-width:0;flex:1 1 60%}
+    .item .grow a{word-break:break-all}
+    .amts{width:100%;align-items:flex-end}
+    .amts .fee{white-space:normal;text-align:right}
+  }
   @media (max-width:480px){
     .swamt{font-size:26px}
     .swpane{padding:16px}
@@ -395,6 +422,7 @@
     <h1>Sequentia Wallet</h1>
     <span class="net" id="net">testnet</span>
     <span class="net lnpill hide" id="lnStatus" title="Lightning device signer status">⚡ LN</span>
+    <button class="gear hide" id="btnGear" title="Settings" aria-label="Settings">⚙</button>
   </div>
   <div class="sub" id="tipline">A self-custodial wallet powered by SWK (Sequentia Wallet Kit), running entirely in your browser.</div>
 
@@ -435,19 +463,25 @@
 
   <!-- ===== app ===== -->
   <div class="hide" id="app">
+    <!-- The five things most visits are for in one row; the rest behind More; Settings is the gear above. -->
     <div class="tabs" id="tabs">
       <button data-tab="balance" class="active">Balance</button>
       <button data-tab="send">Send</button>
       <button data-tab="receive">Receive</button>
       <button data-tab="swap">Swap</button>
-      <button data-tab="mix">Mix</button>
-      <button data-tab="assets">Issuance</button>
-      <button data-tab="stake">Stake</button>
       <button data-tab="history">History</button>
-      <button data-tab="sign">Sign</button>
-      <button data-tab="leaves" id="tabLeaves" class="hide">Leaves</button>
-      <button data-tab="contracts" id="tabContracts" class="hide">Contracts</button>
-      <button data-tab="settings">Settings</button>
+      <div class="more" id="moreMenu">
+        <button class="more-btn" id="btnMore" aria-haspopup="true" aria-expanded="false"><span id="moreLabel">More</span> ▾</button>
+        <div class="more-list hide" id="moreList">
+          <button data-tab="mix">Mix</button>
+          <button data-tab="assets">Issuance</button>
+          <button data-tab="stake">Stake</button>
+          <button data-tab="sign">Sign</button>
+          <button data-tab="leaves" id="tabLeaves" class="dev hide">Leaves</button>
+          <button data-tab="contracts" id="tabContracts" class="dev hide">Contracts</button>
+        </div>
+      </div>
+      <button data-tab="settings" class="hide" aria-hidden="true"></button>
     </div>
 
     <!-- wallet-wide reference-currency picker: every tab/amount field reflects this -->
@@ -2527,7 +2561,13 @@ async function btcWaitConf(txid, spkHex, tries=300){
 function show(id,on=true){ $(id).classList.toggle('hide', !on); }
 function views(active){ for(const v of ['welcome','createView','importView','app']) show(v, v===active); }
 function tab(name){
-  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
+  document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
+  // More stands for the tab chosen from it, and is lit while one of those is open.
+  { const inMore=$('moreList') && $('moreList').querySelector('button.active');
+    if($('btnMore')) $('btnMore').classList.toggle('active', !!inMore);
+    if($('moreLabel')) $('moreLabel').textContent = inMore ? inMore.textContent : 'More';
+    closeMore(); }
+  if($('btnGear')) $('btnGear').classList.toggle('active', name==='settings');
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
   if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='sign' && !keySignStarted){ keySignStarted=true; $('keySignIndex').value = addrIndex ?? 0; renderKeySign(); }
@@ -2774,7 +2814,7 @@ async function openWallet(phrase){
   const endRestore = timer('open wallet › restore cached scan', { count:false });
   const restored = await restoreWolletState();
   endRestore(restored ? 'restored' : 'nothing to restore');
-  addrIndex=null; views('app'); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
+  addrIndex=null; views('app'); show('btnGear', true); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
   // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
   // on at any time; the leaf wallet starts only while the mode is on.
   try{ initLeaves(); }catch(e){ console.warn('[leaves] init failed:', e?.message??e); }
@@ -5414,7 +5454,12 @@ async function cjRunBtc(){
   }finally{ cjBusy=false; $('cjBtcGo').disabled=false; }
 }
 
-document.querySelectorAll('#tabs button').forEach(b=> b.onclick=()=>tab(b.dataset.tab));
+document.querySelectorAll('#tabs button[data-tab]').forEach(b=> b.onclick=()=>tab(b.dataset.tab));
+function closeMore(){ const l=$('moreList'); if(l && !l.classList.contains('hide')){ l.classList.add('hide'); $('btnMore').setAttribute('aria-expanded','false'); } }
+$('btnMore').onclick=(e)=>{ e.stopPropagation(); const l=$('moreList'), open=l.classList.toggle('hide')===false; $('btnMore').setAttribute('aria-expanded', String(open)); };
+document.addEventListener('click', (e)=>{ if(!e.target.closest || !e.target.closest('#moreMenu')) closeMore(); });
+document.addEventListener('keydown', (e)=>{ if(e.key==='Escape') closeMore(); });
+$('btnGear').onclick=()=>tab('settings');
 $('btnCreate').onclick=()=>{ const m=Mnemonic.fromRandom(12); window._pending=m.toString();
   const w=$('words'); w.innerHTML=''; window._pending.split(' ').forEach((x,i)=>{ const s=el('span'); s.innerHTML=`<b>${i+1}</b>${x}`; w.appendChild(s); });
   views('createView'); };

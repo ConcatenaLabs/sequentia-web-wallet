@@ -77,7 +77,8 @@ Get testnet funds from the **Issuance** tab: one-click faucet buttons for tSEQ a
 assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com/faucet pays
 straight to your current address).
 
-The tabs:
+The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake and Sign
+under **More**; Settings behind the gear in the header.
 
 - **Balance**: a headline portfolio total across parent-chain BTC and every Sequentia asset,
   valued in your chosen reference currency, then one uniform row per asset. No asset is
