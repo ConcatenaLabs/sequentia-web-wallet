@@ -5704,7 +5704,7 @@ function renderHistory(){
     for(const l of legs){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n;
       const a=el('span','amt '+(neg?'neg':'pos'), (neg?'':'+')+fmtAtoms(l.atoms,am.precision)+' '+am.ticker); box.appendChild(a); }
     if(r.fee){ const fm=assetMeta(r.fee.hex), rv=refValueStr(r.fee.hex, BigInt(r.fee.atoms));
-      box.appendChild(el('span','fee','fee '+fmtAtoms(r.fee.atoms,fm.precision)+' '+fm.ticker+(rv?' · '+rv:''))); }
+      box.appendChild(el('span','fee','fee '+fmtAtoms(r.fee.atoms,fm.precision)+' '+fm.ticker+(rv?' ('+rv+')':''))); }
     item.appendChild(box);
     list.appendChild(item);
   }
