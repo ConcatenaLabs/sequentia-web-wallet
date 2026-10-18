@@ -6819,12 +6819,13 @@ async function onCovOrderStatus(s){
 }
 
 // Called on wallet open: rehydrate placed orders + resume watching for fills. The
-// covenant rests ON-CHAIN, so a fill can happen while the tab was closed; on reopen
-// we rescan so any credit already received is reflected, and re-arm the watcher.
+// covenant rests ON-CHAIN, so a fill can happen while the tab was closed; any credit
+// already received is picked up by the companion scan of the wallet's first
+// sync, which openWallet awaits just before calling this, so it is not scanned again
+// here. Then re-arm the watcher.
 export function resumeCovenantOrders(){
   loadPlaced();
   ensureCompanion();
-  scanCompanion().catch(()=>{});
   reconcileUnfundedPlaced().catch(()=>{});   // recover any record that died mid-broadcast
   if (PLACED.length){ ensureCovenantRelay(); }
 }
@@ -9315,7 +9316,12 @@ export function covenantCreditBalance(){
   try { return (COMPANION && COMPANION.balance) ? COMPANION.balance().toJSON() : {}; }
   catch { return {}; }
 }
-export async function scanCovenantCompanion(){ await scanCompanion(); }
+// The wallet's sync scans the companion in the same queued turn as the primary wallet, on a client
+// of its own, so the two walk their address histories side by side rather than one after the
+// other. It holds the wallet queue across both scans and both applies, which is what keeps every
+// other user of COMPANION out meanwhile.
+export function companionWollet(){ return ensureCompanion(); }
+export function applyCompanionUpdate(u){ if (u && COMPANION) COMPANION.applyUpdate(u); }
 // The "credits received" block: proceeds paid into the taproot payout when a resting
 // order filled (possibly while the wallet was closed). Sweeping them into the main
 // wpkh balance is a follow-up; here the maker at least SEES them (task requirement).
