@@ -6569,7 +6569,7 @@ async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset){
     const signed = C.signer.sign(pset);
     const finalized = C.wollet.finalize(signed);
     const t = await C.client.broadcast(finalized);
-    try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+    try { C.wollet.applyTransaction(finalized.extractTx ? finalized.extractTx() : finalized); } catch {}   // spend-tracking: the scan is minutes stale
     try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
     return t;
   };
@@ -6848,7 +6848,7 @@ async function sendSeqAsset(toAddr, assetHex, atoms){
     const signed = C.signer.sign(pset);
     const finalized = C.wollet.finalize(signed);
     const t = await C.client.broadcast(finalized);
-    try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+    try { C.wollet.applyTransaction(finalized.extractTx ? finalized.extractTx() : finalized); } catch {}   // spend-tracking: the scan is minutes stale
     try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
     return t;
   };
@@ -9426,7 +9426,7 @@ async function liftOffer(q, onStatusArg){
       const finalPset = new wasm.Pset(strippedB64);
       const finalized = C.wollet.finalize(finalPset);
       const txid = await C.client.broadcast(finalized);
-      try { C.wollet.applyTransaction(finalized); } catch {}   // spend-tracking: the scan is minutes stale
+      try { C.wollet.applyTransaction(finalized.extractTx ? finalized.extractTx() : finalized); } catch {}   // spend-tracking: the scan is minutes stale
       try { C.noteOwnTx && C.noteOwnTx(finalized); } catch {}
       return { transaction: strippedB64, txid: (txid && txid.toString) ? txid.toString() : String(txid) };
     };
