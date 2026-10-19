@@ -22,7 +22,7 @@
 
 import { planPlaceOrder, buildCovenantTerms, planFillFromMatched, __test__ as covOrderTest } from './covenant-order.js';
 import { bytesToHex } from './covenant.js';
-import { makeCovenantHooks, revHexStr } from './covenant-fill-host.js';
+import { makeCovenantHooks, revHexStr, chainOf } from './covenant-fill-host.js';
 
 // swap.js reads `localStorage` at module load; a no-op shim is all the import needs.
 globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
@@ -54,6 +54,13 @@ const FIXED = { sellAtoms: 90n*100000000n, rateNum: 3n, rateDen: 7n, minLot: 500
 check('revhex_reverses', revHex('001122'), '221100');
 check('revhex_involution', revHex(revHex(A_DISPLAY)), A_DISPLAY);
 check('revhex_matches_host_copy', revHexStr(A_INTERNAL), revHex(A_INTERNAL));
+// The kit's extInt() answers the Chain enum's number (0 External, 1 Internal); a change coin must
+// be signed on the internal chain, or the fill is refused as a wrong derivation.
+check('chain_internal_number', chainOf({ extInt: () => 1 }), 1);
+check('chain_external_number', chainOf({ extInt: () => 0 }), 0);
+check('chain_internal_name', chainOf({ extInt: () => 'Internal' }), 1);
+check('chain_external_name', chainOf({ extInt: () => 'External' }), 0);
+check('chain_absent', chainOf({}), 0);
 
 // --- (a) place path: DISPLAY ids in -> INTERNAL golden derivation out -------
 {
