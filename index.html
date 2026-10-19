@@ -4021,8 +4021,8 @@ function lnMoveRoomField(card, leg, moveAtoms){
       terms.adopt(q);
       if(!q.ok){
         state={ problem: (q.min!=null && q.max!=null)
-          ? 'The service sells between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room to receive.'
-          : 'No price for this room: '+(q.reason||q.error||'the service did not answer') };
+          ? 'The service sells between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room to receive. Change the amount, or leave it empty to move without room to receive.'
+          : 'No price for this room: '+(q.reason||q.error||'the service did not answer')+'. Leave it empty to move without room to receive.' };
         line.textContent=state.problem; return;
       }
       const fee=BigInt(q.fee);
