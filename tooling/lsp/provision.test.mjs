@@ -11,14 +11,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeProvisioner } from './provision.mjs';
 
+// A binary that starts and exits: /bin/true, or where there is none (Windows) Node itself, which
+// exits at once on arguments it does not take. /bin/false only has to fail, which a missing
+// file does too.
+const TRUE = fs.existsSync('/bin/true') ? '/bin/true' : process.execPath;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prov-test-'));
 const P = makeProvisioner({
   dir,
-  lightningd: '/bin/true', node: '/bin/true', wsRelay: 'ignored', hsmdProxy: 'ignored',
+  lightningd: TRUE, node: TRUE, wsRelay: 'ignored', hsmdProxy: 'ignored',
   lncli: '/bin/false',                       // getinfo -> error -> null (node "down")
-  elementsCli: '/bin/true',
+  elementsCli: TRUE,
   rpcPort: 18300, rpcUser: 'u', rpcPass: 'p',
-  chains: { btc: { network: 'testnet4', rpcConnect: '127.0.0.1', rpcPort: 48332, rpcUser: 'u', rpcPass: 'p', cli: '/bin/true', feerate: 1000, extra: [] } },
+  chains: { btc: { network: 'testnet4', rpcConnect: '127.0.0.1', rpcPort: 48332, rpcUser: 'u', rpcPass: 'p', cli: TRUE, feerate: 1000, extra: [] } },
 });
 
 const ASSET = 'aa'.repeat(32);
