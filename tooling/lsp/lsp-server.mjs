@@ -1590,10 +1590,14 @@ function startSubasBuyHodl(body) {
 // hosted node cooperatively, paying this side's balance to the node's own wallet (or to
 // `destination` when one is named). Device-signed and fail-closed: the keyless node's closing tx is
 // signed by the DEVICE, which signs a cooperative close only when it pays this side's balance to the
-// device's own scripts, so the LSP can command the close but cannot redirect the funds; and if no
-// device signer is connected, the close times out rather than moving anything. A `destination`
-// outside the device's scripts therefore ends in the unilateral fallback. `unilateraltimeout` gives
-// the cooperative path a window before falling back to a (still device-signed) unilateral close.
+// device's own scripts or to a script the wallet named to it (approveCloseDestination), so the LSP
+// can command the close but cannot redirect the funds; and if no device signer is connected, the
+// close times out rather than moving anything. `unilateraltimeout` gives the cooperative path a
+// window before a (still device-signed) unilateral close, which is what happens when the peer does
+// not answer. A `destination` the device refuses is worse: once the peer has signed a closing
+// transaction lightningd keeps it as the one to broadcast, the device refuses that too, and the
+// channel stays in AWAITING_UNILATERAL (seqln test_keyless_node_refused_close_falls_back_to_unilateral).
+// So the wallet names its address to the device before asking for a close to it.
 async function closeChannel(body) {
   const chain = CHAINS[String(body.chain || '').toLowerCase()];
   if (!chain) return { ok: false, error: "chain must be 'btc' or 'seq'" };
@@ -1605,9 +1609,8 @@ async function closeChannel(body) {
   const nodeKey = body.node || null;
   const { rpc } = targetFor(chain, assetId, nodeKey);
   if (!rpc) return { ok: false, error: `no hosted Lightning node for ${chain === 'btc' ? 'BTC' : assetLabel(assetId)}` };
-  // Where the close pays this side: the node's own wallet unless a destination is named. A
-  // keyless node's device signs a cooperative close only when it pays this side's balance to the
-  // device's own scripts, so a named destination outside them ends in the unilateral fallback.
+  // Where the close pays this side: the node's own wallet unless a destination is named, which the
+  // device must have been given (see above).
   const dest = String(body.destination || '').trim();
   // Pick the channel to close: the named scid, else the node's single open channel.
   const pc = await lnrpc('listpeerchannels', [], rpc).catch(() => ({ channels: [] }));
@@ -1616,7 +1619,8 @@ async function closeChannel(body) {
   if (!ch) return { ok: false, error: open.length ? 'multiple channels on this node — specify scid' : 'no open channel to close on this node' };
   const id = ch.short_channel_id || ch.channel_id;
   // close <id> <unilateraltimeout> <destination>: cooperative first (funds -> destination), then a
-  // device-signed unilateral fallback. Bounded by an execFile timeout so a missing device fails fast.
+  // device-signed unilateral close if the peer does not answer. Bounded by an execFile timeout so a
+  // missing device fails fast.
   const uni = Number.isFinite(Number(body.unilateraltimeout)) ? Math.max(1, Number(body.unilateraltimeout)) : 60;
   const r = await lnrpc('close', dest ? [id, String(uni), dest] : [id, String(uni)], rpc, (uni + 30) * 1000);
   return { ok: true, closing_txid: r.txid || (r.txids && r.txids[0]) || null, type: r.type || null,
