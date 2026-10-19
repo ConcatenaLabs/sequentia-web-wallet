@@ -111,7 +111,7 @@ import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 import { rateOf, assetInboundLimits, feeReuseProblem } from './inbound-limits.mjs';
-import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
+import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt, roomFromStock } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 
 function reqEnv(name) {
@@ -776,6 +776,25 @@ async function frontableInventory() {
     } catch { /* BTC-LN node down -> no BTC-leg fronting advertised */ }
   }
   return { assets, btc };
+}
+
+// How much room to receive in an asset the service can open right now: the LP's confirmed, unreserved
+// coins of it (frontableInventory), less the reserve and headroom provisionInbound funds on top of the
+// amount sold. Room was sold, and its fee taken, without asking: a wallet bought 2 OILX of room while
+// the LP held 0.96 OILX, and fundchannel failed after the fee was paid. Null when no LP is configured.
+async function roomStock(assetId) {
+  if (!CFG.subasLpRpc || !assetId) return null;
+  try {
+    const inv = await frontableInventory();
+    return roomFromStock(inv.assets[String(assetId).toLowerCase()] || 0,
+      { reserve: CFG.subasInboundReserve, headroomBps: CFG.subasInboundHeadroomBps });
+  } catch { return null; }
+}
+function stockRefusal(stock, assetId) {
+  const label = assetLabel(assetId) || 'this asset';
+  return stock > 0
+    ? `the service can open at most ${stock} atoms of room to receive in ${label} right now`
+    : `the service holds no ${label} to open room to receive right now`;
 }
 
 async function status(deviceKeys = []) {
@@ -4899,7 +4918,12 @@ const server = http.createServer(async (req, res) => {
       if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
       const months = parseMonths(url.searchParams.get('months'), CFG.inboundMonths, CFG.inboundDefaultMonths);
       if (months == null) return send(res, 400, { ok: false, error: `months must be one of ${CFG.inboundMonths.join(', ')}`, months_allowed: CFG.inboundMonths });
-      const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, assetId, months, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
+      let q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, assetId, months, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
+      // Never quote room the service cannot open: the LP has to hold the coins it puts on its side.
+      if (q.ok && !isBtc) {
+        const stock = await roomStock(assetId);
+        if (stock != null && q.amount > stock) q = { ...q, ok: false, fee: 0, reason: stockRefusal(stock, assetId), stock_max: stock };
+      }
       const nodeKey = url.searchParams.get('node_key') || '';
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
       // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
@@ -4942,6 +4966,13 @@ const server = http.createServer(async (req, res) => {
       let openAmount = amount;
       if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc: false, assetId, months, ...lim }); }
       else if (!q.ok && q.max != null && amount > q.max) return send(res, 400, { ok: false, error: q.reason, min: q.min, max: q.max });
+      // Before anything is charged: room the LP cannot fund is not sold. A prepaid fee already sent
+      // stays unused (it is recorded only when a purchase goes ahead), so a retry once the LP holds
+      // the coins uses it.
+      {
+        const stock = await roomStock(assetId);
+        if (stock != null && openAmount > stock) return send(res, 409, { ok: false, error: stockRefusal(stock, assetId), stock_max: stock });
+      }
       // The service keeps the channel open until then; after it, it may close it.
       const until = expiresAt(Date.now(), months);
       const owed = debtOwed(body.node_key, assetId);

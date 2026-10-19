@@ -3869,8 +3869,12 @@ function lnClearInbound(){ try{ localStorage.removeItem(INBOUND_KEY); }catch{} }
 // has not been asked for yet (lnResumeReceiveRoom finishes it on the next open).
 function lnRoomSlotFree(){
   const prior=lnLoadInbound();
-  if(prior && prior.fee_txid) throw new Error('Your earlier purchase of room to receive '+(prior.ticker||'')+' is still finishing. Reopen the wallet in a minute to finish it, then try again.');
+  if(prior && prior.fee_txid) throw new Error('Your fee for room to receive '+(prior.ticker||'')+' is already paid, and that room is not open yet: the wallet asks the service again each time it opens. To use the fee now for a smaller room, open Receive over Lightning for '+(prior.ticker||'that asset')+'.');
 }
+// A paid fee whose room the service has not opened (it held too little of the asset, or the tab
+// closed first). The service takes it again for the same asset and node and no more room than it
+// paid for (feeReuseProblem), so it buys a smaller room now instead of waiting.
+function lnPaidRoom(asset){ const p=lnLoadInbound(); return p && p.fee_txid && p.asset===asset ? p : null; }
 // Ask the service to open the room, until it sees the fee (it answers 402 until then).
 async function lnClaimInbound(rec, say){
   const deadline = Date.now() + 8*60_000;
@@ -3932,6 +3936,13 @@ function lnRoomPriceText(q, tk, prec){
       : 'Fee '+f(fee)+'. '+span+' of '+f(BigInt(q.amount))+' of room at '+rate+'% a year; never less than '+f(floor)+'.')
     +' The service keeps this channel open for '+term+'. Receiving uses up the room and spending makes it again.';
 }
+// Room the service cannot open: it holds too little of the asset to put on its side of a channel.
+function roomStockText(max, tk, prec){
+  return BigInt(max) > 0n
+    ? 'The service holds enough '+tk+' to open at most '+fmtAtoms(BigInt(max), prec)+' '+tk+' of room right now.'
+    : 'The service holds no '+tk+' to open room to receive right now.';
+}
+function roomShortfall(e){ const m=String((e && e.message) || e); return !!(e && e.status===409 && /room to receive/.test(m)) || /Could not afford|holds no .* to open room|at most \d+ atoms of room/.test(m); }
 function lnReceiveRoomDialog(leg, startAtoms){
   const m=el('div','modal'), c=el('div','card');
   c.appendChild(el('label','lbl','Receive '+leg.ticker+' over Lightning'));
@@ -3959,8 +3970,16 @@ function lnReceiveRoomDialog(leg, startAtoms){
       const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), months });
       if(String(atoms)!==String(parseAtoms((inp.value||'').trim(), prec)) || months!==terms.months()) return;   // changed meanwhile
       terms.adopt(q);
+      const paid=lnPaidRoom(leg.asset);
+      if(paid && atoms<=BigInt(paid.amount) && (q.ok || (q.stock_max!=null && atoms<=BigInt(q.stock_max)))){
+        quote.textContent='Already paid: your earlier fee covers room for up to '+fmtAtoms(BigInt(paid.amount), prec)+' '+tk+'. Nothing more to pay.';
+        last={ atoms, fee: 0n, months: paid.months, paid };
+        ok.textContent='Open'; ok.disabled=false; return;
+      }
+      ok.textContent='Pay the fee and open';
       if(!q.ok){
-        quote.textContent = (q.min!=null && q.max!=null)
+        quote.textContent = q.stock_max!=null ? roomStockText(q.stock_max, tk, prec)
+          : (q.min!=null && q.max!=null)
           ? 'The service opens between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room.'
           : 'No price for this amount: '+(q.reason||q.error||'the service did not answer');
         return;
@@ -3984,8 +4003,20 @@ function lnReceiveRoomDialog(leg, startAtoms){
       say('Connecting your '+tk+' Lightning node…');
       const prov = await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: tk, policy:lnPolicy(), deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
       if(!(prov && prov.connected)) throw new Error('Could not bring your device signer online. Check your connection and try again.');
-      lnRoomSlotFree();
+      if(!last.paid) lnRoomSlotFree();
       await waitNodeReady({ nodeKey: prov.key, onProgress: ()=>say('Preparing your Lightning node…') });
+      if(last.paid){
+        // The fee is paid already: ask for the smaller room with it.
+        const rec={ ...last.paid, amount: Number(last.atoms), node: prov.key };
+        lnSaveInbound(rec);
+        const r=await lnClaimInbound(rec, say);
+        st.className='status ok';
+        st.textContent='Done. A channel with room for '+fmtAtoms(last.atoms, prec)+' '+tk+' is opening to you, paid by your earlier fee'
+          +(r && r.expires_at ? '; the service keeps it open until '+new Date(r.expires_at).toLocaleDateString()+'.' : '.');
+        no.disabled=false; no.textContent='Close'; no.onclick=()=>m.remove();
+        try{ refreshLnStatus(); }catch{}
+        return;
+      }
       // The price again, for this node: anything it already owes is due with it.
       const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(last.atoms), node_key: prov.key, months: last.months });
       if(!q.ok) throw new Error(q.reason || q.error || 'the service gave no price');
@@ -4009,7 +4040,11 @@ function lnReceiveRoomDialog(leg, startAtoms){
       try{ refreshLnStatus(); }catch{}
       setTimeout(()=>{ try{ sync(); }catch{} }, 1500);
     }catch(e){
-      st.className='status err'; st.textContent='Failed: '+prettyErr(e)+(lnLoadInbound() && lnLoadInbound().fee_txid ? ' Your fee is paid; the wallet finishes this the next time it opens.' : '');
+      const paid = lnLoadInbound() && lnLoadInbound().fee_txid;
+      st.className='status err';
+      st.textContent = roomShortfall(e)
+        ? 'The service does not hold enough '+tk+' to open this room right now.'+(paid ? ' Your fee is paid and kept: the wallet asks again each time it opens, and the room opens once the service has the '+tk+'.' : ' Nothing was paid.')
+        : 'Failed: '+prettyErr(e)+(paid ? ' Your fee is paid; the wallet finishes this the next time it opens.' : '');
       no.disabled=false; inp.disabled=false; ok.disabled=false;
     }
   };
@@ -4040,7 +4075,8 @@ function lnMoveRoomField(card, leg, moveAtoms){
       if(my!==seq) return;
       terms.adopt(q);
       if(!q.ok){
-        state={ problem: (q.min!=null && q.max!=null)
+        state={ problem: q.stock_max!=null ? roomStockText(q.stock_max, tk, prec)+' Change the amount, or leave it empty to move without room to receive.'
+          : (q.min!=null && q.max!=null)
           ? 'The service sells between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room to receive. Change the amount, or leave it empty to move without room to receive.'
           : 'No price for this room: '+(q.reason||q.error||'the service did not answer')+'. Leave it empty to move without room to receive.' };
         line.textContent=state.problem; return;
