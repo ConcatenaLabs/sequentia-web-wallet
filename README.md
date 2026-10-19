@@ -280,8 +280,9 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   go to the node's own address first and the node funds the channel from there
   (`tooling/lsp/README.md`).
 - Receiving over Lightning needs room on the other side of a channel, which the service sells: it
-  opens a channel to your node with that room on its side, for a fee in the same asset, paid on
-  chain. Move to Lightning asks for it with the move, and the fee is one more output of the
+  opens a channel to your node with that room on its side and keeps it open for the months you
+  choose, for a fee in the same asset, paid on chain: the amount times the asset's yearly rate
+  times the months, with a minimum. Receiving uses up the room and spending makes it again. Move to Lightning asks for it with the move, and the fee is one more output of the
   funding transaction; the service opens its channel once that transaction confirms. Once an
   asset is on Lightning, its Balance row says how much it can receive and offers more room.
 - A trade with both rails set to Lightning settles both legs atomically on one preimage, fully

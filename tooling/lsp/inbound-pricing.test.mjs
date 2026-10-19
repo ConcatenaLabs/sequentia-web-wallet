@@ -14,20 +14,18 @@
 import assert from 'node:assert';
 import test from 'node:test';
 
-// quoteInboundFee, mirrored from lsp-server.mjs (which reads its defaults from CFG).
-const D = { bps: 100, minSat: 3000, minAtoms: 1000, minAmount: 100000, maxAmount: 10000000 };
+import { quoteRoom, annualBpsFor, parseMonths, expiresAt, MONTHS_ALLOWED } from './inbound-price.mjs';
+
+// quoteInboundFee in lsp-server.mjs is quoteRoom with its configuration: the defaults below. A
+// client that names no duration gets a year at 1%, which is what the service always charged.
+const D = { annualBps: 100, months: 12, minSat: 3000, minAtoms: 1000, minAmount: 100000, maxAmount: 10000000 };
 function quoteInboundFee(amount, o = {}) {
   const c = { ...D, ...o };
-  const amt = Math.floor(Number(amount) || 0);
-  const floor = c.isBtc ? c.minSat : c.minAtoms;
-  if (!(amt > 0)) return { ok: false, reason: 'amount must be greater than zero', amount: 0, fee: 0 };
-  if (amt < c.minAmount) return { ok: false, reason: `the smallest amount of inbound sold is ${c.minAmount}`, amount: amt, fee: 0 };
-  if (amt > c.maxAmount) return { ok: false, reason: `the largest amount of inbound sold is ${c.maxAmount}`, amount: amt, fee: 0 };
-  const pct = Math.ceil((amt * c.bps) / 10000);
-  return { ok: true, amount: amt, fee: Math.max(pct, floor), bps: c.bps, floor };
+  return quoteRoom(amount, { months: c.months, annualBps: c.annualBps, floor: c.isBtc ? c.minSat : c.minAtoms,
+    minAmount: c.minAmount, maxAmount: c.maxAmount });
 }
 
-test('the headline price is 1% of the amount bought', () => {
+test('the headline price is 1% of the amount bought for a year', () => {
   assert.equal(quoteInboundFee(1_000_000, { isBtc: true }).fee, 10_000);
   assert.equal(quoteInboundFee(500_000, { isBtc: true }).fee, 5_000);
 });
@@ -89,6 +87,55 @@ test('a quote never charges more than the liquidity is worth', () => {
     const q = quoteInboundFee(amt, { isBtc: true });
     assert.ok(q.fee < amt / 10, `fee ${q.fee} is more than 10% of ${amt}`);
   }
+});
+
+// ── THE PRICE OF TIME ───────────────────────────────────────────────────────
+// What the service gives up is its coins held in the channel, so the price grows with the time
+// they are held, at a yearly rate set per asset.
+
+test('the price is the amount times the yearly rate times the months', () => {
+  // 100 USDX (8 decimals) at 5% a year: 6 months is 2.5 USDX, a year is 5, a month is 0.4166… (up).
+  const usdx = 100e8;
+  assert.equal(quoteRoom(usdx, { months: 6, annualBps: 500, floor: 1e8, minAmount: 10e8, maxAmount: 10000e8 }).fee, 2.5e8);
+  assert.equal(quoteRoom(usdx, { months: 12, annualBps: 500, floor: 1e8, minAmount: 10e8, maxAmount: 10000e8 }).fee, 5e8);
+  // a month at 5% would be 0.4166 USDX, under the 1 USDX floor: the floor applies
+  assert.equal(quoteRoom(usdx, { months: 1, annualBps: 500, floor: 1e8, minAmount: 10e8, maxAmount: 10000e8 }).fee, 1e8);
+  const q = quoteRoom(usdx, { months: 6, annualBps: 500, floor: 1e8, minAmount: 10e8, maxAmount: 10000e8 });
+  assert.equal(q.months, 6); assert.equal(q.annual_bps, 500); assert.equal(q.bps, 250);
+});
+
+test('a client that names no duration pays what it always did', () => {
+  assert.equal(quoteInboundFee(1_000_000, { isBtc: true }).fee, 10_000);
+  assert.equal(quoteInboundFee(1_000_000, { isBtc: true, months: 6 }).fee, 5_000);
+});
+
+test('an asset worth little is priced without losing precision', () => {
+  // 1e16 atoms × 500 bps × 12 months overflows a double's exact integers; the quote must not.
+  const q = quoteRoom(1e16, { months: 12, annualBps: 500, floor: 1, minAmount: 1, maxAmount: 1e17 });
+  assert.equal(q.fee, 5e14);
+});
+
+test('each asset has its own yearly rate, BTC and the native asset included', () => {
+  const table = { USDX: 500, btc: 100, ['aa'.repeat(32)]: 300 };
+  assert.equal(annualBpsFor(table, 'ff'.repeat(32), 'USDX', 200), 500, 'by label');
+  assert.equal(annualBpsFor(table, 'AA'.repeat(32), 'GOLD', 200), 300, 'by id, any case');
+  assert.equal(annualBpsFor(table, 'BTC', 'BTC', 200), 100);
+  assert.equal(annualBpsFor(table, 'bb'.repeat(32), 'tSEQ', 200), 200, 'not named: the default, never free');
+  assert.equal(annualBpsFor(null, 'x', 'y', 150), 150);
+});
+
+test('only the durations sold are accepted', () => {
+  assert.deepEqual(MONTHS_ALLOWED, [1, 3, 6, 12]);
+  assert.equal(parseMonths(undefined), 12);
+  assert.equal(parseMonths('', [1, 3, 6, 12], 6), 6);
+  assert.equal(parseMonths('6'), 6);
+  for (const bad of ['5', '0', '-1', '6.5', 'x', 24]) assert.equal(parseMonths(bad), null, String(bad));
+});
+
+test('the channel is kept for calendar months', () => {
+  const jan31 = Date.UTC(2026, 0, 31);
+  assert.equal(new Date(expiresAt(Date.UTC(2026, 9, 19), 6)).toISOString().slice(0, 10), '2027-04-19');
+  assert.ok(expiresAt(jan31, 1) - jan31 >= 28 * 86400e3);
 });
 
 // ── COLLECTION: TWO WAYS TO PAY ──────────────────────────────────────────────
