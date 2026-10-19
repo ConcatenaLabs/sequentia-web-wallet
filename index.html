@@ -2013,7 +2013,7 @@ function updateFeeAssetHint(){
   const state = !priced ? 'no' : (rv ? 'ok' : 'warn');
   const dot=el('span','feedot '+state); hint.appendChild(dot);
   hint.appendChild(document.createTextNode(
-    state==='ok' ? `Accepted for fees by this node; 1 ${t} ${rv}. The fee is shown in both before you sign.`
+    state==='ok' ? `Accepted for fees by this node; 1 ${t} ${rv}. The fee is shown in both before signing.`
     : state==='warn' ? `Accepted for fees by this node, but ${t} has no market price, so the fee's value cannot be shown.`
     : `This node does not accept ${t} for fees; the transaction could be rejected. Pick another asset.`));
   // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
@@ -5406,7 +5406,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
   // A fee worth more than 30 reference units (USD) is almost always a typed rate gone wrong.
   { const f=builtFee, pu = f ? priceFor(priceTicker(f.hex)) : 0;
     const usd = (f && pu>0) ? Number(BigInt(f.atoms)) / Math.pow(10, assetMeta(f.hex).precision||0) * pu : 0;
-    if(usd > 30){ const w=el('div','warn','⚠ This fee is worth about '+usd.toLocaleString(undefined,{maximumFractionDigits:2})+' USD. Check the fee rate before you sign.'); w.style.margin='10px 0'; const row=ok.parentNode; row.parentNode.insertBefore(w, row); } }
+    if(usd > 30){ const w=el('div','warn','⚠ This fee is worth about '+usd.toLocaleString(undefined,{maximumFractionDigits:2})+' USD. Check the fee rate before signing.'); w.style.margin='10px 0'; const row=ok.parentNode; row.parentNode.insertBefore(w, row); } }
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Signing &amp; broadcasting…';
     const endConfirm = timer('send › confirm to broadcast');
