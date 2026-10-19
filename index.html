@@ -3036,7 +3036,12 @@ function lnStatusPill(){
   // while there are no channels yet.
   const activeChannels = (lnLastStatus && lnLastStatus.channels)
     ? lnLastStatus.channels.filter(c=>c.node_key && String(c.state||'').startsWith('CHANNELD')).length : 0;
-  el.className = 'net lnpill ' + (activeChannels ? 'ln-ready' : (st.connected ? 'ln-ready' : (st.phase==='error' ? 'ln-err' : 'ln-warn')));
+  // Without a channel of its own, what the wallet needs from Lightning is the service: it opens a
+  // node and a channel on the first Move or receive. So the service answering /status is "ready".
+  // The shared demo signers (st) used to decide this, and with them down the pill read
+  // "connecting…" forever on a wallet that could move to Lightning at any moment.
+  const serviceUp = !!lnLastStatus || st.connected;
+  el.className = 'net lnpill ' + (activeChannels || serviceUp ? 'ln-ready' : (st.phase==='error' ? 'ln-err' : 'ln-warn'));
   // ONE consistent vocabulary. This used to flip between a signer fraction ("LN 0/2") and a
   // channel count ("LN 13 ch") — two different meanings wearing the same shape, so "0/2" read
   // as "0 of 2 channels" when it meant "0 of 2 signers connected". The channel count is the
@@ -3044,8 +3049,8 @@ function lnStatusPill(){
   // fraction that mimics the "N ch" form. The signer detail lives in the tooltip.
   if(activeChannels){
     el.textContent = '⚡ LN '+activeChannels+' ch';
-  } else if (st.connected){
-    el.textContent = '⚡ LN ready';                 // signers up, no channel yet
+  } else if (serviceUp){
+    el.textContent = '⚡ LN ready';                 // the service answers; no channel yet
   } else if (st.phase==='error'){
     el.textContent = '⚡ LN offline';
   } else {
