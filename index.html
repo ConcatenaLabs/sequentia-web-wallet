@@ -147,6 +147,8 @@
   .arow2{flex-direction:column;align-items:stretch;gap:0}
   .arow-head{display:flex;align-items:baseline;gap:10px}
   .ln-meta{margin-top:9px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:rgba(255,198,41,.045)}
+  .ln-help{margin:6px 0 0;padding-left:18px}
+  .ln-help li{margin:3px 0}
   .rails{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin:7px 0 0 14px;padding:6px 10px;border-left:2px solid var(--line);border-radius:0 8px 8px 0;background:rgba(255,255,255,.025)}
   .rail .rl{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:700}
   .rail .ra{font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:1px}
@@ -519,7 +521,11 @@
         <div class="warn hide" id="lnUpgradeNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
-          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving a Sequentia asset to Lightning pays the amount straight into a channel on your hosted node, in one transaction your wallet signs only once the channel's way back is signed; BTC goes to the node's own address first, and the node opens the channel from there. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
+          <ul class="sub ln-help">
+            <li>Moving an asset to Lightning pays the amount into a channel on your hosted node.</li>
+            <li>Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it.</li>
+            <li>An asset is movable when the funding transaction of the Lightning channel can pay a fee in that asset or another you hold, accepted by a block producer.</li>
+          </ul>
         </details>
       </div>
       <div class="card">
@@ -2042,7 +2048,7 @@ function btcVbytes(nin, nout){ return Math.ceil(10.75 + 68*nin + 31*nout); }
 function btcFeeRate(){ const v=parseFloat(($('feeRate').value||'').trim()); return v>0 ? v : BTC_DEFAULT_FEERATE; }
 
 // build + sign a P2WPKH transaction spending wallet utxos to `outputs` ([{address, amount}])
-async function btcBuildTx(outputs, feeRate){
+async function btcBuildTx(outputs, feeRate, { unsigned = false } = {}){
   const utxos = await btcGatherUtxos();
   if(!utxos.length) throw new Error('no spendable BTC; testnet4 balance is empty');
   utxos.sort((a,b)=> a.value<b.value?1:a.value>b.value?-1:0);   // largest first
@@ -2061,8 +2067,14 @@ async function btcBuildTx(outputs, feeRate){
   for(const u of sel) tx.addInput({txid:u.txid, index:u.vout, witnessUtxo:{script:u.script, amount:u.value}});
   for(const o of outputs) tx.addOutputAddress(o.address, o.amount, btc.TEST_NETWORK);
   if(withChange) tx.addOutputAddress(btcAddr(true, btcChangeNext), change, btc.TEST_NETWORK);
-  const seen=new Set();              // sign each distinct key once
-  for(const u of sel){ const k=[...u.priv].join(','); if(seen.has(k)) continue; seen.add(k); tx.sign(u.priv); }
+  const seen=new Set(), keys=[];     // sign each distinct key once
+  for(const u of sel){ const k=[...u.priv].join(','); if(seen.has(k)) continue; seen.add(k); keys.push(u.priv); }
+  // Unsigned: the caller hands the transaction on first (a channel's funding, to its node) and
+  // signs it later with finish(); every input is segwit, so the txid is fixed already.
+  if(unsigned) return { tx, txid: tx.id, fee, inputs: sel.length,
+    changeIndex: withChange ? btcChangeNext : null,
+    finish: () => { for(const k of keys) tx.sign(k); tx.finalize(); return { hex: tx.hex, txid: tx.id }; } };
+  for(const k of keys) tx.sign(k);
   tx.finalize();
   // btcChangeNext is advanced only after a SUCCESSFUL broadcast (see btcReviewBroadcast),
   // so a cancelled or failed build never burns a change index or marches past the scan window.
@@ -3394,11 +3406,40 @@ function lnFundingProblem(pset, { script, amount, asset }){
   if(v!==BigInt(amount)) return 'its payment to the channel is not the amount you chose';
   return null;
 }
-async function lnFundDirect({ address, script, amount, asset, complete, onBroadcast }){
+async function lnFundDirect(args){ return args.chain==='btc' ? lnFundDirectBtc(args) : lnFundDirectSeq(args); }
+// The fee of a Sequentia channel's funding: in the asset being moved while some of it stays on
+// chain, else in the most valuable other asset this wallet holds that a block producer accepts.
+function lnFundingFeeAsset(asset, amount){
+  const left = BigInt(balObj()[asset] || 0) - BigInt(amount);
+  if(feeRateEntry(asset) && feeRateEntry(asset).rate > 0 && left > 0n) return asset;
+  const other = rescueFeeAssets().find(o => o.hex !== asset);
+  return other ? other.hex : asset;
+}
+async function lnFundDirectBtc({ address, script, amount, complete, onBroadcast }){
+  const built = await btcBuildTx([{ address, amount: BigInt(amount) }], btcFeeRate(), { unsigned: true });
+  const tx = built.tx, want = String(script||'').toLowerCase();
+  const mine = [];
+  for(let i=0;i<tx.outputsLength;i++){ const o=tx.getOutput(i); if(hexOfBytes(o.script)===want) mine.push(o); }
+  if(mine.length!==1 || mine[0].amount!==BigInt(amount)) throw new Error('Not opening the channel: the funding transaction does not pay the channel exactly the amount you chose.');
+  const psbt = tx.toPSBT(0);
+  let bin=''; for(const b of psbt) bin+=String.fromCharCode(b);
+  const fundingTxid = await complete(btoa(bin));
+  if(built.txid!==fundingTxid) throw new Error('Not opening the channel: your node expects a different funding transaction.');
+  const signed = built.finish();
+  if(signed.txid!==fundingTxid) throw new Error('Not opening the channel: the signed funding transaction is not the one your node expects.');
+  try{ localStorage.setItem(LN_FUNDING_KEY, JSON.stringify({ chain:'btc', txid: signed.txid, hex: signed.hex, at: Date.now() })); }catch{}
+  onBroadcast();
+  const r = await fetch(`${T4_API}/tx`, { method:'POST', body: signed.hex });
+  const txt = (await r.text()).trim();
+  if(!r.ok) throw new Error(txt || ('HTTP '+r.status));
+  if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);
+  return { txid: signed.txid };
+}
+async function lnFundDirectSeq({ address, script, amount, asset, complete, onBroadcast }){
   const a = new Address(address);
   if(a.isBlinded()) throw new Error('the channel funding address is confidential');
   let b = network.txBuilder().addExplicitRecipient(a, BigInt(amount), new AssetId(asset));
-  b = applyFee(b, asset);   // the fee in the asset being moved, as for a deposit (lnSendDeposit)
+  b = applyFee(b, lnFundingFeeAsset(asset, amount));
   // The wallet is held for the whole exchange, so nothing else spends these coins meanwhile.
   return withWollet(async () => {
     const pset = b.finish(wollet);
@@ -3425,25 +3466,28 @@ async function lnRebroadcastFunding(){
   const f = lnPendingFunding();
   if(!f || !f.hex) return;
   try{
-    const r = await fetch(ESPLORA+'/tx/'+f.txid+'/status');
+    const api = f.chain==='btc' ? T4_API : ESPLORA;
+    const r = await fetch(api+'/tx/'+f.txid+'/status');
     if(r.ok){ lnClearFunding(f.txid); return; }
-    const tx = new Transaction(f.hex);
-    await (broadcastClient || client).broadcast(tx);
+    if(f.chain==='btc'){
+      const b = await fetch(`${T4_API}/tx`, { method:'POST', body: f.hex });
+      if(!b.ok) throw new Error((await b.text()).trim() || ('HTTP '+b.status));
+    } else {
+      await (broadcastClient || client).broadcast(new Transaction(f.hex));
+    }
     console.info('[ln] channel funding '+f.txid+' broadcast again');
   }catch(e){ console.warn('[ln] channel funding rebroadcast (retried on the next open):', e?.message??e); }
 }
-// Every Move funds a Sequentia channel in one transaction when the service can; BTC, and a service
-// without the endpoints, go through the deposit to the node.
+// Every Move funds its channel in one transaction when the service can; a service without the
+// endpoints gets the deposit to the node.
 async function lnFundChannel(opts){
-  if(opts.chain==='seq'){
-    try{
-      const res = await fundChannelDirect({ asset: opts.asset, amount: opts.amount, node: opts.node, fund: lnFundDirect, onProgress: opts.onProgress });
-      try{ lnClearFunding(); }catch{}
-      return res;
-    }catch(e){
-      if(!e || !e.unsupported) throw e;
-      console.info('[ln] '+e.message+'; funding through the deposit');
-    }
+  try{
+    const res = await fundChannelDirect({ chain: opts.chain, asset: opts.asset, amount: opts.amount, node: opts.node, fund: lnFundDirect, onProgress: opts.onProgress });
+    try{ lnClearFunding(); }catch{}
+    return res;
+  }catch(e){
+    if(!e || !e.unsupported) throw e;
+    console.info('[ln] '+e.message+'; funding through the deposit');
   }
   return fundChannel({ ...opts, sendOnchain: lnSendDeposit });
 }
@@ -3809,7 +3853,7 @@ function moveToLightningDialog(leg){
   const avail = BigInt(leg.onchain||0n);
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Move '+leg.ticker+' to Lightning'));
-  c.appendChild(el('div','sub',(leg.chain==='btc' ? 'Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it.' : 'Your wallet pays this amount into a Lightning channel on your hosted node, in one on-chain transaction that it signs only after the channel’s way back is signed.')+' Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
+  c.appendChild(el('div','sub','Your wallet pays this amount into a Lightning channel on your hosted node, in one on-chain transaction that it signs only after the channel’s way back is signed. Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
   c.appendChild(el('div','sub','Available on-chain: '+fmtAtoms(avail, leg.precision)+' '+leg.ticker));

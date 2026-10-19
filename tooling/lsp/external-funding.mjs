@@ -61,6 +61,22 @@ export function fundingProblem(decoded, { script, atoms, asset }) {
   return null;
 }
 
+// The same for a Bitcoin channel, from bitcoind's `decodepsbt` (a PSBT v0: the unsigned
+// transaction is in `tx`, amounts in BTC). Bitcoin has no confidential outputs and CLN checks a
+// Bitcoin funding output's amount itself; checked here too, so both chains answer alike.
+export function btcFundingProblem(decoded, { script, sats }) {
+  const outs = decoded && decoded.tx && Array.isArray(decoded.tx.vout) ? decoded.tx.vout : null;
+  if (!outs) return 'the transaction could not be read';
+  const want = String(script || '').toLowerCase();
+  if (!/^[0-9a-f]+$/.test(want)) return 'the channel has no funding script';
+  const toChannel = outs.filter((o) => String((o.scriptPubKey && o.scriptPubKey.hex) || '').toLowerCase() === want);
+  if (toChannel.length === 0) return 'the transaction does not pay the channel';
+  if (toChannel.length > 1) return 'the transaction pays the channel more than once';
+  const got = amountAtoms(toChannel[0].value);
+  if (got !== Number(sats)) return `the payment to the channel is ${got} sats, not the channel's ${sats}`;
+  return null;
+}
+
 // The funding txid the node recorded for the channel `fundchannel_complete` answered for.
 export function fundingTxidOf(channels, channelId) {
   const id = String(channelId || '').toLowerCase();

@@ -269,15 +269,16 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   both your hosted node and the node your channel is with: the hosted node collects the
   device's signature on each commitment before the device revokes it, so the two together can
   broadcast a revoked commitment and take the channel's funds.
-- Moving a Sequentia asset to Lightning is one transaction: your wallet pays the channel's
+- Moving BTC or a Sequentia asset to Lightning is one transaction: your wallet pays the channel's
   2-of-2 output directly, so the coins are never on the hosted node and there is one fee and one
   confirmation. The wallet builds and blinds the transaction, the node's peer signs the
   channel's first commitment (the way back) against it while it is still unsigned, and only then
   does the wallet sign and broadcast it, after checking that it pays exactly the amount, in the
   asset, to the channel, and that its txid is the one the node expects. The signed transaction
   is stored before it is broadcast and sent again on the next open if the tab closed in between.
-  BTC goes to the BTC node's own address first, and the node funds the channel from there; so
-  does an asset when the service offers only that way (`tooling/lsp/README.md`).
+  BTC channels are funded the same way. With a service that offers only the older way, the coins
+  go to the node's own address first and the node funds the channel from there
+  (`tooling/lsp/README.md`).
 - A trade with both rails set to Lightning settles both legs atomically on one preimage, fully
   off-chain. A mixed rail (one leg on-chain, one Lightning) is a submarine swap.
 
