@@ -1676,6 +1676,15 @@ const EXCHANGE_RATE_SCALE = 100000000;
 // the previous session), avoiding a load window where only tSEQ resolves. Refreshed by fetchFeeRates.
 let feeRates = (()=>{ try{ return JSON.parse(localStorage.getItem('swk.feeRatesCache')||'{}'); }catch{ return {}; } })();
 let feeRefRate = null;                     // the tSEQ reference rate, READ from the feed (never fabricated; null until the feed provides it)
+// What the nodes the wallet broadcasts to say about each fee asset (/feeinfo: how many of them
+// accept it) and how busy the next block is (/congestion). Both are optional: a server without
+// them answers 404, and the fee choice then rests on /feerates alone, as before.
+let _feeInfo = null, _congestion = null;
+async function fetchFeeInfo(){
+  try{ const r = await fetch('/feeinfo'); if(r.ok) _feeInfo = (await r.json()).assets || null; }catch{}
+  try{ const r = await fetch('/congestion'); if(r.ok) _congestion = await r.json(); }catch{}
+  try{ populateFeeAssets(); }catch{}
+}
 async function fetchFeeRates(){
   try{
     // /feerates = getfeeexchangerates: the node's effective acceptance set {("bitcoin"|hex): rate},
@@ -1975,11 +1984,18 @@ function fillFeeAssetSelect(sel){
     let held=false; try{ held = BigInt(b[h]||'0') > 0n; }catch{}
     if(!held) continue;                                         // ONLY a POSITIVE balance qualifies — tSEQ has NO privilege; if you hold 0 tSEQ it never appears
     const tk = h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker;
-    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)){ refused.push(tk); continue; }   // the node does not accept it for fees
+    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)){ refused.push({ hex:h, tk }); continue; }   // not accepted by every node the wallet sends to
     add(h, tk + (refValue(h, 1n)==null ? ' · no price' : ''));
   }
   // Held but not accepted: listed after the others, not selectable, so a missing asset is explained.
-  for(const tk of refused){ const o=el('option'); o.disabled=true; o.textContent=tk+' · not accepted for fees'; sel.appendChild(o); }
+  for(const r of refused){
+    // Accepted by some of the nodes the wallet sends to is not enough: one that refuses it would
+    // drop the transaction. Say how many, when the server can tell.
+    const fi = _feeInfo && _feeInfo[String(r.hex).toLowerCase()];
+    const o=el('option'); o.disabled=true;
+    o.textContent = r.tk + (fi && fi.accepted_by > 0 ? ' · accepted by '+fi.accepted_by+' of '+fi.nodes+' nodes only' : ' · not accepted for fees');
+    sel.appendChild(o);
+  }
   if(prev && [...sel.options].some(o=>o.value===prev && !o.disabled)) sel.value=prev;
 }
 function populateFeeAssets(){ fillFeeAssetSelect($('feeAsset')); updateFeeAssetHint(); }
@@ -2016,6 +2032,14 @@ function updateFeeAssetHint(){
     state==='ok' ? `Accepted for fees by this node; 1 ${t} ${rv}. The fee is shown in both before signing.`
     : state==='warn' ? `Accepted for fees by this node, but ${t} has no market price, so the fee's value cannot be shown.`
     : `This node does not accept ${t} for fees; the transaction could be rejected. Pick another asset.`));
+  // How busy the next block is, when the server says.
+  if(_congestion && Number.isFinite(Number(_congestion.backlog_blocks))){
+    const b = Number(_congestion.backlog_blocks);
+    const line = el('div','sub');
+    line.textContent = b < 1 ? 'The next block has room for everything waiting.'
+      : 'About '+Math.ceil(b)+' blocks of transactions are waiting; at the default rate this may wait that long.';
+    hint.appendChild(line);
+  }
   // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
   // depends on the producer that mines it also accepting THIS asset; the rescue is RBF/CPFP
   // paying the bump in any asset producers accept, compared in the same reference unit.
@@ -4586,7 +4610,7 @@ async function _syncImpl(){
       try { applyCompanionUpdate(compUpdate); } catch(e){ console.warn('[sync] companion apply:', e?.message??e); }
     });
     // ...alongside the other chain, the fee-asset rates and the restricted-asset balances
-    await Promise.all([scans, part('Bitcoin scan', btcScan()), part('fee rates', fetchFeeRates()),
+    await Promise.all([scans, part('Bitcoin scan', btcScan()), part('fee rates', fetchFeeRates()), part('fee info', fetchFeeInfo()),
       part('OpenAMP balances', oampRefreshBalances()), part('OpenAMP user', oampRefreshUser())]);
     refreshScanCacheBase();   // no-op once a base exists; off-path (throwaway wollet, own client), never blocks this sync
     _scannedOnce = true;   // the live balance is now authoritative — stop showing the cached snapshot
