@@ -1417,6 +1417,10 @@ async function refreshInstant(){
     MAX0CONF_SATS = (st && Number.isFinite(Number(st.mixed_max_0conf_sats))) ? Number(st.mixed_max_0conf_sats) : MAX0CONF_SATS;
     BRIDGECAPS = (st && st.bridge) || BRIDGECAPS;
     applyStatusConstants(st);   // P5.4a — overlay shared constants (market_slip/min_lot_bps/front_cap/dust)
+    // Rebuilt from scratch on every read, summed over every open channel of an asset: a wallet has
+    // several per asset (its own, the service's to receive, one per move), and keeping the last one
+    // seen showed the composer one channel's balance; a stale key also outlived a closed channel.
+    INSTANT = {};
     for (const c of chans){
       if (!c.node_key) continue;   // ONLY the wallet's own channels count as its Lightning balance
                                    // (never shared/demo) — consistent with the Balance tab + railAvail
@@ -1426,17 +1430,19 @@ async function refreshInstant(){
       // and the composer showed "0 Lightning" for a funded channel. Resolve the full asset hex →
       // metaOf().ticker to match, exactly like the Balance card matches on c.asset.
       const isBtc = (c.leg === 'btc' || c.asset_label === 'BTC' || c.chain === 'btc');   // mirror channelMatches' 3-way BTC test
+      if (c.state && c.state !== 'CHANNELD_NORMAL') continue;   // opening or closing: nothing to pay or receive yet
       let t;
       if (isBtc) t = 'BTC';
       else {
         const hex = (typeof c.asset === 'string' && /^[0-9a-f]{64}$/i.test(c.asset)) ? c.asset.toLowerCase() : null;
-        t = hex ? metaOf(hex).ticker : (c.asset_label || c.asset || c.ticker);
+        // The service names the policy asset 'policy', not by id: it is tSEQ's channel like any other.
+        const policy = c.asset === 'policy' || /^policy/i.test(String(c.asset_label || ''));
+        t = hex ? metaOf(hex).ticker : policy ? metaOf(C.POLICY_HEX).ticker : (c.asset_label || c.asset || c.ticker);
       }
       if (!t) continue;
-      INSTANT[t] = {
-        spendable: (c.spendable_units ?? c.spendable ?? 0),
-        receivable: (c.receivable_units ?? c.receivable ?? 0),
-      };
+      const e = INSTANT[t] || (INSTANT[t] = { spendable: 0, receivable: 0 });
+      e.spendable += Number(c.spendable_units ?? c.spendable ?? 0);
+      e.receivable += Number(c.receivable_units ?? c.receivable ?? 0);
     }
   } catch { INSTANT = {}; LNSTATUS = { channels: [], funding: null }; }
   try { paintPanes(); } catch {}
