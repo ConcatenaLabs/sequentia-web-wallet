@@ -2,7 +2,7 @@
 // what `decodepsbt` must show for the node to ask its peer for the first commitment.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { amountAtoms, fundingProblem, fundingTxidOf } from './external-funding.mjs';
+import { amountAtoms, fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 
 const GOLD = '3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1';
 const SEQ = '4d1b177ce67c24263c8a8f756b4e3525ec16fa5dd225e333c1d2d3d3ffe5e57f';
@@ -79,4 +79,20 @@ test('the funding txid is the one the node recorded for that channel', () => {
   assert.equal(fundingTxidOf(chans, 'bb'.repeat(32)), '22'.repeat(32));
   assert.equal(fundingTxidOf(chans, 'cc'.repeat(32)), null);
   assert.equal(fundingTxidOf([{ channel_id: 'aa'.repeat(32), funding_txid: 'xyz' }], 'aa'.repeat(32)), null);
+});
+
+// bitcoind's decodepsbt of a PSBT v0: the unsigned transaction under `tx`, amounts in BTC.
+const btcTx = (...vout) => ({ tx: { txid: 'ab'.repeat(32), vout } });
+const btcOut = (value, hex) => ({ value, n: 0, scriptPubKey: { hex, type: 'witness_v0_scripthash' } });
+const btcWant = { script: SCRIPT, sats: 250_000 };
+
+test('a Bitcoin funding paying the channel exactly may fund it', () => {
+  assert.equal(btcFundingProblem(btcTx(btcOut(0.0025, SCRIPT), btcOut(0.01, '0014' + '2a'.repeat(20))), btcWant), null);
+});
+
+test('a Bitcoin funding paying the channel less, twice, or not at all is refused', () => {
+  assert.match(btcFundingProblem(btcTx(btcOut(0.002, SCRIPT)), btcWant), /200000 sats, not the channel's 250000/);
+  assert.match(btcFundingProblem(btcTx(btcOut(0.0025, SCRIPT), btcOut(0.0025, SCRIPT)), btcWant), /more than once/);
+  assert.match(btcFundingProblem(btcTx(btcOut(0.0025, '0014' + '2a'.repeat(20))), btcWant), /does not pay the channel/);
+  assert.match(btcFundingProblem({ outputs: [] }, btcWant), /could not be read/);
 });

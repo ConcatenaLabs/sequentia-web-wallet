@@ -34,7 +34,7 @@
 //        keyless, so the funding tx's SIGN_WITHDRAWAL is served by the DEVICE — the LSP
 //        can command fundchannel but cannot sign it. Returns 202 {job_id, poll}.
 //   GET  /channel/open/<id> -> pending_deposit | opening | awaiting_lockin | active | failed.
-//   POST /channel/start {chain:'seq', asset, amount, node} -> `fundchannel_start`: the channel's
+//   POST /channel/start {chain, asset?, amount, node} -> `fundchannel_start`: the channel's
 //        funding address. The wallet funds it in ONE transaction of its own, no deposit to the node:
 //   POST /channel/complete {job_id, psbt} -> checks the wallet's blinded, unsigned transaction
 //        pays the channel exactly, in its asset, in the clear (external-funding.mjs), then
@@ -109,7 +109,7 @@ import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair,
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
-import { fundingProblem, fundingTxidOf } from './external-funding.mjs';
+import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 
 function reqEnv(name) {
@@ -1185,7 +1185,7 @@ function startChannelOpen(body) {
 // ---------------------------------------------------------------------------
 // One-transaction channel funding: the wallet's own transaction funds the channel, the node never
 // holds the coins (external-funding.mjs has the flow and why each check is there).
-//   POST /channel/start    {chain:'seq', asset, amount, node} -> {job_id, funding_address, script, poll}
+//   POST /channel/start    {chain:'seq'|'btc', asset?, amount, node} -> {job_id, funding_address, script, poll}
 //   POST /channel/complete {job_id, psbt}  the wallet's blinded, UNSIGNED transaction -> {funding_txid}
 //   POST /channel/cancel   {job_id}        before the wallet broadcasts -> {cancelled}
 // The job is then polled at GET /channel/open/<id>, like a deposit-funded open.
@@ -1206,24 +1206,45 @@ function elementsCall(method, args = [], timeoutMs = 15000) {
   });
 }
 
+function btcCall(method, args = [], timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    if (!(CFG.btcCli && CFG.btcRpcPort)) {
+      return reject(new Error('this LSP cannot read Bitcoin transactions (BTC_CLI and BTC_RPC_PORT are not set)'));
+    }
+    execFile(CFG.btcCli, [`-rpcport=${CFG.btcRpcPort}`, `-rpcuser=${CFG.btcRpcUser}`,
+      `-rpcpassword=${CFG.btcRpcPass}`, method, ...args],
+      { timeout: timeoutMs, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
+        if (err) return reject(new Error(`${method}: ${scrubDetail(String(stderr || err.message).trim())}`));
+        const out = String(stdout).trim();
+        if (!out) return resolve(null);
+        try { resolve(JSON.parse(out)); } catch { resolve(out); }
+      });
+  });
+}
+const chainCall = (chain, method, args) => (chain === 'btc' ? btcCall : elementsCall)(method, args);
+
 async function startExternalFunding(body) {
-  if (CHAINS[String(body.chain || '').toLowerCase()] !== 'seq') {
-    return { ok: false, error: "one-transaction funding is for Sequentia channels (chain 'seq')" };
-  }
+  const chain = CHAINS[String(body.chain || '').toLowerCase()];
+  if (!chain) return { ok: false, error: "chain must be 'btc' or 'seq'" };
   const amount = Number(body.amount);
   if (!Number.isSafeInteger(amount) || amount <= 0) return { ok: false, error: 'amount must be a whole number of atoms' };
-  const assetId = body.asset ? resolveAsset(body.asset) : null;
-  if (!assetId) return { ok: false, error: 'a Sequentia asset id is required (no default asset)' };
+  let assetId = null;
+  if (chain === 'seq') {
+    assetId = body.asset ? resolveAsset(body.asset) : null;
+    if (!assetId) return { ok: false, error: 'a Sequentia asset id is required (no default asset)' };
+  }
+  const label = chain === 'btc' ? 'BTC' : assetLabel(assetId);
   const nodeKey = body.node || null;
-  const { rpc, peer } = targetFor('seq', assetId, nodeKey);
-  if (!rpc) return { ok: false, error: `this LSP has no hosted Lightning node for ${assetLabel(assetId)}; provision one first (POST /node/provision)` };
-  if (!peer) return { ok: false, error: `no routing peer configured for ${assetLabel(assetId)}` };
-  if (!(CFG.elementsCli && CFG.seqRpcPort)) return { ok: false, error: 'this LSP cannot check a funding transaction (ELEMENTS_CLI and SEQ_RPC_PORT are not set)' };
+  const { rpc, peer } = targetFor(chain, assetId, nodeKey);
+  if (!rpc) return { ok: false, error: `this LSP has no hosted Lightning node for ${label}; provision one first (POST /node/provision)` };
+  if (!peer) return { ok: false, error: `no routing peer configured for ${label}` };
+  if (chain === 'seq' && !(CFG.elementsCli && CFG.seqRpcPort)) return { ok: false, error: 'this LSP cannot check a funding transaction (ELEMENTS_CLI and SEQ_RPC_PORT are not set)' };
+  if (chain === 'btc' && !(CFG.btcCli && CFG.btcRpcPort)) return { ok: false, error: 'this LSP cannot check a funding transaction (BTC_CLI and BTC_RPC_PORT are not set)' };
   const [peerId, peerAddr] = peer.split('@');
   reapChannelJobs();
   const jobId = crypto.randomUUID();
-  const job = { ok: true, job_id: jobId, chain: 'seq', asset_id: assetId, node_key: nodeKey,
-    asset_label: assetLabel(assetId), requested_amount: amount, peer_id: peerId, external: true,
+  const job = { ok: true, job_id: jobId, chain, asset_id: assetId, node_key: nodeKey,
+    asset_label: label, requested_amount: amount, peer_id: peerId, external: true,
     status: 'starting', state: null, funding_txid: null, short_channel_id: null, started_ms: Date.now() };
   channelJobs.set(jobId, job);
   try {
@@ -1232,8 +1253,8 @@ async function startExternalFunding(body) {
     await waitSynced(rpc, Date.now() + 120_000);
     job.status = 'connecting';
     await ensurePeer(rpc, peerId, peerAddr, job);
-    const st = await lnrpcKw('fundchannel_start', [`id=${peerId}`, `amount=${amount}`, `asset=${assetId}`,
-      'announce=true'], rpc, SIGNER_RPC_TIMEOUT_MS * 3);
+    const st = await lnrpcKw('fundchannel_start', [`id=${peerId}`, `amount=${amount}`,
+      ...(assetId ? [`asset=${assetId}`] : []), 'announce=true'], rpc, SIGNER_RPC_TIMEOUT_MS * 3);
     if (!st.funding_address || !st.scriptpubkey) throw new Error('fundchannel_start returned no funding address');
     job.funding_address = st.funding_address;
     job.script = st.scriptpubkey;
@@ -1251,12 +1272,14 @@ async function completeExternalFunding(body) {
   if (job.status !== 'started') return { ok: false, code: 409, error: `the channel is ${job.status}, not waiting for its funding` };
   const psbt = String(body.psbt || '');
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(psbt)) return { ok: false, error: 'psbt must be base64' };
-  const { rpc } = targetFor('seq', job.asset_id, job.node_key);
+  const { rpc } = targetFor(job.chain, job.asset_id, job.node_key);
   // The node's own reading of the transaction, not the wallet's word for it.
   let decoded;
-  try { decoded = await elementsCall('decodepsbt', [psbt]); }
+  try { decoded = await chainCall(job.chain, 'decodepsbt', [psbt]); }
   catch (e) { return { ok: false, error: `the funding transaction could not be read: ${e.message}` }; }
-  const problem = fundingProblem(decoded, { script: job.script, atoms: job.requested_amount, asset: job.asset_id });
+  const problem = job.chain === 'btc'
+    ? btcFundingProblem(decoded, { script: job.script, sats: job.requested_amount })
+    : fundingProblem(decoded, { script: job.script, atoms: job.requested_amount, asset: job.asset_id });
   if (problem) return { ok: false, error: `not funding the channel: ${problem}` };
   job.status = 'completing';
   let done;
@@ -1302,8 +1325,8 @@ async function watchExternalLockin(job, rpc) {
 async function fundingSeen(job) {
   if (!job.funding_txid) return false;
   if (job.funding_outnum != null
-      && await elementsCall('gettxout', [job.funding_txid, String(job.funding_outnum), 'true']).catch(() => null)) return true;
-  return !!(await elementsCall('getrawtransaction', [job.funding_txid]).catch(() => null));
+      && await chainCall(job.chain, 'gettxout', [job.funding_txid, String(job.funding_outnum), 'true']).catch(() => null)) return true;
+  return !!(await chainCall(job.chain, 'getrawtransaction', [job.funding_txid]).catch(() => null));
 }
 
 // Cancelling is safe only while the funding transaction exists nowhere but in the wallet: once it
@@ -1322,7 +1345,7 @@ async function cancelExternalFunding(body) {
     job.status = 'awaiting_lockin';
     return { ok: false, code: 409, error: 'the funding transaction is already on the network; the channel will open' };
   }
-  const { rpc } = targetFor('seq', job.asset_id, job.node_key);
+  const { rpc } = targetFor(job.chain, job.asset_id, job.node_key);
   try { await lnrpcKw('fundchannel_cancel', [`id=${job.peer_id}`], rpc, SIGNER_RPC_TIMEOUT_MS); }
   catch (e) { if (job.status === 'awaiting_broadcast') return { ok: false, error: String((e && e.message) || e) }; }
   job.status = 'cancelled'; job.done_ms = Date.now();
