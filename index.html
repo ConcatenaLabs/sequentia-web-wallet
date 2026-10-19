@@ -147,10 +147,15 @@
   .arow2{flex-direction:column;align-items:stretch;gap:0}
   .arow-head{display:flex;align-items:baseline;gap:10px}
   .ln-meta{margin-top:9px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:rgba(255,198,41,.045)}
-  .ln-meta-head{display:flex;align-items:center;gap:5px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--amber2);font-weight:700;margin-bottom:5px}
-  .ln-meta-head .z{color:var(--amber2)}
-  .ln-meta-split{font-size:12px;color:var(--fg)}
-  .ln-meta-hint{font-size:11px;color:var(--dim);margin-top:6px}
+  .rails{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
+  .rail .rl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:700}
+  .rail .ra{font-size:14px;font-variant-numeric:tabular-nums;margin-top:2px}
+  .rail .rs{font-size:11px;color:var(--dim);margin-top:1px}
+  .rail.right{text-align:right}
+  .rails .mv{padding:4px 12px;font-size:12px;white-space:nowrap}
+  .move-dirs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+  .move-dirs button{text-align:left;padding:10px 12px}
+  .move-dirs .md-t{font-weight:700;font-size:13px}
   .bal-acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
   .bal-acts button{padding:3px 11px;font-size:12px}
   .ln-note{margin-top:12px}
@@ -3470,6 +3475,40 @@ function lnSpendableFor(kind /* 'BTC' | assetHex */){
   }
   return { units, channels: n };
 }
+// Whether one of the wallet's own channels for a leg is funded but not yet confirmed.
+function lnOpeningFor(kind /* 'BTC' | assetHex */){
+  for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
+    if(!c.node_key || c.state!=='CHANNELD_AWAITING_LOCKIN') continue;
+    const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
+    if(kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase())) return true;
+  }
+  return false;
+}
+// Move ⇄: one button per asset for both ways. With only one way open it goes straight there;
+// with both, it asks which.
+function moveRailsDialog({ leg, own, ticker, precision, onchain, ln, toLn, toChain }){
+  if(toLn && !toChain) return moveToLightningDialog(leg);
+  if(toChain && !toLn) return closeToChainDialog(leg, own);
+  if(!toLn && !toChain) return;
+  const m=el('div','modal'), c=el('div','card');
+  c.appendChild(el('label','lbl','Move '+ticker));
+  const dirs=el('div','move-dirs');
+  const pick=(title, note, go)=>{
+    const b=el('button','ghost');
+    b.appendChild(el('div','md-t', title));
+    b.appendChild(el('div','sub', note));
+    b.onclick=()=>{ m.remove(); go(); };
+    dirs.appendChild(b);
+  };
+  pick('On-chain → Lightning', fmtAtoms(onchain, precision)+' '+ticker+' on-chain', ()=>moveToLightningDialog(leg));
+  pick('Lightning → on-chain', fmtAtoms(ln, precision)+' '+ticker+' on Lightning', ()=>closeToChainDialog(leg, own));
+  c.appendChild(dirs);
+  const row=el('div','row'); row.style.marginTop='12px';
+  const no=el('button','ghost','Cancel'); no.onclick=()=>m.remove(); row.appendChild(no);
+  c.appendChild(row);
+  m.appendChild(c); document.body.appendChild(m);
+  m.onclick=(e)=>{ if(e.target===m) m.remove(); };
+}
 // The active channel(s) on the user's OWN provisioned node for a leg — carries the scid + node_key
 // that "Move back to chain" needs to name the exact channel to close. Returns [{scid, node_key, spendable_units}].
 function lnOwnChannelsFor(kind /* 'BTC' | assetHex */){
@@ -4364,32 +4403,30 @@ function renderBalance(){
     if(kind!=='BTC' && leavesApi && devModeOn(localStorage) && known){
       r.appendChild(el('div','leaf-split', fmtAtoms(onchainAtoms||0n, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning'));
     }
-    // Lightning metacard: only when there is an own Lightning balance, or on-chain funds that could
-    // be moved in — never an empty "Not in Lightning yet" card on a zero row (e.g. a fresh BTC).
+    // Under the total, the two places the asset can be, side by side and on the same footing:
+    // on-chain on the left, Lightning on the right, and between them the one Move ⇄ for either
+    // way. Shown only when Lightning has something for this asset: a balance in a channel, or
+    // on-chain funds that could go into one (a fresh BTC row stays a single line).
     if(lnOn && leg && (chans>0 || own.length || (movable && (onchainAtoms||0n) > 0n))){
-      const meta=el('div','ln-meta');
-      const mh=el('div','ln-meta-head'); mh.appendChild(el('span','z','⚡')); mh.appendChild(document.createTextNode(' Lightning')); meta.appendChild(mh);
-      const split=el('div','ln-meta-split');
-      split.textContent = chans>0
-        ? (fmtAtoms(lnAtoms, precision)+' '+ticker+' in Lightning · '+fmtAtoms(onchainAtoms||0n, precision)+' on-chain')
-        : ('Not in Lightning yet · '+fmtAtoms(onchainAtoms||0n, precision)+' '+ticker+' on-chain');
-      meta.appendChild(split);
-      const acts=el('div','bal-acts');
-      if(movable || chans>0){
-        const btn=el('button','ghost', chans>0?'Add to Lightning':'Move to Lightning');
-        btn.disabled = !((onchainAtoms||0n) > 0n);   // provisions the user's OWN hosted node on click
-        btn.title = btn.disabled ? ('No on-chain '+ticker+' to move') : ('Provision your own '+ticker+' Lightning node and open a channel');
-        btn.onclick=()=>moveToLightningDialog(leg);
-        acts.appendChild(btn);
-      }
-      if(own.length){   // Move-to-chain only for the user's OWN provisioned channels (carry a node_key)
-        const cb=el('button','ghost','Close channel');
-        cb.title='Close your '+ticker+' Lightning channel: its balance goes on chain to your Lightning node\'s own address';
-        cb.onclick=()=>closeToChainDialog(leg, own);
-        acts.appendChild(cb);
-      }
-      if(acts.children.length) meta.appendChild(acts);
-      r.appendChild(meta);
+      const on=(onchainAtoms||0n);
+      const rails=el('div','rails');
+      const side=(cls, label, atoms, note)=>{
+        const d=el('div','rail'+(cls?' '+cls:''));
+        d.appendChild(el('div','rl', label));
+        d.appendChild(el('div','ra', fmtAtoms(atoms, precision)));
+        if(note) d.appendChild(el('div','rs', note));
+        return d;
+      };
+      const opening = lnOpeningFor(kind);
+      rails.appendChild(side('', 'On-chain', on, ''));
+      const toLn = movable && on > 0n, toChain = own.length > 0;
+      const mv=el('button','ghost mv','Move ⇄');
+      mv.disabled = !(toLn || toChain);
+      mv.title = mv.disabled ? ('Nothing to move yet') : ('Move '+ticker+' between on-chain and Lightning');
+      mv.onclick=()=>moveRailsDialog({ leg, own, ticker, precision, onchain: on, ln: lnAtoms, toLn, toChain });
+      rails.appendChild(mv);
+      rails.appendChild(side('right', 'Lightning', lnAtoms, opening ? 'channel opening' : ''));
+      r.appendChild(rails);
     }
     list.appendChild(r);
   };
