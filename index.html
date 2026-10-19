@@ -4411,7 +4411,8 @@ function loadSnapshot(){
 }
 function saveSnapshot(){
   try{
-    _snap = { at: Date.now(), tip: wollet.tip().height(), seq: balObj(), btc: (btcBalance||0n).toString(), hist: historyRows() };
+    _snap = { at: Date.now(), tip: wollet.tip().height(), seq: balObj(), btc: (btcBalance||0n).toString(), hist: historyRows(),
+      btcHist: _btcHistRows || (_snap && _snap.btcHist) || undefined };
     localStorage.setItem(snapKey(), JSON.stringify(_snap));
     localStorage.removeItem('swk.balCache');   // not keyed by wallet: it showed one wallet's balance on another's first paint
   }catch(e){ console.warn('[snapshot] not saved:', e?.message??e); }
@@ -6103,9 +6104,36 @@ function renderHistory(){
 // The parent-chain history mirrors the Sequentia list above: esplora testnet4 /address/{a}/txs for
 // the wallet's active BTC addresses, deduped by txid, classified in/out by net delta to the wallet,
 // each row linking to the testnet4 explorer (/testnet4/tx/...).
+// The Bitcoin history rows of the last completed read, kept in the wallet's snapshot so the tab has
+// something true to show before this session's first sync: [{ txid, delta, conf, height, time }].
+let _btcHistRows = null;
+function drawBtcRows(list, rows){
+  list.innerHTML='';
+  if(!rows.length){ list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
+  for(const t of rows){
+    const delta=BigInt(t.delta), incoming = delta >= 0n;
+    const item=el('div','item');
+    item.appendChild(el('span','badge dir '+(incoming?'b-in':'b-out'), incoming?'IN':'OUT'));
+    const mid=el('div','grow');
+    const when = t.conf ? (t.time ? new Date(t.time*1000).toLocaleString() : 'block '+t.height) : 'unconfirmed';
+    { const _d=el('div'); _d.appendChild(txLink('/testnet4/tx/'+t.txid, t.txid.slice(0,20)+'…')); mid.appendChild(_d); }
+    mid.appendChild(el('div','sub'+(t.conf?'':' unconf'), when+' · Bitcoin testnet4'));
+    item.appendChild(mid);
+    const mag = delta<0n ? -delta : delta;
+    item.appendChild(el('span','amt '+(incoming?'pos':'neg'), (incoming?'':'-')+fmtAtoms(mag,8)+' BTC'));
+    list.appendChild(item);
+  }
+}
 async function renderBtcHistory(){
   const list=$('btcHistList'); if(!list) return;
   if(!btcRoot){ list.innerHTML=''; list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
+  // Before the first sync this wallet has not looked at the chain yet: the last read, dated by the
+  // status line above, or that it is being read; never "no transactions", which nobody has checked.
+  if(!_scannedOnce){
+    if(_snap && Array.isArray(_snap.btcHist)) drawBtcRows(list, _snap.btcHist);
+    else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your Bitcoin history…')); }
+    return;
+  }
   // Wallet address universe (for in/out classification): the full scanned window on both branches.
   const lim = Math.max(btcScanLimit, btcChangeNext+1, GAP+1);
   const walletAddrs = new Set();
@@ -6115,7 +6143,7 @@ async function renderBtcHistory(){
   const query = new Set();
   for(const i of btcUsed) query.add(btcAddr(false,i));
   for(let i=0;i<btcChangeNext;i++) query.add(btcAddr(true,i));
-  if(!query.size){ list.innerHTML=''; list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
+  if(!query.size){ drawBtcRows(list, []); keepBtcRows([]); return; }   // no address has been used: none
   const seen = new Map();   // txid -> esplora tx
   await Promise.all([...query].map(async a=>{
     try{ const txs=await fetch(`${T4_API}/address/${a}/txs`).then(r=>r.ok?r.json():[]);
@@ -6123,26 +6151,20 @@ async function renderBtcHistory(){
   }));
   const txs=[...seen.values()];
   txs.sort((a,b)=>(((b.status&&b.status.block_height)??9e9)-((a.status&&a.status.block_height)??9e9)));   // unconfirmed first, then newest
-  list.innerHTML='';
-  if(!txs.length){ list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
-  for(const t of txs.slice(0,60)){
+  const rows = txs.slice(0,60).map(t=>{
     let inSum=0n, outSum=0n;
     for(const vin of (t.vin||[])){ const po=vin.prevout; if(po && walletAddrs.has(po.scriptpubkey_address)) inSum+=BigInt(po.value||0); }
     for(const vo of (t.vout||[])){ if(walletAddrs.has(vo.scriptpubkey_address)) outSum+=BigInt(vo.value||0); }
-    const delta = outSum - inSum;
-    const incoming = delta >= 0n;
-    const item=el('div','item');
-    item.appendChild(el('span','badge dir '+(incoming?'b-in':'b-out'), incoming?'IN':'OUT'));
-    const mid=el('div','grow');
-    const conf = t.status && t.status.confirmed;
-    const when = conf ? (t.status.block_time ? new Date(t.status.block_time*1000).toLocaleString() : 'block '+t.status.block_height) : 'unconfirmed';
-    { const _d=el('div'); _d.appendChild(txLink('/testnet4/tx/'+t.txid, t.txid.slice(0,20)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub'+(conf?'':' unconf'), when+' · Bitcoin testnet4'));
-    item.appendChild(mid);
-    const mag = delta<0n ? -delta : delta;
-    item.appendChild(el('span','amt '+(incoming?'pos':'neg'), (incoming?'':'-')+fmtAtoms(mag,8)+' BTC'));
-    list.appendChild(item);
-  }
+    const st=t.status||{};
+    return { txid:t.txid, delta:(outSum-inSum).toString(), conf:!!st.confirmed, height:st.block_height||0, time:st.block_time||0 };
+  });
+  drawBtcRows(list, rows);
+  keepBtcRows(rows);
+}
+// Into the snapshot too, so the next open shows these until its own first sync completes.
+function keepBtcRows(rows){
+  _btcHistRows = rows;
+  try{ const snap=JSON.parse(localStorage.getItem(snapKey())||'null'); if(snap){ snap.btcHist=rows; localStorage.setItem(snapKey(), JSON.stringify(snap)); _snap=snap; } }catch{}
 }
 
 // ---------- RBF fee-bump / replace + CPFP rescue (asset-agnostic) ----------
