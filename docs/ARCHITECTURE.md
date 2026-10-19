@@ -235,13 +235,15 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.sequentia.oampTransfers`, `swk.sequentia.signerHints` | OpenAMP transfer log; pool signer keys this browser has delegated to |
 | `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |
 | `swk.ln.predating`, `swk.ln.predating.dismissed` | per hosted node, the channels its device found in an older device's store, which it does not carry over; and the notes about them, and about coins on the node outside a channel, that the user dismissed |
+| `swk.ln.funding.v1` | a Lightning channel's funding transaction, signed and stored just before it is broadcast; sent again on the next open if the network does not know it, and cleared once it does |
+| `swk.ln.pendingMove.v1` | a Move to Lightning past its on-chain transaction but not yet open, to finish on the next open |
 | `swk.devMode` | `1` while developer mode is on; absent (off) by default |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
 | `swk.snapshot:<descriptor>` | what the last completed sync found, per wallet: balances on both chains, the Sequentia history rows and when. Shown, dated, until the session's first sync completes and whenever a sync fails; never used to build or sign. Safe to clear |
 | `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
-The fund-bearing keys are the mnemonic, the pool join in flight, and the in-flight swap, walk, peg and bridge records;
+The fund-bearing keys are the mnemonic, the pool join in flight, a channel funding not yet broadcast, and the in-flight swap, walk, peg and bridge records;
 the rest can be cleared without loss. The leaf wallet's store is not in `localStorage`: it is a SQLite file in the
 origin's private file system (OPFS), one per mnemonic, and it holds what the mnemonic cannot rebuild (which leaves
 were spent off-chain, forfeits signed, the operator's record heads). Clearing the site's data loses it.
@@ -261,8 +263,8 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 69 `*.test.mjs` files: 46 hold `node:test` suites, and the
-other 23, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
+`node --test` (Node 22+) runs all 72 `*.test.mjs` files: 48 hold `node:test` suites, and the
+other 24, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
 hooks (leg operations, state accessors) for headless driving, and the real
