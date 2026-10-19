@@ -241,6 +241,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.devMode` | `1` while developer mode is on; absent (off) by default |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
+| `swk.txSeen:<descriptor>` | per wallet, the block height and time the explorer gave for this wallet's own transactions before a sync recorded them; shown in History at once, and each one starts a sync. Safe to clear |
 | `swk.snapshot:<descriptor>` | what the last completed sync found, per wallet: balances on both chains, the Sequentia history rows and when. Shown, dated, until the session's first sync completes and whenever a sync fails; never used to build or sign. Safe to clear |
 | `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
