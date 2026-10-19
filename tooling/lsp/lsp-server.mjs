@@ -1594,10 +1594,10 @@ function startSubasBuyHodl(body) {
 // can command the close but cannot redirect the funds; and if no device signer is connected, the
 // close times out rather than moving anything. `unilateraltimeout` gives the cooperative path a
 // window before a (still device-signed) unilateral close, which is what happens when the peer does
-// not answer. A `destination` the device refuses is worse: once the peer has signed a closing
-// transaction lightningd keeps it as the one to broadcast, the device refuses that too, and the
-// channel stays in AWAITING_UNILATERAL (seqln test_keyless_node_refused_close_falls_back_to_unilateral).
-// So the wallet names its address to the device before asking for a close to it.
+// not answer, and when the device refuses the `destination`: the node then keeps its commitment as
+// the transaction to broadcast (seqln test_keyless_node_refused_close_falls_back_to_unilateral), and
+// the funds reach the node's own address after the channel's delay. So the wallet names its address
+// to the device before asking for a close to it.
 async function closeChannel(body) {
   const chain = CHAINS[String(body.chain || '').toLowerCase()];
   if (!chain) return { ok: false, error: "chain must be 'btc' or 'seq'" };
