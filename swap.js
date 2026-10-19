@@ -602,6 +602,7 @@ export function initSwap(ctx){
     _payHint  = C.attachRefHint($('swPayAmt'),  () => S.payAsset || '');
     _recvHint = C.attachRefHint($('swRecvAmt'), () => S.receiveAsset || '');
   }
+  paintGuideSoon();
 }
 let _payHint = null, _recvHint = null;
 
@@ -629,6 +630,7 @@ function wireAmount(input, side){
     if (S.mode !== 'post' && _pf) _pf._userTyped = false;
     LAST_QUOTE = null;
     setReviewEnabled(false);
+    paintGuideSoon();
     // Instant auto-fill: derive the other leg NOW from the last-known book price (no network), so it
     // fills as you type instead of after the debounce + fetch. TAKE only (LIMIT's two sides are the
     // user's own independent price). The debounced requote below then refreshes the book and finalizes
@@ -1522,9 +1524,10 @@ function paintPanes(){
   const cta = $('swReview');
   if (cta){
     const needRails = !!(S.payAsset && S.receiveAsset) && !(S.payRail && S.recvRail);
-    cta.textContent = needRails ? 'Choose how you pay & receive' : 'Place order';
+    cta.textContent = 'Place order';   // what it waits for is said under it (paintGuide)
     if (needRails) cta.disabled = true;
   }
+  paintGuideSoon();
 }
 
 // The opt-in confidential-RECEIVE control shows ONLY when you are receiving a Sequentia-issued asset
@@ -1729,8 +1732,14 @@ function renderRailNote(ra){
       && !(pick.direction === 'pay' ? sellCapable(legAsset) : subassetCapable(legAsset));
     if (crossFallback){
       html = `<span>Settles over Lightning when possible, otherwise on-chain - same price, nothing to set up.</span>`;
-    } else {
+    } else if (pick.direction === 'pay'){
       html = `<span>Lightning is set up for you when you place the order · near-instant, nothing to set up.</span>`;
+      withBtn = false;
+    } else {
+      // Receiving needs room in a channel toward you; the service opens one when you place the
+      // order. Moving this asset to Lightning yourself would not help: it adds room to send.
+      html = `<span>To receive ${nm} over Lightning, the service opens a channel to you when you place the order.</span>`;
+      withBtn = false;
     }
   }
   note.innerHTML = html + (withBtn ? ` <button type="button" class="swfix" id="swRailMove">${btnLabel}</button>` : '');
@@ -2100,7 +2109,60 @@ function clearOpposite(){
   const other = S.edited === 'pay' ? C.$('swRecvAmt') : C.$('swPayAmt');
   clearDerived(other);   // never stomp a value the user typed or is editing on the OTHER side
 }
+// The composer as steps, in the order a trade is made: choose the two assets, enter an amount,
+// choose how each side settles, place. Until both assets are chosen nothing else is shown; the step
+// waiting for the user is outlined; and under the button one line says what it is waiting for.
+// Painted after every change that can move a step (coalesced: the error and status lines are
+// often written right after the button is disabled, and the reason must read them).
+let _guideQueued = false;
+function paintGuideSoon(){
+  if (_guideQueued) return; _guideQueued = true;
+  setTimeout(() => { _guideQueued = false; try { paintGuide(); } catch {} }, 0);
+}
+function amountEntered(){
+  return ['swPayAmt', 'swRecvAmt'].some(id => {
+    const v = Number(String((C.$(id) || {}).value || '').replace(',', '.'));
+    return Number.isFinite(v) && v > 0;
+  });
+}
+function guideStep(){
+  if (!(S.payAsset && S.receiveAsset)) return 1;
+  if (!amountEntered()) return 2;
+  const rails = C.$('swRailPicks');
+  if (rails && !rails.classList.contains('hide') && !(S.payRail && S.recvRail)) return 3;
+  return 4;
+}
+function paintGuide(){
+  const $ = C.$, g = $('swGuide'); if (!g) return;
+  const step = guideStep();
+  const names = ['Assets', 'Amount', 'Settlement', 'Place'];
+  g.innerHTML = names.map((n, i) => {
+    const k = i + 1, cls = k < step ? 'gs done' : (k === step ? 'gs now' : 'gs');
+    return `<span class="${cls}"><b>${k < step ? '✓' : k}</b>${n}</span>`;
+  }).join('');
+  // Nothing past the assets until both are chosen.
+  for (const id of ['swPriceSec', 'swSettleSec', 'swFeeRow']){ const e = $(id); if (e) e.classList.toggle('hide', step === 1); }
+  // The one control waiting for the user.
+  const now = step === 1 ? (S.payAsset ? 'swRecvPick' : 'swPayPick')
+    : step === 2 ? 'swPayAmt' : step === 3 ? 'swRailPicks' : null;
+  for (const id of ['swPayPick', 'swRecvPick', 'swPayAmt', 'swRailPicks']){ const e = $(id); if (e) e.classList.toggle('swnow', id === now); }
+  if (step === 2 && _guideStepWas !== 2){ const a = $('swPayAmt'); if (a && document.activeElement !== a) try { a.focus({ preventScroll: true }); } catch {} }
+  _guideStepWas = step;
+  const why = $('swWhy'), cta = $('swReview'); if (!why || !cta) return;
+  let text = '';
+  if (step === 1) text = 'Choose what you pay and what you receive.';
+  else if (step === 2) text = 'Enter how much you pay, or how much you want to receive; the other side fills in at the best price.';
+  else if (step === 3) text = 'Choose how you pay and how you receive: on-chain, or over Lightning.';
+  else if (cta.disabled){
+    const err = ($('swErr') || {}).textContent || '', status = ($('swStatus') || {}).textContent || '';
+    text = (err || status) ? '' : 'Getting a price for this amount…';
+  }
+  why.textContent = text;
+}
+let _guideStepWas = 0;
+
 function setReviewEnabled(on){
+  paintGuideSoon();
   const b = C.$('swReview'); if (!b) return;
   // RAIL-BLIND gate (spec §6.5): never enable placement until BOTH settlement rails are chosen — there
   // is NO default. A ready quote is necessary but not sufficient. paintPanes labels the CTA to prompt.
@@ -3194,7 +3256,7 @@ async function requoteMixed(route, amtStr){
     // (bp.submarine) settles without those, so it is not gated here.
     if (buy && bp.crosses && bp.supported && !bp.submarine && !(L && L.swap && L.bridgeHold && L.nodePayHash)){
       LAST_QUOTE = null; setReviewEnabled(false);
-      $('swErr').textContent = payerBridgeDisabledNote();
+      $('swErr').textContent = payerBridgeDisabledNote(route);
       return;
     }
     // Paying BTC over your OWN Lightning needs spendable BTC in Lightning (a genuine capability gate — the
@@ -3289,7 +3351,7 @@ async function requoteMixed(route, amtStr){
   // Place with the shared plain note (never lift a DIFFERENT offer than shown, never give rail advice).
   if (!matchedSub){
     LAST_QUOTE = null; setReviewEnabled(false);
-    $('swErr').textContent = payerBridgeDisabledNote();
+    $('swErr').textContent = payerBridgeDisabledNote(route);
     return;
   }
   // A MATCH IS NOT A CAPABILITY. The re-quote above can now FIND a sub-asset offer when the
@@ -3453,7 +3515,7 @@ async function requoteCross(route, amtStr){
       // one), so bp.crosses alone let that shape reach an enabled Place it could never execute.
       if (bp.crosses || !courierLiftable(bp.offer)){
         LAST_QUOTE = null; setReviewEnabled(false);
-        $('swErr').textContent = payerBridgeDisabledNote();
+        $('swErr').textContent = payerBridgeDisabledNote(route);
         return;
       }
       const takeAtoms = BigInt(dec.takeAtoms || 0), takeBtc = BigInt(dec.takeBtc || 0);
@@ -4223,7 +4285,13 @@ function popover(anchorEl, items, onPick){
   const draw = (q) => {
     listEl.innerHTML = ''; kbdIdx = -1; shown = []; optEls = [];
     const match = pickerMatches(items, q);
-    if (!match.length){ listEl.appendChild(el('div','swopt-empty','No matching assets.')); return; }
+    if (!match.length){
+      const syncing = !q && C.walletSynced && !C.walletSynced();
+      listEl.appendChild(el('div','swopt-empty', syncing
+        ? 'Your wallet is still syncing; your assets appear here in a moment.'
+        : 'No matching assets.'));
+      return;
+    }
     // PINNED rows first (the other side's asset · tap-to-swap-sides), then your held assets,
     // then everything else. The "All assets" tail is capped until you search, so a registry
     // of thousands never renders thousands of rows.
@@ -5141,10 +5209,16 @@ function settlementDispatch(route){
 // ZERO exposure if ever reached). Until that node capability lands this shape must NEVER reach an enabled
 // Place (offer-then-refuse), so EVERY entry point (requoteMixed, onReview, reviewMixed) surfaces THIS note and
 // disables Review — one message, one gate, no path where a priced+enabled "Bridged buy" is offered then refused.
-function payerBridgeDisabledNote(){
-  // A genuine cannot-execute (this build lacks the capability to place this trade). Plain human reason — NO rail,
-  // NO bridge/counterparty machinery, NO rail advice (the user must never be shown any of that).
-  return 'This trade could not be placed right now - try again shortly.';
+function payerBridgeDisabledNote(route){
+  // A genuine cannot-execute: the best offer cannot be settled the way this trade is set up. Retrying
+  // changes nothing, so when a side over Lightning is what blocks it, say which and what to do; no
+  // bridge or counterparty machinery is named.
+  const r = route || {};
+  if (r.recvRail === 'ln' && r.payRail !== 'ln')
+    return 'The best offer here cannot be filled with what you receive arriving over Lightning · set "Receive to" On-chain to take it.';
+  if (r.payRail === 'ln' && r.recvRail !== 'ln')
+    return 'The best offer here cannot be filled with what you pay leaving over Lightning · set "Pay from" On-chain to take it.';
+  return 'The best offer here cannot be filled this way · try the other settlement option, or another offer.';
 }
 
 // --- chain read helpers (anchor depth + tips), same endpoints the wallet's watchers use ------------------
@@ -8565,7 +8639,7 @@ async function reviewCross(q){
   // against the relay that does not hold it, "offer not found or not open") and dead-ends the take.
   // The composer no longer builds one; refuse here too rather than trust that it never will.
   if (q.unified && q.offer && q.offer.rail !== 'onchain'){
-    $('swErr').textContent = payerBridgeDisabledNote();
+    $('swErr').textContent = payerBridgeDisabledNote(q.route);
     return;
   }
   // Market order bigger than the best maker's depth: a MARKET order on a cross/BTC pair is IOC (spec
