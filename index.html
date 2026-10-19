@@ -6382,7 +6382,13 @@ function rbfDialog(txid, replace){
         if(!(units > 0)) return 'Enter a rate above zero.';
         const atoms = units * Math.pow(10, assetMeta(hex).precision ?? 8) * stuck.vsize;
         const newRef = refAtomsOf(hex, atoms);
-        const verdict = newRef <= stuck.feeRef ? ' That is not more than the transaction it replaces pays, so the network would refuse it.' : '';
+        // BIP 125: a replacement pays what it replaces plus the network's increment (its relay
+        // minimum per vByte) for its own size. Short of that the network refuses it outright.
+        const needRef = stuck.feeRef + minRef() * stuck.vsize;
+        const needAtoms = refRateToUnits(hex, needRef / stuck.vsize) * Math.pow(10, assetMeta(hex).precision ?? 8) * stuck.vsize;
+        const verdict = newRef < needRef
+          ? ' A replacement must pay at least '+feeLine(hex, needAtoms)+' (what it replaces plus the network’s minimum increment), so the network would refuse this one.'
+          : '';
         return 'The replacement pays about '+feeLine(hex, atoms)+', '+timesMin(newRef / stuck.vsize)+'.'+verdict;
       },
     });
