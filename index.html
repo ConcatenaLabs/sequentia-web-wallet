@@ -1298,12 +1298,13 @@
           <p>What is guaranteed is the channel, kept open for the months paid for, not a fixed amount of room. Receiving uses room up and spending makes it again. When the time is over the service may close the channel: what is on your side then comes back to you on chain. To keep receiving, buy room again.</p>
           <p>You can ask for room when you move an asset to Lightning: its fee travels in the same transaction, and the service opens its channel as soon as that transaction confirms.</p>
         </details>
-        <details id="faq-room-full"><summary>My room to receive is used up. What can I do?</summary>
+        <details id="faq-room-full"><summary>I need more room to receive, or more to send. What can I do?</summary>
+          <p>Add capacity on the side you need, without giving up any you have:</p>
           <ul class="ln-help">
-            <li>Spend over Lightning: whatever you pay out makes room again.</li>
-            <li>Buy more room from the asset's row in Balance.</li>
-            <li>Move the asset on chain. This closes the channel: there is no partial move that keeps it open.</li>
+            <li><b>To receive more</b>, buy more room from the asset's row in Balance: the service adds a channel to you with that room on its side. Spending over Lightning also makes room again, for free.</li>
+            <li><b>To send more</b>, move more of the asset to Lightning: it adds a channel with that amount on your side. Receiving over Lightning also adds to what you can send.</li>
           </ul>
+          <p>Each addition is a channel of its own beside the ones you have, because channels in an asset cannot be enlarged in place. Your node uses them together, and splits a payment across them when one channel is not enough.</p>
         </details>
         <details id="faq-ln-cost"><summary>Is Lightning cheaper than paying on chain?</summary>
           <p>For sending, by far. A payment over Lightning pays no on-chain fee, only a small routing fee when it passes through another node; on chain you pay once to move the asset in and once to move it back out. Someone who sends three payments a week on chain at 10 cents each pays about 7.80 USD in six months; over Lightning the same payments cost the two moves, about 20 cents, plus those routing fees.</p>
@@ -2822,7 +2823,7 @@ function renderRoomStepper(host){
     { t:'You buy 100 USDX of room to receive, for 6 months', d:'The service opens a channel to you with 100 USDX of its own on its side. You pay once, before it opens: at 5% a year, half a year of 100 USDX of room costs 2.50 USDX.', y:0, s:100 },
     { t:'You receive 60 USDX', d:'Whoever pays you moves value from the service\u2019s side to yours: 60 USDX is now yours on Lightning, and 40 is left to receive.', y:60, s:40 },
     { t:'You spend 30 USDX', d:'The payment leaves your side and goes back to the service\u2019s side: you can receive 70 again, without paying for it again.', y:30, s:70 },
-    { t:'You receive 70 USDX: the channel is full on your side', d:'You hold 100 USDX on Lightning and have no room left. To receive more, spend, buy more room, or move the asset on chain.', y:100, s:0 },
+    { t:'You receive 70 USDX: the channel is full on your side', d:'You hold 100 USDX on Lightning and have no room left. To receive more, spend some, or buy more room: the service adds a channel with it on its side.', y:100, s:0 },
     { t:'The 6 months are over', d:'The channel was kept open for the whole time; the room in it depended on what you received and spent. The service may now close it, and what is on your side comes back to you on chain. To keep receiving, buy room again.', y:100, s:0 },
   ];
   let i=0;
