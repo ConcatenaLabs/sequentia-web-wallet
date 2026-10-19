@@ -512,7 +512,7 @@
         <div class="warn hide" id="lnUpgradeNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
-          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving to Lightning sends the amount on-chain to your hosted node, then your device co-signs opening a channel with it. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
+          <p class="sub">Each asset shows its on-chain and Lightning balance together. Moving a Sequentia asset to Lightning pays the amount straight into a channel on your hosted node, in one transaction your wallet signs only once the channel's way back is signed; BTC goes to the node's own address first, and the node opens the channel from there. Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it. An asset is movable when the funding transaction can pay an accepted fee in that asset or another you hold; a brand-new asset no block producer accepts for fees yet cannot be moved until one does.</p>
         </details>
       </div>
       <div class="card">
@@ -1241,7 +1241,7 @@ import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resu
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
-  seqlnChannels, seqlnFunding, fundChannel, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
+  seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
@@ -2871,6 +2871,7 @@ async function openWallet(phrase){
   // Finish a Move-to-Lightning that was interrupted after its deposit landed (funds on the user's
   // own node, never lost) — self-healing so a network blip / reload can't strand a deposit.
   try{ updateLnMoveBanner(); }catch{}   // show the in-flight banner immediately if a move is still pending from last session
+  try{ lnRebroadcastFunding(); }catch{}
   try{ resumeMove(); }catch(e){ console.warn('[resume] move resume failed:', e?.message??e); }
   // Lightning (LSP): bring the on-device signer online so the "Instant (Lightning)"
   // swap rail becomes available. Non-fatal + opt-in: if the wss endpoint / host key
@@ -3075,17 +3076,20 @@ function rememberOwnLnLeg(leg){ if(!leg) return; const s=new Set(ownLnLegs()); i
 // that needed them was their own wallet. Every phase now has words, and an unrecognised one still
 // moves the line instead of freezing it, so a future phase degrades to vague rather than to a lie.
 const LN_MOVE_PHASE = {
+  'starting':        'Asking your Lightning node to start the channel…',
+  'completing':      'Your node and its peer are signing the way back before any coin moves…',
+  'broadcasting':    'Signing and sending the channel funding…',
   'consolidating':   'Moving the coins on your Lightning node to its own address first…',
   'deposit-address': 'Getting your hosted node deposit address…',
   'sending':         'Signing and sending the on-chain deposit…',
-  'sent':            'Deposit sent; waiting for confirmation…',
+  'sent':            'Sent; waiting for it to confirm…',
   'opening-request': 'Asking your Lightning node to open the channel…',
   'pending_deposit': 'Waiting for the deposit to confirm on-chain…',
   'syncing':         'Waiting for your Lightning node to answer — keep this wallet open and unlocked, it needs your device to sign…',
   'connecting':      'Connecting your node to the routing peer (your device co-signs the handshake)…',
   'opening':         'Opening the Lightning channel (your device is co-signing the funding)…',
   'awaiting_lockin': 'Channel funding broadcast; waiting for it to confirm…',
-  'reconnecting':    'Connection hiccup — reconnecting (your deposit is safe; this will finish)…',
+  'reconnecting':    'Connection hiccup — reconnecting (your coins are safe; this will finish)…',
   'active':          'Channel active.',
 };
 // The line for a phase, or null to leave the current line alone. 'failed' returns null on purpose:
@@ -3357,6 +3361,84 @@ async function lnSendDeposit({ chain, asset, amount, address }){
   noteOwnTx(finalized);
   return { txid: (txid && txid.toString) ? txid.toString() : String(txid) };
   });
+}
+
+// A Sequentia channel funded by ONE transaction of the wallet's own (seqln.js fundChannelDirect):
+// the wallet pays the channel straight from its coins, so there is no deposit to the node first,
+// one fee and one confirmation instead of two. The order is what keeps the coins safe: the
+// transaction is built and blinded, checked, handed to the node UNSIGNED, and signed only once the
+// node answers that its peer has signed the first commitment, the way back. Then the signed
+// transaction must have the txid the node holds commitments for, and it is stored before it is
+// broadcast, so a closed tab cannot lose a transaction the channel is waiting for.
+const LN_FUNDING_KEY = 'swk.ln.funding.v1';   // { txid, hex, asset, at }: signed for a channel, maybe not yet broadcast
+function lnPendingFunding(){ try{ return JSON.parse(localStorage.getItem(LN_FUNDING_KEY)||'null'); }catch{ return null; } }
+function lnClearFunding(txid){ try{ const f=lnPendingFunding(); if(f && (!txid || f.txid===txid)) localStorage.removeItem(LN_FUNDING_KEY); }catch{} }
+// Why `pset` must not fund a channel of `amount` atoms of `asset` to `script`, or null. The
+// service checks the same on its side; the wallet does not sign on its word. That the payment
+// is in the clear is not read here: SWK shows no output's commitments (and gives every output a
+// blinder index, explicit ones too), so it rests on the recipient being explicit by construction
+// (lnFundDirect), and the service refuses a confidential one from its own decodepsbt.
+function lnFundingProblem(pset, { script, amount, asset }){
+  const want=String(script||'').toLowerCase();
+  const mine=pset.outputs().filter(o=>o.scriptPubkey().toString().toLowerCase()===want);
+  if(mine.length!==1) return mine.length ? 'it pays the channel more than once' : 'it does not pay the channel';
+  const o=mine[0], a=o.asset(), v=o.amount();
+  if(!a || a.toString().toLowerCase()!==String(asset).toLowerCase()) return 'its payment to the channel is in another asset';
+  if(v!==BigInt(amount)) return 'its payment to the channel is not the amount you chose';
+  return null;
+}
+async function lnFundDirect({ address, script, amount, asset, complete, onBroadcast }){
+  const a = new Address(address);
+  if(a.isBlinded()) throw new Error('the channel funding address is confidential');
+  let b = network.txBuilder().addExplicitRecipient(a, BigInt(amount), new AssetId(asset));
+  b = applyFee(b, asset);   // the fee in the asset being moved, as for a deposit (lnSendDeposit)
+  // The wallet is held for the whole exchange, so nothing else spends these coins meanwhile.
+  return withWollet(async () => {
+    const pset = b.finish(wollet);
+    const problem = lnFundingProblem(pset, { script, amount, asset });
+    if(problem) throw new Error('Not opening the channel: the funding transaction is wrong ('+problem+').');
+    let unsignedTxid = null;
+    try{ unsignedTxid = pset.extractTx().txid().toString(); }catch{}
+    const fundingTxid = await complete(pset.toString());
+    if(unsignedTxid && unsignedTxid!==fundingTxid) throw new Error('Not opening the channel: your node expects a different funding transaction.');
+    const finalized = wollet.finalize(signer.sign(pset));
+    const txid = finalized.txid().toString();
+    if(txid!==fundingTxid) throw new Error('Not opening the channel: the signed funding transaction is not the one your node expects.');
+    try{ localStorage.setItem(LN_FUNDING_KEY, JSON.stringify({ txid, hex: finalized.toString(), asset, at: Date.now() })); }catch{}
+    onBroadcast();
+    await (broadcastClient || client).broadcast(finalized);
+    try{ wollet.applyTransaction(finalized); }catch{}
+    noteOwnTx(finalized);
+    return { txid };
+  });
+}
+// A funding transaction stored but maybe never broadcast (the tab closed in between): send it
+// again. The network answers "already known" for one it has, and either way it is cleared once seen.
+async function lnRebroadcastFunding(){
+  const f = lnPendingFunding();
+  if(!f || !f.hex) return;
+  try{
+    const r = await fetch(ESPLORA+'/tx/'+f.txid+'/status');
+    if(r.ok){ lnClearFunding(f.txid); return; }
+    const tx = new Transaction(f.hex);
+    await (broadcastClient || client).broadcast(tx);
+    console.info('[ln] channel funding '+f.txid+' broadcast again');
+  }catch(e){ console.warn('[ln] channel funding rebroadcast (retried on the next open):', e?.message??e); }
+}
+// Every Move funds a Sequentia channel in one transaction when the service can; BTC, and a service
+// without the endpoints, go through the deposit to the node.
+async function lnFundChannel(opts){
+  if(opts.chain==='seq'){
+    try{
+      const res = await fundChannelDirect({ asset: opts.asset, amount: opts.amount, node: opts.node, fund: lnFundDirect, onProgress: opts.onProgress });
+      try{ lnClearFunding(); }catch{}
+      return res;
+    }catch(e){
+      if(!e || !e.unsupported) throw e;
+      console.info('[ln] '+e.message+'; funding through the deposit');
+    }
+  }
+  return fundChannel({ ...opts, sendOnchain: lnSendDeposit });
 }
 
 // The asset a channel from /status is in, as a display-order id. The LSP reports the policy asset
@@ -3667,7 +3749,7 @@ function moveToLightningDialog(leg){
   const avail = BigInt(leg.onchain||0n);
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Move '+leg.ticker+' to Lightning'));
-  c.appendChild(el('div','sub','Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it. Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
+  c.appendChild(el('div','sub',(leg.chain==='btc' ? 'Your wallet sends this amount on-chain to your hosted node, then your device co-signs opening a Lightning channel with it.' : 'Your wallet pays this amount into a Lightning channel on your hosted node, in one on-chain transaction that it signs only after the channel’s way back is signed.')+' Your device signs every transaction and channel update for it, and approves each payment only within the payment limit set on it. The on-chain funding pays a network fee through the open fee market; if no block producer accepts a fee you can pay, the move cannot be mined and will fail with a clear message.'));
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
   c.appendChild(el('div','sub','Available on-chain: '+fmtAtoms(avail, leg.precision)+' '+leg.ticker));
@@ -3710,13 +3792,12 @@ function moveToLightningDialog(leg){
       // 3. Fund a channel ON THAT node: the deposit address + the device-co-signed
       //    fundchannel are both routed to prov.key (the user's provisioned node), never the
       //    shared demo node. The wallet signs the on-chain deposit itself (lnSendDeposit).
-      say('Your Lightning node is ready. Preparing the on-chain deposit…');
+      say('Your Lightning node is ready. Preparing the channel…');
       // Record enough to FINISH this move if it is interrupted after the deposit lands (network
       // blip / reload). Persisted the moment the deposit is sent; cleared once the channel opens.
       const moveRec = { chain: leg.chain, asset: leg.asset || undefined, amount: Number(atoms), node: prov.key, ticker: leg.ticker, precision: leg.precision };
-      const res = await fundChannel({
+      const res = await lnFundChannel({
         chain: leg.chain, asset: leg.asset || undefined, amount: Number(atoms), node: prov.key,
-        sendOnchain: lnSendDeposit,
         onProgress: (e)=>{
           if(e.phase==='sent'){
             try{ saveMoveState(moveRec); }catch{}   // deposit is now on the node — a reload (or the background job) can finish the open
@@ -3726,7 +3807,7 @@ function moveToLightningDialog(leg){
             // survives a reload via resumeMove). The user gets a toast when the channel is ready.
             no.disabled=false; no.textContent='Continue in background';
             no.onclick=()=>{ backgrounded=true; m.remove();
-              try{ toast('Deposit sent. Your '+leg.ticker+' Lightning channel is opening in the background. Keep using the wallet; we’ll let you know when it’s ready.'); }catch{} };
+              try{ toast('Sent. Your '+leg.ticker+' Lightning channel is opening in the background. Keep using the wallet; we’ll let you know when it’s ready.'); }catch{} };
           }
           const copy = lnMovePhaseCopy(e.phase);
           if(copy) say(copy);
@@ -3973,8 +4054,8 @@ function initSwapTab(){
       if (!(prov && prov.connected)) throw new Error('Could not bring your device signer online for your Lightning node.');
       say('Preparing your Lightning node (booting and syncing)…');
       await waitNodeReady({ nodeKey: prov.key, onProgress: () => say('Preparing your Lightning node (booting and syncing)…') });
-      say('Your Lightning node is ready. Preparing the on-chain deposit…');
-      const res = await fundChannel({ chain, asset: asset || undefined, amount: Number(amount), node: prov.key, sendOnchain: lnSendDeposit, onProgress: (e) => { const copy = lnMovePhaseCopy(e.phase); if (copy) say(copy); } });
+      say('Your Lightning node is ready. Preparing the channel…');
+      const res = await lnFundChannel({ chain, asset: asset || undefined, amount: Number(amount), node: prov.key, onProgress: (e) => { const copy = lnMovePhaseCopy(e.phase); if (copy) say(copy); } });
       try { renderLightningBalance(); } catch {}
       return res;
     },

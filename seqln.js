@@ -494,7 +494,9 @@ async function lspFetch(path, { allowNotOk = false, ...opts } = {}) {
     // summary error — dropping it left terminal failures as a bare "did not settle"
     // with the real reason discarded.
     const detail = j.detail ? String(j.detail).trim().split('\n').filter(Boolean).slice(-2).join(' · ') : '';
-    throw new Error((j.error || ('HTTP ' + r.status)) + (detail ? ` — ${detail.slice(0, 300)}` : ''));
+    const err = new Error((j.error || ('HTTP ' + r.status)) + (detail ? ` — ${detail.slice(0, 300)}` : ''));
+    err.status = r.status;
+    throw err;
   }
   return j;
 }
@@ -964,6 +966,80 @@ export async function fundChannel({ chain, asset, amount, node, sendOnchain, onP
   }
 }
 
+// A Sequentia channel funded by ONE transaction of the wallet's own: no deposit to the node, one
+// fee, one confirmation (tooling/lsp/external-funding.mjs has the protocol). The LSP starts the
+// channel and names its funding address; `fund` is the wallet's side, and is handed `complete`:
+//
+//   fund({ address, script, amount, asset, complete, onBroadcast }) -> { txid }
+//     builds and blinds the transaction paying exactly `amount` of `asset` to `address`, in the
+//     clear, checks it, and hands it UNSIGNED to `complete(psbtBase64)`, which answers the funding
+//     txid once the peer has signed the first commitment, the way back. Only then does it sign,
+//     check the signed transaction has that txid, call `onBroadcast()` and broadcast.
+//
+// Anything failing before `onBroadcast` cancels the channel, and no coin has moved. After it, the
+// channel is never cancelled here: its coins may already be in the 2-of-2, which only this
+// channel's commitments spend. An LSP without the endpoints throws with `unsupported` set, for the
+// caller to fund through the deposit (fundChannel).
+export async function fundChannelDirect({ asset, amount, node, fund, onProgress, pollMs = 5000, timeoutMs = 3_600_000 } = {}) {
+  if (typeof fund !== 'function') throw new Error('fundChannelDirect: a fund hook is required (the wallet builds and signs the funding)');
+  const emit = (phase, extra) => { try { onProgress && onProgress({ phase, ...extra }); } catch {} };
+  emit('starting');
+  let started;
+  try {
+    started = await lspFetch('/channel/start', { method: 'POST', timeoutMs: 300_000,
+      body: JSON.stringify({ chain: 'seq', asset, amount, node }) });
+  } catch (e) {
+    if (e && e.status === 404) {
+      const u = new Error('this Lightning service funds channels only through a deposit');
+      u.unsupported = true;
+      throw u;
+    }
+    throw e;
+  }
+  if (!started.funding_address || !started.script) throw new Error('the Lightning service named no funding address');
+  const jobId = started.job_id;
+  let broadcast = false;
+  let sent;
+  try {
+    sent = await fund({ address: started.funding_address, script: started.script, amount, asset,
+      complete: async (psbt) => {
+        emit('completing');
+        const done = await lspFetch('/channel/complete', { method: 'POST', timeoutMs: 180_000,
+          body: JSON.stringify({ job_id: jobId, psbt }) });
+        if (!/^[0-9a-f]{64}$/i.test(done.funding_txid || '')) throw new Error('the Lightning service named no funding txid');
+        return String(done.funding_txid).toLowerCase();
+      },
+      onBroadcast: () => { broadcast = true; emit('broadcasting'); } });
+  } catch (e) {
+    if (!broadcast) {
+      await lspFetch('/channel/cancel', { method: 'POST', body: JSON.stringify({ job_id: jobId }) })
+        .catch((c) => console.warn('[ln] channel cancel:', c && c.message));
+    }
+    throw e;
+  }
+  emit('sent', { funding_txid: sent && sent.txid });
+  const jobUrl = started.poll || `/channel/open/${jobId}`;
+  const deadline = Date.now() + timeoutMs;
+  let job = { status: 'awaiting_lockin' }, pollErrors = 0;
+  const maxPollErrors = 24;
+  for (;;) {
+    emit(job.status, { job, funding_txid: sent && sent.txid });
+    if (job.status === 'active') return job;
+    if (job.status === 'failed') throw new Error(job.error || 'channel open failed');
+    if (Date.now() > deadline) throw new Error('channel open timed out');
+    await new Promise((r) => setTimeout(r, pollMs));
+    try { job = await lspFetch(jobUrl); pollErrors = 0; }
+    catch (e) {
+      if (++pollErrors > maxPollErrors) {
+        const err = new Error('Lost connection while the channel confirms. Its funding is on chain; reopen the wallet to see it open.');
+        err.resumable = true; err.jobUrl = jobUrl; err.cause = e;
+        throw err;
+      }
+      emit('reconnecting', { attempt: pollErrors, of: maxPollErrors });
+    }
+  }
+}
+
 // Resume a channel-open WITHOUT re-depositing: the deposit already landed on the node, so just
 // (re)start the LSP's fundchannel-from-existing-balance job and poll it to completion. Used to
 // recover a move that was interrupted after the deposit but before the channel opened (the
@@ -996,7 +1072,7 @@ export async function resumeFundChannel({ chain, asset, amount, node, consolidat
 export default {
   initSeqln, seqlnConfigured, seqlnDeployed, seqlnState, onSeqlnStatus, seqlnAvailable,
   lnFinalityCopy, connectDevice, disconnectDevice, seqlnGetStatus, seqlnSwap,
-  seqlnChannels, seqlnFunding, seqlnNodes, provisionNode, fundChannel,
+  seqlnChannels, seqlnFunding, seqlnNodes, provisionNode, fundChannel, fundChannelDirect,
   deviceTransportPubkey, connectProvisioned, provisionAndConnect, provisionedState, disconnectProvisioned,
   nodeGetinfo, waitNodeReady,
 };
