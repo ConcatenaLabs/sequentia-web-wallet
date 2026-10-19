@@ -178,6 +178,9 @@
   .modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
   .modal .card{margin:0;max-width:480px;width:100%;max-height:88vh;overflow:auto}
   .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+  .blind-ask{margin:12px 0 4px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+  .blind-ask label{display:flex;gap:8px;align-items:flex-start;font-size:14px;cursor:pointer}
+  .blind-ask .sub{margin-top:6px;font-size:12.5px}
   .faq details{border-top:1px solid var(--line);padding:10px 0}
   .faq details:first-of-type{border-top:0}
   .faq summary{cursor:pointer;font-weight:600;font-size:14.5px}
@@ -1264,6 +1267,12 @@
         </details>
         <details id="faq-dropped"><summary>What does "Dropped by the network" mean?</summary>
           <p>The explorer no longer has the transaction, so no producer will mine it. That happens when the mempool is full and drops its cheapest transactions, when a transaction waits too long, or when another one spending the same coins replaces it. Its coins are yours to spend again; send the payment again if it is still needed.</p>
+        </details>
+        <details id="faq-blinded"><summary>What is a blinded address, and can I bring those coins back to my usual address?</summary>
+          <p>Every address of this wallet has two forms. The usual one, starting tb1, receives in the clear: anyone can see on the explorer how much of which asset arrived. The blinded one, starting tsqb1, hides the amount and the asset from everyone but you. Both belong to this wallet and to the same recovery phrase.</p>
+          <p>Coins received at a blinded address count in your balance, spend like any other and come back with your recovery phrase. An explorer shows that a payment happened, not how much or of what. Transactions that carry hidden amounts are a little larger, because each hidden amount comes with a proof, so they cost a slightly higher network fee.</p>
+          <p>To bring them back to your usual address, send them to yourself: in Send, paste your tb1 address from Receive and the amount. That one transaction makes them visible again; sending the whole balance of that asset also gathers its coins into one.</p>
+          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap confidentially</i>. Some offers come from a maker who completes the swap and blinds the output that pays you, so they can only pay a blinded address: the swap asks before using one, with that choice suggested, and skips those offers if you say no.</p>
         </details>
         <details id="faq-final"><summary>When is a payment final?</summary>
           <p>It shows at once, is confirmed in about a block, and is final once the Bitcoin block that anchors it is buried. Until then a reorganisation could still undo it.</p>
