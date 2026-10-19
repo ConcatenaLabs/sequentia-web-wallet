@@ -5,7 +5,7 @@ import assert from 'node:assert';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
-import { nodeRejectText } from './node-reject.js';
+import { nodeRejectText, shortfallText } from './node-reject.js';
 
 // As they reach the wallet: the explorer's broadcast answer, Esplora's, and the node's RPC error.
 const SEEN = {
@@ -60,8 +60,21 @@ test('a message without a reject code is left to the caller', () => {
 
 test('the page asks here before anything else', () => {
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-  assert.match(html, /import \{ nodeRejectText \} from '\.\/node-reject\.js';/);
+  assert.match(html, /import \{ nodeRejectText, shortfallText \} from '\.\/node-reject\.js';/);
   const body = html.slice(html.indexOf('function prettyErr(e){'));
   const first = body.indexOf('nodeRejectText(m)'), other = body.indexOf('if(/');
   assert.ok(first > 0 && first < other, 'prettyErr must consult nodeRejectText before its own rules');
+});
+
+const META = (h) => h.startsWith('e396') ? { ticker: 'EURX', precision: 8 } : { ticker: 'USDX', precision: 8 };
+
+test('a shortfall is said in the asset, not in atoms and ids', () => {
+  const t = shortfallText('Insufficient funds: missing 702 units for asset e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13', META);
+  assert.equal(t, 'Not enough EURX: 0.00000702 EURX short, counting the network fee when it is paid in EURX. Lower the amount, or pay the fee in another asset.');
+});
+
+test('coins at blinded outputs that an order cannot take are named, with the way out', () => {
+  const t = shortfallText('insufficient transparent 2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de: need 999998663, have 0 (a further 49999999999065 is held in confidential outputs, which an on-chain covenant fill cannot spend; send it to yourself at a transparent address first)', META);
+  assert.match(t, /you hold 0 USDX that way; the other 499999.99999065 USDX is at blinded outputs\. Send it to yourself/);
+  assert.equal(shortfallText('something else', META), null);
 });

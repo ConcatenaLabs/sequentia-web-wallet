@@ -49,3 +49,28 @@ export function nodeRejectText(message) {
   if (OTHER_CODE.test(m)) return 'The network refused this transaction, so nothing was sent. Refresh and try again; if it is refused again, the wallet’s log in the browser console has the reason.';
   return null;
 }
+
+// A shortfall the wallet kit reports in atoms and asset ids, said in the asset's own units: "Not
+// enough EURX: 0.00000702 EURX short" rather than "Insufficient funds: missing 702 units for asset
+// e396…". And what an order on the book can spend: only coins held in the clear, which a covenant
+// fill reports as "insufficient transparent <id>". meta(hex) answers { ticker, precision }.
+function atoms(n, precision) {
+  const s = String(BigInt(n)).padStart(precision + 1, '0');
+  const whole = s.slice(0, s.length - precision), frac = precision ? s.slice(-precision).replace(/0+$/, '') : '';
+  return frac ? whole + '.' + frac : whole;
+}
+export function shortfallText(message, meta) {
+  const m = String(message || '');
+  let x = m.match(/Insufficient funds: missing (\d+) units for asset ([0-9a-f]{64})/i);
+  if (x) {
+    const a = meta(x[2]);
+    return 'Not enough ' + a.ticker + ': ' + atoms(x[1], a.precision) + ' ' + a.ticker + ' short, counting the network fee when it is paid in ' + a.ticker + '. Lower the amount, or pay the fee in another asset.';
+  }
+  x = m.match(/insufficient transparent ([0-9a-f]{64}): need (\d+), have (\d+)(?: \(a further (\d+))?/i);
+  if (x) {
+    const a = meta(x[1]);
+    return 'An order on the book can only take ' + a.ticker + ' you hold in the clear, and you hold ' + atoms(x[3], a.precision) + ' ' + a.ticker + ' that way'
+      + (x[4] ? '; the other ' + atoms(x[4], a.precision) + ' ' + a.ticker + ' is at blinded outputs. Send it to yourself at your usual address (Send, to your tb1 address from Receive), then place the order again.' : '.');
+  }
+  return null;
+}
