@@ -4228,6 +4228,8 @@ function initSwapTab(){
     // Sub-asset BUY (pay BTC on-chain, receive asset over LN) — HODL primitives. The DEVICE holds
     // P; the maker pays H by hash to the user's node; the device settles once held (see startBuy).
     channelInbound: (p) => seqlnChannelInbound(p),
+    inboundQuote: (p) => seqlnInboundQuote(p),
+    receivable: (hex) => lnReceivableFor(hex),
     nodeInvoice: (p) => seqlnNodeInvoice(p),
     invoiceStatus: (p) => seqlnInvoiceStatus(p),
     nodeSettle: (p) => seqlnNodeSettle(p),
