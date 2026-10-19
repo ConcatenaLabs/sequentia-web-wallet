@@ -62,3 +62,12 @@ export function expiresAt(now, months) {
   d.setUTCMonth(d.getUTCMonth() + Number(months));
   return d.getTime();
 }
+
+// The most room the service can open from `have` atoms of the asset: a channel for `amount` is
+// funded with amount × (1 + headroomBps/10000) + reserve (provisionInbound), so this inverts it.
+// Room the LP cannot fund must not be sold, nor its fee taken.
+export function roomFromStock(have, { reserve, headroomBps }) {
+  const h = Math.floor(Number(have) || 0) - Math.floor(Number(reserve) || 0);
+  if (!(h > 0)) return 0;
+  return Math.floor((h * 10000) / (10000 + Math.max(0, Number(headroomBps) || 0)));
+}
