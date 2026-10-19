@@ -634,6 +634,7 @@
           <select id="lnRecvAsset" style="flex:1"></select>
           <input id="lnRecvAmt" class="mono" placeholder="amount" style="width:130px">
         </div>
+        <div class="sub" id="lnRecvRoom" style="margin-top:8px"></div>
         <button class="primary" id="lnRecvBtn" style="margin-top:10px">Create invoice</button>
         <div class="status" id="lnRecvStatus" style="margin-top:8px"></div>
         <div class="mono" id="lnRecvBolt11" style="margin-top:8px;word-break:break-all;font-size:11px"></div>
@@ -3598,7 +3599,7 @@ async function lnResumeReceiveRoom(){
   try{ await lnClaimInbound(rec); toast('You can now receive '+rec.ticker+' over Lightning'); try{ refreshLnStatus(); }catch{} }
   catch(e){ console.warn('[ln] receive room (retried on the next open):', e?.message??e); }
 }
-function lnReceiveRoomDialog(leg){
+function lnReceiveRoomDialog(leg, startAtoms){
   const m=el('div','modal'), c=el('div','card');
   c.appendChild(el('label','lbl','Receive '+leg.ticker+' over Lightning'));
   c.appendChild(el('div','sub','To receive over Lightning, the other side of a channel needs room for what arrives. The service opens a channel to you with that room on its side. You pay its fee once, in '+leg.ticker+', on chain.'));
@@ -3673,6 +3674,7 @@ function lnReceiveRoomDialog(leg){
       no.disabled=false; inp.disabled=false; ok.disabled=false;
     }
   };
+  if(startAtoms>0n){ inp.value=fmtAtoms(startAtoms, prec).replace(/,/g,''); requote(); }
   setTimeout(()=>inp.focus(), 50);
 }
 // Move ⇄: one button per asset for both ways. With only one way open it goes straight there;
@@ -3796,20 +3798,25 @@ function refreshLnSendReceive(){
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
   if (sc) sc.classList.toggle('hide', !on);
   if (rc) rc.classList.toggle('hide', !on);
-  if (on){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); }
+  if (on){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
 }
+// How much of the chosen asset can arrive over Lightning, said before an invoice is made for more.
+function lnPaintRecvRoom(){
+  const box=$('lnRecvRoom'), sel=$('lnRecvAsset'); if(!box || !sel || !sel.value) return;
+  const hex=sel.value, meta=assetMeta(hex), room=lnReceivableFor(hex==='BTC' ? 'BTC' : hex);
+  box.innerHTML='';
+  if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'; return; }
+  box.appendChild(document.createTextNode('You cannot receive '+meta.ticker+' over Lightning yet: a channel needs room for it on the other side. '));
+  if(hex!=='BTC'){
+    const b=el('button','ghost','Add room to receive'); b.style.cssText='padding:2px 10px;font-size:12px';
+    b.onclick=()=>lnReceiveRoomDialog(lnLegFor(hex)); box.appendChild(b);
+  }
+}
+// The leg a Balance row would hand to the Lightning dialogs, for an asset.
+function lnLegFor(hex){ const m=assetMeta(hex); return { chain:'seq', asset:hex, ticker:m.ticker, precision:m.precision }; }
 // Bring the hosted node for one leg online and answer its node key. BTC and a Sequentia
 // asset are provisioned from different device identities, so this is the single place that
 // knows which pair of calls a leg takes.
-// Wait no longer than `ms` for `p`. Used where a step is a nicety rather than a
-// requirement: a hosted node that never answers must not hold the whole action.
-function lnDeadline(p, ms){
-  let t; return Promise.race([
-    Promise.resolve(p).finally(() => clearTimeout(t)),
-    new Promise((_, rej) => { t = setTimeout(() => rej(new Error('the hosted node did not answer in time')), ms); }),
-  ]);
-}
-const LN_INBOUND_MS = 20000;   // the JIT inbound step may be opening a channel on-chain behind it
 async function lnConnectLeg(asset, say){
   let node_key;
   if (asset === 'BTC'){ await lnApi.connectBtcNode(); node_key = await lnApi.btcNodeKey(); }
@@ -3827,31 +3834,28 @@ let _lnSRWired = false;
 function initLnSendReceive(){
   if (_lnSRWired) return; _lnSRWired = true;
   const recvBtn = $('lnRecvBtn'), sendBtn = $('lnSendBtn'), copyBtn = $('lnRecvCopy');
+  if ($('lnRecvAsset')) $('lnRecvAsset').addEventListener('change', lnPaintRecvRoom);
   if (recvBtn) recvBtn.onclick = async () => {
     const asset = $('lnRecvAsset').value, meta = assetMeta(asset);
     const amt = Math.round(Number($('lnRecvAmt').value) * Math.pow(10, meta.precision || 0));
     const st = $('lnRecvStatus'), out = $('lnRecvBolt11');
     out.textContent = ''; $('lnRecvCopy').classList.add('hide');
     if (!(amt > 0)){ st.className = 'status err'; st.textContent = 'Enter an amount.'; return; }
+    // An invoice for more than can arrive would only fail in the payer's wallet. Room to receive
+    // is bought openly, with its price, in its own dialog; it is never bought here on the side.
+    const room = lnReceivableFor(asset === 'BTC' ? 'BTC' : asset);
+    if (asset !== 'BTC' && room < BigInt(amt)){
+      st.className = 'status err';
+      st.textContent = room > 0n
+        ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning. Add room to receive more, or ask for less.'
+        : 'You cannot receive ' + meta.ticker + ' over Lightning yet. Add room to receive first; it takes about a block.';
+      lnPaintRecvRoom();
+      return;
+    }
     recvBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
       if (!lnApi) throw new Error('open your wallet first');
       const node_key = await lnConnectLeg(asset, (t) => { st.innerHTML = '<span class="spin"></span>' + esc(t); });
-      // JIT inbound liquidity is a Sequentia-asset endpoint: POST /channel/inbound answers
-      // "asset must be a Sequentia asset id", so the BTC leg takes the channel it already has.
-      if (asset !== 'BTC'){
-        st.innerHTML = '<span class="spin"></span>Ensuring inbound liquidity…';
-        // Best-effort: a funded channel may already have inbound, and an invoice is worth
-        // having either way. It is also the step most likely to stall — the LSP can be
-        // opening a channel on-chain behind it — so it gets a deadline rather than the
-        // spinner it used to leave on screen for minutes.
-        try { await lnDeadline(lnApi.channelInbound({ node_key, asset, amount: amt }), LN_INBOUND_MS); }
-        catch(e){
-          if (!lnOwnChannelsFor(asset).length)
-            throw new Error('no Lightning channel can receive ' + meta.ticker + ' yet (' + prettyErr(e) + '). Nothing was created; try again in a minute, or receive on-chain with the address above');
-          console.warn('[ln] inbound liquidity (continuing over the existing channel):', e?.message ?? e);
-        }
-      }
       st.innerHTML = '<span class="spin"></span>Creating the invoice…';
       const inv = await lnApi.nodeReceive({ node_key, amount: amt, description: 'Receive ' + meta.ticker });
       if (!inv || !inv.bolt11) throw new Error((inv && inv.error) || 'no invoice returned');

@@ -4916,7 +4916,14 @@ const server = http.createServer(async (req, res) => {
       // CHARGE FOR IT. The fee is quoted here from the same function the quote endpoint uses, so the
       // price cannot drift between what was shown and what is charged, and any debt already carried
       // by this node falls due now.
-      const q = quoteInboundFee(amount, { isBtc: false, ...(await inboundLimitsFor(assetId)) });
+      const lim = await inboundLimitsFor(assetId);
+      let q = quoteInboundFee(amount, { isBtc: false, ...lim });
+      // Out of range is not free. Below the smallest sale the room opened (and charged) is that
+      // smallest sale; above the largest there is no sale. Both used to skip the fee and open the
+      // channel anyway, because the charge below runs only for a quote that is ok.
+      let openAmount = amount;
+      if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc: false, ...lim }); }
+      else if (!q.ok && q.max != null && amount > q.max) return send(res, 400, { ok: false, error: q.reason, min: q.min, max: q.max });
       const owed = debtOwed(body.node_key, assetId);
       const due = (q.ok ? q.fee : 0) + owed;
       const mode = String(body.mode || CFG.inboundCollectMode || 'deferred').toLowerCase();
@@ -4946,7 +4953,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       try {
-        const r = await provisionInbound({ nodeKey: body.node_key, assetId, amount });
+        const r = await provisionInbound({ nodeKey: body.node_key, assetId, amount: openAmount });
         // Only record the debt once the channel actually exists — charging for a channel that failed
         // to open would be billing for nothing. An idempotent no-op is not a new sale either.
         let nowOwed = owed;
