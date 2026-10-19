@@ -1679,6 +1679,72 @@ function setMode(m){
 // paintPanes). We never auto-select or force a rail; we only surface an honest LN-readiness note
 // for a leg the user actually set to Lightning. Shown for same-chain pairs too: a Sequentia asset
 // can settle over SeqLN, so "pay/receive over Lightning" is a real choice on every pair.
+// This wallet's own Lightning channels in one asset ('BTC' for bitcoin), summed: what they can send
+// and what they can still receive. Only open channels count (CHANNELD_NORMAL), matched as the
+// Balance tab matches them: by asset id, the policy asset by the 'policy' tag the service gives it.
+function lnLegTotals(hex){
+  let spend = 0, recv = 0;
+  const want = String(hex || '').toLowerCase(), tk = hex === 'BTC' ? 'BTC' : (metaOf(hex).ticker || '');
+  for (const c of (LNSTATUS.channels || [])){
+    if (!c.node_key || c.state !== 'CHANNELD_NORMAL') continue;
+    const isBtc = (c.leg === 'btc' || c.asset_label === 'BTC' || c.chain === 'btc');
+    if (hex === 'BTC' ? !isBtc : isBtc) continue;
+    if (hex !== 'BTC'){
+      const a = String(c.asset || '').toLowerCase(), l = String(c.asset_label || '').toLowerCase();
+      const policy = a === 'policy' || l === 'policy' || l === 'policy…';
+      if (!(a === want || (policy && want === String(C.POLICY_HEX || '').toLowerCase()) || (tk && l === tk.toLowerCase()))) continue;
+    }
+    spend += Number(c.spendable_units ?? c.spendable ?? 0);
+    recv += Number(c.receivable_units ?? c.receivable ?? 0);
+  }
+  return { spend, recv };
+}
+// Which rails a leg can use, from where the wallet holds the asset: paying needs a balance on that
+// rail (on-chain, or spendable in a Lightning channel), receiving over Lightning needs room to
+// receive, and receiving on-chain always works. Each refusal says how to make the rail usable.
+function legRailOptions(leg){
+  const hex = leg === 'pay' ? S.payAsset : S.receiveAsset;
+  const tk = hex === 'BTC' ? 'BTC' : (metaOf(hex).ticker || 'this asset');
+  const lnOn = lnDeployed();
+  const ln = lnOn ? lnLegTotals(hex) : { spend: 0, recv: 0 };
+  const noLn = 'Lightning is not available on this server.';
+  if (leg === 'pay'){
+    const onChain = balAtoms(hex) > 0n, onLn = ln.spend > 0;
+    const none = !onChain && !onLn ? 'You hold no ' + tk + ' to pay with: receive some first, or pay with another asset.' : '';
+    return {
+      chain: { ok: onChain, why: onChain ? '' : none || ('You have no ' + tk + ' on-chain: it is all on Lightning. Pay over Lightning, or move some on-chain from Balance.') },
+      ln: { ok: onLn, why: onLn ? '' : !lnOn ? noLn : none || ('You have no ' + tk + ' on Lightning. Move some to Lightning from Balance to pay with it here, or pay on-chain.') },
+    };
+  }
+  const room = ln.recv > 0;
+  const lnWhy = room ? '' : !lnOn ? noLn
+    : hex === 'BTC' ? 'You have no room to receive BTC over Lightning. Receive it on-chain.'
+    : ln.spend > 0 ? 'You have no room to receive ' + tk + ' over Lightning. Buy room to receive from the ' + tk + ' row in Balance, or receive it on-chain.'
+    : balAtoms(hex) > 0n ? 'You have no room to receive ' + tk + ' over Lightning. Move some ' + tk + ' to Lightning from Balance and ask for room to receive in the same step, or receive it on-chain.'
+    : 'You have no room to receive ' + tk + ' over Lightning: that takes a Lightning channel in ' + tk + ', which you can open once you hold some. Receive it on-chain.';
+  return { chain: { ok: true, why: '' }, ln: { ok: room, why: lnWhy } };
+}
+// A leg with one usable rail gets it without asking, and so does a leg whose chosen rail stopped
+// being usable (its balance moved): the guide then goes straight to the next step. With two
+// usable rails the choice stays the user's.
+function autoRails(){
+  for (const leg of ['pay', 'recv']){
+    const seg = C.$(leg === 'pay' ? 'swPayRailSeg' : 'swRecvRailSeg'); if (!seg) continue;
+    const o = legRailOptions(leg);
+    const usable = ['chain', 'ln'].filter(r => { const b = seg.querySelector('button[data-r="' + r + '"]'); return o[r].ok && b && !b.disabled; });
+    const cur = leg === 'pay' ? S.payRail : S.recvRail;
+    if (usable.length === 1 && cur !== usable[0]) setRail(leg, usable[0]);
+  }
+}
+// Say why a rail cannot be used, where the rail note goes, with the way to Balance when that is
+// where the fix is.
+function showRailRefusal(why){
+  const note = C.$('swRailNote'); if (!note || !why) return;
+  note.classList.remove('hide');
+  note.innerHTML = '<span>' + esc(why) + '</span>' + (/Balance/.test(why) ? ' <button type="button" class="swfix" id="swRailMove">Go to Balance</button>' : '');
+  const b = C.$('swRailMove');
+  if (b) b.onclick = () => { if (C.gotoLightning) C.gotoLightning(); };
+}
 function updateRails(){
   const box = C.$('swRailPicks'); if (!box) return;
   const pay = S.payAsset, receive = S.receiveAsset;
@@ -1692,6 +1758,7 @@ function updateRails(){
   const ra = lnDeployed() ? railAvail(pay, receive) : null;
   paintRailSegs(ra);
   renderRailNote(ra);
+  autoRails();
 }
 // An honest inline note under the rail choosers when the Lightning option is NOT
 // offerable for a leg (no channel / wrong-side liquidity): says why + links to
@@ -1857,7 +1924,10 @@ function railSupported(p, r){
 function wireRailSeg(id, leg){
   const seg = C.$(id); if (!seg || seg._wired) return; seg._wired = true;
   // Guard on b.disabled at click time so a greyed (unsupported) combo can't be picked.
-  seg.querySelectorAll('button[data-r]').forEach(b => b.onclick = () => { if (!b.disabled) setRail(leg, b.dataset.r); });
+  seg.querySelectorAll('button[data-r]').forEach(b => b.onclick = () => {
+    if (b.classList.contains('off')) return showRailRefusal(b.dataset.why);
+    if (!b.disabled) setRail(leg, b.dataset.r);
+  });
 }
 function paintRailSegs(ra){
   ra = ra || railAvail(S.payAsset, S.receiveAsset);
@@ -1865,9 +1935,16 @@ function paintRailSegs(ra){
   const paint = (id, leg) => { const seg = C.$(id); if (!seg) return;
     const cur = leg === 'pay' ? S.payRail : S.recvRail;
     const legLn = leg === 'pay' ? ra.payLn : ra.recvLn;   // real per-asset LN verdict for this leg
+    const opts = legRailOptions(leg);
     seg.querySelectorAll('button[data-r]').forEach(b => {
       const r = b.dataset.r;
       b.classList.toggle('on', r === cur);
+      // Where the wallet holds the asset decides first: a rail with nothing on it is shown off, and a
+      // click on it says why and how to put something there (showRailRefusal), rather than nothing.
+      const o = opts[r] || { ok: true, why: '' };
+      b.classList.toggle('off', !o.ok);
+      if (!o.ok){ b.dataset.why = o.why; b.disabled = false; b.title = o.why; return; }
+      delete b.dataset.why;
       // The Lightning button is now SELECTABLE even without a channel: if the leg has no channel yet,
       // one is opened for you INLINE on Place-order (see reviewLn / renderRailNote). Only the
       // undeployed mixed shape (asset over LN + BTC on-chain) stays disabled. A no-channel LN pick

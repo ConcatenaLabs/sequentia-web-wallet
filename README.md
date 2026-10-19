@@ -238,6 +238,11 @@ One symmetric composer: "You pay X" / "You receive Y". The route is inferred fro
 - **Instant (Lightning)** and **mixed** rails for BTC ↔ asset appear when the Lightning
   backend is reachable (see below).
 
+Each side picks its rail where the wallet holds the asset: paying needs a balance on that rail
+(on-chain, or spendable in a Lightning channel), receiving over Lightning needs room to receive,
+and receiving on-chain always works. A side with one usable rail gets it without asking; a rail
+with nothing on it is shown off, and clicking it says why and how to make it usable.
+
 Two price modes, always switchable:
 
 - **Market**: the other amount fills at the best executable price (a sweep estimate with a

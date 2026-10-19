@@ -320,7 +320,8 @@
   .swbook-seg{flex:0 0 auto;max-width:320px}
   .swbookbar .sub{flex:1;min-width:180px;font-size:12px;color:var(--dim)}
   /* A rail toggle that would form an unsupported mixed combo is greyed + non-clickable. */
-  .swseg button:disabled{opacity:.4;cursor:not-allowed;color:var(--dim);background:transparent;box-shadow:none}
+  .swseg button:disabled,.swseg button.off{opacity:.4;cursor:not-allowed;color:var(--dim);background:transparent;box-shadow:none}
+  .swseg button.off:hover{color:var(--dim)}
   .swseg button:disabled:hover{color:var(--dim);filter:none}
   .swseg button:disabled.on{color:var(--dim)}
   .swfee{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel2)}
@@ -1316,7 +1317,8 @@
           <p>These numbers use 5% a year and a 1 USDX minimum as an example; the dialog always shows the real price before you pay.</p>
         </details>
         <details id="faq-ln-swap"><summary>Why does a swap ask me for room to receive?</summary>
-          <p>A swap that pays you over Lightning needs room on the other side of one of your channels, in the asset you receive. Without it the payment cannot arrive. The swap says what that room costs before you place the order. The service opens the channel when the order is placed, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
+          <p>A swap that pays you over Lightning needs room on the other side of one of your channels, in the asset you receive, or the payment cannot arrive. With no room in that asset, receiving over Lightning is off in the swap: receive on-chain, or buy room first. With some room but less than the amount, the swap says what the rest costs; the service opens it when the order is placed, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
+          <p>The same goes for paying: each side of a swap offers only the rails where you hold the asset, and picks the only one by itself when there is one.</p>
         </details>
       </div>
     </section>
