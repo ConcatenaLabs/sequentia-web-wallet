@@ -1816,6 +1816,22 @@ function debtClear(nodeKey, assetId, amount) {
   return next;
 }
 
+// The node's own names for assets (dumpassetlabels). getfeeexchangerates and INBOUND_ANNUAL_BPS key
+// an asset by that name ("USDX"), and assetLabel only knows GOLD, so without this table every other
+// asset found no rate: atom limits instead of value limits, and the default yearly rate. Read again
+// at most every ten minutes; a failed read keeps the last table.
+const nodeLabels = { byId: new Map(), at: 0 };
+async function refreshNodeLabels() {
+  if (Date.now() - nodeLabels.at < 10 * 60_000) return;
+  const t = await elementsCall('dumpassetlabels').catch(() => null);
+  if (!t || typeof t !== 'object') return;
+  nodeLabels.byId = new Map(Object.entries(t).map(([label, id]) => [String(id).toLowerCase(), label]));
+  nodeLabels.at = Date.now();
+}
+function pricedLabel(id) {
+  return nodeLabels.byId.get(String(id || '').toLowerCase()) || assetLabel(id);
+}
+
 // PRICE FOR SELLING INBOUND LIQUIDITY: max(floor, amount × the asset's yearly rate × months / 12),
 // quoted before anything is opened (inbound-price.mjs). Denominated in the asset being bought and
 // charged in its own units, so buying room never requires holding some other asset first; `isBtc`
@@ -1826,7 +1842,7 @@ function quoteInboundFee(amount, { isBtc = false, assetId = '', months, minSat, 
   const floor = isBtc
     ? (minSat == null ? CFG.inboundFeeMinSat : Number(minSat))
     : (minAtoms == null ? CFG.inboundFeeMinAtoms : Number(minAtoms));
-  const annualBps = annualBpsFor(CFG.inboundAnnualBps, isBtc ? 'BTC' : assetId, isBtc ? 'BTC' : assetLabel(assetId), CFG.inboundFeeBps);
+  const annualBps = annualBpsFor(CFG.inboundAnnualBps, isBtc ? 'BTC' : assetId, isBtc ? 'BTC' : pricedLabel(assetId), CFG.inboundFeeBps);
   return quoteRoom(amount, { months: months == null ? CFG.inboundDefaultMonths : months, annualBps, floor,
     minAmount: minAmount == null ? CFG.inboundMinSat : minAmount, maxAmount: maxAmount == null ? CFG.inboundMaxSat : maxAmount });
 }
@@ -1835,8 +1851,9 @@ function quoteInboundFee(amount, { isBtc = false, assetId = '', months, minSat, 
 // (inbound-limits.mjs), or {} to keep the atom limits when the node prices nothing for it.
 async function inboundLimitsFor(assetId) {
   if (!assetId) return {};
+  await refreshNodeLabels();
   const rates = await elementsCall('getfeeexchangerates').catch(() => null);
-  const lim = assetInboundLimits(rateOf(rates, assetId, assetLabel(assetId)),
+  const lim = assetInboundLimits(rateOf(rates, assetId, pricedLabel(assetId)),
     { refMin: CFG.inboundRefMin, refMax: CFG.inboundRefMax, refFeeFloor: CFG.inboundRefFeeFloor });
   return lim || {};
 }
