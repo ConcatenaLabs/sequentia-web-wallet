@@ -107,6 +107,7 @@
   .b-in{color:var(--green);border-color:#1f4d33;background:#10241a}
   .b-out{color:var(--red);border-color:#5a2420;background:#2a1110}
   .b-iss{color:var(--blue);border-color:#244a63;background:#0d1f2a}
+  .b-swap{color:var(--amber2);border-color:#5c4410;background:#241b08}
   .amt{margin-left:auto;font-weight:700;font:14px ui-monospace,monospace;white-space:nowrap}
   .amts{margin-left:auto;text-align:right;display:flex;flex-direction:column;gap:2px}
   .amts .amt{margin-left:0}
@@ -1405,6 +1406,7 @@ import * as seqob from './seqob.js';
 import { nodeRejectText, shortfallText } from './node-reject.js';
 import { waitReasons } from './wait-reason.js';
 import { feeAssetVerdict, rateNote } from './fee-verdict.js';
+import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
@@ -6095,7 +6097,7 @@ function cjUtxos(){
       txid:op.txid().toString(), vout:op.vout(),
       atoms:BigInt(sec.value()), asset:sec.asset().toString(),
       spkHex:(spk.toString?spk.toString():hexOfBytes(spk.bytes())),
-      chain:(u.extInt && String(u.extInt()).toLowerCase().includes('internal'))?1:0,
+      chain:chainOf(u),
       index:u.wildcardIndex(),
     });
   }
@@ -6468,6 +6470,17 @@ $('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make
 
 // ---------- history ----------
 // The Sequentia history as rows of plain data: what renderHistory draws and what the snapshot keeps.
+// One asset out and another in, fee aside: a swap. The kit calls such a transaction "unknown"
+// (its in/out test is per asset), and History showed it as UNKNOWN.
+function isSwapLegs(legs){
+  const l=Array.isArray(legs) ? legs : [];
+  return l.some(x=>BigInt(x.atoms)<0n) && l.some(x=>BigInt(x.atoms)>0n);
+}
+function swapLine(legs){
+  const tk=(x)=>assetMeta(x.hex).ticker;
+  const out=legs.filter(x=>BigInt(x.atoms)<0n).map(tk), got=legs.filter(x=>BigInt(x.atoms)>0n).map(tk);
+  return 'Swap: '+out.join(' + ')+' for '+got.join(' + ');
+}
 function historyRows(){
   const txs=wollet.transactions();
   const seen=seenConfirmed();
@@ -6499,6 +6512,7 @@ function historyRows(){
       type = nz.every(([,v])=>BigInt(v)<0n) ? 'outgoing' : nz.every(([,v])=>BigInt(v)>0n) ? 'incoming' : 'unknown';
     }
     if(wePaid && !legs.length) type='self';   // only the fee left: a payment to this wallet itself
+    if(type==='unknown' && isSwapLegs(legs)) type='swap';
     const main = legs[0] || (fee ? { hex:fee.hex, atoms:'-'+fee.atoms } : { hex:POLICY_HEX, atoms:'0' });
     return { txid, height:heightOf(t)||0, ts:t.timestamp()||(seen[txid]||[])[1]||0, type, hex:main.hex, atoms:main.atoms, legs, fee: wePaid ? fee : null };
   });
@@ -6545,22 +6559,25 @@ function renderHistory(){
   const short=(id)=>id.slice(0,8)+'…';
   const spedUp=new Set(Object.values(kinds).filter(k=>k && k.kind==='speedup').map(k=>k.of));
   for(const r of ordered){
-    const txid=r.txid, type=r.type, k=kinds[txid];
+    const txid=r.txid, k=kinds[txid];
+    // Rows saved before swaps were named carry "unknown": name them from their legs too.
+    const type = (r.type==='unknown' && isSwapLegs(r.legs)) ? 'swap' : r.type;
     const replaced = !r.height && replacedBy.has(txid);
     const dropped = !r.height && !replaced && leftMempool(txid);
     if(live && !r.height && !replaced) checkInMempool(txid).catch(()=>{});
     const item=el('div','item'+(r._child?' child':'')+(replaced?' replaced':''));
     // A short direction label; what kind of transaction it is goes on its own line below.
     const label = type==='incoming' ? 'IN' : (type==='outgoing'||type==='burn') ? 'OUT' : type==='self' ? 'SELF'
-      : type==='issuance' ? 'ISSUE' : type==='reissuance' ? 'REISSUE' : String(type).toUpperCase();
+      : type==='swap' ? 'SWAP' : type==='issuance' ? 'ISSUE' : type==='reissuance' ? 'REISSUE' : String(type).toUpperCase();
     // Green in, red out; a payment to oneself is neither, so it takes the neutral blue.
-    const bcls = type==='incoming'?'b-in':(type==='outgoing'||type==='burn')?'b-out':'b-iss';
+    const bcls = type==='incoming'?'b-in':(type==='outgoing'||type==='burn')?'b-out':type==='swap'?'b-swap':'b-iss';
     item.appendChild(el('span','badge dir '+bcls, label));
     const mid=el('div','grow');
     const when = r.height ? (r.ts ? new Date(r.ts*1000).toLocaleString() : 'block '+r.height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+txid, txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub'+(r.height?'':' unconf'), when));
     if(type==='self' && !k) mid.appendChild(el('div','kind','To yourself: only the fee left the wallet'));
+    if(type==='swap') mid.appendChild(el('div','kind', swapLine(r.legs)));
     if(k && k.kind==='speedup') mid.appendChild(el('div','kind','Speeds up '+short(k.of)));
     else if(k && k.kind==='bump') mid.appendChild(el('div','kind','Same payment as '+short(k.of)+', at a higher fee'));
     else if(k && k.kind==='replace') mid.appendChild(el('div','kind','Replaces '+short(k.of)));
@@ -6648,6 +6665,7 @@ function txDetail(r, tip){
   { const w=el('span','v'); w.appendChild(document.createTextNode(r.txid+' '));
     const cp=el('button','ghost','Copy'); cp.style.cssText='padding:1px 8px;font-size:11.5px';
     cp.onclick=(e)=>{ e.stopPropagation(); copyToClipboard(r.txid, cp); }; w.appendChild(cp); row('Transaction', w); }
+  if(isSwapLegs(r.legs)) row('Type', swapLine(r.legs));
   row('Status', r.height ? 'Confirmed in block '+r.height+(tip>=r.height ? ' · '+(tip-r.height+1)+' confirmation'+(tip===r.height?'':'s') : '')
     : leftMempool(r.txid) ? 'Dropped by the network: it will not confirm' : 'Waiting for a block');
   if(!r.height){
