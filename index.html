@@ -4053,6 +4053,15 @@ function moveToLightningDialog(leg){
       });
       try{ clearMoveState(); }catch{}   // channel opened — the move is complete
       try{ updateLnMoveBanner(); }catch{}
+      // A channel that holds nothing of yours is not where the coins went: an older service matched a
+      // deposit to a channel it had opened toward you to receive. Say where they are instead of "Done".
+      if(res.spendable_msat!=null && res.spendable_msat < 1000 && res.reused_existing){
+        st.className='status err';
+        st.textContent='Your '+leg.ticker+' reached your Lightning node, but the service matched it to a channel that only receives, so it is not in a channel yet. It is safe on your node’s own address; move it again to put it in a channel.';
+        no.disabled=false; no.textContent='Close'; no.onclick=()=>m.remove();
+        try{ await sync(); renderBalance(); renderLightningBalance(); }catch{}
+        return;
+      }
       st.className='status ok';
       st.textContent = 'Done. Lightning channel '+(res.short_channel_id||'')+' is active'
         + (res.spendable_msat!=null ? (' with '+fmtAtoms(BigInt(Math.round(res.spendable_msat/1000)), leg.precision)+' '+leg.ticker+' spendable.') : '.');
