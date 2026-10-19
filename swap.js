@@ -7153,10 +7153,17 @@ function staleMakerError(e){
 }
 // The resting asks a market walk takes, best first, as takeMarketWalk selects them: the directly
 // settleable rows, never this wallet's own.
+// Offers a fill just failed against (a covenant already taken, a maker offline or offering spent
+// coins) stay on the relay's book for a while. Left in, the next preview promised their price and
+// the next walk tried them again, so a market order "filled" at the offers behind them while its
+// review showed theirs. They join the session's dead-offer registry (markOfferDead), with its expiry.
+function offerKey(o){ return 'walk:' + String(o.offer_id || o.offerId || '') + ':' + String(o.maker_pubkey || o.makerPubkey || ''); }
+function deadOffer(o){ return _deadOffers.has(offerKey(o)); }
 function walkAsks(pay, receive, mine){
   const me = mine != null ? mine : (makerPubHex() || '').toLowerCase();
   return renderSameUnion(pay, receive)
     .filter((o) => !o._displayOnly)
+    .filter((o) => !deadOffer(o))
     .filter((o) => String(o.maker_pubkey || o.makerPubkey || '').toLowerCase() !== me);   // never self-fill
 }
 function isCovenantOffer(o){ return !!(o && (o.covenant || o.Covenant)); }
@@ -7235,9 +7242,19 @@ export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus
   if (!asks.length) throw new Error(all.length
     ? 'The orders resting here can only pay a blinded address. Allow receiving at a blinded address of this wallet, or switch to Limit to rest an order.'
     : 'No resting orders are on the book to fill right now. Switch to Limit to rest an order.');
+  // The book was just read again. If it moved since the review against the user (what this order
+  // now takes falls short of what the review showed by more than half a percent), stop before any
+  // fill and hand back the new figures to confirm: a maker re-pricing between the two used to
+  // fill the order at the new price with nothing said.
+  if (opts.expectRecv != null){
+    const now = walkPreview(pay, receive, payAtoms, blindOk);
+    if (now.got * 1000n < BigInt(opts.expectRecv) * 995n){
+      const e = new Error('the book moved since the review'); e.repriced = now; throw e;
+    }
+  }
   const bestPrice = Number(big(asks[0].offer_amount || asks[0].offerAmount || 0)) / Number(big(asks[0].want_amount || asks[0].wantAmount || 1));
   const floor = bestPrice * (1 - CONFIG.marketSlip);   // receive-per-pay we refuse to go below
-  let paidPay = 0n, gotRecv = 0n; const txids = []; const seen = new Set(); let idx = 0, lastErr = null;
+  let paidPay = 0n, gotRecv = 0n; const txids = []; const seen = new Set(); let idx = 0, lastErr = null, failed = 0, stopped = false;
   for (const o of asks){
     if (paidPay >= payAtoms) break;
     const oid = String(o.offer_id || o.offerId || '');
@@ -7272,12 +7289,26 @@ export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus
       txids.push(txid);
       paidPay += q.amountP; gotRecv += q.amountR;
       try { await C.sync(); } catch {}   // reflect the spent UTXOs before the next fill
-    } catch (e){ lastErr = e; /* skip this offer, try the next crossable one */ }
+    } catch (e){
+      lastErr = e; failed++;
+      markOfferDead(offerKey(o), String((e && e.message) || e));
+      // With a review to honour, an offer that could not be taken changes what the order gets.
+      // Before any fill: if the rest of the book now falls short of the review, stop and show the
+      // new figures. After a fill: stop there and say so, rather than walk on to worse offers.
+      if (opts.expectRecv != null){
+        if (!txids.length){
+          const now = walkPreview(pay, receive, payAtoms, blindOk);
+          if (now.got * 1000n < BigInt(opts.expectRecv) * 995n){
+            const r = new Error('an offer in the review could not be taken'); r.repriced = now; r.cause = e; throw r;
+          }
+        } else { stopped = true; break; }
+      }
+    }
   }
   if (!txids.length) throw new Error(lastErr
     ? ('Could not fill against the resting orders: ' + C.prettyErr(lastErr))
     : 'Nothing on the book crossed your price. Switch to Limit to rest an order at your price.');
-  return { txids, paidPay, gotRecv, full: paidPay >= payAtoms };
+  return { txids, paidPay, gotRecv, full: paidPay >= payAtoms, stopped, failed };
 }
 
 // Review a MARKET order (same-chain): confirm, then walk the book.
@@ -7329,7 +7360,8 @@ async function takeCovenantWalkReview(q){
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Walking the order book…';
     try {
       const res = await takeMarketWalk(pay, receive, payAtoms, recvAtoms,
-        (msg) => { st.innerHTML = '<span class="spin"></span>' + esc(msg); }, { blindInteractive: !!(consent && consent.checked()) });
+        (msg) => { st.innerHTML = '<span class="spin"></span>' + esc(msg); },
+        { blindInteractive: !!(consent && consent.checked()), expectRecv: pv.got });
       modal.remove();
       // ONE receipt for the whole market order (the actual paid/received totals across every level it
       // swept), keyed by the first fill txid, carrying all fill txids — a per-txid row would repeat the
@@ -7340,7 +7372,9 @@ async function takeCovenantWalkReview(q){
         card: true,   // task 21b: genuine settlement -> settle card
         ...tradeMeta(pay, receive, res.paidPay, res.gotRecv) });
       const gotStr = C.fmtAtoms(res.gotRecv, rm.precision);
-      if (res.full)
+      if (res.stopped)
+        C.toast(`Filled part of the order · received ${gotStr} ${rm.ticker}. An offer it was counting on could not be taken, so it stopped rather than take worse ones; place the rest again to see the price now.`);
+      else if (res.full)
         C.toast(`Market order filled · received ${gotStr} ${rm.ticker}.`,
           res.txids[0] ? { href: '/explorer/tx/' + res.txids[0], label: String(res.txids[0]).slice(0, 18) + '…' } : undefined);
       else
@@ -7349,6 +7383,24 @@ async function takeCovenantWalkReview(q){
       await C.sync();
       renderSwap();
     } catch (e){
+      if (e && e.repriced){
+        // Nothing was filled: show the new figures and let the next Confirm accept them.
+        const before = pv.got; pv = e.repriced;
+        const card = modal.querySelector('.card');
+        for (const kvEl of card.querySelectorAll('.kv')){
+          const k = kvEl.querySelector('.k'), v = kvEl.querySelector('.v'), hit = rows(pv).find(r => k && r[0] === k.textContent);
+          if (hit && v) v.textContent = hit[1];
+        }
+        const less = before > 0n ? Number((before - pv.got) * 10000n / before) / 100 : 0;
+        st.className = 'status warn';
+        const why = e.cause ? 'An offer in this review could not be taken (' + C.prettyErr(e.cause) + ')' : 'The book moved since this review opened';
+        st.textContent = pv.paid > 0n
+          ? why + ': you would now receive about ' + C.fmtAtoms(pv.got, rm.precision) + ' ' + rm.ticker
+            + ' (' + less.toLocaleString(undefined, { maximumFractionDigits: 2 }) + '% less). Nothing was filled. Confirm again to accept it.'
+          : why + ', and nothing within reach of the best price can fill now. Nothing was filled.';
+        ok.disabled = pv.paid <= 0n;
+        return;
+      }
       st.className = 'status err'; st.textContent = 'Could not fill: ' + C.prettyErr(e); ok.disabled = false;
     }
   };
