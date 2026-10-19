@@ -3510,11 +3510,19 @@ async function lnFundDirectBtc({ address, script, amount, complete, onBroadcast 
   if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);
   return { txid: signed.txid };
 }
-async function lnFundDirectSeq({ address, script, amount, asset, complete, onBroadcast }){
+// `extra` ({ address, amount, onTxid }) is one more payment in the same asset carried by the funding
+// transaction: the fee for room to receive, bought with the move. onTxid hears the txid before the
+// broadcast, so the purchase is stored with it first.
+async function lnFundDirectSeq({ address, script, amount, asset, complete, onBroadcast, extra }){
   const a = new Address(address);
   if(a.isBlinded()) throw new Error('the channel funding address is confidential');
   let b = network.txBuilder().addExplicitRecipient(a, BigInt(amount), new AssetId(asset));
-  b = applyFee(b, lnFundingFeeAsset(asset, amount));
+  const extraAtoms = extra ? BigInt(extra.amount) : 0n;
+  if(extra){
+    const x = new Address(extra.address);
+    b = x.isBlinded() ? b.addRecipient(x, extraAtoms, new AssetId(asset)) : b.addExplicitRecipient(x, extraAtoms, new AssetId(asset));
+  }
+  b = applyFee(b, lnFundingFeeAsset(asset, BigInt(amount) + extraAtoms));
   // The wallet is held for the whole exchange, so nothing else spends these coins meanwhile.
   return withWollet(async () => {
     const pset = b.finish(wollet);
@@ -3528,6 +3536,7 @@ async function lnFundDirectSeq({ address, script, amount, asset, complete, onBro
     const txid = finalized.txid().toString();
     if(txid!==fundingTxid) throw new Error('Not opening the channel: the signed funding transaction is not the one your node expects.');
     try{ localStorage.setItem(LN_FUNDING_KEY, JSON.stringify({ txid, hex: finalized.toString(), asset, at: Date.now() })); }catch{}
+    if(extra && extra.onTxid) extra.onTxid(txid);
     onBroadcast();
     await (broadcastClient || client).broadcast(finalized);
     try{ wollet.applyTransaction(finalized); }catch{}
@@ -3557,7 +3566,8 @@ async function lnRebroadcastFunding(){
 // endpoints gets the deposit to the node.
 async function lnFundChannel(opts){
   try{
-    const res = await fundChannelDirect({ chain: opts.chain, asset: opts.asset, amount: opts.amount, node: opts.node, fund: lnFundDirect, onProgress: opts.onProgress });
+    const fund = opts.extra ? (args)=>lnFundDirect({ ...args, extra: opts.extra }) : lnFundDirect;
+    const res = await fundChannelDirect({ chain: opts.chain, asset: opts.asset, amount: opts.amount, node: opts.node, fund, onProgress: opts.onProgress });
     try{ lnClearFunding(); }catch{}
     return res;
   }catch(e){
@@ -3623,6 +3633,12 @@ const INBOUND_KEY = 'swk.ln.inboundBuy.v1';   // { asset, ticker, amount, node, 
 function lnSaveInbound(rec){ try{ localStorage.setItem(INBOUND_KEY, JSON.stringify(rec)); }catch{} }
 function lnLoadInbound(){ try{ return JSON.parse(localStorage.getItem(INBOUND_KEY)||'null'); }catch{ return null; } }
 function lnClearInbound(){ try{ localStorage.removeItem(INBOUND_KEY); }catch{} }
+// One purchase at a time: a new one must not write over one whose fee is paid but whose channel
+// has not been asked for yet (lnResumeReceiveRoom finishes it on the next open).
+function lnRoomSlotFree(){
+  const prior=lnLoadInbound();
+  if(prior && prior.fee_txid) throw new Error('Your earlier purchase of room to receive '+(prior.ticker||'')+' is still finishing. Reopen the wallet in a minute to finish it, then try again.');
+}
 // Ask the service to open the room, until it sees the fee (it answers 402 until then).
 async function lnClaimInbound(rec, say){
   const deadline = Date.now() + 8*60_000;
@@ -3692,6 +3708,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
       say('Connecting your '+tk+' Lightning node…');
       const prov = await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: tk, policy:lnPolicy(), deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
       if(!(prov && prov.connected)) throw new Error('Could not bring your device signer online. Check your connection and try again.');
+      lnRoomSlotFree();
       await waitNodeReady({ nodeKey: prov.key, onProgress: ()=>say('Preparing your Lightning node…') });
       // The price again, for this node: anything it already owes is due with it.
       const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(last.atoms), node_key: prov.key });
@@ -3708,7 +3725,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
       say('Opening the channel to you…');
       const r=await lnClaimInbound(rec, say);
       st.className='status ok';
-      st.textContent = r && r.already_had_inbound
+      st.textContent = r && r.already_had_inbound && !r.pending
         ? 'You can already receive this much '+tk+' over Lightning; no new channel was needed.'
         : 'Done. A channel with room for '+fmtAtoms(last.atoms, prec)+' '+tk+' is opening to you; you can receive over Lightning once it confirms.';
       no.disabled=false; no.textContent='Close'; no.onclick=()=>m.remove();
@@ -3721,6 +3738,41 @@ function lnReceiveRoomDialog(leg, startAtoms){
   };
   if(startAtoms>0n){ inp.value=fmtAtoms(startAtoms, prec).replace(/,/g,''); requote(); }
   setTimeout(()=>inp.focus(), 50);
+}
+// The "room to receive" part of Move to Lightning: an optional amount, priced as it is typed. value()
+// answers null when empty, { problem } when it cannot be bought, or { atoms, fee } (the quoted fee,
+// without anything the node already owes, which the move adds once it knows the node).
+function lnMoveRoomField(card, leg, moveAtoms){
+  const tk=leg.ticker, prec=leg.precision;
+  card.appendChild(el('label','lbl','Room to receive (optional)'));
+  card.appendChild(el('div','sub','Lightning can bring you '+tk+' only if the other side of a channel has room for it. The service opens a channel to you with that room as soon as this move confirms. Its fee, in '+tk+', is paid in the same transaction. Leave it empty if you only want to send.'));
+  const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; card.appendChild(inp);
+  const line=el('div','sub'); line.style.marginTop='6px'; card.appendChild(line);
+  let state=null, t=null, seq=0;
+  const recheck=async()=>{
+    const my=++seq;
+    let atoms; try{ atoms=parseAtoms((inp.value||'').trim(), prec); }catch{ atoms=null; }
+    if((inp.value||'').trim()==='' || atoms===0n){ state=null; line.textContent=''; return; }
+    if(atoms==null){ state={ problem:'Enter a valid amount of room to receive, or leave it empty.' }; line.textContent=state.problem; return; }
+    state={ problem:'The price of the room to receive is still loading.' }; line.textContent='Getting the price…';
+    try{
+      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms) });
+      if(my!==seq) return;
+      if(!q.ok){
+        state={ problem: (q.min!=null && q.max!=null)
+          ? 'The service sells between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room to receive.'
+          : 'No price for this room: '+(q.reason||q.error||'the service did not answer') };
+        line.textContent=state.problem; return;
+      }
+      const fee=BigInt(q.fee), pct=(q.bps/100).toLocaleString(undefined,{maximumFractionDigits:2});
+      state={ atoms, fee };
+      const left=BigInt(leg.onchain||0n) - moveAtoms() - fee;
+      line.textContent='Fee '+fmtAtoms(fee, prec)+' '+tk+' ('+pct+'%, at least '+fmtAtoms(BigInt(q.floor), prec)+').'
+        + (left < 0n ? ' Together with the amount it is more than you hold on-chain.' : '');
+    }catch(e){ if(my===seq){ state={ problem:'Could not price the room to receive: '+prettyErr(e) }; line.textContent=state.problem; } }
+  };
+  inp.oninput=()=>{ clearTimeout(t); t=setTimeout(recheck, 350); };
+  return { value: ()=>state, recheck: ()=>{ clearTimeout(t); t=setTimeout(recheck, 350); }, lock: ()=>{ inp.disabled=true; } };
 }
 // Move ⇄: one button per asset for both ways. With only one way open it goes straight there;
 // with both, it asks which.
@@ -3852,13 +3904,20 @@ function lnPaintRecvRoom(){
   box.innerHTML='';
   if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'; return; }
   box.appendChild(document.createTextNode('You cannot receive '+meta.ticker+' over Lightning yet: a channel needs room for it on the other side. '));
-  if(hex!=='BTC'){
+  if(hex==='BTC') return;
+  if(lnOnLightning(hex)){
     const b=el('button','ghost','Add room to receive'); b.style.cssText='padding:2px 10px;font-size:12px';
     b.onclick=()=>lnReceiveRoomDialog(lnLegFor(hex)); box.appendChild(b);
+  } else {
+    box.appendChild(document.createTextNode('Move some '+meta.ticker+' to Lightning first, from Balance; you choose the room to receive in the same step.'));
   }
 }
 // The leg a Balance row would hand to the Lightning dialogs, for an asset.
-function lnLegFor(hex){ const m=assetMeta(hex); return { chain:'seq', asset:hex, ticker:m.ticker, precision:m.precision }; }
+function lnLegFor(hex){ const m=assetMeta(hex); return { chain:'seq', asset:hex, ticker:m.ticker, precision:m.precision, onchain: BigInt(balObj()[hex]||0) }; }
+// Whether an asset is on Lightning already: a channel of the wallet's own node holds or receives it,
+// or one is opening. Room to receive is bought on its own only then; before, it is asked for with
+// the move that opens the first channel.
+function lnOnLightning(kind /* 'BTC' | assetHex */){ return lnOwnChannelsFor(kind).length > 0 || lnOpeningFor(kind); }
 // Bring the hosted node for one leg online and answer its node key. BTC and a Sequentia
 // asset are provisioned from different device identities, so this is the single place that
 // knows which pair of calls a leg takes.
@@ -3893,7 +3952,9 @@ function initLnSendReceive(){
       st.className = 'status err';
       st.textContent = room > 0n
         ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning. Add room to receive more, or ask for less.'
-        : 'You cannot receive ' + meta.ticker + ' over Lightning yet. Add room to receive first; it takes about a block.';
+        : (lnOnLightning(asset)
+          ? 'You cannot receive ' + meta.ticker + ' over Lightning yet. Add room to receive first; it takes about a block.'
+          : 'You cannot receive ' + meta.ticker + ' over Lightning yet. Move some ' + meta.ticker + ' to Lightning first, from Balance, and choose the room to receive in the same step.');
       lnPaintRecvRoom();
       return;
     }
@@ -4051,12 +4112,17 @@ function moveToLightningDialog(leg){
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
   c.appendChild(el('div','sub','Available on-chain: '+fmtAtoms(avail, leg.precision)+' '+leg.ticker));
+  // Room to receive, asked for now rather than after the channel opens: the service opens its
+  // channel to you as soon as this move's transaction confirms, and its fee rides in that same
+  // transaction. Sequentia assets only: the service sells no room in BTC.
+  const recv = leg.chain==='seq' ? lnMoveRoomField(c, leg, ()=>{ try{ return parseAtoms((inp.value||'').trim(), leg.precision); }catch{ return 0n; } }) : null;
   const act=el('div','row'); act.style.marginTop='14px';
   const ok=el('button','primary','Move to Lightning'); const no=el('button','ghost','Cancel');
   act.appendChild(ok); act.appendChild(no); c.appendChild(act);
   const st=el('div','status'); c.appendChild(st);
   m.appendChild(c); document.body.appendChild(m);
   no.onclick=()=>{ if(!ok.disabled) m.remove(); };
+  if(recv) inp.addEventListener('input', recv.recheck);
   ok.onclick=async()=>{
     let backgrounded=false;   // set once the user chooses to close the modal and let the move finish in the background
     let atoms;
@@ -4064,7 +4130,10 @@ function moveToLightningDialog(leg){
     if(!(atoms>0n)){ st.className='status err'; st.textContent='Enter an amount greater than zero.'; return; }
     if(atoms>avail){ st.className='status err'; st.textContent='Amount exceeds your on-chain '+leg.ticker+' balance.'; return; }
     if(leg.chain==='btc' && atoms < 546n){ st.className='status err'; st.textContent='Minimum channel is 546 sats (the dust limit).'; return; }
-    ok.disabled=true; no.disabled=true;
+    const room = recv ? recv.value() : null;
+    if(room && room.problem){ st.className='status err'; st.textContent=room.problem; return; }
+    if(room && atoms + room.fee > avail){ st.className='status err'; st.textContent='The amount and the fee for room to receive together exceed your on-chain '+leg.ticker+' balance.'; return; }
+    ok.disabled=true; no.disabled=true; if(recv) recv.lock();
     const say=(txt)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+txt; };
     try{
       const phrase=(localStorage.getItem(KEY)||'').trim();
@@ -4094,8 +4163,26 @@ function moveToLightningDialog(leg){
       // Record enough to FINISH this move if it is interrupted after the deposit lands (network
       // blip / reload). Persisted the moment the deposit is sent; cleared once the channel opens.
       const moveRec = { chain: leg.chain, asset: leg.asset || undefined, amount: Number(atoms), node: prov.key, ticker: leg.ticker, precision: leg.precision };
+      // Room to receive: priced again for this node (anything it owes is due with it) and stored
+      // before the funding transaction carries its fee, so a closed tab finishes it on the next open.
+      let roomRec=null, extra;
+      if(room){
+        lnRoomSlotFree();
+        say('Pricing the room to receive…');
+        const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(room.atoms), node_key: prov.key });
+        if(!q.ok) throw new Error('room to receive: '+(q.reason || q.error || 'the service gave no price'));
+        roomRec={ asset: leg.asset, ticker: leg.ticker, amount: Number(room.atoms), node: prov.key, fee_txid: null, at: Date.now() };
+        const due=BigInt(q.due_now||0);
+        if(due>0n){
+          if(!q.pay_to) throw new Error('room to receive: the service gave no address for the fee'+(q.prepaid_unavailable ? ' ('+q.prepaid_unavailable+')' : ''));
+          if(atoms + due > avail) throw new Error('The amount and the fee for room to receive ('+fmtAtoms(due, leg.precision)+' '+leg.ticker+') together exceed your on-chain '+leg.ticker+' balance.');
+          lnSaveInbound(roomRec);
+          extra={ address: q.pay_to, amount: due, onTxid: (txid)=>{ roomRec.fee_txid=txid; lnSaveInbound(roomRec); } };
+        }
+        roomRec.due=due;
+      }
       const res = await lnFundChannel({
-        chain: leg.chain, asset: leg.asset || undefined, amount: Number(atoms), node: prov.key,
+        chain: leg.chain, asset: leg.asset || undefined, amount: Number(atoms), node: prov.key, extra,
         onProgress: (e)=>{
           if(e.phase==='sent'){
             try{ saveMoveState(moveRec); }catch{}   // deposit is now on the node — a reload (or the background job) can finish the open
@@ -4122,10 +4209,33 @@ function moveToLightningDialog(leg){
         try{ await sync(); renderBalance(); renderLightningBalance(); }catch{}
         return;
       }
-      st.className='status ok';
-      st.textContent = 'Done. Lightning channel '+(res.short_channel_id||'')+' is active'
+      const doneText = 'Done. Lightning channel '+(res.short_channel_id||'')+' is active'
         + (res.spendable_msat!=null ? (' with '+fmtAtoms(BigInt(Math.round(res.spendable_msat/1000)), leg.precision)+' '+leg.ticker+' spendable.') : '.');
+      st.className='status ok'; st.textContent = doneText;
       toast('Moved '+leg.ticker+' to Lightning');
+      if(roomRec){
+        try{
+          // A service without one-transaction funding took a deposit instead: the fee goes on its own.
+          if(roomRec.due>0n && !roomRec.fee_txid){
+            // The deposit spent coins this wallet may still list: read the chain again first.
+            say('Paying the fee for room to receive…');
+            await sync();
+            lnSaveInbound(roomRec);
+            const sent=await lnSendDeposit({ chain:'seq', asset: leg.asset, amount: roomRec.due, address: extra.address });
+            roomRec.fee_txid=sent.txid; lnSaveInbound(roomRec);
+          }
+          const r=await lnClaimInbound(roomRec, (t)=>say(t));
+          st.className='status ok';
+          st.textContent = doneText + (r && r.already_had_inbound && !r.pending
+            ? ' You can already receive this much '+leg.ticker+' over Lightning.'
+            : ' A channel with room to receive '+fmtAtoms(BigInt(roomRec.amount), leg.precision)+' '+leg.ticker+' is opening to you; it is ready in about a block.');
+          if(backgrounded) toast('You can soon receive '+leg.ticker+' over Lightning');
+        }catch(e){
+          st.className='status err';
+          st.textContent = doneText + ' Room to receive failed: '+prettyErr(e)
+            + (lnLoadInbound() && lnLoadInbound().fee_txid ? ' Its fee is paid; the wallet finishes it the next time it opens.' : '');
+        }
+      }
       // Remember we opened a channel on this leg, so the on-load reconnect can bring its signer
       // back even when the node is momentarily blocked waiting for that signer (and thus invisible
       // to /status) — the reconnect deadlock a just-revived node would otherwise hit.
@@ -4746,8 +4856,9 @@ function renderBalance(){
         if(toChain) one.appendChild(button('Move on-chain', 'Move '+ticker+' out of Lightning, on chain', ()=>closeToChainDialog(leg, own)));
         r.appendChild(one);
       }
-      // Room to receive over Lightning: how much the asset can arrive with, and a way to buy room.
-      if(leg.chain==='seq' && movable){
+      // Room to receive over Lightning: how much the asset can arrive with, and a way to buy more.
+      // Before the asset is on Lightning there is no line: Move to Lightning asks for room itself.
+      if(leg.chain==='seq' && movable && (own.length > 0 || opening)){
         const room=lnReceivableFor(kind);
         const line=el('div','rail-recv');
         line.appendChild(el('span',null, room>0n ? 'Can receive '+fmtAtoms(room, precision)+' '+ticker+' over Lightning' : 'Cannot receive '+ticker+' over Lightning yet'));
