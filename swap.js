@@ -1738,13 +1738,39 @@ function renderRailNote(ra){
     } else {
       // Receiving needs room in a channel toward you; the service opens one when you place the
       // order. Moving this asset to Lightning yourself would not help: it adds room to send.
-      html = `<span>To receive ${nm} over Lightning, the service opens a channel to you when you place the order.</span>`;
+      html = `<span>To receive ${nm} over Lightning, the service opens a channel to you when you place the order.</span>`
+        + inboundFeeLine(S.receiveAsset);
       withBtn = false;
     }
   }
   note.innerHTML = html + (withBtn ? ` <button type="button" class="swfix" id="swRailMove">${btnLabel}</button>` : '');
   const b = C.$('swRailMove');
   if (b) b.onclick = () => { if (C.gotoLightning) C.gotoLightning(); else try { C.toast('Set up Lightning from the Balance tab.'); } catch {} };
+}
+// What that channel costs, in the asset received, said beside the note: the service charges for
+// room to receive, and when it opens the channel as the order is placed the fee is owed and settled
+// with the node's next purchase of room. Quoted once per asset and amount (the note repaints often);
+// nothing is said when the wallet already has the room or there is no amount yet.
+const _inboundFee = { key: '', text: '' };
+function inboundFeeLine(hex){
+  if (!hex || hex === 'BTC' || !(L && L.inboundQuote)) return '';
+  const m = metaOf(hex) || {}, prec = m.precision || 0;
+  let atoms = 0n; try { atoms = C.parseAtoms((C.$('swRecvAmt').value || '').trim(), prec); } catch {}
+  if (!(atoms > 0n)) return '';
+  try { if (L.receivable && L.receivable(hex) >= atoms) return ''; } catch {}
+  const key = hex + ':' + atoms;
+  if (_inboundFee.key === key) return _inboundFee.text;
+  _inboundFee.key = key; _inboundFee.text = '';
+  L.inboundQuote({ asset: hex, amount: Number(atoms) }).then((q) => {
+    if (_inboundFee.key !== key || !q) return;
+    const tk = esc(m.ticker || 'the asset');
+    _inboundFee.text = q.ok
+      ? ` <span>Its fee is ${esc(C.fmtAtoms(BigInt(q.fee), prec))} ${tk}, owed to the service and settled with your next purchase of room to receive.</span>`
+      : (q.max != null && atoms > BigInt(q.max)) ? ` <span>The service opens at most ${esc(C.fmtAtoms(BigInt(q.max), prec))} ${tk} of room: receive less, or receive on-chain.</span>`
+      : (q.min != null) ? ` <span>The service opens at least ${esc(C.fmtAtoms(BigInt(q.min), prec))} ${tk} of room, and charges for that.</span>` : '';
+    try { updateRails(); } catch {}
+  }).catch(() => {});
+  return '';
 }
 // DYNAMIC sub-asset rail availability from the order book (L.book) — NO hardcoded maker
 // list. The sub-asset relays are a permissionless signed-intent book, so a rail is offered
@@ -2147,6 +2173,8 @@ function paintGuide(){
     : step === 2 ? 'swPayAmt' : step === 3 ? 'swRailPicks' : null;
   for (const id of ['swPayPick', 'swRecvPick', 'swPayAmt', 'swRailPicks']){ const e = $(id); if (e) e.classList.toggle('swnow', id === now); }
   if (step === 2 && _guideStepWas !== 2){ const a = $('swPayAmt'); if (a && document.activeElement !== a) try { a.focus({ preventScroll: true }); } catch {} }
+  // Receiving over Lightning: the note under the rails names the channel's fee for this amount.
+  if (S.recvRail === 'ln' && S.payAsset && S.receiveAsset){ try { renderRailNote(lnDeployed() ? railAvail(S.payAsset, S.receiveAsset) : null); } catch {} }
   _guideStepWas = step;
   const why = $('swWhy'), cta = $('swReview'); if (!why || !cta) return;
   let text = '';
