@@ -237,6 +237,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.ln.predating`, `swk.ln.predating.dismissed` | per hosted node, the channels its device found in an older device's store, which it does not carry over; and the notes about them, and about coins on the node outside a channel, that the user dismissed |
 | `swk.ln.funding.v1` | a Lightning channel's funding transaction, signed and stored just before it is broadcast; sent again on the next open if the network does not know it, and cleared once it does |
 | `swk.ln.closeTo.v1` | per hosted node, the scripts of this wallet's own addresses its device may close a channel to; named to the device again whenever its signer starts |
+| `swk.ln.inboundBuy.v1` | a purchase of room to receive over Lightning whose fee is paid (or about to be): finished on the next open |
 | `swk.ln.pendingMove.v1` | a Move to Lightning past its on-chain transaction but not yet open, to finish on the next open |
 | `swk.devMode` | `1` while developer mode is on; absent (off) by default |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
@@ -265,7 +266,7 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 72 `*.test.mjs` files: 48 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 73 `*.test.mjs` files: 49 hold `node:test` suites, and the
 other 24, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
