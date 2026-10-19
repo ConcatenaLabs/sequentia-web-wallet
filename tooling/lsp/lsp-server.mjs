@@ -110,6 +110,7 @@ import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, asse
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
+import { rateOf, assetInboundLimits, feeReuseProblem } from './inbound-limits.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 
 function reqEnv(name) {
@@ -230,6 +231,12 @@ const CFG = {
   inboundFeeMinAtoms: Number(process.env.INBOUND_FEE_MIN_ATOMS || 1000),   // per-asset floor, in that asset's atoms
   inboundMinSat: Number(process.env.INBOUND_MIN_SAT || 100000),            // Phoenix sells 100k..10M
   inboundMaxSat: Number(process.env.INBOUND_MAX_SAT || 10000000),
+  // An asset's inbound limits and fee floor, in reference atoms of the node's fee exchange rates
+  // (1e8 to a reference unit; inbound-limits.mjs). Used for every asset the node prices; an asset
+  // it does not price keeps the atom limits above.
+  inboundRefMin: Number(process.env.INBOUND_REF_MIN || 10e8),            // 10 reference units
+  inboundRefMax: Number(process.env.INBOUND_REF_MAX || 10_000e8),        // 10,000 reference units
+  inboundRefFeeFloor: Number(process.env.INBOUND_REF_FEE_FLOOR || 1e8),  // 1 reference unit
   // How the fee is collected when the caller does not say: 'prepaid' (pay on-chain first) or
   // 'deferred' (open now, owe it). Deferred is the friendlier default; the cap is what stops it
   // from becoming unlimited free liquidity for a caller that simply never settles.
@@ -1753,6 +1760,23 @@ function loadDebts() {
   }
 }
 const inboundDebts = loadDebts();
+// Which purchase each prepaid fee transaction paid for, so one payment buys one channel
+// (feeReuseProblem). Persisted beside the debts: a restart must not make a paid fee spendable again.
+const FEES_FILE = CFG.provDir ? path.join(CFG.provDir, 'inbound-fees.json') : '';
+const inboundFees = (() => {
+  if (!FEES_FILE) return new Map();
+  try { return new Map(Object.entries(JSON.parse(fs.readFileSync(FEES_FILE, 'utf8')) || {})); }
+  catch (e) {
+    if (!e || e.code !== 'ENOENT') console.error('[lsp] inbound-fees.json unreadable, starting empty:', e && e.message);
+    return new Map();
+  }
+})();
+function recordFeeUse(txid, use) {
+  inboundFees.set(String(txid).toLowerCase(), { ...use, at: Date.now() });
+  if (!FEES_FILE) return;
+  try { fs.writeFileSync(FEES_FILE, JSON.stringify(Object.fromEntries(inboundFees)), 'utf8'); }
+  catch (e) { console.error('[lsp] could not persist inbound fees:', e && e.message); }
+}
 function persistDebts() {
   if (!DEBTS_FILE) return;
   try { fs.writeFileSync(DEBTS_FILE, JSON.stringify(Object.fromEntries(inboundDebts)), 'utf8'); }
@@ -1806,6 +1830,16 @@ function quoteInboundFee(amount, { isBtc = false, bps, minSat, minAtoms, minAmou
   const pct = Math.ceil((amt * rate) / 10000);
   const fee = Math.max(pct, floor);
   return { ok: true, amount: amt, fee, bps: rate, floor, min: lo, max: hi };
+}
+
+// The limits quoteInboundFee applies to an asset: by value through the node's exchange rate
+// (inbound-limits.mjs), or {} to keep the atom limits when the node prices nothing for it.
+async function inboundLimitsFor(assetId) {
+  if (!assetId) return {};
+  const rates = await elementsCall('getfeeexchangerates').catch(() => null);
+  const lim = assetInboundLimits(rateOf(rates, assetId, assetLabel(assetId)),
+    { refMin: CFG.inboundRefMin, refMax: CFG.inboundRefMax, refFeeFloor: CFG.inboundRefFeeFloor });
+  return lim || {};
 }
 
 // Where a prepaid fee is sent: an address on the LP's OWN on-chain wallet, which is also the node
@@ -4847,7 +4881,7 @@ const server = http.createServer(async (req, res) => {
       const isBtc = !rawAsset || /^btc$/i.test(rawAsset);
       const assetId = isBtc ? '' : resolveAsset(rawAsset);
       if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
-      const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc });
+      const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
       const nodeKey = url.searchParams.get('node_key') || '';
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
       // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
@@ -4879,12 +4913,15 @@ const server = http.createServer(async (req, res) => {
       // CHARGE FOR IT. The fee is quoted here from the same function the quote endpoint uses, so the
       // price cannot drift between what was shown and what is charged, and any debt already carried
       // by this node falls due now.
-      const q = quoteInboundFee(amount, { isBtc: false });
+      const q = quoteInboundFee(amount, { isBtc: false, ...(await inboundLimitsFor(assetId)) });
       const owed = debtOwed(body.node_key, assetId);
       const due = (q.ok ? q.fee : 0) + owed;
       const mode = String(body.mode || CFG.inboundCollectMode || 'deferred').toLowerCase();
       if (q.ok && due > 0 && CFG.inboundFeeBps > 0) {
         if (mode === 'prepaid') {
+          const reused = feeReuseProblem(inboundFees.get(String(body.fee_txid || '').toLowerCase()),
+            { nodeKey: body.node_key, assetId, amount });
+          if (reused) return send(res, 409, { ok: false, error: reused, mode });
           try { await verifyInboundFeePaid({ txid: body.fee_txid, assetId, fee: due }); }
           catch (e) {
             // 402: the request is well-formed, the payment is what is missing. Hand back the price
@@ -4893,6 +4930,8 @@ const server = http.createServer(async (req, res) => {
             return send(res, 402, { ok: false, error: String((e && e.message) || e),
               fee: q.fee, already_owed: owed, due_now: due, pay_to: payTo, asset: assetId, mode });
           }
+          if (!inboundFees.has(String(body.fee_txid).toLowerCase()))
+            recordFeeUse(body.fee_txid, { node_key: body.node_key || '', asset: assetId, amount });
           debtClear(body.node_key, assetId);
         } else if (mode === 'deferred') {
           if (owed > CFG.inboundDebtCap) {
