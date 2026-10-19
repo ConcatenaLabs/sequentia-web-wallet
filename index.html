@@ -1270,6 +1270,7 @@ import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoCon
   conversions as rewardConversions, sliceForWholeHtlc, NATIVE_BTC as AC_BTC } from './rewards.js';
 import * as seqob from './seqob.js';
 import { nodeRejectText } from './node-reject.js';
+import { waitReasons } from './wait-reason.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
@@ -2811,6 +2812,12 @@ function noteOwnTx(finalized){
     _ownTxRing.push({ hex, at: Date.now() });
     while (_ownTxRing.length > 32) _ownTxRing.shift();
   } catch {}
+}
+// Stop re-applying one of them: the network dropped it, so the wallet must stop counting its spends.
+function forgetOwnTx(txid){
+  for (let i = _ownTxRing.length - 1; i >= 0; i--){
+    try { if (new Transaction(_ownTxRing[i].hex).txid().toString() === txid) _ownTxRing.splice(i, 1); } catch {}
+  }
 }
 function reapplyOwnTxs(){
   const cutoff = Date.now() - 60*60_000;
@@ -5558,7 +5565,9 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
     const usd = (f && pu>0) ? Number(BigInt(f.atoms)) / Math.pow(10, assetMeta(f.hex).precision||0) * pu : 0;
     if(usd > 30){ const w=el('div','warn','⚠ This fee is worth about '+usd.toLocaleString(undefined,{maximumFractionDigits:2})+' USD. Check the fee rate before signing.'); w.style.margin='10px 0'; const row=ok.parentNode; row.parentNode.insertBefore(w, row); } }
   ok.onclick=async()=>{
-    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Signing &amp; broadcasting…';
+    ok.disabled=true;
+    const phase=(t)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+t; };
+    phase(beforeSign ? 'Checking it is still unconfirmed…' : 'Signing…');
     const endConfirm = timer('send › confirm to broadcast');
     try{
       // Signing and broadcasting do not wait for the wallet queue. A sync holds it for a whole
@@ -5568,10 +5577,12 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
       // and the broadcast goes through a client of its own. Only spend-tracking writes to the
       // wollet, so only that takes a turn, after this payment is already on its way; the own-tx
       // ring re-applies it after any scan that predates it.
-      if(beforeSign) await beforeSign();   // a rescue's last look: was the stuck transaction confirmed meanwhile?
+      if(beforeSign){ await beforeSign(); phase('Signing…'); }   // a rescue's last look: was the stuck transaction confirmed meanwhile?
+      await new Promise(r=>setTimeout(r,16));   // paint the step before the synchronous signing
       const endSign = timer('send › sign + finalize', { count:false });
       const finalized = wollet.finalize(signer.sign(pset));
       endSign();
+      phase('Sending it to the network…');
       const endCast = timer('send › broadcast', { count:false });
       const txid = await broadcastClient.broadcast(finalized);
       endCast();
@@ -6124,16 +6135,23 @@ $('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXp
 $('btnXpubCopyRecv').onclick=()=>copyToClipboard(($('xpubText').textContent||'').split('\n')[0], $('btnXpubCopyRecv'));
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
 
-$('btnIssue').onclick=async()=>{ $('issueErr').textContent='';
+// Say at once that a click landed: the wasm build after it is synchronous and can hold the page for
+// seconds. The label comes back when `fn` ends, however it ends (the review sheet is open by then).
+async function busyButton(btn, fn){
+  const label=btn.textContent; btn.disabled=true; btn.textContent='Preparing…';
+  await new Promise(r=>setTimeout(r,16));   // one frame, so 'Preparing…' is painted before the build
+  try{ return await fn(); } finally{ btn.disabled=false; btn.textContent=label; }
+}
+$('btnIssue').onclick=()=>busyButton($('btnIssue'), async()=>{ $('issueErr').textContent='';
   try{ await afterRecordedSpends(); const {pset, meta}=buildIssuePset();
     await reviewBroadcast(pset, `Issue ${meta.ticker}`, ()=>{
       const assetId=meta.assetId;   // captured pre-broadcast in buildIssuePset
       if(assetId) saveLabel(assetId, meta);
       $('isName').value=$('isTicker').value=$('isAmount').value=$('isDomain').value='';
       if(assetId && meta.contract) registerIssuedAsset(assetId, meta.contract); });
-  }catch(e){ $('issueErr').textContent=e?.message??String(e); } };
+  }catch(e){ $('issueErr').textContent=e?.message??String(e); } });
 
-$('btnReissue').onclick=async()=>{ $('raErr').textContent='';
+$('btnReissue').onclick=()=>busyButton($('btnReissue'), async()=>{ $('raErr').textContent='';
   try{ await afterRecordedSpends(); const asset=$('raAsset').value.trim();
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — throws 'label it before sending' rather than mis-scaling at precision 0 (the 1e8 trap)
     const input=$('raAmount');
@@ -6142,8 +6160,8 @@ $('btnReissue').onclick=async()=>{ $('raErr').textContent='';
     const rb=applyRaFeeAsset(network.txBuilder().reissueAsset(new AssetId(asset), amt, undefined, undefined));
     const pset=rb.b.finish(wollet);
     await reviewBroadcast(pset, 'Confirm Sequentia payment', null, rb.feeHex, {rows:[{atoms:amt, hex:asset, ref}], feeAssetHex:rb.feeHex});
-  }catch(e){ $('raErr').textContent=e?.message??String(e); } };
-$('btnBurn').onclick=async()=>{ $('raErr').textContent='';
+  }catch(e){ $('raErr').textContent=e?.message??String(e); } });
+$('btnBurn').onclick=()=>busyButton($('btnBurn'), async()=>{ $('raErr').textContent='';
   try{ await afterRecordedSpends(); const asset=$('raAsset').value.trim();
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — never burn a mis-scaled amount on an unlabeled asset
     const input=$('raAmount');
@@ -6152,7 +6170,7 @@ $('btnBurn').onclick=async()=>{ $('raErr').textContent='';
     const bb=applyRaFeeAsset(network.txBuilder().addBurn(amt, new AssetId(asset)));
     const pset=bb.b.finish(wollet);
     await reviewBroadcast(pset, 'Confirm Sequentia payment', null, bb.feeHex, {rows:[{atoms:amt, hex:asset, ref}], feeAssetHex:bb.feeHex});
-  }catch(e){ $('raErr').textContent=e?.message??String(e); } };
+  }catch(e){ $('raErr').textContent=e?.message??String(e); } });
 
 $('btnReveal').onclick=()=>{ $('seedReveal').textContent=localStorage.getItem(KEY)||''; show('seedReveal'); $('btnReveal').classList.add('hide'); };
 $('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make sure you have your recovery phrase.')){ localStorage.removeItem(KEY); location.reload(); } };
@@ -6238,6 +6256,8 @@ function renderHistory(){
   for(const r of ordered){
     const txid=r.txid, type=r.type, k=kinds[txid];
     const replaced = !r.height && replacedBy.has(txid);
+    const dropped = !r.height && !replaced && leftMempool(txid);
+    if(live && !r.height && !replaced) checkInMempool(txid).catch(()=>{});
     const item=el('div','item'+(r._child?' child':'')+(replaced?' replaced':''));
     // A short direction label; what kind of transaction it is goes on its own line below.
     const label = type==='incoming' ? 'IN' : (type==='outgoing'||type==='burn') ? 'OUT' : type==='self' ? 'SELF'
@@ -6254,10 +6274,12 @@ function renderHistory(){
     else if(k && k.kind==='bump') mid.appendChild(el('div','kind','Same payment as '+short(k.of)+', at a higher fee'));
     else if(k && k.kind==='replace') mid.appendChild(el('div','kind','Replaces '+short(k.of)));
     if(replaced) mid.appendChild(el('div','kind','Replaced by '+short(replacedBy.get(txid))+'; it will not confirm'));
+    if(dropped) mid.appendChild(el('div','kind','Dropped by the network: it will not confirm, and its coins are spendable again'));
     // Rescues act on the live wollet, so they are offered only once this session has synced.
     let tipNow = 0; try{ tipNow = wollet.tip().height(); }catch{}
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
-    if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
+    if(dropped){}
+    else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
       const mk=(label,fn)=>{ const x=el('button','ghost',label); x.style.cssText='padding:4px 10px;font-size:12px'; x.onclick=fn; return x; };
@@ -6288,6 +6310,45 @@ function renderHistory(){
     list.appendChild(item);
   }
 }
+// Whether the network still holds an unconfirmed transaction. A transaction can leave every
+// mempool without confirming: evicted when the mempool is full, expired after two weeks, or
+// replaced by one that spends the same coins. The wallet kept showing it as "unconfirmed" (and
+// kept re-applying its spends for an hour), so its coins looked spent and a rescue was offered for
+// a transaction nobody would mine. The explorer answers 404 for it; one miss can be the indexer
+// lagging, so two misses at least a minute apart are needed. Checked at most once a minute each.
+const _mempoolMiss = new Map();   // txid -> { misses, first, last }
+const MISS_GAP_MS = 60_000;
+function leftMempool(txid){ const m=_mempoolMiss.get(txid); return !!m && m.misses >= 2 && m.last - m.first >= MISS_GAP_MS; }
+async function checkInMempool(txid){
+  const m=_mempoolMiss.get(txid) || { misses:0, first:0, last:0, checked:0 };
+  if(Date.now() - (m.checked||0) < MISS_GAP_MS) return;
+  m.checked=Date.now(); _mempoolMiss.set(txid, m);
+  let r; try{ r=await fetch(ESPLORA+'/tx/'+txid+'/status'); }catch{ return; }   // no answer is not an answer
+  if(r.status===404){
+    const was=leftMempool(txid);
+    if(!m.misses) m.first=Date.now();
+    m.misses++; m.last=Date.now();
+    if(!was && leftMempool(txid)){ forgetOwnTx(txid); try{ renderHistory(); renderBalance(); }catch{} }
+  } else if(r.ok){
+    _mempoolMiss.delete(txid);
+    try{ const st=await r.json(); if(st && st.confirmed) sync().catch(()=>{}); }catch{}   // confirmed meanwhile: read it in
+  }
+}
+// Why an unconfirmed transaction is still waiting (wait-reason.js), from what the explorer says
+// about it and about the next block. Gone from the mempool is said first: nothing else matters then.
+async function whyWaiting(r){
+  if(leftMempool(r.txid)) return ['The network no longer has it: it was dropped or replaced, so it will not confirm. Its coins are spendable again; send the payment again if it is still needed.'];
+  let tx=null;
+  try{ const q=await fetch(ESPLORA+'/tx/'+r.txid); if(q.status===404) return ['The explorer does not have it right now. If that lasts, it was dropped or replaced: the wallet checks again shortly.']; if(q.ok) tx=await q.json(); }catch{}
+  const vsize = tx && tx.weight ? Math.ceil(tx.weight/4) : 0;
+  const paid = r.fee && BigInt(r.fee.atoms) > 0n ? r.fee : null;
+  let congestion=null;
+  try{ const q=await fetch('/congestion'+(paid ? '?asset='+encodeURIComponent(paid.hex) : '')); if(q.ok) congestion=await q.json(); }catch{}
+  const fm = paid ? assetMeta(paid.hex) : null;
+  return waitReasons({ vsize, congestion,
+    fee: paid ? { atoms: Number(BigInt(paid.atoms)), ticker: fm.ticker, precision: fm.precision ?? 8 } : null,
+    feeInfo: paid && _feeInfo ? _feeInfo[String(paid.hex).toLowerCase()] || null : null });
+}
 // What a History row knows about its transaction, laid out under it: the full id to copy, where it
 // is in the chain, every asset it moved for this wallet, its fee, and the explorer.
 function txDetail(r, tip){
@@ -6296,7 +6357,12 @@ function txDetail(r, tip){
   { const w=el('span','v'); w.appendChild(document.createTextNode(r.txid+' '));
     const cp=el('button','ghost','Copy'); cp.style.cssText='padding:1px 8px;font-size:11.5px';
     cp.onclick=(e)=>{ e.stopPropagation(); copyToClipboard(r.txid, cp); }; w.appendChild(cp); row('Transaction', w); }
-  row('Status', r.height ? 'Confirmed in block '+r.height+(tip>=r.height ? ' · '+(tip-r.height+1)+' confirmation'+(tip===r.height?'':'s') : '') : 'Waiting for a block');
+  row('Status', r.height ? 'Confirmed in block '+r.height+(tip>=r.height ? ' · '+(tip-r.height+1)+' confirmation'+(tip===r.height?'':'s') : '')
+    : leftMempool(r.txid) ? 'Dropped by the network: it will not confirm' : 'Waiting for a block');
+  if(!r.height){
+    const why=el('span','v','Checking…'); row('Why it is waiting', why);
+    whyWaiting(r).then(lines=>{ why.textContent=lines.join(' '); }).catch(()=>{ why.textContent='The wallet could not read the network just now.'; });
+  }
   if(r.ts) row('Date', new Date(r.ts*1000).toLocaleString());
   const legs = Array.isArray(r.legs) ? r.legs : [{ hex:r.hex, atoms:r.atoms }];
   for(const l of legs){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n, rv=refValueStr(l.hex, neg ? -BigInt(l.atoms) : BigInt(l.atoms));
@@ -6524,10 +6590,13 @@ function rbfDialog(txid, replace){
   act.appendChild(ok); act.appendChild(no); c.appendChild(act);
   m.appendChild(c); document.body.appendChild(m);
   no.onclick = () => m.remove();
-  ok.onclick = () => {
+  ok.onclick = async () => {
     const args = { hex: fee.hex, units: fee.units };
     const target = replace ? { addr: addr.value.trim(), assetHex: asset.value, amtStr: assetAmountOf(amt, asset.value) } : null;
-    m.remove(); doRbf(txid, args, target);
+    // The check that it is still unconfirmed and the build take a moment: say so here until the review opens.
+    ok.disabled = true; no.disabled = true; ok.textContent = 'Preparing…';
+    await new Promise(r => setTimeout(r, 16));
+    await doRbf(txid, args, target); m.remove();
   };
 }
 async function doRbf(txid, fee, target){
@@ -6592,7 +6661,12 @@ function cpfpDialog(txid){
   act.appendChild(ok); act.appendChild(no); c.appendChild(act);
   m.appendChild(c); document.body.appendChild(m);
   no.onclick = () => m.remove();
-  ok.onclick = () => { const f = { hex: fee.hex, units: fee.units }; m.remove(); doCpfp(txid, f); };
+  ok.onclick = async () => {
+    const f = { hex: fee.hex, units: fee.units };
+    ok.disabled = true; no.disabled = true; ok.textContent = 'Preparing…';
+    await new Promise(r => setTimeout(r, 16));
+    await doCpfp(txid, f); m.remove();
+  };
 }
 async function doCpfp(parentTxid, fee){
   try{
@@ -7095,7 +7169,7 @@ $('acMin').onchange = () => {
   refreshAcStatus().catch(()=>{});
 };
 $('acSlip').onchange = () => { setRewardSettings({ maxSlippageBp: Number($('acSlip').value) }); refreshAcStatus().catch(()=>{}); };
-$('btnStake').onclick=async()=>{ $('stakeErr').textContent='';
+$('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').textContent='';
   try{
     await afterRecordedSpends();
     const csv=STAKE_CSV;
@@ -7113,7 +7187,7 @@ $('btnStake').onclick=async()=>{ $('stakeErr').textContent='';
       $('stAmount').value=''; renderStake();
     }, POLICY_HEX, {rows:[{atoms, hex:POLICY_HEX, ref}], feeAssetHex:POLICY_HEX});
   }catch(e){ $('stakeErr').textContent=e?.message??String(e); }
-};
+});
 
 
 // ---------- staking pools ----------
