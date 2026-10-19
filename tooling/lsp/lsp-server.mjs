@@ -1069,7 +1069,10 @@ async function runChannelOpen(job) {
       .catch(() => ({ channels: [] }));
     const OPEN_STATES = ['OPENINGD', 'DUALOPEND_OPEN_INIT', 'DUALOPEND_AWAITING_LOCKIN',
                          'CHANNELD_AWAITING_LOCKIN', 'CHANNELD_NORMAL'];
-    existingCh = (pc.channels || []).find((c) => OPEN_STATES.includes(c.state)) || null;
+    // Only a channel this node opened can be the one its deposit funded. A channel the LP opened
+    // toward it (room to receive, bought on /channel/inbound) holds nothing of the user's: adopting
+    // it reported the move "active with 0 spendable" and left the deposit on the node's address.
+    existingCh = (pc.channels || []).find((c) => OPEN_STATES.includes(c.state) && c.opener !== 'remote') || null;
   }
   if (existingCh) {
     job.funding_txid = existingCh.funding_txid
