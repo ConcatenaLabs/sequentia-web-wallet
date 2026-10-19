@@ -1285,9 +1285,16 @@
           <div id="roomStepper" class="room-stepper"></div>
         </details>
         <details id="faq-room"><summary>What does room to receive cost, and what is guaranteed?</summary>
-          <p>You choose how much you want to be able to receive and for how long: 1, 3, 6 or 12 months. You pay once, in the asset itself, on chain:</p>
-          <p class="mono">fee = amount × the asset's yearly rate × months ÷ 12, never below a minimum</p>
-          <p>What the service gives up is its coins, held in your channel for that time, so the price grows with both. The rate differs by asset: a coin that would earn something elsewhere costs more to hold than one that would not. The minimum covers what opening any channel costs. The dialog shows the formula with the numbers before you pay.</p>
+          <p>You choose how much you want to be able to receive and for how long: 1, 3, 6 or 12 months. You pay once, in the asset itself, on chain, before the channel opens.</p>
+          <p>The price is a yearly percentage of the room you buy, charged only for the months you choose: half of it for 6 months, a quarter for 3. Each asset has its own yearly percentage, set by the service. There is also a minimum, because opening any channel costs the service something whatever its size; when the percentage comes to less, you pay the minimum.</p>
+          <p>For example, with USDX at 5% a year and a minimum of 1 USDX:</p>
+          <ul class="ln-help">
+            <li>100 USDX of room for 6 months: half of 5% of 100 USDX, so <b>2.50 USDX</b>.</li>
+            <li>100 USDX for a year: 5% of 100 USDX, so <b>5 USDX</b>.</li>
+            <li>1,000 USDX for 3 months: a quarter of 5% of 1,000 USDX, so <b>12.50 USDX</b>.</li>
+            <li>100 USDX for 1 month: a twelfth of 5 USDX is 0.42 USDX, under the minimum, so <b>1 USDX</b>.</li>
+          </ul>
+          <p>The dialog does this calculation with the service's real percentage before you pay. Why it is priced this way: what the service gives up is its own coins, held in your channel for that time, so the price grows with the amount and with the months. The percentage differs by asset because a coin that would earn something elsewhere, lent out or staked, costs more to hold than one that would not.</p>
           <p>What is guaranteed is the channel, kept open for the months paid for, not a fixed amount of room. Receiving uses room up and spending makes it again. When the time is over the service may close the channel: what is on your side then comes back to you on chain. To keep receiving, buy room again.</p>
           <p>You can ask for room when you move an asset to Lightning: its fee travels in the same transaction, and the service opens its channel as soon as that transaction confirms.</p>
         </details>
@@ -1297,6 +1304,15 @@
             <li>Buy more room from the asset's row in Balance.</li>
             <li>Move the asset on chain. This closes the channel: there is no partial move that keeps it open.</li>
           </ul>
+        </details>
+        <details id="faq-ln-cost"><summary>Is Lightning cheaper than paying on chain?</summary>
+          <p>For sending, by far. A payment over Lightning pays no on-chain fee, only a small routing fee when it passes through another node; on chain you pay once to move the asset in and once to move it back out. Someone who sends three payments a week on chain at 10 cents each pays about 7.80 USD in six months; over Lightning the same payments cost the two moves, about 20 cents, plus those routing fees.</p>
+          <p>For receiving, it depends on whether money also leaves. Room you buy is used up by what you receive and made again by what you spend, so:</p>
+          <ul class="ln-help">
+            <li>If you spend about as much as you receive, a little room serves you for months. 100 USDX of room for 6 months costs 2.50 USDX at 5% a year, against 7.80 USD for 78 payments on chain.</li>
+            <li>If you only receive, every payment uses room up for good, and you need room for all of it. Receiving 10 USDX three times a week is 780 USDX in six months: buying that room for 6 months at 5% a year costs 19.50 USDX, and buying it a month at a time costs the minimum six times. On chain, receiving costs you nothing: the sender pays the fee.</li>
+          </ul>
+          <p>These numbers use 5% a year and a 1 USDX minimum as an example; the dialog always shows the real price before you pay.</p>
         </details>
         <details id="faq-ln-swap"><summary>Why does a swap ask me for room to receive?</summary>
           <p>A swap that pays you over Lightning needs room on the other side of one of your channels, in the asset you receive. Without it the payment cannot arrive. The swap says what that room costs before you place the order. The service opens the channel when the order is placed, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
@@ -2803,7 +2819,7 @@ document.addEventListener('click', (e)=>{
 function renderRoomStepper(host){
   if(!host || host._built) return; host._built=true;
   const S=[
-    { t:'You buy 100 USDX of room to receive, for 6 months', d:'The service opens a channel to you with 100 USDX of its own on its side. You pay once, before it opens.', y:0, s:100 },
+    { t:'You buy 100 USDX of room to receive, for 6 months', d:'The service opens a channel to you with 100 USDX of its own on its side. You pay once, before it opens: at 5% a year, half a year of 100 USDX of room costs 2.50 USDX.', y:0, s:100 },
     { t:'You receive 60 USDX', d:'Whoever pays you moves value from the service\u2019s side to yours: 60 USDX is now yours on Lightning, and 40 is left to receive.', y:60, s:40 },
     { t:'You spend 30 USDX', d:'The payment leaves your side and goes back to the service\u2019s side: you can receive 70 again, without paying for it again.', y:30, s:70 },
     { t:'You receive 70 USDX: the channel is full on your side', d:'You hold 100 USDX on Lightning and have no room left. To receive more, spend, buy more room, or move the asset on chain.', y:100, s:0 },
@@ -3887,8 +3903,10 @@ function lnRoomPriceText(q, tk, prec){
   const months=Number(q.months), rate=(Number(q.annual_bps)/100).toLocaleString(undefined,{maximumFractionDigits:2});
   const byTime=(BigInt(q.amount)*BigInt(q.annual_bps)*BigInt(months)+119999n)/120000n;
   const term=months===1?'1 month':months+' months';
-  return 'Fee '+f(fee)+': '+f(BigInt(q.amount))+' × '+rate+'% a year × '+term
-    +(byTime < floor ? ', raised to the minimum of '+f(floor)+'.' : ' (minimum '+f(floor)+').')
+  const span=months===12?'A year':months===1?'One month':months+' months';
+  return (byTime < floor
+      ? 'Fee '+f(fee)+', the minimum. '+span+' of '+f(BigInt(q.amount))+' of room at '+rate+'% a year would be only '+f(byTime)+'.'
+      : 'Fee '+f(fee)+'. '+span+' of '+f(BigInt(q.amount))+' of room at '+rate+'% a year; never less than '+f(floor)+'.')
     +' The service keeps this channel open for '+term+'. Receiving uses up the room and spending makes it again.';
 }
 function lnReceiveRoomDialog(leg, startAtoms){
