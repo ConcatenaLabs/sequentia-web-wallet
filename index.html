@@ -3344,7 +3344,11 @@ function pruneDeadOwnLegs(force){
   const st = (typeof provisionedState==='function') ? provisionedState() : {};
   for(const leg of [..._lnReconnectedLegs]){
     const nk = _lnLegNodeKey[leg];
-    const alive = !!(nk && st[nk] && st[nk].connected === true);
+    // A link still being set up (handshake, waiting for the node id) is not dead: pruning it made
+    // every sweep during a slow start "reconnect" it again, each time re-running the node checks
+    // after it (getinfo, /status, up to ten /node/onchain reads) and logging another reconnection.
+    const ph = nk && st[nk] ? String(st[nk].phase || '') : '';
+    const alive = !!(nk && st[nk] && (st[nk].connected === true || ['connecting', 'handshaking', 'authenticated', 'node_id'].includes(ph)));
     if(force && nk){ try{ disconnectProvisioned(nk); }catch{} }   // wake: tear the (maybe-zombie) link down
     if(force || !alive){ _lnReconnectedLegs.delete(leg); }        // allow reconnectOwnNodes to rebuild it
   }
