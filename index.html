@@ -1248,7 +1248,7 @@ import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resu
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
-  seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
+  seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
@@ -3717,11 +3717,24 @@ function initLnSendReceive(){
 // the device signs a close only when it pays this side's balance to its own scripts, and moves the
 // node's coins only to its own addresses or into a channel. Sending them to any other address,
 // this wallet's included, waits for a way to approve that address on the device.
+// Where a channel's close pays this wallet: a new address of its own, in the clear (a close
+// pays explicit outputs), on the channel's chain. Its script is what the device is told is ours.
+async function lnWalletCloseDestination(leg){
+  if(leg.chain==='btc'){
+    const p = btc.p2wpkh(btcNode(false, unifiedNextUnused()).publicKey, btc.TEST_NETWORK);
+    return { address: p.address, scriptHex: hexOfBytes(p.output) };
+  }
+  return withWollet(async () => {
+    const a = wollet.address(undefined).address();
+    const u = a.toUnconfidential ? a.toUnconfidential() : a;
+    return { address: u.toString(), scriptHex: hexOfBytes(u.scriptPubkey().bytes()) };
+  });
+}
 function closeToChainDialog(leg, own){
   const chan = own[0];   // one channel per own node in practice; scid names it exactly
   const m=el('div','modal'); const c=el('div','card');
-  c.appendChild(el('label','lbl','Close your '+leg.ticker+' Lightning channel'));
-  c.appendChild(el('div','sub','This closes your '+leg.ticker+' Lightning channel. Its balance goes on chain to your Lightning node\'s own address, from where you can open a new channel. Your device moves your node\'s coins only to the node\'s own addresses or into a channel: sending them to any other address, this wallet\'s included, waits for a way to approve that address on your device. A cooperative close is near-instant; if the routing peer is offline it falls back to a slower unilateral close.'));
+  c.appendChild(el('label','lbl','Move '+leg.ticker+' on-chain'));
+  c.appendChild(el('div','sub','This closes your '+leg.ticker+' Lightning channel and pays its balance straight to this wallet, on chain. Your device signs the close only because it pays your balance to an address of this wallet. If the routing peer is offline the close falls back to a slower unilateral one, which pays your Lightning node\'s own address instead.'));
   const inLn=el('div','sub'); inLn.style.marginTop='8px';
   inLn.textContent='In Lightning: '+fmtAtoms(BigInt(Math.round(chan.spendable_units||0)), leg.precision)+' '+leg.ticker+' (channel '+(chan.scid||'')+')';
   c.appendChild(inLn);
@@ -3743,10 +3756,16 @@ function closeToChainDialog(leg, own){
         : await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: leg.ticker, policy:lnPolicy(),
             deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
       if(!(prov && prov.connected)) throw new Error('Could not bring your device signer online. Check your connection and try again.');
-      // 2. Ask the LSP to close cooperatively, paying the node's own address.
+      // 2. Tell the device which address of this wallet the close may pay, then ask the LSP to
+      //    close cooperatively to it.
+      const dest = await lnWalletCloseDestination(leg);
+      approveCloseDestination(prov.key, dest.scriptHex);
       say('Closing the channel (your device is co-signing)…');
-      const res = await closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||chan.node_key, scid: chan.scid });
-      say('Done. Closing transaction '+(res.closing_txid? res.closing_txid.slice(0,16)+'…':'broadcast')+'. Your '+leg.ticker+' is on chain at your Lightning node\'s own address once it confirms.');
+      const res = await closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||chan.node_key, scid: chan.scid, destination: dest.address });
+      const tx = res.closing_txid ? res.closing_txid.slice(0,16)+'…' : 'broadcast';
+      say(res.type==='unilateral'
+        ? 'The routing peer did not answer, so the channel closed unilaterally (transaction '+tx+'). Your '+leg.ticker+' goes to your Lightning node\'s own address after the channel\'s delay.'
+        : 'Done. Closing transaction '+tx+'. Your '+leg.ticker+' arrives in this wallet once it confirms.');
       go.textContent='Close'; go.disabled=false; go.onclick=()=>m.remove(); cancel.style.display='none';
       setTimeout(async()=>{ try{ await sync(); renderBalance(); renderLightningBalance(); }catch{} }, 1500);
     }catch(e){ say('Failed: '+prettyErr(e)); go.disabled=false; cancel.disabled=false; }

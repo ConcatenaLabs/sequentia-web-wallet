@@ -55,6 +55,13 @@ export class Signer {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Name a scriptPubKey of the wallet that holds this device's seed: a
+     * cooperative close may then pay this side's balance to it, held to the
+     * same balance as a close to the node's wallet. Only the page can name
+     * one, never the node; named again after every start.
+     */
+    approveCloseDestination(script: Uint8Array): void;
+    /**
      * One-time recovery: track a channel from parameters read off the NODE
      * (`listpeerchannels`) after the persisted blob was lost — trust-
      * equivalent to `setup_channel`, which also comes via the node. Refuses
@@ -164,6 +171,7 @@ export interface InitOutput {
     readonly noisesession_newInitiator: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly noisesession_readActTwo: (a: number, b: number, c: number) => [number, number, number, number];
     readonly noisesession_writeActOne: (a: number) => [number, number, number, number];
+    readonly signer_approveCloseDestination: (a: number, b: number, c: number) => void;
     readonly signer_armChannel: (a: number, b: number, c: number, d: bigint, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => [number, number, number];
     readonly signer_exportChannels: (a: number) => [number, number];
     readonly signer_fromMnemonic: (a: number, b: number) => [number, number, number];

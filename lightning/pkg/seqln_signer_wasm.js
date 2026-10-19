@@ -157,6 +157,18 @@ export class Signer {
         wasm.__wbg_signer_free(ptr, 0);
     }
     /**
+     * Name a scriptPubKey of the wallet that holds this device's seed: a
+     * cooperative close may then pay this side's balance to it, held to the
+     * same balance as a close to the node's wallet. Only the page can name
+     * one, never the node; named again after every start.
+     * @param {Uint8Array} script
+     */
+    approveCloseDestination(script) {
+        const ptr0 = passArray8ToWasm0(script, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.signer_approveCloseDestination(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * One-time recovery: track a channel from parameters read off the NODE
      * (`listpeerchannels`) after the persisted blob was lost — trust-
      * equivalent to `setup_channel`, which also comes via the node. Refuses

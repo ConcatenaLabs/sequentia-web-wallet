@@ -11,6 +11,7 @@ export const noisesession_isReady: (a: number) => number;
 export const noisesession_newInitiator: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const noisesession_readActTwo: (a: number, b: number, c: number) => [number, number, number, number];
 export const noisesession_writeActOne: (a: number) => [number, number, number, number];
+export const signer_approveCloseDestination: (a: number, b: number, c: number) => void;
 export const signer_armChannel: (a: number, b: number, c: number, d: bigint, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => [number, number, number];
 export const signer_exportChannels: (a: number) => [number, number];
 export const signer_fromMnemonic: (a: number, b: number) => [number, number, number];
