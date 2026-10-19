@@ -178,6 +178,12 @@
   .modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
   .modal .card{margin:0;max-width:480px;width:100%;max-height:88vh;overflow:auto}
   .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+  #histList .item.clickable{cursor:pointer}
+  .txdetail{margin:0 0 10px 52px;padding:2px 0 2px 12px;border-left:2px solid var(--line)}
+  .txdetail .kv{font-size:12.5px;padding:5px 0}
+  .txdetail .kv:first-child{border-top:0}
+  .txdetail .kv .v{font:12.5px ui-monospace,Menlo,Consolas,monospace}
+  @media (max-width:560px){ .txdetail{margin-left:8px} }
   .sent-head{display:flex;align-items:center;gap:12px;margin:2px 0 14px}
   .sent-check{width:40px;height:40px;border-radius:50%;background:#10241a;border:1px solid #1f4d33;color:var(--green);
     display:flex;align-items:center;justify-content:center;font-size:22px;flex:none}
@@ -6097,8 +6103,33 @@ function renderHistory(){
     if(r.fee){ const fm=assetMeta(r.fee.hex), rv=refValueStr(r.fee.hex, BigInt(r.fee.atoms));
       box.appendChild(el('span','fee','fee '+fmtAtoms(r.fee.atoms,fm.precision)+' '+fm.ticker+(rv?' ('+rv+')':''))); }
     item.appendChild(box);
+    // A click opens the whole record under the row, and a second closes it.
+    item.classList.add('clickable'); item.title='Show details';
+    item.onclick=(e)=>{
+      if(e.target.closest('button,a,input')) return;
+      if(item._detail){ item._detail.remove(); item._detail=null; }
+      else { item._detail=txDetail(r, tipNow); item.after(item._detail); }
+    };
     list.appendChild(item);
   }
+}
+// What a History row knows about its transaction, laid out under it: the full id to copy, where it
+// is in the chain, every asset it moved for this wallet, its fee, and the explorer.
+function txDetail(r, tip){
+  const d=el('div','txdetail');
+  const row=(k, v)=>{ const x=el('div','kv'); x.appendChild(el('span','k',k)); x.appendChild(typeof v==='string' ? el('span','v',v) : v); d.appendChild(x); };
+  { const w=el('span','v'); w.appendChild(document.createTextNode(r.txid+' '));
+    const cp=el('button','ghost','Copy'); cp.style.cssText='padding:1px 8px;font-size:11.5px';
+    cp.onclick=(e)=>{ e.stopPropagation(); copyToClipboard(r.txid, cp); }; w.appendChild(cp); row('Transaction', w); }
+  row('Status', r.height ? 'Confirmed in block '+r.height+(tip>=r.height ? ' · '+(tip-r.height+1)+' confirmation'+(tip===r.height?'':'s') : '') : 'Waiting for a block');
+  if(r.ts) row('Date', new Date(r.ts*1000).toLocaleString());
+  const legs = Array.isArray(r.legs) ? r.legs : [{ hex:r.hex, atoms:r.atoms }];
+  for(const l of legs){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n, rv=refValueStr(l.hex, neg ? -BigInt(l.atoms) : BigInt(l.atoms));
+    row(neg ? am.ticker+' sent' : am.ticker+' received', (neg?'':'+')+fmtAtoms(l.atoms,am.precision)+' '+am.ticker+(rv?' ('+rv+')':'')); }
+  if(r.fee){ const fm=assetMeta(r.fee.hex), rv=refValueStr(r.fee.hex, BigInt(r.fee.atoms));
+    row('Fee', fmtAtoms(r.fee.atoms,fm.precision)+' '+fm.ticker+(rv?' ('+rv+')':'')); }
+  { const a=txLink('/explorer/tx/'+r.txid, 'Open in the explorer'); a.classList.add('v'); row('Explorer', a); }
+  return d;
 }
 // ---------- Bitcoin (testnet4) history (T6: BTC is first-class, dual-chain parity) ----------
 // The parent-chain history mirrors the Sequentia list above: esplora testnet4 /address/{a}/txs for
