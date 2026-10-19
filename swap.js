@@ -205,7 +205,7 @@ export function logTrade(e){
       size: (e.size != null) ? e.size : null, sizeTicker: e.sizeTicker || null,
       fee: (e.fee != null) ? e.fee : null, feeTicker: e.feeTicker || null,
       rail: e.rail || null, preimage: e.preimage || null,
-      txids: Array.isArray(e.txids) ? e.txids.filter(Boolean).slice(0, 12) : (e.txid ? [e.txid] : []),
+      txids: Array.isArray(e.txids) ? e.txids.filter(Boolean).slice(0, 64) : (e.txid ? [e.txid] : []),
     });
     saveHist(h);
     try { renderInFlightCard(); } catch {}   // surface the new receipt in the trades view immediately
@@ -213,6 +213,12 @@ export function logTrade(e){
     // completion card. Opt-in by flag — the fund-time and refund rows must never pop one.
     if (e.card && !identicalRelog){ try { showSettleCard(h[0], e); } catch {} }
   } catch {}
+}
+// The trades that settled in more than one transaction (a market order walks several offers, one
+// fill each), so History can show them as one order: [{ id, title, txids }].
+export function multiTxTrades(){
+  try { return loadHist().filter(t => Array.isArray(t.txids) && t.txids.length > 1).map(t => ({ id: t.id, title: t.title || '', txids: t.txids })); }
+  catch { return []; }
 }
 // P5.1 — export the user's durable trade history as CSV or JSON (a file they keep). Reads the SAME
 // per-wallet records the view renders; purely local (no network), only the user's own txids/preimage.

@@ -108,6 +108,8 @@
   .b-out{color:var(--red);border-color:#5a2420;background:#2a1110}
   .b-iss{color:var(--blue);border-color:#244a63;background:#0d1f2a}
   .b-swap{color:var(--amber2);border-color:#5c4410;background:#241b08}
+  .group-box{margin-left:22px;border-left:1px solid var(--line);padding-left:8px}
+  .group-n{font-size:13px;color:var(--txt)}
   .amt{margin-left:auto;font-weight:700;font:14px ui-monospace,monospace;white-space:nowrap}
   .amts{margin-left:auto;text-align:right;display:flex;flex-direction:column;gap:2px}
   .amts .amt{margin-left:0}
@@ -1410,7 +1412,7 @@ import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
-import { esc, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
+import { esc, multiTxTrades, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -6517,6 +6519,58 @@ function historyRows(){
     return { txid, height:heightOf(t)||0, ts:t.timestamp()||(seen[txid]||[])[1]||0, type, hex:main.hex, atoms:main.atoms, legs, fee: wePaid ? fee : null };
   });
 }
+// Which History rows are fills of one order. A trade the swap logged with several transactions is
+// one group, by its txids. Swaps it has no record of (made on another device, or before the log kept
+// them) are grouped when they follow one another in the list with the same assets out and in, in
+// the same block. Groups of one are left alone. { byTx: txid->key, members: key->[rows], titles }
+function swapGroups(rows){
+  const byTx=new Map(), titles=new Map();
+  try{ for(const t of multiTxTrades()) for(const id of t.txids){ byTx.set(id, 'log:'+t.id); titles.set('log:'+t.id, t.title); } }catch{}
+  const swapOf=(r)=> (r.type==='swap' || (r.type==='unknown' && isSwapLegs(r.legs))) && !r._child;
+  const pairOf=(r)=>{ const l=r.legs||[]; return l.filter(x=>BigInt(x.atoms)<0n).map(x=>x.hex).sort().join('+')+'>'+l.filter(x=>BigInt(x.atoms)>0n).map(x=>x.hex).sort().join('+'); };
+  let prev=null, run=0;
+  for(const r of rows){
+    if(!swapOf(r) || byTx.has(r.txid)){ prev=null; continue; }
+    const key='blk:'+pairOf(r)+':'+(r.height||'unconfirmed');
+    if(prev && prev.key===key){ if(!byTx.has(prev.txid)){ run++; byTx.set(prev.txid, key+':'+run); } byTx.set(r.txid, byTx.get(prev.txid)); }
+    prev={ key, txid:r.txid };
+  }
+  const members=new Map();
+  for(const r of rows){ const g=byTx.get(r.txid); if(g){ if(!members.has(g)) members.set(g, []); members.get(g).push(r); } }
+  for(const [g, list] of members) if(list.length<2){ members.delete(g); for(const r of list) byTx.delete(r.txid); }
+  for(const [id, g] of [...byTx]) if(!members.has(g)) byTx.delete(id);
+  return { byTx, members, titles };
+}
+// The row an order's fills fold under: what left and arrived in total, the fees, and how many fills,
+// with a box below for the fills themselves, shown on a click.
+function swapGroupRow(rows, title){
+  const item=el('div','item clickable group'), box=el('div','group-box hide');
+  const sum=new Map(), fees=new Map();
+  for(const r of rows){
+    for(const l of (Array.isArray(r.legs) ? r.legs : [])) sum.set(l.hex, (sum.get(l.hex)||0n)+BigInt(l.atoms));
+    if(r.fee) fees.set(r.fee.hex, (fees.get(r.fee.hex)||0n)+BigInt(r.fee.atoms));
+  }
+  const legs=[...sum].filter(([,v])=>v!==0n).map(([hex,v])=>({ hex, atoms:v.toString() }));
+  item.appendChild(el('span','badge dir b-swap','SWAP'));
+  const mid=el('div','grow');
+  const pending=rows.some(r=>!r.height), first=rows[rows.length-1];
+  const caret=el('div','group-n', '▸ '+rows.length+' fills'+(title ? ' · one market order' : ''));
+  mid.appendChild(caret);
+  mid.appendChild(el('div','sub'+(pending?' unconf':''), pending ? 'not all confirmed' : (first.ts ? new Date(first.ts*1000).toLocaleString() : 'block '+first.height)));
+  mid.appendChild(el('div','kind', swapLine(legs)));
+  item.appendChild(mid);
+  const amts=el('div','amts');
+  for(const l of legs.sort((a,b)=>BigInt(a.atoms)<0n?-1:1)){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n;
+    amts.appendChild(el('span','amt '+(neg?'neg':'pos'), (neg?'':'+')+fmtAtoms(l.atoms,am.precision)+' '+am.ticker)); }
+  for(const [hex,a] of fees){ const fm=assetMeta(hex), rv=refValueStr(hex, a);
+    amts.appendChild(el('span','fee','fees '+fmtAtoms(a,fm.precision)+' '+fm.ticker+(rv?' ('+rv+')':''))); }
+  item.appendChild(amts);
+  item.title='Show the fills';
+  item.onclick=(e)=>{ if(e.target.closest('button,a,input')) return;
+    const open=box.classList.toggle('hide')===false;
+    caret.textContent=(open?'▾ ':'▸ ')+rows.length+' fills'+(title ? ' · one market order' : ''); };
+  return { item, box };
+}
 function renderHistory(){
   renderBtcHistory().catch(()=>{});   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
   renderOampHistory(); refreshOampHistory().catch(()=>{});   // WW-6: restricted-transfer history + confirmation/anchor chips
@@ -6558,8 +6612,14 @@ function renderHistory(){
   }
   const short=(id)=>id.slice(0,8)+'…';
   const spedUp=new Set(Object.values(kinds).filter(k=>k && k.kind==='speedup').map(k=>k.of));
+  // One order, one row: the fills of a market order (one transaction per offer it took) are folded
+  // under a row with the order's totals, opened with a click. swapGroups names them.
+  const groups=swapGroups(ordered), boxes=new Map();
   for(const r of ordered){
     const txid=r.txid, k=kinds[txid];
+    const g=groups.byTx.get(txid);
+    if(g && !boxes.has(g)){ const head=swapGroupRow(groups.members.get(g), groups.titles.get(g)); list.appendChild(head.item); list.appendChild(head.box); boxes.set(g, head.box); }
+    const into = g ? boxes.get(g) : list;
     // Rows saved before swaps were named carry "unknown": name them from their legs too.
     const type = (r.type==='unknown' && isSwapLegs(r.legs)) ? 'swap' : r.type;
     const replaced = !r.height && replacedBy.has(txid);
@@ -6615,7 +6675,8 @@ function renderHistory(){
       if(item._detail){ item._detail.remove(); item._detail=null; }
       else { item._detail=txDetail(r, tipNow); item.after(item._detail); }
     };
-    list.appendChild(item);
+    if(g) item.classList.add('child');
+    into.appendChild(item);
   }
 }
 // Whether the network still holds an unconfirmed transaction. A transaction can leave every
