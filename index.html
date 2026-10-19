@@ -2607,7 +2607,7 @@ const seqLeg = {
       // Apply our own tx to the wollet NOW: the scan cadence is minutes (and the scan cache is
       // broken), so without this the very next build re-selects the inputs this tx just spent
       // and the node rejects it with bad-txns-inputs-missingorspent.
-      try { wollet.applyTransaction(finalized); } catch {}
+      try { wollet.applyTransaction(ownTx(finalized)); } catch {}
       noteOwnTx(finalized);   // survive a stale scan Update clobbering the applied spend
       return { txid: txid.toString ? txid.toString() : String(txid) };
     });
@@ -3018,9 +3018,16 @@ async function idbPut(key,val){ try{ const db=await idbOpen(); await new Promise
 // hour and re-apply after each applyUpdate — idempotent when the scan already saw them,
 // corrective when it did not.
 const _ownTxRing = [];   // [{hex, at}]
+// The transaction a finalized PSET carries. Wollet.finalize answers a Pset, and applyTransaction
+// takes a Transaction: handed the Pset, it threw (swallowed by its catch) and noteOwnTx dropped the
+// Pset's base64 as not hex, so no send recorded its own spends and the next one, built before a
+// scan caught up, spent the same coins again (refused as bad-txns-inputs-missingorspent, or as a
+// replacement paying no more). Every caller goes through this.
+function ownTx(x){ return (x && typeof x.extractTx === 'function') ? x.extractTx() : x; }
 function noteOwnTx(finalized){
   try {
-    const hex = finalized && finalized.toString ? String(finalized.toString()) : null;
+    const tx = ownTx(finalized);
+    const hex = tx && tx.toString ? String(tx.toString()) : null;
     if (!hex || !/^[0-9a-f]+$/i.test(hex)) return;
     _ownTxRing.push({ hex, at: Date.now() });
     while (_ownTxRing.length > 32) _ownTxRing.shift();
@@ -3672,7 +3679,7 @@ async function lnSendDeposit({ chain, asset, amount, address }){
   const signed = signer.sign(pset);
   const finalized = wollet.finalize(signed);
   const txid = await client.broadcast(finalized);
-  try { wollet.applyTransaction(finalized); } catch {}   // spend-tracking: see seqLeg.fund
+  try { wollet.applyTransaction(ownTx(finalized)); } catch {}   // spend-tracking: see seqLeg.fund
   noteOwnTx(finalized);
   return { txid: (txid && txid.toString) ? txid.toString() : String(txid) };
   });
@@ -3754,13 +3761,13 @@ async function lnFundDirectSeq({ address, script, amount, asset, complete, onBro
     const fundingTxid = await complete(pset.toString());
     if(unsignedTxid && unsignedTxid!==fundingTxid) throw new Error('Not opening the channel: your node expects a different funding transaction.');
     const finalized = wollet.finalize(signer.sign(pset));
-    const txid = finalized.txid().toString();
+    const txid = ownTx(finalized).txid().toString();
     if(txid!==fundingTxid) throw new Error('Not opening the channel: the signed funding transaction is not the one your node expects.');
-    try{ localStorage.setItem(LN_FUNDING_KEY, JSON.stringify({ txid, hex: finalized.toString(), asset, at: Date.now() })); }catch{}
+    try{ localStorage.setItem(LN_FUNDING_KEY, JSON.stringify({ txid, hex: ownTx(finalized).toString(), asset, at: Date.now() })); }catch{}
     if(extra && extra.onTxid) extra.onTxid(txid);
     onBroadcast();
     await (broadcastClient || client).broadcast(finalized);
-    try{ wollet.applyTransaction(finalized); }catch{}
+    try{ wollet.applyTransaction(ownTx(finalized)); }catch{}
     noteOwnTx(finalized);
     return { txid };
   });
@@ -3778,7 +3785,7 @@ async function lnRebroadcastFunding(){
       const b = await fetch(`${T4_API}/tx`, { method:'POST', body: f.hex });
       if(!b.ok) throw new Error((await b.text()).trim() || ('HTTP '+b.status));
     } else {
-      await (broadcastClient || client).broadcast(new Transaction(f.hex));
+      await (broadcastClient || client).broadcastTx(new Transaction(f.hex));   // broadcast() takes a Pset
     }
     console.info('[ln] channel funding '+f.txid+' broadcast again');
   }catch(e){ console.warn('[ln] channel funding rebroadcast (retried on the next open):', e?.message??e); }
@@ -5862,7 +5869,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
           fee: fee ? { hex:fee.hex, atoms:String(fee.atoms) } : null }); }
       _spendsPending++;
       _spendsRecorded = Promise.all([_spendsRecorded,
-        queued('send › record the spend', () => { try { wollet.applyTransaction(finalized); } catch {} })
+        queued('send › record the spend', () => { try { wollet.applyTransaction(ownTx(finalized)); } catch {} })
           .finally(() => { _spendsPending--; try{ renderBalance(); renderHistory(); }catch{} })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
       endConfirm();
       showSent(m, { title, kv, txid: txid.toString() });
