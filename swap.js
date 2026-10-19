@@ -3494,9 +3494,23 @@ async function requoteCross(route, amtStr){
     if (_railsUnset && (offers.length || haveUnified || !unreachable)){
       // Same as below: missing a rail choice must never read as a broken connection.
       status.textContent = ''; LAST_QUOTE = null; setReviewEnabled(false);
-      $('swRate').textContent = 'Choose how you pay & receive to see the price.';
       $('swRoute').textContent = dirLabel;
       $('swErr').textContent = '';
+      // The book is one for every rail, so a Market order fills the other amount before the rails
+      // are chosen: priced as an on-chain take on both sides, the shape every maker can settle. Only
+      // Place waits for the rails. bridgedTakePlan records the rails it was given as chosen: keep
+      // the composer's own state.
+      const unset = _railsUnset;
+      const pv = S.mode !== 'post' ? bridgedTakePlan(route, { payRail: 'chain', recvRail: 'chain' }) : null;
+      _railsUnset = unset;
+      if (pv && pv.offer){
+        const dec = renderMixedTake(route, { side: route.payIsBtc ? 'buy' : 'sell', offerAtoms: pv.offer.assetAtoms,
+          offerBtc: pv.offer.btcSats, minFill: offerMinFill(pv.offer, pv.offer.raw || {}) });
+        // The best offer on any rail: the rails chosen next may settle only a different one.
+        if (dec.hasAmount && !dec.belowMin) $('swRate').textContent += ' · the best price on any rail; the rails you choose can change it';
+      } else {
+        $('swRate').textContent = 'Choose how you pay & receive to see the price.';
+      }
       return;
     }
     if (unreachable && !offers.length && !haveUnified){
