@@ -178,6 +178,8 @@
   .modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
   .modal .card{margin:0;max-width:480px;width:100%;max-height:88vh;overflow:auto}
   .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+  .feedot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px}
+  .feedot.ok{background:var(--green)} .feedot.warn{background:var(--amber)} .feedot.no{background:var(--red)}
   #histList .item.clickable{cursor:pointer}
   .txdetail{margin:0 0 10px 52px;padding:2px 0 2px 12px;border-left:2px solid var(--line)}
   .txdetail .kv{font-size:12.5px;padding:5px 0}
@@ -1968,14 +1970,17 @@ function initAppRefUI(){
 function fillFeeAssetSelect(sel){
   if(!sel) return; const prev=sel.value; sel.innerHTML='';
   const add=(val,label)=>{ const o=el('option'); o.value=val; o.textContent=label; sel.appendChild(o); };
-  const b=balObj();
+  const b=balObj(), refused=[];
   for(const h of Object.keys(b)){
     let held=false; try{ held = BigInt(b[h]||'0') > 0n; }catch{}
     if(!held) continue;                                         // ONLY a POSITIVE balance qualifies — tSEQ has NO privilege; if you hold 0 tSEQ it never appears
-    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)) continue;  // and only if this node prices the asset for fees
-    add(h, h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker);
+    const tk = h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker;
+    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)){ refused.push(tk); continue; }   // the node does not accept it for fees
+    add(h, tk + (refValue(h, 1n)==null ? ' · no price' : ''));
   }
-  if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;
+  // Held but not accepted: listed after the others, not selectable, so a missing asset is explained.
+  for(const tk of refused){ const o=el('option'); o.disabled=true; o.textContent=tk+' · not accepted for fees'; sel.appendChild(o); }
+  if(prev && [...sel.options].some(o=>o.value===prev && !o.disabled)) sel.value=prev;
 }
 function populateFeeAssets(){ fillFeeAssetSelect($('feeAsset')); updateFeeAssetHint(); }
 // Issuance can pay its fee in ANY held, node-priced asset, exactly like Send. No default to tSEQ.
@@ -1997,19 +2002,20 @@ function updateFeeAssetHint(){
   const sel=$('feeAsset'), hint=$('feeAssetHint'); if(!sel||!hint) return;
   const h=sel.value;
   hint.textContent='';                          // textContent only (never innerHTML) — a ticker can't inject markup
-  if(!h || h===POLICY_HEX) return;
-  const t=assetMeta(h).ticker;
+  if(!h) return;
+  const t = h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker;   // every fee asset gets the same line, tSEQ too
   const e=feeRateEntry(h);
   const priced = !!(e && e.rate);
-  if(priced){
-    // Value 1 unit of the asset in the user's chosen reference currency (the "show values in"
-    // picker) — never the consensus reference unit, which is SEQ-denominated. SEQ is not
-    // privileged in the UI.
-    const rv = refValueStr(h, Math.pow(10, assetMeta(h).precision||0));
-    hint.textContent = `Fee charged in ${t} at this node's published rate` + (rv ? ` (1 ${t} ${rv})` : '') + `. The wallet needs enough ${t} to cover it.`;
-  } else {
-    hint.textContent = `This node has no published rate for ${t}; the fee may be estimated and could be rejected. Try another asset.`;
-  }
+  // Three states, as in Sequentia Qt: accepted by this node and priced on the market (green);
+  // accepted but with no market price, so the fee's value cannot be shown (amber); not accepted
+  // (red, only reachable from an older selection: such assets are disabled in the menu).
+  const rv = priced ? refValueStr(h, Math.pow(10, assetMeta(h).precision||0)) : '';
+  const state = !priced ? 'no' : (rv ? 'ok' : 'warn');
+  const dot=el('span','feedot '+state); hint.appendChild(dot);
+  hint.appendChild(document.createTextNode(
+    state==='ok' ? `Accepted for fees by this node; 1 ${t} ${rv}. The fee is shown in both before you sign.`
+    : state==='warn' ? `Accepted for fees by this node, but ${t} has no market price, so the fee's value cannot be shown.`
+    : `This node does not accept ${t} for fees; the transaction could be rejected. Pick another asset.`));
   // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
   // depends on the producer that mines it also accepting THIS asset; the rescue is RBF/CPFP
   // paying the bump in any asset producers accept, compared in the same reference unit.
@@ -5397,6 +5403,10 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
   }
   const {m, ok, st} = modalRows({title, kv});
   endReview();
+  // A fee worth more than 30 reference units (USD) is almost always a typed rate gone wrong.
+  { const f=builtFee, pu = f ? priceFor(priceTicker(f.hex)) : 0;
+    const usd = (f && pu>0) ? Number(BigInt(f.atoms)) / Math.pow(10, assetMeta(f.hex).precision||0) * pu : 0;
+    if(usd > 30){ const w=el('div','warn','⚠ This fee is worth about '+usd.toLocaleString(undefined,{maximumFractionDigits:2})+' USD. Check the fee rate before you sign.'); w.style.margin='10px 0'; const row=ok.parentNode; row.parentNode.insertBefore(w, row); } }
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Signing &amp; broadcasting…';
     const endConfirm = timer('send › confirm to broadcast');
