@@ -2905,6 +2905,7 @@ async function openWallet(phrase){
   // own node, never lost) — self-healing so a network blip / reload can't strand a deposit.
   try{ updateLnMoveBanner(); }catch{}   // show the in-flight banner immediately if a move is still pending from last session
   try{ lnRebroadcastFunding(); }catch{}
+  setInterval(()=>{ watchOwnConfirmations().catch(()=>{}); }, 15000);
   try{ resumeMove(); }catch(e){ console.warn('[resume] move resume failed:', e?.message??e); }
   // Lightning (LSP): bring the on-device signer online so the "Instant (Lightning)"
   // swap rail becomes available. Non-fatal + opt-in: if the wss endpoint / host key
@@ -4335,6 +4336,39 @@ const _sentAtTip = {
   set(id, h){ try{ const m=this.all(); m[id]=h; const ids=Object.keys(m); for(const x of ids.slice(0, Math.max(0, ids.length-100))) delete m[x];
     localStorage.setItem(this.key(), JSON.stringify(m)); }catch{} },
 };   // txid -> tip height at broadcast
+// Confirmations this wallet has seen for its own transactions before its wollet records them: the
+// explorer says a block has one (the Sent card's poll, or watchOwnConfirmations), and History and
+// the balance show it at once instead of waiting for the next sync. Each one starts a sync, which
+// then has the chain's own word for it. Kept per wallet, so a reload keeps them.
+// [txid] -> [height, unix time]
+function seenKey(){ return 'swk.txSeen:'+wolletKey(); }
+function seenConfirmed(){ try{ return JSON.parse(localStorage.getItem(seenKey())||'{}')||{}; }catch{ return {}; } }
+function noteSeenConfirmed(txid, height, ts){
+  if(!(Number(height)>0) || !/^[0-9a-f]{64}$/i.test(String(txid||''))) return;
+  const m=seenConfirmed(); if(m[txid] && m[txid][0]===Number(height)) return;
+  m[txid]=[Number(height), Number(ts)||Math.floor(Date.now()/1000)];
+  const ids=Object.keys(m); for(const id of ids.slice(0, Math.max(0, ids.length-100))) delete m[id];
+  try{ localStorage.setItem(seenKey(), JSON.stringify(m)); }catch{}
+  try{ renderHistory(); renderBalance(); }catch{}
+  sync().catch(()=>{});
+}
+// While this wallet has transactions of its own waiting for a block, ask the explorer about them
+// (one request each, at most ten, every 15 s); none waiting, no request.
+let _confBusy=false;
+async function watchOwnConfirmations(){
+  if(_confBusy || !wollet) return; _confBusy=true;
+  try{
+    let ids=[]; try{ ids=wollet.transactions().filter(t=>!t.height()).map(t=>t.txid().toString()); }catch{}
+    for(const p of livePending()) if(!ids.includes(p.txid)) ids.push(p.txid);
+    const seen=seenConfirmed();
+    for(const id of ids.filter(x=>!seen[x]).slice(0,10)){
+      try{
+        const st=await fetch(ESPLORA+'/tx/'+id+'/status',{cache:'no-store'}).then(r=>r.ok?r.json():null);
+        if(st && st.confirmed) noteSeenConfirmed(id, st.block_height, st.block_time);
+      }catch{}
+    }
+  }finally{ _confBusy=false; }
+}
 function livePending(){
   if(!_pendingSends.length) return _pendingSends;
   let known; try{ known=new Set(wollet.transactions().map(t=>t.txid().toString())); }catch{ known=new Set(); }
@@ -5139,7 +5173,12 @@ function showSent(m, { title, kv, txid, explorer = '/explorer/tx/', statusUrl = 
     try{
       const r = await fetch(statusUrl+txid+'/status');
       if(r.ok){ const st = await r.json();
-        if(st && st.confirmed){ say('✓ Confirmed in block '+esc(String(st.block_height))+'.', 'ok'); return; } }
+        if(st && st.confirmed){
+          say('✓ Confirmed in block '+esc(String(st.block_height))+'.', 'ok');
+          if(statusUrl===ESPLORA+'/tx/') noteSeenConfirmed(txid, st.block_height, st.block_time);
+          else sync().catch(()=>{});   // a Bitcoin payment: its history is read by the sync
+          return;
+        } }
     }catch{}
     timer = setTimeout(poll, 5000);
   };
@@ -5803,7 +5842,9 @@ $('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make
 // The Sequentia history as rows of plain data: what renderHistory draws and what the snapshot keeps.
 function historyRows(){
   const txs=wollet.transactions();
-  txs.sort((a,b)=>(b.height()??9e9)-(a.height()??9e9));
+  const seen=seenConfirmed();
+  const heightOf=(t)=> t.height() || (seen[t.txid().toString()]||[])[0] || null;
+  txs.sort((a,b)=>(heightOf(b)??9e9)-(heightOf(a)??9e9));
   return txs.slice(0,60).map(t=>{
     const txid=t.txid().toString();
     const delta=t.balance().toJSON();
@@ -5831,7 +5872,7 @@ function historyRows(){
     }
     if(wePaid && !legs.length) type='self';   // only the fee left: a payment to this wallet itself
     const main = legs[0] || (fee ? { hex:fee.hex, atoms:'-'+fee.atoms } : { hex:POLICY_HEX, atoms:'0' });
-    return { txid, height:t.height()||0, ts:t.timestamp()||0, type, hex:main.hex, atoms:main.atoms, legs, fee: wePaid ? fee : null };
+    return { txid, height:heightOf(t)||0, ts:t.timestamp()||(seen[txid]||[])[1]||0, type, hex:main.hex, atoms:main.atoms, legs, fee: wePaid ? fee : null };
   });
 }
 function renderHistory(){
@@ -5851,10 +5892,11 @@ function renderHistory(){
   // Sends this wallet has broadcast and the wollet has not recorded yet, newest first, on top.
   for(const p of pending.slice().reverse()){
     const item=el('div','item');
-    item.appendChild(el('span','badge dir b-out','OUT'));
+    const self=!p.out.length;   // every output back to this wallet: only the fee leaves it
+    item.appendChild(el('span','badge dir '+(self?'b-iss':'b-out'), self?'SELF':'OUT'));
     const mid=el('div','grow');
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+p.txid, p.txid.slice(0,20)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub unconf', 'sending · '+p.title));
+    mid.appendChild(el('div','sub unconf', self ? 'sending · to yourself: only the fee leaves the wallet' : 'sending · '+p.title));
     item.appendChild(mid);
     const o=p.out[0] || p.fee;
     if(o){ const am=assetMeta(o.hex); item.appendChild(el('span','amt neg', '-'+fmtAtoms(o.atoms,am.precision)+' '+am.ticker)); }
