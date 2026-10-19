@@ -690,7 +690,11 @@ function applyComposeDerivation(pay, receive, price){
   });
   if (!r) return;                                    // no derivation -> leave both fields untouched
   const meta = C.assetMeta(otherAsset);
-  const otherAtoms = C.parseAtoms(String(trim(r.value)), meta.precision || 0);
+  // Round the derived side in the maker's favour, to the atom: what you receive down, what you pay
+  // up. Rounding to the nearest atom could ask for a fraction of an atom more than the best offer
+  // gives, which on a tiny amount is a price no offer meets.
+  const raw = r.value * Math.pow(10, meta.precision || 0);
+  const otherAtoms = BigInt(S.edited === 'pay' ? Math.floor(raw + 1e-6) : Math.ceil(raw - 1e-6));
   if (otherEl._refMode && C.refValue){
     const rv = C.refValue(otherAsset, otherAtoms);   // native -> ref number for a USD-mode field
     setDerived(otherEl, rv ? String(trim(rv.v)) : C.fmtAtoms(otherAtoms, meta.precision || 0));
@@ -2714,7 +2718,11 @@ async function requoteSame(route, amtStr){
       // Route to the walk when something DIRECTLY liftable crosses the price; otherwise say so
       // plainly (no silent rest). crossableDepthAtoms measures the resting depth that meets the
       // order price — over the rows the walk can actually fill, never the display-only families.
-      const depth = crossableDepthAtoms(direct, payAtoms, recvAtoms);
+      // A market order fills from the best ask down to the slippage floor, for what it pays, exactly
+      // as takeMarketWalk executes it: gate on that. The ratio of the two fields is a preview rounded
+      // to the atom, and gating on it refused orders the walk fills: on a tiny amount one atom of
+      // rounding put the "order price" above every ask ("Nothing is resting that crosses").
+      const depth = bestDirect ? crossableDepthAtoms(direct, payAtoms, recvAtoms, ratioRecvPerPay(bestDirect) * (1 - CONFIG.marketSlip)) : 0n;
       if (depth <= 0n){
         LAST_QUOTE = null; setReviewEnabled(false);
         $('swErr').textContent = `Nothing is resting that crosses your price for ${rm.ticker}/${pm.ticker}. A market order only fills against resting orders · switch to Limit to rest an order at your price.`;
@@ -2884,9 +2892,11 @@ function refOfNativeStr(hex, str){
 // depth is the remainder that rests. `offers` are the crossable asks (BOOK.offers), each offering
 // `offer_amount` of RECEIVE for `want_amount` of PAY. A best-effort preview; the matcher does the
 // actual crossing at fill time.
-function crossableDepthAtoms(offers, orderPayAtoms, orderRecvAtoms){
+// `floorRatio`, when given, replaces the order's own price: a market order accepts anything from the
+// best ask down to the slippage floor, which is what takeMarketWalk executes.
+function crossableDepthAtoms(offers, orderPayAtoms, orderRecvAtoms, floorRatio){
   const op = Number(orderPayAtoms), or = Number(orderRecvAtoms);
-  const orderPrice = op > 0 ? or / op : 0;               // receive per pay the order is willing to accept
+  const orderPrice = floorRatio != null ? floorRatio : (op > 0 ? or / op : 0);   // receive per pay the order accepts
   let d = 0n;
   for (const o of (offers || [])){
     const recvU = Number(big(o.offer_amount || o.offerAmount || 0));
@@ -10087,7 +10097,7 @@ function stripBip32(b64){
 
 // Test-only exports: drive the REAL same-chain pipeline + the composer mapping
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
-export const __test__ = { stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
+export const __test__ = { crossableDepthAtoms, ratioRecvPerPay, stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,
   // an LSP or a chain: these are the ordering + accounting rules, and they are what
   // decide how much of a user's order actually fills.
