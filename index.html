@@ -1269,6 +1269,7 @@ import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256 } from './btc.js';
 import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoConvert,
   conversions as rewardConversions, sliceForWholeHtlc, NATIVE_BTC as AC_BTC } from './rewards.js';
 import * as seqob from './seqob.js';
+import { nodeRejectText } from './node-reject.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
@@ -5210,6 +5211,9 @@ function looksPlain(m){
 }
 function prettyErr(e){
   const m=(e?.message??String(e));
+  // A node's refusal of a transaction, by its reject code (node-reject.js).
+  const refused=nodeRejectText(m);
+  if(refused){ try{ console.warn('[prettyErr] node refused:', m); }catch{} return refused; }
   if(/conflicting|already known|txn-already|already in (block|the mempool)|already.?confirmed/i.test(m))
     return 'This transaction conflicts with one already in the mempool or a block; it may have already confirmed. Refresh to check; a confirmed transaction needs no bump.';
   if(/insufficient fee|min relay|fee too low|rejecting replacement/i.test(m))
