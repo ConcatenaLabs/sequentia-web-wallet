@@ -111,6 +111,7 @@ import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 import { rateOf, assetInboundLimits, feeReuseProblem } from './inbound-limits.mjs';
+import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 
 function reqEnv(name) {
@@ -226,7 +227,15 @@ const CFG = {
   // Sequentia difference: this is NOT BTC-only. Inbound is sold in whatever asset it is denominated
   // in -- native BTC and every LSP-supported asset alike -- and the fee is charged in THAT asset, so
   // no asset is privileged and nobody has to hold a particular one to buy capacity.
-  inboundFeeBps: Number(process.env.INBOUND_FEE_BPS || 100),               // 1%, as Phoenix charges
+  // The yearly rate of room to receive, in basis points (inbound-price.mjs): INBOUND_FEE_BPS for any
+  // asset INBOUND_ANNUAL_BPS does not name. INBOUND_ANNUAL_BPS is JSON keyed by asset id or label,
+  // "BTC" for bitcoin: {"USDX":500,"EURX":500,"BTC":100}. Sold for INBOUND_MONTHS (months, comma
+  // separated); a client that names none gets INBOUND_DEFAULT_MONTHS, so one that predates the
+  // duration pays what it always did (1% for a year).
+  inboundFeeBps: Number(process.env.INBOUND_FEE_BPS || 100),               // 1% a year
+  inboundAnnualBps: (() => { try { return JSON.parse(process.env.INBOUND_ANNUAL_BPS || '{}'); } catch { return {}; } })(),
+  inboundMonths: String(process.env.INBOUND_MONTHS || MONTHS_ALLOWED.join(',')).split(',').map(Number).filter(n => Number.isInteger(n) && n > 0),
+  inboundDefaultMonths: Number(process.env.INBOUND_DEFAULT_MONTHS || 12),
   inboundFeeMinSat: Number(process.env.INBOUND_FEE_MIN_SAT || 3000),       // BTC floor (Phoenix: 3000 sat)
   inboundFeeMinAtoms: Number(process.env.INBOUND_FEE_MIN_ATOMS || 1000),   // per-asset floor, in that asset's atoms
   inboundMinSat: Number(process.env.INBOUND_MIN_SAT || 100000),            // Phoenix sells 100k..10M
@@ -1807,36 +1816,19 @@ function debtClear(nodeKey, assetId, amount) {
   return next;
 }
 
-// PRICE FOR SELLING INBOUND LIQUIDITY.
-//
-// Modelled on Phoenix (ACINQ): a percentage of the requested amount, with a floor, over a bounded
-// range. Inbound is capital the LP locks up on the user's behalf for the life of the channel, so it
-// is sold rather than given away -- and quoting it up front is the honest half: the user sees the
-// price before anything is opened, not after.
-//
-// Denominated in the asset being bought. Native BTC and every LSP-supported asset are priced the
-// same way and charged in THEIR OWN units, so buying capacity never requires holding some other
-// asset first. `isBtc` only selects which floor applies, since a satoshi and an asset atom are not
-// comparable quantities.
-//
-// Pure and total: it never throws, and an out-of-range request comes back with ok:false and a reason
-// rather than a thrown error, because this is also what the quote endpoint returns to the UI.
-function quoteInboundFee(amount, { isBtc = false, bps, minSat, minAtoms, minAmount, maxAmount } = {}) {
-  const amt = Math.floor(Number(amount) || 0);
-  const rate = bps == null ? CFG.inboundFeeBps : Number(bps);
+// PRICE FOR SELLING INBOUND LIQUIDITY: max(floor, amount × the asset's yearly rate × months / 12),
+// quoted before anything is opened (inbound-price.mjs). Denominated in the asset being bought and
+// charged in its own units, so buying room never requires holding some other asset first; `isBtc`
+// only selects which floor applies, since a satoshi and an asset atom are not comparable. Never
+// throws: an out-of-range request comes back ok:false with a reason, which the quote endpoint
+// returns to the UI as it is.
+function quoteInboundFee(amount, { isBtc = false, assetId = '', months, minSat, minAtoms, minAmount, maxAmount } = {}) {
   const floor = isBtc
     ? (minSat == null ? CFG.inboundFeeMinSat : Number(minSat))
     : (minAtoms == null ? CFG.inboundFeeMinAtoms : Number(minAtoms));
-  const lo = minAmount == null ? CFG.inboundMinSat : Number(minAmount);
-  const hi = maxAmount == null ? CFG.inboundMaxSat : Number(maxAmount);
-  if (!(amt > 0)) return { ok: false, reason: 'amount must be greater than zero', amount: 0, fee: 0 };
-  if (amt < lo) return { ok: false, reason: `the smallest amount of inbound sold is ${lo}`, amount: amt, fee: 0, min: lo, max: hi };
-  if (amt > hi) return { ok: false, reason: `the largest amount of inbound sold is ${hi}`, amount: amt, fee: 0, min: lo, max: hi };
-  // Round the percentage UP: rounding a price down means selling capacity below cost on every
-  // request that lands mid-atom, and those are the common case, not the exception.
-  const pct = Math.ceil((amt * rate) / 10000);
-  const fee = Math.max(pct, floor);
-  return { ok: true, amount: amt, fee, bps: rate, floor, min: lo, max: hi };
+  const annualBps = annualBpsFor(CFG.inboundAnnualBps, isBtc ? 'BTC' : assetId, isBtc ? 'BTC' : assetLabel(assetId), CFG.inboundFeeBps);
+  return quoteRoom(amount, { months: months == null ? CFG.inboundDefaultMonths : months, annualBps, floor,
+    minAmount: minAmount == null ? CFG.inboundMinSat : minAmount, maxAmount: maxAmount == null ? CFG.inboundMaxSat : maxAmount });
 }
 
 // The limits quoteInboundFee applies to an asset: by value through the node's exchange rate
@@ -4888,7 +4880,9 @@ const server = http.createServer(async (req, res) => {
       const isBtc = !rawAsset || /^btc$/i.test(rawAsset);
       const assetId = isBtc ? '' : resolveAsset(rawAsset);
       if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
-      const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
+      const months = parseMonths(url.searchParams.get('months'), CFG.inboundMonths, CFG.inboundDefaultMonths);
+      if (months == null) return send(res, 400, { ok: false, error: `months must be one of ${CFG.inboundMonths.join(', ')}`, months_allowed: CFG.inboundMonths });
+      const q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, assetId, months, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
       const nodeKey = url.searchParams.get('node_key') || '';
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
       // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
@@ -4901,6 +4895,7 @@ const server = http.createServer(async (req, res) => {
         asset_label: isBtc ? 'BTC' : (assetLabel(assetId) || assetId.slice(0, 8)),
         // Both ways to pay, and what each means, so the caller can offer a real choice.
         modes: ['prepaid', 'deferred'],
+        months_allowed: CFG.inboundMonths,
         pay_to: payTo,
         prepaid_unavailable: payErr,
         already_owed: owed,
@@ -4921,13 +4916,17 @@ const server = http.createServer(async (req, res) => {
       // price cannot drift between what was shown and what is charged, and any debt already carried
       // by this node falls due now.
       const lim = await inboundLimitsFor(assetId);
-      let q = quoteInboundFee(amount, { isBtc: false, ...lim });
+      const months = parseMonths(body.months, CFG.inboundMonths, CFG.inboundDefaultMonths);
+      if (months == null) return send(res, 400, { ok: false, error: `months must be one of ${CFG.inboundMonths.join(', ')}`, months_allowed: CFG.inboundMonths });
+      let q = quoteInboundFee(amount, { isBtc: false, assetId, months, ...lim });
       // Out of range is not free. Below the smallest sale the room opened (and charged) is that
       // smallest sale; above the largest there is no sale. Both used to skip the fee and open the
       // channel anyway, because the charge below runs only for a quote that is ok.
       let openAmount = amount;
-      if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc: false, ...lim }); }
+      if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc: false, assetId, months, ...lim }); }
       else if (!q.ok && q.max != null && amount > q.max) return send(res, 400, { ok: false, error: q.reason, min: q.min, max: q.max });
+      // The service keeps the channel open until then; after it, it may close it.
+      const until = expiresAt(Date.now(), months);
       const owed = debtOwed(body.node_key, assetId);
       const due = (q.ok ? q.fee : 0) + owed;
       const mode = String(body.mode || CFG.inboundCollectMode || 'deferred').toLowerCase();
@@ -4945,7 +4944,7 @@ const server = http.createServer(async (req, res) => {
               fee: q.fee, already_owed: owed, due_now: due, pay_to: payTo, asset: assetId, mode });
           }
           if (!inboundFees.has(String(body.fee_txid).toLowerCase()))
-            recordFeeUse(body.fee_txid, { node_key: body.node_key || '', asset: assetId, amount });
+            recordFeeUse(body.fee_txid, { node_key: body.node_key || '', asset: assetId, amount, months, expires_at: until });
           debtClear(body.node_key, assetId);
         } else if (mode === 'deferred') {
           if (owed > CFG.inboundDebtCap) {
@@ -4962,7 +4961,8 @@ const server = http.createServer(async (req, res) => {
         // to open would be billing for nothing. An idempotent no-op is not a new sale either.
         let nowOwed = owed;
         if (mode === 'deferred' && q.ok && !r.already_had_inbound && CFG.inboundFeeBps > 0) nowOwed = debtAdd(body.node_key, assetId, q.fee);
-        return send(res, 200, { ...r, fee_charged: mode === 'prepaid' ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode });
+        return send(res, 200, { ...r, fee_charged: mode === 'prepaid' ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode,
+          months, expires_at: until });
       } catch (e) { return send(res, 502, { ok: false, error: String((e && e.message) || e) }); }
     }
     // "Move back to chain": cooperatively close a channel on the user's own hosted node, sending

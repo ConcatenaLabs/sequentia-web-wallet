@@ -3653,7 +3653,7 @@ async function lnClaimInbound(rec, say){
   for(;;){
     try{
       say && say('Opening the channel to you…');
-      const r = await seqlnChannelInbound({ node_key: rec.node, asset: rec.asset, amount: rec.amount, mode: 'prepaid', fee_txid: rec.fee_txid || undefined });
+      const r = await seqlnChannelInbound({ node_key: rec.node, asset: rec.asset, amount: rec.amount, mode: 'prepaid', fee_txid: rec.fee_txid || undefined, months: rec.months || undefined });
       lnClearInbound();
       return r;
     }catch(e){
@@ -3668,12 +3668,51 @@ async function lnResumeReceiveRoom(){
   try{ await lnClaimInbound(rec); toast('You can now receive '+rec.ticker+' over Lightning'); try{ refreshLnStatus(); }catch{} }
   catch(e){ console.warn('[ln] receive room (retried on the next open):', e?.message??e); }
 }
+// How long the service keeps the channel to you open, chosen with the amount: the price is the
+// amount times the asset's yearly rate times the months. Six months unless the service does not
+// sell that term; a service that predates terms names none, and the choice is not shown.
+function lnRoomTerms(card, onChange){
+  const row=el('div','row'); row.style.cssText='gap:8px;align-items:center;margin-top:8px';
+  row.appendChild(el('span','sub','Keep the channel open for'));
+  const sel=el('select');
+  const fill=(list)=>{ const cur=Number(sel.value)||6; sel.innerHTML='';
+    for(const n of list){ const o=el('option'); o.value=String(n); o.textContent=n===1?'1 month':n+' months'; sel.appendChild(o); }
+    sel.value=String(list.includes(cur) ? cur : list.includes(6) ? 6 : list[list.length-1]); };
+  fill([1,3,6,12]);
+  row.appendChild(sel); card.appendChild(row);
+  sel.onchange=()=>onChange && onChange();
+  return { months: ()=>Number(sel.value), lock: ()=>{ sel.disabled=true; },
+    // what the service answered: the terms it sells, or none (it then prices a year, as it always did)
+    adopt(q){
+      if(Array.isArray(q && q.months_allowed) && q.months_allowed.length){
+        const list=q.months_allowed.map(Number).filter(n=>n>0).sort((a,b)=>a-b);
+        if(list.join()!==[...sel.options].map(o=>o.value).join()) fill(list);
+        row.style.display='';
+      } else if(q && q.ok) row.style.display='none';
+    } };
+}
+// A room quote said as the formula it comes from, so the user can check it by hand: the amount, the
+// asset's yearly rate, the months, and the floor when it is what applies.
+function lnRoomPriceText(q, tk, prec){
+  const fee=BigInt(q.fee), floor=BigInt(q.floor||0), f=(a)=>fmtAtoms(a, prec)+' '+tk;
+  if(q.annual_bps==null){   // a service that predates terms: a share of the amount, for a year
+    const pct=(q.bps/100).toLocaleString(undefined,{maximumFractionDigits:2});
+    return 'Fee '+f(fee)+' ('+pct+'%, at least '+f(floor)+').';
+  }
+  const months=Number(q.months), rate=(Number(q.annual_bps)/100).toLocaleString(undefined,{maximumFractionDigits:2});
+  const byTime=(BigInt(q.amount)*BigInt(q.annual_bps)*BigInt(months)+119999n)/120000n;
+  const term=months===1?'1 month':months+' months';
+  return 'Fee '+f(fee)+': '+f(BigInt(q.amount))+' × '+rate+'% a year × '+term
+    +(byTime < floor ? ', raised to the minimum of '+f(floor)+'.' : ' (minimum '+f(floor)+').')
+    +' The service keeps this channel open for '+term+'. Receiving uses up the room and spending makes it again.';
+}
 function lnReceiveRoomDialog(leg, startAtoms){
   const m=el('div','modal'), c=el('div','card');
   c.appendChild(el('label','lbl','Receive '+leg.ticker+' over Lightning'));
   c.appendChild(el('div','sub','To receive over Lightning, the other side of a channel needs room for what arrives. The service opens a channel to you with that room on its side. You pay its fee once, in '+leg.ticker+', on chain.'));
   c.appendChild(el('label','lbl','How much do you want to be able to receive?'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
+  const terms=lnRoomTerms(c, ()=>requote());
   const quote=el('div','sub'); quote.style.marginTop='6px'; c.appendChild(quote);
   const act=el('div','row'); act.style.marginTop='14px';
   const ok=el('button','primary','Pay the fee and open'); const no=el('button','ghost','Cancel');
@@ -3689,8 +3728,10 @@ function lnReceiveRoomDialog(leg, startAtoms){
     if(!(atoms>0n)){ quote.textContent=''; return; }
     quote.textContent='Getting the price…';
     try{
-      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms) });
-      if(String(atoms)!==String(parseAtoms((inp.value||'').trim(), prec))) return;   // typed on meanwhile
+      const months=terms.months();
+      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), months });
+      if(String(atoms)!==String(parseAtoms((inp.value||'').trim(), prec)) || months!==terms.months()) return;   // changed meanwhile
+      terms.adopt(q);
       if(!q.ok){
         quote.textContent = (q.min!=null && q.max!=null)
           ? 'The service opens between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room.'
@@ -3698,17 +3739,17 @@ function lnReceiveRoomDialog(leg, startAtoms){
         return;
       }
       const have=BigInt(balObj()[leg.asset]||0);
-      const fee=BigInt(q.fee), pct=(q.bps/100).toLocaleString(undefined,{maximumFractionDigits:2});
-      quote.textContent='Fee '+fmtAtoms(fee, prec)+' '+tk+' ('+pct+'%, at least '+fmtAtoms(BigInt(q.floor), prec)+'), paid now on chain, plus the network fee of that payment.'
+      const fee=BigInt(q.fee);
+      quote.textContent=lnRoomPriceText(q, tk, prec)+' Paid now on chain, plus the network fee of that payment.'
         + (fee > have ? ' You hold '+fmtAtoms(have, prec)+' '+tk+', not enough for it.' : '');
-      last={ atoms, fee };
+      last={ atoms, fee, months };
       ok.disabled = fee > have;
     }catch(e){ quote.textContent='Could not reach the service: '+prettyErr(e); }
   };
   inp.oninput=()=>{ clearTimeout(t); t=setTimeout(requote, 350); };
   ok.onclick=async()=>{
     if(!last) return;
-    ok.disabled=true; no.disabled=true; inp.disabled=true;
+    ok.disabled=true; no.disabled=true; inp.disabled=true; terms.lock();
     const say=(txt)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+esc(txt); };
     try{
       const phrase=(localStorage.getItem(KEY)||'').trim();
@@ -3719,9 +3760,9 @@ function lnReceiveRoomDialog(leg, startAtoms){
       lnRoomSlotFree();
       await waitNodeReady({ nodeKey: prov.key, onProgress: ()=>say('Preparing your Lightning node…') });
       // The price again, for this node: anything it already owes is due with it.
-      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(last.atoms), node_key: prov.key });
+      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(last.atoms), node_key: prov.key, months: last.months });
       if(!q.ok) throw new Error(q.reason || q.error || 'the service gave no price');
-      const rec={ asset: leg.asset, ticker: tk, amount: Number(last.atoms), node: prov.key, fee_txid: null, at: Date.now() };
+      const rec={ asset: leg.asset, ticker: tk, amount: Number(last.atoms), months: last.months, node: prov.key, fee_txid: null, at: Date.now() };
       const due=BigInt(q.due_now||0);
       if(due>0n){
         if(!q.pay_to) throw new Error('the service gave no address for the fee'+(q.prepaid_unavailable ? ' ('+q.prepaid_unavailable+')' : ''));
@@ -3735,7 +3776,8 @@ function lnReceiveRoomDialog(leg, startAtoms){
       st.className='status ok';
       st.textContent = r && r.already_had_inbound && !r.pending
         ? 'You can already receive this much '+tk+' over Lightning; no new channel was needed.'
-        : 'Done. A channel with room for '+fmtAtoms(last.atoms, prec)+' '+tk+' is opening to you; you can receive over Lightning once it confirms.';
+        : 'Done. A channel with room for '+fmtAtoms(last.atoms, prec)+' '+tk+' is opening to you; you can receive over Lightning once it confirms'
+          +(r && r.expires_at ? ', and the service keeps it open until '+new Date(r.expires_at).toLocaleDateString()+'.' : '.');
       no.disabled=false; no.textContent='Close'; no.onclick=()=>m.remove();
       try{ refreshLnStatus(); }catch{}
       setTimeout(()=>{ try{ sync(); }catch{} }, 1500);
@@ -3755,6 +3797,7 @@ function lnMoveRoomField(card, leg, moveAtoms){
   card.appendChild(el('label','lbl','Room to receive (optional)'));
   card.appendChild(el('div','sub','Lightning can bring you '+tk+' only if the other side of a channel has room for it. The service opens a channel to you with that room as soon as this move confirms. Its fee, in '+tk+', is paid in the same transaction. Leave it empty if you only want to send.'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; card.appendChild(inp);
+  const terms=lnRoomTerms(card, ()=>{ clearTimeout(t); recheck(); });
   const line=el('div','sub'); line.style.marginTop='6px'; card.appendChild(line);
   let state=null, t=null, seq=0;
   const recheck=async()=>{
@@ -3764,23 +3807,25 @@ function lnMoveRoomField(card, leg, moveAtoms){
     if(atoms==null){ state={ problem:'Enter a valid amount of room to receive, or leave it empty.' }; line.textContent=state.problem; return; }
     state={ problem:'The price of the room to receive is still loading.' }; line.textContent='Getting the price…';
     try{
-      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms) });
+      const months=terms.months();
+      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), months });
       if(my!==seq) return;
+      terms.adopt(q);
       if(!q.ok){
         state={ problem: (q.min!=null && q.max!=null)
           ? 'The service sells between '+fmtAtoms(BigInt(q.min), prec)+' and '+fmtAtoms(BigInt(q.max), prec)+' '+tk+' of room to receive.'
           : 'No price for this room: '+(q.reason||q.error||'the service did not answer') };
         line.textContent=state.problem; return;
       }
-      const fee=BigInt(q.fee), pct=(q.bps/100).toLocaleString(undefined,{maximumFractionDigits:2});
-      state={ atoms, fee };
+      const fee=BigInt(q.fee);
+      state={ atoms, fee, months };
       const left=BigInt(leg.onchain||0n) - moveAtoms() - fee;
-      line.textContent='Fee '+fmtAtoms(fee, prec)+' '+tk+' ('+pct+'%, at least '+fmtAtoms(BigInt(q.floor), prec)+').'
+      line.textContent=lnRoomPriceText(q, tk, prec)
         + (left < 0n ? ' Together with the amount it is more than you hold on-chain.' : '');
     }catch(e){ if(my===seq){ state={ problem:'Could not price the room to receive: '+prettyErr(e) }; line.textContent=state.problem; } }
   };
   inp.oninput=()=>{ clearTimeout(t); t=setTimeout(recheck, 350); };
-  return { value: ()=>state, recheck: ()=>{ clearTimeout(t); t=setTimeout(recheck, 350); }, lock: ()=>{ inp.disabled=true; } };
+  return { value: ()=>state, recheck: ()=>{ clearTimeout(t); t=setTimeout(recheck, 350); }, lock: ()=>{ inp.disabled=true; terms.lock(); } };
 }
 // Move ⇄: one button per asset for both ways. With only one way open it goes straight there;
 // with both, it asks which.
@@ -4177,9 +4222,9 @@ function moveToLightningDialog(leg){
       if(room){
         lnRoomSlotFree();
         say('Pricing the room to receive…');
-        const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(room.atoms), node_key: prov.key });
+        const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(room.atoms), node_key: prov.key, months: room.months });
         if(!q.ok) throw new Error('room to receive: '+(q.reason || q.error || 'the service gave no price'));
-        roomRec={ asset: leg.asset, ticker: leg.ticker, amount: Number(room.atoms), node: prov.key, fee_txid: null, at: Date.now() };
+        roomRec={ asset: leg.asset, ticker: leg.ticker, amount: Number(room.atoms), months: room.months, node: prov.key, fee_txid: null, at: Date.now() };
         const due=BigInt(q.due_now||0);
         if(due>0n){
           if(!q.pay_to) throw new Error('room to receive: the service gave no address for the fee'+(q.prepaid_unavailable ? ' ('+q.prepaid_unavailable+')' : ''));
