@@ -4646,7 +4646,7 @@ function renderBalance(){
       const button=(label, title, go)=>{
         const b=el('button','ghost mv', label); b.title=title; b.onclick=go; return b;
       };
-      if(on > 0n && (lnAtoms > 0n || chans > 0)){
+      if(on > 0n && lnAtoms > 0n){   // in both places: a channel that only receives holds nothing of yours
         const rails=el('div','rails');
         const side=(cls, label, atoms, note)=>{
           const d=el('div','rail'+(cls?' '+cls:''));
@@ -4664,6 +4664,7 @@ function renderBalance(){
         r.appendChild(rails);
       } else if(toLn){
         const one=el('div','rail-one');
+        if(opening) one.appendChild(el('span','rs', 'Lightning channel opening'));
         one.appendChild(button('Move to Lightning', 'Move '+ticker+' into a Lightning channel', ()=>moveToLightningDialog(leg)));
         r.appendChild(one);
       } else if(lnAtoms > 0n || opening){
