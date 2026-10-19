@@ -77,8 +77,8 @@ Get testnet funds from the **Issuance** tab: one-click faucet buttons for tSEQ a
 assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com/faucet pays
 straight to your current address).
 
-The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake and Sign
-under **More**; Settings behind the gear in the header.
+The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign and
+Help under **More**; Settings behind the gear in the header.
 
 - **Balance**: a headline portfolio total across parent-chain BTC and every Sequentia asset,
   valued in your chosen reference currency, then one uniform row per asset. No asset is
@@ -125,7 +125,13 @@ under **More**; Settings behind the gear in the header.
   selection as a send. They appear once a payment has missed a block. Each dialog says what the
   stuck transaction pays, as a multiple of the network's minimum rate, suggests a rate in the
   chosen asset's own units, and says what the rescue comes to; it checks again before signing
-  that the transaction is still unconfirmed.
+  that the transaction is still unconfirmed. Each row's details say why an unconfirmed
+  transaction is waiting, and a transaction the network dropped is marked so.
+- **Help**: questions and answers on fees (which assets pay them, what the marks next to the fee
+  asset mean, setting a rate, why a transaction is refused or waits, the three rescues) and on
+  Lightning (who holds the keys, moving in and out, sending and receiving, what room to receive
+  costs and guarantees, with a step-by-step picture of one channel). Links across the wallet open
+  the relevant answer, over a dialog when one is open.
 - **Sign**: two kinds of signature, neither able to authorize a spend. An OpenAMP request (a
   login challenge or a document hash) signed with the wallet's OpenAMP key, tagged so it can
   never stand in for a spend authorization; and a classic message signed with the key behind
@@ -320,6 +326,7 @@ works normally without the restricted rows.
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
+| `fee-verdict.js` | What Send says about the fee before signing, worded as Sequentia Qt's fee selector: the fee asset refused by the nodes the wallet sends to (not listed, or listed at rate zero), accepted but unpublished on the Asset Registry or unpriced, or fine; and what a typed rate clears against the producer's next block (under the relay floor Send refuses to build it). |
 | `wait-reason.js` | Why an unconfirmed transaction is still waiting, from the explorer's `/feeinfo` and `/congestion`: a fee asset some nodes refuse, a rate under the mempool floor or under what a full next block takes, or nothing holding it back. Shown in a History row's details. |
 | `node-reject.js` | What a node's refusal of a transaction means: its reject code (`bad-txns-inputs-missingorspent`, `dust`, `min relay fee not met`…) as a sentence that says nothing was sent and what to do. `prettyErr` in `index.html` asks it first. |
 | `bolt11.js` | What the wallet reads from a Lightning invoice: its network, amount, payment hash, final CLTV and, on Sequentia, the asset it is paid in (field `a`, which a Sequentia invoice must carry). Copied into the browser extension's `vendor/`. |

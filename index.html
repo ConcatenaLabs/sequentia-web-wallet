@@ -178,6 +178,23 @@
   .modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
   .modal .card{margin:0;max-width:480px;width:100%;max-height:88vh;overflow:auto}
   .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+  .faq details{border-top:1px solid var(--line);padding:10px 0}
+  .faq details:first-of-type{border-top:0}
+  .faq summary{cursor:pointer;font-weight:600;font-size:14.5px}
+  .faq p{margin:8px 0 0;font-size:14px;color:var(--dim)} .faq p b,.faq li b{color:var(--txt)}
+  .faq ul{font-size:14px;color:var(--dim)} .faq .mono{color:var(--txt)}
+  .faq details.flash{animation:faqflash 1.2s ease-out}
+  @keyframes faqflash{from{background:rgba(240,165,0,.14)}to{background:transparent}}
+  .room-stepper{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:12px}
+  .rs-title{font-weight:600;font-size:14px}
+  .rs-labels{display:flex;justify-content:space-between;font-size:12px;color:var(--dim);margin:12px 0 4px}
+  .rs-bar{display:flex;height:34px;border-radius:7px;overflow:hidden;border:1px solid var(--line)}
+  .rs-bar div{display:flex;align-items:center;justify-content:center;font-size:12.5px;white-space:nowrap;overflow:hidden;transition:flex .45s}
+  .rs-you{background:var(--amber);color:#1b1407} .rs-svc{background:#2f6f5a;color:#e6f5ee}
+  .rs-nums{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;margin-top:8px} .rs-nums b{color:var(--txt)}
+  .rs-nav{display:flex;gap:8px;align-items:center;margin-top:10px} .rs-nav button{padding:4px 12px;font-size:12.5px}
+  .rs-dots{margin-left:auto;display:flex;gap:5px} .rs-dots i{width:8px;height:8px;border-radius:50%;border:1px solid var(--dim);display:inline-block}
+  .rs-dots i.on{background:var(--txt);border-color:var(--txt)}
   .feedot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px}
   .feedot.ok{background:var(--green)} .feedot.warn{background:var(--amber)} .feedot.no{background:var(--red)}
   #histList .item.clickable{cursor:pointer}
@@ -508,6 +525,7 @@
           <button data-tab="assets">Issuance</button>
           <button data-tab="stake">Stake</button>
           <button data-tab="sign">Sign</button>
+          <button data-tab="help">Help</button>
           <button data-tab="leaves" id="tabLeaves" class="dev hide">Leaves</button>
           <button data-tab="contracts" id="tabContracts" class="dev hide">Contracts</button>
         </div>
@@ -547,6 +565,7 @@
             <li>Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it.</li>
             <li>An asset is movable when the funding transaction of the Lightning channel can pay a fee in that asset or another you hold, accepted by a block producer.</li>
           </ul>
+          <p class="sub"><a href="#" data-help="faq-ln-sides">How sending and receiving over Lightning work</a> · <a href="#" data-help="faq-room">What room to receive costs</a></p>
         </details>
       </div>
       <div class="card">
@@ -581,6 +600,7 @@
               <select id="feeAsset"></select>
             </div>
           </div>
+          <div class="sub" id="feeRateNote" style="margin-top:6px"></div>
           <div class="sub" id="feeAssetHint" style="margin-top:6px"></div>
         </div>
         <div class="row" style="margin-top:14px">
@@ -1198,6 +1218,91 @@
     </section>
 
     <!-- settings -->
+    <section data-panel="help" class="hide">
+      <div class="card faq">
+        <label class="lbl">Fees and transactions</label>
+        <details id="faq-fee-asset"><summary>In which asset can I pay a network fee?</summary>
+          <p>In any asset a block producer accepts. None is privileged: tSEQ is one choice among the others.</p>
+          <p>Each producer keeps a list of the assets it takes for fees, each with an exchange rate that turns a fee into a common reference value, so producers can compare fees paid in different assets. A price server usually builds that list from the Asset Registry and from market prices.</p>
+          <p>Send offers the assets you hold that the nodes this wallet sends to accept, and shows the fee in that asset and in your reference currency before you sign.</p>
+        </details>
+        <details id="faq-fee-light"><summary>What do the green, amber and red marks next to the fee asset mean?</summary>
+          <ul class="ln-help">
+            <li><b>Green</b>: the nodes this wallet sends to accept it, it is published on the Asset Registry and it has a market price. Any producer's price server can value it.</li>
+            <li><b>Amber</b>: the nodes accept it, but it is not published on the Asset Registry or has no market price, so the price servers other producers run may not value it. The payment can then confirm only in a block of a producer that accepts it. Every send can be replaced, so if it waits you can replace it and pay the fee in another asset.</li>
+            <li><b>Red</b>: the nodes this wallet sends to do not accept it, or list it at a rate of zero, which refuses it. The transaction would be rejected before it reached a producer. An asset only some of them accept is listed but cannot be chosen.</li>
+          </ul>
+        </details>
+        <details id="faq-fee-rate"><summary>How do I set my own fee rate?</summary>
+          <p>Leave the rate empty and the wallet pays the network's default. To set it yourself, type it in the fee asset per vByte, the unit a transaction's size is measured in: a 140 vByte payment at 0.0000001 OILX per vByte pays 0.000014 OILX.</p>
+          <p>Below the relay minimum no node takes the transaction at all. When blocks are full, the next block takes only what pays more than the cheapest transaction it still fits; the wallet says how busy the next block is and, when it is full, the rate the producer estimates for making it. Under the fee rate, Send says which of these your rate clears.</p>
+          <p>A fee worth more than 30 USD is flagged before you sign: it is almost always a rate typed in the wrong unit.</p>
+        </details>
+        <details id="faq-refused"><summary>Why was my transaction refused?</summary>
+          <p>When the network refuses a transaction, nothing is sent, and the wallet says why in a sentence. The usual reasons:</p>
+          <ul class="ln-help">
+            <li>a coin it spends was already spent, usually by another payment from this wallet: refresh and try again;</li>
+            <li>it conflicts with a payment still waiting for a block: wait for that one, or speed it up;</li>
+            <li>the fee is under the minimum, or the fee asset is not accepted: raise the rate or pick another asset;</li>
+            <li>an amount is too small to relay (dust);</li>
+            <li>too many of your payments are waiting in a row: wait for the next block;</li>
+            <li>the asset is frozen by its supervisor, or its supervision rules refuse the transfer.</li>
+          </ul>
+        </details>
+        <details id="faq-waiting"><summary>Why is my transaction not confirmed yet?</summary>
+          <p>A block comes about once a minute. Open the transaction in History: under <i>Why it is waiting</i> the wallet reads the explorer and says what holds it back. The fee asset may be accepted by only some nodes, or refused by the producer. The rate may be under the mempool's minimum, or under what a full next block takes. Or nothing may be wrong.</p>
+          <p>If it misses a block, the row offers Bump fee, Replace and Speed up.</p>
+        </details>
+        <details id="faq-rescue"><summary>What do Bump fee, Replace and Speed up do?</summary>
+          <ul class="ln-help">
+            <li><b>Bump fee</b> sends the same payment again at a higher fee, in any accepted asset, and replaces the original. A replacement must pay at least the old fee plus the network's increment for its own size; the dialog says the least it must pay.</li>
+            <li><b>Replace</b> spends the same coins with new recipients or amounts, to correct a payment that has not confirmed.</li>
+            <li><b>Speed up</b> sends a small payment to yourself that spends the stuck one and pays enough for the two together, since a producer takes them as a pair. It works on a payment you received too. It cannot change the asset the stuck one paid its fee in: if that asset is the problem, use Replace.</li>
+          </ul>
+          <p>Each one checks, just before you sign, that the stuck transaction has not confirmed in the meantime.</p>
+        </details>
+        <details id="faq-dropped"><summary>What does "Dropped by the network" mean?</summary>
+          <p>The explorer no longer has the transaction, so no producer will mine it. That happens when the mempool is full and drops its cheapest transactions, when a transaction waits too long, or when another one spending the same coins replaces it. Its coins are yours to spend again; send the payment again if it is still needed.</p>
+        </details>
+        <details id="faq-final"><summary>When is a payment final?</summary>
+          <p>It shows at once, is confirmed in about a block, and is final once the Bitcoin block that anchors it is buried. Until then a reorganisation could still undo it.</p>
+        </details>
+      </div>
+      <div class="card faq">
+        <label class="lbl">Lightning</label>
+        <details id="faq-ln-keys"><summary>Where is my Lightning balance, and who holds the keys?</summary>
+          <p>Each asset you move to Lightning is in a channel of a Lightning node the service hosts for you. That node holds no keys. Your browser derives them from your recovery phrase and signs every channel update after checking it, and it approves each payment only within a daily payment limit set on it.</p>
+          <p>The service cannot move your coins on its own, with one exception. An operator who runs both your hosted node and the node your channel is with could, together, publish an old state of the channel. Keep on Lightning what you would trust the service with.</p>
+          <p>Keep one tab of the wallet open at a time: two tabs are two signers for the same channels.</p>
+        </details>
+        <details id="faq-ln-move"><summary>How do I move an asset to Lightning, and back?</summary>
+          <p><b>Move to Lightning</b> pays the amount straight into a channel, in one on-chain transaction. The wallet signs it only after the channel's way back is signed. An asset is movable when that transaction can pay a fee, in the asset itself or in another you hold, that a block producer accepts.</p>
+          <p><b>Move on-chain</b> closes the channel and pays your side of it to an address of this wallet. If the node your channel is with does not answer, the close is unilateral instead: it pays your hosted node's own address, after a delay of some blocks set when the channel opened.</p>
+        </details>
+        <details id="faq-ln-sides"><summary>Why can I send over Lightning but not receive?</summary>
+          <p>A channel is one balance split between its two sides. You can send what is on your side. You can receive only up to what is on the other side, because a payment to you moves value from that side to yours. A channel you open with Move to Lightning has everything on your side: it can send, not receive.</p>
+          <p>To receive, the other side of a channel needs room, and the service sells it: it opens a channel to you with its own coins on its side.</p>
+          <div id="roomStepper" class="room-stepper"></div>
+        </details>
+        <details id="faq-room"><summary>What does room to receive cost, and what is guaranteed?</summary>
+          <p>You choose how much you want to be able to receive and for how long: 1, 3, 6 or 12 months. You pay once, in the asset itself, on chain:</p>
+          <p class="mono">fee = amount × the asset's yearly rate × months ÷ 12, never below a minimum</p>
+          <p>What the service gives up is its coins, held in your channel for that time, so the price grows with both. The rate differs by asset: a coin that would earn something elsewhere costs more to hold than one that would not. The minimum covers what opening any channel costs. The dialog shows the formula with the numbers before you pay.</p>
+          <p>What is guaranteed is the channel, kept open for the months paid for, not a fixed amount of room. Receiving uses room up and spending makes it again. When the time is over the service may close the channel: what is on your side then comes back to you on chain. To keep receiving, buy room again.</p>
+          <p>You can ask for room when you move an asset to Lightning: its fee travels in the same transaction, and the service opens its channel as soon as that transaction confirms.</p>
+        </details>
+        <details id="faq-room-full"><summary>My room to receive is used up. What can I do?</summary>
+          <ul class="ln-help">
+            <li>Spend over Lightning: whatever you pay out makes room again.</li>
+            <li>Buy more room from the asset's row in Balance.</li>
+            <li>Move the asset on chain. This closes the channel: there is no partial move that keeps it open.</li>
+          </ul>
+        </details>
+        <details id="faq-ln-swap"><summary>Why does a swap ask me for room to receive?</summary>
+          <p>A swap that pays you over Lightning needs room on the other side of one of your channels, in the asset you receive. Without it the payment cannot arrive. The swap says what that room costs before you place the order. The service opens the channel when the order is placed, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
+        </details>
+      </div>
+    </section>
     <section data-panel="settings" class="hide">
       <div id="devModeRoot"></div>
       <div class="card">
@@ -1271,6 +1376,7 @@ import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoCon
 import * as seqob from './seqob.js';
 import { nodeRejectText } from './node-reject.js';
 import { waitReasons } from './wait-reason.js';
+import { feeAssetVerdict, rateNote } from './fee-verdict.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
@@ -2024,16 +2130,13 @@ function updateFeeAssetHint(){
   const t = h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker;   // every fee asset gets the same line, tSEQ too
   const e=feeRateEntry(h);
   const priced = !!(e && e.rate);
-  // Three states, as in Sequentia Qt: accepted by this node and priced on the market (green);
-  // accepted but with no market price, so the fee's value cannot be shown (amber); not accepted
-  // (red, only reachable from an older selection: such assets are disabled in the menu).
+  // Three states, worded as Sequentia Qt's fee selector (fee-verdict.js): refused by the nodes the
+  // wallet sends to (red); accepted, but not published on the Asset Registry or with no market
+  // price, so other producers may not take it (amber); nothing wrong (green).
   const rv = priced ? refValueStr(h, Math.pow(10, assetMeta(h).precision||0)) : '';
-  const state = !priced ? 'no' : (rv ? 'ok' : 'warn');
-  const dot=el('span','feedot '+state); hint.appendChild(dot);
-  hint.appendChild(document.createTextNode(
-    state==='ok' ? `Accepted for fees by this node; 1 ${t} ${rv}. The fee is shown in both before signing.`
-    : state==='warn' ? `Accepted for fees by this node, but ${t} has no market price, so the fee's value cannot be shown.`
-    : `This node does not accept ${t} for fees; the transaction could be rejected. Pick another asset.`));
+  const v = feeAssetVerdict({ ticker: t, info: (_feeInfo && _feeInfo[String(h).toLowerCase()]) || null, accepted: priced, price: rv });
+  hint.appendChild(el('span','feedot '+v.state));
+  hint.appendChild(document.createTextNode(v.text));
   // How busy the next block is, when the server says.
   if(_congestion && Number.isFinite(Number(_congestion.backlog_blocks))){
     const b = Number(_congestion.backlog_blocks);
@@ -2053,14 +2156,37 @@ function updateFeeAssetHint(){
       }).catch(()=>{});
     }
   }
-  // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
-  // depends on the producer that mines it also accepting THIS asset; the rescue is RBF/CPFP
-  // paying the bump in any asset producers accept, compared in the same reference unit.
-  const warn=el('div','warn');
-  warn.textContent = priced
-    ? `⚠ Confirmation still depends on the producer that mines it accepting ${t}. If it doesn't confirm, RBF (on by default) lets you replace it, paying the bump in any asset producers accept.`
-    : `⚠ Your relay node doesn't price ${t}, so it may reject this and the estimated fee may be off. You can still try; another producer may accept ${t}. RBF is on by default, so you can replace it (e.g. with a different fee asset) if needed.`;
-  hint.appendChild(warn);
+  { const more=el('div','sub'); more.appendChild(helpLink('faq-fee-light', 'What the marks mean')); hint.appendChild(more); }
+  paintFeeRateNote();
+}
+// What a typed fee rate clears, against the producer's view of the next block in that asset
+// (fee-verdict.js rateNote): under the relay floor the network refuses it, so Send does not build
+// it; under what a full next block takes it will wait. Nothing is said when the rate is empty, for
+// a Bitcoin send, or when the explorer has no /congestion. Read at most every 30 s per asset.
+const _congByAsset = new Map();   // hex -> { at, c }
+async function congestionFor(hex){
+  const hit=_congByAsset.get(hex);
+  if(hit && Date.now()-hit.at < 30_000) return hit.c;
+  let c=null;
+  try{ const r=await fetch('/congestion?asset='+encodeURIComponent(hex)); if(r.ok) c=await r.json(); }catch{}
+  _congByAsset.set(hex, { at: Date.now(), c });
+  return c;
+}
+async function feeRateVerdict(){
+  if(isBtcSend()) return null;
+  const units=parseFloat(($('feeRate').value||'').trim()), h=$('feeAsset') && $('feeAsset').value;
+  if(!(units > 0) || !h) return null;
+  const m=assetMeta(h);
+  return rateNote({ unitsPerVb: units, precision: m.precision ?? 8, ticker: h===POLICY_HEX ? 'tSEQ' : m.ticker, congestion: await congestionFor(h) });
+}
+let _rateNoteSeq=0;
+async function paintFeeRateNote(){
+  const box=$('feeRateNote'); if(!box) return;
+  const my=++_rateNoteSeq;
+  let n=null; try{ n=await feeRateVerdict(); }catch{}
+  if(my!==_rateNoteSeq) return;
+  box.className = !n ? 'sub' : n.level==='no' ? 'status err' : n.level==='warn' ? 'warn' : 'sub';
+  box.textContent = n ? n.text : '';
 }
 
 // ---------- Bitcoin (testnet4) — same BIP84 keychain, identical tb1 addresses ----------
@@ -2646,6 +2772,64 @@ async function btcWaitConf(txid, spkHex, tries=300){
 // ---------- views ----------
 function show(id,on=true){ $(id).classList.toggle('hide', !on); }
 function views(active){ for(const v of ['welcome','createView','importView','app']) show(v, v===active); }
+// Help: open the tab on one question, unfolded and in view. Links anywhere name it with data-help.
+// From inside a dialog the answer opens over it instead, so a move or a payment in progress there
+// keeps its window.
+function openHelp(id){
+  const src=$(id); if(!src) return;
+  if(document.querySelector('.modal')){
+    const m=el('div','modal'), c=el('div','card faq');
+    const d=src.cloneNode(true); d.removeAttribute('id'); d.open=true;
+    for(const x of d.querySelectorAll('[id]')) x.removeAttribute('id');
+    c.appendChild(d);
+    const st=d.querySelector('.room-stepper'); if(st){ st.innerHTML=''; st._built=false; renderRoomStepper(st); }
+    const row=el('div','row'); row.style.marginTop='12px';
+    const close=el('button','ghost','Close'); close.onclick=()=>m.remove(); row.appendChild(close); c.appendChild(row);
+    m.appendChild(c); document.body.appendChild(m);
+    m.onclick=(e)=>{ if(e.target===m) m.remove(); };
+    return;
+  }
+  tab('help');
+  src.open=true;
+  src.scrollIntoView({ block:'start', behavior:'smooth' });
+  src.classList.remove('flash'); void src.offsetWidth; src.classList.add('flash');
+}
+function helpLink(id, text){ const a=el('a', null, text); a.href='#'; a.dataset.help=id; return a; }
+document.addEventListener('click', (e)=>{
+  const a=e.target.closest && e.target.closest('[data-help]'); if(!a) return;
+  e.preventDefault(); openHelp(a.dataset.help);
+});
+// The room-to-receive explainer in Help: one channel the service opens toward you, step by step.
+function renderRoomStepper(host){
+  if(!host || host._built) return; host._built=true;
+  const S=[
+    { t:'You buy 100 USDX of room to receive, for 6 months', d:'The service opens a channel to you with 100 USDX of its own on its side. You pay once, before it opens.', y:0, s:100 },
+    { t:'You receive 60 USDX', d:'Whoever pays you moves value from the service\u2019s side to yours: 60 USDX is now yours on Lightning, and 40 is left to receive.', y:60, s:40 },
+    { t:'You spend 30 USDX', d:'The payment leaves your side and goes back to the service\u2019s side: you can receive 70 again, without paying for it again.', y:30, s:70 },
+    { t:'You receive 70 USDX: the channel is full on your side', d:'You hold 100 USDX on Lightning and have no room left. To receive more, spend, buy more room, or move the asset on chain.', y:100, s:0 },
+    { t:'The 6 months are over', d:'The channel was kept open for the whole time; the room in it depended on what you received and spent. The service may now close it, and what is on your side comes back to you on chain. To keep receiving, buy room again.', y:100, s:0 },
+  ];
+  let i=0;
+  const title=el('div','rs-title'), desc=el('p'), bar=el('div','rs-bar'), you=el('div','rs-you'), svc=el('div','rs-svc');
+  const labels=el('div','rs-labels'); labels.appendChild(el('span',null,'Your side: you can send it')); labels.appendChild(el('span',null,'The service\u2019s side: you can receive it'));
+  bar.appendChild(you); bar.appendChild(svc);
+  const nums=el('div','rs-nums sub'), room=el('b'), send=el('b');
+  { const a=el('span',null,'You can receive: '); a.appendChild(room); const b=el('span',null,'You can send: '); b.appendChild(send); nums.appendChild(a); nums.appendChild(b); }
+  const nav=el('div','rs-nav'), prev=el('button','ghost','Back'), next=el('button','ghost','Next'), dots=el('div','rs-dots');
+  for(let k=0;k<S.length;k++) dots.appendChild(el('i'));
+  nav.appendChild(prev); nav.appendChild(next); nav.appendChild(dots);
+  for(const x of [title, desc, labels, bar, nums, nav]) host.appendChild(x);
+  const paint=()=>{ const x=S[i];
+    title.textContent=(i+1)+'. '+x.t; desc.textContent=x.d;
+    you.style.flex=String(Math.max(x.y, 0.001)); svc.style.flex=String(Math.max(x.s, 0.001));
+    you.textContent=x.y ? x.y+' USDX' : ''; svc.textContent=x.s ? x.s+' USDX' : '';
+    room.textContent=x.s+' USDX'; send.textContent=x.y+' USDX';
+    [...dots.children].forEach((d,k)=>d.classList.toggle('on', k===i));
+    prev.disabled = i===0; next.disabled = i===S.length-1; };
+  prev.onclick=()=>{ if(i>0){ i--; paint(); } };
+  next.onclick=()=>{ if(i<S.length-1){ i++; paint(); } };
+  paint();
+}
 function tab(name){
   document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
   // More stands for the tab chosen from it, and is lit while one of those is open.
@@ -2662,6 +2846,7 @@ function tab(name){
   if(name==='swap') renderActiveSwap();
   if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='assets') populateIssueFeeAssets();
+  if(name==='help') renderRoomStepper($('roomStepper'));
   if(name==='mix') try{ renderMix(); }catch(e){ console.error(e); }
   if(name==='balance') try{ renderBalance(); }catch{}   // render immediately (from cache pre-scan), don't wait for the scan
   if(name==='leaves') try{ leavesApi && leavesApi.render(); }catch{}
@@ -3710,6 +3895,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
   const m=el('div','modal'), c=el('div','card');
   c.appendChild(el('label','lbl','Receive '+leg.ticker+' over Lightning'));
   c.appendChild(el('div','sub','To receive over Lightning, the other side of a channel needs room for what arrives. The service opens a channel to you with that room on its side. You pay its fee once, in '+leg.ticker+', on chain.'));
+  { const p=el('div','sub'); p.appendChild(helpLink('faq-ln-sides', 'How room to receive works')); c.appendChild(p); }
   c.appendChild(el('label','lbl','How much do you want to be able to receive?'));
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; c.appendChild(inp);
   const terms=lnRoomTerms(c, ()=>requote());
@@ -3796,6 +3982,7 @@ function lnMoveRoomField(card, leg, moveAtoms){
   const tk=leg.ticker, prec=leg.precision;
   card.appendChild(el('label','lbl','Room to receive (optional)'));
   card.appendChild(el('div','sub','Lightning can bring you '+tk+' only if the other side of a channel has room for it. The service opens a channel to you with that room as soon as this move confirms. Its fee, in '+tk+', is paid in the same transaction. Leave it empty if you only want to send.'));
+  { const p=el('div','sub'); p.appendChild(helpLink('faq-ln-sides', 'How room to receive works')); card.appendChild(p); }
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; card.appendChild(inp);
   const terms=lnRoomTerms(card, ()=>{ clearTimeout(t); recheck(); });
   const line=el('div','sub'); line.style.marginTop='6px'; card.appendChild(line);
@@ -6161,6 +6348,8 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       await btcReviewBroadcast(outputs, reset);
     } else {
       const faHex = $('feeAsset') ? $('feeAsset').value : POLICY_HEX;
+      // A rate the network would refuse outright is not built (the note under the rate says why).
+      { const rn=await feeRateVerdict(); if(rn && rn.block) throw new Error(rn.text); }
       const endBuild = timer('send › build', { count:false });
       const pset = buildSendPset(rows);
       endBuild();
@@ -6178,7 +6367,8 @@ $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
 $('xpubForm').onchange=()=>renderXpubForm();
 $('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXpubCopy'));
 $('btnXpubCopyRecv').onclick=()=>copyToClipboard(($('xpubText').textContent||'').split('\n')[0], $('btnXpubCopyRecv'));
-$('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); };
+$('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); paintFeeRateNote(); };
+{ let t=null; $('feeRate').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(paintFeeRateNote, 250); }); }
 
 // Say at once that a click landed: the wasm build after it is synchronous and can hold the page for
 // seconds. The label comes back when `fn` ends, however it ends (the review sheet is open by then).
