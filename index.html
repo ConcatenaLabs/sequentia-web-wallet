@@ -2039,6 +2039,17 @@ function updateFeeAssetHint(){
     line.textContent = b < 1 ? 'The next block has room for everything waiting.'
       : 'About '+Math.ceil(b)+' blocks of transactions are waiting; at the default rate this may wait that long.';
     hint.appendChild(line);
+    // Blocks are full: the producer's estimate for the next one, in this asset, as a rate to type.
+    if(b >= 1){
+      fetch('/estimatefee?blocks=1&asset='+encodeURIComponent(h)).then(r=>r.ok?r.json():null).then(est=>{
+        const atomsKvb = est && Number(est.asset_atoms_per_kvb);
+        if(!(atomsKvb > 0) || $('feeAsset').value !== h) return;
+        const units = atomsKvb / 1000 / Math.pow(10, assetMeta(h).precision ?? 8);
+        const e2 = el('div','sub');
+        e2.textContent = 'To make the next block, the producer estimates about '+units.toPrecision(3)+' '+t+' per vByte: type it as the fee rate.';
+        hint.appendChild(e2);
+      }).catch(()=>{});
+    }
   }
   // Asset-agnostic caution. No asset (not even the policy asset) is privileged — confirmation
   // depends on the producer that mines it also accepting THIS asset; the rescue is RBF/CPFP
