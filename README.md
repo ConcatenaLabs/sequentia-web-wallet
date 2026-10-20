@@ -85,9 +85,14 @@ Help under **More**; Settings behind the gear in the header.
   pinned or privileged; the Sequence token (tSEQ) is one row among equals.
 - **Send**: multi-recipient sends of any owned asset, including BTC (a real Bitcoin testnet4
   transaction) and OpenAMP restricted assets. For Sequentia sends you choose the **fee asset**:
-  the fee can be paid in any asset the node publishes an exchange rate for, and the fee-rate
-  field is denominated in that asset's own units per vByte (sat/vB applies only to actual BTC
-  sends). Every send shows a review dialog before broadcast.
+  the fee can be paid in any asset the node publishes an exchange rate for. The rate is
+  recommended, as in Sequentia Qt: **Fee options** chooses how many blocks to confirm within
+  (the producer's `estimatesmartfee` through the explorer's `/estimatefee`, or Bitcoin
+  testnet4's fee estimates; with no estimate, the standard rate, or a little above the cheapest
+  rate a full next block takes), or a custom rate in the fee asset's own units per vByte
+  (sat/vB only for BTC sends), judged as it is typed. A testnet4 estimate above 50 sat/vB is
+  someone flooding testnet4 and is not followed. Every send shows a review dialog before
+  broadcast.
 - **Receive**: one address for both chains. The default is the non-confidential `tb1...` form,
   which is Bitcoin-compatible: the same address receives parent-chain BTC and Sequentia assets.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
