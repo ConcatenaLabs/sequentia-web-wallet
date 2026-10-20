@@ -270,7 +270,7 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 89 `*.test.mjs` files: 64 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 90 `*.test.mjs` files: 65 hold `node:test` suites, and the
 other 25, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
