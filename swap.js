@@ -1037,6 +1037,7 @@ function startableAssets(){
   for (const h of set){
     if (h === 'BTC'){ byKey.set('BTC', 'BTC'); continue; }
     const meta = (C.assetMeta && C.assetMeta(h)) || {};
+    if (meta.token_of) continue;                          // a reissuance token is a key to issue more, not a market asset
     const resolved = meta.name && meta.name !== 'Asset';
     if (!resolved && !held(h)) continue;                  // stale dust of an old id, no metadata: hide it
     const key = resolved ? meta.ticker : h;               // group resolved by ticker; keep unresolved-but-held unique
@@ -1160,6 +1161,16 @@ function patchMarketRow(id, p, bk, cd){
   setCell('.mk-depth', hasDepth ? `<span class="mono">${esc(trim(bk.baseDepth))}</span> <span class="sub">${esc(bm.ticker)}</span>` : '<span class="sub">no resting depth</span>');
   tr._depth = hasDepth ? 1 : 0; tr._vol = (cd && cd.vol != null) ? Number(cd.vol) : 0;
 }
+// The order the overview reads the pairs in. There are hundreds (every pair of every registry
+// asset), four at a time, and the BTC pairs were added last: they sat at the bottom showing "…"
+// until every other pair had loaded, which read as an empty bitcoin book. So the pairs most likely
+// to have depth go first: bitcoin's, then those between registry-verified assets (the ones makers
+// quote), then the rest. The rows are re-sorted as results arrive, not only at the end.
+function loadPriority(p){
+  if (p.base === 'BTC' || p.quote === 'BTC') return 3;
+  const v = (h) => { try { return C.assetVerified ? !!C.assetVerified(h) : false; } catch { return false; } };
+  return (v(p.base) ? 1 : 0) + (v(p.quote) ? 1 : 0);
+}
 function reorderMarketRows(host){
   const tbody = host.querySelector('tbody'); if (!tbody) return;
   const rows = [...tbody.querySelectorAll('tr')];
@@ -1211,11 +1222,15 @@ async function renderMarketsOverview(){
     + `<thead><tr><th>Pair</th><th>Last</th><th>24h</th><th>Spread</th><th>Depth</th></tr></thead>`
     + `<tbody>${skeleton}</tbody></table></div>`;
   wireMarketsView(host);
-  await _pool(pairs, 4, async (p) => {
+  let resort = null;
+  const order = pairs.map((p, i) => ({ p, i, w: loadPriority(p) })).sort((a, b) => b.w - a.w || a.i - b.i).map(x => x.p);
+  await _pool(order, 6, async (p) => {
     const [bk, cd] = await Promise.all([bookSignals(p.base, p.quote).catch(() => null), candleSignals(p.base, p.quote).catch(() => null)]);
     if (req !== _mkReq) return;                             // superseded by a newer open/refresh
     patchMarketRow(_mkRowId(p), p, bk, cd);
+    if (bk && bk.count > 0 && !resort) resort = setTimeout(() => { resort = null; if (req === _mkReq) reorderMarketRows(host); }, 800);
   });
+  if (resort){ clearTimeout(resort); resort = null; }
   if (req === _mkReq) reorderMarketRows(host);
 }
 
