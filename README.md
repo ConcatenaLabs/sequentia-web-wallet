@@ -491,7 +491,8 @@ the vectors seqdex's Go planner writes (`covenant-fill-vectors.json`), and
 `covenant-offer-move.test.mjs` verifies Go-signed covenant offers before and after the relay moves
 their outpoint (`covenant-offer-vectors.json`). `covenant-sim.test.mjs` holds the Simplicity order
 to the template's vectors and programs (`seqdex-order-vectors.json`, `seqdex-order-fills.json`)
-and its offers to Go's signed bytes (`simplicity-offer-vectors.json`).
+and its offers to Go's signed bytes (`simplicity-offer-vectors.json`); `covenant-terms.test.mjs` holds
+the tapscript leaf's refusal of a term of 2^63 or more to Go's (`covenant-terms-vectors.json`).
 
 `node tooling/sign-tab-probe.mjs` opens the wallet in a headless Chromium, creates a wallet,
 signs a message with the staking key from the Sign tab, and recovers a key from the signature

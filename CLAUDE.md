@@ -139,7 +139,11 @@ compiler) is held to `seqdex-order-vectors.json` and `seqdex-order-fills.json`, 
 `daemon/pkg/covenant/seqdex_order/vectors.json` and `fills.json`, and its offer member
 (`simplicity_covenant`, field 25) to `simplicity-offer-vectors.json`, a copy of seqdex's
 `daemon/internal/seqob/offer/testdata/simplicity_offer_vectors.json`, by `covenant-sim.test.mjs`.
-When seqdex re-pins the template, copy all three here.
+When seqdex re-pins the template, copy all three here. The tapscript leaf reads its terms as signed
+64-bit numbers, so `buildFillLeaf` refuses a `rate_num`, `rate_den` or `min_lot` of 2^63 or more
+(`checkLeafTerms`, as seqdex's Go `CheckTerms`): `covenant-terms-vectors.json`, a copy of seqdex's
+`daemon/pkg/covenant/testdata/terms_bound_vectors.json`, holds `covenant-terms.test.mjs` to Go's
+leaf bytes below the edge and to the refusal at it.
 
 ## Fund-safety idioms that are already established
 
