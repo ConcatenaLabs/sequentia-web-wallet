@@ -57,3 +57,10 @@ test('a maker that never co-signs is not reported as a trade that may still comp
   assert.ok(wait.indexOf('maker did not answer: ') < wait.indexOf('hooks.finalizeAccept('), 'only before this wallet signs');
   assert.ok(html.indexOf("if(/maker did not answer: /.test(m))") < html.indexOf("if(/timed? ?out|timeout|deadline exceeded/i.test(m))"));
 });
+
+test('a lift waits for the maker against one deadline, a minute long', () => {
+  const seqob = readFileSync(new URL('./seqob.js', import.meta.url), 'utf8');
+  assert.match(seqob, /export const COSIGN_WAIT_MS = 60_000;/);
+  assert.match(seqob, /m = await nextMsg\(Math\.max\(1000, cosignBy - Date\.now\(\)\)\);/);
+  assert.ok(!/nextMsg\(90000\)/.test(seqob));
+});
