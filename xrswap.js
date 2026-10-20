@@ -39,6 +39,7 @@
 
 import * as seqob from './seqob.js';
 import * as xcourier from './xcourier.js';
+import { T4_WAIT, testnet4BlockAgeNow, blockAgeText } from './btc-wait.js';
 import { sha256, secp256k1 } from './btc.js';
 
 let C = null;            // injected app context (see index.html initSwapTab)
@@ -644,7 +645,7 @@ async function onOpen(){
       ['If the maker stalls', 'your asset is refundable after the maker’s stated Sequentia timeout (the exact block is shown once the maker locks; the wizard offers the refund then, with a countdown)'],
       ['Settlement', 'the BTC you receive is anchor-bound to Bitcoin; it can revert only if Bitcoin itself reverts'],
       // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
-      ['Speed', 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave, it resumes and refunds automatically.'],
+      ['Speed', T4_WAIT],
     ];
     const { m: modal, ok, st } = C.modalRows({ title: 'Sell ' + sm.ticker + ' for BTC', kv });
 
@@ -1381,7 +1382,7 @@ function stepConfirmCard(){
   const done = SWAP.btc_leg_height > 0;
   const body = [ C.el('div','sub','Wait for the maker’s BTC lock to confirm so your Sequentia leg can anchor at or above it.') ];
   if (done) body.push(okLine('BTC leg confirmed at parent height ' + SWAP.btc_leg_height + '.'));
-  else if (locked) body.push(C.el('div','status','Waiting for the maker’s BTC lock to confirm - one Bitcoin block, usually 10–20 minutes on testnet4.'));
+  else if (locked) body.push(C.el('div','status','Waiting for the maker’s BTC lock to confirm: one Bitcoin testnet4 block, which can take from minutes to hours. ' + blockAgeText(testnet4BlockAgeNow())));
   return stepCard(2, 'BTC lock confirms', done, locked && !done, body);
 }
 function stepFundCard(){

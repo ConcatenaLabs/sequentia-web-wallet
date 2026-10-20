@@ -60,6 +60,7 @@
 import * as xc from './xcourier.js';       // cross-chain courier transport (order book)
 import { secp256k1 } from './btc.js';      // session key for the swap's reattach credential
 import * as seqob from './seqob.js';        // order-book relay client (fetchBook, base, Crypter)
+import { T4_WAIT } from './btc-wait.js';   // the one wording for a wait on testnet4 blocks
 
 let C = null;            // the injected app context (see index.html initXswapTab)
 let XMARKETS = [];       // [{ btc_asset, seq_asset, name, seq_reserve, btc_reserve, price_seq_per_btc }]
@@ -840,7 +841,7 @@ function confirmLockModal(fq, sm){
       ['BTC refund after', 'block ' + fq.btc_locktime + ' (if the maker stalls, you reclaim the BTC)'],
       ['Then, automatically', 'the maker locks the asset, the wallet checks the Bitcoin anchor, and claims your asset. Anchor-bound to Bitcoin - reverts only if Bitcoin reverts.'],
       // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
-      ['Speed', 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave, it resumes and refunds automatically.'],
+      ['Speed', T4_WAIT],
     ];
     const { m, ok } = C.modalRows({ title: 'Confirm cross-chain swap', kv });
     if (ok) ok.textContent = 'Lock BTC & swap';
@@ -1189,7 +1190,7 @@ async function onLockBtc(){
     ['BTC refund after', 'block ' + q.btc_locktime + ' (if the maker stalls, you reclaim the BTC)'],
     ['Atomicity', 'The BTC is claimable by the maker only with your secret; you can refund it after the timeout.'],
     // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
-    ['Speed', 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave, it resumes and refunds automatically.'],
+    ['Speed', T4_WAIT],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Lock the BTC leg', kv });
   ok.onclick = async () => {
