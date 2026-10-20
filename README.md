@@ -38,7 +38,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Portfolio and per-amount display in a user-chosen reference currency (USD, BTC, or any priced asset)
 - Any-asset fees on Sequentia transactions (open fee market), with fee-asset selection on every send
 - Trade tab: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
-  self-enforcing SeqOB covenants and fill without the wallet being open
+  self-enforcing SeqOB covenants and fill without the wallet being open. An order's locked coins
+  come back through Reclaim once its lock has passed: a median time a day after it is placed (a
+  block height a day ahead when the explorer gives no median time)
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs

@@ -38,7 +38,7 @@ import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc
 import { planPlaceOrder, buildCovenantTerms, settleFill as covSettleFill, planRefund as covPlanRefund, cancel as covCancel } from './covenant-order.js';
 import { verifyAgainstSPK as covVerifyAgainstSPK } from './covenant.js';
 import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
-import { computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits, DEFAULT_ORDER_BLOCKS } from './covenant-flow.js';
+import { computeRate, orderExpiry, orderExpiryTime, lockState, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits, DEFAULT_ORDER_BLOCKS } from './covenant-flow.js';
 // HONEST per-asset Lightning-rail gating (offer LN only with a real usable channel).
 import { railAvailability } from './ln-rail.js';
 // Pure predicate only — LSP *transport* still reaches this module solely through the injected `L`
@@ -5402,6 +5402,28 @@ async function anchorHeightOf(blockHash){
 }
 async function btcTipHeight(){ try { const t = await fetch(location.origin + '/testnet4/api/blocks/tip/height').then(r => r.ok ? r.text() : null); return t != null ? parseInt(t.trim(), 10) : null; } catch { return null; } }
 async function seqTipHeight(){ try { const t = await fetch(location.origin + '/api/blocks/tip/height').then(r => r.ok ? r.text() : null); return t != null ? parseInt(t.trim(), 10) : null; } catch { return null; } }
+// The Sequentia tip's median time past (unix seconds), what a median-time REFUND lock is
+// judged by (BIP 113); null when the explorer cannot say.
+async function seqTipMedianTime(){
+  try {
+    const h = await fetch(location.origin + '/api/blocks/tip/hash').then(r => r.ok ? r.text() : null);
+    if (!h) return null;
+    const b = await fetch(location.origin + '/api/block/' + h.trim()).then(r => r.ok ? r.json() : null);
+    const t = b && Number(b.mediantime);
+    return t > 0 ? t : null;
+  } catch { return null; }
+}
+// Where covenant REFUND locks are judged from: the tip's height and median time.
+async function covTipNow(){
+  let height = 0; try { height = C.wollet.tip().height(); } catch {}
+  return { height, medianTime: (await seqTipMedianTime()) || 0 };
+}
+// How long a lock that has not opened has left, in words.
+function lockLeftText(ls){
+  if (!ls.time) return blocksAsTime(ls.blocksLeft);
+  const m = Math.max(0, Math.round((Number(ls.secondsLeft) || 0) / 60)), h = Math.floor(m / 60);
+  return 'about ' + (h ? h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '') : m + ' min');
+}
 function randomSecretHex(){ const b = new Uint8Array(32); crypto.getRandomValues(b); return [...b].map((x) => x.toString(16).padStart(2, '0')).join(''); }
 
 // The subswap taker deps built from the wallet's own C.seqLeg / C.wasm primitives + the LSP `L` bridge. The
@@ -6664,6 +6686,9 @@ function covenantDerivationIds(payDisplay, receiveDisplay, idsInternal){
 async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
   opts = opts || {};
   const tip = C.wollet.tip().height();
+  // The REFUND lock: a median time a day ahead (covenant-flow.js orderExpiryTime says why), or a
+  // height a day ahead when the explorer gives no median time.
+  const medianTime = await seqTipMedianTime();
   const { rateNum, rateDen } = computeRate(payAtoms, recvAtoms);
   // FUND-SAFETY (gate BEFORE broadcast): the on-chain FILL leaf evaluates
   // locked*rateNum + rateDen-1 in signed 64-bit. computeRate only divides out the
@@ -6684,7 +6709,7 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
     ...covenantDerivationIds(pay, receive, true),
     sellAtoms: BigInt(payAtoms),
     rateNum, rateDen, minLot,                             // a taker may fill any lot >= minLot; the covenant re-rests the remainder
-    expiryLocktime: orderExpiry(tip),
+    expiryLocktime: medianTime ? orderExpiryTime(medianTime) : orderExpiry(tip),
     makerProg: payout.program,                            // the taproot payout the FILL credits
     makerX: payout.internalKey,                           // wallet-derived x-only REFUND authoriser
   };
@@ -7137,9 +7162,9 @@ export function resumeCovenantOrders(){
 // Funded orders the relay never listed (it refused while the funding was unconfirmed, or the tab
 // closed first): list them now. Best effort; one still refused waits for the next open.
 async function listUnpostedPlaced(){
-  let tip = 0; try { tip = C.wollet.tip().height(); } catch {}
+  const tipNow = await covTipNow();
   for (const rec of PLACED){
-    if (rec.posted || rec.covTxid == null || rec._orphan || (tip > 0 && tip >= Number(rec.expiry))) continue;
+    if (rec.posted || rec.covTxid == null || rec._orphan || lockState(rec.expiry, tipNow).open) continue;
     try { await repostCovenantOrder(rec); } catch {}
   }
   try { renderMyOrders(); } catch {}
@@ -10157,11 +10182,11 @@ function blocksAsTime(blocks){
   const m = Math.max(0, Math.round(Number(blocks) || 0)), h = Math.floor(m / 60);
   return 'about ' + (h ? h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '') : m + ' min');
 }
-function confirmDelist(rec, left){
+function confirmDelist(rec, ls){
   const give = C.assetMeta(rec.pay), amt = C.fmtAtoms(BigInt(rec.sellAtoms), give.precision) + ' ' + give.ticker;
   const { m, ok } = C.modalRows({ title: 'Cancel this order?', kv: [
     ['Now', 'The order leaves the order book: nobody can take it any more.'],
-    ['Your ' + amt, 'Stays locked on-chain until block ' + rec.expiry + ', ' + blocksAsTime(left) + ' from now. The covenant has no earlier way back.'],
+    ['Your ' + amt, 'Stays locked on-chain until ' + ls.until + ', ' + lockLeftText(ls) + ' from now. The covenant has no earlier way back.'],
     ['Then', 'Reclaim, in Your resting orders, returns it to you.'],
   ] });
   ok.textContent = 'Cancel the order';
@@ -10192,21 +10217,21 @@ async function renderMyOrders(){
   // still reclaimable via the CLTV refund. Without these the reclaim UI vanished with the relay
   // listing and the funds became unreachable through the wallet.
   const localReclaim = PLACED.filter(r => r.covTxid != null && !relayIds.has(r.offerId) && !r._orphan);
-  let tipNow = 0; try { tipNow = C.wollet.tip().height(); } catch {}
+  const tipNow = localReclaim.length ? await covTipNow() : { height: 0, medianTime: 0 };
   const localRows = localReclaim.map(r => {
     const give = C.assetMeta(r.pay);
-    // Before its expiry block the covenant has no way back but a fill: say until when, and how long
+    // Before its lock opens the covenant has no way back but a fill: say until when, and how long
     // that is, instead of a Reclaim that answers with a toast and does nothing.
-    const left = Number(r.expiry) - tipNow;
-    const locked = tipNow > 0 && left > 0;
+    const ls = lockState(r.expiry, tipNow);
+    const locked = ls.known && !ls.open;
     if (!r.posted && locked) return `<div class="swbook-row myorder">
       <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · funded on-chain, not listed yet</span>
       <button type="button" class="ghost swrepost" data-id="${esc(r.offerId)}">List it</button></div>`;
     return `<div class="swbook-row myorder">
       <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · delisted · ${locked
-        ? `locked on-chain until block ${esc(String(r.expiry))}, ${esc(blocksAsTime(left))} from now`
+        ? `locked on-chain until ${esc(ls.until)}, ${esc(lockLeftText(ls))} from now`
         : 'its lock has expired: reclaim it'}</span>
-      <button type="button" class="ghost swcancel" data-id="${esc(r.offerId)}"${locked ? ' disabled title="The covenant returns the coins only after its expiry block."' : ''}>${locked ? 'Reclaim later' : 'Reclaim'}</button></div>`;
+      <button type="button" class="ghost swcancel" data-id="${esc(r.offerId)}"${locked ? ' disabled title="The covenant returns the coins only once its lock has passed."' : ''}>${locked ? 'Reclaim later' : 'Reclaim'}</button></div>`;
   }).join('');
   if (!orders.length && !localRows){ host.innerHTML = credits; return; }
   const rows = orders.map(o => {
@@ -10248,17 +10273,17 @@ async function renderMyOrders(){
   host.querySelectorAll('.swcancel').forEach(b => b.onclick = async () => {
     const id = b.dataset.id;
     const rec = PLACED.find(r => (r.offerId === id));
-    // A funded covenant order cancelled before its expiry leaves the book but not the chain: its
-    // coins stay locked until the expiry block. Say so before doing it.
+    // A funded covenant order cancelled before its lock opens leaves the book but not the chain: its
+    // coins stay locked until then. Say so before doing it.
+    const tipNow = rec && rec.covTxid != null ? await covTipNow() : { height: 0, medianTime: 0 };
     if (rec && rec.covTxid != null){
-      let tip = 0; try { tip = C.wollet.tip().height(); } catch {}
-      const left = Number(rec.expiry) - tip;
-      if (tip > 0 && left > 0 && !(await confirmDelist(rec, left))) return;
+      const ls = lockState(rec.expiry, tipNow);
+      if (ls.known && !ls.open && !(await confirmDelist(rec, ls))) return;
     }
     b.disabled = true; b.textContent = 'Cancelling…';
     try {
       // A funded covenant's locked asset is reclaimable on-chain only via the CLTV
-      // REFUND leaf: once expired (tip >= expiry) broadcast the reclaim; before that
+      // REFUND leaf: once its lock has passed broadcast the reclaim; before that
       // delist + tell the maker when the funds become reclaimable. A non-covenant
       // (no local funded record) just delists on the relay.
       if (rec && rec.covTxid != null){
@@ -10271,8 +10296,7 @@ async function renderMyOrders(){
         // hand it the display id explicitly. (Legacy records: order.assetA == rec.pay, a no-op.)
         recipe.covenantAsset = rec.pay;
         recipe.makerKeyPath = payout.path;   // m/86'/coin'/0'/0/index — the leaf's key
-        const tipHeight = C.wollet.tip().height();
-        const out = await covCancel(id, { recipe, tipHeight, expiryLocktime: Number(rec.expiry) },
+        const out = await covCancel(id, { recipe, tipHeight: tipNow.height, tipTime: tipNow.medianTime, expiryLocktime: Number(rec.expiry) },
           { relayCancel: async (offerId) => seqob.signAndCancel(offerId, makerPriv()), ...refundHooksFor() });
         if (out.refundTxid){
           C.toast('Order cancelled · reclaimed on-chain (' + String(out.refundTxid).slice(0,12) + '…).');
@@ -10281,14 +10305,14 @@ async function renderMyOrders(){
           if (rec.pegged){ try { await C.sync(); await pegOutReceivedSbtc(BigInt(rec.sellAtoms)); } catch { recordPendingPegOut(BigInt(rec.sellAtoms)); } }
         } else if (out.reclaimable){
           const meta = C.assetMeta(rec.pay);
-          C.toast('Order delisted. The locked ' + esc(meta.ticker) + ' is reclaimable on-chain after block ' + out.reclaimable.afterHeight + '.');
+          C.toast('Order delisted. The locked ' + esc(meta.ticker) + ' is reclaimable on-chain after ' + lockState(rec.expiry, tipNow).until + '.');
         }
       } else {
         await seqob.signAndCancel(id, makerPriv());
       }
       // Drop the local record only once the funds are back (or there were none to
       // reclaim); keep it while still-locked so a later Cancel can reclaim at expiry.
-      const stillLocked = rec && rec.covTxid != null && C.wollet.tip().height() < Number(rec.expiry);
+      const stillLocked = rec && rec.covTxid != null && !lockState(rec.expiry, tipNow).open;
       if (!stillLocked){
         const before = PLACED.length;
         PLACED = PLACED.filter(r => r.offerId !== id);

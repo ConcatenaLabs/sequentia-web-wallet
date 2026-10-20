@@ -4,7 +4,7 @@
 // that mocks the relay + wasm hooks (proving the taker settlement path without a
 // live relay). Run: node covenant-flow.test.mjs
 
-import { gcdBig, computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit, DEFAULT_ORDER_BLOCKS } from './covenant-flow.js';
+import { gcdBig, computeRate, orderExpiry, orderExpiryTime, lockState, isTimeLock, deriveOtherField, buildCovenantOffer, fillRestSplit, DEFAULT_ORDER_BLOCKS, DEFAULT_ORDER_SECONDS, LOCKTIME_THRESHOLD } from './covenant-flow.js';
 import { ceilPrice, bytesToHex } from './covenant.js';
 import { planPlaceOrder, buildCovenantTerms, place, settleFill } from './covenant-order.js';
 import * as seqob from './seqob.js';
@@ -36,6 +36,25 @@ check('gcd', gcdBig(90n*100000000n, 30n*100000000n), 30n*100000000n);
 }
 check('expiry_default', orderExpiry(1000), 1000 + DEFAULT_ORDER_BLOCKS);
 check('expiry_custom', orderExpiry(1000, 50), 1050);
+// New orders take a median-time lock a day ahead; a height lock stays for when there is no median time.
+check('expiry_time_default', orderExpiryTime(1792000000), 1792000000 + DEFAULT_ORDER_SECONDS);
+check('expiry_time_is_time', String(isTimeLock(orderExpiryTime(1792000000))), 'true');
+check('expiry_height_is_height', String(isTimeLock(orderExpiry(1000))), 'false');
+check('expiry_threshold', LOCKTIME_THRESHOLD, 500000000);
+{
+  let threw = false; try { orderExpiryTime(1000); } catch { threw = true; }
+  check('expiry_time_refuses_a_height', String(threw), 'true');
+}
+// Where a lock stands: a height lock opens once the tip has reached it (the refund goes in the next
+// block); a time lock once the tip's median time has passed it.
+check('lock_height_open_at_its_height', String(lockState(400, { height: 400 }).open), 'true');
+check('lock_height_shut_before', JSON.stringify([lockState(400, { height: 399 }).open, lockState(400, { height: 399 }).blocksLeft]), '[false,1]');
+check('lock_time_shut_at_its_time', String(lockState(1792611631, { height: 9e8, medianTime: 1792611631 }).open), 'false');
+check('lock_time_open_after', String(lockState(1792611631, { medianTime: 1792611632 }).open), 'true');
+check('lock_time_left', String(lockState(1792611631, { medianTime: 1792611631 - 3600 }).secondsLeft), '3600');
+check('lock_time_unknown_without_median_time', JSON.stringify([lockState(1792611631, { height: 5 }).known, lockState(1792611631, { height: 5 }).open]), '[false,false]');
+check('lock_time_until', lockState(1792611631, {}).until, '2026-10-21 19:40 UTC');
+check('lock_height_until', lockState(400, {}).until, 'block 400');
 
 // --- anti-clobber compose-field rule ----------------------------------------
 // Empty market (no price): typing one side must NOT derive or clear the other —
