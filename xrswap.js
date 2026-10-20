@@ -640,10 +640,9 @@ async function onOpen(){
       ...(i > 0 ? [['Heads up', `the previous maker didn’t respond; this is the next best resting offer (${i} of ${attempts.length - 1})`]] : []),
       ['You sell', C.fmtAtoms(q.seq_amount, sm.precision) + ' ' + sm.ticker],
       ['You receive', C.fmtAtoms(recvBtc, 8) + ' BTC'],
-      ['How it works', 'The maker locks the BTC first. Once it confirms, your wallet locks the asset, the maker takes it by revealing a secret, and your wallet uses that secret to claim the BTC - automatically. You only confirm here.'],
+      ['How it works', 'The maker locks the BTC first. Once it confirms, your wallet locks the asset, the maker takes it by revealing a secret, and your wallet uses that secret to claim the BTC - automatically.'],
       ['You commit', 'your ' + sm.ticker + ' once the maker’s BTC lock confirms - until then nothing is spent'],
-      ['If the maker stalls', 'your asset is refundable after the maker’s stated Sequentia timeout (the exact block is shown once the maker locks; the wizard offers the refund then, with a countdown)'],
-      ['Settlement', 'the BTC you receive is anchor-bound to Bitcoin; it can revert only if Bitcoin itself reverts'],
+      ['If the maker stalls', 'you get your ' + sm.ticker + ' back after a timeout; the wallet shows when'],
       // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
       ['Speed', T4_WAIT],
     ];
@@ -1406,7 +1405,7 @@ function stepRevealCard(){
 function stepClaimCard(){
   const done = SWAP.state === ST.BTC_CLAIMED || !!SWAP.btc_claim_txid;
   const canClaim = !!SWAP.preimage && !done;
-  const body = [ C.el('div','sub','Claim the maker’s BTC leg with the revealed secret - completing the swap (anchor-bounded; reverts only if Bitcoin reverts).') ];
+  const body = [ C.el('div','sub','Claim the maker’s BTC leg with the revealed secret, which completes the swap.') ];
   if (SWAP.btc_claim_txid) body.push(kvRowHtml('Your BTC claim tx', txLink(SWAP.btc_claim_txid, true)));
   if (SWAP.state === ST.REFUNDED) body.push(okLine('Refunded: ' + (SWAP.detail || 'your asset leg was refunded.')));
   if (done) body.push(okLine('Swap complete - you received BTC for your asset, linked by the secret.'));

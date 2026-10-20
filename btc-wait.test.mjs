@@ -10,8 +10,9 @@ import { T4_WAIT, blockAgeText, testnet4BlockAge, __test__ } from './btc-wait.js
 
 test('the wait is blamed on the test network, and the trade is safe to leave', () => {
   assert.match(T4_WAIT, /hours apart/);
-  assert.match(T4_WAIT, /that is the test network, not Sequentia/);
-  assert.match(T4_WAIT, /Safe to leave/);
+  assert.match(T4_WAIT, /comes from testnet4, not Sequentia/);
+  assert.match(T4_WAIT, /You can close the wallet/);
+  assert.ok(T4_WAIT.length < 180, 'kept short: ' + T4_WAIT.length);
 });
 
 test('the age of the last block reads as a person would say it', () => {
