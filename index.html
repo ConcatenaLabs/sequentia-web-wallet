@@ -240,7 +240,7 @@
   .sent-title{font-size:18px;font-weight:600}
   .sent-state{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px}
   .kv .v.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
-  .kv:first-child{border-top:none} .kv .k{color:var(--dim);flex:0 0 auto;white-space:nowrap} .kv .v{text-align:right;overflow-wrap:anywhere;min-width:0;font:13px ui-monospace,monospace}
+  .kv:first-child{border-top:none} .kv .k{color:var(--dim);flex:0 0 auto;max-width:calc(62% - 14px);overflow-wrap:anywhere} .kv .v{text-align:right;overflow-wrap:anywhere;min-width:min(9.5em,38%);flex:1 1 auto;font:13px ui-monospace,monospace}
   /* toast */
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d242d;border:1px solid var(--line);
          border-radius:10px;padding:12px 16px;font-size:13.5px;max-width:92vw;box-shadow:0 8px 30px #0008;z-index:60}
@@ -2358,7 +2358,10 @@ async function btcReviewBroadcast(outputs, onDone, satPerVb){
       if(!r.ok) throw new Error(txt||('HTTP '+r.status));
       if(!/^[0-9a-fA-F]{64}$/.test(txt)) throw new Error('unexpected broadcast response: '+txt.slice(0,80));
       if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);  // advance only on a confirmed broadcast
-      showSent(m, { title:'Bitcoin (testnet4) payment', kv, txid:txt, explorer:'/testnet4/tx/', statusUrl:T4_API+'/tx/' });
+      // What left the wallet: the outputs to addresses not its own, and the fee.
+      { let gone=built.fee; for(const o of outputs) if(!isOwnBtcAddress(o.address)) gone+=o.amount;
+        noteBtcSent(txt, -gone); renderBtcHistory().catch(()=>{}); }
+      showSent(m, { title:'Bitcoin (testnet4) payment', kv, txid:txt, explorer:'/testnet4/tx/', statusUrl:T4_API+'/tx/', historyAt:'btcHistList' });
       if(onDone) onDone(txt); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
@@ -6042,7 +6045,7 @@ function modalRows(rows){
 // lines they reviewed and signed, the transaction id, and where it stands, refreshed until a block
 // includes it. A toast that faded in three seconds was the only confirmation before, and it said
 // "Broadcast:" next to half a txid.
-function showSent(m, { title, kv, txid, explorer = '/explorer/tx/', statusUrl = ESPLORA+'/tx/' }){
+function showSent(m, { title, kv, txid, explorer = '/explorer/tx/', statusUrl = ESPLORA+'/tx/', historyAt = null }){
   const c = m.querySelector('.card'); c.innerHTML = '';
   const head = el('div','sent-head'); head.appendChild(el('div','sent-check','✓'));
   const ht = el('div'); ht.appendChild(el('div','sent-title','Sent'));
@@ -6059,7 +6062,8 @@ function showSent(m, { title, kv, txid, explorer = '/explorer/tx/', statusUrl = 
   let timer = null;
   const close = () => { if(timer) clearTimeout(timer); m.remove(); };
   done.onclick = close;
-  hist.onclick = () => { close(); tab('history'); };
+  hist.onclick = () => { close(); tab('history');
+    if(historyAt){ const t=$(historyAt); if(t) setTimeout(()=>{ try{ t.closest('.card').scrollIntoView({ behavior:'smooth', block:'start' }); }catch{} }, 60); } };
   copy.onclick = () => copyToClipboard(txid, copy);
   // Ask the explorer where the transaction is until a block has it, or the card is closed.
   const poll = async () => {
@@ -7099,8 +7103,17 @@ function txDetail(r, tip){
 // The Bitcoin history rows of the last completed read, kept in the wallet's snapshot so the tab has
 // something true to show before this session's first sync: [{ txid, delta, conf, height, time }].
 let _btcHistRows = null;
+// Bitcoin payments this wallet broadcast, kept until the explorer lists them, so History shows a
+// payment the moment it is sent: [{ txid, delta, at }]. The explorer can take a while to see a new
+// transaction, and until it did the payment was nowhere in the wallet.
+const BTC_PENDING_KEY = 'swk.btc.pendingSends.v1';
+function btcPendingSends(){ try{ const a=JSON.parse(localStorage.getItem(BTC_PENDING_KEY)||'[]'); return Array.isArray(a) ? a.filter(p=>p && p.txid && Date.now()-(p.at||0) < 3*86_400_000) : []; }catch{ return []; } }
+function saveBtcPending(a){ try{ localStorage.setItem(BTC_PENDING_KEY, JSON.stringify(a)); }catch{} }
+function noteBtcSent(txid, delta){ const a=btcPendingSends().filter(p=>p.txid!==txid); a.unshift({ txid, delta: String(delta), at: Date.now() }); saveBtcPending(a); }
 function drawBtcRows(list, rows){
   list.innerHTML='';
+  const known=new Set(rows.map(r=>r.txid));
+  rows = [...btcPendingSends().filter(p=>!known.has(p.txid)).map(p=>({ txid:p.txid, delta:p.delta, conf:false, height:0, time:0, mine:true })), ...rows];
   if(!rows.length){ list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
   for(const t of rows){
     const delta=BigInt(t.delta), incoming = delta >= 0n;
@@ -7109,12 +7122,19 @@ function drawBtcRows(list, rows){
     const mid=el('div','grow');
     const when = t.conf ? (t.time ? new Date(t.time*1000).toLocaleString() : 'block '+t.height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/testnet4/tx/'+t.txid, t.txid.slice(0,20)+'…')); mid.appendChild(_d); }
-    mid.appendChild(el('div','sub'+(t.conf?'':' unconf'), when+' · Bitcoin testnet4'));
+    mid.appendChild(el('div','sub'+(t.conf?'':' unconf'), when+(t.mine ? ' · just sent, the explorer has not listed it yet' : ' · Bitcoin testnet4')));
     item.appendChild(mid);
     const mag = delta<0n ? -delta : delta;
     item.appendChild(el('span','amt '+(incoming?'pos':'neg'), (incoming?'':'-')+fmtAtoms(mag,8)+' BTC'));
     list.appendChild(item);
   }
+}
+// Whether a Bitcoin address is one of this wallet's, in the window its scans cover.
+function isOwnBtcAddress(addr){
+  if(!btcRoot || !addr) return false;
+  const lim=Math.max(btcScanLimit, btcChangeNext+1, GAP+1);
+  for(const internal of [false,true]) for(let i=0;i<lim;i++) if(btcAddr(internal,i)===addr) return true;
+  return false;
 }
 async function renderBtcHistory(){
   const list=$('btcHistList'); if(!list) return;
@@ -7150,6 +7170,8 @@ async function renderBtcHistory(){
     const st=t.status||{};
     return { txid:t.txid, delta:(outSum-inSum).toString(), conf:!!st.confirmed, height:st.block_height||0, time:st.block_time||0 };
   });
+  // A sent payment the explorer now lists needs no remembering.
+  { const seenIds=new Set(rows.map(r=>r.txid)); const p=btcPendingSends(); const left=p.filter(x=>!seenIds.has(x.txid)); if(left.length!==p.length) saveBtcPending(left); }
   drawBtcRows(list, rows);
   keepBtcRows(rows);
 }
