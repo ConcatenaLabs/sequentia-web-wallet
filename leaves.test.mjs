@@ -2,8 +2,8 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { leafBalances, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
-  devModeOn, setDevMode, DEV_MODE_KEY } from './leaves.js'
+import { syncDecision, leafBalances, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+  devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
 const Y = '7f'.repeat(32)
@@ -13,15 +13,39 @@ function memStore () {
   return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
 }
 
-test('developer mode is off by default, and one setting', () => {
+test('the mode is user by default, and kept for each wallet', () => {
   const s = memStore()
-  assert.equal(devModeOn(s), false)
-  setDevMode(s, true)
-  assert.equal(s.getItem(DEV_MODE_KEY), '1')
-  assert.equal(devModeOn(s), true)
-  setDevMode(s, false)
-  assert.equal(devModeOn(s), false)
-  assert.equal(devModeOn({ getItem () { throw new Error('blocked') } }), false, 'storage that throws reads as off')
+  assert.equal(walletMode(s, 'aaaaaaaa'), 'user')
+  assert.equal(devModeOn(s, 'aaaaaaaa'), false)
+  setWalletMode(s, 'aaaaaaaa', 'developer')
+  assert.equal(s.getItem(MODE_KEY + '.aaaaaaaa'), 'developer')
+  assert.equal(devModeOn(s, 'aaaaaaaa'), true)
+  assert.equal(walletMode(s, 'bbbbbbbb'), 'user', 'another wallet keeps its own mode')
+  setWalletMode(s, 'aaaaaaaa', 'user')
+  assert.equal(devModeOn(s, 'aaaaaaaa'), false)
+  assert.throws(() => setWalletMode(s, 'aaaaaaaa', 'expert'), /'developer' or 'user'/)
+  assert.equal(walletMode({ getItem () { throw new Error('blocked') } }, 'aaaaaaaa'), 'user', 'storage that throws reads as user mode')
+  assert.equal(joinedOperator(s, 'aaaaaaaa'), false)
+})
+
+test('the one setting kept before modes were kept per wallet becomes the first reader\'s, once', () => {
+  const s = memStore()
+  s.setItem(LEGACY_DEV_MODE_KEY, '1')
+  assert.equal(walletMode(s, 'cccccccc'), 'developer')
+  assert.equal(s.getItem(LEGACY_DEV_MODE_KEY), null)
+  assert.equal(walletMode(s, 'dddddddd'), 'user')
+  assert.equal(walletMode(s, 'cccccccc'), 'developer')
+})
+
+test('the mode\'s words are the ones every Sequentia wallet uses', () => {
+  assert.deepEqual({ ...MODE_WORDS }, {
+    title: 'Mode',
+    user: 'User mode',
+    userLine: 'One figure per asset, and the wallet chooses how value moves.',
+    developer: 'Developer mode',
+    developerLine: 'Every rail by name, side by side (on-chain, leaves and Lightning), each with its balance and its manual controls, and the developer tools.',
+    note: 'Kept for this wallet. Sites that ask the wallet for its mode follow it.',
+  })
 })
 
 test('leaf balances add up every state, and keep on-chain apart', () => {
@@ -107,4 +131,17 @@ test('a worker that fails to start fails every call, saying so', async () => {
   w.onerror({ message: 'module not found' })
   await assert.rejects(p, /could not start: module not found/)
   await assert.rejects(c.run('coins'), /could not start/)
+})
+
+test('the page syncs when the time the schedule first gave arrives, though the schedule moves it on and is not due', () => {
+  // A coin given to a refresh: every read says next_sync_at = now + 3600, due false.
+  let d = syncDecision({ now: 1000, next_sync_at: 4600, due: false }, null, false)
+  assert.deepEqual(d, { sync: false, why: null, held: 4600 })
+  d = syncDecision({ now: 2000, next_sync_at: 5600, due: false }, d.held, false)
+  assert.deepEqual(d, { sync: false, why: null, held: 4600 }, 'the time first given is held, not the one read now')
+  d = syncDecision({ now: 4600, next_sync_at: 8200, due: false }, d.held, false)
+  assert.deepEqual(d, { sync: true, why: 'time', held: null })
+  assert.deepEqual(syncDecision({ now: 1, next_sync_at: 9, due: true }, 5, false), { sync: true, why: 'schedule', held: null })
+  assert.deepEqual(syncDecision({ now: 1, next_sync_at: 9, due: false }, null, true), { sync: true, why: 'moving', held: null })
+  assert.deepEqual(syncDecision({ now: 1, next_sync_at: null, due: false }, null, false), { sync: false, why: null, held: null })
 })

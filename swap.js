@@ -94,7 +94,7 @@ const HIST_KEY = 'swk.dex.history';   // legacy/global key; folded into the acti
 const HIST_CAP = 400;                 // durable tail (the old 15-row cap lost history); the view slices for display
 // A stable per-wallet suffix from the wallet descriptor (FNV-1a -> 8 hex). Falls back to the maker id,
 // then 'default', when no wallet/context is wired yet — so a call before openWallet never throws.
-function walletTag(){
+export function walletTag(){
   let src = null;
   try { src = (C && C.wollet && C.wollet.descriptor) ? C.wollet.descriptor().toString() : null; } catch {}
   if (!src){ try { src = makerPubHex(); } catch {} }
