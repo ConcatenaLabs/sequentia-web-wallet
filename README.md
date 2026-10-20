@@ -229,7 +229,8 @@ descriptor and its programs) and an instance of it (the template's values on thi
 kit's contract engine does the work; the tab asks it and shows what it answers.
 
 - **Template**: one the kit carries (`sequentia/one-key`, `sequentia/one-key-exit`,
-  `sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`), or a descriptor pasted with its sources (each with its includes
+  `sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`, `sequentia/capped-sale`,
+  `sequentia/subscription-escrow`), or a descriptor pasted with its sources (each with its includes
   resolved, as `seqc expand` prints it). The engine checks a pasted template with the
   contracts' own reader and pinned compiler, and only then adds it to this wallet's list. The
   tab shows this wallet's contract key (`m/8383h/1h/0h/0/0`), the key a template names for it.
@@ -238,7 +239,8 @@ kit's contract engine does the work; the tab asks it and shows what it answers.
 - **Spend**: for the faucet drip covenant's drip, the recipient (this wallet by default), the
   amount and a fee rate in the dripped asset's own units; for any other path, the request
   written by hand: its inputs (the contract coin, this wallet's own coins, a foreign coin spent
-  through a script leaf with its witness given) and its outputs, each saying whether it returns
+  through a script leaf with its witness given, other coins of the same template spent by the
+  same tapscript path, each with its own instance) and its outputs, each saying whether it returns
   to the contract, pays this wallet, pays someone, is the fee, opens a contract, or recreates a
   foreign coin. **Fund it from this wallet** lets the wallet add its own coins for what the
   request's inputs do not cover, and the change: a Pignus take, top-up or repayment is written
@@ -252,7 +254,10 @@ and what was checked. The engine spends a wallet coin only as this wallet's own 
 says, and a foreign coin only as the chain's record of it says, which the wallet reads itself.
 The wallet signs only when the template is on its list, the engine recomputed the output, it
 ran every program against the final transaction, and the key is a contract key or, on a path
-that takes no signature, none; its funding keys sign only its own coins. **Sign and broadcast** signs the digest of exactly the screen shown. A spend
+that takes no signature, none; its funding keys sign only its own coins. A capped sale's
+purchase names the buyer's key itself (`BUYER_KEY`): the wallet signs it only when that key is
+its contract key, refuses a purchase past the key's cap before anything is built, and reads
+the purchase in its own terms (what is bought, against which cap, what the treasury is paid). **Sign and broadcast** signs the digest of exactly the screen shown. A spend
 the engine refuses (a relative lock not yet passed, an amount the program forbids, an output
 it cannot account for) is refused before anything is signed, in the engine's words.
 
