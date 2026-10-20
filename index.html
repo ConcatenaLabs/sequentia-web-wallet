@@ -5081,6 +5081,7 @@ async function _syncImpl(){
     // that's been used on either chain (never backward, so a manual "New address" sticks).
     addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
     renderBalance(); renderHistory(); renderReceive(); refreshStakes(); populateFeeAssets(); refreshRecipientAssets();
+    { const sw=document.querySelector('[data-panel="swap"]'); if(sw && !sw.classList.contains('hide')) try{ renderActiveSwap(); }catch{} }   // its balances are real now
     const t = wollet.tip();
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
     _lastSyncOk = Date.now(); saveSnapshot();
@@ -5562,7 +5563,13 @@ function looksPlain(m){
 // "Insufficient funds: missing 702 units for asset e396…" read like a fault, not like "0.00000702
 // EURX short". And what an order on the book can spend: only coins held in the clear, which a
 // covenant fill reported as "insufficient transparent <id>" and prettyErr then hid entirely.
-function balanceShortText(m){ return shortfallText(m, (h)=>{ const a=assetMeta(h); return { ticker:a.ticker, precision:a.precision ?? 8 }; }); }
+// Until the first scan after opening, the live balance is empty and every spend comes up short:
+// say that the wallet is still reading the chain, not that the coins are missing.
+const SYNCING_SPEND_TEXT='Your wallet is still reading the chain since you opened it. Try again once it finishes; Balance shows your last known balance meanwhile.';
+function balanceShortText(m){
+  const t=shortfallText(m, (h)=>{ const a=assetMeta(h); return { ticker:a.ticker, precision:a.precision ?? 8 }; });
+  return t && !_scannedOnce ? SYNCING_SPEND_TEXT : t;
+}
 // The sentence for an error shown where the wallet used to print the raw message (Send, issuance,
 // staking): a shortfall or a node's refusal in words, anything else as it was.
 function plainErr(e){ const m=(e?.message??String(e)); return balanceShortText(m) || nodeRejectText(m) || m; }

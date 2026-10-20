@@ -38,7 +38,7 @@ import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc
 import { planPlaceOrder, buildCovenantTerms, settleFill as covSettleFill, planRefund as covPlanRefund, cancel as covCancel } from './covenant-order.js';
 import { verifyAgainstSPK as covVerifyAgainstSPK } from './covenant.js';
 import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
-import { computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits } from './covenant-flow.js';
+import { computeRate, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits, DEFAULT_ORDER_BLOCKS } from './covenant-flow.js';
 // HONEST per-asset Lightning-rail gating (offer LN only with a real usable channel).
 import { railAvailability } from './ln-rail.js';
 // Pure predicate only — LSP *transport* still reaches this module solely through the injected `L`
@@ -1391,6 +1391,12 @@ function metaOf(hex){
     return { ...m, precision: 8 };
   return m;
 }
+// After the page opens, the wallet reads the chain again before its live balance is real: until
+// then it is empty, while Balance shows the last known one. A swap that said "You only hold 0 USDX"
+// to someone holding half a million meanwhile was simply wrong; it says what is happening instead.
+const SYNC_TEXT = 'Your wallet is still reading the chain since you opened it; the swap is ready once it finishes (Balance shows your last known balance meanwhile).';
+function walletSyncing(){ try { return !!(C.walletSynced && !C.walletSynced()); } catch { return false; } }
+function notHeld(text){ return walletSyncing() ? SYNC_TEXT : text; }
 function balAtoms(hex){
   if (!hex) return 0n;
   if (hex === 'BTC') return big(C.btcBalance || 0);   // parent-chain balance, shown like any other
@@ -1399,6 +1405,7 @@ function balAtoms(hex){
 function balStr(hex){
   if (!hex) return '';
   const m = metaOf(hex);
+  if (walletSyncing()) return 'Balance: reading the chain…';
   const onchain = balAtoms(hex), instant = instantAtomsFor(hex);
   let s = 'Balance ' + C.fmtAtoms(onchain, m.precision) + ' ' + m.ticker + ' on-chain';
   if (instant > 0n) s += ' · ' + C.fmtAtoms(instant, m.precision) + ' Lightning';
@@ -1773,6 +1780,7 @@ function autoRails(){
 // where the fix is.
 function showRailRefusal(why){
   const note = C.$('swRailNote'); if (!note || !why) return;
+  if (walletSyncing()) why = SYNC_TEXT;
   note.classList.remove('hide');
   note.innerHTML = '<span>' + esc(why) + '</span>' + (/Balance/.test(why) ? ' <button type="button" class="swfix" id="swRailMove">Go to Balance</button>' : '');
   const b = C.$('swRailMove');
@@ -2289,7 +2297,9 @@ function paintGuide(){
   const why = $('swWhy'), cta = $('swReview'); if (!why || !cta) return;
   let text = '';
   if (step === 1) text = 'Choose what you pay and what you receive.';
-  else if (step === 2) text = 'Enter how much you pay, or how much you want to receive; the other side fills in at the best price.';
+  else if (step === 2) text = S.mode === 'post'
+    ? 'Enter both amounts: what you pay and what you want to receive. Their ratio is your price, and the order rests until someone takes it.'
+    : 'Enter how much you pay, or how much you want to receive; the other side fills in at the best price.';
   else if (step === 3) text = 'Choose how you pay and how you receive: on-chain, or over Lightning.';
   else if (cta.disabled){
     const err = ($('swErr') || {}).textContent || '', status = ($('swStatus') || {}).textContent || '';
@@ -2693,9 +2703,9 @@ async function requoteSame(route, amtStr){
     const _feeAtoms = _feeAsset ? covFeeAtoms(_feeAsset) : 0n;
     if (payAtoms + (_feeAsset === pay ? _feeAtoms : 0n) > balAtoms(pay)){
       LAST_QUOTE = null; setReviewEnabled(false);
-      $('swErr').textContent = _feeAsset === pay
+      $('swErr').textContent = notHeld(_feeAsset === pay
         ? `You only hold ${C.fmtAtoms(balAtoms(pay), pm.precision)} ${pm.ticker} · not enough for the amount plus the fee.`
-        : `You only hold ${C.fmtAtoms(balAtoms(pay), pm.precision)} ${pm.ticker}.`;
+        : `You only hold ${C.fmtAtoms(balAtoms(pay), pm.precision)} ${pm.ticker}.`);
       return;
     }
     if (_feeAsset && _feeAsset !== pay && _feeAtoms > balAtoms(_feeAsset)){
@@ -2717,7 +2727,7 @@ async function requoteSame(route, amtStr){
         q.confidential = true;
         if (q.amountP > balAtoms(pay)){
           LAST_QUOTE = null; setReviewEnabled(false);
-          $('swErr').textContent = `You only hold ${C.fmtAtoms(balAtoms(pay), pm.precision)} ${pm.ticker}.`;
+          $('swErr').textContent = notHeld(`You only hold ${C.fmtAtoms(balAtoms(pay), pm.precision)} ${pm.ticker}.`);
           return;
         }
         LAST_QUOTE = q;
@@ -3683,7 +3693,7 @@ async function requoteCross(route, amtStr){
       const _payBal   = balAtoms(route.payIsBtc ? 'BTC' : seqAsset);
       const _payNeed  = route.payIsBtc ? (_payAtoms + 1000n) : _payAtoms;
       if (_payNeed > _payBal){
-        $('swErr').textContent = `You only hold ${C.fmtAtoms(_payBal, route.payIsBtc ? 8 : seqPrec)} ${route.payIsBtc ? 'BTC' : am.ticker}${route.payIsBtc ? ' (an on-chain fee is also needed)' : ''} · reduce the amount.`;
+        $('swErr').textContent = notHeld(`You only hold ${C.fmtAtoms(_payBal, route.payIsBtc ? 8 : seqPrec)} ${route.payIsBtc ? 'BTC' : am.ticker}${route.payIsBtc ? ' (an on-chain fee is also needed)' : ''} · reduce the amount.`);
         LAST_QUOTE = null; setReviewEnabled(false);
         return;
       }
@@ -6708,11 +6718,29 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
     advertiseOfferAssetAs: opts.advertiseOfferAssetAs,     // SBTC peg: advertise BTC while the covenant locks SBTC
   });
   onStatus && onStatus('Posting your resting order…');
-  await seqob.postCovenantOffer(offer, makerPriv());
+  // The relay lists a covenant only once its funding output is in the UTXO set at the tip, and the
+  // funding was broadcast a moment ago: until a block takes it the relay answers "is not an unspent
+  // output at the tip". That reached the user as "Something went wrong" while the coins were already
+  // locked in the order. Wait for the block and post again; past a few minutes, say what is true.
+  const deadline = Date.now() + 4 * 60_000;
+  for (;;){
+    try { await seqob.postCovenantOffer(offer, makerPriv()); break; }
+    catch (e){
+      if (!fundingNotYetSeen(e)) throw e;
+      if (Date.now() > deadline){
+        const m = C.assetMeta(pay);
+        throw new Error(`Your ${C.fmtAtoms(BigInt(payAtoms), m.precision)} ${m.ticker} is locked in the order on-chain, but the order book does not list it yet because the funding has not confirmed. Nothing is lost: the wallet lists it each time it opens, and Your resting orders can list it now.`);
+      }
+      onStatus && onStatus('Waiting for the funding to confirm (about a block) before the order is listed…');
+      await new Promise(r => setTimeout(r, 15_000));
+    }
+  }
   rec.posted = true; savePlaced();   // the relay accepted it; it is now a live resting order
   ensureCovenantRelay();   // watch for a match so we can settle / reflect a fill
   return rec;
 }
+// The relay's answer for a covenant whose funding it cannot see yet (unconfirmed, or not relayed).
+function fundingNotYetSeen(e){ return /not an unspent output at the tip|liveness/i.test(String((e && e.message) || e)); }
 
 // ---------------------------------------------------------------------------
 // SBTC silent peg — rest an on-chain-BTC LIMIT order while the wallet is offline
@@ -7097,8 +7125,18 @@ async function onCovOrderStatus(s){
 export function resumeCovenantOrders(){
   loadPlaced();
   ensureCompanion();
-  reconcileUnfundedPlaced().catch(()=>{});   // recover any record that died mid-broadcast
+  reconcileUnfundedPlaced().then(listUnpostedPlaced).catch(()=>{});   // recover any record that died mid-broadcast, then list what never was
   if (PLACED.length){ ensureCovenantRelay(); }
+}
+// Funded orders the relay never listed (it refused while the funding was unconfirmed, or the tab
+// closed first): list them now. Best effort; one still refused waits for the next open.
+async function listUnpostedPlaced(){
+  let tip = 0; try { tip = C.wollet.tip().height(); } catch {}
+  for (const rec of PLACED){
+    if (rec.posted || rec.covTxid == null || rec._orphan || (tip > 0 && tip >= Number(rec.expiry))) continue;
+    try { await repostCovenantOrder(rec); } catch {}
+  }
+  try { renderMyOrders(); } catch {}
 }
 
 // A record persisted BEFORE the funding broadcast (covTxid null) whose tab died in
@@ -7442,7 +7480,7 @@ async function placeCovenantReview(q){
       ? `Fills against the order book now at your price or better. If your order is larger than what's resting, the filled part settles on-chain and the unfilled remainder keeps resting at the same price until it's crossed · even while this wallet is closed. Consensus rejects any underpay or redirect.`
       : `Rests on-chain at your price and fills · fully or partially · whenever someone crosses it, even while this wallet is closed. A partial fill settles that part and leaves the rest resting. Consensus rejects any underpay or redirect.`],
     ['You can close the wallet', `The order rests on-chain; when it fills you are credited to a payout address only this wallet controls. Reopen any time to see it.`],
-    ['If it does not fill', `Cancel any time to delist it. After the order expires the locked ${pm.ticker} is reclaimable on-chain.`],
+    ['If it does not fill', `Cancel any time to take it off the book. The ${pm.ticker} stays locked on-chain until the order expires, ${blocksAsTime(DEFAULT_ORDER_BLOCKS)} after it is placed; then Reclaim returns it.`],
     ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
   ];
   // Market order bigger than the resting book at this price: show the fill-now / rest split honestly.
@@ -8670,16 +8708,16 @@ async function postCrossOfferReview(q){
   } catch { $('swErr').textContent = `Enter both amounts - the ${am.ticker} and the BTC.`; return; }
   if (reverse){
     const haveBtc = balAtoms('BTC');
-    if (btcSats > haveBtc){ $('swErr').textContent = `You only hold ${C.fmtAtoms(haveBtc, 8)} BTC.`; return; }
+    if (btcSats > haveBtc){ $('swErr').textContent = notHeld(`You only hold ${C.fmtAtoms(haveBtc, 8)} BTC.`); return; }
   } else {
     const onc = balAtoms(assetHex), lnHeld = instantAtomsFor(assetHex);
     if (assetAtoms > onc){
       // A resting CROSS offer locks the asset in an ON-CHAIN HTLC, so it needs on-chain funds. If the
       // only reason for the shortfall is that the asset sits in Lightning, say that plainly rather than
       // a bare "you only hold" that reads wrong when a Lightning balance is visible.
-      $('swErr').textContent = (lnHeld > 0n && (onc + lnHeld) >= assetAtoms)
+      $('swErr').textContent = notHeld((lnHeld > 0n && (onc + lnHeld) >= assetAtoms)
         ? `You’ll need this ${am.ticker} on-chain to post this order · ${C.fmtAtoms(lnHeld, am.precision)} ${am.ticker} of yours is in Lightning and only ${C.fmtAtoms(onc, am.precision)} is on-chain. Move some ${am.ticker} back on-chain to post it.`
-        : `You only hold ${C.fmtAtoms(onc, am.precision)} ${am.ticker}.`;
+        : `You only hold ${C.fmtAtoms(onc, am.precision)} ${am.ticker}.`);
       return;
     }
   }
@@ -8733,7 +8771,7 @@ async function postPeggedBtcReview(q){
     if (btcSats <= 0n || assetAtoms <= 0n) throw 0;
   } catch { $('swErr').textContent = `Enter both the BTC and the ${am.ticker}.`; return; }
   const haveBtc = balAtoms('BTC');
-  if (btcSats > haveBtc){ $('swErr').textContent = `You only hold ${C.fmtAtoms(haveBtc, 8)} BTC.`; return; }
+  if (btcSats > haveBtc){ $('swErr').textContent = notHeld(`You only hold ${C.fmtAtoms(haveBtc, 8)} BTC.`); return; }
   const assetU = Number(assetAtoms)/Math.pow(10, am.precision||0), btcU = Number(btcSats)/1e8;
   const kv = [
     ['Posting', `A resting BID that stays live while you're offline · you post an offer others can take in the ${am.ticker}/BTC market`],
@@ -10107,6 +10145,25 @@ function renderInFlightCard(){
   });
 }
 
+// Sequentia makes about a block a minute: "about 23 h 40 min".
+function blocksAsTime(blocks){
+  const m = Math.max(0, Math.round(Number(blocks) || 0)), h = Math.floor(m / 60);
+  return 'about ' + (h ? h + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '') : m + ' min');
+}
+function confirmDelist(rec, left){
+  const give = C.assetMeta(rec.pay), amt = C.fmtAtoms(BigInt(rec.sellAtoms), give.precision) + ' ' + give.ticker;
+  const { m, ok } = C.modalRows({ title: 'Cancel this order?', kv: [
+    ['Now', 'The order leaves the order book: nobody can take it any more.'],
+    ['Your ' + amt, 'Stays locked on-chain until block ' + rec.expiry + ', ' + blocksAsTime(left) + ' from now. The covenant has no earlier way back.'],
+    ['Then', 'Reclaim, in Your resting orders, returns it to you.'],
+  ] });
+  ok.textContent = 'Cancel the order';
+  return new Promise((resolve) => {
+    ok.onclick = () => { m.remove(); resolve(true); };
+    const back = [...m.querySelectorAll('button')].find(x => x !== ok);
+    if (back){ back.textContent = 'Keep it'; back.onclick = () => { m.remove(); resolve(false); }; }
+  });
+}
 async function renderMyOrders(){
   const host = C.$('swMyOrders'); if (!host) return;
   if (XMAKE) return renderXMake();   // a live wallet cross offer owns this panel
@@ -10128,11 +10185,21 @@ async function renderMyOrders(){
   // still reclaimable via the CLTV refund. Without these the reclaim UI vanished with the relay
   // listing and the funds became unreachable through the wallet.
   const localReclaim = PLACED.filter(r => r.covTxid != null && !relayIds.has(r.offerId) && !r._orphan);
+  let tipNow = 0; try { tipNow = C.wollet.tip().height(); } catch {}
   const localRows = localReclaim.map(r => {
     const give = C.assetMeta(r.pay);
+    // Before its expiry block the covenant has no way back but a fill: say until when, and how long
+    // that is, instead of a Reclaim that answers with a toast and does nothing.
+    const left = Number(r.expiry) - tipNow;
+    const locked = tipNow > 0 && left > 0;
+    if (!r.posted && locked) return `<div class="swbook-row myorder">
+      <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · funded on-chain, not listed yet</span>
+      <button type="button" class="ghost swrepost" data-id="${esc(r.offerId)}">List it</button></div>`;
     return `<div class="swbook-row myorder">
-      <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · funded on-chain (delisted from the relay)</span>
-      <button type="button" class="ghost swcancel" data-id="${esc(r.offerId)}">Reclaim</button></div>`;
+      <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · delisted · ${locked
+        ? `locked on-chain until block ${esc(String(r.expiry))}, ${esc(blocksAsTime(left))} from now`
+        : 'its lock has expired: reclaim it'}</span>
+      <button type="button" class="ghost swcancel" data-id="${esc(r.offerId)}"${locked ? ' disabled title="The covenant returns the coins only after its expiry block."' : ''}>${locked ? 'Reclaim later' : 'Reclaim'}</button></div>`;
   }).join('');
   if (!orders.length && !localRows){ host.innerHTML = credits; return; }
   const rows = orders.map(o => {
@@ -10172,9 +10239,16 @@ async function renderMyOrders(){
     } catch (e){ b.disabled = false; b.textContent = label; try { C.toast && C.toast('Re-post failed: ' + C.prettyErr(e)); } catch {} }
   });
   host.querySelectorAll('.swcancel').forEach(b => b.onclick = async () => {
-    b.disabled = true; b.textContent = 'Cancelling…';
     const id = b.dataset.id;
     const rec = PLACED.find(r => (r.offerId === id));
+    // A funded covenant order cancelled before its expiry leaves the book but not the chain: its
+    // coins stay locked until the expiry block. Say so before doing it.
+    if (rec && rec.covTxid != null){
+      let tip = 0; try { tip = C.wollet.tip().height(); } catch {}
+      const left = Number(rec.expiry) - tip;
+      if (tip > 0 && left > 0 && !(await confirmDelist(rec, left))) return;
+    }
+    b.disabled = true; b.textContent = 'Cancelling…';
     try {
       // A funded covenant's locked asset is reclaimable on-chain only via the CLTV
       // REFUND leaf: once expired (tip >= expiry) broadcast the reclaim; before that
