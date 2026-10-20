@@ -43,7 +43,7 @@ try {
   ok(!(await page.eval("document.getElementById('tabContracts').classList.contains('hide')")), 'developer mode on: the Contracts tab shows')
   await page.eval("document.getElementById('tabContracts').click()")
   const options = await page.eval("[...document.querySelectorAll('#contractTemplate option')].map(o=>o.textContent)")
-  ok(options.length === 7 && options[2].startsWith('sequentia/faucet-drip v1') && options[3].startsWith('pignus/vault v2') && options[4].startsWith('pignus/offer v2') && options[5].startsWith('sequentia/capped-sale v1') && options[6].startsWith('sequentia/subscription-escrow v1'), 'the wallet lists the kit\'s templates: ' + options.join('; '))
+  ok(options.length === 9 && options[2].startsWith('sequentia/faucet-drip v1') && options[3].startsWith('pignus/vault v2') && options[4].startsWith('pignus/offer v2') && options[5].startsWith('pignus/vault-threshold v1') && options[6].startsWith('pignus/offer-threshold v1') && options[7].startsWith('sequentia/capped-sale v1') && options[8].startsWith('sequentia/subscription-escrow v1'), 'the wallet lists the kit\'s templates: ' + options.join('; '))
   await page.eval("(()=>{const s=document.getElementById('contractTemplate'); s.value=s.options[2].value; document.getElementById('contractUseTemplate').click()})()")
   await page.waitFor("document.getElementById('contractTemplateOut').innerText.length > 0")
   const out = await page.eval("document.getElementById('contractTemplateOut').innerText")
