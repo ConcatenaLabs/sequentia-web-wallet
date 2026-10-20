@@ -105,8 +105,11 @@ Help under **More**; Settings behind the gear in the header.
   pays it what was promised before signing its own inputs. A BTC lane, when the coordinator
   opens one, pegs the BTC into SBTC through the custody bridge for the round and back out
   afterwards. Without a reachable coordinator the tab shows a status line and no lanes.
-- **Issuance**: faucet, issue a new asset (amount, precision 0-8, optional reissuance tokens),
-  reissue or burn an existing one, and label unknown assets. Metadata precedence: your local
+- **Issuance**: faucet, issue a new asset (amount, 0 to 8 decimal places, and whether more can be
+  issued later, which gives the wallet one reissuance token), reissue an asset whose token the
+  wallet holds or burn any asset, and label unknown assets. The name, ticker and decimal places
+  typed at issuance label the asset in this wallet, and its token shows in the balance marked as
+  a reissuance token, with a button to issue more. Metadata precedence: your local
   labels, then the Asset Registry, then built-in defaults for the public testnet demo assets.
 - **Stake**: bond tSEQ to a CSV-time-locked staking output. Minimum stake 40,000 tSEQ;
   the wallet always uses the network-minimum unbonding lock, a time-based CSV lock of about

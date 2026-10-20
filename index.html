@@ -108,6 +108,7 @@
   .b-out{color:var(--red);border-color:#5a2420;background:#2a1110}
   .b-iss{color:var(--blue);border-color:#244a63;background:#0d1f2a}
   .b-swap{color:var(--amber2);border-color:#5c4410;background:#241b08}
+  .b-token{margin-left:8px;color:var(--amber2);border-color:#5c4410;background:#241b08;font-size:10px}
   .group-box{margin-left:22px;border-left:1px solid var(--line);padding-left:8px}
   .group-n{font-size:13px;color:var(--txt)}
   .amt{margin-left:auto;font-weight:700;font:14px ui-monospace,monospace;white-space:nowrap}
@@ -1016,8 +1017,16 @@
         </div>
         <div class="row" style="margin-top:10px">
           <div class="grow"><label class="lbl">Amount</label><input id="isAmount" class="mono" placeholder="1000"></div>
-          <div style="width:120px"><label class="lbl">Precision</label><input id="isPrec" class="mono" value="0"></div>
-          <div style="width:130px"><label class="lbl">Reissue tokens</label><input id="isTokens" class="mono" value="0"></div>
+          <div style="width:150px"><label class="lbl">Decimal places</label><select id="isPrec"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select></div>
+        </div>
+        <p class="sub" id="isPrecHint" style="margin-top:6px"></p>
+        <div class="field">
+          <label class="lbl">Can more be issued later?</label>
+          <select id="isReissuable">
+            <option value="no">No: the supply is fixed forever</option>
+            <option value="yes">Yes: this wallet keeps a reissuance token</option>
+          </select>
+          <p class="sub" id="isReissueHint" style="margin-top:6px"></p>
         </div>
         <div class="row" style="margin-top:10px">
           <div style="width:160px"><label class="lbl">Pay fee in</label><select id="isFeeAsset"></select></div>
@@ -1032,6 +1041,7 @@
       </div>
       <div class="card">
         <label class="lbl">Reissue / burn an asset</label>
+        <div class="field"><label class="lbl">Asset</label><select id="raPick"></select></div>
         <div class="field"><label class="lbl">Asset id</label><input id="raAsset" class="mono" placeholder="64-hex asset id"></div>
         <div class="row" style="margin-top:10px">
           <div class="grow"><label class="lbl">Amount</label><input id="raAmount" class="mono" placeholder="0.0"></div>
@@ -1041,7 +1051,7 @@
           <button id="btnReissue">Reissue</button>
           <button class="danger" id="btnBurn">Burn</button>
         </div>
-        <p class="sub" style="margin-top:10px">Reissue needs the asset's reissuance token in this wallet. Burn permanently destroys the amount.</p>
+        <p class="sub" style="margin-top:10px">Reissue creates more of an asset and needs its reissuance token in this wallet; the token stays with you. Burn permanently destroys the amount.</p>
         <div class="status err" id="raErr"></div>
       </div>
     </section>
@@ -1522,7 +1532,9 @@ const DEFAULT_ASSETS = {
   'df66fc977b42c2c049184422a27e38aea2c3ce60e91a56d0b2c5d63256fc835d': {ticker:'OILX',  name:'Crude Oil (barrel)',   precision:8},
 };
 const labels = () => { try { return JSON.parse(localStorage.getItem(LBL)||'{}'); } catch { return {}; } };
-function saveLabel(hex, info){ const m=labels(); m[hex]=info; localStorage.setItem(LBL, JSON.stringify(m)); }
+function saveLabel(hex, info){ const m=labels(); m[hex]=info; localStorage.setItem(LBL, JSON.stringify(m, (k,v)=>typeof v==='bigint' ? v.toString() : v)); }
+// The reissuance token of an asset this wallet issued: its label names the asset it reissues.
+function tokenOf(hex){ const l=labels()[hex]; return (l && l.token_of) || ''; }
 // The Sequentia Asset Registry is the authoritative metadata source (verified,
 // centrally maintained). Fetch its minimal index at startup and prefer it over
 // the built-in DEFAULT_ASSETS, which remain an offline fallback. Precedence:
@@ -2877,7 +2889,7 @@ function tab(name){
   if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
   if(name==='swap') renderActiveSwap();
   if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
-  if(name==='assets') populateIssueFeeAssets();
+  if(name==='assets'){ populateIssueFeeAssets(); issueHints(); fillReissuePick(); }
   if(name==='help') renderRoomStepper($('roomStepper'));
   if(name==='mix') try{ renderMix(); }catch(e){ console.error(e); }
   if(name==='balance') try{ renderBalance(); }catch{}   // render immediately (from cache pre-scan), don't wait for the scan
@@ -5072,7 +5084,7 @@ function availableFor(hex){ if(hex==='BTC') return (typeof btcBalance!=='undefin
 // Re-run every recipient row's "Available:" line after a sync changes balances.
 function refreshAllAvail(){ const box=document.getElementById('recipients'); if(!box) return; for(const r of box.children){ if(typeof r._refreshAvail==='function'){ try{ r._refreshAvail(); }catch{} } } }
 function renderBalance(){
-  try{ populateFeeAssets(); populateIssueFeeAssets(); }catch{}   // keep the fee pickers in sync as balances load
+  try{ populateFeeAssets(); populateIssueFeeAssets(); fillReissuePick(); }catch{}   // keep the fee and reissue pickers in sync as balances load
   let live = {}; try{ live = balObj(); }catch{}   // wollet.balance() can throw before the first scan
   let b = live, btcBal = btcBalance;
   // Before this session's first sync an unscanned wollet can report an empty or all-zero balance
@@ -5247,7 +5259,15 @@ function renderBalance(){
     // Elide the 64-char hex id (link text), and use the /explorer/ prefix so the link lands on the
     // asset page instead of the SPA catch-all/greeting (W1). The full id is still the href.
     const sub=el('div');
+    if(known && meta.name && meta.name!=='Asset' && meta.name!==meta.ticker){ const nm=el('span',null, meta.name); nm.style.marginRight='8px'; sub.appendChild(nm); }
     sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
+    if(tokenOf(h)){
+      const of=tokenOf(h), om=assetMeta(of);
+      const tb=el('span','badge b-token','reissuance token'); tb.title='Whoever holds this can issue more '+om.ticker+'. Keep it safe.'; sub.appendChild(tb);
+      const more=el('button','ghost','Issue more '+om.ticker); more.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px';
+      more.onclick=()=>{ tab('assets'); fillReissuePick(); $('raPick').value=of; $('raPick')._picked=true; $('raAsset').value=of; $('raAmount').focus(); };
+      sub.appendChild(more);
+    }
     if(!known){
       // Received an asset the wallet can't name/scale: today a dead end (can't be sent). Offer to
       // label it (ticker/name/precision), so it becomes sendable. See labelAssetDialog / T9.
@@ -6031,9 +6051,11 @@ async function oampReviewBroadcast(assetId, recipientAid, atoms, onDone){
 function buildIssuePset(){
   const name=$('isName').value.trim(), ticker=$('isTicker').value.trim().toUpperCase();
   const prec=parseInt($('isPrec').value||'0',10);
-  if(!(prec>=0&&prec<=8)) throw new Error('precision must be 0–8');
+  if(!(prec>=0&&prec<=8)) throw new Error('decimal places must be 0 to 8');
   const amount=parseAtoms($('isAmount').value, prec);
-  const tokens=BigInt(parseInt($('isTokens').value||'0',10));
+  // One whole token (1e8 atoms, shown with 8 decimal places, as Elements issues them). Fewer atoms
+  // would be an explicit output under the dust threshold, which the network refuses.
+  const tokens=$('isReissuable').value==='yes' ? REISSUANCE_TOKEN_ATOMS : 0n;
   if(amount<=0n) throw new Error('issue amount must be greater than zero');
   // Optional on-chain contract. When the issuer supplies a domain we commit a Liquid-style
   // contract hash in the asset entropy, so the asset id BINDS to {name, ticker, precision,
@@ -6061,12 +6083,42 @@ function buildIssuePset(){
   // Capture the new asset id NOW, from the freshly-built (unsigned) pset. Reading it back in the
   // post-broadcast callback returned nothing (the pset is signed/finalized by then), which is why
   // issued assets were left unlabeled and never registered.
-  let assetId;
+  let assetId, tokenId;
   // issuanceIds()/issuanceAsset() live on PsetInput, not Pset (the old pset.issuanceIds() was a
   // no-op that silently returned undefined via ?.). Read the id off the issuance input directly;
   // this avoids wollet.psetDetails(), which throws on Sequentia's transparent outputs.
-  try { for(const inp of pset.inputs()){ const a=inp.issuanceAsset?.(); if(a){ assetId=a.toString(); break; } } } catch {}
-  return {pset, meta:{name, ticker:ticker||'ASSET', precision:prec, contract:contractJson, assetId, amount, tokens, domain, feeHex}};
+  try { for(const inp of pset.inputs()){ const a=inp.issuanceAsset?.(); if(a){ assetId=a.toString(); if(tokens>0n){ const t=inp.issuanceToken?.(); if(t) tokenId=t.toString(); } break; } } } catch {}
+  return {pset, meta:{name, ticker:ticker||'ASSET', precision:prec, contract:contractJson, assetId, tokenId, amount, tokens, domain, feeHex}};
+}
+const REISSUANCE_TOKEN_ATOMS = 100_000_000n;
+// What the issuance form means, said under it as it is filled in: the decimal places (how finely
+// the asset divides, fixed forever) and whether the supply is fixed.
+function issueHints(){
+  const tk=($('isTicker').value.trim().toUpperCase())||'the asset';
+  const prec=parseInt($('isPrec').value||'0',10);
+  let amt=null; try{ const a=parseAtoms(($('isAmount').value||'').trim(), prec); if(a>0n) amt=a; }catch{}
+  const smallest=prec===0 ? '1' : '0.'+'0'.repeat(prec-1)+'1';
+  $('isPrecHint').textContent = (prec===0
+      ? 'No decimal places: '+tk+' is counted in whole units only, like tickets or shares.'
+      : prec+' decimal places: the smallest amount of '+tk+' anyone can hold or send is '+smallest+'.')
+    + (amt!=null ? ' You issue '+fmtAtoms(amt, prec)+' '+tk+'.' : '')
+    + ' This cannot be changed after issuing.';
+  $('isReissueHint').textContent = $('isReissuable').value==='yes'
+    ? 'This wallet receives one reissuance token ('+(tk==='the asset' ? 'TICKER' : tk)+'-RT), shown in your balance. Whoever holds it can issue more '+tk+' at any time, so keep it as safe as the asset itself. Burning or losing it fixes the supply.'
+    : 'The amount you issue now is all there will ever be: nobody, you included, can issue more.';
+}
+// The assets this wallet can reissue: those whose reissuance token it holds.
+function fillReissuePick(){
+  const sel=$('raPick'); if(!sel) return;
+  const cur=sel.value; sel.innerHTML='';
+  let bal={}; try{ bal=balObj(); }catch{}
+  const own=Object.keys(bal).filter(h=>BigInt(bal[h]||0)>0n && tokenOf(h)).map(h=>tokenOf(h));
+  const add=(v, t)=>{ const o=el('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
+  for(const a of own){ const m=assetMeta(a); add(a, m.ticker+(m.name && m.name!=='Asset' ? ' · '+m.name : '')); }
+  add('', own.length ? 'Another asset (paste its id)' : 'Paste the asset id below');
+  // What the person picked stays picked; until they pick, the first asset they can reissue is chosen.
+  sel.value=(sel._picked && [...sel.options].some(o=>o.value===cur)) ? cur : sel.options[0].value;
+  if(sel.value && !sel._picked) $('raAsset').value=sel.value;
 }
 
 // Submit a freshly-issued asset to the public asset registry. The registry re-derives the asset
@@ -6465,43 +6517,56 @@ async function busyButton(btn, fn){
   await new Promise(r=>setTimeout(r,16));   // one frame, so 'Preparing…' is painted before the build
   try{ return await fn(); } finally{ btn.disabled=false; btn.textContent=label; }
 }
+for(const id of ['isTicker','isAmount','isPrec','isReissuable']){ $(id).addEventListener('input', issueHints); $(id).addEventListener('change', issueHints); }
+$('raPick').onchange=()=>{ $('raPick')._picked=true; if($('raPick').value){ $('raAsset').value=$('raPick').value; } else { $('raAsset').value=''; $('raAsset').focus(); } $('raAsset').dispatchEvent(new Event('input')); };
 $('btnIssue').onclick=()=>busyButton($('btnIssue'), async()=>{ $('issueErr').textContent='';
   try{ await afterRecordedSpends(); const {pset, meta}=buildIssuePset();
     // Say what is issued: the kit cannot read a new asset's outputs back (psetDetails throws on
     // Sequentia's explicit outputs), so the review showed only a fee and a note.
     const issued=[
       ['You issue', fmtAtoms(meta.amount, meta.precision)+' '+meta.ticker+(meta.name ? ' ('+meta.name+')' : '')],
-      ['Reissuance tokens', meta.tokens > 0n ? String(meta.tokens)+' (lets you issue more later)' : 'none: the supply is fixed'],
+      ['Decimal places', meta.precision+(meta.precision ? ': the smallest amount is '+fmtAtoms(1n, meta.precision)+' '+meta.ticker : ': whole units only')+', fixed forever'],
+      ['More later', meta.tokens > 0n ? 'yes: this wallet receives 1 reissuance token ('+meta.ticker+'-RT); whoever holds it can issue more' : 'no: the supply is fixed forever'],
       ['Domain', meta.domain ? meta.domain+' (proved for the asset registry)' : 'none'],
       ...(meta.assetId ? [['Asset id', meta.assetId]] : []),
     ];
     await reviewBroadcast(pset, `Issue ${meta.ticker}`, ()=>{
       const assetId=meta.assetId;   // captured pre-broadcast in buildIssuePset
-      if(assetId) saveLabel(assetId, meta);
+      // The name, ticker and decimal places typed here are how this wallet shows the asset (and its
+      // token) from now on, before the registry lists it and even if it never does.
+      if(assetId) saveLabel(assetId, { ticker: meta.ticker, name: meta.name || meta.ticker, precision: meta.precision, ...(meta.domain ? { domain: meta.domain } : {}) });
+      if(assetId && meta.tokenId) saveLabel(meta.tokenId, { ticker: meta.ticker+'-RT', name: 'Reissuance token of '+meta.ticker, precision: 8, token_of: assetId });
       $('isName').value=$('isTicker').value=$('isAmount').value=$('isDomain').value='';
+      $('isReissuable').value='no'; issueHints();
       if(assetId && meta.contract) registerIssuedAsset(assetId, meta.contract); }, meta.feeHex, { rows: [], extra: issued, feeAssetHex: meta.feeHex });
   }catch(e){ $('issueErr').textContent=plainErr(e); } });
 
 $('btnReissue').onclick=()=>busyButton($('btnReissue'), async()=>{ $('raErr').textContent='';
   try{ await afterRecordedSpends(); const asset=$('raAsset').value.trim();
+    if(!/^[0-9a-f]{64}$/i.test(asset)) throw new Error('Choose the asset, or paste its 64-character id.');
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — throws 'label it before sending' rather than mis-scaling at precision 0 (the 1e8 trap)
     const input=$('raAmount');
     const amt=parseAtoms(assetAmountOf(input, asset), prec);   // honours ⇄ ref-input mode
-    const ref=(input._refMode && (input.value||'').trim()) ? {typed:(input.value||'').trim(), ccy:(input._refCcy||REF)} : null;
     const rb=applyRaFeeAsset(network.txBuilder().reissueAsset(new AssetId(asset), amt, undefined, undefined));
     const pset=rb.b.finish(wollet);
-    await reviewBroadcast(pset, 'Confirm Sequentia payment', null, rb.feeHex, {rows:[{atoms:amt, hex:asset, ref}], feeAssetHex:rb.feeHex});
-  }catch(e){ $('raErr').textContent=e?.message??String(e); } });
+    const m=assetMeta(asset);
+    await reviewBroadcast(pset, 'Issue more '+m.ticker, ()=>{ $('raAmount').value=''; }, rb.feeHex, { rows: [], feeAssetHex: rb.feeHex, extra: [
+      ['You issue', fmtAtoms(amt, prec)+' more '+m.ticker+(m.name && m.name!=='Asset' && m.name!==m.ticker ? ' ('+m.name+')' : '')],
+      ['Reissuance token', 'stays in this wallet, so you can issue more again'] ] });
+  }catch(e){ $('raErr').textContent=plainErr(e); } });
 $('btnBurn').onclick=()=>busyButton($('btnBurn'), async()=>{ $('raErr').textContent='';
   try{ await afterRecordedSpends(); const asset=$('raAsset').value.trim();
+    if(!/^[0-9a-f]{64}$/i.test(asset)) throw new Error('Choose the asset, or paste its 64-character id.');
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — never burn a mis-scaled amount on an unlabeled asset
     const input=$('raAmount');
     const amt=parseAtoms(assetAmountOf(input, asset), prec);   // honours ⇄ ref-input mode
-    const ref=(input._refMode && (input.value||'').trim()) ? {typed:(input.value||'').trim(), ccy:(input._refCcy||REF)} : null;
     const bb=applyRaFeeAsset(network.txBuilder().addBurn(amt, new AssetId(asset)));
     const pset=bb.b.finish(wollet);
-    await reviewBroadcast(pset, 'Confirm Sequentia payment', null, bb.feeHex, {rows:[{atoms:amt, hex:asset, ref}], feeAssetHex:bb.feeHex});
-  }catch(e){ $('raErr').textContent=e?.message??String(e); } });
+    const m=assetMeta(asset);
+    await reviewBroadcast(pset, 'Burn '+m.ticker, ()=>{ $('raAmount').value=''; }, bb.feeHex, { rows: [], feeAssetHex: bb.feeHex, extra: [
+      ['You destroy', fmtAtoms(amt, prec)+' '+m.ticker+(m.name && m.name!=='Asset' && m.name!==m.ticker ? ' ('+m.name+')' : '')],
+      ['Afterwards', 'nobody can spend it, you included: this cannot be undone'] ] });
+  }catch(e){ $('raErr').textContent=plainErr(e); } });
 
 $('btnReveal').onclick=()=>{ $('seedReveal').textContent=localStorage.getItem(KEY)||''; show('seedReveal'); $('btnReveal').classList.add('hide'); };
 $('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make sure you have your recovery phrase.')){ localStorage.removeItem(KEY); location.reload(); } };
