@@ -113,6 +113,7 @@ import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-fun
 import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
+import { buildInboundStats } from './inbound-stats.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -1793,6 +1794,40 @@ function recordFeeUse(txid, use) {
   try { fs.writeFileSync(FEES_FILE, JSON.stringify(Object.fromEntries(inboundFees)), 'utf8'); }
   catch (e) { console.error('[lsp] could not persist inbound fees:', e && e.message); }
 }
+// THE SERVICE'S BOOKS, for GET /stats/inbound (inbound-stats.mjs): one line per channel actually
+// sold, one per purchase or priced quote refused for lack of stock, and an hourly snapshot of what the
+// LP holds and has locked. Append-only JSONL beside the other ledgers; a line is small and the files
+// grow by a few KB a day. Read whole: the stats endpoint is cached a minute.
+const SALES_FILE = CFG.provDir ? path.join(CFG.provDir, 'inbound-sales.jsonl') : '';
+const REFUSED_FILE = CFG.provDir ? path.join(CFG.provDir, 'inbound-refused.jsonl') : '';
+const STOCK_FILE = CFG.provDir ? path.join(CFG.provDir, 'inbound-stock.jsonl') : '';
+function appendLine(file, obj) {
+  if (!file) return;
+  try { fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8'); }
+  catch (e) { console.error('[lsp] could not append to', path.basename(file) + ':', e && e.message); }
+}
+function readLines(file) {
+  if (!file) return [];
+  let txt = ''; try { txt = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const out = [];
+  for (const l of txt.split('\n')) { if (!l.trim()) continue; try { out.push(JSON.parse(l)); } catch {} }
+  return out;
+}
+async function feeRateNow(assetId) {
+  await refreshNodeLabels().catch(() => {});
+  const rates = await elementsCall('getfeeexchangerates').catch(() => null);
+  return rateOf(rates, assetId, pricedLabel(assetId));
+}
+// A refusal for lack of stock is demand turned away: the signal for where to restock. One line per
+// node, asset and room in ten minutes, so a person retyping an amount is not counted ten times.
+const _refusedSeen = new Map();
+async function logRefused(assetId, room, nodeKey, where) {
+  const k = [nodeKey || '', assetId, room].join('|'), now = Date.now();
+  if (now - (_refusedSeen.get(k) || 0) < 10 * 60_000) return;
+  _refusedSeen.set(k, now);
+  appendLine(REFUSED_FILE, { at: now, asset: assetId, room, where, rate: await feeRateNow(assetId).catch(() => null) });
+}
+
 // The channel a prepaid fee paid for is open: that fee has bought its room and buys nothing more.
 function markFeeOpened(txid, opened) {
   const k = String(txid || '').toLowerCase(), u = inboundFees.get(k);
@@ -4252,6 +4287,12 @@ const server = http.createServer(async (req, res) => {
       return send(res, 502, { ok: false, error: 'anchor unavailable' });   // generic — never surface the internal RPC endpoint
     }
   }
+  // PUBLIC, read-only: what the room-to-receive service holds, sold and turned away, in aggregate
+  // (sequentiatestnet.com/liquidity). No token, nothing identifying; cached a minute.
+  if (req.method === 'GET' && url.pathname === '/stats/inbound') {
+    try { return send(res, 200, await inboundStats()); }
+    catch { return send(res, 502, { ok: false, error: 'stats unavailable' }); }
+  }
   if (!authed(req)) return send(res, 401, { ok: false, error: 'unauthorized (Bearer token required)' });
   try {
     // ----- ORDER BOOK (sub-asset rail): the wallet gates its BUY/SELL toggles on live
@@ -4929,7 +4970,7 @@ const server = http.createServer(async (req, res) => {
       let q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, assetId, months, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
       if (q.ok && !isBtc) {
         const short = await inboundFundingProblem(assetId, q.amount);
-        if (short) q = { ...q, ok: false, ...short };
+        if (short) { logRefused(assetId, q.amount, url.searchParams.get('node_key') || '', 'quote'); q = { ...q, ok: false, ...short }; }
       }
       const nodeKey = url.searchParams.get('node_key') || '';
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
@@ -4981,7 +5022,7 @@ const server = http.createServer(async (req, res) => {
       // the coins uses it.
       {
         const short = await inboundFundingProblem(assetId, openAmount);
-        if (short) return send(res, 503, { ok: false, error: short.reason, lp_short: true, fundable: short.fundable, asset: assetId });
+        if (short) { logRefused(assetId, openAmount, body.node_key, 'purchase'); return send(res, 503, { ok: false, error: short.reason, lp_short: true, fundable: short.fundable, asset: assetId }); }
       }
       // The service keeps the channel open until then; after it, it may close it.
       const until = expiresAt(Date.now(), months);
@@ -5024,6 +5065,9 @@ const server = http.createServer(async (req, res) => {
         let nowOwed = owed;
         if (mode === 'deferred' && q.ok && !r.already_had_inbound && CFG.inboundFeeBps > 0) nowOwed = debtAdd(body.node_key, assetId, q.fee);
         if (mode === 'prepaid' && body.fee_txid) markFeeOpened(body.fee_txid, { room: openAmount, channel_id: r.channel_id || null });
+        // A sale is a channel that exists now and did not before.
+        if (!r.already_had_inbound) appendLine(SALES_FILE, { at: Date.now(), asset: assetId, room: openAmount, months,
+          fee: q.ok ? q.fee : 0, mode, rate: await feeRateNow(assetId).catch(() => null), expires_at: until });
         return send(res, 200, { ...r, fee_charged: mode === 'prepaid' ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode,
           months, expires_at: until });
       } catch (e) {
@@ -5607,6 +5651,41 @@ server.on('upgrade', (req, socket) => {
     console.error('[ws-router] upgrade error:', e.message);
   }
 });
+
+// The stats answer, from the LP and the books, a minute at most old.
+let _inboundStats = { at: 0, body: null };
+async function inboundStats() {
+  if (_inboundStats.body && Date.now() - _inboundStats.at < 60_000) return _inboundStats.body;
+  if (!CFG.subasLpRpc) throw new Error('no LP configured');
+  await refreshNodeLabels().catch(() => {});
+  const [listfunds, peerchannels, rates, policyHex] = await Promise.all([
+    lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS),
+    lnrpc('listpeerchannels', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS),
+    elementsCall('getfeeexchangerates').catch(() => null),
+    policyAssetHex(),
+  ]);
+  const debts = {};
+  for (const [k, v] of inboundDebts) { const a = String(k.split('|')[1] || '').toLowerCase(); if (a && a !== 'btc') debts[a] = (debts[a] || 0) + Number(v || 0); }
+  const body = buildInboundStats({
+    listfunds, peerchannels, rates, policyHex, debts, now: Date.now(),
+    label: (a) => nodeLabels.byId.get(String(a).toLowerCase()) || (a === String(policyHex).toLowerCase() ? 'tSEQ' : null),
+    sales: readLines(SALES_FILE), refused: readLines(REFUSED_FILE),
+    cfg: { headroomBps: CFG.subasInboundHeadroomBps, reserve: CFG.subasInboundReserve,
+      minRef: CFG.inboundRefMin / 1e8, maxRef: CFG.inboundRefMax / 1e8, floorRef: CFG.inboundRefFeeFloor / 1e8,
+      lowRef: 1000, months: CFG.inboundMonths, annualBps: CFG.inboundFeeBps },
+  });
+  _inboundStats = { at: Date.now(), body };
+  return body;
+}
+// Once an hour, what the LP holds and has locked, per asset: utilization over time.
+async function snapshotInboundStock() {
+  if (!STOCK_FILE || !CFG.subasLpRpc) return;
+  try {
+    const st = await inboundStats();
+    appendLine(STOCK_FILE, { at: Date.now(), assets: st.assets.map((a) => ({ asset: a.asset, free: a.free_atoms, locked: a.locked_atoms, channels: a.channels, rate: a.price_ref ? a.price_ref * 1e8 : null })) });
+  } catch (e) { console.warn('[lsp] inbound stock snapshot skipped:', e && e.message); }
+}
+setInterval(snapshotInboundStock, 3_600_000).unref();
 
 server.listen(CFG.port, '127.0.0.1', () => {
   console.error(`[lsp] listening http://127.0.0.1:${CFG.port}  asset-rpc ${CFG.hostedAssetRpc}  btc-rpc ${CFG.hostedBtcRpc}  relay ${CFG.relay}`);
