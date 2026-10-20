@@ -508,6 +508,16 @@
     body.typing .tabs{display:none}
     body.typing{padding-bottom:0}
     body.typing .toast,body.typing .lnmove-banner{bottom:16px}
+    /* The swap's four steps stay on one line; on the narrowest phones a finished step is its check. */
+    .swguide{flex-wrap:nowrap;gap:2px;padding:12px 12px 0}
+    .swguide .gs{white-space:nowrap;font-size:11.5px;gap:4px;padding:3px 7px 3px 3px}
+    /* The flip button sits on the line between the panes: keep the balance line clear of it. */
+    #swPayPane{padding-bottom:30px}
+    #swPayPane + .swflip-wrap + .swpane{padding-top:30px}
+  }
+  @media (max-width:360px){
+    .swguide .gs.done .gn{display:none}
+    .swguide .gs.done{padding-right:3px}
   }
   @media (max-width:480px){
     .swamt{font-size:26px}
