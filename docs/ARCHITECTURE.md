@@ -222,7 +222,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | Key | Contents |
 |---|---|
 | `swk.sequentia.mnemonic` | the recovery phrase, plaintext (see README security notes) |
-| `swk.sequentia.assets` | user asset labels `{assetHex: {name,ticker,precision}}` |
+| `swk.sequentia.assets` | user asset labels `{assetHex: {name,ticker,precision}}`; a reissuance token's label also names its asset, `token_of` |
 | `swk.sequentia.stakes` | tracked stake outputs (re-verified against the chain each sync, unbond and claim read from it) |
 | `swk.sequentia.pendingDelegation` | a pool join in flight: both signed transactions, kept until the record confirms |
 | `seqRefCcy` | chosen reference currency |
@@ -266,7 +266,7 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 78 `*.test.mjs` files: 54 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 79 `*.test.mjs` files: 55 hold `node:test` suites, and the
 other 24, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
