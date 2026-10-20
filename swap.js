@@ -3037,9 +3037,15 @@ function executableQuote(o, payAsset, receiveAsset, editedAsset, typedAtoms){
     const nativeFeeSats = (BigInt(C.DEFAULT_FEERATE) * EST_SWAP_VSIZE) / 1000n;   // sat/kvB * vbytes / 1000
     feeAmount = ceilDiv(nativeFeeSats * BigInt(C.EXCHANGE_RATE_SCALE), feeRate);
   } catch {}
+  // A fee in the asset received is the maker's to fund (SWK seqdex_swap_request takes it as
+  // fee_amount 0: an explicit fee in that asset would inflate the amount the maker checks). Asking
+  // for it explicitly failed the take with "swap fee cannot be paid in the received asset", shown as
+  // "Something went wrong", while the picker offered that asset.
+  const makerPaysFee = feeAsset === receiveAsset;
+  if (makerPaysFee) feeAmount = 0n;
   return { kind:'same', offer:o, takeBase:take,
     assetP: payAsset, amountP: pay, assetR: receiveAsset, amountR: recv,
-    feeAsset, feeAmount, feeRate, capped: take >= baseAmt };
+    feeAsset, feeAmount, feeRate, makerPaysFee, capped: take >= baseAmt };
 }
 
 function paintEmptyRate(pay, receive, n){
@@ -8936,8 +8942,9 @@ async function reviewSame(q){
     ...(q.confidential ? [['Privacy', 'Blinded book · your trade settles confidentially; amounts and assets are hidden on-chain.']] : []),
     ['You pay', amtRow(q.assetP, q.amountP) + refSuffix(q.assetP, q.amountP)],
     ['You receive', amtRow(q.assetR, q.amountR) + refSuffix(q.assetR, q.amountR)],
-    ['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'],
-    ['Fee paid in', fm.ticker],
+    ...(q.makerPaysFee
+      ? [['Network fee', `Paid by the other side, in ${fm.ticker}: you receive the amount above in full.`]]
+      : [['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'], ['Fee paid in', fm.ticker]]),
     ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
     ['Settlement', 'Settles in full or not at all.'],
   ];

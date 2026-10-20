@@ -44,3 +44,16 @@ test('cancelling before the lock expires asks first, and the row says until when
   assert.match(src, /locked on-chain until block \$\{esc\(String\(r\.expiry\)\)\}/);
   assert.match(src, /\$\{locked \? 'Reclaim later' : 'Reclaim'\}/);
 });
+
+test('a fee in the asset received is left to the maker, as SWK requires', () => {
+  const q = src.slice(src.indexOf('function executableQuote('));
+  assert.match(q.slice(0, 3000), /const makerPaysFee = feeAsset === receiveAsset;\n  if \(makerPaysFee\) feeAmount = 0n;/);
+  assert.match(src, /Paid by the other side, in \$\{fm\.ticker\}: you receive the amount above in full\./);
+});
+
+test('a maker that never co-signs is not reported as a trade that may still complete', () => {
+  const seqob = readFileSync(new URL('./seqob.js', import.meta.url), 'utf8');
+  const wait = seqob.slice(seqob.indexOf("// Await the maker's sealed SwapAccept."));
+  assert.ok(wait.indexOf('maker did not answer: ') < wait.indexOf('hooks.finalizeAccept('), 'only before this wallet signs');
+  assert.ok(html.indexOf("if(/maker did not answer: /.test(m))") < html.indexOf("if(/timed? ?out|timeout|deadline exceeded/i.test(m))"));
+});
