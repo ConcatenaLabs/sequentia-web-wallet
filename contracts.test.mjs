@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   trustedTemplates, addTrusted, removeTrusted, knownHashes, chainFacts, contractCoins,
-  registryName, prepare, sign, approvalSections, FAUCET_DRIP, CONTRACT_KEY_PATH
+  registryName, prepare, sign, approvalSections, fundFromWallet, prevoutOf, FAUCET_DRIP, CONTRACT_KEY_PATH
 } from './contracts.js'
 
 const memStore = () => { const m = new Map(); return { getItem: k => m.has(k) ? m.get(k) : null, setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) } }
@@ -105,4 +105,53 @@ test('the approval shows the template, the path, the parameters by role, the bal
   // An unregistered template says what it calls itself, and that no registry checked it.
   const u = approvalSections({ ...SUMMARY, template: { ...SUMMARY.template, registered: false, shown: 'an unregistered template, root 5251' } })
   assert.ok(u[0].rows.some(([k, v]) => k === 'It names itself' && v.includes('not checked by any registry')))
+})
+
+test('funding from the wallet adds its own explicit coins for what the inputs miss, and the change', () => {
+  const req = { path: 'repay', coin: { txid: 'v', vout: 0, script_pubkey: '5120', asset: 'xx', amount: 100 },
+    outputs: [{ to: 'contract', script: '5120', asset: 'xx', amount: 100 }, { to: 'pay', script: '0014', asset: 'yy', amount: 70 }, { to: 'fee', asset: 'yy', amount: 5 }] }
+  const coins = [
+    { txid: 'a', vout: 0, asset: 'yy', amount: 40, confidential: false },
+    { txid: 'b', vout: 1, asset: 'yy', amount: 50, confidential: false },
+    { txid: 'c', vout: 0, asset: 'yy', amount: 900, confidential: true },
+    { txid: 'd', vout: 0, asset: 'xx', amount: 900, confidential: false }]
+  const r = fundFromWallet(req, coins, 'ert1qchange')
+  assert.deepEqual(r.inputs, [{ is: 'contract' }, { is: 'wallet', txid: 'b', vout: 1, asset: 'yy', amount: 50 }, { is: 'wallet', txid: 'a', vout: 0, asset: 'yy', amount: 40 }])
+  assert.deepEqual(r.outputs.at(-1), { to: 'wallet', address: 'ert1qchange', asset: 'yy', amount: 15 })
+  assert.equal(req.inputs, undefined, 'the request handed in is left as it was')
+  // A coin the request names already is not picked twice, and too little is refused.
+  const named = fundFromWallet({ ...req, inputs: [{ is: 'contract' }, { is: 'wallet', txid: 'b', vout: 1, asset: 'yy', amount: 50 }] }, coins, 'ert1qchange')
+  assert.equal(named.inputs.filter(i => i.txid === 'b').length, 1)
+  assert.throws(() => fundFromWallet(req, coins.slice(0, 1), 'x'), /holds too little of yy in explicit coins/)
+})
+
+test('the chain\'s record of an output, and of every foreign coin a request names', async () => {
+  const f = fakeFetch({ '/tx/t1': { vout: [{ scriptpubkey: '0014', value: 3, asset: 'aa' }, { scriptpubkey: '5120bb', value: 1, asset: 'be' }] } })
+  assert.deepEqual(await prevoutOf(f, 't1', 1), { script_pubkey: '5120bb', asset: 'be', amount: 1 })
+  await assert.rejects(prevoutOf(fakeFetch({ '/tx/t2': { vout: [{ scriptpubkey: '00', valuecommitment: '08' }] } }), 't2', 0), /not an explicit output/)
+  const facts = await chainFacts(fakeFetch({ '/blocks/tip/hash': 'h9', '/block/h9': { height: 9, mediantime: 900 }, '/tx/t1/status': { confirmed: false },
+    '/tx/t1': { vout: [{ scriptpubkey: '0014', value: 3, asset: 'aa' }, { scriptpubkey: '5120bb', value: 1, asset: 'be' }] } }), 't1', [['t1', 0], ['t1', 1]])
+  assert.deepEqual(facts.prevouts, { 't1:0': { script_pubkey: '0014', asset: 'aa', amount: 3 }, 't1:1': { script_pubkey: '5120bb', asset: 'be', amount: 1 } })
+})
+
+test('the approval shows every input by what it is, the contract an output opens and the spender\'s values', () => {
+  const s = { ...SUMMARY,
+    path: { ...SUMMARY.path, selected_by: 'PATH = Left(Left(… (checked against the kit\'s table for this template)' },
+    spender: [{ name: 'PATH', value: 'Left(Left(()))' }],
+    inputs: [
+      { index: 0, is: 'contract', shown: 'the contract\'s coin, 1.00000000 XCOL' },
+      { index: 1, is: 'foreign', shown: 'a coin that is neither the contract\'s nor this wallet\'s: 1 BEACON, recreated at output 2', request_says: 'the oracle\'s beacon coin', checked_against_chain: true },
+      { index: 2, is: 'wallet', shown: 'this wallet\'s coin, 2.00000000 YDEBT, signed with its funding key m/84h/1h/0h/0/3' }],
+    opens: [{ index: 0, shown: 'opens pignus/vault v2 (an unregistered template, root 5fbc), holding 10.00000000 XCOL', summary: 'A loan.', template_hash: '6b17',
+      params: [{ label: 'Borrower\'s payout script', role: 'script_hash', shown: 'ab (SHA-256 of this wallet\'s script 0014)' }], slots: [] }] }
+  const rows = approvalSections(s).flatMap(x => x.rows.map(([k, v]) => x.title + ' | ' + k + ' | ' + v))
+  for (const want of [
+    'What it spends | Input 1 | a coin that is neither the contract\'s nor this wallet\'s: 1 BEACON, recreated at output 2',
+    'What it spends | Input 1, as the request calls it | the oracle\'s beacon coin (the request\'s word, not checked)',
+    'What it spends | Input 1, checked against the chain | yes: the chain\'s record of the coin is what the request says',
+    'What it spends | Input 2 | this wallet\'s coin, 2.00000000 YDEBT, signed with its funding key m/84h/1h/0h/0/3',
+    'Output 0 opens a contract | Borrower\'s payout script [script_hash] | ab (SHA-256 of this wallet\'s script 0014)',
+    'Values the spender chose | PATH | Left(Left(()))',
+    'Checked before signing | Path chosen by | PATH = Left(Left(… (checked against the kit\'s table for this template)'
+  ]) assert.ok(rows.includes(want), want + '\n' + rows.join('\n'))
 })

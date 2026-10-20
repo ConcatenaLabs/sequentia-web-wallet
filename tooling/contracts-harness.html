@@ -2,7 +2,8 @@
 <!-- The Contracts tab of developer mode, mounted on a private regtest chain for
      tooling/contracts-regtest.mjs. It is the same module the wallet mounts
      (contracts.js), with the same context, but its network is the regtest chain
-     named in the query string and its wallet is opened from the mnemonic there.
+     named in the query string and its wallet is opened from the mnemonic there and
+     synced (window.__sync) against the same origin's /api.
      Nothing here is used by the deployed wallet. -->
 <html><head><meta charset="utf-8"><title>Contracts (regtest)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -32,7 +33,11 @@ const hex = (a) => [...a].map(b => b.toString(16).padStart(2, '0')).join('')
 const unconf = (a) => a.toUnconfidential ? a.toUnconfidential() : a
 const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.textContent = h; return e }
 const assets = JSON.parse(q.get('assets') || '{}')
-window.__wallet = { signer, network, receive: unconf(wollet.address(0).address()).toString() }
+window.__wallet = { signer, network, wollet, receive: unconf(wollet.address(0).address()).toString() }
+// The wallet's own sync, against the same origin's Esplora: what walletCoins reads.
+const esplora = new lwk.EsploraClient(network, location.origin + '/api', false, 4, false)
+window.__coins = () => lwk.ContractSpend.walletCoins(wollet)
+window.__sync = async () => { const u = await esplora.fullScan(wollet); if (u) wollet.applyUpdate(u); return true }
 window.__contracts = mountContracts({
   lwk,
   network: () => network,
@@ -41,6 +46,7 @@ window.__contracts = mountContracts({
   registryFetch: (path) => fetch('/registry' + path),
   walletScripts: () => [0, 1, 2].map(i => hex(unconf(wollet.address(i).address()).scriptPubkey().bytes())),
   receiveAddress: () => window.__wallet.receive,
+  walletCoins: () => JSON.parse(lwk.ContractSpend.walletCoins(wollet)),
   assetMeta: (h) => assets[h] || { ticker: h.slice(0, 8) + '…', precision: 0 },
   store: localStorage,
   el
