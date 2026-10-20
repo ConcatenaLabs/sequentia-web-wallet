@@ -31,6 +31,7 @@
 
 import * as seqob from './seqob.js';
 import { secp256k1 } from './btc.js';
+import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc-wait.js';
 // The byte-exact passive-CLOB covenant stack: place a funded resting order that
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
 // match as the taker. Everything routes through these; no crypto is hand-rolled here.
@@ -248,11 +249,12 @@ function exportTrades(fmt){
 
 // --- Per-trade progress narrative (task 21a) --------------------------------------
 // Typical stage durations: honest rough figures for THIS deployment (an LN hop is seconds, a
-// Sequentia block ~1 minute, a testnet4 Bitcoin block 10-60+ minutes), keyed by the record
-// states the drivers actually set. Absent key = no honest figure; show elapsed alone.
+// Sequentia block ~1 minute), keyed by the record states the drivers actually set. Absent key = no
+// honest figure; show elapsed alone. 'confirming' has none: it can wait on a testnet4 block, which
+// comes anything from minutes to hours after the last (btc-wait.js says so in the status line).
 const STAGE_TYPICAL_S = {
   starting: 15, 'awaiting-lock': 90, verifying: 10, verified: 120, 'anchor-wait': 120,
-  paying: 15, held: 120, confirming: 1800, claiming: 90, funding: 30, settling: 90,
+  paying: 15, held: 120, claiming: 90, funding: 30, settling: 90,
   funded: 90, holding: 15,
 };
 function fmtDur(ms){
@@ -3212,7 +3214,7 @@ function renderMixedTake(route, plan){
   // through the maker-first bridge — a Bitcoin-confirmation wait, with no fast maker resting —
   // the quote line itself carries the slow class, so the user knows BEFORE typing an amount
   // (the review repeats it before Confirm). Never shown when a Sequentia-speed maker serves it.
-  const slowNote = (plan.slowOnly ? ' · waits on Bitcoin confirmations — typically 10-60+ minutes on testnet4' : '')
+  const slowNote = (plan.slowOnly ? ' · ' + T4_WAIT_SHORT : '')
     + (plan.betterOtherRails ? ' · a better price rests on rails this selection cannot settle (switch the Lightning leg to take it)' : '');
   // NO amount typed yet: show the plain price and wait for an amount.
   if (want <= 0n){
@@ -4573,7 +4575,7 @@ const _deadOffers = {
 // These two strings are the ONE copy for the settlement class, shared by the reviews and the
 // drive-time status so they can never drift apart.
 const SPEED_FAST_NOTE = 'Settles at Sequentia speed · typically about a minute.';
-const SPEED_SLOW_NOTE = 'Waits on Bitcoin confirmations · typically 10-60+ minutes on testnet4 · safe to leave — it resumes and refunds automatically.';
+const SPEED_SLOW_NOTE = T4_WAIT;
 
 // Does taking THIS offer, on THESE taker rails, settle at Sequentia speed? An offer served
 // natively (the sub-asset shapes) or by a P2P submarine (an interactive maker on the matching
@@ -5574,8 +5576,9 @@ function subswapStatusLine(b){
   // settlement decision.
   if (b && b.kind === 'lsp-payer-buy' && (b.state === 'held' || b.state === 'confirming')){
     if (b.front_mode === 'inventory') return base + ' · fronted from inventory — typically about a minute';
-    const wait = b.expected_wait ? 'expected wait ' + String(b.expected_wait) : 'typically 10-60+ minutes on testnet4';
-    return base + ' · waits on Bitcoin confirmations — ' + wait + ' · safe to leave, resumes + refunds automatically';
+    const wait = b.expected_wait ? 'expected wait ' + String(b.expected_wait) : 'testnet4 blocks can be hours apart';
+    const age = blockAgeText(testnet4BlockAgeNow());
+    return base + ' · waits on Bitcoin confirmations — ' + wait + ' · safe to leave, resumes + refunds automatically' + (age ? ' · ' + age : '');
   }
   return base;
 }

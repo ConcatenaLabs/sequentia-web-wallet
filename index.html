@@ -1356,6 +1356,11 @@
           </ul>
           <p>These numbers use 5% a year and a 1 USDX minimum as an example; the dialog always shows the real price before you pay.</p>
         </details>
+        <details id="faq-testnet4"><summary>Why does a swap with bitcoin take so long?</summary>
+          <p>The bitcoin here is Bitcoin <b>testnet4</b>, a public test network, not Sequentia. A swap that moves bitcoin on chain waits for a testnet4 block, and testnet4 blocks come irregularly: sometimes several in a few minutes, sometimes none for hours. People also flood it with transactions, so its fee estimates can climb to hundreds of sat/vB for coins worth nothing. On Bitcoin itself a block comes about every ten minutes.</p>
+          <p>While a trade waits, its row in Active trades says how long ago the last testnet4 block was found. You can close the wallet: the trade resumes when you open it again, and if the other side never completes, your coins come back to you after the timeout shown in the review.</p>
+          <p>Swaps between Sequentia assets, and swaps whose bitcoin moves over Lightning, do not wait for testnet4 blocks.</p>
+        </details>
         <details id="faq-ln-swap"><summary>Why does a swap ask me for room to receive?</summary>
           <p>A swap that pays you over Lightning needs room on the other side of one of your channels, in the asset you receive, or the payment cannot arrive. With no room in that asset, receiving over Lightning is off in the swap: receive on-chain, or buy room first. With some room but less than the amount, the swap says what the rest costs; the service opens it when the order is placed, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
           <p>The same goes for paying: each side of a swap offers only the rails where you hold the asset, and picks the only one by itself when there is one.</p>
@@ -2974,7 +2979,7 @@ function tab(name){
   if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
   if(name==='swap') renderActiveSwap();
   if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
-  if(name==='assets'){ populateIssueFeeAssets(); issueHints(); fillReissuePick(); }
+  if(name==='assets'){ try{ populateIssueFeeAssets(); }catch{} issueHints(); fillReissuePick(); }   // no wallet yet: no balance to read
   if(name==='help') renderRoomStepper($('roomStepper'));
   if(name==='mix') try{ renderMix(); }catch(e){ console.error(e); }
   if(name==='balance') try{ renderBalance(); }catch{}   // render immediately (from cache pre-scan), don't wait for the scan
