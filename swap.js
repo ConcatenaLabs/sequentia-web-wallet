@@ -652,6 +652,15 @@ function wireAmount(input, side){
     clearTimeout(_quoteTimer);
     _quoteTimer = setTimeout(() => requote().catch(()=>{}), 220);
   });
+  // The pin that sizes both legs to what the book can fill skips the field being typed in, and
+  // nothing quoted again once focus left it: typing 1 OILX into a market order the best offer could
+  // fill only to 0.509 left "1 OILX" (98 USD) beside a pay leg cut to 50 USD. Leaving the field now
+  // quotes again, so the two legs agree.
+  input.addEventListener('blur', () => {
+    if (S.mode === 'post' || !input._userTyped) return;
+    clearTimeout(_quoteTimer);
+    _quoteTimer = setTimeout(() => requote().catch(()=>{}), 0);
+  });
 }
 // The last book best-price (receive-per-pay), cached per pair by requoteSame so a keystroke can
 // derive the opposite leg instantly (see wireAmount) without waiting for the debounced re-fetch.

@@ -90,3 +90,9 @@ test('a time left reads as time, for a block lock and a median-time lock', () =>
   assert.equal(lockLeftText({ time: true, secondsLeft: 5400 }), 'about 1 h 30 min');
   assert.equal(lockLeftText({ time: true, secondsLeft: 86400 }), 'about 24 h');
 });
+
+test('leaving an amount field quotes again, so both legs agree once the take is sized', () => {
+  const wire = src.slice(src.indexOf('function wireAmount('), src.indexOf('// The last book best-price (receive-per-pay)'));
+  assert.match(wire, /input\.addEventListener\('blur', \(\) => \{\n    if \(S\.mode === 'post' \|\| !input\._userTyped\) return;/);
+  assert.match(wire, /_quoteTimer = setTimeout\(\(\) => requote\(\)\.catch\(\(\)=>\{\}\), 0\);/);
+});
