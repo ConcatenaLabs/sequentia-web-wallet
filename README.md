@@ -373,7 +373,7 @@ works normally without the restricted rows.
 | `pkg/` | **Not tracked.** The `lwk_wasm` WebAssembly bindings built from SWK (see below). |
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
 | `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
-| `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow, the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
+| `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
@@ -482,7 +482,7 @@ This runs every `*.test.mjs` file, at the root and under `tooling/lsp/`. Most re
 `node --test` runs as one test each, among them `seqln.test.mjs`, `xcourier.test.mjs`,
 `xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the
 covenant scripts (`covenant.test.mjs`, `covenant-byteorder.test.mjs`, `covenant-order.test.mjs`,
-`covenant-flow.test.mjs`); each also runs on its own, for example
+`covenant-flow.test.mjs`, `covenant-post-existing.test.mjs`); each also runs on its own, for example
 `node covenant-byteorder.test.mjs`. `covenant-fills.test.mjs` holds the multi-order fill layout to
 the vectors seqdex's Go planner writes (`covenant-fill-vectors.json`), and
 `covenant-offer-move.test.mjs` verifies Go-signed covenant offers before and after the relay moves
