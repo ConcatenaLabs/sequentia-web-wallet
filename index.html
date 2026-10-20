@@ -108,6 +108,9 @@
   .b-out{color:var(--red);border-color:#5a2420;background:#2a1110}
   .b-iss{color:var(--blue);border-color:#244a63;background:#0d1f2a}
   .b-swap{color:var(--amber2);border-color:#5c4410;background:#241b08}
+  .fee-opts{margin-top:10px;padding:12px;border:1px solid var(--line);border-radius:10px}
+  .fee-mode{display:flex;gap:8px;align-items:center;font-size:14px;cursor:pointer}
+  .fee-mode input{width:auto;margin:0}
   .b-token{margin-left:8px;color:var(--amber2);border-color:#5c4410;background:#241b08;font-size:10px}
   .group-box{margin-left:22px;border-left:1px solid var(--line);padding-left:8px}
   .group-n{font-size:13px;color:var(--txt)}
@@ -600,12 +603,27 @@
         <div class="field">
           <div class="row">
             <div class="grow">
-              <label class="lbl" id="feeRateLabel">Fee rate (optional)</label>
-              <input id="feeRate" class="mono" placeholder="leave blank for the default">
+              <label class="lbl">Network fee</label>
+              <div class="sub" id="feeSummary" style="margin-top:6px">Recommended: standard rate</div>
+              <button class="ghost" id="btnFeeOpts" style="margin-top:6px;padding:3px 10px;font-size:12px">Fee options</button>
             </div>
             <div style="width:160px" id="feeAssetBox">
               <label class="lbl">Pay fee in</label>
               <select id="feeAsset"></select>
+            </div>
+          </div>
+          <div id="feeOpts" class="fee-opts hide">
+            <label class="fee-mode"><input type="radio" name="feeMode" value="rec" checked> Recommended</label>
+            <div class="row" style="gap:8px;align-items:center;margin:6px 0 0 24px">
+              <span class="sub">Confirm within</span>
+              <select id="feeTarget"></select>
+            </div>
+            <div class="sub" id="feeRecNote" style="margin:6px 0 0 24px"></div>
+            <label class="fee-mode" style="margin-top:12px"><input type="radio" name="feeMode" value="custom"> Custom</label>
+            <div id="feeCustom" class="hide" style="margin:6px 0 0 24px">
+              <label class="lbl" id="feeRateLabel">Fee rate</label>
+              <input id="feeRate" class="mono" placeholder="0.0">
+              <p class="sub" id="feeCustomHelp" style="margin-top:6px"></p>
             </div>
           </div>
           <div class="sub" id="feeRateNote" style="margin-top:6px"></div>
@@ -2216,9 +2234,75 @@ async function congestionFor(hex){
   _congByAsset.set(hex, { at: Date.now(), c });
   return c;
 }
+// The fee rate a send pays, in units of the fee asset per vByte (sat/vB for bitcoin), or null for
+// the standard rate. Like Sequentia Qt: recommended by default, from the network's estimate for the
+// chosen number of blocks; a custom rate only when asked for under Fee options.
+let _feeMode='rec', _recUnits=null, _recSeq=0;
+function feeUnitsChosen(){
+  if(_feeMode==='custom'){ const v=parseFloat(($('feeRate').value||'').trim()); return v>0 ? v : null; }
+  return _recUnits;
+}
+// The confirmation targets offered, in blocks. Bitcoin's estimates come in its own buckets.
+function feeTargets(btc){
+  return btc ? [[1,'the next block'],[6,'about an hour (6 blocks)'],[144,'about a day (144 blocks)']]
+             : [[1,'the next block'],[3,'3 blocks'],[6,'6 blocks'],[24,'24 blocks']];
+}
+function fillFeeTargets(){
+  const sel=$('feeTarget'); if(!sel) return;
+  const btc=isBtcSend(); if(sel._btc===btc && sel.options.length) return;
+  sel._btc=btc; sel.innerHTML='';
+  for(const [n,t] of feeTargets(btc)){ const o=el('option'); o.value=String(n); o.textContent=t; sel.appendChild(o); }
+}
+// The recommended rate for the target: the network's estimate (estimatesmartfee in the fee asset,
+// or Bitcoin testnet4's fee-estimates). With no estimate, the standard rate, unless the next block
+// is full, when it pays a little above the cheapest rate that block still takes.
+async function refreshFeeRec(){
+  fillFeeTargets();
+  const my=++_recSeq, btc=isBtcSend(), target=Number($('feeTarget').value)||1;
+  let units=null, note='';
+  try{
+    if(btc){
+      const est=await (await fetch(T4_API+'/fee-estimates')).json();
+      const k=Object.keys(est||{}).map(Number).filter(n=>n>=target).sort((a,b)=>a-b)[0];
+      const v=k!=null ? Number(est[k]) : NaN;
+      // Testnet4's estimates are set by whoever floods it, at times hundreds of sat/vB for coins that
+      // are worth nothing: past a sane rate the wallet keeps the standard one and says so.
+      if(v>BTC_SANE_FEERATE){ note='Bitcoin testnet4 estimates '+fmtUnits(v)+' sat/vB for '+k+' blocks, because people flood testnet4 with transactions. The wallet keeps the standard '+BTC_DEFAULT_FEERATE+' sat/vB, so this may wait for hours; choose Custom to pay more.'; }
+      else if(v>0){ units=Math.max(1, Math.ceil(v*10)/10); note='Bitcoin testnet4 estimates '+fmtUnits(units)+' sat/vB to confirm within '+k+' block'+(k>1?'s':'')+'. Testnet4 blocks come irregularly, sometimes hours apart: no rate makes it fast.'; }
+      else note='Bitcoin testnet4 gives no estimate for this, so the standard '+BTC_DEFAULT_FEERATE+' sat/vB is used. Testnet4 blocks come irregularly, sometimes hours apart.';
+    } else {
+      const h=$('feeAsset') && $('feeAsset').value; if(!h){ if(my===_recSeq){ _recUnits=null; $('feeRecNote').textContent=''; paintFeeSummary(); } return; }
+      const tk=feeUnitOf(h), scale=1000*Math.pow(10, assetMeta(h).precision ?? 8);
+      let atoms=0;
+      try{ const r=await fetch('/estimatefee?blocks='+target+'&asset='+encodeURIComponent(h)); if(r.ok){ const j=await r.json(); atoms=Number(j && j.asset_atoms_per_kvb)||0; } }catch{}
+      if(atoms>0){ units=atoms/scale; note='The network estimates '+fmtUnits(units)+' '+tk+'/vB to confirm within '+(target===1?'the next block':target+' blocks')+'.'; }
+      else{
+        const c=await congestionFor(h), nb=c ? Number(c.next_block_min_asset_atoms_per_kvb)||0 : 0;
+        if(c && c.next_block_full && nb>0){ units=nb*1.1/scale; note='Blocks are full: the next one takes '+fmtUnits(nb/scale)+' '+tk+'/vB or more, so this pays a little above that.'; }
+        else note='Blocks have room now, so the standard rate confirms in the next block.';
+      }
+    }
+  }catch{ note='No estimate could be read, so the standard rate is used.'; }
+  if(my!==_recSeq) return;
+  _recUnits=units; $('feeRecNote').textContent=note;
+  paintFeeSummary(); paintFeeRateNote();
+}
+// The one line Send shows about the fee while the options are closed.
+function paintFeeSummary(){
+  const s=$('feeSummary'); if(!s) return;
+  const btc=isBtcSend(), unit=btc ? 'sat' : feeRateTicker(), u=feeUnitsChosen();
+  let std=null;
+  if(btc) std=BTC_DEFAULT_FEERATE; else { try{ std=refRateToUnits($('feeAsset').value, DEFAULT_FEERATE/1000); }catch{} }
+  s.textContent=(_feeMode==='custom' && u ? 'Custom: ' : 'Recommended: ')
+    + (u ? fmtUnits(u)+' '+unit+'/vB' : 'standard rate'+(std ? ', '+fmtUnits(std)+' '+unit+'/vB' : ''));
+  const help=$('feeCustomHelp');
+  if(help) help.textContent = btc
+    ? 'In satoshis per virtual byte. A simple payment is around 150 virtual bytes.'
+    : 'In '+unit+' per virtual byte of the transaction; a simple payment is a few hundred virtual bytes, and the fee is the rate times that. Below the lowest rate the network relays, the payment is refused; below what a full block takes, it waits until blocks have room. The line below says which. Leave it empty for the standard rate.';
+}
 async function feeRateVerdict(){
   if(isBtcSend()) return null;
-  const units=parseFloat(($('feeRate').value||'').trim()), h=$('feeAsset') && $('feeAsset').value;
+  const units=feeUnitsChosen(), h=$('feeAsset') && $('feeAsset').value;
   if(!(units > 0) || !h) return null;
   const m=assetMeta(h);
   return rateNote({ unitsPerVb: units, precision: m.precision ?? 8, ticker: h===POLICY_HEX ? 'tSEQ' : m.ticker, congestion: await congestionFor(h) });
@@ -2239,6 +2323,7 @@ const GAP = 20;                          // address gap limit scanned on each ch
 let btcRoot = null, btcBalance = 0n, btcUsed = new Set(), btcChangeNext = 0, btcScanLimit = GAP+1;
 const BTC_DUST = 294n;            // P2WPKH dust threshold (sats)
 const BTC_DEFAULT_FEERATE = 2;    // sat/vB default for testnet4
+const BTC_SANE_FEERATE = 50;      // sat/vB: above it a testnet4 estimate is someone's flood, not a price
 function btcInit(phrase){ btcRoot = HDKey.fromMasterSeed(mnemonicToSeedSync(phrase.trim().replace(/\s+/g,' '))); }
 function btcNode(internal, i){ return btcRoot.derive(`m/84'/1'/0'/${internal?1:0}/${i}`); }
 function btcAddr(internal, i){ return btc.p2wpkh(btcNode(internal,i).publicKey, btc.TEST_NETWORK).address; }
@@ -2281,7 +2366,7 @@ async function btcGatherUtxos(){
 
 // deterministic vbytes for a P2WPKH-only tx, and the fee field as sat/vB
 function btcVbytes(nin, nout){ return Math.ceil(10.75 + 68*nin + 31*nout); }
-function btcFeeRate(){ const v=parseFloat(($('feeRate').value||'').trim()); return v>0 ? v : BTC_DEFAULT_FEERATE; }
+function btcFeeRate(){ const v=feeUnitsChosen(); return v>0 ? v : BTC_DEFAULT_FEERATE; }
 
 // build + sign a P2WPKH transaction spending wallet utxos to `outputs` ([{address, amount}])
 async function btcBuildTx(outputs, feeRate, { unsigned = false } = {}){
@@ -5643,7 +5728,8 @@ function updateFeeForSendType(){
   const box=$('feeAssetBox'); if(box) box.style.display = btc ? 'none' : '';
   if(btc){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4); this is a parent-chain payment.'; }
   else { updateFeeAssetHint(); }
-  const l=$('feeRateLabel'); if(l) l.textContent='Fee rate ('+feeRateTicker()+'/vB, optional)';
+  const l=$('feeRateLabel'); if(l) l.textContent='Fee rate ('+feeRateTicker()+'/vB)';
+  refreshFeeRec();
 }
 // Only one scanner at a time; also stop the camera if the page is hidden/unloaded with it open.
 let activeScannerCleanup=null;
@@ -5778,7 +5864,7 @@ function buildSendPset(rows){
     if(a.isBlinded()) b = r.asset===POLICY_HEX ? b.addLbtcRecipient(a, sats) : b.addRecipient(a, sats, assetId);
     else b = b.addExplicitRecipient(a, sats, assetId);
   }
-  const fr=$('feeRate').value.trim();
+  const fr=feeUnitsChosen();
   const fa=$('feeAsset') && $('feeAsset').value;
   const feeHex=(fa && fa!==POLICY_HEX)?fa:POLICY_HEX;
   // The rate field is in the fee asset's own units per vByte (e.g. OILX/vB, tSEQ/vB) — never
@@ -5788,7 +5874,7 @@ function buildSendPset(rows){
   // Pay the fee in whatever asset the user chose, at this node's published rate. There is no 1:1
   // fallback — a fabricated rate yields a wrong fee, so an unpriced asset is a hard error
   // (feeRateFor throws). The selectors already gate unpriced assets out; this is the last guard.
-  b = fr ? applyFeeUnits(b, feeHex, parseFloat(fr)) : applyFee(b, feeHex);
+  b = fr ? applyFeeUnits(b, feeHex, fr) : applyFee(b, feeHex);
   return b.finish(wollet);
 }
 
@@ -6508,7 +6594,15 @@ $('xpubForm').onchange=()=>renderXpubForm();
 $('btnXpubCopy').onclick=()=>copyToClipboard($('xpubText').textContent, $('btnXpubCopy'));
 $('btnXpubCopyRecv').onclick=()=>copyToClipboard(($('xpubText').textContent||'').split('\n')[0], $('btnXpubCopyRecv'));
 $('feeAsset').onchange=()=>{ feeAssetManual=true; updateFeeForSendType(); paintFeeRateNote(); };
-{ let t=null; $('feeRate').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(paintFeeRateNote, 250); }); }
+{ let t=null; $('feeRate').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(()=>{ paintFeeSummary(); paintFeeRateNote(); }, 250); }); }
+$('btnFeeOpts').onclick=()=>{ const open=$('feeOpts').classList.toggle('hide')===false; $('btnFeeOpts').textContent=open ? 'Hide fee options' : 'Fee options'; if(open) refreshFeeRec(); };
+$('feeTarget').onchange=()=>refreshFeeRec();
+document.querySelectorAll('input[name=feeMode]').forEach(r=>r.onchange=()=>{
+  _feeMode=document.querySelector('input[name=feeMode]:checked').value;
+  $('feeCustom').classList.toggle('hide', _feeMode!=='custom');
+  $('feeTarget').disabled = _feeMode==='custom';
+  if(_feeMode==='custom') $('feeRate').focus();
+  paintFeeSummary(); paintFeeRateNote(); });
 
 // Say at once that a click landed: the wasm build after it is synchronous and can hold the page for
 // seconds. The label comes back when `fn` ends, however it ends (the review sheet is open by then).
