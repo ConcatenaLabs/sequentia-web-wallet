@@ -184,6 +184,18 @@ check('fill_part_rem_idx', String(recPart.plan.remainderIndex), '1');
   ok('cancel_immature_not_matured', outImm.matured === false, 'tip < expiry not matured');
   ok('cancel_immature_no_broadcast', broadcasted === null && outImm.refundTxid === null, 'no on-chain refund pre-expiry');
   check('cancel_immature_reclaim_after', String(outImm.reclaimable && outImm.reclaimable.afterHeight), '400');
+
+  // A median-time lock is judged by the tip's median time (BIP 113: final once the median time has
+  // passed it), whatever the height.
+  const T = 1792611631;
+  delisted = false; broadcasted = null;
+  const outTimeImm = await covOrderTest.cancel('off-3', { recipe, tipHeight: 99999999, tipTime: T, expiryLocktime: T }, hooks);
+  ok('cancel_timelock_not_matured_at_its_time', outTimeImm.matured === false && broadcasted === null, 'median time == lock is not past it');
+  check('cancel_timelock_reclaim_after', String(outTimeImm.reclaimable && outTimeImm.reclaimable.afterTime), String(T));
+  const outTimeNoTip = await covOrderTest.cancel('off-4', { recipe, tipHeight: 99999999, expiryLocktime: T }, hooks);
+  ok('cancel_timelock_needs_the_median_time', outTimeNoTip.matured === false, 'a height says nothing about a time lock');
+  const outTime = await covOrderTest.cancel('off-5', { recipe, tipHeight: 1, tipTime: T + 1, expiryLocktime: T }, hooks);
+  ok('cancel_timelock_matured', outTime.matured === true && broadcasted !== null && outTime.refundTxid === 'refundtxid', 'median time past the lock reclaims');
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASS');

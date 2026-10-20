@@ -40,8 +40,9 @@ test('the relay refusing an unconfirmed funding is waited out, not shown as an e
 test('cancelling before the lock expires asks first, and the row says until when', () => {
   assert.match(fn(src, 'confirmDelist'), /The covenant has no earlier way back\./);
   const cancel = src.slice(src.indexOf("host.querySelectorAll('.swcancel').forEach"));
-  assert.ok(cancel.indexOf('confirmDelist(rec, left)') < cancel.indexOf("b.textContent = 'Cancelling…'"));
-  assert.match(src, /locked on-chain until block \$\{esc\(String\(r\.expiry\)\)\}/);
+  assert.ok(cancel.indexOf('confirmDelist(rec, ls)') < cancel.indexOf("b.textContent = 'Cancelling…'"));
+  // Until when: a block for a height lock, a UTC time for a median-time lock (covenant-flow lockState).
+  assert.match(src, /locked on-chain until \$\{esc\(ls\.until\)\}, \$\{esc\(lockLeftText\(ls\)\)\} from now/);
   assert.match(src, /\$\{locked \? 'Reclaim later' : 'Reclaim'\}/);
 });
 
@@ -63,4 +64,29 @@ test('a lift waits for the maker against one deadline, a minute long', () => {
   assert.match(seqob, /export const COSIGN_WAIT_MS = 60_000;/);
   assert.match(seqob, /m = await nextMsg\(Math\.max\(1000, cosignBy - Date\.now\(\)\)\);/);
   assert.ok(!/nextMsg\(90000\)/.test(seqob));
+});
+
+test("a new order's lock is a median time a day ahead, read from the explorer's tip block", async () => {
+  const calls = [];
+  const fetch = async (u) => {
+    calls.push(u);
+    if (u.endsWith('/api/blocks/tip/hash')) return { ok: true, text: async () => 'ab12\n' };
+    if (u.endsWith('/api/block/ab12')) return { ok: true, json: async () => ({ mediantime: 1792000000 }) };
+    return { ok: false };
+  };
+  const medianTime = new Function('fetch', 'location', 'return async ' + fn(src, 'seqTipMedianTime'))(fetch, { origin: 'https://w' });
+  assert.equal(await medianTime(), 1792000000);
+  assert.deepEqual(calls, ['https://w/api/blocks/tip/hash', 'https://w/api/block/ab12']);
+  const none = new Function('fetch', 'location', 'return async ' + fn(src, 'seqTipMedianTime'))(async () => ({ ok: false }), { origin: 'https://w' });
+  assert.equal(await none(), null);
+  // placeCovenant takes it, or a height a day ahead when the explorer gives none.
+  assert.match(fn(src, 'placeCovenant'), /expiryLocktime: medianTime \? orderExpiryTime\(medianTime\) : orderExpiry\(tip\),/);
+});
+
+test('a time left reads as time, for a block lock and a median-time lock', () => {
+  const blocksAsTime = new Function('return ' + fn(src, 'blocksAsTime'))();
+  const lockLeftText = new Function('blocksAsTime', 'return ' + fn(src, 'lockLeftText'))(blocksAsTime);
+  assert.equal(lockLeftText({ time: false, blocksLeft: 90 }), 'about 1 h 30 min');
+  assert.equal(lockLeftText({ time: true, secondsLeft: 5400 }), 'about 1 h 30 min');
+  assert.equal(lockLeftText({ time: true, secondsLeft: 86400 }), 'about 24 h');
 });

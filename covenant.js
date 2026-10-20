@@ -178,8 +178,13 @@ export function buildFillLeaf(assetA, assetB, rateNum, rateDen, minLot, makerPro
   return s.bytes();
 }
 
-// buildRefundLeaf: absolute-CLTV reclaim by the maker after expiry. makerX is the
-// maker's 32-byte x-only pubkey.
+// An order's REFUND lock (expiry_locktime) is an absolute lock as CLTV reads it:
+// below LOCKTIME_THRESHOLD a block height, from it a median time past in unix
+// seconds. The same REFUND leaf takes either.
+export const LOCKTIME_THRESHOLD = 500000000;
+
+// buildRefundLeaf: absolute-CLTV reclaim by the maker after expiry (a height or
+// a median time). makerX is the maker's 32-byte x-only pubkey.
 export function buildRefundLeaf(expiryLocktime, makerX){
   makerX = hexToBytes(makerX);
   if (makerX.length !== 32) throw new Error('makerX must be 32 bytes');

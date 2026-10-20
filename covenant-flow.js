@@ -7,13 +7,17 @@
 // It owns three concerns the UI needs, none of which touch crypto or the chain:
 //
 //   1. rate math — turn a maker's "sell N of A, want M of B" into the covenant's
-//      reduced rate_num/rate_den, and the absolute REFUND expiry height.
+//      reduced rate_num/rate_den, and the absolute REFUND lock (a median time by
+//      default, or a height) and where it stands.
 //   2. the anti-clobber compose-field rule — "price + one amount derives the
 //      other, but NEVER destroys user input" (the first-order-in-empty-market
 //      bug where two linked fields wiped each other).
 //   3. the seqob.v1.Offer skeleton a covenant resting order posts (assembled from
 //      the order + CovenantTerms; signed + posted by swap.js via seqob.js).
 // ---------------------------------------------------------------------------
+
+import { LOCKTIME_THRESHOLD } from './covenant.js';
+export { LOCKTIME_THRESHOLD };
 
 // --- rate math --------------------------------------------------------------
 
@@ -49,13 +53,49 @@ export function leafProductFits(lockedAtoms, rateNum, rateDen){
   return locked * num + den - 1n <= MAX_LEAF_PRODUCT;
 }
 
-// The absolute-locktime REFUND height baked into a resting order. The maker may
-// reclaim the locked A only after this height (until then the order can only be
-// filled at the pinned price). Default horizon ~1 day of Sequentia blocks.
+// The absolute REFUND lock baked into a resting order. The maker may reclaim the
+// locked A only once it has passed (until then the order can only be filled at the
+// pinned price). It is a median time past (unix seconds, from LOCKTIME_THRESHOLD)
+// or a block height (below it); the REFUND leaf takes either.
+//
+// New orders take a median time, a day ahead. A height counts blocks, and the
+// blocks an anchor rollback disconnects are mined again later, so a height lock
+// opens later than its maker planned, by as much as the rollback undid; and an
+// operator that fills orders only while their refund is hours away has to turn a
+// height into hours at an assumed block rate. A median time opens when the
+// chain's clock passes it, rollback or not. orderExpiry (a height, ~1 day of
+// Sequentia blocks) remains for when no median time can be read.
 export const DEFAULT_ORDER_BLOCKS = 1440;
+export const DEFAULT_ORDER_SECONDS = 86400;
 export function orderExpiry(tipHeight, blocks){
   const h = Number(tipHeight) || 0;
   return h + (Number(blocks) || DEFAULT_ORDER_BLOCKS);
+}
+export function orderExpiryTime(medianTime, seconds){
+  const t = Number(medianTime) || 0;
+  if (t < LOCKTIME_THRESHOLD) throw new Error(`median time ${medianTime} is not a time (below ${LOCKTIME_THRESHOLD})`);
+  return t + (Number(seconds) || DEFAULT_ORDER_SECONDS);
+}
+export function isTimeLock(expiry){ return Number(expiry) >= LOCKTIME_THRESHOLD; }
+
+// lockState says where an order's REFUND lock stands at the tip
+// ({ height, medianTime }, either 0 when unknown): whether a refund spent now is
+// final (a height lock once the tip has reached it, since the spend goes in a
+// later block; a time lock once the tip's median time has passed it, BIP 113),
+// how long is left, and a phrase for when it opens. known is false when the tip
+// value that lock needs is unknown.
+export function lockState(expiry, tip){
+  const e = Number(expiry);
+  if (isTimeLock(e)){
+    const t = Number(tip && tip.medianTime) || 0;
+    const until = new Date(e * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    if (!t) return { known: false, open: false, time: true, until };
+    return { known: true, open: t > e, time: true, secondsLeft: Math.max(0, e - t), until };
+  }
+  const h = Number(tip && tip.height) || 0;
+  const until = 'block ' + e;
+  if (!h) return { known: false, open: false, time: false, until };
+  return { known: true, open: h >= e, time: false, blocksLeft: Math.max(0, e - h), until };
 }
 
 // --- compose-field rule (anti-clobber) --------------------------------------
@@ -161,4 +201,4 @@ export function buildCovenantOffer({ assetA, assetB, sellAtoms, recvAtoms, coven
   };
 }
 
-export const __test__ = { gcdBig, computeRate, leafProductFits, orderExpiry, deriveOtherField, buildCovenantOffer, fillRestSplit };
+export const __test__ = { gcdBig, computeRate, leafProductFits, orderExpiry, orderExpiryTime, lockState, deriveOtherField, buildCovenantOffer, fillRestSplit };
