@@ -2282,7 +2282,7 @@ function paintGuide(){
   const names = ['Assets', 'Amount', 'Settlement', 'Place'];
   g.innerHTML = names.map((n, i) => {
     const k = i + 1, cls = k < step ? 'gs done' : (k === step ? 'gs now' : 'gs');
-    return `<span class="${cls}"><b>${k < step ? '✓' : k}</b>${n}</span>`;
+    return `<span class="${cls}"><b>${k < step ? '✓' : k}</b><span class="gn">${n}</span></span>`;
   }).join('');
   // Nothing past the assets until both are chosen.
   for (const id of ['swPriceSec', 'swSettleSec', 'swFeeRow']){ const e = $(id); if (e) e.classList.toggle('hide', step === 1); }

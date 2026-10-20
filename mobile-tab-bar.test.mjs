@@ -29,3 +29,12 @@ test('it hides while the keyboard is up', () => {
   assert.match(html, /window\.visualViewport\.addEventListener\('resize', sync\)/);
   assert.match(html, /vv\.height < window\.innerHeight \* 0\.75/);
 });
+
+test('the swap steps stay on one line and the flip button clears the balance', () => {
+  assert.match(phone, /\.swguide\{flex-wrap:nowrap;/);
+  assert.match(phone, /#swPayPane\{padding-bottom:30px\}/);
+  assert.match(phone, /#swPayPane \+ \.swflip-wrap \+ \.swpane\{padding-top:30px\}/);
+  assert.match(html, /@media \(max-width:360px\)\{\n    \.swguide \.gs\.done \.gn\{display:none\}/);
+  const swap = readFileSync(new URL('./swap.js', import.meta.url), 'utf8');
+  assert.match(swap, /<b>\$\{k < step \? '✓' : k\}<\/b><span class="gn">\$\{n\}<\/span>/);
+});
