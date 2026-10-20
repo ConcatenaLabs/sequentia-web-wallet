@@ -375,6 +375,7 @@ works normally without the restricted rows.
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
 | `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
 | `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
+| `covenant-sim.js` | SeqDEX's Simplicity order (the template `seqdex/order`): its address from the terms and the pinned commitment root, and a fill's witness from the template's pinned programs, with no compiler; `seqob.js` signs and verifies its offers (`simplicity_covenant`). Pinned to the template's vectors as seqdex vendors them. |
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
 | `sbtc.js` | Thin client for the SBTC custody bridge (address allocation only; it moves no funds). |
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
@@ -487,7 +488,9 @@ covenant scripts (`covenant.test.mjs`, `covenant-byteorder.test.mjs`, `covenant-
 `node covenant-byteorder.test.mjs`. `covenant-fills.test.mjs` holds the multi-order fill layout to
 the vectors seqdex's Go planner writes (`covenant-fill-vectors.json`), and
 `covenant-offer-move.test.mjs` verifies Go-signed covenant offers before and after the relay moves
-their outpoint (`covenant-offer-vectors.json`).
+their outpoint (`covenant-offer-vectors.json`). `covenant-sim.test.mjs` holds the Simplicity order
+to the template's vectors and programs (`seqdex-order-vectors.json`, `seqdex-order-fills.json`)
+and its offers to Go's signed bytes (`simplicity-offer-vectors.json`).
 
 `node tooling/sign-tab-probe.mjs` opens the wallet in a headless Chromium, creates a wallet,
 signs a message with the staking key from the Sign tab, and recovers a key from the signature

@@ -133,6 +133,13 @@ at `(txid, 2k+1)` after a fill without its offline maker signing again: `covenan
 (a copy of seqdex's `daemon/internal/seqob/offer/testdata/covenant_offer_vectors.json`) holds Go's
 canonical bytes and signature for an offer served at its funding outpoint and again after a move,
 and `covenant-offer-move.test.mjs` verifies both through `normRelayOffer` and `verifyOffer`.
+The Simplicity order of the template `seqdex/order` (`covenant-sim.js`: its address from the terms
+and the pinned commitment root, and a fill's witness from the template's pinned programs, no
+compiler) is held to `seqdex-order-vectors.json` and `seqdex-order-fills.json`, copies of seqdex's
+`daemon/pkg/covenant/seqdex_order/vectors.json` and `fills.json`, and its offer member
+(`simplicity_covenant`, field 25) to `simplicity-offer-vectors.json`, a copy of seqdex's
+`daemon/internal/seqob/offer/testdata/simplicity_offer_vectors.json`, by `covenant-sim.test.mjs`.
+When seqdex re-pins the template, copy all three here.
 
 ## Fund-safety idioms that are already established
 
