@@ -3255,6 +3255,7 @@ function initContracts(){
       return out;
     },
     receiveAddress: ()=>{ const a=wollet.address(addrIndex==null?undefined:addrIndex).address(); return (a.toUnconfidential?a.toUnconfidential():a).toString(); },
+    walletCoins: ()=> lwk.ContractSpend.walletCoins ? JSON.parse(lwk.ContractSpend.walletCoins(wollet)) : [],
     assetMeta, store: localStorage, el,
   }, $('contractsRoot'));
 }

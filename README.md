@@ -229,7 +229,7 @@ descriptor and its programs) and an instance of it (the template's values on thi
 kit's contract engine does the work; the tab asks it and shows what it answers.
 
 - **Template**: one the kit carries (`sequentia/one-key`, `sequentia/one-key-exit`,
-  `sequentia/faucet-drip`), or a descriptor pasted with its sources (each with its includes
+  `sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`), or a descriptor pasted with its sources (each with its includes
   resolved, as `seqc expand` prints it). The engine checks a pasted template with the
   contracts' own reader and pinned compiler, and only then adds it to this wallet's list. The
   tab shows this wallet's contract key (`m/8383h/1h/0h/0/0`), the key a template names for it.
@@ -237,15 +237,22 @@ kit's contract engine does the work; the tab asks it and shows what it answers.
 - **Coin and path**: the explicit coins the address holds, and the way to spend.
 - **Spend**: for the faucet drip covenant's drip, the recipient (this wallet by default), the
   amount and a fee rate in the dripped asset's own units; for any other path, the request
-  written by hand (its outputs, each saying whether it returns to the contract, pays this
-  wallet, pays someone, or is the fee).
+  written by hand: its inputs (the contract coin, this wallet's own coins, a foreign coin spent
+  through a script leaf with its witness given) and its outputs, each saying whether it returns
+  to the contract, pays this wallet, pays someone, is the fee, opens a contract, or recreates a
+  foreign coin. **Fund it from this wallet** lets the wallet add its own coins for what the
+  request's inputs do not cover, and the change: a Pignus take, top-up or repayment is written
+  this way.
 
 **Review** shows the approval: the template by the registry's name (looked up by the wallet,
 never taken from the template), else its commitment root; the path, who can take it and what it
-does; every parameter by role; this wallet's balance change in every asset; where the coins
-go; and what was checked. The wallet signs only when the template is on its list, the engine
-recomputed the output, it ran the program against the final transaction, and the key is a
-contract key. **Sign and broadcast** signs the digest of exactly the screen shown. A spend
+does; every parameter by role; every input by what it is; this wallet's balance change in
+every asset, counting what its own coins pay; any contract an output opens; where the coins go;
+and what was checked. The engine spends a wallet coin only as this wallet's own record of it
+says, and a foreign coin only as the chain's record of it says, which the wallet reads itself.
+The wallet signs only when the template is on its list, the engine recomputed the output, it
+ran every program against the final transaction, and the key is a contract key or, on a path
+that takes no signature, none; its funding keys sign only its own coins. **Sign and broadcast** signs the digest of exactly the screen shown. A spend
 the engine refuses (a relative lock not yet passed, an amount the program forbids, an output
 it cannot account for) is refused before anything is signed, in the engine's words.
 
@@ -488,7 +495,13 @@ whose faucet key is the page's contract key is funded, dripped from through the 
 screen and confirmed, and a drip before the interval, one above the tier and one whose
 successor is not the covenant are each refused before signing. The tab runs there on
 `tooling/contracts-harness.html`, which mounts the same module on the regtest network, since
-`index.html` is bound to the testnet. `node tooling/contracts-tab-probe.mjs` checks the tab in
+`index.html` is bound to the testnet. `SEQUENTIA_BIN=<Sequentia>/src node
+tooling/contracts-vault-regtest.mjs <evidence-dir>` runs a Pignus version 2 loan through the same
+tab: a take that opens a vault, a top-up and a repayment, each written by hand, funded from the
+wallet, shown and signed from the approval screen and confirmed, and a wallet input said to be
+in another asset refused. Its chain is anchored to a regtest parent (the kit reads anchored
+headers to sync the wallet), served through `tooling/esplora-shim.mjs`.
+`node tooling/contracts-tab-probe.mjs` checks the tab in
 `index.html` itself: hidden with developer mode off, shown with it on, reading a template.
 
 `node tooling/leaves-drive.mjs <evidence-dir>` drives developer mode in a headless Chromium

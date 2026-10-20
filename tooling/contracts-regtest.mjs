@@ -164,7 +164,7 @@ try {
   for (const want of ['Sign this contract spend?', 'sequentia/faucet-drip v1 (registered)', 'drip (simplicity leaf drip)', 'the holder of FAUCET_KEY',
     'Dripped asset [asset]', 'tSEQ (' + policy + ')', 'Faucet key [pubkey]', 'this wallet\'s contract key, m/8383h/1h/0h/0/0',
     'Tier 1: a drip pays at most [amount]', '500.00000000 tSEQ', 'Recovery delay [sequence]', '2 × 512 s = 1024 s',
-    'Your balance change', 'This wallet', '-500.00000', 'Network fee', 'the program ran against the final transaction', 'is this wallet\'s contract key at m/8383h/1h/0h/0/0']) {
+    'Your balance change', 'This wallet', '-500.00000', 'Network fee', 'the contract\'s program (input 0) ran against the final transaction', 'is this wallet\'s contract key at m/8383h/1h/0h/0/0']) {
     ok(screen.toLowerCase().includes(want.toLowerCase()), 'the approval shows: ' + want)
   }
   await shot('contracts-02-approval.png')

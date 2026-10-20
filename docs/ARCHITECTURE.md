@@ -277,6 +277,6 @@ also run on their own with `node <file>`. The swap modules additionally export `
 hooks (leg operations, state accessors) for headless driving, and the real
 WASM-signer-over-Noise path is proven by `tooling/lsp/device-harness.mjs` against a live
 backend. `tooling/stake-records-regtest.mjs` runs the staking flows against a real node.
-`tooling/contracts-regtest.mjs` drives developer mode's Contracts tab against a private regtest
-chain (see the README). `tooling/leaves-drive.mjs` drives developer mode's Leaves tab in a headless Chromium against a
+`tooling/contracts-regtest.mjs` and `tooling/contracts-vault-regtest.mjs` drive developer mode's
+Contracts tab against a private regtest chain (see the README). `tooling/leaves-drive.mjs` drives developer mode's Leaves tab in a headless Chromium against a
 local regtest operator (see the README).
