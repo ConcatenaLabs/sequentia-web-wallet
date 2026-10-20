@@ -4698,6 +4698,7 @@ function initSwapTab(){
                                               // courier resume find the maker's asset HTLC on-chain
     SEQ_ESPLORA: ESPLORA,                     // Sequentia esplora for the claim broadcast
     onExit: () => renderSwap(),               // no swap left -> back to the composer (single entry point)
+    notice: (msg) => swapNotice(msg),
     // The daemon's cross-chain API. Same one-port daemon as same-chain in
     // production; overridable for local testing via a global.
     XDEX: (typeof window!=='undefined' && window.SEQ_XDEX_BASE) || (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
@@ -4717,6 +4718,7 @@ function initSwapTab(){
     btcLeg, seqLeg,                            // the BTC-leg + SEQ-leg bridges
     SEQ_ESPLORA: ESPLORA,
     onExit: () => renderSwap(),
+    notice: (msg) => swapNotice(msg),
     XDEX: (typeof window!=='undefined' && window.SEQ_XDEX_BASE) || (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
   });
   // BOOT RESUME for the reverse flow. renderReverse (which arms every reverse resume path,
@@ -4955,6 +4957,22 @@ function initSwapTab(){
   });
 }
 function renderActiveSwap(){ renderSwap(); }
+// A message about a trade that did not happen, shown above the composer's error line and kept
+// until it is closed or an amount is typed: the composer's own error line is rewritten on every
+// quote, so a reason written there was gone before anyone could read it.
+function swapNotice(msg){
+  const err=$('swErr'); if(!err) return;
+  let n=$('swNotice');
+  if(!n){
+    n=el('div','status err'); n.id='swNotice'; n.style.cssText='display:flex;gap:10px;align-items:flex-start';
+    err.parentNode.insertBefore(n, err);
+    for(const id of ['swPayAmt','swRecvAmt']){ const i=$(id); if(i) i.addEventListener('input', ()=>{ const x=$('swNotice'); if(x) x.remove(); }); }
+  }
+  n.innerHTML='';
+  n.appendChild(el('span','grow', msg));
+  const x=el('button','ghost','×'); x.setAttribute('aria-label','Close'); x.style.cssText='padding:0 8px;line-height:1.4'; x.onclick=()=>n.remove();
+  n.appendChild(x);
+}
 
 // ---------- sync + balance ----------
 // ---------- what the wallet knew, and when ----------

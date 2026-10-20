@@ -307,7 +307,9 @@ function armParkSweeper(){
 function bounceToComposer(msg){
   SWAP = null; renderStepper();
   if (C.onExit) C.onExit();
-  const e = document.getElementById('swErr'); if (e && msg) e.textContent = msg;
+  // The composer repaints and quotes again on exit, which clears #swErr at once: a message written
+  // there vanished before it could be read. The notice stays until it is closed.
+  if (msg) { if (C.notice) C.notice(msg); else { const e = document.getElementById('swErr'); if (e) e.textContent = msg; } }
 }
 
 export function initXswap(ctx){
@@ -620,8 +622,22 @@ async function runForwardCourier(q){
           throw await abortTerms(s, `the maker quoted ${C.fmtAtoms(tBtc,8)} BTC, not the ${C.fmtAtoms(wantBtc,8)} BTC that slice prices to at the signed ratio`);
         if (!makerBtcClaimPub || !makerSeqRefundPub)
           throw await abortTerms(s, 'the maker’s terms were missing a key');
-        if (!(bl > sl))
-          throw await abortTerms(s, `bad locktime ordering (T_btc ${bl} must exceed T_seq ${sl})`);
+        // Each timeout is a height on ITS OWN chain: T_btc on Bitcoin testnet4, T_seq on Sequentia.
+        // This compared the two (T_btc > T_seq), which held only while Sequentia's height was below
+        // testnet4's; Sequentia makes a block a minute and testnet4 one in ten, so once it passed,
+        // every on-chain BTC take was refused here as "No maker completed the handshake". Check each
+        // against its own tip, as the Go taker does (xdriver.go RunTakerForward): T_btc ahead of the
+        // testnet4 tip by at most MAX_BTC_LOCK_DELTA, T_seq leaving MIN_SEQ_CLAIM_WINDOW to claim in.
+        {
+          const [btcTip, seqTip] = await Promise.all([btcTipHeight(), seqTipHeight()]);
+          const seqNow = seqTip >= 0 ? seqTip : (() => { try { return C.wollet.tip().height(); } catch { return -1; } })();
+          if (btcTip < 0 || seqNow < 0)
+            throw await abortTerms(s, 'could not read the chain tips to check the maker’s timeouts');
+          if (!(bl > btcTip && bl <= btcTip + MAX_BTC_LOCK_DELTA))
+            throw await abortTerms(s, `the maker’s Bitcoin timeout (block ${bl}) is not within ${MAX_BTC_LOCK_DELTA} blocks of the testnet4 tip ${btcTip}`);
+          if (!(sl >= seqNow + MIN_SEQ_CLAIM_WINDOW))
+            throw await abortTerms(s, `the maker’s Sequentia timeout (block ${sl}) leaves less than ${MIN_SEQ_CLAIM_WINDOW} blocks after the tip ${seqNow} to claim in`);
+        }
         // 2) The slice we take: takeSeq = the composer-requested amount (== the whole offer for a whole
         //    take). Refuse an over-ask (> the offer) or a non-positive slice BEFORE any BTC moves. Price the
         //    slice at the SIGNED offer's OWN ratio, CEIL (the maker never underpaid) — the SAME value the
@@ -1350,8 +1366,8 @@ async function btcTipHeight(){
   try {
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
     const r = await fetch(base + '/blocks/tip/height', { signal: AbortSignal.timeout(6000) });
-    const h = Number((await r.text()).trim());
-    if (Number.isFinite(h)) return h;
+    const t = r.ok ? (await r.text()).trim() : '';
+    if (/^\d+$/.test(t)) return Number(t);   // an error page or an empty answer is not height 0
   } catch {}
   return -1;
 }
@@ -1362,6 +1378,9 @@ async function btcTipHeight(){
 // — if the maker's refund confirms first, our claim is orphaned but s is already public, and the maker
 // claims our BTC with s. Refusing to claim (routing to refund) is the only safe move there.
 const SEQ_REFUND_MARGIN = 3;   // Sequentia blocks of safety before T_seq
+// The bounds a maker's timeouts must meet, each on its own chain (the Go taker's defaults).
+const MAX_BTC_LOCK_DELTA = 400;    // T_btc no further than this many testnet4 blocks past the tip
+const MIN_SEQ_CLAIM_WINDOW = 120;  // T_seq at least this many Sequentia blocks past the tip
 async function seqTipHeight(){
   try {
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/lsp';

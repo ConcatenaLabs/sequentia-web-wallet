@@ -270,6 +270,13 @@ const MIN_SEQ_CLAIM_WINDOW = 120;
 // And on the parent chain: below this many blocks before T_btc we could no longer
 // claim the maker's BTC after it reveals, so funding would be one-sided.
 const MIN_BTC_CLAIM_WINDOW = 6;
+// The bounds on a maker's timeouts, each on its own chain (the Go reverse taker's defaults).
+const MIN_BTC_CLAIM_DELTA = 30;   // T_btc at least this many testnet4 blocks past the tip
+const MAX_SEQ_LOCK_DELTA = 480;   // T_seq at most this many Sequentia blocks past the tip
+const BTC_CLAIM_MARGIN = 6;
+// The testnet4 blocks that outlast `seqDelta` Sequentia blocks, plus a margin
+// (xdriver_reverse.go reverseMinBtcDelta: ceil(seqDelta * 90 / 150) + margin).
+function reverseMinBtcDelta(seqDelta){ return Math.floor((Number(seqDelta) * 90 + 149) / 150) + BTC_CLAIM_MARGIN; }
 async function anchorTipStatus(){
   if (C && C.anchorTipStatus) return C.anchorTipStatus();
   try {
@@ -586,8 +593,24 @@ async function verifyMakerBtcLeg(){
     return { ok:false, reason:'maker BTC-leg script does not match the agreed terms - do not fund' };
   if (SWAP.btc_leg.amount < SWAP.btc_amount)
     return { ok:false, reason:`maker locked ${SWAP.btc_leg.amount} BTC atoms, less than the agreed ${SWAP.btc_amount}` };
-  if (!(SWAP.btc_locktime > SWAP.seq_locktime))
-    return { ok:false, reason:'bad timeout ordering (T_btc must exceed T_seq)' };
+  // Each timeout is a height on its own chain, so "T_btc > T_seq" compared Bitcoin testnet4 blocks
+  // with Sequentia blocks: true only while Sequentia's height was below testnet4's, and false for
+  // every sale once it passed it. Check them as the Go taker does (xdriver_reverse.go
+  // RunTakerReverse): T_btc far enough past the testnet4 tip to claim in, T_seq not too far past
+  // the Sequentia tip, and the Bitcoin time left outlasting the Sequentia time left (B1 ordering).
+  {
+    let btcTip = NaN, seqTip = NaN;
+    try { [btcTip, seqTip] = await Promise.all([btcTipHeight(), seqTipHeight()]); } catch {}
+    if (!Number.isFinite(btcTip) || !Number.isFinite(seqTip))
+      return { ok:false, reason:'could not read the chain tips to check the maker’s timeouts - do not fund' };
+    const tBtc = Number(SWAP.btc_locktime), tSeq = Number(SWAP.seq_locktime);
+    if (tBtc < btcTip + MIN_BTC_CLAIM_DELTA)
+      return { ok:false, reason:`the maker’s Bitcoin timeout (block ${tBtc}) is less than ${MIN_BTC_CLAIM_DELTA} blocks past the testnet4 tip ${btcTip} - do not fund` };
+    if (tSeq > seqTip + MAX_SEQ_LOCK_DELTA)
+      return { ok:false, reason:`the maker’s Sequentia timeout (block ${tSeq}) is more than ${MAX_SEQ_LOCK_DELTA} blocks past the tip ${seqTip} - do not fund` };
+    if (tBtc - btcTip < reverseMinBtcDelta(tSeq - seqTip))
+      return { ok:false, reason:`the maker’s Bitcoin timeout does not outlast the Sequentia one (${tBtc - btcTip} testnet4 blocks against ${tSeq - seqTip} Sequentia blocks) - do not fund` };
+  }
 
   // T_seq FLOOR. Ordering alone is not enough: a maker can satisfy
   // T_btc > T_seq while still minting a T_seq only a few blocks above the
@@ -661,7 +684,9 @@ async function onOpen(){
       const r = await driveReverse(q);   // auto-drives; returns 'retry' iff no maker locked (pre-lock)
       if (r === 'retry'){
         if (i < attempts.length - 1){ C.toast && C.toast('That maker didn’t respond - showing the next best offer.'); continue; }
-        if (C.$('xrswapErr')) C.$('xrswapErr').textContent = `No maker responded${attempts.length > 1 ? ` (tried ${attempts.length} offers)` : ''}. Nothing was spent - try again shortly.`;
+        const _m = `No maker responded${attempts.length > 1 ? ` (tried ${attempts.length} offers)` : ''}. Nothing was spent - try again shortly.`;
+        if (C.$('xrswapErr')) C.$('xrswapErr').textContent = _m;
+        if (C.notice) C.notice(_m);
       }
       return;   // committed / settled / terminal — done
     } catch (e){

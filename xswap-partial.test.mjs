@@ -41,6 +41,8 @@ function installEnv(){
     const u = String(url);
     if (u.includes('/anchor?')) return { ok: true, json: async () => ({ ok: true, anchor_height: 142600, anchor_status: 'ok', poscertified: true }) };
     if (u.endsWith('/anchor'))   return { ok: true, json: async () => ({ ok: true, height: 16500, anchor_status: 'ok' }) };
+    // The testnet4 tip: T_BTC sits 380 blocks past it, inside the 400 a taker accepts.
+    if (u.endsWith('/blocks/tip/height')) return { ok: true, text: async () => '142520' };
     return { ok: false, status: 404, text: async () => '', json: async () => ({}) };
   };
 }
@@ -83,7 +85,9 @@ function scriptedSession(scripted){
 // ===========================================================================
 const ASSET = 'GOLDASSET';
 const WHOLE_SEQ = 5000000n, WHOLE_BTC = 25001n;   // the whole resting ask (25001 sats makes the ratio non-integer -> proves CEIL)
-const T_BTC = 142700, T_SEQ = 16740, CONF_H = 142600;
+// Each timeout on its own chain, as makers set them: T_BTC 300 testnet4 blocks past the BTC-leg
+// height, T_SEQ 400 Sequentia blocks past the reverse tests' tip, which the Bitcoin time outlasts.
+const T_BTC = 142900, T_SEQ = 16740, CONF_H = 142600;
 const HASH = 'cd'.repeat(32), SECRET = 'ab'.repeat(32);
 const SEQ_CLAIM_PUB = '02seqclaim', MAKER_BTC_CLAIM = '02mbc', MAKER_SEQ_REFUND = '02msr', BTC_REFUND_PUB = '02btcrefund';
 const redeemOf = (h, claim, ref, lock) => `R:${h}:${claim}:${ref}:${lock}`;

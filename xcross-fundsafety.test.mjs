@@ -68,7 +68,9 @@ function scriptedSession(scripted){
 // ===========================================================================
 const ASSET = 'GOLDASSET';
 const WHOLE_SEQ = 5000000n, WHOLE_BTC = 25001n;
-const T_BTC = 142700, T_SEQ = 16740, CONF_H = 142600;
+// Each timeout on its own chain, as makers set them: T_BTC 300 testnet4 blocks past the BTC-leg
+// height, T_SEQ 400 Sequentia blocks past the reverse tests' tip, which the Bitcoin time outlasts.
+const T_BTC = 142900, T_SEQ = 16740, CONF_H = 142600;
 const R_HASH = 'ef'.repeat(32);
 const R_TAKER_BTC_CLAIM = '02tbc', R_TAKER_SEQ_REFUND = '02tsr', R_MAKER_SEQ_CLAIM = '02msc', R_MAKER_BTC_REFUND = '02mbr';
 const redeemOf = (h, claim, ref, lock) => `R:${h}:${claim}:${ref}:${lock}`;
