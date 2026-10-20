@@ -14,7 +14,7 @@
 import assert from 'node:assert';
 import test from 'node:test';
 
-import { quoteRoom, annualBpsFor, parseMonths, expiresAt, MONTHS_ALLOWED, roomFromStock } from './inbound-price.mjs';
+import { quoteRoom, annualBpsFor, parseMonths, expiresAt, MONTHS_ALLOWED } from './inbound-price.mjs';
 import { readFileSync } from 'node:fs';
 
 // quoteInboundFee in lsp-server.mjs is quoteRoom with its configuration: the defaults below. A
@@ -206,28 +206,18 @@ test('a debt cap is what stops deferred becoming unlimited free liquidity', () =
 
 // ROOM THE SERVICE CANNOT OPEN IS NOT SOLD. The room is the LP's own coins on its side of the
 // channel. A wallet bought 2 OILX of room while the LP held 0.96 OILX: the fee was taken, then
-// fundchannel failed for want of the coins.
-const STOCK = { reserve: 5000, headroomBps: 1500 };   // provisionInbound's defaults
-const funded = (amount) => Math.ceil(amount * (1 + STOCK.headroomBps / 10000)) + STOCK.reserve;
-
-test('the room the stock can open is what provisionInbound can fund from it', () => {
-  const have = 95_900_000;                                  // 0.959 OILX
-  const max = roomFromStock(have, STOCK);
-  assert.ok(funded(max) <= have, 'the largest room sold must be fundable');
-  assert.ok(funded(max + 2) > have, 'and it is the largest');
-  assert.ok(max < 200_000_000, 'so 2 OILX of room is refused');
-  assert.equal(roomFromStock(4000, STOCK), 0, 'less than the reserve opens nothing');
-  assert.equal(roomFromStock(0, STOCK), 0);
-});
-
-test('the quote and the purchase both ask the stock, and the purchase asks before charging', () => {
+// fundchannel failed for want of the coins. The arithmetic is inboundRoomFundable
+// (inbound-limits.test.mjs); this pins where the server asks it.
+test('the quote and the purchase both ask the LP, and the purchase asks before charging', () => {
   const src = readFileSync(new URL('./lsp-server.mjs', import.meta.url), 'utf8');
   const quote = src.slice(src.indexOf("url.pathname === '/channel/inbound/quote'"));
-  assert.ok(quote.indexOf('roomStock(assetId)') > 0 && quote.indexOf('roomStock(assetId)') < quote.indexOf('return send(res, q.ok ? 200 : 400'),
-    'the quote refuses room the stock cannot open');
+  const q = quote.indexOf('inboundFundingProblem(assetId, q.amount)');
+  assert.ok(q > 0 && q < quote.indexOf('return send(res, q.ok ? 200 : 400'), 'the quote refuses room the LP cannot fund');
   const post = src.slice(src.indexOf("req.method === 'POST' && url.pathname === '/channel/inbound'"));
-  const stock = post.indexOf('roomStock(assetId)');
-  assert.ok(stock > 0, 'the purchase asks the stock');
+  const stock = post.indexOf('inboundFundingProblem(assetId, openAmount)');
+  assert.ok(stock > 0, 'the purchase asks the LP');
   for (const charge of ['verifyInboundFeePaid(', 'recordFeeUse(', 'debtAdd(']) assert.ok(stock < post.indexOf(charge), 'before ' + charge);
   assert.ok(stock < post.indexOf('provisionInbound('), 'and before funding');
+  const prov = src.slice(src.indexOf('async function provisionInbound('));
+  assert.ok(prov.indexOf('inboundFundingProblem(assetId, amount)') < prov.indexOf("lnrpc('fundchannel'"), 'provisionInbound asks again before fundchannel');
 });

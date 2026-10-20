@@ -2,7 +2,7 @@
 // And a prepaid fee pays for one purchase.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { rateOf, assetInboundLimits, feeReuseProblem } from './inbound-limits.mjs';
+import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee } from './inbound-limits.mjs';
 
 const USDX = '1f'.repeat(32), TSEQ = 'c8'.repeat(32), GOLD = '3a'.repeat(32);
 // Reference limits: 10 to 10,000 reference units, a fee of at least 1 (in reference atoms, 1e8 a unit).
@@ -55,4 +55,43 @@ test('a fee transaction pays for one purchase, and may only be used again to ret
   assert.match(feeReuseProblem(prior, req({ amount: 5_000_001 })), /already paid/);
   assert.match(feeReuseProblem(prior, req({ nodeKey: 'seq:a:02bb' })), /already paid/);
   assert.match(feeReuseProblem(prior, req({ assetId: TSEQ })), /already paid/);
+});
+
+test('room is sold only as far as the LP can fund it', () => {
+  const k = { headroomBps: 1500, reserve: 5000 };
+  // 500 USDX of room is funded with 575 USDX + 5000 atoms: the channel of the 20/10 failure.
+  assert.equal(inboundFundAtoms(500e8, k), 57_500_005_000);
+  assert.equal(inboundRoomFundable(57_500_005_000, k), 500e8);
+  assert.equal(inboundRoomFundable(57_500_004_999, k), 500e8 - 1);
+  assert.ok(inboundFundAtoms(inboundRoomFundable(109_969_946, k), k) <= 109_969_946);
+  assert.equal(inboundRoomFundable(5000, k), 0);
+  assert.equal(inboundRoomFundable(0, k), 0);
+});
+
+test('the LP counts only its confirmed, unreserved outputs of the asset', () => {
+  const lf = { outputs: [
+    { status: 'confirmed', asset: USDX, amount_msat: 100e8 * 1000 },
+    { status: 'confirmed', asset: USDX.toUpperCase(), amount_msat: 1e8 * 1000 },
+    { status: 'unconfirmed', asset: USDX, amount_msat: 50e8 * 1000 },
+    { status: 'confirmed', asset: USDX, amount_msat: 7e8 * 1000, reserved: true },
+    { status: 'confirmed', asset: GOLD, amount_msat: 9e8 * 1000 },
+    { status: 'confirmed', amount_msat: 3e8 * 1000 },                          // the policy asset, untagged
+  ] };
+  assert.equal(lpFreeAtoms(lf, USDX), 101e8);
+  assert.equal(lpFreeAtoms(lf, TSEQ, TSEQ), 3e8);
+  assert.equal(lpFreeAtoms(lf, TSEQ), 0);
+  assert.equal(lpFreeAtoms(null, USDX), 0);
+});
+
+test('a fee paid for room never opened is found for that node and asset, and an opened one is not', () => {
+  const fees = new Map(Object.entries({
+    aa: { node_key: 'n1', asset: USDX, amount: 500e8, months: 1 },
+    bb: { node_key: 'n1', asset: USDX.toUpperCase(), amount: 600e8, months: 3 },
+    cc: { node_key: 'n1', asset: USDX, amount: 900e8, opened_at: 1 },
+    dd: { node_key: 'n2', asset: USDX, amount: 999e8 },
+    ee: { node_key: 'n1', asset: GOLD, amount: 999e8 },
+  }));
+  assert.deepEqual(paidWaitingFee(fees, 'n1', USDX), { fee_txid: 'bb', amount: 600e8, months: 3 });
+  assert.equal(paidWaitingFee(fees, 'n3', USDX), null);
+  assert.deepEqual(paidWaitingFee(Object.fromEntries(fees), 'n2', USDX), { fee_txid: 'dd', amount: 999e8, months: null });
 });

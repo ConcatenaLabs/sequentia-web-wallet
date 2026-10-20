@@ -1,3 +1,5 @@
+import { rateText } from './fee-panel.js';
+
 // What Send says about the fee before anything is signed, worded as Sequentia Qt's fee selector
 // (src/qt/feeselectionwidget.cpp) says it, from what the nodes the wallet sends to report.
 //
@@ -59,13 +61,13 @@ function units(x) {
 export function rateNote({ unitsPerVb, precision, ticker: t, congestion: c }) {
   if (!(unitsPerVb > 0) || !c) return null;
   const typed = unitsPerVb * Math.pow(10, precision ?? 8) * 1000;   // atoms per kvB
-  const perVb = (atomsKvb) => units(atomsKvb / 1000 / Math.pow(10, precision ?? 8)) + ' ' + t + '/vB';
+  const perVb = (atomsKvb) => rateText(atomsKvb, { ticker: t, precision: precision ?? 8 }, null, '');
   const floor = Number(c.mempoolminfee_asset_atoms_per_kvb), next = Number(c.next_block_min_asset_atoms_per_kvb);
   if (c.accepted === false) {
     return { level: 'no', block: true, text: 'The block producer does not accept fees in ' + t + '. Pick another fee asset.' };
   }
   if (floor > 0 && typed < floor) {
-    return { level: 'no', block: true, text: 'Below ' + perVb(floor) + ' the network will not relay this transaction at all. Raise the rate, or leave it empty for the default.' };
+    return { level: 'no', block: true, text: 'Below ' + perVb(floor) + ' the network will not relay this transaction at all. Raise the rate, or choose Recommended.' };
   }
   const backlog = Math.max(1, Math.ceil(Number(c.backlog_blocks) || 0));
   if (c.next_block_full && next > 0) {

@@ -110,8 +110,8 @@ import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, asse
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
-import { rateOf, assetInboundLimits, feeReuseProblem } from './inbound-limits.mjs';
-import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt, roomFromStock } from './inbound-price.mjs';
+import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee } from './inbound-limits.mjs';
+import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 
 function reqEnv(name) {
@@ -776,25 +776,6 @@ async function frontableInventory() {
     } catch { /* BTC-LN node down -> no BTC-leg fronting advertised */ }
   }
   return { assets, btc };
-}
-
-// How much room to receive in an asset the service can open right now: the LP's confirmed, unreserved
-// coins of it (frontableInventory), less the reserve and headroom provisionInbound funds on top of the
-// amount sold. Room was sold, and its fee taken, without asking: a wallet bought 2 OILX of room while
-// the LP held 0.96 OILX, and fundchannel failed after the fee was paid. Null when no LP is configured.
-async function roomStock(assetId) {
-  if (!CFG.subasLpRpc || !assetId) return null;
-  try {
-    const inv = await frontableInventory();
-    return roomFromStock(inv.assets[String(assetId).toLowerCase()] || 0,
-      { reserve: CFG.subasInboundReserve, headroomBps: CFG.subasInboundHeadroomBps });
-  } catch { return null; }
-}
-function stockRefusal(stock, assetId) {
-  const label = assetLabel(assetId) || 'this asset';
-  return stock > 0
-    ? `the service can open at most ${stock} atoms of room to receive in ${label} right now`
-    : `the service holds no ${label} to open room to receive right now`;
 }
 
 async function status(deviceKeys = []) {
@@ -1807,10 +1788,16 @@ const inboundFees = (() => {
   }
 })();
 function recordFeeUse(txid, use) {
-  inboundFees.set(String(txid).toLowerCase(), { ...use, at: Date.now() });
+  inboundFees.set(String(txid).toLowerCase(), { at: Date.now(), ...use });
   if (!FEES_FILE) return;
   try { fs.writeFileSync(FEES_FILE, JSON.stringify(Object.fromEntries(inboundFees)), 'utf8'); }
   catch (e) { console.error('[lsp] could not persist inbound fees:', e && e.message); }
+}
+// The channel a prepaid fee paid for is open: that fee has bought its room and buys nothing more.
+function markFeeOpened(txid, opened) {
+  const k = String(txid || '').toLowerCase(), u = inboundFees.get(k);
+  if (!u || u.opened_at) return;
+  recordFeeUse(k, { ...u, ...opened, opened_at: Date.now(), at: u.at });
 }
 function persistDebts() {
   if (!DEBTS_FILE) return;
@@ -1888,6 +1875,23 @@ async function inboundFeeAddress() {
   return addr;
 }
 
+// Room to receive the LP cannot fund is not for sale. The quote used to price any amount in range
+// whatever the LP held, so a wallet paid the fee and then met fundchannel's "Could not afford" (seen
+// 20/10/2026: 500 USDX of room bought, twice, from an LP holding 2 USDX). Returns null when the LP
+// can fund `amount`, else { lp_short: true, fundable, reason }; null too when the LP cannot be read,
+// so a quote still renders and provisionInbound stays the last word.
+async function inboundFundingProblem(assetId, amount) {
+  if (!CFG.subasLpRpc || !assetId || !(amount > 0)) return null;
+  const lf = await lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS).catch(() => null);
+  if (!lf) return null;
+  const k = { headroomBps: CFG.subasInboundHeadroomBps, reserve: CFG.subasInboundReserve };
+  const have = lpFreeAtoms(lf, assetId, await policyAssetHex());
+  if (have >= inboundFundAtoms(amount, k)) return null;
+  const fundable = inboundRoomFundable(have, k);
+  return { lp_short: true, fundable,
+    reason: `the service can open at most ${fundable} of room in this asset right now, not ${amount}` };
+}
+
 // Verify a prepaid fee actually landed. Reads the LP's OWN funds for an output from that txid worth
 // at least the fee in the right asset.
 //
@@ -1948,6 +1952,10 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
       channel_id: opening.channel_id || null, receivable_msat: opening.receivable_msat ?? null, fee_msat: 0,
       note: 'an inbound channel of this size is already confirming; it becomes usable without buying another' };
   }
+  // An LP short of the asset fails here, said in atoms, before it dials the user node; a prepaid fee
+  // stays good for this same purchase once the LP holds enough (feeReuseProblem).
+  const short = await inboundFundingProblem(assetId, amount);
+  if (short) throw Object.assign(new Error(short.reason), short);
   // The user node's listen address, so the LP can dial it.
   const uinfo = await lnrpc('getinfo', [], userRpc, STATUS_RPC_TIMEOUT_MS);
   const userId = uinfo.id;
@@ -1964,7 +1972,7 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   // asking for 200,000 yielded 185,640 receivable, the idempotency check above rightly refused to
   // count it, and the NEXT attempt opened another undersized channel. That is how one wallet ended up
   // with thirteen GOLD channels, not one of which could carry the trade it was opened for.
-  const fundAmt = Math.ceil(amount * (1 + CFG.subasInboundHeadroomBps / 10000)) + CFG.subasInboundReserve;
+  const fundAmt = inboundFundAtoms(amount, { headroomBps: CFG.subasInboundHeadroomBps, reserve: CFG.subasInboundReserve });
   const fc = await lnrpc('fundchannel', [`id=${userId}`, `amount=${fundAmt}sat`, `asset=${assetId}`, 'mindepth=0', 'announce=false'], CFG.subasLpRpc);
   // Wait for CHANNELD_NORMAL on the user side (0-conf -> seconds).
   const deadline = Date.now() + 90000;
@@ -4919,13 +4927,14 @@ const server = http.createServer(async (req, res) => {
       const months = parseMonths(url.searchParams.get('months'), CFG.inboundMonths, CFG.inboundDefaultMonths);
       if (months == null) return send(res, 400, { ok: false, error: `months must be one of ${CFG.inboundMonths.join(', ')}`, months_allowed: CFG.inboundMonths });
       let q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, assetId, months, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
-      // Never quote room the service cannot open: the LP has to hold the coins it puts on its side.
       if (q.ok && !isBtc) {
-        const stock = await roomStock(assetId);
-        if (stock != null && q.amount > stock) q = { ...q, ok: false, fee: 0, reason: stockRefusal(stock, assetId), stock_max: stock };
+        const short = await inboundFundingProblem(assetId, q.amount);
+        if (short) q = { ...q, ok: false, ...short };
       }
       const nodeKey = url.searchParams.get('node_key') || '';
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
+      // A fee this node already paid for room in this asset that was never opened.
+      const paidWaiting = nodeKey && !isBtc ? paidWaitingFee(inboundFees, nodeKey, assetId) : null;
       // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
       // when the LP is unreachable, so the mode is simply reported as unavailable rather than 500ing.
       let payTo = null, payErr = null;
@@ -4940,6 +4949,7 @@ const server = http.createServer(async (req, res) => {
         pay_to: payTo,
         prepaid_unavailable: payErr,
         already_owed: owed,
+        paid_waiting: paidWaiting,
         due_now: q.ok ? q.fee + owed : 0,   // a deferred debt is charged on the next purchase
         // The mining fee for the funding tx is the LP's cost and is not separable per request here,
         // so say so rather than implying the quoted number is the only cost, as Phoenix does.
@@ -4970,8 +4980,8 @@ const server = http.createServer(async (req, res) => {
       // stays unused (it is recorded only when a purchase goes ahead), so a retry once the LP holds
       // the coins uses it.
       {
-        const stock = await roomStock(assetId);
-        if (stock != null && openAmount > stock) return send(res, 409, { ok: false, error: stockRefusal(stock, assetId), stock_max: stock });
+        const short = await inboundFundingProblem(assetId, openAmount);
+        if (short) return send(res, 503, { ok: false, error: short.reason, lp_short: true, fundable: short.fundable, asset: assetId });
       }
       // The service keeps the channel open until then; after it, it may close it.
       const until = expiresAt(Date.now(), months);
@@ -4980,9 +4990,13 @@ const server = http.createServer(async (req, res) => {
       const mode = String(body.mode || CFG.inboundCollectMode || 'deferred').toLowerCase();
       if (q.ok && due > 0 && CFG.inboundFeeBps > 0) {
         if (mode === 'prepaid') {
-          const reused = feeReuseProblem(inboundFees.get(String(body.fee_txid || '').toLowerCase()),
-            { nodeKey: body.node_key, assetId, amount });
+          const prior = inboundFees.get(String(body.fee_txid || '').toLowerCase());
+          const reused = feeReuseProblem(prior, { nodeKey: body.node_key, assetId, amount });
           if (reused) return send(res, 409, { ok: false, error: reused, mode });
+          // Its room is open already (a retry whose answer was lost): done, and nothing new is opened
+          // on that payment.
+          if (prior && prior.opened_at) return send(res, 200, { ok: true, already_opened: true, already_had_inbound: true,
+            channel_id: prior.channel_id || null, opened_at: prior.opened_at, months: prior.months, expires_at: prior.expires_at, mode });
           try { await verifyInboundFeePaid({ txid: body.fee_txid, assetId, fee: due }); }
           catch (e) {
             // 402: the request is well-formed, the payment is what is missing. Hand back the price
@@ -5009,9 +5023,13 @@ const server = http.createServer(async (req, res) => {
         // to open would be billing for nothing. An idempotent no-op is not a new sale either.
         let nowOwed = owed;
         if (mode === 'deferred' && q.ok && !r.already_had_inbound && CFG.inboundFeeBps > 0) nowOwed = debtAdd(body.node_key, assetId, q.fee);
+        if (mode === 'prepaid' && body.fee_txid) markFeeOpened(body.fee_txid, { room: openAmount, channel_id: r.channel_id || null });
         return send(res, 200, { ...r, fee_charged: mode === 'prepaid' ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode,
           months, expires_at: until });
-      } catch (e) { return send(res, 502, { ok: false, error: String((e && e.message) || e) }); }
+      } catch (e) {
+        if (e && e.lp_short) return send(res, 503, { ok: false, error: e.message, lp_short: true, fundable: e.fundable, asset: assetId });
+        return send(res, 502, { ok: false, error: String((e && e.message) || e) });
+      }
     }
     // "Move back to chain": cooperatively close a channel on the user's own hosted node, sending
     // the reclaimed funds straight to the wallet's on-chain address. Device-signed (see closeChannel).

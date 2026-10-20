@@ -53,3 +53,48 @@ export function feeReuseProblem(prior, { nodeKey, assetId, amount }) {
     && Number(amount) <= Number(prior.amount);
   return same ? null : 'that fee payment already paid for another purchase';
 }
+
+// What the LP funds to sell `amount` atoms of room to receive: the amount plus the share CLN holds
+// back as reserve and commitment fees, plus a flat margin. provisionInbound funds exactly this.
+export function inboundFundAtoms(amount, { headroomBps, reserve }) {
+  return Math.ceil(Number(amount) * (1 + Number(headroomBps) / 10000)) + Number(reserve);
+}
+
+// The most room to receive `available` atoms of the LP can fund, the inverse of inboundFundAtoms.
+export function inboundRoomFundable(available, { headroomBps, reserve }) {
+  const net = Number(available) - Number(reserve);
+  if (!(net > 0)) return 0;
+  let room = Math.floor(net / (1 + Number(headroomBps) / 10000));
+  while (room > 0 && inboundFundAtoms(room, { headroomBps, reserve }) > available) room--;
+  return room;
+}
+
+// The LP's free on-chain atoms of `assetId` in a CLN listfunds answer: confirmed and unreserved
+// outputs only, the ones fundchannel spends. The policy asset rides untagged, so untagged outputs
+// count under `policyHex`.
+export function lpFreeAtoms(listfunds, assetId, policyHex = '') {
+  const want = String(assetId || '').toLowerCase();
+  let atoms = 0;
+  for (const o of (listfunds && listfunds.outputs) || []) {
+    if (o.status !== 'confirmed' || o.reserved) continue;
+    const a = String(o.asset || '').toLowerCase() || String(policyHex || '').toLowerCase();
+    if (a !== want) continue;
+    atoms += Math.round(Number(o.amount_msat ?? 0) / 1000);
+  }
+  return atoms;
+}
+
+// A prepaid fee this node paid for room in `assetId` whose channel the service has not opened yet
+// (the LP was short of the asset, or the purchase never got that far): { fee_txid, amount, months },
+// the largest such, or null. The quote hands it back, so a wallet uses that fee instead of paying
+// again, whatever device or address it buys from: the record a wallet keeps lives in one browser's
+// storage only, and two fees for one 500 USDX room were paid that way.
+export function paidWaitingFee(fees, nodeKey, assetId) {
+  const asset = String(assetId || '').toLowerCase();
+  let best = null;
+  for (const [txid, u] of (fees instanceof Map ? fees : new Map(Object.entries(fees || {})))) {
+    if (!u || u.opened_at || String(u.node_key || '') !== String(nodeKey || '') || String(u.asset || '').toLowerCase() !== asset) continue;
+    if (!best || Number(u.amount) > best.amount) best = { fee_txid: txid, amount: Number(u.amount), months: u.months ?? null };
+  }
+  return best;
+}
