@@ -83,7 +83,8 @@ assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com
 straight to your current address).
 
 The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign and
-Help under **More**; Settings behind the gear in the header.
+Help under **More**; Settings behind the gear in the header. On a phone the same tabs are a bar
+fixed to the bottom of the screen, icon over label, which steps aside while the keyboard is up.
 
 - **Balance**: a headline portfolio total across parent-chain BTC and every Sequentia asset,
   valued in your chosen reference currency, then one uniform row per asset. No asset is
