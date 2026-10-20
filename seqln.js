@@ -519,6 +519,7 @@ async function lspFetch(path, { allowNotOk = false, ...opts } = {}) {
     const detail = j.detail ? String(j.detail).trim().split('\n').filter(Boolean).slice(-2).join(' · ') : '';
     const err = new Error((j.error || ('HTTP ' + r.status)) + (detail ? ` — ${detail.slice(0, 300)}` : ''));
     err.status = r.status;
+    err.body = j;   // the answer's own fields (e.g. lp_short, fundable), for callers that word them
     throw err;
   }
   return j;

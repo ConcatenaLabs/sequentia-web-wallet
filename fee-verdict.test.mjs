@@ -57,14 +57,14 @@ const note = (unitsPerVb, c) => rateNote({ unitsPerVb, precision: 8, ticker: 'OI
 test('under the relay floor: refused, and Send does not build it', () => {
   const n = note(0.000000005, C);   // 500 atoms/kvB < 1000
   assert.equal(n.level, 'no'); assert.equal(n.block, true);
-  assert.match(n.text, /Below 0\.00000001 OILX\/vB the network will not relay this transaction at all/);
+  assert.match(n.text, /Below 0\.000001 OILX per 100 bytes the network will not relay this transaction at all/);
 });
 
 test('full blocks: under the next block it waits, above it is ahead', () => {
   const full = { ...C, next_block_full: true, backlog_blocks: 2.2, next_block_min_asset_atoms_per_kvb: 5000 };
   const under = note(0.00000002, full), over = note(0.0000001, full);
   assert.equal(under.level, 'warn'); assert.equal(under.block, false);
-  assert.match(under.text, /next one takes nothing below 0\.00000005 OILX\/vB, with about 3 blocks/);
+  assert.match(under.text, /next one takes nothing below 0\.000005 OILX per 100 bytes, with about 3 blocks/);
   assert.equal(over.level, 'ok');
   assert.match(over.text, /At this rate yours is ahead of them/);
 });
