@@ -12,8 +12,10 @@ DOM-light or DOM-free and receives what it needs through an `init*(ctx)` call.
 ```
 index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools, history, OpenAMP, Sign, QR)
  ├─ stake-records.js       pool join (two transactions) / move / leave, unbond + claim, record discovery
- ├─ leaves.js              developer mode: the Leaves tab and its setting (rails, board, receive, send,
- │   │                     sync on the schedule, settle now, exit drill, refusals)
+ ├─ leaves.js              the mode setting (per wallet), and developer mode's Leaves tab (rails,
+ │   │                     board, receive, send, sync on the schedule, settle now, exit drill, refusals)
+ ├─ wallet-api.js          the page API: window.sequentiaWallet and the sequentia-wallet channel
+ │   └─ leaf-request.js    reads a receive request for the approval dialog (copied to the extension)
  │   └─ leaves/worker.js   dedicated worker running leaves/pkg/ (the operator wallet library, WASM,
  │                         tracked): blocking HTTP as synchronous XHR, its SQLite store on OPFS
  ├─ contracts.js           developer mode: the Contracts tab (template, instance, coin, path, the
@@ -95,7 +97,7 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | seqln.js | hosted-SeqLN LSP HTTP API + per-node signer WebSockets |
 | `/coinjoin` | coinjoin.js | seqcj CoinJoin coordinator (override: `window.SEQ_COINJOIN_URL`); the Mix tab reports it missing |
 | `/sbtc` | sbtc.js | SBTC custody bridge: peg-in / peg-out address allocation for offline-resting BTC limit orders |
-| the operator's server, the node's JSON-RPC | leaves/worker.js | developer mode only: the URLs the user enters when joining an operator. Each is fetched with a synchronous XHR from the worker, so a server on another origin must answer CORS |
+| the operator's server, the node's JSON-RPC | leaves/worker.js | the URLs the user enters when joining an operator in developer mode, then whenever this wallet's leaf wallet syncs, in either mode. Each is fetched with a synchronous XHR from the worker, so a server on another origin must answer CORS |
 | `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
 
 Every backend beyond the two Esplora APIs is optional at runtime: fetch failures degrade the
@@ -122,7 +124,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LN_PAYMENT_LIMITS` | the device's default, 10,000,000 atoms of each asset per day | device payment limits: `{default, period, assets: {<asset id>\|'btc': atoms}}`, each in the asset's own atoms, `null` for none |
 | `SEQ_LSP_FRONT_CAP` | `0.0005` BTC | LSP instant-front cap for mixed swaps |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'~10 min'}` | on-chain confirmation estimate for the timing banner |
-| `SEQ_LEAVES_TICK_MS` | `60000` | how often developer mode reads the leaf wallet's schedule (it syncs when the schedule is due, and every 30 s at most while something is in flight) |
+| `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |
 
 A Lightning leg is **enabled** only when both its WS URL and host pubkey are set; with neither
@@ -239,7 +241,9 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.ln.closeTo.v1` | per hosted node, the scripts of this wallet's own addresses its device may close a channel to; named to the device again whenever its signer starts |
 | `swk.ln.inboundBuy.v1` | a purchase of room to receive over Lightning whose fee is paid (or about to be), on its own or inside the funding transaction of a Move to Lightning: finished on the next open |
 | `swk.ln.pendingMove.v1` | a Move to Lightning past its on-chain transaction but not yet open, to finish on the next open |
-| `swk.devMode` | `1` while developer mode is on; absent (off) by default |
+| `swk.mode.<tag>` | per wallet (the tag is a 32-bit FNV-1a of its descriptor), `developer` or `user`; absent is user mode. A `swk.devMode` of `1` left from before is taken as the first wallet's that reads it |
+| `swk.leaves.joined.<tag>` | `1` once this wallet has joined a leaf operator: its leaf wallet then opens and syncs in either mode |
+| `swk.leaves.address.<tag>` | the leaf wallet's on-chain address handed to the page API, the same each time it is asked |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
 | `swk.txSeen:<descriptor>` | per wallet, the block height and time the explorer gave for this wallet's own transactions before a sync recorded them; shown in History at once, and each one starts a sync. Safe to clear |

@@ -1438,7 +1438,7 @@ import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
-import { esc, multiTxTrades, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden } from './swap.js';
+import { esc, multiTxTrades, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -1454,6 +1454,7 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn } from './leaves.js';
+import { mountPageApi } from './wallet-api.js';
 import { mountContracts } from './contracts.js';
 
 const ESPLORA = location.origin + '/api';
@@ -3197,27 +3198,36 @@ async function openWallet(phrase){
   try{ handleDeepLinkRoute(); }catch(e){ console.warn('[deeplink] route handling failed:', e?.message??e); }
 }
 
-// ---------- developer mode: leaves ----------
-// leaves.js holds the panels and talks to the leaf wallet's worker (leaves/worker.js),
-// which runs the operator wallet library compiled to wasm. Off by default.
-let leavesApi = null;
+// ---------- the mode, and leaves ----------
+// leaves.js holds the mode setting, the Leaves tab and the leaf wallet's worker
+// (leaves/worker.js), which runs the operator wallet library compiled to wasm. The mode
+// is kept for each wallet (by its tag); user mode by default. A wallet that joined an
+// operator keeps its leaf wallet syncing in either mode; user mode shows nothing of it
+// but its value in each asset's figure and the headline.
+let leavesApi = null, pageApi = null;
+const devMode = ()=> devModeOn(localStorage, walletTag());
 function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
   leavesApi = mountLeaves({
     makeWorker: ()=> new Worker(new URL('./leaves/worker.js', import.meta.url), { type:'module' }),
     store: localStorage,
+    walletTag,
     mnemonic: ()=> localStorage.getItem(KEY),
     el, assetMeta, fmtAtoms, refValueStr,
     btcOnchain: ()=> btcBalance || 0n,
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
-    onModeChange: (on)=>{ show('tabLeaves', on); show('tabContracts', on); if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} },
+    onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} if(pageApi) pageApi.modeChanged(m); },
+    onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
   }, $('leavesRoot'), $('devModeRoot'));
-  show('tabLeaves', devModeOn(localStorage));
-  if(devModeOn(localStorage)) leavesApi.start();
+  show('tabLeaves', devMode());
+  leavesApi.start();
+  // The page API: the wallet's mode and leaf rail for code running in this page, and the
+  // mode for the wallet's other pages on this origin (wallet-api.js, docs/PAGE_API.md).
+  try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
 }
 
 // ---------- developer mode: contract spends ----------
@@ -3226,7 +3236,7 @@ function initLeaves(){
 // developer mode, beside the Leaves tab.
 let contractsApi = null;
 function initContracts(){
-  show('tabContracts', devModeOn(localStorage));
+  show('tabContracts', devMode());
   if(contractsApi) return;
   if(!lwk.ContractApproval){
     $('contractsRoot').appendChild(el('div','status err','Contract spends need a newer wallet build: this pkg/ has no contract engine.'));
@@ -5136,7 +5146,8 @@ function renderBalance(){
     const lnAtoms = lnOn ? lnAtomsFor(kind) : 0n;
     const chans   = lnOn ? lnChansFor(kind) : 0;
     const own     = lnOn ? ownChansFor(kind) : [];
-    const leafAtoms = (kind!=='BTC' && leavesApi && devModeOn(localStorage)) ? leavesApi.leafAtoms(kind) : 0n;
+    // Leaves count in the asset's one figure in both modes; developer mode also splits it.
+    const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
     const totalAtoms = (onchainAtoms||0n) + lnAtoms + leafAtoms;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
@@ -5158,7 +5169,7 @@ function renderBalance(){
     head.appendChild(a);
     r.appendChild(head);
     // Developer mode: every rail of the asset on one line (leaves.js holds the leaf figure).
-    if(kind!=='BTC' && leavesApi && devModeOn(localStorage) && known){
+    if(kind!=='BTC' && leavesApi && devMode() && known){
       r.appendChild(el('div','leaf-split', fmtAtoms(onchainAtoms||0n, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning'));
     }
     // Where the asset is, under its total. Held in both places: a sub-row, indented and hung off
@@ -5215,8 +5226,8 @@ function renderBalance(){
   // The Sequentia assets to show: everything held on-chain PLUS anything that still has a live
   // Lightning channel even at 0 on-chain (so a fully-moved asset stays visible).
   const seqKeys = new Set(Object.keys(b));
-  // Developer mode: an asset held only as leaves still has its row.
-  if(leavesApi && devModeOn(localStorage)) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
+  // An asset held only as leaves still has its row, in both modes.
+  if(leavesApi) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
   if(lnLastStatus && lnLastStatus.channels){
     for(const c of lnLastStatus.channels){
       const isBtc=(c.asset_label==='BTC'||c.leg==='btc');
@@ -5226,11 +5237,12 @@ function renderBalance(){
     }
   }
 
-  // Headline total across BTC + every asset (on-chain + Lightning), in the reference currency.
+  // Headline total across BTC + every asset, every rail (on-chain, Lightning, leaves), in
+  // the reference currency, in both modes. No asset comes first.
   let total=0, totalRef=null, anyPriced=false, allPriced=true;
   const addToTotal=(refKey, atoms)=>{ const rv=refValue(refKey, atoms); if(rv){ total+=rv.v; totalRef=rv.ref; anyPriced=true; } else if((atoms||0n)>0n) allPriced=false; };
   addToTotal('BTC', btcBal + (lnOn?lnAtomsFor('BTC'):0n));
-  const leafFor = (h)=> (leavesApi && devModeOn(localStorage)) ? leavesApi.leafAtoms(h) : 0n;
+  const leafFor = (h)=> leavesApi ? leavesApi.leafAtoms(h) : 0n;
   for(const h of seqKeys) addToTotal(h, BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h));
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
   // (WW-4 / spec 1.5(a)). Keyed 'oamp:'+id so assetMeta/priceTicker resolve the real ticker+precision;

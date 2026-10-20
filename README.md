@@ -52,9 +52,12 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   and, from the same Sign tab, a message signed with the staking key, which is how a site
   that reads your stake -- Levo -- signs you in: paste its message, sign, paste the signature back
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
-- Developer mode (a setting, off by default): coins held as leaves of an operator's tree, with
-  the balance per rail, boarding, receive requests and payments, settle now, and an exit drill;
-  and contract spends, shown and signed under the five-point rule
+- A mode setting, kept for each wallet: user mode (one figure per asset, and the wallet
+  chooses how value moves) by default, or developer mode, which adds coins held as leaves of
+  an operator's tree, with the balance per rail, boarding, receive requests and payments,
+  settle now, and an exit drill; and contract spends, shown and signed under the five-point
+  rule. The wallet's own pages read the mode and the leaf rail through its page API
+  ([docs/PAGE_API.md](docs/PAGE_API.md))
 
 Experimental, and said so in the app:
 
@@ -147,19 +150,35 @@ Help under **More**; Settings behind the gear in the header.
   The classic one is the "Bitcoin Signed Message" format, so `verifymessage` checks it on
   Sequentia and on Bitcoin alike — against the legacy form of the address, the only form that
   RPC accepts.
-- **Settings**: developer mode, backend endpoints, network, the policy asset id, reveal-phrase,
+- **Settings**: the mode, backend endpoints, network, the policy asset id, reveal-phrase,
   and remove-wallet.
 
 A wallet-wide **"Show values in"** selector picks the reference currency (USD by default, BTC
 or any priced asset optional). Every amount field carries a live approximate value in that
 currency, and amount inputs can be flipped to be typed directly in the reference currency.
 
+### The mode
+
+**Settings → Mode** is one setting, kept for each wallet, with the same words in every
+Sequentia wallet:
+
+- **User mode** (the default): One figure per asset, and the wallet chooses how value moves.
+- **Developer mode**: Every rail by name, side by side (on-chain, leaves and Lightning), each
+  with its balance and its manual controls, and the developer tools.
+
+The headline total counts every rail of every asset (on-chain, Lightning and leaves) in the
+reference currency, in both modes, and no asset comes first. In developer mode each asset row
+also reads "X on-chain · Y in leaves · Z on Lightning", and the **Leaves** and **Contracts**
+tabs appear. In user mode nothing of leaves is shown or reachable, but a wallet that joined
+an operator keeps its leaf wallet syncing while the page is open, since its coins have dates
+to keep, and their value counts in each asset's one figure. The wallet's own pages read the
+mode, and in developer mode the leaf rail, through the page API (`window.sequentiaWallet`,
+[docs/PAGE_API.md](docs/PAGE_API.md)), in the shape the browser extension's provider serves.
+
 ### Developer mode: leaves
 
-Developer mode is one setting under **Settings**, off by default. It adds a **Leaves** tab for
-coins held as leaves of an operator's tree, and shows every step by hand. On the Balance tab
-each asset row then reads "X on-chain · Y in leaves · Z on Lightning", and the headline total
-counts the leaves too.
+The **Leaves** tab holds coins held as leaves of an operator's tree, and shows every step by
+hand.
 
 The Leaves tab first asks to **join an operator**: its server URL and the URL of a node's
 JSON-RPC (with a user and password if that node needs them). The node must validate its
@@ -180,7 +199,8 @@ must answer CORS. The tab then has:
 - **Send to a receive request**: pays it out of round, in the asset named.
 - **Sync and schedule**: the chain's median time, when the schedule next asks for a sync and
   why, and every unpaid receive request with when it lapses. While the page is open it reads
-  the schedule every minute and syncs when it is due, and every 30 seconds at most while a
+  the schedule every minute and syncs when it is due, when the time it gave after the last
+  sync arrives (whatever later reads say), and every 30 seconds at most while a
   board, a payment, a participation or an exit is in flight. **Sync now** runs one at once.
 - **Leaves and their dates**: every leaf with its state, kind, expiry, exit deadline, and the
   dates sync keeps for it (synced daily from, refreshed from, taken home from, exit by), and
@@ -352,7 +372,9 @@ works normally without the restricted rows.
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record and drives the transactions SWK builds over the staking key's bare scripts. |
-| `leaves.js` | Developer mode: the setting and the Leaves tab, which shows what the leaf wallet answers. |
+| `leaves.js` | The mode setting, and developer mode's Leaves tab, which shows what the leaf wallet answers. |
+| `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
+| `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |

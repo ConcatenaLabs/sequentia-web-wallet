@@ -1,13 +1,21 @@
-// LEAVES: the wallet's developer mode for coins held as leaves of an operator's tree.
+// LEAVES: coins held as leaves of an operator's tree, and the wallet's mode.
 //
-// Developer mode is one setting, off by default. When it is on, the Leaves tab shows
-// every rail side by side and lets each step be taken by hand: the balance per rail
-// (on-chain, leaves, Lightning) for every asset, boarding an on-chain coin into the
-// operator's tree, a receive request and a payment to one, the mailbox (read by sync),
-// "settle now" (a refresh into the next round, followed to its new leaf), and the exit
-// drill (one leaf taken on-chain by the wallet alone, every step and fee shown, until
-// its claim is final). Every leaf shows its dates and the schedule sync keeps for it,
-// and the wallet syncs by itself on that schedule while the page is open.
+// The mode is one setting, kept for each wallet, user mode until the user changes it.
+// User mode is one figure per asset, and the wallet chooses how value moves. Developer
+// mode names every rail side by side (on-chain, leaves, Lightning), each with its
+// balance and its manual controls, and shows the developer tools: the Leaves tab and the
+// Contracts tab. In developer mode the Leaves tab lets each step be taken by hand:
+// boarding an on-chain coin into the operator's tree, a receive request and a payment
+// to one, the mailbox (read by sync), "settle now" (a refresh into the next round,
+// followed to its new leaf), and the exit drill (one leaf taken on-chain by the wallet
+// alone, every step and fee shown before it is broadcast, until its claim is final); a
+// board, too, shows its fee before it is signed. Every leaf shows its dates
+// and the schedule sync keeps for it.
+//
+// A wallet that joined an operator keeps its leaf wallet open and syncing on the
+// library's schedule while the page is open, in either mode: its coins must be
+// refreshed or taken home on their dates. In user mode nothing of leaves is shown or
+// reachable; their value counts in each asset's one figure and in the headline.
 //
 // Nothing about a leaf is computed here. The operator wallet library runs in a
 // dedicated worker (leaves/worker.js, its wasm in leaves/pkg): every script, record,
@@ -20,6 +28,7 @@
 // ctx:
 //   makeWorker()        -> a Worker-like object (postMessage, onmessage, onerror)
 //   store               localStorage-alike
+//   walletTag()         the wallet's tag (what is kept for each wallet is keyed by it)
 //   mnemonic()          the wallet's phrase
 //   el(tag, cls, text)  builds a node; text is set as text, never markup
 //   assetMeta(hex)      -> { ticker, precision }
@@ -28,20 +37,58 @@
 //   btcOnchain()        -> BigInt sats on the Bitcoin side
 //   lnFor(kind)         -> BigInt atoms on Lightning ('BTC' or an asset hex)
 //   onChange()          called when leaf balances change (the Balance tab re-renders)
+//   onModeChange(mode)  called when the user changes the mode
+//   onEvent(name, data) the leaf events: 'leafArrived', 'leafSyncDue'
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 
-export const DEV_MODE_KEY = 'swk.devMode'
+// The mode's words, the same in every Sequentia wallet (this one, the extension and
+// Ambra): change them in all three together.
+export const MODE_WORDS = Object.freeze({
+  title: 'Mode',
+  user: 'User mode',
+  userLine: 'One figure per asset, and the wallet chooses how value moves.',
+  developer: 'Developer mode',
+  developerLine: 'Every rail by name, side by side (on-chain, leaves and Lightning), each with its balance and its manual controls, and the developer tools.',
+  note: 'Kept for this wallet. Sites that ask the wallet for its mode follow it.',
+})
+
+export const MODE_KEY = 'swk.mode'                  // + '.' + the wallet's tag
+export const LEGACY_DEV_MODE_KEY = 'swk.devMode'     // one setting for every wallet, before
+export const JOINED_KEY = 'swk.leaves.joined'        // + '.' + tag: this wallet joined an operator
+export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf address handed to pages
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const TICK_MS = 60_000
 
-export function devModeOn (store) {
-  try { return store.getItem(DEV_MODE_KEY) === '1' } catch { return false }
+const tagged = (key, tag) => key + '.' + (tag || 'default')
+
+// 'developer' or 'user', for the wallet of `tag`. The one setting kept before modes were
+// kept for each wallet becomes the first wallet's that reads it, once.
+export function walletMode (store, tag) {
+  try {
+    const v = store.getItem(tagged(MODE_KEY, tag))
+    if (v === 'developer' || v === 'user') return v
+    if (store.getItem(LEGACY_DEV_MODE_KEY) === '1') {
+      store.setItem(tagged(MODE_KEY, tag), 'developer')
+      store.removeItem(LEGACY_DEV_MODE_KEY)
+      return 'developer'
+    }
+  } catch {}
+  return 'user'
 }
 
-export function setDevMode (store, on) {
-  try { if (on) store.setItem(DEV_MODE_KEY, '1'); else store.removeItem(DEV_MODE_KEY) } catch {}
+export function setWalletMode (store, tag, mode) {
+  if (mode !== 'developer' && mode !== 'user') throw new Error("the mode is 'developer' or 'user'")
+  try { store.setItem(tagged(MODE_KEY, tag), mode); store.removeItem(LEGACY_DEV_MODE_KEY) } catch {}
+  return mode
 }
+
+export function devModeOn (store, tag) { return walletMode(store, tag) === 'developer' }
+
+export function joinedOperator (store, tag) {
+  try { return store.getItem(tagged(JOINED_KEY, tag)) === '1' } catch { return false }
+}
+function setJoined (store, tag) { try { store.setItem(tagged(JOINED_KEY, tag), '1') } catch {} }
 
 // ---------------------------------------------------------------------------
 // The worker
@@ -139,6 +186,21 @@ const DONE_PARTICIPATION = new Set(['released', 'void', 'expired', 'refused'])
 export function inFlight (coins, participations) {
   if ((coins || []).some((c) => ['pending', 'sending', 'given', 'forfeited', 'exiting'].includes(c.state))) return true
   return (participations || []).some((p) => !DONE_PARTICIPATION.has(p.state) && !p.released)
+}
+
+// Whether to sync now. The time to hold to is the schedule's next_sync_at as it was
+// first given after the last sync (`held`): a schedule that moves that time on at every
+// read (a coin given to a refresh reads now + 1 h each time, and is not `due` until its
+// home date) is still synced once the time first given arrives. Also when the schedule
+// is due, and while something moves. Answers { sync, why, held } (the time to hold to
+// next: null once a sync runs).
+export function syncDecision (schedule, held, moving) {
+  const s = schedule || {}
+  const at = typeof held === 'number' ? held : (typeof s.next_sync_at === 'number' ? s.next_sync_at : null)
+  if (s.due) return { sync: true, why: 'schedule', held: null }
+  if (at != null && typeof s.now === 'number' && s.now >= at) return { sync: true, why: 'time', held: null }
+  if (moving) return { sync: true, why: 'moving', held: null }
+  return { sync: false, why: null, held: at }
 }
 
 // When the page next asks: the schedule's own time when it is near, otherwise the
@@ -250,11 +312,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (ctx.onChange) try { ctx.onChange() } catch {}
   }
 
+  const tag = () => { try { return ctx.walletTag ? ctx.walletTag() : 'default' } catch { return 'default' } }
+  const dev = () => devModeOn(ctx.store, tag())
+  const emit = (name, data) => { if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {} }
+  const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
+
+  // Opens the leaf wallet: in developer mode always (the tab shows the join form when
+  // this wallet has joined none), in user mode only when it has joined an operator,
+  // whose coins it then syncs without showing them.
   async function start () {
+    if (S.open) return
+    if (!dev() && !joinedOperator(ctx.store, tag())) return
     if (!S.client) S.client = new LeafClient(ctx.makeWorker)
     const m = ctx.mnemonic()
     const has = await S.client.exists(m)
     if (!has) { S.open = false; render(); return }
+    setJoined(ctx.store, tag())
     let pw = null; try { pw = ctx.store.getItem(NODE_PASSWORD_KEY) } catch {}
     await S.client.open(m, pw || undefined)
     S.open = true
@@ -279,10 +352,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try {
       const s = await run('schedule')
       S.schedule = s
-      if ((s.due || inFlight(S.coins, S.participations)) && !S.busy) {
+      if (s.due) emit('leafSyncDue', { now: s.now, next_sync_at: s.next_sync_at, why: s.why ?? null })
+      const d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
+      S.heldFor = d.held
+      if (d.sync && !S.busy) {
         S.busy = true; render()
         try {
           const v = await run('sync')
+          arrivals(v && v.mailbox)
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
         try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } finally { S.busy = false }
@@ -296,6 +373,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
       await act('sync', async () => {
         try {
           const v = await run('sync')
+          S.heldFor = null
+          arrivals(v && v.mailbox)
           S.lastSync = { at: now(), value: v, auto: false }
           return v
         } catch (e) { S.lastSync = { at: now(), error: e, auto: false }; throw e }
@@ -309,8 +388,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (settingsRoot) renderSettings()
     if (!root) return
     root.innerHTML = ''
-    if (!devModeOn(ctx.store)) {
-      root.appendChild(el('div', 'muted', 'Developer mode is off. Turn it on in Settings to work with leaves.'))
+    if (!dev()) {
+      root.appendChild(el('div', 'muted', 'Leaves are a developer-mode rail. Choose developer mode in Settings to work with them.'))
       return
     }
     if (!S.open) { renderJoin(); return }
@@ -343,6 +422,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         await act('join', async () => {
           if (!S.client) S.client = new LeafClient(ctx.makeWorker)
           const info = await S.client.create(ctx.mnemonic(), config)
+          setJoined(ctx.store, tag())
           try { if (config.node_password) ctx.store.setItem(NODE_PASSWORD_KEY, config.node_password); else ctx.store.removeItem(NODE_PASSWORD_KEY) } catch {}
           S.open = true
           S.joined = info.result
@@ -415,9 +495,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     field(c, 'Asset', assetSelect('leafBoardAsset', onchain))
     const a = el('input'); a.id = 'leafBoardAmount'; field(c, 'Amount, in atoms', bind(a))
     field(c, 'Fee asset', assetSelect('leafBoardFee', all, 'the asset boarded'))
-    const b = button('Board', () => {
-      const args = { asset: val('leafBoardAsset'), amount: val('leafBoardAmount'), fee_asset: val('leafBoardFee') || null }
-      act('board', () => run('board', args)).catch(() => {})
+    // The fee is shown before anything is signed: the library quotes the board, and
+    // boards only on the fee shown.
+    const b = button('Board', async () => {
+      const args = { asset: val('leafBoardAsset'), amount: val('leafBoardAmount') }
+      if (val('leafBoardFee')) args.fee_asset = val('leafBoardFee')
+      try { const q = await act('board_quote', () => run('board_quote', args)); S.boardQuote = { args, q }; render() } catch {}
     }, 'primary')
     b.id = 'btnLeafBoard'; b.disabled = S.busy
     const ad = button('Show an on-chain address', () => act('address', () => run('address')).catch(() => {}), 'ghost')
@@ -428,6 +511,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
       a2.dataset.script = S.last.value.script_pubkey || ''
       c.appendChild(el('div', 'sub', 'An address of this wallet on the leaf wallet\'s chain, the same key as the wallet\'s own addresses: pay it to have a coin to board, or a fee coin for an exit.'))
       c.appendChild(a2)
+    }
+    if (S.boardQuote) {
+      const { args, q } = S.boardQuote
+      const box = el('div', 'warn leaf-quote'); box.id = 'leafBoardQuote'
+      box.appendChild(el('div', null, `Board ${amt(args.asset, args.amount)}: fee ${amt(q.fee.asset, q.fee.amount)}, the node's floor now; ${q.vsize} vB, spending ${q.inputs} coin(s). The board goes ahead only on this fee.`))
+      const r2 = el('div', 'row'); r2.style.marginTop = '8px'
+      const ok = button('Sign and board', async () => {
+        S.boardQuote = null
+        act('board', () => run('board', { ...args, shown: q.fee })).catch(() => {})
+      }, 'primary'); ok.id = 'btnLeafBoardConfirm'; ok.disabled = S.busy
+      const no = button('Cancel', () => { S.boardQuote = null; render() }, 'ghost')
+      r2.appendChild(ok); r2.appendChild(no); box.appendChild(r2)
+      c.appendChild(box)
     }
     const out = resultBox('board'); if (out) c.appendChild(out)
     root.appendChild(c)
@@ -526,10 +622,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
     schedule()
   }
 
+  // Each run of the drill is quoted first: what it would broadcast, each fee, and the
+  // claim's; the run broadcasts only on the fees shown.
   async function drill (leafId, feeAsset) {
     S.drill = S.drill && S.drill.leaf === leafId ? S.drill : { leaf: leafId, runs: [] }
+    const args = { leaf_id: leafId }
+    if (feeAsset) args.fee_asset = feeAsset
     try {
-      const v = await act('exit', () => run('exit', { leaf_id: leafId, fee_asset: feeAsset || null }))
+      const q = await act('exit_quote', () => run('exit_quote', args))
+      S.drill.quote = q
+    } catch (e) { S.drill.runs.push({ at: now(), error: e }) }
+    render()
+  }
+
+  async function drillConfirm () {
+    const q = S.drill && S.drill.quote
+    if (!q) return
+    S.drill.quote = null
+    const args = { leaf_id: S.drill.leaf, shown: q.unroll || {} }
+    if (q.fee_asset) args.fee_asset = q.fee_asset
+    try {
+      const v = await act('exit', () => run('exit', args))
       S.drill.runs.push({ at: now(), value: v })
     } catch (e) { S.drill.runs.push({ at: now(), error: e }) }
     schedule()
@@ -615,7 +728,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
       c.appendChild(d)
     })
-    if (!coin || coin.state !== 'exited') {
+    if (S.drill.quote) {
+      const q = S.drill.quote
+      const box = el('div', 'warn leaf-quote'); box.id = 'leafExitQuote'
+      box.appendChild(el('div', null, (q.steps || []).length ? 'This run broadcasts, before anything is signed for the chain:' : 'This run broadcasts nothing before the claim.'))
+      ;(q.steps || []).forEach((st, i) => box.appendChild(el('div', 'sub', `transaction ${i + 1}: ${st.vsize} vB, fee ${(st.fee || []).map((f) => amt(f.asset, f.amount)).join(' + ') || 'none'}, paid from ${st.paid_by}`)))
+      const cl = q.claim || {}
+      box.appendChild(el('div', 'sub', cl.error ? `the claim: ${cl.error}` : `the claim, once the leaf is in a block and its exit delay of ${q.exit_delay_seconds} s has run: fee about ${(cl.fee || []).map((f) => amt(f.asset, f.amount)).join(' + ') || 'none'} at the floor then`))
+      const r2 = el('div', 'row'); r2.style.marginTop = '8px'
+      const ok = button('Broadcast on these fees', () => drillConfirm(), 'danger'); ok.id = 'btnLeafExitConfirm'; ok.disabled = S.busy
+      const no = button('Cancel', () => { S.drill.quote = null; render() }, 'ghost')
+      r2.appendChild(ok); r2.appendChild(no); box.appendChild(r2)
+      c.appendChild(box)
+    } else if (!coin || coin.state !== 'exited') {
       const b = button('Run the exit again', () => drill(S.drill.leaf)); b.id = 'btnLeafExitAgain'; b.disabled = S.busy
       const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(b); c.appendChild(r)
     }
@@ -650,19 +775,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   function renderSettings () {
     settingsRoot.innerHTML = ''
-    const c = card('Developer mode')
-    c.appendChild(el('p', 'sub', 'Shows every rail and every step by hand: the balance per rail, coins held as leaves of an operator\'s tree, boarding, receive requests, payments, settle now and the exit drill. Off by default.'))
-    const lab = el('label', 'row'); lab.style.gap = '8px'
-    const cb = el('input'); cb.type = 'checkbox'; cb.id = 'devModeToggle'; cb.style.width = 'auto'; cb.checked = devModeOn(ctx.store)
-    cb.onchange = async () => {
-      setDevMode(ctx.store, cb.checked)
-      if (ctx.onModeChange) try { ctx.onModeChange(cb.checked) } catch {}
-      if (cb.checked) { try { await start() } catch (e) { S.error = { what: 'open', e } } } else { clearTimeout(S.timer) }
-      render()
+    const c = card(MODE_WORDS.title)
+    c.id = 'walletModeCard'
+    const current = walletMode(ctx.store, tag())
+    for (const m of ['user', 'developer']) {
+      const lab = el('label', 'mode-choice'); lab.style.display = 'flex'; lab.style.flexWrap = 'nowrap'; lab.style.gap = '8px'; lab.style.alignItems = 'flex-start'; lab.style.marginTop = '6px'
+      const r = el('input'); r.type = 'radio'; r.name = 'walletMode'; r.value = m; r.id = m === 'user' ? 'modeUser' : 'modeDeveloper'
+      r.style.width = 'auto'; r.checked = current === m
+      r.onchange = () => { if (r.checked) changeMode(m) }
+      r.style.flex = '0 0 auto'; r.style.marginTop = '3px'
+      const t = el('span'); t.style.flex = '1 1 auto'
+      t.appendChild(el('b', null, MODE_WORDS[m]))
+      t.appendChild(el('div', 'sub', m === 'user' ? MODE_WORDS.userLine : MODE_WORDS.developerLine))
+      lab.appendChild(r); lab.appendChild(t); c.appendChild(lab)
     }
-    lab.appendChild(cb); lab.appendChild(el('span', null, 'Developer mode'))
-    c.appendChild(lab)
-    if (S.open && S.info) {
+    c.appendChild(el('p', 'sub', MODE_WORDS.note))
+    if (dev() && S.open && S.info) {
       c.appendChild(kv('Operator server', S.info.server))
       c.appendChild(kv('Operator key (pinned)', S.info.operator))
       c.appendChild(kv('Node', S.info.node))
@@ -673,11 +801,41 @@ export function mountLeaves (ctx, root, settingsRoot) {
     settingsRoot.appendChild(c)
   }
 
+  // The leaf wallet stays open across a change of mode: only what is shown, and what a
+  // page may reach, follows it.
+  async function changeMode (m) {
+    setWalletMode(ctx.store, tag(), m)
+    if (ctx.onModeChange) try { ctx.onModeChange(m) } catch {}
+    if (m === 'developer') { try { await start() } catch (e) { S.error = { what: 'open', e } } }
+    render()
+  }
+
+  // ---- for the page API (wallet-api.js): the library's commands, one at a time ----
+  async function command (cmd, args) {
+    if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet has not joined a leaf operator: join one in the wallet\u2019s Leaves tab' })
+    return await act(cmd, () => run(cmd, args || {}))
+  }
+  // One on-chain address of the leaf wallet, the same each time a page asks: taking a
+  // new one on every ask would let a page grow the wallet's scan without end.
+  async function address () {
+    const key = tagged(ADDRESS_KEY, tag())
+    try { const v = JSON.parse(ctx.store.getItem(key) || 'null'); if (v && v.address) return v } catch {}
+    const a = await command('address')
+    const v = { address: a.address, script_pubkey: a.script_pubkey }
+    try { ctx.store.setItem(key, JSON.stringify(v)) } catch {}
+    return v
+  }
+
   const api = {
     state: S,
     render,
     start: async () => { try { await start() } catch (e) { S.error = { what: 'open', e }; render() } },
     // Leaf atoms of an asset, for the Balance tab's rows and headline total.
+    mode: () => walletMode(ctx.store, tag()),
+    setMode: (m) => changeMode(m),
+    isOpen: () => S.open,
+    command,
+    address,
     leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
     leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),
     syncNow,

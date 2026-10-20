@@ -95,12 +95,22 @@ async function main () {
   await click('#btnConfirm')
   await page.waitFor("document.querySelector('#app') && document.querySelector('#app').offsetParent !== null", 60000)
 
-  // --- Developer mode is off by default, and a setting ---
-  check('developer mode is off by default: no Leaves tab', await page.eval("document.querySelector('#tabLeaves').classList.contains('hide')"))
+  // The test asset carries a local label, so its Balance row is shown like any held asset's.
+  await page.eval(`localStorage.setItem('swk.sequentia.assets', JSON.stringify({ ${JSON.stringify(X)}: { ticker: 'XLEAF', name: 'Drive asset', precision: 0, local: true } }))`)
+
+  // --- The mode: user mode by default, one setting ---
+  check('user mode by default: no Leaves tab', await page.eval("document.querySelector('#tabLeaves').classList.contains('hide')"))
   await click('[data-tab=settings]')
-  await page.eval("const c=document.querySelector('#devModeToggle'); c.checked=true; c.dispatchEvent(new Event('change'))")
+  const modeCard = await text('#walletModeCard')
+  check('the mode setting, in the words every wallet uses, user mode chosen', await page.eval("document.querySelector('#modeUser').checked")
+    && modeCard.includes('One figure per asset, and the wallet chooses how value moves.') && modeCard.includes('Kept for this wallet.'), modeCard)
+  check('the page API reads user mode', (await page.eval("window.sequentiaWallet.request({method:'getWalletMode'})")).mode === 'user')
+  await shot('mode-user')
+  await page.eval("window.__events=[]; window.sequentiaWallet.on('modeChanged',(d)=>window.__events.push(['modeChanged',d])).on('leafArrived',(d)=>window.__events.push(['leafArrived',d]))")
+  await page.eval("(()=>{const c=document.querySelector('#modeDeveloper'); c.checked=true; c.dispatchEvent(new Event('change')); return true})()")
   await page.waitFor("!document.querySelector('#tabLeaves').classList.contains('hide')")
-  check('the setting shows the Leaves tab', true)
+  check('developer mode shows the Leaves tab', true)
+  check('the page API heard modeChanged {mode: developer}', await page.eval("window.__events.some(e=>e[0]==='modeChanged'&&e[1].mode==='developer')"))
   await click('[data-tab=leaves]')
   await page.waitFor("document.querySelector('#leafJoin')", 30000)
 
@@ -131,13 +141,18 @@ async function main () {
   await set('leafBoardAsset', X); await set('leafBoardAmount', '500')
   await click('#btnLeafBoard'); await idle()
   let refusal = await text('.leaf-refusal')
-  check('a board below the smallest leaf is refused in the library\'s words', /smallest leaf/.test(refusal), refusal)
+  check('a board below the smallest leaf is refused in the library\'s words, before anything is signed', /smallest leaf/.test(refusal) && !(await page.eval("!!document.querySelector('#leafBoardQuote')")), refusal)
   await shot('board-refused')
 
   await set('leafBoardAmount', '2000000')
   await click('#btnLeafBoard'); await idle()
+  const bq = await text('#leafBoardQuote')
+  const bqFee = (bq.match(/fee \S+ \S+ \((\d+) atoms\)/) || [])[1]
+  check('the board shows its fee before anything is signed', !!bqFee && /vB/.test(bq), bq)
+  await shot('board-quote')
+  await click('#btnLeafBoardConfirm'); await idle()
   const board = JSON.parse(await page.eval("document.querySelector('#leafBoard .leaf-result').textContent"))
-  check('board answered pending, with its transaction and fee in the asset boarded', board.state === 'pending' && board.txid && board.fee.asset === X, { txid: board.txid, fee: board.fee, vsize: board.vsize })
+  check('board answered pending, paying exactly the fee shown in the asset boarded', board.state === 'pending' && board.txid && board.fee.asset === X && board.fee.amount === bqFee, { txid: board.txid, fee: board.fee, vsize: board.vsize, shown: bqFee })
   await ctl('/produce'); await ctl('/bury')
   const boardTx = await rpc('getrawtransaction', [board.txid, true])
   check('node: the board transaction is in a block', boardTx.confirmations >= 1, `${board.txid} confirmations ${boardTx.confirmations}`)
@@ -153,7 +168,7 @@ async function main () {
   await set('leafRecvAsset', X)
   await click('#btnLeafReceive'); await idle()
   const request = await page.eval("document.querySelector('#leafRequest').value")
-  check('a receive request is shown', request.startsWith('arca:'), request.slice(0, 24) + '…')
+  check('a receive request is shown', /^(arca|request):/.test(request), request.slice(0, 24) + '…')
   await shot('receive-request')
   const mempoolBefore = await rpc('getrawmempool')
   const paid = cli('send', request, '--amount', '300000', '--asset', X)
@@ -207,6 +222,10 @@ async function main () {
 
   // --- The exit drill: the new leaf, on-chain from its record alone ---
   await page.eval(`document.querySelector('[data-leaf="${newLeaf.leaf}"] [data-action=exit]').click()`); await idle()
+  const eq = await text('#leafExitQuote')
+  check('the drill shows what its run broadcasts, each fee, before anything is broadcast', /transaction 1: \d+ vB, fee /.test(eq) && /the claim/.test(eq), eq)
+  await shot('exit-quote')
+  await click('#btnLeafExitConfirm'); await idle()
   const exitTxids = []
   for (let i = 0; i < 12; i++) {
     const runs = await page.eval("[...document.querySelectorAll('#leafDrill .leaf-drill-run')].map(d=>d.innerText)")
@@ -216,6 +235,8 @@ async function main () {
     if (/: claimed/.test(lastRun) || /exited/.test(await text('#leafDrill'))) break
     if (/: waiting/.test(lastRun) && /BIP68|exit delay|non-BIP68-final/i.test(lastRun)) { await ctl('/advance', { seconds: 600 }) } else { await ctl('/produce') }
     await click('#btnLeafExitAgain'); await idle()
+    await page.waitFor("document.querySelector('#btnLeafExitConfirm') || document.querySelectorAll('#leafDrill .leaf-drill-run').length > " + runs.length, 60000)
+    if (await page.eval("!!document.querySelector('#btnLeafExitConfirm')")) { await click('#btnLeafExitConfirm'); await idle() }
   }
   const drillText = await text('#leafDrill')
   check('the drill showed each step with its fee', /broadcast .* vB, fee /.test(drillText), exitTxids)
@@ -256,6 +277,67 @@ async function main () {
   await page.waitFor(`[...document.querySelectorAll('.leaf-participation')].filter(p=>/released/.test(p.innerText)).length>=2`, 180000)
   check('the page followed the refresh to its new leaf by itself', true)
   await shot('auto-refreshed')
+
+  // --- The page API: the leaf address, a board and an exit behind the wallet's dialog ---
+  const api = (method, params) => page.eval(`window.sequentiaWallet.request(${JSON.stringify({ method, params })}).then(r=>({ok:true,r}),e=>({ok:false,e:e.message}))`)
+  const decide = async (approve, name) => {
+    await page.waitFor("!!document.querySelector('#pageApiApproval')", 60000)
+    const body = await text('#pageApiApproval')
+    await shot(name)
+    await click(approve ? '#pageApiApprove' : '#pageApiReject')
+    return body
+  }
+  const ad1 = await api('getLeafAddress'), ad2 = await api('getLeafAddress')
+  check('page API getLeafAddress: silent, the same address each time', ad1.ok && ad2.ok && ad1.r.address === ad2.r.address && /^0014/.test(ad1.r.script_pubkey), [ad1, ad2])
+  await ctl('/fund', { script: ad1.r.script_pubkey, asset: X, amount: 3000000 }); await ctl('/produce'); await syncNow()
+  let pend = page.eval(`window.__b = window.sequentiaWallet.request(${JSON.stringify({ method: 'boardLeaves', params: { asset: X, amount: '500' } })}).then(r=>({ok:true,r}),e=>({ok:false,e:e.message}))`)
+  let rb = await pend
+  check('page API: a board below the smallest leaf is refused before any dialog', !rb.ok && /smallest leaf/.test(rb.e) && !(await page.eval("!!document.querySelector('#pageApiApproval')")), rb)
+  await page.eval(`(()=>{ window.__b = window.sequentiaWallet.request(${JSON.stringify({ method: 'boardLeaves', params: { asset: X, amount: '1000000' } })}).then(r=>({ok:true,r}),e=>({ok:false,e:e.message})); return true })()`)
+  const bdlg = await decide(false, 'page-api-board-rejected')
+  rb = await page.eval('window.__b')
+  check('page API: a rejected board runs nothing', !rb.ok && /rejected/.test(rb.e), rb)
+  await page.eval(`(()=>{ window.__b = window.sequentiaWallet.request(${JSON.stringify({ method: 'boardLeaves', params: { asset: X, amount: '1000000' } })}).then(r=>({ok:true,r}),e=>({ok:false,e:e.message})); return true })()`)
+  const bdlg2 = await decide(true, 'page-api-board')
+  const pFee = (bdlg2.match(/Fee\s*\S+ \S+ \((\d+) atoms\)/) || [])[1]
+  rb = await page.eval('window.__b')
+  check('page API boardLeaves: the dialog shows the fee, and the board pays exactly it', !!pFee && rb.ok && rb.r.fee.amount === pFee && rb.r.value === '1000000', { shown: pFee, answer: rb.ok ? { leaf: rb.r.leaf_id, txid: rb.r.txid, fee: rb.r.fee } : rb, dialog: bdlg.slice(0, 200) })
+  check('node: the page API board is in the mempool', rb.ok && (await rpc('getrawmempool')).includes(rb.r.txid))
+  await ctl('/produce'); await ctl('/bury'); await syncNow()
+  await page.eval(`(()=>{ window.__e = window.sequentiaWallet.request(${JSON.stringify({ method: 'exitLeaf', params: { leaf_id: rb.ok ? rb.r.leaf_id : '' } })}).then(r=>({ok:true,r}),e=>({ok:false,e:e.message})); return true })()`)
+  const edlg = await decide(true, 'page-api-exit')
+  const eFee = (edlg.match(/Transaction 1\s*\d+ vB, fee \S+ \S+ \((\d+) atoms\)/) || [])[1]
+  const re = await page.eval('window.__e')
+  const st1 = re.ok && re.r.broadcast && re.r.broadcast[0]
+  check('page API exitLeaf: the dialog shows each fee, and the path is broadcast on exactly it', !!eFee && !!st1 && st1.fee[0].amount === eFee, { shown: eFee, answer: re.ok ? { state: re.r.state, broadcast: re.r.broadcast } : re })
+  await ctl('/produce')
+  const ex1 = st1 ? await rpc('getrawtransaction', [st1.txid, true]) : null
+  check('node: the page API exit\'s first transaction is in a block', !!ex1 && ex1.confirmations >= 1, st1 && st1.txid)
+
+  // Another page of the origin reads the mode over the channel.
+  const viaChannel = await page.eval("new Promise((ok)=>{ const c=new BroadcastChannel('sequentia-wallet'); c.onmessage=(e)=>{ if(e.data.type==='answer'&&e.data.id===42){ c.close(); ok(e.data) } }; c.postMessage({type:'request', id:42, method:'getWalletMode'}) })")
+  check('the sequentia-wallet channel answers the mode to another context of the origin', viaChannel.ok && viaChannel.result.mode === 'developer', viaChannel)
+
+  // --- User mode: nothing of leaves shown or reachable; their value still counted ---
+  await click('[data-tab=settings]')
+  await page.eval("(()=>{const c=document.querySelector('#modeUser'); c.checked=true; c.dispatchEvent(new Event('change')); return true})()")
+  await page.waitFor("document.querySelector('#tabLeaves').classList.contains('hide') && document.querySelector('#tabContracts').classList.contains('hide')", 10000)
+  check('user mode hides the Leaves and Contracts tabs', true)
+  check('the page API heard modeChanged {mode: user}', await page.eval("window.__events.some(e=>e[0]==='modeChanged'&&e[1].mode==='user')"))
+  const um = await api('getLeafBalances'), ua = await api('getLeafAddress'), ub = await api('boardLeaves', { asset: X, amount: '1000000' })
+  check('in user mode every page API leaf method refuses, before any dialog', [um, ua, ub].every((x) => !x.ok && /developer-mode rail/.test(x.e)) && !(await page.eval("!!document.querySelector('#pageApiApproval')")), [um.e, ua.e, ub.e])
+  await click('[data-tab=balance]')
+  const row = await page.eval(`(()=>{ const rows=[...document.querySelectorAll('.asset-row')]; const r=rows.find(x=>x.innerText.includes('XLEAF')); return r ? { head: r.querySelector('.arow-head').innerText, split: !!r.querySelector('.leaf-split') } : null })()`)
+  check('in user mode the asset keeps one figure with its leaves in it, and no rail split', !!row && !row.split, row)
+  await shot('balance-user-mode')
+  await click('[data-tab=settings]')
+  await page.eval("(()=>{const c=document.querySelector('#modeDeveloper'); c.checked=true; c.dispatchEvent(new Event('change')); return true})()")
+  await page.waitFor("!document.querySelector('#tabLeaves').classList.contains('hide')", 10000)
+  await click('[data-tab=balance]')
+  const row2 = await page.eval(`(()=>{ const rows=[...document.querySelectorAll('.asset-row')]; const r=rows.find(x=>x.innerText.includes('XLEAF')); return r ? { head: r.querySelector('.arow-head').innerText, split: (r.querySelector('.leaf-split')||{}).innerText||'' } : null })()`)
+  check('in developer mode the row splits by rail, and its figure is the same as in user mode', !!row2 && / in leaves · /.test(row2.split) && row && row.head === row2.head, { user: row, developer: row2 })
+  await shot('balance-developer-mode')
+  await click('[data-tab=leaves]')
 
   // --- Every refusal, in the library's words ---
   const refusals = await text('#leafRefusals')

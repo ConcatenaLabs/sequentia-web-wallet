@@ -51,6 +51,14 @@ requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in
 in it may decide anything the library decides. The page's copy never names the operator
 protocol: developer mode speaks of leaves, rounds and the operator.
 
+The mode is kept for each wallet (`swk.mode.<walletTag>`, `leaves.js`), user mode by default,
+and its words are the same in the extension and Ambra: change them in all three together. A
+wallet that joined an operator keeps its leaf wallet syncing in either mode; user mode shows
+nothing of leaves and the page API refuses every leaf method there, but leaves count in each
+asset's figure and the headline. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
+answers as the extension's provider answers, and `leaf-request.js` is copied into the
+extension's `src/`: change it here first.
+
 `contracts.js` is developer mode's Contracts tab. The same rule holds: the kit's contract engine
 (`ContractTemplate`, `ContractInstance`, `ContractSpend`, `ContractApproval` in `pkg/`) reads,
 checks, builds, runs and signs; the module renders the approval it returns and signs the
