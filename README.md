@@ -134,7 +134,8 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   the record's transaction spends that coin, which is what authorises it. Every spend of a
   stake record is signed for the height of the block it enters, so the wallet refuses to
   build one when it cannot read the chain tip.
-- **History**: transactions on both chains, with explorer links, and rescue actions for stuck
+- **History**: transactions on both chains, with explorer links (Bitcoin's first when it has any;
+  with none on either chain, one line says so), and rescue actions for stuck
   Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
   selection as a send. They appear once a payment has missed a block. Each dialog says what the
   stuck transaction pays, as a multiple of the network's minimum rate, suggests a rate in the
