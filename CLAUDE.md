@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 86 `*.test.mjs` files (67 at the root, 19 under `tooling/lsp/`), and `node --test` runs
+There are 87 `*.test.mjs` files (68 at the root, 19 under `tooling/lsp/`), and `node --test` runs
 every one of them. 24 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -127,7 +127,12 @@ Byte-order bugs here are cross-language: the counterpart is Go, in `seqdex`. The
 of a transaction filling several orders (order `k` at input `k`, its credit at `2k`, its rest or gap
 at `2k+1`): `covenant-fill-vectors.json` is a copy of seqdex's
 `daemon/pkg/covenant/testdata/fill_vectors.json`, and `covenant-fills.test.mjs` holds
-`buildFillTx` and `checkFill` to its bytes. When the Go side changes the file, copy it here.
+`buildFillTx` and `checkFill` to its bytes. When the Go side changes the file, copy it here. The
+signed bytes of a covenant offer leave its outpoint out, so the relay can re-point a resting order
+at `(txid, 2k+1)` after a fill without its offline maker signing again: `covenant-offer-vectors.json`
+(a copy of seqdex's `daemon/internal/seqob/offer/testdata/covenant_offer_vectors.json`) holds Go's
+canonical bytes and signature for an offer served at its funding outpoint and again after a move,
+and `covenant-offer-move.test.mjs` verifies both through `normRelayOffer` and `verifyOffer`.
 
 ## Fund-safety idioms that are already established
 
