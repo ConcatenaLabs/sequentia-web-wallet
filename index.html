@@ -5619,6 +5619,8 @@ function prettyErr(e){
     return 'Your hosted Lightning node did not complete that request, so nothing was created. It may still be starting up — try again shortly, or with a smaller amount.';
   if(/lightning-rpc|connection refused|ECONNREFUSED/i.test(m))
     return 'Your Lightning node is not reachable right now, so nothing was sent. Reopen the wallet to reconnect it, then try again.';
+  if(/maker did not answer: /.test(m))
+    return 'The other side did not answer in time. This wallet signed nothing, so nothing was traded.';
   if(/timed? ?out|timeout|deadline exceeded/i.test(m))
     // NEVER claim "nothing was committed" on a timeout: a timeout means the wallet stopped
     // WAITING, not that the trade stopped HAPPENING. A pure-LN swap was observed settling on
