@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sequentia Wallet</title>
 <link rel="icon" type="image/png" href="./sequentia-mark.png">
 <style>
@@ -115,6 +115,7 @@
   .more-list button.active{background:#1d242d;color:var(--amber2)}
   .more-list .dev{color:var(--dim)}
   .more-list .dev:first-of-type{border-top:1px solid var(--line);margin-top:4px;border-radius:0 0 6px 6px}
+  .tico{display:none;width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
   .gear{margin-left:6px;flex:none;width:36px;height:36px;padding:0;border:none;background:transparent;color:var(--dim);
     border-radius:50%;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
   .gear svg{width:21px;height:21px;display:block}
@@ -484,6 +485,30 @@
     .amts{width:100%;align-items:flex-end}
     .amts .fee{white-space:normal;text-align:right}
   }
+  /* Phones: the menu is a bar fixed to the bottom of the screen, icon over label, within reach of a
+     thumb. It hides while the keyboard is up (body.typing, set from focus and the visual viewport),
+     because a fixed bar either rides up over the field being typed in (Android) or floats in the
+     middle of the page (iOS Safari). The page keeps room under its last line for it, and the bar
+     clears the iPhone home indicator (viewport-fit=cover, safe-area-inset-bottom). */
+  @media (max-width:560px){
+    .tabs{position:fixed;left:0;right:0;bottom:0;z-index:45;margin:0;gap:0;flex-wrap:nowrap;justify-content:space-around;
+      background:var(--bg);border-top:1px solid var(--line);border-bottom:none;
+      padding:5px max(4px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left))}
+    .tabs > button,.more-btn{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:2px;
+      padding:5px 0 3px;font-size:10.5px;border:none;border-radius:10px;background:transparent;color:var(--dim);font-weight:500}
+    .tabs > button.active,.more-btn.active{background:transparent;color:var(--amber);font-weight:600}
+    .tabs .tico{display:block}
+    .tabs > button.hide{display:none}
+    .more{flex:1 1 0;min-width:0;display:flex}
+    .more-btn .caret{display:none}
+    .more-btn > span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .more-list{top:auto;bottom:calc(100% + 10px);left:auto;right:4px}
+    body{padding-bottom:calc(68px + env(safe-area-inset-bottom))}
+    .toast,.lnmove-banner{bottom:calc(76px + env(safe-area-inset-bottom))}
+    body.typing .tabs{display:none}
+    body.typing{padding-bottom:0}
+    body.typing .toast,body.typing .lnmove-banner{bottom:16px}
+  }
   @media (max-width:480px){
     .swamt{font-size:26px}
     .swpane{padding:16px}
@@ -544,13 +569,13 @@
   <div class="hide" id="app">
     <!-- The five things most visits are for in one row; the rest behind More; Settings is the gear above. -->
     <div class="tabs" id="tabs">
-      <button data-tab="balance" class="active">Balance</button>
-      <button data-tab="send">Send</button>
-      <button data-tab="receive">Receive</button>
-      <button data-tab="swap">Swap</button>
-      <button data-tab="history">History</button>
+      <button data-tab="balance" class="active"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a1 1 0 0 1-1-1V7Z"/><path d="M4 7l11-3v3"/><circle cx="16" cy="13" r="1.2"/></svg><span>Balance</span></button>
+      <button data-tab="send"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7"/><path d="M9 7h8v8"/></svg><span>Send</span></button>
+      <button data-tab="receive"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7 7 17"/><path d="M15 17H7V9"/></svg><span>Receive</span></button>
+      <button data-tab="swap"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h13l-3-3"/><path d="M20 16H7l3 3"/></svg><span>Swap</span></button>
+      <button data-tab="history"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg><span>History</span></button>
       <div class="more" id="moreMenu">
-        <button class="more-btn" id="btnMore" aria-haspopup="true" aria-expanded="false"><span id="moreLabel">More</span> ▾</button>
+        <button class="more-btn" id="btnMore" aria-haspopup="true" aria-expanded="false"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18" cy="12" r="1.3"/></svg><span id="moreLabel">More</span><span class="caret"> ▾</span></button>
         <div class="more-list hide" id="moreList">
           <button data-tab="mix">Mix</button>
           <button data-tab="assets">Issuance</button>
@@ -6608,6 +6633,20 @@ async function cjRunBtc(){
 
 document.querySelectorAll('#tabs button[data-tab]').forEach(b=> b.onclick=()=>tab(b.dataset.tab));
 function closeMore(){ const l=$('moreList'); if(l && !l.classList.contains('hide')){ l.classList.add('hide'); $('btnMore').setAttribute('aria-expanded','false'); } }
+// The phone tab bar steps aside while the keyboard is up: a field has the focus, or the visual
+// viewport has shrunk well below the window (the keyboard took it). It comes back when both end.
+{
+  const typingField = (t) => !!(t && t.matches && t.matches('input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=range]), textarea, select, [contenteditable="true"]'));
+  let focused = false;
+  const sync = () => {
+    const vv = window.visualViewport;
+    const kb = !!(vv && vv.height < window.innerHeight * 0.75);
+    document.body.classList.toggle('typing', focused || kb);
+  };
+  document.addEventListener('focusin', (e) => { focused = typingField(e.target); sync(); });
+  document.addEventListener('focusout', () => { setTimeout(() => { focused = typingField(document.activeElement); sync(); }, 120); });
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', sync);
+}
 $('btnMore').onclick=(e)=>{ e.stopPropagation(); const l=$('moreList'), open=l.classList.toggle('hide')===false; $('btnMore').setAttribute('aria-expanded', String(open)); };
 document.addEventListener('click', (e)=>{ if(!e.target.closest || !e.target.closest('#moreMenu')) closeMore(); });
 document.addEventListener('keydown', (e)=>{ if(e.key==='Escape') closeMore(); });
