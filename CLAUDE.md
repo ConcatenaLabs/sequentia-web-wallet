@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 84 `*.test.mjs` files (65 at the root, 19 under `tooling/lsp/`), and `node --test` runs
+There are 86 `*.test.mjs` files (67 at the root, 19 under `tooling/lsp/`), and `node --test` runs
 every one of them. 24 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -123,7 +123,11 @@ record without the marker keeps the old display-order derivation, because its re
 re-derive the same taptree. "Fixing" a legacy record strands its locked coins forever.
 
 Byte-order bugs here are cross-language: the counterpart is Go, in `seqdex`. The golden vectors in
-`covenant-byteorder.test.mjs` are pinned against the Go side. Keep them pinned.
+`covenant-byteorder.test.mjs` are pinned against the Go side. Keep them pinned. So is the layout
+of a transaction filling several orders (order `k` at input `k`, its credit at `2k`, its rest or gap
+at `2k+1`): `covenant-fill-vectors.json` is a copy of seqdex's
+`daemon/pkg/covenant/testdata/fill_vectors.json`, and `covenant-fills.test.mjs` holds
+`buildFillTx` and `checkFill` to its bytes. When the Go side changes the file, copy it here.
 
 ## Fund-safety idioms that are already established
 

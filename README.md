@@ -479,8 +479,10 @@ This runs every `*.test.mjs` file, at the root and under `tooling/lsp/`. Most re
 `node:test` cases. The rest are standalone scripts with their own `check()` harness, which
 `node --test` runs as one test each, among them `seqln.test.mjs`, `xcourier.test.mjs`,
 `xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the
-`covenant*.test.mjs` golden vectors; each also runs on its own, for example
-`node covenant-byteorder.test.mjs`.
+covenant scripts (`covenant.test.mjs`, `covenant-byteorder.test.mjs`, `covenant-order.test.mjs`,
+`covenant-flow.test.mjs`); each also runs on its own, for example
+`node covenant-byteorder.test.mjs`. `covenant-fills.test.mjs` holds the multi-order fill layout to
+the vectors seqdex's Go planner writes (`covenant-fill-vectors.json`).
 
 `node tooling/sign-tab-probe.mjs` opens the wallet in a headless Chromium, creates a wallet,
 signs a message with the staking key from the Sign tab, and recovers a key from the signature
