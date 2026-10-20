@@ -232,8 +232,8 @@ descriptor and its programs) and an instance of it (the template's values on thi
 kit's contract engine does the work; the tab asks it and shows what it answers.
 
 - **Template**: one the kit carries (`sequentia/one-key`, `sequentia/one-key-exit`,
-  `sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`, `sequentia/capped-sale`,
-  `sequentia/subscription-escrow`), or a descriptor pasted with its sources (each with its includes
+  `sequentia/faucet-drip`, `pignus/vault`, `pignus/offer`, `pignus/vault-threshold`,
+  `pignus/offer-threshold`, `sequentia/capped-sale`, `sequentia/subscription-escrow`), or a descriptor pasted with its sources (each with its includes
   resolved, as `seqc expand` prints it). The engine checks a pasted template with the
   contracts' own reader and pinned compiler, and only then adds it to this wallet's list. The
   tab shows this wallet's contract key (`m/8383h/1h/0h/0/0`), the key a template names for it.
