@@ -7,9 +7,8 @@
 // ago the last testnet4 block was found, which is the one number that explains a long wait.
 
 // For a review or a quote, before anything is committed.
-export const T4_WAIT = 'Waits on Bitcoin confirmations, on testnet4: its blocks come irregularly, sometimes hours apart, '
-  + 'and it is often flooded: that is the test network, not Sequentia (on Bitcoin itself a block comes about every 10 minutes). '
-  + 'Safe to leave: it resumes and refunds automatically.';
+export const T4_WAIT = 'Waits on Bitcoin confirmations. Testnet4 blocks arrive irregularly, sometimes hours apart: '
+  + 'a delay here comes from testnet4, not Sequentia. You can close the wallet meanwhile.';
 // For a quote line, where there is room for a few words.
 export const T4_WAIT_SHORT = 'waits on Bitcoin confirmations: testnet4 blocks can be hours apart';
 

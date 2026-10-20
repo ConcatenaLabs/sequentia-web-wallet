@@ -770,7 +770,7 @@ async function runForwardCourier(q){
     const claimTxid = await claimSeq();                 // reveals the secret; state -> SEQ_CLAIMED
     setStepStatus('done', '', false);
     renderStepper();
-    C.toast && C.toast('Swap complete - ' + sm.ticker + ' claimed (anchor-bound to Bitcoin).',
+    C.toast && C.toast('Swap complete - ' + sm.ticker + ' claimed.',
       { href: '/explorer/tx/' + claimTxid, label: String(claimTxid).slice(0, 18) + '…' });
     session.close();
   } catch (e){
@@ -839,7 +839,7 @@ function confirmLockModal(fq, sm){
       ['You receive', C.fmtAtoms(fq.seq_amount, sm.precision) + ' ' + sm.ticker],
       ['Maker fee', C.fmtAtoms(fq.fee_btc, 8) + ' BTC'],
       ['BTC refund after', 'block ' + fq.btc_locktime + ' (if the maker stalls, you reclaim the BTC)'],
-      ['Then, automatically', 'the maker locks the asset, the wallet checks the Bitcoin anchor, and claims your asset. Anchor-bound to Bitcoin - reverts only if Bitcoin reverts.'],
+      ['Then, automatically', 'the maker locks the asset and the wallet claims it for you.'],
       // The confirmation-wait class, stated BEFORE commit (task 21c) — same as the mixed rails' Speed row.
       ['Speed', T4_WAIT],
     ];
@@ -907,7 +907,7 @@ async function resumeAnchorClaim(){
     if (!gate.ok) { renderStepper(); return; }   // unsafe (anchored before lock) or timed out near T_btc; stepper shows refund guidance
     const txid = await claimSeq();
     renderStepper();
-    C.toast && C.toast('Swap complete - asset claimed (anchor-bound to Bitcoin).',
+    C.toast && C.toast('Swap complete - asset claimed.',
       { href: '/explorer/tx/' + txid, label: String(txid).slice(0, 18) + '…' });
   } catch { /* transient; the manual Claim button + next resume retry */ }
   finally { _resumeClaiming = false; }
@@ -1525,7 +1525,6 @@ async function onClaimSeq(){
     ['You receive', C.fmtAtoms(SWAP.seq_leg.amount, sm.precision) + ' ' + sm.ticker],
     ['Anchor verified', `Sequentia anchor_height ${gate.anchor_height} ≥ your BTC-leg height ${gate.btc_height}`],
     ['Effect', 'Revealing the secret lets the maker claim your BTC, completing the atomic swap.'],
-    ['Finality', 'Anchor-bounded: this can reorg only if the Bitcoin block it is anchored to does.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Claim the Sequentia leg', kv });
   ok.onclick = async () => {
@@ -1534,7 +1533,7 @@ async function onClaimSeq(){
       const txid = await claimSeq();
       modal.remove();
       renderStepper();
-      C.toast && C.toast('Sequentia leg claimed (anchor-bounded):', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast && C.toast('Asset claimed:', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
     } catch (e){ st.className = 'status err'; st.textContent = 'Failed: ' + C.prettyErr(e); ok.disabled = false; }
   };
 }
@@ -2001,8 +2000,8 @@ function stepDoneCard(){
   // wallet does not poll for. The RFQ path waits for the on-chain BTC_CLAIMED.
   const done = SWAP.state === ST.BTC_CLAIMED || (SWAP.courier && SWAP.state === ST.SEQ_CLAIMED);
   const body = [ C.el('div','sub', SWAP.courier
-    ? 'You have your asset. The maker uses your revealed secret to claim the BTC leg, finishing their side; your asset is settled (anchor-bound to Bitcoin - reverts only if Bitcoin does).'
-    : 'The maker extracts your revealed secret and claims the BTC leg. The swap is then complete (anchor-bounded; reorgs only if Bitcoin does).') ];
+    ? 'You have your asset. The maker uses your revealed secret to claim the BTC, which finishes their side.'
+    : 'The maker uses your revealed secret to claim the BTC, and the swap is complete.') ];
   if (SWAP.btc_claim_txid) body.push(kvRowHtml('BTC claim tx (maker)', txLink(SWAP.btc_claim_txid, true)));
   if (SWAP.preimage) body.push(kvRow('Preimage revealed', short(SWAP.preimage)));
   if (SWAP.state === ST.REFUNDED){ body.push(okLine('Refunded: ' + (SWAP.detail || 'the BTC leg was refunded to you.'))); }
