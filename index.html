@@ -1170,8 +1170,9 @@
     </section>
 
     <!-- history -->
-    <section data-panel="history" class="hide">
-      <div class="card">
+    <section data-panel="history" class="hide" id="historyPanel">
+      <div class="card hide" id="histEmptyCard"><div class="muted">No transactions yet.</div></div>
+      <div class="card" id="seqHistCard">
         <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:2px">
           <label class="lbl" style="margin:0">Sequentia history</label>
           <button id="btnHistSync">Refresh</button>
@@ -1179,12 +1180,12 @@
         <div class="status" id="histStatus"></div>
         <div class="list" id="histList"><div class="muted">Syncing your history…</div></div>
       </div>
-      <div class="card">
+      <div class="card" id="btcHistCard">
         <label class="lbl">Bitcoin (testnet4) history</label>
         <p class="sub" style="margin:0 0 6px">Parent-chain BTC on the shared tb1 address. Links open the testnet4 explorer.</p>
         <div class="list" id="btcHistList"><div class="muted">Loading…</div></div>
       </div>
-      <div class="card">
+      <div class="card" id="oampHistCard">
         <label class="lbl">Restricted transfers (OpenAMP)</label>
         <p class="sub" style="margin:0 0 6px">Transfers you've sent on the OpenAMP enclave ledger from this wallet, tracked here until they confirm. A confirmed transfer is final once its Bitcoin anchor is buried; depth is that anchor's Bitcoin confirmation count.</p>
         <div class="list" id="oampHistList"><div class="muted">No restricted transfers yet.</div></div>
@@ -1496,6 +1497,7 @@ const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
 const KEY = 'swk.sequentia.mnemonic';
 const LBL = 'swk.sequentia.assets';      // { assetHex: {name,ticker,precision} }
+var _histCounts = { seq: null, btc: null, oamp: 0 };   // History's cards, by what they hold (arrangeHistory)
 const DEFAULT_FEERATE = 2000;            // sat/kvB (2 sat/vB) — above the network min relay fee
 const BUMP_FEERATE = 10000;              // sat/kvB (10 sat/vB) — rescue rate for RBF/CPFP; the node arbitrates BIP125 in reference value
 
@@ -6925,6 +6927,20 @@ function swapGroupRow(rows, title){
     caret.textContent=(open?'▾ ':'▸ ')+rows.length+' fills'+(title ? ' · one market order' : ''); };
   return { item, box };
 }
+// Which history comes first: Bitcoin's when it has any transaction, else Sequentia's; with none on
+// either chain, one line says so. A count is null while that history is still being read, and an
+// unread history is never called empty. (_histCounts is declared near the top of the script.)
+function arrangeHistory(){
+  const panel=$('historyPanel'), seq=$('seqHistCard'), btcC=$('btcHistCard'), oamp=$('oampHistCard'), empty=$('histEmptyCard');
+  if(!panel || !seq || !btcC) return;
+  const none = _histCounts.seq===0 && _histCounts.btc===0 && !_histCounts.oamp;
+  empty.classList.toggle('hide', !none);
+  seq.classList.toggle('hide', none);
+  btcC.classList.toggle('hide', none);
+  if(oamp) oamp.classList.toggle('hide', !_histCounts.oamp);
+  if(_histCounts.btc > 0){ if(btcC.nextElementSibling!==seq) panel.insertBefore(btcC, seq); }
+  else if(seq.nextElementSibling!==btcC) panel.insertBefore(seq, btcC);
+}
 function renderHistory(){
   renderBtcHistory().catch(()=>{});   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
   renderOampHistory(); refreshOampHistory().catch(()=>{});   // WW-6: restricted-transfer history + confirmation/anchor chips
@@ -6935,9 +6951,10 @@ function renderHistory(){
   let rows, live=_scannedOnce;
   if(live){ try{ rows=historyRows(); }catch(e){ list.innerHTML=''; list.appendChild(el('div','err','History error: '+(e?.message??e))); return; } }
   else if(_snap && Array.isArray(_snap.hist)) rows=_snap.hist;
-  else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your history…')); return; }
+  else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your history…')); _histCounts.seq=null; arrangeHistory(); return; }
   list.innerHTML='';
   const pending=livePending();
+  _histCounts.seq=rows.length+pending.length; arrangeHistory();
   if(!rows.length && !pending.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
   // Sends this wallet has broadcast and the wollet has not recorded yet, newest first, on top.
   for(const p of pending.slice().reverse()){
@@ -7114,6 +7131,7 @@ function drawBtcRows(list, rows){
   list.innerHTML='';
   const known=new Set(rows.map(r=>r.txid));
   rows = [...btcPendingSends().filter(p=>!known.has(p.txid)).map(p=>({ txid:p.txid, delta:p.delta, conf:false, height:0, time:0, mine:true })), ...rows];
+  _histCounts.btc=rows.length; arrangeHistory();
   if(!rows.length){ list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
   for(const t of rows){
     const delta=BigInt(t.delta), incoming = delta >= 0n;
@@ -7138,12 +7156,12 @@ function isOwnBtcAddress(addr){
 }
 async function renderBtcHistory(){
   const list=$('btcHistList'); if(!list) return;
-  if(!btcRoot){ list.innerHTML=''; list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
+  if(!btcRoot){ list.innerHTML=''; list.appendChild(el('div','muted','No Bitcoin transactions yet.')); _histCounts.btc=0; arrangeHistory(); return; }
   // Before the first sync this wallet has not looked at the chain yet: the last read, dated by the
   // status line above, or that it is being read; never "no transactions", which nobody has checked.
   if(!_scannedOnce){
     if(_snap && Array.isArray(_snap.btcHist)) drawBtcRows(list, _snap.btcHist);
-    else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your Bitcoin history…')); }
+    else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your Bitcoin history…')); _histCounts.btc=null; arrangeHistory(); }
     return;
   }
   // Wallet address universe (for in/out classification): the full scanned window on both branches.
@@ -8411,6 +8429,7 @@ function oampRecordTransfer(rec){
 function renderOampHistory(){
   const list=$('oampHistList'); if(!list) return; list.innerHTML='';
   const xfers=oampLoadTransfers();
+  _histCounts.oamp=xfers.length; arrangeHistory();
   if(!xfers.length){ list.appendChild(el('div','muted','No restricted transfers yet.')); return; }
   for(const x of xfers.slice().reverse()){
     const item=el('div','item');
