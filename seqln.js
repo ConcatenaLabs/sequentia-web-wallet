@@ -13,7 +13,7 @@
 // The two legs settle atomically on one preimage. Both hosted nodes are KEYLESS
 // (no hsm_secret): the browser device is the sole signer for BOTH. It signs only
 // commitments it has validated and approves each payment only within its payment
-// limit for the asset (SEQ_LN_PAYMENT_LIMITS). That does not protect the user
+// limit set for the asset, when a page sets one (SEQ_LN_PAYMENT_LIMITS). That does not protect the user
 // from an operator who runs both the hosted node and its channel peer: the node
 // still collects the device's signature on each commitment before the device
 // revokes it (the preempt slot), so the two together could broadcast a revoked
@@ -37,6 +37,8 @@ import { makeNoteStore, channelFate } from './lnupgrade.js';
 import { makeCreditStore } from './lncredit.js';
 
 const W = (typeof window !== 'undefined') ? window : {};
+// No limit on Lightning payments: the signer's own default reference limit, lifted.
+const NO_PAYMENT_LIMIT = Object.freeze({ reference: null });
 
 const DEFAULTS = {
   lspUrl: W.SEQ_LSP_URL
@@ -59,14 +61,13 @@ const DEFAULTS = {
   // The wasm signer SDK (vendored under /lightning). Dynamic-imported so a wallet
   // with LN unconfigured never loads the 1.5MB wasm.
   sdkPath: W.SEQ_LSP_SDK || './lightning/seqln-signer-sdk.js',
-  // The device's payment limits: { reference: reference atoms|null, default:
-  // atoms|null, period: seconds, assets: { <asset id>|'btc': atoms|null } }.
-  // The device approves a payment only within what its limit leaves for the
-  // period. Unset, the device's own default applies: 1,000 reference units a
-  // day, held in each asset at the rate the wallet gives it (setPaymentRates);
-  // `default` replaces it with the same atoms of every asset, `assets` sets an
-  // asset's own limit in its atoms; null means no limit.
-  paymentLimits: W.SEQ_LN_PAYMENT_LIMITS || null,
+  // The device's payment limits. None: the wallet sets no limit on what its
+  // Lightning payments may spend, so it lifts the signer's own default (1,000
+  // reference units a day) with `reference: null`. A page may set limits with
+  // window.SEQ_LN_PAYMENT_LIMITS: { default: atoms|null, period: seconds,
+  // assets: { <asset id>|'btc': atoms|null } }, `default` the same atoms of
+  // every asset, `assets` an asset's own limit in its atoms, null none.
+  paymentLimits: W.SEQ_LN_PAYMENT_LIMITS || NO_PAYMENT_LIMIT,
 };
 
 const NODES = ['asset', 'btc'];
@@ -94,7 +95,7 @@ const nodeState = { asset: freshNode(), btc: freshNode() };
 function cloneCfg(src) {
   return {
     lspUrl: src.lspUrl, token: src.token, sdkPath: src.sdkPath, sdk: src.sdk || null, wsBase: src.wsBase || null,
-    paymentLimits: src.paymentLimits || null,
+    paymentLimits: src.paymentLimits || NO_PAYMENT_LIMIT,
     nodes: {
       asset: { ...src.nodes.asset },
       btc: { ...src.nodes.btc },
@@ -224,23 +225,8 @@ export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
 function signerOpts(key) {
   const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key),
     onPredating: onPredatingFor(key), onCredit: onCreditFor(key) };
-  const lim = CFG.paymentLimits;
-  const rates = { ...payRates, ...((lim && lim.rates) || {}) };
-  if (Object.keys(rates).length) o.paymentLimits = { ...(lim || {}), rates };
-  else if (lim) o.paymentLimits = lim;
+  if (CFG.paymentLimits) o.paymentLimits = CFG.paymentLimits;
   return o;
-}
-
-// The rates the device converts its default payment limit at ({ <asset id>|'btc': rate }, the
-// node's convention: reference atoms per 10^8 atoms), from the wallet's own feeds (ln-limit.js).
-// Given to every signer built after, and to every signer already running.
-let payRates = {};
-export function setPaymentRates(rates) {
-  payRates = { ...(rates || {}) };
-  const live = [...NODES.map((n) => nodeState[n].signer), ...Object.values(provNodes).map((p) => p.signer)];
-  for (const s of live) {
-    try { if (s) s.setPaymentLimits({ rates: payRates }); } catch {}
-  }
 }
 
 // Channels the device found in a store its predecessor wrote, which validated nothing: the
