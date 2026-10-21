@@ -218,7 +218,9 @@ must answer CORS. The tab then has:
   request to the faucet, which pays it as a leaf out of round, and the page syncs.
 - **Send to a receive request**: pays it out of round, in the asset named.
 - **Sync and schedule**: the chain's median time, when the schedule next asks for a sync and
-  why, and every unpaid receive request with when it lapses. While the page is open it reads
+  why, and every unpaid receive request with when it lapses. It syncs once when the leaf wallet
+  opens, whatever the schedule says, so a wallet back from an absence takes up what happened
+  while it was closed (a plan's step, a payment). While the page is open it reads
   the schedule every minute and syncs when it is due, when the time it gave after the last
   sync arrives (whatever later reads say), and every 30 seconds at most while a
   board, a payment, a participation or an exit is in flight. **Sync now** runs one at once.
@@ -230,8 +232,34 @@ must answer CORS. The tab then has:
   released and the new leaf is held. **Exit drill** takes one leaf on-chain from its record
   alone, without the operator: each run shows what it broadcast, with every fee, and what comes
   next; run it again until the claim is final.
+- **Kept by itself: claims and refresh plans**: what the wallet last did by itself (below),
+  every refresh plan with its leaf, its steps and until when it covers the leaf, with
+  **Cancel**, and **Release** for a planned leaf (the plan cancelled, then its refresh quoted as
+  in Settle now, so the next round makes a leaf that can be paid). **Look up claims** lists the
+  claims under this wallet's addresses, and **Distributions paid from here** the wallet's own.
 - **Participations** and **Refusals**: every participation and where it stands, and every
   refusal the leaf wallet made.
+
+#### What the wallet does by itself
+
+A wallet that joined an operator does three things with no prompt, in either mode, while the
+page is open: it syncs on the library's schedule (above), and after a sync, at most every ten
+minutes and at the first one after the page opens, it runs the library's `care`. That takes up
+every open claim of a distribution named for one of the wallet's addresses, looking under every
+address the wallet handed out and 20 more, so the asset appears in its figure on the Balance tab.
+It signs a refresh plan for each leaf whose refresh step could run within ten days, two
+expiries ahead, the operator's fee for a step bounded at 0.2% of the leaf and taken from the
+leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
+leaf of a round, so a leaf received or boarded out of round is first refreshed into a round,
+under the same bound, and its new leaf planned later. A leaf the operator will
+not plan stays unplanned, with the operator's reason in developer mode, and is refreshed by
+sync while the page is open. A wallet then closed across that leaf's expiry keeps it: the
+operator runs the plan's steps and the wallet takes the new leaf up when it opens again. And it
+cancels a plan whose leaf has moved. A leaf younger than that stays unplanned, because a planned
+leaf can be paid only once refreshed in a round; so a wallet closed within a leaf's first two
+weeks or so and kept closed through its refresh can lose that leaf to the operator's sweep, as
+any holder who stays away past an expiry can. User mode shows none of this: a claim taken up is
+counted in its asset's one figure.
 
 Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
 library itself (the same code as the operator's command-line wallet), compiled to WebAssembly

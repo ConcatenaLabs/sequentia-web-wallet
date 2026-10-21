@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { careDue, careSummary, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -169,4 +169,50 @@ test('the faucet is asked for the asset a request names, or one the operator ser
   // the Sequence token is the faucet's request with no asset named
   assert.deepEqual(faucetRequestBody('request:7b22', 'tSEQ'), { request: 'request:7b22' })
   assert.equal('address' in faucetRequestBody('request:7b22', 'EURX'), false)
+})
+
+test('care runs at the first chance, then at most every ten minutes', () => {
+  assert.equal(CARE_EVERY_MS, 600_000)
+  assert.equal(careDue(null, 5), true)
+  assert.equal(careDue(1_000, 1_000 + 599_999), false)
+  assert.equal(careDue(1_000, 1_000 + 600_000), true)
+})
+
+test('what care did, counted', () => {
+  const v = { claims: [{ claim: 'd:0', leaf_id: 'l1', value: '5', taken_up: {} }, { claim: 'd:1', state: 'pending', note: 'not open' },
+    { claim: 'd:2', leaf_id: 'l2', held: true, error: 'unreachable' }],
+  planned: [{ coin: 'c1', plan_id: 'p1', fee: '0' }, { coin: 'c2', error: 'out_of_bounds' }],
+  cancelled: [{ plan_id: 'p0', state: 'cancelled' }], refreshing: [{ coin: 'c3', participation: 'pp', state: 'pending' }, { coin: 'c4', error: 'fee' }],
+  not_yet_planned: 3 }
+  assert.deepEqual(careSummary(v), { taken: 1, held: 1, planned: 1, unplanned: 1, cancelled: 1, refreshing: 1, later: 3 })
+  assert.deepEqual(careSummary(null), { taken: 0, held: 0, planned: 0, unplanned: 0, cancelled: 0, refreshing: 0, later: 0 })
+})
+
+test('a joined wallet in user mode runs care when it opens, with the kit\'s scan, and re-reads its balance after a claim', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const runs = []
+  let changes = 0
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    runs.push(m.args.command === 'care' ? ['care', m.args.args] : m.args.command)
+    const result = m.args.command === 'care'
+      ? { claims: [{ claim: 'd:0', leaf_id: 'l1', value: '7', taken_up: { txid: 'x' } }], planned: [], cancelled: [], not_yet_planned: 0 }
+      : m.args.command === 'schedule' ? { now: 1, due: false, next_sync_at: null }
+      : m.args.command === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const events = []
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    claimScan: () => 47, onChange: () => { changes++ }, onEvent: (n, d) => events.push([n, d]), tickMs: 3_600_000 }, null, null)
+  await api.start()
+  const care = runs.filter((r) => Array.isArray(r) && r[0] === 'care')
+  assert.deepEqual(care, [['care', { scan: 47 }]])
+  // The claim taken up: the balance read again, and the page told.
+  assert.ok(runs.lastIndexOf('balance') > runs.findIndex((r) => Array.isArray(r)), 'balance re-read after care')
+  assert.ok(changes >= 2)
+  assert.deepEqual(events.find((e) => e[0] === 'leafArrived'), ['leafArrived', { leaf_id: 'l1', value: '7', kind: 'claim' }])
+  api.stop && api.stop()
 })
