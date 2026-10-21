@@ -39,6 +39,8 @@
 //   onChange()          called when leaf balances change (the Balance tab re-renders)
 //   onModeChange(mode)  called when the user changes the mode
 //   onEvent(name, data) the leaf events: 'leafArrived', 'leafSyncDue'
+//   askFaucet(body)     optional: asks the testnet faucet to pay a receive request as a leaf
+//                       ({ request, asset? }); answers the faucet's JSON or throws its error
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 
@@ -187,6 +189,23 @@ export function receiveAssets (info, balances) {
   const held = [...balances.entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a)
   if (!listed.length) return [...balances.keys()]
   return [...new Set([...listed, ...held])]
+}
+
+// The assets to ask the testnet faucet for, for a request: the one it names, or else each
+// asset the operator serves (a leaf can hold nothing else). Which of them the faucet pays as
+// leaves is the faucet's to say; it refuses the others in its own words.
+export function faucetAssets (info, requested) {
+  if (requested) return [requested]
+  return ((info && info.server_info && Array.isArray(info.server_info.assets)) ? info.server_info.assets : [])
+    .map((a) => a && a.asset).filter((a) => typeof a === 'string' && /^[0-9a-f]{64}$/.test(a))
+}
+
+// What the faucet is sent: the request in place of an address, and the asset by the label
+// the faucet knows it by. The Sequence token (SEQ) is the faucet's request with no asset.
+export function faucetRequestBody (request, label) {
+  const body = { request }
+  if (label && !/^t?SEQ$/.test(label)) body.asset = label
+  return body
 }
 
 // States in which a coin is still the wallet's business.
@@ -551,15 +570,48 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const a = el('input'); a.id = 'leafRecvAmount'; field(c, 'Amount, in atoms (optional)', bind(a))
     const b = button('Make a receive request', () => {
       const args = { asset: val('leafRecvAsset') || null, amount: val('leafRecvAmount') || null }
-      act('receive', () => run('receive', args)).catch(() => {})
+      act('receive', () => run('receive', args)).then((v) => { S.request = { text: (v && v.request) || '', asset: args.asset }; S.faucet = null; render() }).catch(() => {})
     })
     b.id = 'btnLeafReceive'; b.disabled = S.busy
     const r = el('div', 'row'); r.style.marginTop = '12px'; r.appendChild(b); c.appendChild(r)
-    if (S.last && S.last.what === 'receive') {
-      const t = el('textarea', 'mono'); t.id = 'leafRequest'; t.rows = 4; t.readOnly = true; t.value = S.last.value.request || ''
+    if (S.request && S.request.text) {
+      const t = el('textarea', 'mono'); t.id = 'leafRequest'; t.rows = 4; t.readOnly = true; t.value = S.request.text
       c.appendChild(t)
+      if (ctx.askFaucet) renderFaucetAsk(c)
     }
     root.appendChild(c)
+  }
+
+  // The testnet faucet pays a receive request as a leaf, out of round, from its own wallet
+  // on the operator: the request names the operator, the chain and this wallet's mailbox,
+  // and the faucet refuses one for another operator or chain. The coin is in the mailbox
+  // once the faucet answers; the sync that follows reads it.
+  function renderFaucetAsk (c) {
+    const choices = faucetAssets(S.info, S.request.asset)
+    if (!choices.length) return
+    c.appendChild(el('p', 'sub', 'On the testnet, the faucet can pay this request as a leaf.'))
+    field(c, 'Asset to ask the faucet for', assetSelect('leafFaucetAsset', choices))
+    const fb = button('Ask the testnet faucet to pay it', async () => {
+      const asset = val('leafFaucetAsset') || choices[0]
+      S.faucet = { busy: true }; render()
+      try {
+        const answer = await ctx.askFaucet(faucetRequestBody(S.request.text, tick(asset)))
+        S.faucet = { answer }
+      } catch (e) { S.faucet = { error: e } }
+      render()
+      if (S.faucet && S.faucet.answer) syncNow()
+    }, 'ghost')
+    fb.id = 'btnLeafFaucet'; fb.disabled = S.busy || !!(S.faucet && S.faucet.busy)
+    const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(fb); c.appendChild(r)
+    const f = S.faucet
+    if (f && f.busy) c.appendChild(el('div', 'status', 'Asking the faucet…'))
+    if (f && f.answer) {
+      const l = f.answer.leaf || {}
+      const d = el('div', 'status ok'); d.id = 'leafFaucetAnswer'
+      d.textContent = `The faucet paid ${l.asset ? amt(l.asset, l.atoms) : (f.answer.amount + ' ' + f.answer.asset)} into this request; sync reads it from the mailbox.`
+      c.appendChild(d)
+    }
+    if (f && f.error) { const d = el('div', 'status err'); d.id = 'leafFaucetAnswer'; d.textContent = 'The faucet refused: ' + (f.error.message || String(f.error)); c.appendChild(d) }
   }
 
   function renderSend () {

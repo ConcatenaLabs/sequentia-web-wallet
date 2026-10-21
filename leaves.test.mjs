@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { syncDecision, leafBalances, receiveAssets, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -157,4 +157,16 @@ test('a receive request offers the operator\'s assets, then other assets held in
   // the operator's list could not be read: every asset the leaf wallet holds, as before
   assert.deepEqual(receiveAssets({ server_info: { unreachable: 'timeout' } }, held).sort(), [T, U, Z].sort())
   assert.deepEqual(receiveAssets(null, leafBalances(null)), [])
+})
+
+test('the faucet is asked for the asset a request names, or one the operator serves, by its label', () => {
+  const U = '2a'.repeat(32), E = 'e3'.repeat(32)
+  const info = { server_info: { assets: [{ asset: U }, { asset: E }] } }
+  assert.deepEqual(faucetAssets(info, U), [U])
+  assert.deepEqual(faucetAssets(info, null), [U, E])
+  assert.deepEqual(faucetAssets({ server_info: { unreachable: 'x' } }, null), [])
+  assert.deepEqual(faucetRequestBody('request:7b22', 'USDX'), { request: 'request:7b22', asset: 'USDX' })
+  // the Sequence token is the faucet's request with no asset named
+  assert.deepEqual(faucetRequestBody('request:7b22', 'tSEQ'), { request: 'request:7b22' })
+  assert.equal('address' in faucetRequestBody('request:7b22', 'EURX'), false)
 })
