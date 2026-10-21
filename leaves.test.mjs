@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { syncDecision, leafBalances, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { syncDecision, leafBalances, receiveAssets, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -144,4 +144,17 @@ test('the page syncs when the time the schedule first gave arrives, though the s
   assert.deepEqual(syncDecision({ now: 1, next_sync_at: 9, due: true }, 5, false), { sync: true, why: 'schedule', held: null })
   assert.deepEqual(syncDecision({ now: 1, next_sync_at: 9, due: false }, null, true), { sync: true, why: 'moving', held: null })
   assert.deepEqual(syncDecision({ now: 1, next_sync_at: null, due: false }, null, false), { sync: false, why: null, held: null })
+})
+
+test('a receive request offers the operator\'s assets, then other assets held in leaves', () => {
+  const U = '2a'.repeat(32), E = 'e3'.repeat(32), T = 'c8'.repeat(32), Z = '5f'.repeat(32)
+  const info = { server_info: { assets: [{ asset: U, min_leaf: '1000000' }, { asset: E, min_leaf: '1000000' }] } }
+  // a fresh wallet: nothing held anywhere, the operator's assets are still offered
+  assert.deepEqual(receiveAssets(info, leafBalances(null)), [U, E])
+  // on-chain coins of an asset the operator does not serve are not offered; leaves of one are
+  const held = leafBalances({ arca: { [Z]: { live: '5' } }, sequentia_onchain: { [T]: '100', [U]: '7' } })
+  assert.deepEqual(receiveAssets(info, held), [U, E, Z])
+  // the operator's list could not be read: every asset the leaf wallet holds, as before
+  assert.deepEqual(receiveAssets({ server_info: { unreachable: 'timeout' } }, held).sort(), [T, U, Z].sort())
+  assert.deepEqual(receiveAssets(null, leafBalances(null)), [])
 })

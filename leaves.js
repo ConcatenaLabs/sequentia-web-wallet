@@ -175,6 +175,20 @@ export function railRows ({ balances, btcOnchain = 0n, lnFor = () => 0n, tickerO
   return rows.concat(seq)
 }
 
+// The assets a receive request may name: those the operator serves, in the order of its
+// published list (the library's `info`, read when the wallet joined or opened), then any
+// other asset the wallet already holds leaves of. A fresh wallet, or one whose coins have
+// not confirmed yet, can still ask for an asset the operator serves; an asset it does not
+// serve is offered only when leaves of it are held. When the operator's list could not be
+// read, every asset the leaf wallet holds, as before it was known.
+export function receiveAssets (info, balances) {
+  const listed = ((info && info.server_info && Array.isArray(info.server_info.assets)) ? info.server_info.assets : [])
+    .map((a) => a && a.asset).filter((a) => typeof a === 'string' && /^[0-9a-f]{64}$/.test(a))
+  const held = [...balances.entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a)
+  if (!listed.length) return [...balances.keys()]
+  return [...new Set([...listed, ...held])]
+}
+
 // States in which a coin is still the wallet's business.
 const HELD = new Set(['pending', 'live', 'offered', 'sending', 'given', 'forfeited', 'exiting'])
 export function heldCoins (coins) { return (coins || []).filter((c) => HELD.has(c.state)) }
@@ -533,8 +547,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const c = card('Receive')
     c.id = 'leafReceive'
     c.appendChild(el('p', 'sub', 'A single-use receive request: a fresh key, this wallet\'s mailbox and the exit delay asked for. The payment arrives in the mailbox, which sync reads.'))
-    const assets = [...leafBalances(S.balance).keys()]
-    field(c, 'Asset (optional)', assetSelect('leafRecvAsset', assets, 'any'))
+    field(c, 'Asset (optional)', assetSelect('leafRecvAsset', receiveAssets(S.info, leafBalances(S.balance)), 'any'))
     const a = el('input'); a.id = 'leafRecvAmount'; field(c, 'Amount, in atoms (optional)', bind(a))
     const b = button('Make a receive request', () => {
       const args = { asset: val('leafRecvAsset') || null, amount: val('leafRecvAmount') || null }
