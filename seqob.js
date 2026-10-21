@@ -279,13 +279,13 @@ function encodeSimplicityCovenantTerms(c){
   return w.bytes();
 }
 
-// seqob.v1.ArcaRestingTerms (offer settlement oneof field 26): an order resting
+// seqob.v1.RestingLeafTerms (offer settlement oneof field 26): an order resting
 // as a leaf in an operator's tree, filled there through the operator with its
 // maker away. Its locator, fields 12-13 (the coin it rests at now and what that
 // coin holds), is outside the signed bytes: every fill moves a part-filled order
 // to a new coin, and the relay follows it there. order_id (3) is signed.
 // landed_maker and refund_key are HEX in the offer object.
-function encodeArcaRestingTerms(c){
+function encodeRestingLeafTerms(c){
   if (!c) return null;
   const w = new PW();
   w.str(1, O(c,'operator_url','operatorUrl'));
@@ -366,8 +366,8 @@ export function canonicalOfferBytes(o){
   w.msg(23, encodeCovenantTerms(O(o,'covenant')));
   // simplicity_covenant = 25: the same, under the Simplicity template seqdex/order.
   w.msg(25, encodeSimplicityCovenantTerms(O(o,'simplicity_covenant','simplicityCovenant')));
-  // arca_resting = 26: an order resting as a leaf in an operator's tree.
-  w.msg(26, encodeArcaRestingTerms(O(o,'arca_resting','arcaResting')));
+  // resting_leaf = 26: an order resting as a leaf in an operator's tree.
+  w.msg(26, encodeRestingLeafTerms(O(o,'resting_leaf','restingLeaf')));
   // maker_sig (31) is deliberately omitted.
   return w.bytes();
 }
@@ -508,7 +508,7 @@ export function normRelayOffer(o){
       if (sim[k] != null) sim[k] = b64ToHex(sim[k]);
     }
   }
-  const rest = o && (o.arca_resting || o.arcaResting);
+  const rest = o && (o.resting_leaf || o.restingLeaf);
   if (rest){
     for (const k of ['landed_maker', 'landedMaker', 'refund_key', 'refundKey']){
       if (rest[k] != null) rest[k] = b64ToHex(rest[k]);
@@ -545,15 +545,15 @@ function covenantOfferForPost(offer){
   return { ...offer, covenant: cc };
 }
 
-// An order resting in an operator's tree: its ArcaRestingTerms `bytes` fields are
+// An order resting in an operator's tree: its RestingLeafTerms `bytes` fields are
 // HEX in the signed object and base64 on the wire, as for covenantOfferForPost.
 export function restingOfferForPost(offer){
-  const c = O(offer,'arca_resting','arcaResting'); if (!c) return offer;
+  const c = O(offer,'resting_leaf','restingLeaf'); if (!c) return offer;
   const b64 = (h) => b64encode(hexToBytes(h));
   const cc = { ...c };
   if (cc.landed_maker != null) cc.landed_maker = b64(cc.landed_maker);
   if (cc.refund_key != null)   cc.refund_key   = b64(cc.refund_key);
-  return { ...offer, arca_resting: cc };
+  return { ...offer, resting_leaf: cc };
 }
 
 // Sign (over the raw-bytes canonical form) then POST an order resting in an
