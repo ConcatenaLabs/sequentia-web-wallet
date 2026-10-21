@@ -123,9 +123,10 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   a reissuance token, with a button to issue more. Metadata precedence: your local
   labels, then the Asset Registry, then built-in defaults for the public testnet demo assets.
 - **Stake**: bond tSEQ to a CSV-time-locked staking output. Minimum stake 40,000 tSEQ;
-  the wallet always uses the network-minimum unbonding lock, a time-based CSV lock of about
-  15 days (43,200 × 30-second slot intervals), because stake weight equals the amount staked
-  and a longer lock earns nothing extra. Once a stake's lock has passed, **Unbond** takes it
+  the wallet always uses the network-minimum lock, a height-based CSV of 43,200 blocks: about
+  30 days at one block a minute (consensus counts a height lock in 30-second slots, so no
+  shorter one stakes), because stake weight equals the amount staked and a longer lock earns
+  nothing extra. The review before signing says it is a stake, its lock and the staker key. Once a stake's lock has passed, **Unbond** takes it
   out of staking at once, and **Claim** returns it to the wallet 2,016 Bitcoin blocks (about
   two weeks) after the unbond's anchor. The same tab delegates to a **staking pool**: a
   small on-chain delegation record lends your weight to a pool signer, the coins stay where
