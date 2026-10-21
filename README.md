@@ -202,7 +202,9 @@ The Leaves tab first asks to **join an operator**: its server URL and the URL of
 JSON-RPC (with a user and password if that node needs them). The node must validate its
 Bitcoin anchors (`-validateanchor`) and keep a transaction index (`-txindex`). Joining pins the
 node's chain and the operator's key, and shows the key to compare with the one the operator
-publishes; the wallet then refuses any server that names another. A server on another origin
+publishes; the wallet then refuses any server that names another. Joining also restores what
+the operator holds of this phrase's leaves, so a phrase that already holds leaves (from another
+browser, the extension or Ambra) shows them at once. A server on another origin
 must answer CORS. The tab then has:
 
 - **Balances per rail**: one row per asset, BTC first and always. On-chain (as the leaf wallet

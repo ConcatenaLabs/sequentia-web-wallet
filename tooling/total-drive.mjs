@@ -14,6 +14,11 @@
 //
 //   ARCA_OPERATOR_CONTROL=127.0.0.1:18640 node tooling/total-drive.mjs <evidence-dir> [mnemonic]
 //
+// With TOTAL_DRIVE_READ_ONLY=<a totals.json of an earlier run> and that run's phrase, it puts
+// nothing on the chain: it opens the phrase in a fresh browser, joins the operator (which
+// restores the phrase's leaves), and checks the page shows the figures and headline recorded
+// there.
+//
 // Needs pkg/ (the lwk_wasm build, which this drive also loads in Node to bond the stakes) and
 // a Chromium (CHROMIUM=…).
 import { spawn } from 'node:child_process'
@@ -51,6 +56,7 @@ const ctl = async (path, body) => {
 }
 const rpc = (method, params = []) => ctl('/rpc', { method, params })
 const cleanup = []
+const readOnly = process.env.TOTAL_DRIVE_READ_ONLY ? JSON.parse(readFileSync(process.env.TOTAL_DRIVE_READ_ONLY, 'utf8')) : null
 
 // The amounts each component holds.
 const ONCHAIN_X = 5_000_000n
@@ -111,6 +117,9 @@ async function main () {
   note(`     the phrase's first address ${addr}`)
 
   // --- On-chain: X, and the Sequence token to stake from ---
+  const bonds = []
+  let onchainPolicy = 0n
+  if (!readOnly) {
   await ctl('/fund', { script: spk, asset: X, amount: Number(ONCHAIN_X) })
   await ctl('/fund', { script: spk, asset: policy, amount: Number(STAKE_H + STAKE_T + 10_000_000n) })
   await ctl('/produce')
@@ -118,7 +127,6 @@ async function main () {
 
   // --- Staked under both locks: bonded by the kit in Node, as the page and as Ambra bond ---
   const pub = signer.stakerPublicKey()
-  const bonds = []
   for (const [csv, atoms] of [[HEIGHT_CSV, STAKE_H], [TIME_CSV, STAKE_T]]) {
     const pset = network.txBuilder().addStakeOutput(pub, csv, atoms).feeRate(2000).finish(wollet)
     const tx = wollet.finalize(signer.sign(pset)).extractTx()
@@ -129,7 +137,8 @@ async function main () {
     await syncW()
   }
   check('two stakes bonded, one under each lock', bonds.length === 2, bonds)
-  const onchainPolicy = BigInt(wollet.balance().toJSON()[policy] || 0)
+  onchainPolicy = BigInt(wollet.balance().toJSON()[policy] || 0)
+  }
 
   // --- The page: the phrase opened, on the private chain ---
   const page = new Page()
@@ -169,6 +178,24 @@ async function main () {
   await set('leafDelay', '1'); await set('leafMinDelay', '1')
   await click('#btnLeafJoin')
   await page.waitFor("document.querySelector('#leafRails')", 120000)
+  if (readOnly) {
+    // Joined: the leaves this phrase holds with the operator are restored, nothing is boarded.
+    await page.waitFor(`[...document.querySelectorAll('#leafCoins .leaf-coin')].some(d=>d.dataset.state==='live')`, 180000).catch(() => {})
+    const restored = await page.eval("[...document.querySelectorAll('#leafCoins .leaf-coin')].filter(d=>d.dataset.state==='live').map(d=>d.dataset.value)")
+    check('joining restored the phrase\'s leaves', restored.length > 0, restored)
+    await setMode('user')
+    await click('[data-tab=balance]')
+    const want = Object.fromEntries(readOnly.rows.map((r) => [r.tk, r.total]))
+    await page.waitFor(`(()=>{ const w=${JSON.stringify(want)}; const rows=[...document.querySelectorAll('#assetList .bt-row')]; return Object.entries(w).every(([tk,t])=>rows.some(r=>r.querySelector('.tk') && r.querySelector('.tk').textContent===tk && r.querySelector('.bt-t').innerText.replace(/\\s+/g,' ').trim()===t)) })()`, 180000).catch(() => {})
+    const rows = await page.eval(`[...document.querySelectorAll('#assetList .bt-row')].map(r=>({ tk: (r.querySelector('.tk')||{}).textContent, total: r.querySelector('.bt-t').innerText.replace(/\s+/g,' ').trim() }))`)
+    for (const r of rows) r.total = r.total.replace(/\s+/g, ' ')
+    const headline = await page.eval("(document.querySelector('#balTotal .bal-total-amt')||{}).innerText")
+    note('     rows: ' + JSON.stringify(rows) + '; headline ' + headline)
+    check('a fresh browser shows the same figures as the run that built them', JSON.stringify(rows) === JSON.stringify(readOnly.rows), { now: rows, then: readOnly.rows })
+    check('and the same headline', headline === readOnly.headline, { now: headline, then: readOnly.headline })
+    await page.screenshot(join(out, '02-fresh-browser-same-totals.png'))
+    return
+  }
   // The coin to board, paid to an address the leaf wallet shows (the same keys as the page's
   // wallet, read from its own node).
   await page.waitFor("document.querySelector('#btnLeafAddress') && !document.querySelector('#btnLeafAddress').disabled", 120000)

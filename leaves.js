@@ -536,6 +536,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
           if (!S.client) S.client = new LeafClient(ctx.makeWorker)
           const info = await S.client.create(ctx.mnemonic(), config)
           setJoined(ctx.store, tag())
+          // A phrase that already holds leaves with this operator (another browser, Ambra, the
+          // extension) finds them under its mailbox key: restore once, as Ambra's join does.
+          try { S.restored = (await S.client.run('restore')).result } catch (e) { S.restored = { error: e.message } }
           try { if (config.node_password) ctx.store.setItem(NODE_PASSWORD_KEY, config.node_password); else ctx.store.removeItem(NODE_PASSWORD_KEY) } catch {}
           S.open = true
           S.joined = info.result
