@@ -1040,10 +1040,14 @@ async function resumeCourierStranded(){
     const btcTip = await btcTipHeight();
     const marginGone = (btcTip >= 0 && SWAP.btc_locktime && btcTip >= (Number(SWAP.btc_locktime) - 6));
     if (!marginGone){
-      SWAP.detail = 'Connection to the maker was interrupted; retrying. Your BTC stays refundable at block ' + SWAP.btc_locktime + ' either way.';
+      // The anchor first: a maker waiting on it is reachable, and blaming it sends the user looking
+      // in the wrong place.
+      const why = await anchorWait().catch(() => null);
+      SWAP.detail = why || ('Connection to the maker was interrupted; retrying. Your BTC stays refundable at block ' + SWAP.btc_locktime + ' either way.');
       saveSwap(); renderStepper();
-      if (C.$('xswapErr')) C.$('xswapErr').textContent =
-        'Could not reach the maker just now. The wallet keeps retrying in the background; your BTC is safe and refunds at block ' + SWAP.btc_locktime + ' if the swap cannot complete.';
+      if (C.$('xswapErr')) C.$('xswapErr').textContent = why
+        ? why + ' The wallet keeps checking; your BTC is safe and refunds at block ' + SWAP.btc_locktime + ' if the swap cannot complete.'
+        : 'Could not reach the maker just now. The wallet keeps retrying in the background; your BTC is safe and refunds at block ' + SWAP.btc_locktime + ' if the swap cannot complete.';
       if (!_strandedRetryTimer){
         _strandedRetryTimer = setTimeout(() => { _strandedRetryTimer = null; resumeCourierStranded(); }, 90000);
       }
@@ -1381,6 +1385,29 @@ const SEQ_REFUND_MARGIN = 3;   // Sequentia blocks of safety before T_seq
 // The bounds a maker's timeouts must meet, each on its own chain (the Go taker's defaults).
 const MAX_BTC_LOCK_DELTA = 400;    // T_btc no further than this many testnet4 blocks past the tip
 const MIN_SEQ_CLAIM_WINDOW = 120;  // T_seq at least this many Sequentia blocks past the tip
+// Why the maker has not locked the asset yet, when Sequentia's Bitcoin anchor is the reason: the
+// maker locks only once Sequentia anchors a Bitcoin block at or after this swap's BTC lock, and
+// Sequentia anchors no block another testnet4 chain contests. 21/10/2026: testnet4 ran two equal
+// branches from 157183, the anchor stayed at 157182 for hours, and the swap said "Could not reach
+// the maker" while the maker waited on the anchor. Null when the anchor is not behind the lock.
+function anchorWaitText({ anchor, lockHeight, contestedFrom }){
+  if (!(anchor > 0) || !(lockHeight > 0) || anchor >= lockHeight) return null;
+  if (contestedFrom != null && contestedFrom <= lockHeight && anchor < contestedFrom)
+    return 'The maker locks the asset once Sequentia anchors a Bitcoin block after your lock. Bitcoin testnet4 has split into '
+      + 'competing chains from block ' + contestedFrom + ', and Sequentia anchors no block another chain contests, so its anchor '
+      + 'stays at ' + anchor + '. The swap goes on once one chain wins: the hold-up is testnet4, not the maker.';
+  return 'The maker locks the asset once Sequentia anchors a Bitcoin block after your lock: Sequentia anchors block '
+    + anchor + ', your lock is at ' + lockHeight + '.';
+}
+// The same, read live: Sequentia's anchor from the LSP, testnet4's competing chains from the explorer.
+async function anchorWait(){
+  const origin = typeof location !== 'undefined' ? location.origin : '';
+  const get = (u) => fetch(origin + u, { signal: AbortSignal.timeout(6000) }).then(r => r.ok ? r.json() : null).catch(() => null);
+  const [a, f, tip] = await Promise.all([get('/lsp/anchor'), get('/testnet4/forks'), btcTipHeight()]);
+  const mined = Number(SWAP && SWAP.btc_leg && SWAP.btc_leg.height) || 0;
+  const contestedFrom = f && f.contested_from != null ? Number(f.contested_from) : null;
+  return anchorWaitText({ anchor: Number(a && a.anchor_height) || 0, lockHeight: mined > 0 ? mined : tip, contestedFrom });
+}
 async function seqTipHeight(){
   try {
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/lsp';
@@ -1781,10 +1808,14 @@ function startSeqLockNarrative(sm){
     const mined = Number(SWAP.btc_leg && SWAP.btc_leg.height) > 0;
     const age = await btcLastBlockAgeMin();
     const mins = Math.round((Date.now() - t0) / 60000);
+    // After a few minutes, say whether the anchor is what the maker waits for.
+    const why = mins >= 3 ? await anchorWait().catch(() => null) : null;
+    if (!SWAP || SWAP.seq_leg) return;
     setStepStatus('seq', 'Maker is locking ' + C.fmtAtoms(SWAP.seq_amount, sm.precision) + ' ' + sm.ticker + ' on Sequentia…'
       + (mined ? ' · your BTC lock is mined' : ' · your BTC lock is broadcast (the maker sees it in the mempool)')
       + (age != null ? ' · last Bitcoin block ' + age + ' min ago' : '')
-      + (mins > 0 ? ' · ' + mins + ' min elapsed' : ''), true);
+      + (mins > 0 ? ' · ' + mins + ' min elapsed' : '')
+      + (why ? ' · ' + why : ''), true);
   };
   paint();
   const timer = setInterval(paint, 30000);
