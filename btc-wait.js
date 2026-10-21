@@ -1,16 +1,14 @@
-// How long a trade that waits on Bitcoin testnet4 takes, said honestly.
+// How long a trade that waits on a Bitcoin block takes, said the same way everywhere.
 //
-// Testnet4 is not Bitcoin: its blocks come irregularly, sometimes several in minutes and then none
-// for hours, and it is often flooded with transactions. A swap with an on-chain BTC leg waits on
-// those blocks, and without a word about it the wait reads as the wallet being broken. Every place
-// a trade waits on testnet4 says the same thing, from here, and the Active trades rows add how long
-// ago the last testnet4 block was found, which is the one number that explains a long wait.
+// A swap with an on-chain BTC leg waits for one Bitcoin block, about ten minutes, and that is the
+// figure a quote or a review states. Testnet4 is not Bitcoin: its blocks come irregularly, and now
+// and then none for an hour or more. That is said only when it is happening: the Active trades rows
+// add how long ago the last testnet4 block was found, and past half an hour that testnet4 is slow.
 
 // For a review or a quote, before anything is committed.
-export const T4_WAIT = 'Waits on Bitcoin confirmations. Testnet4 blocks arrive irregularly, sometimes hours apart: '
-  + 'a delay here comes from testnet4, not Sequentia. You can close the wallet meanwhile.';
+export const T4_WAIT = 'Waits on one Bitcoin block · about 10 minutes. You can close the wallet meanwhile.';
 // For a quote line, where there is room for a few words.
-export const T4_WAIT_SHORT = 'waits on Bitcoin confirmations: testnet4 blocks can be hours apart';
+export const T4_WAIT_SHORT = 'waits on one Bitcoin block · about 10 minutes';
 
 // Seconds since the last testnet4 block, read from the explorer's testnet4 API (`base`, by default
 // this origin) at most once a minute. Null when it cannot be read.
