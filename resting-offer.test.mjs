@@ -1,8 +1,8 @@
-// An order resting as a leaf in an operator's tree (offer member arca_resting,
+// An order resting as a leaf in an operator's tree (offer member resting_leaf,
 // field 26): seqob.js signs and verifies it with Go's canonical bytes and
 // signature where it first rests and where the relay serves it after a part fill
 // rested it again at another coin (resting-offer-vectors.json, a copy of seqdex's
-// daemon/internal/seqob/offer/testdata/arca_resting_offer_vectors.json). The
+// daemon/internal/seqob/offer/testdata/resting_leaf_offer_vectors.json). The
 // locator (coin, value) is outside the signed bytes; the order id and the terms
 // are inside.
 //
@@ -23,8 +23,8 @@ test('rested and moved verify with Go\'s canonical bytes', () => {
     assert.equal(seqob.verifyOffer(o), true, name);
   }
   const moved = normRelayOffer(clone(v.moved));
-  assert.notEqual(moved.arca_resting.coin, v.rested.arca_resting.coin);
-  assert.equal(moved.arca_resting.value, '300000');
+  assert.notEqual(moved.resting_leaf.coin, v.rested.resting_leaf.coin);
+  assert.equal(moved.resting_leaf.value, '300000');
 });
 
 test('a changed rate or order id does not verify', () => {
@@ -39,7 +39,7 @@ test('signing gives Go\'s RFC 6979 signature, and the wire form round-trips', ()
   seqob.signOffer(o, hexToBytes(v.maker_priv));
   assert.equal(o.maker_sig, v.rested.maker_sig);
   const wire = restingOfferForPost(o);
-  assert.equal(wire.arca_resting.landed_maker, v.rested.arca_resting.landed_maker);
-  assert.equal(wire.arca_resting.refund_key, v.rested.arca_resting.refund_key);
-  assert.equal(o.arca_resting.landed_maker, '31'.repeat(32), 'the signed object keeps hex');
+  assert.equal(wire.resting_leaf.landed_maker, v.rested.resting_leaf.landed_maker);
+  assert.equal(wire.resting_leaf.refund_key, v.rested.resting_leaf.refund_key);
+  assert.equal(o.resting_leaf.landed_maker, '31'.repeat(32), 'the signed object keeps hex');
 });

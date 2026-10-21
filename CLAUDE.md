@@ -157,9 +157,9 @@ compiler) is held to `seqdex-order-vectors.json` and `seqdex-order-fills.json`, 
 (`simplicity_covenant`, field 25) to `simplicity-offer-vectors.json`, a copy of seqdex's
 `daemon/internal/seqob/offer/testdata/simplicity_offer_vectors.json`, by `covenant-sim.test.mjs`.
 When seqdex re-pins the template, copy all three here. An order resting as a leaf in an operator's
-tree (`arca_resting`, field 26) signs its terms, operator and order id and leaves its locator (the
+tree (`resting_leaf`, field 26) signs its terms, operator and order id and leaves its locator (the
 coin it rests at, what that coin holds) out: `resting-offer-vectors.json`, a copy of seqdex's
-`daemon/internal/seqob/offer/testdata/arca_resting_offer_vectors.json`, holds
+`daemon/internal/seqob/offer/testdata/resting_leaf_offer_vectors.json`, holds
 `resting-offer.test.mjs` to Go's bytes and signature where the order first rests and after a part
 fill moved it. An offer's `time_in_force` (field 24) is
 signed too, written before the settlement oneof as protobuf-go writes it:
