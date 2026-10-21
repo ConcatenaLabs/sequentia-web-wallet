@@ -120,6 +120,7 @@ test('an order is listed only once it rests, for no longer than until its refund
 test('the page wires the leaf rail beside the composer, and the composer never runs a Leaf leg', () => {
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   assert.match(html, /id="swLeafBox"/);
+  assert.match(html, /body\.swleaf-on #swReview,[^{]*#swConfWrap[^{]*\{display:none !important\}/, 'the composer\'s controls hide while a leg is on Leaf');
   assert.match(html, /get leafRail\(\)\{ return leafRailApi; \}/);
   const swap = readFileSync(new URL('./swap.js', import.meta.url), 'utf8');
   assert.match(swap, /if \(S\.payRail === 'leaf' \|\| S\.recvRail === 'leaf'\) return;/, 'onReview never places on a Leaf leg');

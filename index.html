@@ -343,6 +343,9 @@
   .swrailpick .swrail-lab{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
   .swleaf{margin-top:10px;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--line, rgba(127,127,127,.25));border-radius:10px}
   .swleaf.hide{display:none}
+  /* A leg on Leaf: the leaf panel settles the trade; the composer's own placement controls stay hidden. */
+  body.swleaf-on #swReview, body.swleaf-on #swWhy, body.swleaf-on #swFeeRow, body.swleaf-on #swTiming,
+  body.swleaf-on #swOfflineWrap, body.swleaf-on #swConfWrap, body.swleaf-on #swErr, body.swleaf-on #swStatus{display:none !important}
   .swleaf .swleaf-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
   .swleaf .swleaf-rows .kv{display:flex;gap:10px;justify-content:space-between;font-size:12.5px}
   .swleaf .swleaf-rows .kv .k{color:var(--dim);flex:0 0 auto}

@@ -224,12 +224,9 @@ export function mountLeafRail(ctx) {
   function box() { return ctx.$('swLeafBox') }
   function regular(show) {
     // The composer's own placement controls belong to the on-chain and Lightning rails: while a
-    // leg is on Leaf they are hidden, so nothing of theirs runs on a leaf choice.
-    for (const id of ['swReview', 'swWhy', 'swFeeRow', 'swTiming', 'swOfflineWrap', 'swConfWrap']) {
-      const e = ctx.$(id); if (!e) continue;
-      if (show) { if (e.dataset.leafHid) { e.classList.remove('hide'); e.style.removeProperty('display'); delete e.dataset.leafHid } }
-      else if (!e.classList.contains('hide') || e.style.display !== 'none') { e.dataset.leafHid = '1'; e.classList.add('hide'); e.style.display = 'none' }
-    }
+    // leg is on Leaf they are hidden (index.html's .swleaf-on rules), so nothing of theirs shows
+    // or runs on a leaf choice, whatever the composer's own painters set on them meanwhile.
+    try { document.body.classList.toggle('swleaf-on', !show) } catch {}
   }
 
   // The Leaf buttons in both rail choosers, shown only where the rail is offered.
