@@ -249,6 +249,10 @@
   .faq p{margin:8px 0 0;font-size:14px;color:var(--dim)} .faq p b,.faq li b{color:var(--txt)}
   .faq ul{font-size:14px;color:var(--dim)} .faq .mono{color:var(--txt)}
   .faq details.flash{animation:faqflash 1.2s ease-out}
+  .faq .tblwrap{overflow-x:auto;margin:8px 0 0}
+  .faq table{border-collapse:collapse;font-size:13px;color:var(--dim);min-width:560px}
+  .faq th,.faq td{border-top:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+  .faq th{color:var(--txt);font-weight:600}
   @keyframes faqflash{from{background:rgba(240,165,0,.14)}to{background:transparent}}
   .room-stepper{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:12px}
   .rs-title{font-weight:600;font-size:14px}
@@ -1382,7 +1386,7 @@
           <p>Swaps receive at your usual address unless you turn on <i>Receive this swap confidentially</i>. Some offers come from a maker who completes the swap and blinds the output that pays you, so they can only pay a blinded address: the swap asks before using one, with that choice suggested, and skips those offers if you say no.</p>
         </details>
         <details id="faq-final"><summary>When is a payment final?</summary>
-          <p>It shows at once, is confirmed in about a block, and is final once the Bitcoin block that anchors it is buried. Until then a reorganisation could still undo it.</p>
+          <p>It shows at once and is confirmed in about a minute. A confirmed payment stands as long as Bitcoin does not reorganise the block it anchors to.</p>
         </details>
       </div>
       <div class="card faq">
@@ -1431,6 +1435,19 @@
             <li>If you only receive, every payment uses room up for good, and you need room for all of it. Receiving 10 USDX three times a week is 780 USDX in six months: buying that room for 6 months at 5% a year costs 19.50 USDX, and buying it a month at a time costs the minimum six times. On chain, receiving costs you nothing: the sender pays the fee.</li>
           </ul>
           <p>These numbers use 5% a year and a 1 USDX minimum as an example; the dialog always shows the real price before you pay.</p>
+        </details>
+        <details id="faq-swap-times"><summary>How long does a swap take, and which kinds are offered?</summary>
+          <p>A Sequentia block comes about once a minute, a Bitcoin block about every ten minutes, and Lightning settles at once.</p>
+          <div class="tblwrap"><table>
+            <tr><th>Swap</th><th>Time</th><th>Safe if Bitcoin reorganises?</th><th>In this wallet</th></tr>
+            <tr><td>Lightning ↔ Lightning (any Sequentia asset or Bitcoin)</td><td>Instant</td><td>Yes: it's off-chain and unaffected, provided that the funding transaction is deeper than the Bitcoin reorg</td><td>Available</td></tr>
+            <tr><td>Sequentia on-chain ↔ Sequentia on-chain</td><td>1 minute</td><td>Yes: a single transaction, which stands or falls as a whole</td><td>Available</td></tr>
+            <tr><td>Sequentia on-chain ↔ Bitcoin on-chain</td><td>About 10 minutes</td><td>Yes: the Sequentia side is only accepted in a block anchored after the Bitcoin side confirms, so a reorg undoes both together</td><td>Available</td></tr>
+            <tr><td>Sequentia on-chain ↔ Sequentia over Lightning</td><td>1 minute</td><td>No: a reorg can undo the on-chain side, not the Lightning side</td><td>Not available</td></tr>
+            <tr><td>Sequentia on-chain ↔ Bitcoin over Lightning</td><td>1 minute</td><td>No: a reorg can undo the on-chain side, not the Lightning side</td><td>Not available</td></tr>
+            <tr><td>Sequentia over Lightning ↔ Bitcoin on-chain</td><td>About 10 minutes</td><td>No: a reorg can undo the on-chain side, not the Lightning side</td><td>Not available</td></tr>
+          </table></div>
+          <p><b>Why the last three are not available.</b> When one side settles on-chain and the other over Lightning, a Bitcoin reorganisation can undo the on-chain side while the Lightning payment stands, and one party loses. Making that safe means waiting until the on-chain side is buried under several Bitcoin blocks, longer than the times shown. Swaps here settle in a minute or less, or in one Bitcoin block, so these combinations are not offered. Settle both sides on-chain, or both over Lightning.</p>
         </details>
         <details id="faq-testnet4"><summary>Why does a swap with bitcoin take so long?</summary>
           <p>The bitcoin here is Bitcoin <b>testnet4</b>, a public test network, not Sequentia. A swap that moves bitcoin on chain waits for a testnet4 block, and testnet4 blocks come irregularly: sometimes several in a few minutes, sometimes none for hours. People also flood it with transactions, so its fee estimates can climb to hundreds of sat/vB for coins worth nothing. On Bitcoin itself a block comes about every ten minutes.</p>

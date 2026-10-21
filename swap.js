@@ -511,6 +511,22 @@ let MAX0CONF_SATS = null;
 // The Bitcoin anchor burial the LSP's mixed rail waits for above that ceiling (its MIN_ANCHOR_DEPTH),
 // read from /status. An LSP that does not say is an older one, whose default was 2.
 let LSP_ANCHOR_DEPTH = 2;
+// ON-CHAIN AGAINST LIGHTNING IS NOT OFFERED, on either pair and in either direction, 0-conf fronting
+// included. A Bitcoin reorganisation can undo the on-chain side after the Lightning payment is made,
+// which cannot be undone; making that safe takes a wait of several Bitcoin blocks. The paths are kept
+// whole behind this one switch: window.SEQ_ALLOW_MIXED_RAILS = true offers them again. The FAQ entry
+// faq-swap-times (index.html) says why, and is where the refusal links.
+function mixedRailsAllowed(){ return !!(typeof window !== 'undefined' && window.SEQ_ALLOW_MIXED_RAILS); }
+const MIXED_RAILS_REFUSAL = "This combination isn't offered: with one side on-chain and the other over Lightning,"
+  + ' a Bitcoin reorganisation could undo the on-chain side after the Lightning payment is made.'
+  + ' Settle both sides on-chain, or both over Lightning.';
+const MIXED_RAILS_WHY = ' <a href="#" data-help="faq-swap-times">Why?</a>';
+function isMixedRails(p, r){ return (p === 'chain' || p === 'ln') && (r === 'chain' || r === 'ln') && p !== r; }
+function showMixedRefusal(){
+  const note = C.$('swRailNote'); if (!note) return;
+  note.classList.remove('hide');
+  note.innerHTML = '<span>' + esc(MIXED_RAILS_REFUSAL) + '</span>' + MIXED_RAILS_WHY;
+}
 // P3.2 — the LSP-advertised bridge capability (which rail-crossing shapes it settles). Informational: the
 // wallet's own pre-Review check uses the SHARED pure predicate (bridgedTakeSupported), so a stale/absent
 // value never lets it promise an unsupported bridge.
@@ -1806,6 +1822,8 @@ function updateRails(){
   const pay = S.payAsset, receive = S.receiveAsset;
   if (!(pay && receive && pay !== receive)){ box.classList.add('hide'); renderRailNote(null); paintLeafRail(); return; }
   box.classList.remove('hide');
+  // A mixed pair of rails left over from before (a restored state) settles both sides on-chain.
+  if (!mixedRailsAllowed() && isMixedRails(S.payRail, S.recvRail)){ S.payRail = 'chain'; S.recvRail = 'chain'; }
   // Probe the sub-asset book (async, cached) so the LN-readiness note reflects live liquidity.
   if (pay === 'BTC' || receive === 'BTC'){ try { refreshSubassetBook(pay === 'BTC' ? receive : pay); } catch {} }
   else { // mixed same-chain: the base/<quote> sub-asset book (quote = the pair's numeraire)
@@ -2059,6 +2077,16 @@ function paintRailSegs(ra){
 function setRail(leg, r){
   const cur = leg === 'pay' ? S.payRail : S.recvRail;
   if (cur === r) return;
+  // Mixed rails are not offered (mixedRailsAllowed): moving one leg moves the other with it, and the
+  // note says why. When the other leg cannot follow, the choice is refused and nothing changes.
+  let coupled = false;
+  const otherLeg = leg === 'pay' ? 'recv' : 'pay';
+  if (!mixedRailsAllowed() && isMixedRails(r, otherLeg === 'pay' ? S.payRail : S.recvRail)){
+    let ok = false; try { ok = !!legRailOptions(otherLeg)[r].ok; } catch {}
+    if (!ok){ showMixedRefusal(); return; }
+    if (otherLeg === 'pay') S.payRail = r; else S.recvRail = r;
+    coupled = true;
+  }
   if (leg === 'pay') S.payRail = r; else S.recvRail = r;
   // THE FOUR COMBINATIONS ARE ALL FIRST-CLASS, INCLUDING ON A SAME-CHAIN PAIR.
   //
@@ -2087,6 +2115,7 @@ function setRail(leg, r){
   const ra = lnDeployed() ? railAvail(S.payAsset, S.receiveAsset) : null;
   paintRailSegs(ra);
   try { renderRailNote(ra); } catch {}   // refresh/clear the LN-channel note for the newly-selected rail
+  if (coupled) showMixedRefusal();
   try { renderFeePicker(); } catch {}   // reflect the pay-from-Lightning fee freeze immediately
   try { paintConfControl(); } catch {}  // the confidential-receive toggle depends on the receive rail (on-chain only)
   try { paintPanes(); } catch {}        // re-evaluate the place-CTA gate (both rails now required)
@@ -3350,6 +3379,11 @@ function renderMixedTake(route, plan){
 async function requoteMixed(route, amtStr){
   const { $ } = C;
   $('swStatus').textContent = ''; $('swErr').textContent = '';
+  if (!mixedRailsAllowed()){
+    LAST_QUOTE = null; setReviewEnabled(false); clearTiming();
+    $('swErr').innerHTML = esc(MIXED_RAILS_REFUSAL) + MIXED_RAILS_WHY;
+    return;
+  }
   // Mixed SAME-CHAIN pairs render the pair's ONE ladder via the same loader as chain/chain
   // (union of the same-chain relay book + live stream + unified families; sets UBOOK for the
   // plan below) — the BTC-paired shapes keep the cross ladder (loadBtcBook/renderXBook).
@@ -6681,7 +6715,10 @@ async function _onReviewInner(){
     return postCrossOfferReview(q);
   }
   if (q.kind === 'ln') return reviewLn(q);
-  if (q.kind === 'mixed') return reviewMixed(q);
+  if (q.kind === 'mixed'){
+    if (!mixedRailsAllowed()){ C.$('swErr').innerHTML = esc(MIXED_RAILS_REFUSAL) + MIXED_RAILS_WHY; return; }
+    return reviewMixed(q);
+  }
   if (q.kind === 'cross') return reviewCross(q);
   if (q.kind === 'same' && q.takeMkt) return takeCovenantWalkReview(q);   // MARKET: walk the book, never rest
   if (q.kind === 'same' && q.place) return placeCovenantReview(q);        // LIMIT: rest a covenant
