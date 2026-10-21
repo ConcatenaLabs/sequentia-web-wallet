@@ -673,7 +673,7 @@
           <summary>About your Lightning balances</summary>
           <ul class="sub ln-help">
             <li>Moving an asset to Lightning pays the amount into a channel on your hosted node.</li>
-            <li>Your device signs only channel updates it has checked and approves each payment only within the payment limit set on it.</li>
+            <li>Your device signs only channel updates it has checked.</li>
             <li>An asset is movable when the funding transaction of the Lightning channel can pay a fee in that asset or another you hold, accepted by a block producer.</li>
           </ul>
           <p class="sub"><a href="#" data-help="faq-ln-sides">How sending and receiving over Lightning work</a> · <a href="#" data-help="faq-room">What room to receive costs</a></p>
@@ -1388,7 +1388,7 @@
       <div class="card faq">
         <label class="lbl">Lightning</label>
         <details id="faq-ln-keys"><summary>Where is my Lightning balance, and who holds the keys?</summary>
-          <p>Each asset you move to Lightning is in a channel of a Lightning node the service hosts for you. That node holds no keys. Your browser derives them from your recovery phrase and signs every channel update after checking it, and it approves each payment only within a daily payment limit set on it.</p>
+          <p>Each asset you move to Lightning is in a channel of a Lightning node the service hosts for you. That node holds no keys. Your browser derives them from your recovery phrase and signs every channel update after checking it.</p>
           <p>The service cannot move your coins on its own, with one exception. An operator who runs both your hosted node and the node your channel is with could, together, publish an old state of the channel. Keep on Lightning what you would trust the service with.</p>
           <p>Keep one tab of the wallet open at a time: two tabs are two signers for the same channels.</p>
         </details>
@@ -1484,9 +1484,6 @@
   window.SEQ_LSP_HOST_PUBKEY_ASSET = '0295374d947dc7e27382a83b2034a10b3d51b6f2fdf7e7da490893e3995141523b';
   window.SEQ_LSP_WS_BTC            = 'wss://sequentiatestnet.com/lsp-ws-btc';
   window.SEQ_LSP_HOST_PUBKEY_BTC   = '020a749af93e2a5a4d67ad28585cec31b55a146969eb77ca3d076eb59ff111ed51';
-  // The device signers' payment limit is their own default: 1,000 reference units (US dollars on
-  // the testnet) a day, held in each asset at the node's rate, which the page gives them
-  // (ln-limit.js). Set window.SEQ_LN_PAYMENT_LIMITS only to change it.
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1523,8 +1520,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed, creditNotes,
-  disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp, setPaymentRates } from './seqln.js';
-import { lnRatesFor, lnLimitRefusal } from './ln-limit.js';
+  disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
 import { creditLines } from './lncredit.js';
@@ -1970,7 +1966,6 @@ async function fetchFeeRates(){
     // stale (only the assets priced at first paint — often just tSEQ). Refresh both pickers now.
     try{ populateFeeAssets(); }catch{}
     try{ populateIssueFeeAssets(); }catch{}
-    pushLnRates();
   }catch(e){ console.warn('[feerates] fetch failed:', e?.message??e); }   // keep last-good rates on a transient failure (mirrors loadPrices)
 }
 // The published rate (atoms-of-asset per reference unit) the tx must build its fee with.
@@ -1979,14 +1974,6 @@ async function fetchFeeRates(){
 // /feerates is keyed by ticker ("OILX") plus "bitcoin" (=tSEQ); the rest of the wallet keys
 // fee rates by hex. Resolve a hex's published-rate entry by hex OR by its ticker.
 function feeRateEntry(hex){ return feeRates[hex] || feeRates[assetMeta(hex).ticker]; }
-// Give the device signers the rates their daily Lightning payment limit is held at (ln-limit.js):
-// the node's rate for every asset this wallet can name, and Bitcoin's from its price.
-function pushLnRates(){
-  try{
-    const hexes = [POLICY_HEX, ...Object.keys(labels()), ...Object.keys(REGISTRY_ASSETS), ...Object.keys(DEFAULT_ASSETS)];
-    setPaymentRates(lnRatesFor(hexes, (h)=>{ const e=feeRateEntry(h); return e && e.rate; }, _btcUsd()));
-  }catch(e){ console.warn('[ln] payment rates:', e?.message??e); }
-}
 function feeRateFor(hex){
   const e = feeRateEntry(hex);
   const r = e && e.rate;
@@ -2070,7 +2057,7 @@ async function loadPrices(){
     const d = await fetch('/prices', {cache:'no-store'}).then(r=>r.json());
     const m = {};
     for(const [t,v] of Object.entries(d)){ const p=(v&&typeof v==='object')?v.price:v; if(p>0) m[t.toUpperCase()]=p; }
-    if(Object.keys(m).length){ PRICES = m; _pricesTs = Date.now(); try{ pushLnRates(); }catch{} try{ localStorage.setItem('swk.pricesCache', JSON.stringify(m)); localStorage.setItem('swk.pricesTs', String(_pricesTs)); }catch{} }   // keep last-good; cache value + timestamp for honest staleness next load
+    if(Object.keys(m).length){ PRICES = m; _pricesTs = Date.now(); try{ localStorage.setItem('swk.pricesCache', JSON.stringify(m)); localStorage.setItem('swk.pricesTs', String(_pricesTs)); }catch{} }   // keep last-good; cache value + timestamp for honest staleness next load
     try{ initRefSelector(); }catch{}
     try{ if(typeof renderBalance==='function') renderBalance(); }catch{}
     try{ refreshAllRefHints(); }catch{}
@@ -5906,7 +5893,6 @@ function balanceShortText(m){
 function plainErr(e){ const m=(e?.message??String(e)); return balanceShortText(m) || nodeRejectText(m) || m; }
 function prettyErr(e){
   const m=(e?.message??String(e));
-  { const lim=lnLimitRefusal(m); if(lim) return lim; }   // over the device's daily Lightning limit
   { const short=balanceShortText(m); if(short) return short; }
   // A node's refusal of a transaction, by its reject code (node-reject.js).
   const refused=nodeRejectText(m);

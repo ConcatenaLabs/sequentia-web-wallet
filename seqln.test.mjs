@@ -14,7 +14,7 @@ import assert from 'node:assert';
 import {
   initSeqln, seqlnConfigured, seqlnState, seqlnAvailable,
   connectDevice, disconnectDevice, seqlnGetStatus, seqlnSwap, lnFinalityCopy,
-  seqlnChannels, seqlnFunding, seqlnNodes, provisionNode, fundChannel, setPaymentRates,
+  seqlnChannels, seqlnFunding, seqlnNodes, provisionNode, fundChannel,
 } from './seqln.js';
 import { lnDeriveNode, lnDeriveAll, lnDeriveAsset, LN_PATHS, LN_ASSET_BRANCH } from './seqln-keys.js';
 import {
@@ -275,8 +275,8 @@ assert.equal(seqlnAvailable(), false, 'disconnect() drops both legs');
 console.log('ok: disconnectDevice() tears down both legs and the rail goes unavailable');
 
 // The device's payment limits come from configuration (window.SEQ_LN_PAYMENT_LIMITS, or
-// initSeqln's paymentLimits) and reach the SDK when the signer is built; unset, none are passed
-// and the device keeps its own default.
+// initSeqln's paymentLimits) and reach the SDK when the signer is built; unset, the wallet lifts
+// the device's own default and sets none.
 const LIMITS = { default: 10000000, period: 86400, assets: { ['ab'.repeat(32)]: 5000000, btc: 2000000 } };
 initSeqln({ lspUrl: `http://127.0.0.1:${port}`, token: 'T0KEN', sdkPath: MOCK, paymentLimits: LIMITS,
   nodes: { asset: { wsUrl: 'ws://asset.local/lsp-signer', hostPubkey: 'aa'.repeat(33) } } });
@@ -288,16 +288,8 @@ initSeqln({ lspUrl: `http://127.0.0.1:${port}`, token: 'T0KEN', sdkPath: MOCK,
   nodes: { asset: { wsUrl: 'ws://asset.local/lsp-signer', hostPubkey: 'aa'.repeat(33) } } });
 globalThis.__seqlnMockConnects.length = 0;
 await connectDevice({ node: 'asset', deviceSigningSeed: asset.signingSeed, deviceTransportPrivkey: asset.transportPrivkey });
-assert.equal(globalThis.__seqlnMockConnects[0].paymentLimits, undefined, 'no limits configured: none passed, the device default applies');
+assert.deepEqual(globalThis.__seqlnMockConnects[0].paymentLimits, { reference: null }, 'no limits configured: the device default is lifted');
 disconnectDevice();
-// The wallet's rates (ln-limit.js) reach a signer built after them, with the device's own default.
-setPaymentRates({ ['ab'.repeat(32)]: 100000000, btc: 6000000000000 });
-globalThis.__seqlnMockConnects.length = 0;
-await connectDevice({ node: 'asset', deviceSigningSeed: asset.signingSeed, deviceTransportPrivkey: asset.transportPrivkey });
-assert.deepEqual(globalThis.__seqlnMockConnects[0].paymentLimits,
-  { rates: { ['ab'.repeat(32)]: 100000000, btc: 6000000000000 } }, 'the rates reach the device signer');
-disconnectDevice();
-setPaymentRates({});
 console.log('ok: the configured payment limits reach the device signer');
 
 // ===========================================================================

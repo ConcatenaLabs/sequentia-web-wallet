@@ -121,7 +121,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LSP_WS_BTC` / `SEQ_LSP_HOST_PUBKEY_BTC` | unset | btc-node signer WebSocket + pinned key |
 | `SEQ_LSP_SDK` | `./lightning/seqln-signer-sdk.js` | signer SDK path (dynamic import) |
 | `SEQ_LSP_POLICY` | `enforce` | device-signer policy (`permissive` is the kill-switch that signs without the custody checks) |
-| `SEQ_LN_PAYMENT_LIMITS` | the device's default, 1,000 reference units a day held in each asset at the rate the page gives it (`ln-limit.js`) | device payment limits: `{reference, default, period, assets: {<asset id>\|'btc': atoms}}`: `reference` in reference atoms, `default` the same atoms of every asset, `assets` an asset's own limit in its atoms, `null` for none |
+| `SEQ_LN_PAYMENT_LIMITS` | none: the wallet lifts the device signer's own default (`{reference: null}`) | device payment limits: `{default, period, assets: {<asset id>\|'btc': atoms}}`: `default` the same atoms of every asset, `assets` an asset's own limit in its atoms, `null` for none |
 | `SEQ_LSP_FRONT_CAP` | `0.0005` BTC | LSP instant-front cap for mixed swaps |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
