@@ -26,7 +26,7 @@ a RUNE / signed challenge bound to the device pubkey; the shared token is interi
 | --- | --- | --- |
 | `GET` | `/health` | liveness, no auth |
 | `GET` | `/anchor` | anchor height and status of a Sequentia block, no auth (the wallet verifies a leg's real anchor instead of trusting the maker) |
-| `GET` | `/status` | `{node_id, network, channels:[{peer_id, asset_label, spendable_units, receivable_units, state}]}` |
+| `GET` | `/status` | `{node_id, network, channels:[{peer_id, asset_label, spendable_units, receivable_units, balance_units, state}]}` (`balance_units` is this side's share, the reserve included; `spendable_units` what it can send now) |
 | `GET` | `/rails` | which settlement rails are usable per asset and side |
 | `GET` | `/book`, `/book/unified`, `/lnbook` | the on-chain cross book, the unified rail-agnostic book, the pure-LN book |
 | `POST` | `/offer` | relay a wallet-signed sub-asset offer (the LSP only forwards the bytes) |
