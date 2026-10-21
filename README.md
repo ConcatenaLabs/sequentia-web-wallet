@@ -351,9 +351,10 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   WebSocket Noise_XK (BOLT-8) link. Every commitment update is co-signed on your device. The
   device signs only commitments it has validated, signs a close only if it pays your channel
   balance to the node's own address or to an address of this wallet that the page names to it
-  (which is how Move on-chain closes a channel straight into the wallet), and approves each payment only within its payment limit for
-  the asset (`window.SEQ_LN_PAYMENT_LIMITS` in `index.html`, described in
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)). It moves the node's coins only to the node's own
+  (which is how Move on-chain closes a channel straight into the wallet), and approves each payment only within its daily payment limit:
+  1,000 US dollars a day, held in each asset at the node's rate (`ln-limit.js`; a page can set
+  `window.SEQ_LN_PAYMENT_LIMITS`, described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
+  A payment over it is refused in plain words and nothing is sent. It moves the node's coins only to the node's own
   addresses or into a channel the node opens, with the fee held to that limit: sending them to any
   other address, this wallet's included, waits for a way to approve that address on the device.
   That does not protect you from an operator who runs

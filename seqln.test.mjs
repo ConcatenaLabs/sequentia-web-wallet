@@ -14,7 +14,7 @@ import assert from 'node:assert';
 import {
   initSeqln, seqlnConfigured, seqlnState, seqlnAvailable,
   connectDevice, disconnectDevice, seqlnGetStatus, seqlnSwap, lnFinalityCopy,
-  seqlnChannels, seqlnFunding, seqlnNodes, provisionNode, fundChannel,
+  seqlnChannels, seqlnFunding, seqlnNodes, provisionNode, fundChannel, setPaymentRates,
 } from './seqln.js';
 import { lnDeriveNode, lnDeriveAll, lnDeriveAsset, LN_PATHS, LN_ASSET_BRANCH } from './seqln-keys.js';
 import {
@@ -290,6 +290,14 @@ globalThis.__seqlnMockConnects.length = 0;
 await connectDevice({ node: 'asset', deviceSigningSeed: asset.signingSeed, deviceTransportPrivkey: asset.transportPrivkey });
 assert.equal(globalThis.__seqlnMockConnects[0].paymentLimits, undefined, 'no limits configured: none passed, the device default applies');
 disconnectDevice();
+// The wallet's rates (ln-limit.js) reach a signer built after them, with the device's own default.
+setPaymentRates({ ['ab'.repeat(32)]: 100000000, btc: 6000000000000 });
+globalThis.__seqlnMockConnects.length = 0;
+await connectDevice({ node: 'asset', deviceSigningSeed: asset.signingSeed, deviceTransportPrivkey: asset.transportPrivkey });
+assert.deepEqual(globalThis.__seqlnMockConnects[0].paymentLimits,
+  { rates: { ['ab'.repeat(32)]: 100000000, btc: 6000000000000 } }, 'the rates reach the device signer');
+disconnectDevice();
+setPaymentRates({});
 console.log('ok: the configured payment limits reach the device signer');
 
 // ===========================================================================
