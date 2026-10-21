@@ -216,3 +216,35 @@ test('feature probes name every entry point each flow needs', () => {
   const older = { ...lwk }; delete older.buildUnbondClaimTx;
   assert.ok(!SR.unbondingSupported(older));
 });
+
+test('a restored wallet finds its stakes on the chain: bonded ones, and unbonding ones by the stake they came from', async () => {
+  const csv = 43200;
+  const stakeSpk = lwk.sequentiaStakeScript(ME, csv), unbondSpk = lwk.sequentiaUnbondScript(ME);
+  const sS = await SR.scriptHash(stakeSpk), sU = await SR.scriptHash(unbondSpk);
+  const c = ctx({ esplora: explorer({
+    [`/scripthash/${sS}/utxo`]: [
+      { txid: 'bond1', vout: 0, value: 4000000000000, status: { confirmed: true, block_time: 1792590000 } },
+      { txid: 'bond2', vout: 0, value: 5000000000000, status: { confirmed: false } },
+    ],
+    [`/scripthash/${sU}/utxo`]: [{ txid: 'unbond3', vout: 0, value: 3990000000000, status: { confirmed: true } }],
+    '/tx/unbond3': { vin: [{ txid: 'bond3', vout: 1, prevout: { scriptpubkey: stakeSpk, value: 4000000000000 } }] },
+    '/tx/bond3/status': { confirmed: true, block_time: 1792500000 },
+  }) });
+  const found = await SR.findStakes(c, csv);
+  assert.deepStrictEqual(found.map((f) => f.txid).sort(), ['bond1', 'bond2', 'bond3']);
+  const b1 = found.find((f) => f.txid === 'bond1'), b3 = found.find((f) => f.txid === 'bond3');
+  assert.deepStrictEqual(b1, { pubkey: ME, csv, txid: 'bond1', atoms: '4000000000000', time: 1792590000000 });
+  assert.strictEqual(b3.atoms, '4000000000000');
+  assert.strictEqual(b3.time, 1792500000000);
+});
+
+test('finding stakes: another key\'s unbonding output is not taken for ours, and nothing found is nothing', async () => {
+  const csv = 43200;
+  const sU = await SR.scriptHash(lwk.sequentiaUnbondScript(ME));
+  const c = ctx({ esplora: explorer({
+    [`/scripthash/${sU}/utxo`]: [{ txid: 'u', vout: 0, value: 1 }],
+    '/tx/u': { vin: [{ txid: 'x', vout: 0, prevout: { scriptpubkey: lwk.sequentiaStakeScript(P, csv), value: 1 } }] },
+  }) });
+  assert.deepStrictEqual(await SR.findStakes(c, csv), []);
+  assert.deepStrictEqual(await SR.findStakes(ctx({ stakerPublicKey: () => { throw new Error('no wallet'); } }), csv), []);
+});

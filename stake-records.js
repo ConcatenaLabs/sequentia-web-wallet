@@ -282,6 +282,35 @@ export async function findDelegation(ctx){
   return null;
 }
 
+// ---------------------------------------------------------------- stakes
+
+// The stakes of this wallet's key that the chain holds, for a browser that remembers none
+// of them: a restore from the phrase, or the same phrase in another browser. The page
+// keeps its stakes in its own storage, which a restore starts without, so its Stake tab
+// said "No stakes yet" with the coins locked. They are the explorer's unspent outputs at
+// the staking script of the wallet's key and `csv`, and at the key's unbonding script, an
+// unbonding output leading back through its transaction to the stake it came from.
+// Answers entries in the shape the page keeps ({ pubkey, csv, txid, atoms, time }, txid
+// the bond's). A stake already claimed back is not found: nothing is left to do with it.
+export async function findStakes(ctx, csv){
+  let mine;
+  try { mine = ctx.stakerPublicKey(); } catch { return []; }
+  const at = (st) => (st && st.confirmed && st.block_time) ? st.block_time * 1000 : Date.now();
+  const out = new Map();
+  const stakeSpk = ctx.lwk.sequentiaStakeScript(mine, csv);
+  for (const u of (await json(ctx, `/scripthash/${await scriptHash(stakeSpk)}/utxo`)) || [])
+    if (!out.has(u.txid)) out.set(u.txid, { pubkey: mine, csv, txid: u.txid, atoms: String(u.value), time: at(u.status) });
+  const unbondSpk = ctx.lwk.sequentiaUnbondScript(mine);
+  for (const u of (await json(ctx, `/scripthash/${await scriptHash(unbondSpk)}/utxo`)) || []){
+    const tx = await json(ctx, `/tx/${u.txid}`);
+    const vin = ((tx && tx.vin) || []).find(v => v.prevout && v.prevout.scriptpubkey === stakeSpk);
+    if (!vin || out.has(vin.txid)) continue;
+    const bond = await json(ctx, `/tx/${vin.txid}/status`);
+    out.set(vin.txid, { pubkey: mine, csv, txid: vin.txid, atoms: String(vin.prevout.value), time: at(bond) });
+  }
+  return [...out.values()];
+}
+
 // ---------------------------------------------------------------- joining
 
 // Build both transactions of a join, broadcasting nothing: the payment from
