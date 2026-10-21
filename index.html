@@ -6504,7 +6504,11 @@ function buildIssuePset(){
   }
   // Pay the issuance fee in the chosen asset (any held, node-priced asset — open fee market, no
   // privileged coin). Non-policy assets take feeAsset(id, rate); the policy asset needs no rate.
-  let b = network.txBuilder().issueAsset(amount, undefined, tokens, undefined, contract||undefined);
+  // Transparent by default: the asset and its reissuance token go to this wallet's own addresses
+  // in their explicit form, as a send does. The kit takes an explicit receiver on Sequentia, and
+  // marks a later reissuance of the explicit token with the node's sentinel nonce.
+  const [assetTo, tokenTo] = explicitOwnAddresses(2);
+  let b = network.txBuilder().issueAsset(amount, assetTo, tokens, tokenTo, contract||undefined);
   const feeHex = ($('isFeeAsset') && $('isFeeAsset').value) || '';
   if(!feeHex) throw new Error('no asset in this wallet is priced for fees on this node');
   b = applyFee(b, feeHex);
@@ -6520,6 +6524,16 @@ function buildIssuePset(){
   return {pset, meta:{name, ticker:ticker||'ASSET', precision:prec, contract:contractJson, assetId, tokenId, amount, tokens, domain, feeHex}};
 }
 const REISSUANCE_TOKEN_ATOMS = 100_000_000n;
+// The next `n` receive addresses of this wallet (from the first unused one), explicit.
+function explicitOwnAddresses(n){
+  const first = wollet.address(undefined);
+  const out = [];
+  for(let i=0;i<n;i++){
+    const a = (i===0 ? first : wollet.address(first.index()+i)).address();
+    out.push(a.toUnconfidential ? a.toUnconfidential() : a);
+  }
+  return out;
+}
 // What the issuance form means, said under it as it is filled in: the decimal places (how finely
 // the asset divides, fixed forever) and whether the supply is fixed.
 function issueHints(){
@@ -6991,7 +7005,7 @@ $('btnReissue').onclick=()=>busyButton($('btnReissue'), async()=>{ $('raErr').te
     const prec=sendPrecision(asset);   // T9: same unknown-precision guard as Send — throws 'label it before sending' rather than mis-scaling at precision 0 (the 1e8 trap)
     const input=$('raAmount');
     const amt=parseAtoms(assetAmountOf(input, asset), prec);   // honours ⇄ ref-input mode
-    const rb=applyRaFeeAsset(network.txBuilder().reissueAsset(new AssetId(asset), amt, undefined, undefined));
+    const rb=applyRaFeeAsset(network.txBuilder().reissueAsset(new AssetId(asset), amt, explicitOwnAddresses(1)[0], undefined));
     const pset=rb.b.finish(wollet);
     const m=assetMeta(asset);
     await reviewBroadcast(pset, 'Issue more '+m.ticker, ()=>{ $('raAmount').value=''; }, rb.feeHex, { rows: [], feeAssetHex: rb.feeHex, extra: [

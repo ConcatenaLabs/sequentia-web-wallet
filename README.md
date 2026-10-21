@@ -120,7 +120,8 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   issued later, which gives the wallet one reissuance token), reissue an asset whose token the
   wallet holds or burn any asset, and label unknown assets. The name, ticker and decimal places
   typed at issuance label the asset in this wallet, and its token shows in the balance marked as
-  a reissuance token, with a button to issue more. Metadata precedence: your local
+  a reissuance token, with a button to issue more. The issued amount, the asset and its token
+  go to the wallet's own addresses as explicit outputs, as a send does. Metadata precedence: your local
   labels, then the Asset Registry, then built-in defaults for the public testnet demo assets.
 - **Stake**: bond tSEQ to a CSV-time-locked staking output. Minimum stake 40,000 tSEQ;
   the wallet always uses the network-minimum lock, a height-based CSV of 43,200 blocks: about
