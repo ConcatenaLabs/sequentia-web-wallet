@@ -1,16 +1,18 @@
-// A trade that waits on Bitcoin testnet4 says so, the same way everywhere, with how long ago its
-// last block was found.
+// A trade that waits on a Bitcoin block says so, the same way everywhere, with how long ago the
+// last testnet4 block was found.
 //
 //   node --test btc-wait.test.mjs
 import assert from 'node:assert';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
-import { T4_WAIT, blockAgeText, testnet4BlockAge, __test__ } from './btc-wait.js';
+import { T4_WAIT, T4_WAIT_SHORT, blockAgeText, testnet4BlockAge, __test__ } from './btc-wait.js';
 
-test('the wait is blamed on the test network, and the trade is safe to leave', () => {
-  assert.match(T4_WAIT, /hours apart/);
-  assert.match(T4_WAIT, /comes from testnet4, not Sequentia/);
+test('the wait is one Bitcoin block, and the trade is safe to leave', () => {
+  for (const t of [T4_WAIT, T4_WAIT_SHORT]) {
+    assert.match(t, /one Bitcoin block · about 10 minutes/);
+    assert.doesNotMatch(t, /hours/, 'a slow testnet4 is said only when it is slow (blockAgeText)');
+  }
   assert.match(T4_WAIT, /You can close the wallet/);
   assert.ok(T4_WAIT.length < 180, 'kept short: ' + T4_WAIT.length);
 });

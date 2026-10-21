@@ -218,7 +218,7 @@ function planSell(bids, want = '400'){
   const SLOWONLY = 'dd'.repeat(32);
   const slowLine = await drive(SLOWONLY, [classifyRelayOffer({ want_asset: 'BTC', base_amount: 1000,
     offer_amount: 1000, want_amount: 500, offer_id: 'oc-only', maker_pubkey: '04'.padEnd(66, 'd') })]);
-  assert.match(slowLine, /waits on Bitcoin confirmations/i,
+  assert.match(slowLine, /waits on one Bitcoin block/i,
     'only bridged-slow candidates -> the quote line states the slow class before an amount is typed');
   const MIXEDBOOK = 'ee'.repeat(32);
   const fastLine = await drive(MIXEDBOOK, [
@@ -228,7 +228,7 @@ function planSell(bids, want = '400'){
       offer_id: 'z-sub', maker_pubkey: '05'.padEnd(66, 'e'), maker_ln_node_pubkey: '02'.padEnd(66, 'f') }),
   ]);
   assert.ok(fastLine && fastLine.length, 'a price line rendered');
-  assert.doesNotMatch(fastLine, /Bitcoin confirmations/i,
+  assert.doesNotMatch(fastLine, /Bitcoin block/i,
     'a fast maker at the same price serves the take -> no slow note on the quote line');
   console.log('ok: the quote line carries the slow-class note exactly when only bridged-slow candidates rest');
 }
@@ -239,14 +239,16 @@ function planSell(bids, want = '400'){
 // ===========================================================================
 {
   const held = { kind: 'lsp-payer-buy', state: 'held' };
-  assert.match(T.subswapStatusLine(held), /waits on Bitcoin confirmations/i, 'absent front_mode -> slow (maker-first)');
+  assert.match(T.subswapStatusLine(held), /waits on a Bitcoin block — about 10 minutes/i, 'absent front_mode -> slow (maker-first)');
   assert.match(T.subswapStatusLine(held), /safe to leave/i, 'the slow label reassures: resumes + refunds automatically');
   assert.match(T.subswapStatusLine({ ...held, expected_wait: '~25 min' }), /~25 min/, 'expected_wait refines the estimate when present');
+  assert.doesNotMatch(T.subswapStatusLine({ ...held, expected_wait: 'bitcoin-confirmations' }), /bitcoin-confirmations/, "the LSP's token is not prose");
+  assert.match(T.subswapStatusLine({ ...held, front_mode: 'fronted' }), /about a minute/i, "front_mode 'fronted' (what the LSP sends) -> the fast label");
   assert.match(T.subswapStatusLine({ ...held, front_mode: 'inventory' }), /about a minute/i, "front_mode 'inventory' -> the fast label");
-  assert.doesNotMatch(T.subswapStatusLine({ ...held, front_mode: 'inventory' }), /Bitcoin confirmations/i, 'the fast label carries no confirmation wait');
-  assert.match(T.subswapStatusLine({ ...held, front_mode: 'maker-first' }), /waits on Bitcoin confirmations/i, "front_mode 'maker-first' stays slow");
+  assert.doesNotMatch(T.subswapStatusLine({ ...held, front_mode: 'inventory' }), /Bitcoin block/i, 'the fast label carries no confirmation wait');
+  assert.match(T.subswapStatusLine({ ...held, front_mode: 'maker-first' }), /waits on a Bitcoin block/i, "front_mode 'maker-first' stays slow");
   // A p2p record never gets the bridge refinement (it already settles at Sequentia speed).
-  assert.doesNotMatch(T.subswapStatusLine({ kind: 'p2p-buy', state: 'held' }), /Bitcoin confirmations/i, 'the refinement is payer-bridge-only');
+  assert.doesNotMatch(T.subswapStatusLine({ kind: 'p2p-buy', state: 'held' }), /Bitcoin block/i, 'the refinement is payer-bridge-only');
   console.log('ok: the drive-time status states the true pipeline; absent fields mean maker-first (slow)');
 }
 

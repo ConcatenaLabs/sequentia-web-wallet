@@ -335,9 +335,12 @@ Two price modes, always switchable:
   watchers that resume after a reload), or, for the BTC-paying side, rest as SBTC through the
   custody bridge (see Status above).
 
-The tab is honest about finality: on-chain settlement is described as confirmed in about one
-block and final once its Bitcoin anchor is buried, since until then a Bitcoin reorg can still
-remove it. Only pure-Lightning settlement (nothing on-chain) is labelled final at once.
+The tab states settlement times plainly: a Sequentia block comes about once a minute, a Bitcoin
+block about every ten minutes, and Lightning settles at once. A confirmed Sequentia transaction
+reverts only if Bitcoin reorgs the block it anchors to, and the tab says so. Only where a
+Lightning payment is made against an on-chain leg does a trade wait for that anchor to be buried
+(one Bitcoin block per level past the first), because a reorg would undo the on-chain leg and
+leave the Lightning payment standing; a trade under the service's 0-conf cap is fronted at once.
 
 ### Lightning (experimental)
 
@@ -413,7 +416,7 @@ works normally without the restricted rows.
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
 | `fee-verdict.js` | What Send says about the fee before signing, worded as Sequentia Qt's fee selector: the fee asset refused by the nodes the wallet sends to (not listed, or listed at rate zero), accepted but unpublished on the Asset Registry or unpriced, or fine; and what a typed rate clears against the producer's next block (under the relay floor Send refuses to build it). |
 | `fee-panel.js` | The network fee of a payment, set as in Sequentia Qt: the fee asset, a recommended rate for a confirmation target or a custom one, shown and typed as the total or the rate per 100 bytes, in the fee asset or the reference currency. Mounted by Send and by the replace, bump and speed-up dialogs. |
-| `btc-wait.js` | What a trade that waits on Bitcoin testnet4 says: one wording for the reviews and quotes (testnet4 blocks can be hours apart; safe to leave), and how long ago the last testnet4 block was found, for the Active trades rows. |
+| `btc-wait.js` | What a trade that waits on a Bitcoin block says: one wording for the reviews and quotes (one block, about ten minutes; safe to leave), and how long ago the last testnet4 block was found, for the Active trades rows, which say when testnet4 is running slow. |
 | `wait-reason.js` | Why an unconfirmed transaction is still waiting, from the explorer's `/feeinfo` and `/congestion`: a fee asset some nodes refuse, a rate under the mempool floor or under what a full next block takes, or nothing holding it back. Shown in a History row's details. |
 | `node-reject.js` | What a node's refusal of a transaction means, and a shortfall the wallet kit reports in atoms and ids (`shortfallText`) said in the asset's units: its reject code (`bad-txns-inputs-missingorspent`, `dust`, `min relay fee not met`…) as a sentence that says nothing was sent and what to do. `prettyErr` in `index.html` asks it first. |
 | `tip-watch.js` | Keeps the open wallet up to date: it reads both chains' tips every 30 s while the page is visible, and on becoming visible, and syncs when either has a new block, so a payment received shows without Refresh. |
