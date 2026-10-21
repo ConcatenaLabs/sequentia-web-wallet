@@ -1719,6 +1719,7 @@ function setMode(m){
   LAST_QUOTE = null; setReviewEnabled(false);
   paintModeSeg();
   paintPriceField();   // flip the price field editable<->read-only immediately (requote repaints its value)
+  paintLeafRail();     // what a Leaf choice settles as depends on Market or Limit
   requote().catch(()=>{});
 }
 
@@ -1782,6 +1783,7 @@ function autoRails(){
     const o = legRailOptions(leg);
     const usable = ['chain', 'ln'].filter(r => { const b = seg.querySelector('button[data-r="' + r + '"]'); return o[r].ok && b && !b.disabled; });
     const cur = leg === 'pay' ? S.payRail : S.recvRail;
+    if (cur === 'leaf') continue;   // a Leaf choice is the leaf rail's (leaf-rail.js), never overridden here
     if (usable.length === 1 && cur !== usable[0]) setRail(leg, usable[0]);
   }
 }
@@ -1798,7 +1800,7 @@ function showRailRefusal(why){
 function updateRails(){
   const box = C.$('swRailPicks'); if (!box) return;
   const pay = S.payAsset, receive = S.receiveAsset;
-  if (!(pay && receive && pay !== receive)){ box.classList.add('hide'); renderRailNote(null); return; }
+  if (!(pay && receive && pay !== receive)){ box.classList.add('hide'); renderRailNote(null); paintLeafRail(); return; }
   box.classList.remove('hide');
   // Probe the sub-asset book (async, cached) so the LN-readiness note reflects live liquidity.
   if (pay === 'BTC' || receive === 'BTC'){ try { refreshSubassetBook(pay === 'BTC' ? receive : pay); } catch {} }
@@ -1809,7 +1811,18 @@ function updateRails(){
   paintRailSegs(ra);
   renderRailNote(ra);
   autoRails();
+  paintLeafRail();
 }
+// The Leaf choice and its panel (developer mode) belong to leaf-rail.js, which index.html hands in
+// as C.leafRail. Every repaint of the rails gives it the chance to show, hide or drop its choice.
+function paintLeafRail(){ if (C && C.leafRail) try { C.leafRail.paint(); } catch (e) { console.warn('[leaf rail]', e && e.message); } }
+// What the leaf rail reads of the composer, and the one thing it sets: a leg's rail.
+export function composerState(){
+  const d = (S.payAsset && S.receiveAsset) ? canonicalPair(S.payAsset, S.receiveAsset) : { base: null, quote: null };
+  return { payAsset: S.payAsset, receiveAsset: S.receiveAsset, payRail: S.payRail, recvRail: S.recvRail, mode: S.mode,
+    base: d.base, quote: d.quote, payText: (C.$('swPayAmt') || {}).value || '', recvText: (C.$('swRecvAmt') || {}).value || '' };
+}
+export function setComposerRail(leg, r){ setRail(leg, r); }
 // An honest inline note under the rail choosers when the Lightning option is NOT
 // offerable for a leg (no channel / wrong-side liquidity): says why + links to
 // Move-to-Lightning. Cleared when both legs' LN options are live (or LN is off).
@@ -1988,6 +2001,7 @@ function paintRailSegs(ra){
     const opts = legRailOptions(leg);
     seg.querySelectorAll('button[data-r]').forEach(b => {
       const r = b.dataset.r;
+      if (r === 'leaf') return;   // painted by the leaf rail (leaf-rail.js)
       b.classList.toggle('on', r === cur);
       // Where the wallet holds the asset decides first: a rail with nothing on it is shown off, and a
       // click on it says why and how to put something there (showRailRefusal), rather than nothing.
@@ -4345,7 +4359,7 @@ function pickerCandidates(side){
   // cards), then every other tradable asset — so a registry of thousands stays navigable via the
   // search box. This dropdown is what replaces the removed cards.
   const list = candidates.map(hex => {
-    const held = balAtoms(hex) > 0n || instantAtomsFor(hex) > 0n;
+    const held = balAtoms(hex) > 0n || instantAtomsFor(hex) > 0n || leafAtomsFor(hex) > 0n;
     return {
       hex, ticker: metaOf(hex).ticker, name: pickerName(hex), bal: balLine(hex),
       held, split: held ? heldSplitStr(hex) : '',
@@ -4399,9 +4413,12 @@ function pickerName(hex){ if (hex === 'BTC') return 'Bitcoin testnet4'; return C
 // The on-chain/Lightning split for a held asset — the info that used to be on the top cards,
 // now shown inline under a held asset's name in the dropdown. HTML (the ⚡ part gets the amber .z).
 function heldSplitStr(hex){
-  const m = metaOf(hex), instant = instantAtomsFor(hex), onchain = balAtoms(hex);
-  return `<span class="z">${C.fmtAtoms(instant, m.precision)} Lightning</span> · ${C.fmtAtoms(onchain, m.precision)} on-chain`;
+  const m = metaOf(hex), instant = instantAtomsFor(hex), onchain = balAtoms(hex), leaf = leafAtomsFor(hex);
+  return `<span class="z">${C.fmtAtoms(instant, m.precision)} Lightning</span> · ${C.fmtAtoms(onchain, m.precision)} on-chain`
+    + (leaf > 0n ? ` · ${C.fmtAtoms(leaf, m.precision)} leaves` : '');
 }
+// What the wallet holds of an asset as leaves, in developer mode only (leaf-rail.js); 0 otherwise.
+function leafAtomsFor(hex){ try { return (C.leafRail && C.leafRail.atoms) ? C.leafRail.atoms(hex) : 0n; } catch { return 0n; } }
 
 // Which rows a picker query shows (F1) — pure over the candidate rows, so the headless
 // harness pins it.
@@ -6545,6 +6562,8 @@ async function onReview(){
 }
 async function _onReviewInner(){
   const { $ } = C; $('swErr').textContent = '';
+  // A leg on Leaf is settled by the leaf rail's own panel (leaf-rail.js); nothing here may run on it.
+  if (S.payRail === 'leaf' || S.recvRail === 'leaf') return;
   const q = LAST_QUOTE;
   if (!q){ $('swErr').textContent = 'Enter an amount to get a quote first.'; return; }
   // RAIL-BLIND TAKE: before the rail-specific native dispatch, route the BEST-price offer across rails by its

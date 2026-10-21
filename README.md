@@ -228,6 +228,34 @@ mnemonic. It holds what the mnemonic cannot rebuild, which leaves were spent off
 which forfeits were signed among them, so clearing the site's data loses it. One tab at a time
 can hold it.
 
+### Developer mode: leaves in the Trade tab
+
+With developer mode on and an operator joined, the Trade tab's **Pay from** and **Receive to**
+offer **Leaf** beside On-chain and Lightning, for a pair of two Sequentia assets. BTC is never a
+leaf: a pair with BTC in it has no Leaf choice. A leg on Leaf is settled by the leaf panel under
+the choices, in place of **Place order**, and every amount, fee, date and refusal in it is the
+leaf wallet's own, shown before anything is signed:
+
+- **Market, Leaf to Leaf**: a take from leaves of an on-chain order. The panel finds the best
+  order the operator's round can take (a transparent covenant order on the relay), shows the
+  fill, what is given (the price and the operator's fee, from leaves), the price paid to the
+  maker on the chain and what rests of the order after it, then takes it on those terms. The
+  page hands its forfeit over by its own sync once the operator builds the round; the leaf
+  arrives once the round is final. Beside it: **accept another wallet's swap offer**. The
+  offer is read first (what is got, given and paid, and the date by which the coins got must be
+  taken on the chain), then accepted on those terms; the acceptance is a text to send back.
+- **Limit, Leaf to Leaf**: an in-tree swap offered to another wallet that holds leaves of the
+  same operator, at the two amounts entered. The offer holds the coins and signs nothing; its
+  text goes to the other wallet, and its acceptance, pasted back, completes the swap in one
+  reassignment the operator co-signs. Nothing goes on the chain until a round settles it.
+- **Limit, pay Leaf, receive On-chain**: an order placed on the chain from leaves. The
+  operator's round pays exactly the order's amount into its address, where it rests with the
+  wallet offline; what it is paid lands on the chain under the order's key. Once it rests,
+  **List it on the relay** posts it to the on-chain book. It is cancelled only by its refund,
+  after its date.
+
+Every other combination with a leaf is refused with the reason. User mode shows no Leaf choice.
+
 ### Developer mode: contract spends
 
 With developer mode on, a **Contracts** tab spends a contract written with
@@ -395,6 +423,7 @@ works normally without the restricted rows.
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record, and its stakes on the chain for a browser that does not remember them (a restore), and drives the transactions SWK builds over the staking key's bare scripts. |
 | `leaves.js` | The mode setting, and developer mode's Leaves tab, which shows what the leaf wallet answers. |
+| `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
@@ -537,7 +566,15 @@ It needs the operator repository's harness running
 (`ARCA_OPERATOR_CONTROL=127.0.0.1:18640 cargo test -p arca-cli --test arca_operator_for_browsers -- --ignored`,
 with what that repository's tests need) and its command-line wallet as the counterparty
 (`ARCA_CLI=/path/to/arca`). `tooling/leaves-dev-server.mjs` serves this checkout with that
-operator and its node behind the same origin, for working on the tab by hand.
+operator and its node behind the same origin, for working on the tab by hand (`--seqob URL`
+puts an order-book relay behind `/seqob/` too).
+
+`node tooling/leaf-rail-drive.mjs <evidence-dir>` drives the Trade tab's leaf rail in two
+headless Chromium profiles against the same harness and SeqDEX's relay (`SEQOBD=/path/to/seqobd`,
+started on a port of its own against the harness's node): no Leaf choice in user mode; an
+in-tree swap offered, read, accepted and completed between the two wallets, both balances
+checked; an order placed on the chain from leaves, rested and listed on the relay; and a take of
+it from leaves, its fill round checked at the node.
 
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see

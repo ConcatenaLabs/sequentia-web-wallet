@@ -213,11 +213,12 @@ const HELD = new Set(['pending', 'live', 'offered', 'sending', 'given', 'forfeit
 export function heldCoins (coins) { return (coins || []).filter((c) => HELD.has(c.state)) }
 
 // Whether something is moving that sync must follow now, whatever the schedule says:
-// a coin pending, being sent, given to a participation, under a forfeit or on its way
-// out, or a participation not yet done.
+// a coin pending, being sent, held for an in-tree swap (the other wallet completes it,
+// and only a sync reads what it pays this one), given to a participation, under a
+// forfeit or on its way out, or a participation not yet done.
 const DONE_PARTICIPATION = new Set(['released', 'void', 'expired', 'refused'])
 export function inFlight (coins, participations) {
-  if ((coins || []).some((c) => ['pending', 'sending', 'given', 'forfeited', 'exiting'].includes(c.state))) return true
+  if ((coins || []).some((c) => ['pending', 'sending', 'offered', 'given', 'forfeited', 'exiting'].includes(c.state))) return true
   return (participations || []).some((p) => !DONE_PARTICIPATION.has(p.state) && !p.released)
 }
 
