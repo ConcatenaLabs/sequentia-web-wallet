@@ -1492,9 +1492,11 @@ import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn } from './leaves.js';
 import { mountPageApi } from './wallet-api.js';
 import { mountContracts } from './contracts.js';
+import { watchTips } from './tip-watch.js';
 import { reapplyUnseen } from './own-txs.js';
 
 const ESPLORA = location.origin + '/api';
+let _tipWatch = null;   // the new-block watch (tip-watch.js), started once the wallet is open
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
 const KEY = 'swk.sequentia.mnemonic';
 const LBL = 'swk.sequentia.assets';      // { assetHex: {name,ticker,precision} }
@@ -3177,6 +3179,18 @@ async function openWallet(phrase){
   endOamp();
   await sync();
   endOpen('wallet usable');
+  // From now on a sync whenever either chain has a new block (tip-watch.js): a payment to this
+  // wallet shows without Refresh, and a coin another client of these keys spent stops counting.
+  if (!_tipWatch){
+    const tipOf = (base) => fetch(base + '/blocks/tip/height', { cache:'no-store' })
+      .then(r => r.ok ? r.text() : null).then(t => { const n = parseInt(t, 10); return n > 0 ? n : null; }).catch(() => null);
+    _tipWatch = watchTips({
+      readTips: async () => { const [seq, btc] = await Promise.all([tipOf(ESPLORA), tipOf(T4_API)]); return { seq, btc }; },
+      onMove: () => sync().catch(() => {}),
+      visible: () => !document.hidden,
+      onVisible: (f) => document.addEventListener('visibilitychange', () => { if (!document.hidden) f(); }),
+    });
+  }
   // T11: after the wallet is up, re-launch any maker settlement/refund watcher that a prior session
   // persisted mid-flow (fund-loss safety) and surface the interrupted swap for recovery.
   try{ resumeCrossMakers(); }catch(e){ console.warn('[resume] cross-maker resume failed:', e?.message??e); }
