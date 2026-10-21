@@ -1597,6 +1597,11 @@ const STAKE_PERIOD_LABEL = 'about 30 days (43,200 blocks, the network minimum)';
 // testnet in src/chainparams.cpp). SWK carries the same value for this network;
 // passing it keeps the wallet's choice visible where it is made.
 const POS_RECORDS_V2_HEIGHT = 163000;
+// A private regtest chain instead of the testnet, for the drives in tooling/ only: a drive sets
+// window.SEQ_DEV_CHAIN = { policyAsset, genesis, recordsV2Height } before the page loads, and the
+// wallet's network, its policy asset and the height stake records change signing at follow it.
+// The deployed page never sets it (docs/ARCHITECTURE.md, "Configuration globals").
+const DEV_CHAIN = (typeof window!=='undefined' && window.SEQ_DEV_CHAIN && window.SEQ_DEV_CHAIN.genesis) ? window.SEQ_DEV_CHAIN : null;
 // Bitcoin blocks an unbonding output waits, past the anchor of the block that
 // confirmed the unbond, before it can be claimed (consensus.pos_unbond_anchor_depth).
 const UNBOND_ANCHOR_DEPTH = 2016;
@@ -3064,7 +3069,7 @@ async function boot(){
   const endInit = timer('boot › wasm init');
   await init();
   endInit();
-  network = Network.sequentiaTestnet();
+  network = DEV_CHAIN ? Network.regtestWithGenesis(new AssetId(DEV_CHAIN.policyAsset), DEV_CHAIN.genesis) : Network.sequentiaTestnet();
   POLICY = network.policyAsset(); POLICY_HEX = POLICY.toString();
   // Concurrency applies to the transaction and header downloads of a scan (SWK walks the
   // address histories one at a time whatever this says); 1 fetched a wallet's history
@@ -8338,7 +8343,7 @@ function stakeCtx(){
       return out;
     },
     tipHeight,
-    recordsV2Height: POS_RECORDS_V2_HEIGHT,
+    recordsV2Height: (DEV_CHAIN && DEV_CHAIN.recordsV2Height != null) ? Number(DEV_CHAIN.recordsV2Height) : POS_RECORDS_V2_HEIGHT,
     feeRate: DEFAULT_FEERATE,
     // Signers worth probing for a record of ours, in two groups tried in
     // order: the ones this browser has used (one or two keys, which hit at

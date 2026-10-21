@@ -7,12 +7,13 @@
 //   /node        -> the node's JSON-RPC (the wallet's chain source)
 //   /seqob/…     -> an order-book relay (seqobd), when --seqob names one
 //   /api/…       -> an esplora HTTP API, when --esplora names one
+//   /prices      -> a price feed read from a JSON file, when --prices names one
 //
 // The operator is the one the operator repository's test harness keeps running for a
 // browser (bark-cli/tests/arca_operator_for_browsers.rs); this server reads where its
 // server and node are from that harness's control address.
 //
-//   node tooling/leaves-dev-server.mjs [--control 127.0.0.1:18640] [--port 0] [--seqob URL] [--esplora URL]
+//   node tooling/leaves-dev-server.mjs [--control 127.0.0.1:18640] [--port 0] [--seqob URL] [--esplora URL] [--prices FILE]
 //
 // It prints one line, `serving <url>`, once it listens. Nothing here is used by the
 // deployed wallet.
@@ -27,6 +28,7 @@ const control = arg('--control', process.env.ARCA_OPERATOR_CONTROL || '127.0.0.1
 const port = Number(arg('--port', '0'))
 const seqob = arg('--seqob', null)
 const esplora = arg('--esplora', null)
+const prices = arg('--prices', null)
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
@@ -71,6 +73,7 @@ const srv = createServer(async (req, res) => {
     }
     if (seqob && p.startsWith('/seqob/')) return proxy(req, res, seqob.replace(/\/$/, '') + p.slice('/seqob'.length) + url.search)
     if (esplora && p.startsWith('/api/')) return proxy(req, res, esplora.replace(/\/$/, '') + p.slice('/api'.length) + url.search)
+    if (prices && p === '/prices') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(readFileSync(prices)); return }
     if (p === '/node' || p === '/node/') {
       const s = await state()
       return proxy(req, res, s.node_url)
