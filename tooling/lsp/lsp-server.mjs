@@ -1129,8 +1129,10 @@ async function runChannelOpen(job) {
   // asset-only inputs -> `bad-txns-in-ne-out`. With `asset=<id>` the fork coin-selects that
   // asset's UTXOs and pays the (few-atom, fee-rated) fee IN the asset — one all-asset funding
   // tx (asset channel + asset change + asset fee), matching the demo GOLD channel. We fund an
-  // explicit amount = the confirmed deposit minus a small reserve for that fee; the leftover
-  // stays on the node's wallet (recoverable). A BTC node is policy-denominated (BTC IS the
+  // explicit amount = the confirmed deposit minus a reserve for that fee; the leftover stays on
+  // the node's wallet (recoverable). With `consolidate` the consolidation has already paid a fee
+  // of its own out of those coins, so fundFromNode caps the amount at the consolidated coin minus
+  // the same reserve. A BTC node is policy-denominated (BTC IS the
   // testnet4 policy asset), so it passes no `asset` and funds plainly.
   //
   // The fork sizes the asset fee from the node's OWN fee rate table (its Elements backend's
@@ -1138,7 +1140,7 @@ async function runChannelOpen(job) {
   // design (today that is every live asset: GOLD, USDX, EURX, SILVR, OILX). The wallet gates the
   // Move-to-Lightning list on /feerates, which IS that acceptance set, so it only ever asks for
   // assets the node can fund — consistent by construction.
-  const FEE_RESERVE = 20000; // asset atoms held back for the in-asset on-chain fee (~1 atom)
+  const FEE_RESERVE = 20000; // base units held back for the funding transaction's own fee
   const fundAmount = Math.max(1, (job.confirmed_units || need) - FEE_RESERVE);
   const funded = await fundFromNode({
     consolidate: job.consolidate,
@@ -1148,9 +1150,11 @@ async function runChannelOpen(job) {
     // user's 5 USDX once): ensurePeer throws a clear error and the job fails cleanly, funds intact.
     connect: () => ensurePeer(rpc, peerId, peerAddr, job),
     rpc, chain: job.chain, assetId: job.chain === 'seq' ? job.asset_id : null, peerId, amount: fundAmount,
+    feeReserve: FEE_RESERVE,
     onStatus: (st) => { job.status = st; },
   });
   if (funded.consolidate_txid) job.consolidate_txid = funded.consolidate_txid;
+  job.funded_amount = funded.amount;
   job.funding_txid = funded.funding_txid;
   job.channel_id = funded.channel_id;
   } // end if(!existingCh): skip connect+fundchannel when a channel already exists (A10)

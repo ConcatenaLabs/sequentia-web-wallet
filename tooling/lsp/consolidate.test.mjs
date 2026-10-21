@@ -50,12 +50,13 @@ test("the device's refusal is the job's error", async () => {
 import { fundFromNode } from './consolidate.mjs';
 import { readFileSync } from 'node:fs';
 
-function fundingNode() {
+function fundingNode(outputs = [{ txid: '11'.repeat(32), output: 0, amount_msat: 5000000000, asset: GOLD }]) {
   const calls = [];
   const call = async (method, args, rpc) => {
     calls.push({ method, args, rpc });
     if (method === 'newaddr') return { bech32: 'tb1qown' };
     if (method === 'withdraw') return { txid: '11'.repeat(32) };
+    if (method === 'listfunds') return { outputs, channels: [] };
     throw new Error('unexpected ' + method);
   };
   const connect = async () => { calls.push({ method: 'connect' }); };
@@ -68,11 +69,11 @@ test('with consolidate, the coins move to the node\'s own address before the cha
   const statuses = [];
   const r = await fundFromNode({ consolidate: true, call: n.call, fund: n.fund, connect: n.connect, rpc: '/x',
     chain: 'seq', assetId: GOLD, peerId: '02' + 'aa'.repeat(32), amount: 2980000, onStatus: (s) => statuses.push(s) });
-  assert.deepEqual(n.calls.map((c) => c.method), ['newaddr', 'withdraw', 'connect', 'fundchannel']);
+  assert.deepEqual(n.calls.map((c) => c.method), ['newaddr', 'withdraw', 'listfunds', 'connect', 'fundchannel']);
   assert.deepEqual(n.calls[1].args, ['destination=tb1qown', 'satoshi=all', 'minconf=0', `asset=${GOLD}`]);
-  assert.deepEqual(n.calls[3].args, [`id=02${'aa'.repeat(32)}`, 'amount=2980000', 'announce=true', 'minconf=0', `asset=${GOLD}`]);
+  assert.deepEqual(n.calls[4].args, [`id=02${'aa'.repeat(32)}`, 'amount=2980000', 'announce=true', 'minconf=0', `asset=${GOLD}`]);
   assert.deepEqual(statuses, ['consolidating', 'connecting', 'opening']);
-  assert.deepEqual(r, { consolidate_txid: '11'.repeat(32), funding_txid: '22'.repeat(32), channel_id: '33'.repeat(32) });
+  assert.deepEqual(r, { consolidate_txid: '11'.repeat(32), funding_txid: '22'.repeat(32), channel_id: '33'.repeat(32), amount: 2980000 });
 });
 
 test('without consolidate, the channel is funded from the coins as they are', async () => {
@@ -82,6 +83,36 @@ test('without consolidate, the channel is funded from the coins as they are', as
   assert.deepEqual(n.calls.map((c) => c.method), ['connect', 'fundchannel']);
   assert.deepEqual(n.calls[1].args, [`id=03${'bb'.repeat(32)}`, 'amount=50000', 'announce=true', 'minconf=0']);
   assert.equal(r.consolidate_txid, null);
+  assert.equal(r.amount, 50000);
+});
+
+// The amount the LSP asks for is sized from the coins before the consolidation, which then pays
+// its own fee out of them. Funding that amount left the funding transaction without its fee, and
+// fundchannel refused every time. These are the numbers of a 20150-unit node on the testnet:
+// consolidation fee 17674, reserve 20000.
+test('after a consolidation, the channel is the consolidated coin less the fee reserve', async () => {
+  const before = 2015000000000;
+  const coin = before - 17674;
+  const n = fundingNode([
+    { txid: '11'.repeat(32), output: 0, amount_msat: coin * 1000, asset: GOLD },
+    // Another asset in the same transaction, and a coin of an earlier one: neither is the channel's.
+    { txid: '11'.repeat(32), output: 1, amount_msat: 9e9, asset: 'ff'.repeat(32) },
+    { txid: '44'.repeat(32), output: 0, amount_msat: 9e9, asset: GOLD },
+  ]);
+  const r = await fundFromNode({ consolidate: true, call: n.call, fund: n.fund, connect: n.connect, rpc: '/x',
+    chain: 'seq', assetId: GOLD, peerId: '02' + 'aa'.repeat(32), amount: before - 20000, feeReserve: 20000 });
+  assert.equal(r.amount, coin - 20000);
+  assert.ok(n.calls.find((c) => c.method === 'fundchannel').args.includes(`amount=${coin - 20000}`));
+});
+
+test('a consolidated coin the node cannot see, or one smaller than the reserve, is refused before funding', async () => {
+  for (const outputs of [[], [{ txid: '11'.repeat(32), output: 0, amount_msat: '15000000msat', asset: GOLD }]]) {
+    const n = fundingNode(outputs);
+    await assert.rejects(fundFromNode({ consolidate: true, call: n.call, fund: n.fund, connect: n.connect, rpc: '/x',
+      chain: 'seq', assetId: GOLD, peerId: '02' + 'aa'.repeat(32), amount: 1000000, feeReserve: 20000 }),
+      /no coin the node can see|does not cover the funding fee reserve/);
+    assert.equal(n.calls.filter((c) => c.method === 'fundchannel' || c.method === 'connect').length, 0);
+  }
 });
 
 test('a refused consolidation fails the job before any funding is asked for', async () => {
@@ -99,6 +130,7 @@ test('the LSP\'s channel-open job takes `consolidate` from the request and funds
   const src = readFileSync(new URL('./lsp-server.mjs', import.meta.url), 'utf8');
   assert.match(src, /consolidate: body\.consolidate === true,/);
   assert.match(src, /await fundFromNode\(\{\s*consolidate: job\.consolidate,/);
+  assert.match(src, /feeReserve: FEE_RESERVE,/);
   // fundchannel is asked only through fundFromNode in the channel-open job.
   const job = src.slice(src.indexOf('async function runChannelOpen'), src.indexOf('function startChannelOpen'));
   assert.equal((job.match(/'fundchannel'/g) || []).length, 1);
