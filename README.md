@@ -392,7 +392,7 @@ works normally without the restricted rows.
 | `bolt11.js` | What the wallet reads from a Lightning invoice: its network, amount, payment hash, final CLTV and, on Sequentia, the asset it is paid in (field `a`, which a Sequentia invoice must carry). Copied into the browser extension's `vendor/`. |
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
-| `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record and drives the transactions SWK builds over the staking key's bare scripts. |
+| `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record, and its stakes on the chain for a browser that does not remember them (a restore), and drives the transactions SWK builds over the staking key's bare scripts. |
 | `leaves.js` | The mode setting, and developer mode's Leaves tab, which shows what the leaf wallet answers. |
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |

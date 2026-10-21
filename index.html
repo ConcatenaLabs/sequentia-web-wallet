@@ -7546,6 +7546,14 @@ function renderStake(){
 // on chain (reorged away or never confirmed) once past a grace window, and any
 // whose claim has confirmed: those coins are back in the wallet.
 async function refreshStakes(){
+  // Stakes this browser does not remember (a restore, another browser) are read from the chain.
+  try{
+    const found = await stakeRecords.findStakes(stakeCtx(), STAKE_CSV);
+    let cur; try{ cur=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ cur=[]; }
+    const have = new Set(cur.map(s=>s.txid));
+    const add = found.filter(f=>!have.has(f.txid)).map(f=>({ ...f, period: STAKE_PERIOD_LABEL }));
+    if(add.length) localStorage.setItem(STAKES, JSON.stringify([...cur, ...add]));
+  }catch{ /* the explorer could not be read: the stakes remembered here are still shown */ }
   let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }
   if(!st.length){ renderStake(); return; }
   const GRACE=10*60*1000, before=JSON.stringify(st), keep=[];
