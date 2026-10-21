@@ -78,7 +78,9 @@
 //                      the asset on a buy; funds/holds it on a sell).
 //   MIXED_BTC_RPC      the BTC-LN lightning-rpc for the submarine's Lightning leg
 //                      (default: HOSTED_BTC_RPC, i.e. the device-cosigned hosted node).
-//   MIN_ANCHOR_DEPTH   Bitcoin-anchor depth the taker requires before it pays (default 2).
+//   MIN_ANCHOR_DEPTH   Bitcoin-anchor depth the taker requires before it pays (default 2, the
+//                      least seqdex accepts for a Lightning payment against an on-chain leg).
+//                      Advertised in /status as min_anchor_depth: the wallet states the wait from it.
 //   MIXED_MAX_0CONF    0-conf LP-fronting cap (asset atoms). A mixed swap whose asset
 //                      leg is <= this settles INSTANTLY (the submarine binary skips the
 //                      anchor-bury wait; the LP fronts the small-amount reorg risk) and
@@ -852,6 +854,9 @@ async function status(deviceKeys = []) {
     // — is already the sats ceiling. 0 means "no 0-conf fronting configured" (every mixed trade waits for a
     // confirmation), which the wallet surfaces honestly.
     mixed_max_0conf_sats: CFG.mixedMax0conf || 0,
+    // The anchor burial a mixed trade above that ceiling waits for, so the wallet's timing line states
+    // this box's figure: a Sequentia block, then one Bitcoin block per level past the first.
+    min_anchor_depth: CFG.minAnchorDepth,
     // P5.4a — the shared terminal constants block: the SINGLE source of truth the wallet reads into its
     // config so the market-slippage bound, the covenant min-lot copy, the front cap, and the dust floor
     // are one number, not independent literals that silently drift between the box and the composer.

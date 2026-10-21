@@ -3338,6 +3338,9 @@ function initLeaves(){
       return j;
     },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
+    // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
+    claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
+    careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
   }, $('leavesRoot'), $('devModeRoot'));
   show('tabLeaves', devMode());
   leavesApi.start();

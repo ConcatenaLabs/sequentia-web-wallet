@@ -218,7 +218,9 @@ must answer CORS. The tab then has:
   request to the faucet, which pays it as a leaf out of round, and the page syncs.
 - **Send to a receive request**: pays it out of round, in the asset named.
 - **Sync and schedule**: the chain's median time, when the schedule next asks for a sync and
-  why, and every unpaid receive request with when it lapses. While the page is open it reads
+  why, and every unpaid receive request with when it lapses. It syncs once when the leaf wallet
+  opens, whatever the schedule says, so a wallet back from an absence takes up what happened
+  while it was closed (a plan's step, a payment). While the page is open it reads
   the schedule every minute and syncs when it is due, when the time it gave after the last
   sync arrives (whatever later reads say), and every 30 seconds at most while a
   board, a payment, a participation or an exit is in flight. **Sync now** runs one at once.
@@ -230,8 +232,34 @@ must answer CORS. The tab then has:
   released and the new leaf is held. **Exit drill** takes one leaf on-chain from its record
   alone, without the operator: each run shows what it broadcast, with every fee, and what comes
   next; run it again until the claim is final.
+- **Kept by itself: claims and refresh plans**: what the wallet last did by itself (below),
+  every refresh plan with its leaf, its steps and until when it covers the leaf, with
+  **Cancel**, and **Release** for a planned leaf (the plan cancelled, then its refresh quoted as
+  in Settle now, so the next round makes a leaf that can be paid). **Look up claims** lists the
+  claims under this wallet's addresses, and **Distributions paid from here** the wallet's own.
 - **Participations** and **Refusals**: every participation and where it stands, and every
   refusal the leaf wallet made.
+
+#### What the wallet does by itself
+
+A wallet that joined an operator does three things with no prompt, in either mode, while the
+page is open: it syncs on the library's schedule (above), and after a sync, at most every ten
+minutes and at the first one after the page opens, it runs the library's `care`. That takes up
+every open claim of a distribution named for one of the wallet's addresses, looking under every
+address the wallet handed out and 20 more, so the asset appears in its figure on the Balance tab.
+It signs a refresh plan for each leaf whose refresh step could run within ten days, two
+expiries ahead, the operator's fee for a step bounded at 0.2% of the leaf and taken from the
+leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
+leaf of a round, so a leaf received or boarded out of round is first refreshed into a round,
+under the same bound, and its new leaf planned later. A leaf the operator will
+not plan stays unplanned, with the operator's reason in developer mode, and is refreshed by
+sync while the page is open. A wallet then closed across that leaf's expiry keeps it: the
+operator runs the plan's steps and the wallet takes the new leaf up when it opens again. And it
+cancels a plan whose leaf has moved. A leaf younger than that stays unplanned, because a planned
+leaf can be paid only once refreshed in a round; so a wallet closed within a leaf's first two
+weeks or so and kept closed through its refresh can lose that leaf to the operator's sweep, as
+any holder who stays away past an expiry can. User mode shows none of this: a claim taken up is
+counted in its asset's one figure.
 
 Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
 library itself (the same code as the operator's command-line wallet), compiled to WebAssembly
@@ -348,9 +376,12 @@ Two price modes, always switchable:
   watchers that resume after a reload), or, for the BTC-paying side, rest as SBTC through the
   custody bridge (see Status above).
 
-The tab is honest about finality: on-chain settlement is described as confirmed in about one
-block and final once its Bitcoin anchor is buried, since until then a Bitcoin reorg can still
-remove it. Only pure-Lightning settlement (nothing on-chain) is labelled final at once.
+The tab states settlement times plainly: a Sequentia block comes about once a minute, a Bitcoin
+block about every ten minutes, and Lightning settles at once. A confirmed Sequentia transaction
+reverts only if Bitcoin reorgs the block it anchors to, and the tab says so. Only where a
+Lightning payment is made against an on-chain leg does a trade wait for that anchor to be buried
+(one Bitcoin block per level past the first), because a reorg would undo the on-chain leg and
+leave the Lightning payment standing; a trade under the service's 0-conf cap is fronted at once.
 
 ### Lightning (experimental)
 
@@ -438,7 +469,7 @@ works normally without the restricted rows.
 | `ln-rail.js` / `submarine.js` / `subswap.js` | Lightning-rail gating per asset, the mixed-rail (submarine) swap state machine, and the P2P submarine taker + LSP leg-bridge client. |
 | `fee-verdict.js` | What Send says about the fee before signing, worded as Sequentia Qt's fee selector: the fee asset refused by the nodes the wallet sends to (not listed, or listed at rate zero), accepted but unpublished on the Asset Registry or unpriced, or fine; and what a typed rate clears against the producer's next block (under the relay floor Send refuses to build it). |
 | `fee-panel.js` | The network fee of a payment, set as in Sequentia Qt: the fee asset, a recommended rate for a confirmation target or a custom one, shown and typed as the total or the rate per 100 bytes, in the fee asset or the reference currency. Mounted by Send and by the replace, bump and speed-up dialogs. |
-| `btc-wait.js` | What a trade that waits on Bitcoin testnet4 says: one wording for the reviews and quotes (testnet4 blocks can be hours apart; safe to leave), and how long ago the last testnet4 block was found, for the Active trades rows. |
+| `btc-wait.js` | What a trade that waits on a Bitcoin block says: one wording for the reviews and quotes (one block, about ten minutes; safe to leave), and how long ago the last testnet4 block was found, for the Active trades rows, which say when testnet4 is running slow. |
 | `wait-reason.js` | Why an unconfirmed transaction is still waiting, from the explorer's `/feeinfo` and `/congestion`: a fee asset some nodes refuse, a rate under the mempool floor or under what a full next block takes, or nothing holding it back. Shown in a History row's details. |
 | `node-reject.js` | What a node's refusal of a transaction means, and a shortfall the wallet kit reports in atoms and ids (`shortfallText`) said in the asset's units: its reject code (`bad-txns-inputs-missingorspent`, `dust`, `min relay fee not met`…) as a sentence that says nothing was sent and what to do. `prettyErr` in `index.html` asks it first. |
 | `tip-watch.js` | Keeps the open wallet up to date: it reads both chains' tips every 30 s while the page is visible, and on becoming visible, and syncs when either has a new block, so a payment received shows without Refresh. |

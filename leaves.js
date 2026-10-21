@@ -17,6 +17,18 @@
 // refreshed or taken home on their dates. In user mode nothing of leaves is shown or
 // reachable; their value counts in each asset's one figure and in the headline.
 //
+// What the wallet does by itself, in either mode, is the library's `care`: after a sync,
+// at most every ten minutes and at the first sync after the page opens, it takes up
+// every open claim named for one of the wallet's receive keys (scanning the addresses
+// the kit handed out and 20 more), cancels each refresh plan whose coin has moved, and
+// signs a plan for each coin whose refresh step could run within ten days (a coin
+// received or boarded out of round is refreshed into a round first), so that a
+// wallet closed across that coin's expiry keeps it. A coin younger than that stays
+// unplanned, free to pay out of round; a wallet closed within a coin's first two weeks
+// or so and kept closed through its step window can lose the coin to the operator's
+// sweep, as any absent holder can. Developer mode lists distributions, claims and plans,
+// with Cancel, and Release for a planned coin (cancel, then refresh it in a round).
+//
 // Nothing about a leaf is computed here. The operator wallet library runs in a
 // dedicated worker (leaves/worker.js, its wasm in leaves/pkg): every script, record,
 // check, store write, fee and refusal is the library's. This module asks it, shows what
@@ -41,6 +53,9 @@
 //   onEvent(name, data) the leaf events: 'leafArrived', 'leafSyncDue'
 //   askFaucet(body)     optional: asks the testnet faucet to pay a receive request as a leaf
 //                       ({ request, asset? }); answers the faucet's JSON or throws its error
+//   claimScan()         optional: how many receive keys `care` looks for claims under
+//                       (the kit wallet's next receive index and 20 more)
+//   careEveryMs         optional: how often `care` runs at most (default CARE_EVERY_MS)
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 
@@ -61,6 +76,33 @@ export const JOINED_KEY = 'swk.leaves.joined'        // + '.' + tag: this wallet
 export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf address handed to pages
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const TICK_MS = 60_000
+// How often `care` runs at most, after a sync or a tick of the schedule.
+export const CARE_EVERY_MS = 10 * 60_000
+
+// Whether `care` runs now: at the first chance after the page opens, then at most every
+// CARE_EVERY_MS. `last` is when it last ran (ms), or null.
+export function careDue (last, nowMs, every = CARE_EVERY_MS) {
+  return last == null || nowMs - last >= every
+}
+
+// What a `care` answer did, counted: claims taken up (a leaf id came back), plans made,
+// plans cancelled. Anything at all means the balance may have moved.
+export function careSummary (answer) {
+  const a = answer || {}
+  const claims = Array.isArray(a.claims) ? a.claims : []
+  const planned = Array.isArray(a.planned) ? a.planned : []
+  const cancelled = Array.isArray(a.cancelled) ? a.cancelled : []
+  const refreshing = Array.isArray(a.refreshing) ? a.refreshing : []
+  return {
+    taken: claims.filter((c) => c && c.taken_up && !c.error).length,
+    held: claims.filter((c) => c && c.leaf_id && (c.held || c.error)).length,
+    planned: planned.filter((p) => p && p.plan_id).length,
+    unplanned: planned.filter((p) => p && p.error).length,
+    cancelled: cancelled.filter((p) => p && p.state === 'cancelled').length,
+    refreshing: refreshing.filter((r) => r && r.participation && !r.error).length,
+    later: Number(a.not_yet_planned || 0),
+  }
+}
 
 const tagged = (key, tag) => key + '.' + (tag || 'default')
 
@@ -279,8 +321,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const { el } = ctx
   const now = ctx.now || (() => Date.now())
   const tickMs = ctx.tickMs || TICK_MS
+  const careEvery = ctx.careEveryMs || CARE_EVERY_MS
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
-    refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {} }
+    refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
+    careAt: null, lastCare: null, plans: null, claims: null, distributions: null }
   // What is typed into a form survives a re-render (sync re-renders the panels by itself).
   const bind = (node) => {
     if (S.form[node.id] != null) node.value = S.form[node.id]
@@ -343,6 +387,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open) return
     const [b, c, p, s, r] = [await run('balance'), await run('coins'), await run('participations'), await run('schedule'), await run('refusals')]
     S.balance = b; S.coins = c || []; S.participations = p || []; S.schedule = s; S.refusals = r || []
+    // The plans are shown in developer mode only; reading them asks nothing of the operator.
+    if (dev()) { try { const pl = await run('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
     if (ctx.onChange) try { ctx.onChange() } catch {}
   }
 
@@ -367,7 +413,35 @@ export function mountLeaves (ctx, root, settingsRoot) {
     S.open = true
     S.info = await run('info')
     await reload()
+    // The resume pass: one sync when the leaf wallet opens, whatever the schedule says. A
+    // wallet closed for a while may have coins a plan's step replaced, payments in its
+    // mailbox, or an exit to move on; the schedule wakes a planned coin only at its plan's
+    // date, so without this the page would show the coin the step gave up until then.
+    S.busy = true; render()
+    try {
+      const v = await run('sync')
+      arrivals(v && v.mailbox)
+      S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
+    } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
+    try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
+    try { await careIfDue() } finally { S.busy = false }
     schedule()
+  }
+
+  // ---- what the wallet does by itself: claims taken up, plans kept ----
+  const claimScan = () => { try { const n = ctx.claimScan ? Number(ctx.claimScan()) : NaN; return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined } catch { return undefined } }
+  async function careIfDue () {
+    if (!S.open || !careDue(S.careAt, now(), careEvery)) return
+    S.careAt = now()
+    try {
+      const args = {}
+      const scan = claimScan(); if (scan) args.scan = scan
+      const v = await run('care', args)
+      S.lastCare = { at: now(), value: v }
+      const sum = careSummary(v)
+      if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
+      for (const c of (v && v.claims) || []) if (c && c.taken_up && !c.error) emit('leafArrived', { leaf_id: c.leaf_id, value: String(c.value ?? ''), kind: 'claim' })
+    } catch (e) { S.lastCare = { at: now(), error: e } }
   }
 
   // ---- the schedule: sync by itself while the page is open ----
@@ -396,7 +470,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
           arrivals(v && v.mailbox)
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
-        try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } finally { S.busy = false }
+        try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
+        try { await careIfDue() } finally { S.busy = false }
+      } else if (!S.busy && careDue(S.careAt, now(), careEvery)) {
+        S.busy = true
+        try { await careIfDue() } finally { S.busy = false }
       }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
     schedule()
@@ -410,6 +488,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           S.heldFor = null
           arrivals(v && v.mailbox)
           S.lastSync = { at: now(), value: v, auto: false }
+          await careIfDue()
           return v
         } catch (e) { S.lastSync = { at: now(), error: e, auto: false }; throw e }
       })
@@ -431,7 +510,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (S.error) { const c = card('Refused: ' + S.error.what); c.appendChild(errBox(S.error.e)); root.appendChild(c) }
     if (S.reloadError) { const c = card('Could not read the wallet'); c.appendChild(errBox(S.reloadError)); root.appendChild(c) }
     if (S.startNote) { const c = card('At the start of the last command'); c.appendChild(el('div', 'warn', S.startNote)); root.appendChild(c) }
-    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
+    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
   }
 
   function renderJoin () {
@@ -668,6 +747,79 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
     }
     root.appendChild(c)
+  }
+
+  // Developer mode's view of what the wallet does by itself.
+  function renderCare () {
+    const c = card('Kept by itself: claims and refresh plans')
+    c.id = 'leafCare'
+    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for each leaf whose refresh could run within ten days, so a closed wallet keeps it across its expiry. A younger leaf stays unplanned and free to pay; a wallet closed in a leaf\'s first two weeks or so and kept closed through its refresh can lose it to the operator\'s sweep. A planned leaf is paid only once refreshed in a round: Release cancels its plan and quotes that refresh.'))
+    const lc = S.lastCare
+    if (lc) {
+      c.dataset.careAt = String(lc.at)
+      if (lc.error) c.appendChild(errBox(lc.error))
+      else {
+        const sum = careSummary(lc.value)
+        c.dataset.taken = String(sum.taken); c.dataset.planned = String(sum.planned); c.dataset.cancelled = String(sum.cancelled); c.dataset.refreshing = String(sum.refreshing)
+        c.appendChild(kv('Last run', new Date(lc.at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')))
+        c.appendChild(kv('Claims taken up', `${sum.taken}${sum.held ? `, ${sum.held} held for a later run` : ''}`))
+        c.appendChild(kv('Plans signed', `${sum.planned}${sum.unplanned ? `, ${sum.unplanned} refused by the operator` : ''}; ${sum.later} leaf(s) not yet near their refresh`))
+        c.appendChild(kv('Plans cancelled (their leaf moved)', String(sum.cancelled)))
+        c.appendChild(kv('Leaves of no round refreshed into one, to be planned', String(sum.refreshing)))
+        for (const x of (lc.value && lc.value.refreshing) || []) if (x && x.error) c.appendChild(el('div', 'sub leaf-refusal', `${short(x.coin)}: ${x.error}`))
+        for (const p of (lc.value && lc.value.planned) || []) if (p && p.error) c.appendChild(el('div', 'sub leaf-refusal', `${short(p.coin)}: ${p.error}`))
+        for (const x of (lc.value && lc.value.claims) || []) if (x && (x.refused || x.error)) c.appendChild(el('div', 'sub leaf-refusal', `claim ${x.claim}: ${x.refused || x.error}`))
+        const pre = el('pre', 'mono leaf-result'); pre.textContent = JSON.stringify(lc.value, null, 1)
+        const d = el('details'); d.appendChild(el('summary', 'sub', 'What care answered')); d.appendChild(pre); c.appendChild(d)
+      }
+    } else c.appendChild(el('div', 'muted', 'Not run yet in this page.'))
+    const plans = S.plans || []
+    const list = el('div'); list.id = 'leafPlans'
+    if (!plans.length) list.appendChild(el('div', 'muted', 'No refresh plans.'))
+    for (const p of plans) {
+      const row = el('div', 'leaf-plan'); row.dataset.plan = p.plan_id; row.dataset.state = p.state
+      row.appendChild(el('div', null, `Plan ${short(p.plan_id)} · ${p.state} · leaf ${short(p.coin)} · ${amt(p.asset, p.value)}`))
+      row.appendChild(el('div', 'sub', `covers it until ${when(p.covered_until, (S.schedule || {}).now)} at the earliest; sync by ${when(p.sync_by, (S.schedule || {}).now)}; steps: ${(p.steps || []).map((st) => st.state || 'waiting').join(', ')}`))
+      if (p.state === 'open') {
+        const r = el('div', 'row'); r.style.marginTop = '6px'
+        const cancel = button('Cancel', () => cancelPlan(p.plan_id), 'ghost'); cancel.disabled = S.busy
+        const current = ((p.steps || []).filter((st) => st.leaf_id).map((st) => st.leaf_id).pop()) || p.coin
+        const release = button('Release', () => releasePlan(p.plan_id, current), 'ghost'); release.disabled = S.busy
+        r.appendChild(cancel); r.appendChild(release); row.appendChild(r)
+      }
+      list.appendChild(row)
+    }
+    c.appendChild(list)
+    const r = el('div', 'row'); r.style.marginTop = '10px'
+    const lookC = button('Look up claims', async () => { try { const scan = claimScan(); S.claims = await act('claims', () => run('claims', scan ? { scan } : {})) } catch {} }, 'ghost'); lookC.id = 'btnLeafClaims'
+    const lookD = button('Distributions paid from here', async () => { try { S.distributions = await act('distributions', () => run('distributions')) } catch {} }, 'ghost')
+    const now1 = button('Run now', async () => { S.careAt = null; try { await act('care', () => careIfDue()) } catch {} }, 'ghost'); now1.id = 'btnLeafCare'
+    for (const b of [now1, lookC, lookD]) { b.disabled = S.busy; r.appendChild(b) }
+    c.appendChild(r)
+    if (Array.isArray(S.claims)) {
+      const d = el('div'); d.id = 'leafClaimList'
+      if (!S.claims.length) d.appendChild(el('div', 'muted', 'No claims under this wallet\'s addresses.'))
+      for (const x of S.claims) d.appendChild(el('div', 'sub', `${x.distribution ? short(x.distribution) + ':' + x.index : ''} · ${amt(x.asset, x.value)} · ${x.state}${x.held ? ' · held as ' + short(x.held) : ''} · to ${short(x.address)}`))
+      c.appendChild(d)
+    }
+    if (S.distributions != null) {
+      const pre = el('pre', 'mono leaf-result'); pre.textContent = JSON.stringify(S.distributions, null, 1)
+      const d = el('details'); d.open = true; d.appendChild(el('summary', 'sub', 'Distributions')); d.appendChild(pre); c.appendChild(d)
+    }
+    root.appendChild(c)
+  }
+
+  async function cancelPlan (id) {
+    try { await act('plan_cancel', () => run('plan_cancel', { plan: id })) } catch {}
+    schedule()
+  }
+
+  // Release: the plan cancelled, then its leaf's refresh quoted (and confirmed below the
+  // leaves, as Settle now), so a new leaf free to pay comes out of the next round.
+  async function releasePlan (id, leaf) {
+    try { await act('plan_cancel', () => run('plan_cancel', { plan: id })) } catch { schedule(); return }
+    await settle([leaf])
+    schedule()
   }
 
   async function settle (leaves) {

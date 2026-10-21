@@ -123,7 +123,8 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LSP_POLICY` | `enforce` | device-signer policy (`permissive` is the kill-switch that signs without the custody checks) |
 | `SEQ_LN_PAYMENT_LIMITS` | the device's default, 1,000 reference units a day held in each asset at the rate the page gives it (`ln-limit.js`) | device payment limits: `{reference, default, period, assets: {<asset id>\|'btc': atoms}}`: `reference` in reference atoms, `default` the same atoms of every asset, `assets` an asset's own limit in its atoms, `null` for none |
 | `SEQ_LSP_FRONT_CAP` | `0.0005` BTC | LSP instant-front cap for mixed swaps |
-| `SEQ_ONCHAIN_CONF` | `{n:1, t:'~10 min'}` | on-chain confirmation estimate for the timing banner |
+| `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
+| `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |
 | `SEQ_DEV_CHAIN` | unset | a private regtest chain for the drives in `tooling/`: `{policyAsset, genesis, recordsV2Height}` makes the wallet's network `Network.regtestWithGenesis(policyAsset, genesis)` and signs stake records for that chain; the explorer is still `origin + '/api'`, which `tooling/leaves-dev-server.mjs --esplora` points at `tooling/esplora-shim.mjs` |
