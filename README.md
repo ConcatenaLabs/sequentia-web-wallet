@@ -198,8 +198,9 @@ must answer CORS. The tab then has:
 - **Board**: brings an on-chain coin into the tree. **Show an on-chain address** gives an
   address of the same keys on the leaf wallet's chain, to pay a coin to board or a fee coin. The
   fee is paid in the asset boarded unless another is named.
-- **Receive**: a single-use receive request (`arca:…`). A payment arrives in the mailbox, which
-  sync reads.
+- **Receive**: a single-use receive request (`request:…`), for any asset or one the operator
+  serves (its published list, then any other asset held in leaves). A payment arrives in the
+  mailbox, which sync reads.
 - **Send to a receive request**: pays it out of round, in the asset named.
 - **Sync and schedule**: the chain's median time, when the schedule next asks for a sync and
   why, and every unpaid receive request with when it lapses. While the page is open it reads
