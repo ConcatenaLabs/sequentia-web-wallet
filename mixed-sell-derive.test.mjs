@@ -34,6 +34,9 @@ const SUBAS_CAPABLE = {
     readOutput:async()=>null, findFundingByAddress:async()=>null, tipHeight:async()=>300, htlcAddress:()=>'a', htlcSpkHex:()=>'00', outspend:async()=>({known:false,spent:false}) },
   wasm:{ generateSwapSecret:()=>({secret_hex:'00'.repeat(32),hash_hex:'11'.repeat(32)}), buildSeqHtlcRedeemScript:()=>'00' },
 };
+// The wallet does not offer on-chain against Lightning (swap.js mixedRailsAllowed); these paths are
+// tested as they run once the switch offers them again.
+globalThis.window = Object.assign(globalThis.window || {}, { SEQ_ALLOW_MIXED_RAILS: true });
 const swap = await import('./swap.js');
 swap.initSwap({ ...C, ...SUBAS_CAPABLE,
   ln:{ available:()=>true, deployed:()=>true, status:async()=>({channels:[]}), unifiedBook:async()=>null,
