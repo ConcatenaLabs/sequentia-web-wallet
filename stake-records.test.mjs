@@ -248,3 +248,32 @@ test('finding stakes: another key\'s unbonding output is not taken for ours, and
   assert.deepStrictEqual(await SR.findStakes(c, csv), []);
   assert.deepStrictEqual(await SR.findStakes(ctx({ stakerPublicKey: () => { throw new Error('no wallet'); } }), csv), []);
 });
+
+test('a time-locked stake (as Ambra bonds) is found, matures by median time, and unbonds from its own script', async () => {
+  assert.deepStrictEqual(SR.STAKE_CSVS, [43200, (1 << 22) | 2532]);
+  assert.ok(SR.isTimeCsv(SR.TIME_CSV) && !SR.isTimeCsv(SR.HEIGHT_CSV));
+  assert.strictEqual(SR.csvSeconds(SR.TIME_CSV), 2532 * 512);
+  const csv = SR.TIME_CSV;
+  const stakeSpk = lwk.sequentiaStakeScript(ME, csv);
+  const t = {
+    [`/scripthash/${await SR.scriptHash(stakeSpk)}/utxo`]: [{ txid: 'tb', vout: 0, value: 4000000000000, status: { confirmed: true, block_time: 1700000000 } }],
+    '/tx/tb': { txid: 'tb', vout: [{ scriptpubkey: stakeSpk, value: 4000000000000 }], status: { confirmed: true, block_height: 500, block_hash: 'B' } },
+    '/tx/tb/outspend/0': { spent: false },
+    '/block/B': { id: 'B', previousblockhash: 'P', mediantime: 1700000100 },
+    '/block/P': { id: 'P', mediantime: 1700000000 },
+    '/blocks/tip/hash': 'T',
+    '/block/T': { id: 'T', mediantime: 1700000000 + 2532 * 512 - 1 },
+  };
+  const found = await SR.findStakes(ctx({ esplora: explorer(t) }), csv);
+  assert.deepStrictEqual(found.map((f) => [f.txid, f.csv, f.atoms]), [['tb', csv, '4000000000000']]);
+  // One second short of the lock, judged by the tip's median time: still bonded, whatever the height.
+  let s = await SR.stakeState(ctx({ esplora: explorer(t) }), found[0], 10 ** 6);
+  assert.deepStrictEqual([s.state, s.maturesAtTime], ['bonded', 1700000000 + 2532 * 512]);
+  await assert.rejects(SR.buildUnbond(ctx(), s), /cannot be unbonded yet/);
+  t['/block/T'].mediantime += 1;
+  s = await SR.stakeState(ctx({ esplora: explorer(t) }), found[0], 501);
+  assert.strictEqual(s.state, 'unbondable');
+  const ub = await SR.buildUnbond(ctx(), s);
+  assert.strictEqual(ub.recipe.stakes[0].script, stakeSpk);
+});
+

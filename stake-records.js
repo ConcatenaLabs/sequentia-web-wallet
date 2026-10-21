@@ -284,6 +284,20 @@ export async function findDelegation(ctx){
 
 // ---------------------------------------------------------------- stakes
 
+// The two locks a Sequentia wallet bonds with, both the network's shortest: a
+// height-based CSV of 43,200 blocks (this wallet and the extension), which
+// consensus counts in 30-second slots, and a time-based CSV of 2,532 units of
+// 512 seconds (Ambra), ceil(43,200 × 30 / 512). A stake of this wallet's key
+// under either is found, shown and unbonded here, whichever wallet made it.
+export const HEIGHT_CSV = 43200;
+export const TIME_CSV = (1 << 22) | 2532;
+export const STAKE_CSVS = [HEIGHT_CSV, TIME_CSV];
+const CSV_TIME_FLAG = 1 << 22;
+const CSV_MASK = 0xffff;
+export const isTimeCsv = (csv) => (Number(csv) & CSV_TIME_FLAG) !== 0;
+/// What a time-based lock waits, in seconds.
+export const csvSeconds = (csv) => (Number(csv) & CSV_MASK) * 512;
+
 // The stakes of this wallet's key that the chain holds, for a browser that remembers none
 // of them: a restore from the phrase, or the same phrase in another browser. The page
 // keeps its stakes in its own storage, which a restore starts without, so its Stake tab
@@ -433,6 +447,18 @@ export async function stakeState(ctx, entry, tip){
 
   const spent = await json(ctx, `/tx/${entry.txid}/outspend/${vout}`);
   if (!spent || !spent.spent){
+    if (isTimeCsv(entry.csv)){
+      // A time lock (BIP68): a spend is valid in the next block once the
+      // tip's median time is at least the median time of the block before
+      // the bond's, plus the lock.
+      const bondBlock = await json(ctx, `/block/${tx.status.block_hash}`);
+      const before = bondBlock && bondBlock.previousblockhash ? await json(ctx, `/block/${bondBlock.previousblockhash}`) : null;
+      const tipHash = await text(ctx, '/blocks/tip/hash');
+      const tipBlock = await json(ctx, `/block/${tipHash}`);
+      if (!before || before.mediantime == null || !tipBlock || tipBlock.mediantime == null) return { state: 'bonded', stake, maturesAtTime: null };
+      const maturesAtTime = Number(before.mediantime) + csvSeconds(entry.csv);
+      return { state: Number(tipBlock.mediantime) >= maturesAtTime ? 'unbondable' : 'bonded', stake, maturesAtTime, tipTime: Number(tipBlock.mediantime) };
+    }
     // A spend locked to the bond's relative height enters a block at least
     // `csv` blocks after the bond's own.
     const maturesAt = tx.status.block_height + Number(entry.csv);

@@ -7739,12 +7739,20 @@ const STAKE_STATES = new Map();
 const BLOCK_SECONDS = 60;
 
 function stakeLine(s, st){
-  // The lock from the stake's own CSV, not the words stored with it when it was bonded.
-  const lock = Number(s.csv)===STAKE_CSV ? STAKE_PERIOD_LABEL : `${Number(s.csv).toLocaleString()}-block lock`;
+  // The lock from the stake's own CSV, not the words stored with it when it was bonded. A stake
+  // another wallet of this phrase made (Ambra bonds with a time lock) is shown the same way.
+  const lock = Number(s.csv)===STAKE_CSV ? STAKE_PERIOD_LABEL
+    : stakeRecords.isTimeCsv(s.csv) ? `about ${Math.round(stakeRecords.csvSeconds(s.csv)/86400)} days (a time lock, the network minimum)`
+    : `${Number(s.csv).toLocaleString()}-block lock`;
   const base = `${lock} · bonded ${new Date(s.time).toLocaleDateString()}`;
   if(!st) return base;
   switch(st.state){
     case 'bonded': {
+      if(st.maturesAtTime!==undefined){
+        if(st.maturesAtTime==null) return base;
+        const left = Math.max(0, st.maturesAtTime - (st.tipTime||0));
+        return `${base} · can be unbonded from ${new Date(st.maturesAtTime*1000).toLocaleDateString()} (about ${Math.ceil(left/86400)} days)`;
+      }
       const left = Math.max(0, st.maturesAt - (st.tip||0) - 1);
       return `${base} · can be unbonded from block ${st.maturesAt.toLocaleString()} (${left.toLocaleString()} blocks, about ${Math.ceil(left*BLOCK_SECONDS/86400)} days)`;
     }
@@ -7801,10 +7809,12 @@ function renderStake(){
 async function refreshStakes(){
   // Stakes this browser does not remember (a restore, another browser) are read from the chain.
   try{
-    const found = await stakeRecords.findStakes(stakeCtx(), STAKE_CSV);
+    // Both locks: a stake this phrase bonded in another wallet is found here too.
+    const found = [];
+    for(const csv of stakeRecords.STAKE_CSVS) found.push(...await stakeRecords.findStakes(stakeCtx(), csv));
     let cur; try{ cur=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ cur=[]; }
     const have = new Set(cur.map(s=>s.txid));
-    const add = found.filter(f=>!have.has(f.txid)).map(f=>({ ...f, period: STAKE_PERIOD_LABEL }));
+    const add = found.filter(f=>!have.has(f.txid)).map(f=>({ ...f, period: Number(f.csv)===STAKE_CSV ? STAKE_PERIOD_LABEL : 'a time lock of about 15 days' }));
     if(add.length) localStorage.setItem(STAKES, JSON.stringify([...cur, ...add]));
   }catch{ /* the explorer could not be read: the stakes remembered here are still shown */ }
   let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }

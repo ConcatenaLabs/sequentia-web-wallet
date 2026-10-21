@@ -233,6 +233,10 @@ function shim(node) {
     if (p === '/blocks/tip/hash') return [200, c.best]
     if ((m = p.match(/^\/block-height\/(\d+)$/))) return [200, await node.rpc('getblockhash', Number(m[1]))]
     if ((m = p.match(/^\/block\/([0-9a-f]{64})\/header$/))) return [200, await node.rpc('getblockheader', m[1], false)]
+    if ((m = p.match(/^\/block\/([0-9a-f]{64})$/))) {
+      const h = await node.rpc('getblockheader', m[1], true)
+      return [200, { id: h.hash, height: h.height, previousblockhash: h.previousblockhash, timestamp: h.time, mediantime: h.mediantime }]
+    }
     if ((m = p.match(/^\/tx\/([0-9a-f]{64})$/))) return c.txs.has(m[1]) ? [200, esploraTx(c, m[1])] : [404, 'Transaction not found']
     if ((m = p.match(/^\/tx\/([0-9a-f]{64})\/status$/))) return c.txs.has(m[1]) ? [200, c.txs.get(m[1]).status] : [404, 'Transaction not found']
     if ((m = p.match(/^\/tx\/([0-9a-f]{64})\/hex$/))) return c.txs.has(m[1]) ? [200, c.txs.get(m[1]).t.hex] : [404, 'Transaction not found']
@@ -358,14 +362,14 @@ async function inBlock(node, producer, ids, what) {
 }
 
 // The page's bond: TxBuilder.addStakeOutput on the wallet's PSET path.
-async function bond(node, W, producer, atoms) {
+async function bond(node, W, producer, atoms, csv = UNBONDING) {
   const pub = W.signer.stakerPublicKey()
-  const pset = W.network.txBuilder().addStakeOutput(pub, UNBONDING, atoms).feeRate(FEE_RATE).finish(W.wollet)
+  const pset = W.network.txBuilder().addStakeOutput(pub, csv, atoms).feeRate(FEE_RATE).finish(W.wollet)
   const tx = W.wollet.finalize(W.signer.sign(pset)).extractTx()
   const txid = await W.broadcast(tx.toString())
   const ctx = W.ctx()
   const stakes = JSON.parse(ctx.store.getItem(ctx.stakesKey) || '[]')
-  stakes.push({ pubkey: pub, csv: UNBONDING, period: 'test', atoms: atoms.toString(), txid, time: Date.now() })
+  stakes.push({ pubkey: pub, csv, period: 'test', atoms: atoms.toString(), txid, time: Date.now() })
   ctx.store.setItem(ctx.stakesKey, JSON.stringify(stakes))
   await inBlock(node, producer, [txid], 'bond')
   return txid
@@ -482,6 +486,30 @@ async function recordsFromBlockOne() {
     await W.sync()
     const u = W.wollet.utxos().find((x) => x.outpoint().txid().toString() === clTxid)
     check(!!u, 'the claimed coins are in the wallet')
+
+    // --- a stake under a time lock, the kind Ambra bonds (BIP68 time, units of 512
+    // seconds): found from the chain by its script, bonded until the tip's median time
+    // passes the lock, then unbonded by this module from its own script.
+    const TIME_LOCK = (1 << 22) | 1           // one unit, 512 s: at least this chain's lock
+    const tBond = await bond(node, W, producer, 50n * COIN, TIME_LOCK)
+    const tFound = await SR.findStakes(ctx, TIME_LOCK)
+    check(tFound.some((f) => f.txid === tBond && f.csv === TIME_LOCK), 'the time-locked stake is found on the chain')
+    const tEntry = () => JSON.parse(ctx.store.getItem(ctx.stakesKey)).find((x) => x.txid === tBond)
+    s = await SR.stakeState(ctx, tEntry(), await node.tip())
+    check(s.state === 'bonded' && s.maturesAtTime > 0, `time-locked stake bonded until median time ${s.maturesAtTime} (tip's ${s.tipTime})`)
+    await refused(SR.buildUnbond(ctx, s), /cannot be unbonded yet/, 'unbond before the time lock, wallet')
+    const tEarly = await SR.buildUnbond(ctx, { ...s, state: 'unbondable' })
+    await refused(W.broadcast(tEarly.rawHex), /non-BIP68-final/, 'unbond before the time lock, node')
+    // The chain's median time moves past the lock: a later clock and eleven blocks.
+    await node.rpc('setmocktime', Math.max(Math.floor(Date.now() / 1000), s.tipTime) + 700)
+    for (let i = 0; i < 12; i++) await node.produce(producer.wif)
+    s = await SR.stakeState(ctx, tEntry(), await node.tip())
+    check(s.state === 'unbondable', `time-locked stake unbondable: tip's median time ${s.tipTime || '(passed)'}`)
+    const tUb = await SR.buildUnbond(ctx, s)
+    const tUbTxid = await SR.broadcastStep(ctx, tBond, 'unbond', tUb)
+    await inBlock(node, producer, [tUbTxid], 'unbond of the time-locked stake')
+    s = await SR.stakeState(ctx, tEntry(), await node.tip())
+    check(s.state === 'unbonding', 'time-locked stake unbonding')
 
     log('  measured vsize: ' + JSON.stringify(sizes) + '  budget: ' + JSON.stringify(SR.VBYTES))
     for (const k of ['create', 'move', 'leave', 'unbond', 'claim'])
