@@ -1492,6 +1492,7 @@ import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn } from './leaves.js';
 import { mountPageApi } from './wallet-api.js';
 import { mountContracts } from './contracts.js';
+import { reapplyUnseen } from './own-txs.js';
 
 const ESPLORA = location.origin + '/api';
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
@@ -3056,8 +3057,8 @@ async function idbPut(key,val){ try{ const db=await idbOpen(); await new Promise
 // the wollet forgets its own spends, the next build re-selects already-spent inputs, and the node
 // rejects it with bad-txns-inputs-missingorspent. Seen live: a trade's funding broadcast failed
 // this way and its failure path then took out the trade store. Keep every own tx from the last
-// hour and re-apply after each applyUpdate — idempotent when the scan already saw them,
-// corrective when it did not.
+// hour and re-apply after each applyUpdate those the scan did not return: corrective when it
+// missed them, and never a transaction the wollet already holds (own-txs.js).
 const _ownTxRing = [];   // [{hex, at}]
 // The transaction a finalized PSET carries. Wollet.finalize answers a Pset, and applyTransaction
 // takes a Transaction: handed the Pset, it threw (swallowed by its catch) and noteOwnTx dropped the
@@ -3080,11 +3081,8 @@ function forgetOwnTx(txid){
     try { if (new Transaction(_ownTxRing[i].hex).txid().toString() === txid) _ownTxRing.splice(i, 1); } catch {}
   }
 }
-function reapplyOwnTxs(){
-  const cutoff = Date.now() - 60*60_000;
-  for (let i = _ownTxRing.length - 1; i >= 0; i--) if (_ownTxRing[i].at < cutoff) _ownTxRing.splice(i, 1);
-  for (const e of _ownTxRing){ try { wollet.applyTransaction(new Transaction(e.hex)); } catch {} }
-}
+// Only those the scan has not returned (own-txs.js says why the others must be left alone).
+function reapplyOwnTxs(){ reapplyUnseen(wollet, _ownTxRing, (hex) => new Transaction(hex)); }
 // SINGLE-FILE QUEUE for the shared wasm objects (wollet + esplora client). wasm-bindgen
 // forbids re-entrant mutable use of one object ("recursive use of an object detected which
 // would lead to unsafe aliasing in rust"), and this wallet now runs several concurrent
