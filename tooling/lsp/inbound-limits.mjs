@@ -98,3 +98,45 @@ export function paidWaitingFee(fees, nodeKey, assetId) {
   }
   return best;
 }
+
+// What a fee transaction paid the LP in `assetId`, in atoms, read from a CLN listfunds answer that
+// lists spent outputs too: the LP may already have spent the fee (funding a channel, say) by the time
+// the wallet asks for its room, and a fee spent is still a fee paid. The policy asset rides untagged,
+// so untagged outputs count under `policyHex`, as in lpFreeAtoms.
+export function feePaidAtoms(listfunds, txid, assetId, policyHex = '') {
+  const want = String(txid || '').toLowerCase(), asset = String(assetId || '').toLowerCase();
+  let atoms = 0;
+  for (const o of (listfunds && listfunds.outputs) || []) {
+    if (String(o.txid || '').toLowerCase() !== want) continue;
+    const a = String(o.asset || o.asset_id || '').toLowerCase() || String(policyHex || '').toLowerCase();
+    if (a !== asset) continue;
+    atoms += Math.floor(Number(o.amount_msat != null ? Number(o.amount_msat) / 1000 : (o.value || 0)));
+  }
+  return atoms;
+}
+
+// A room's price moves with the asset's exchange rate, and a fee is paid at the price quoted to the
+// node before it paid, then seen by the service only once it confirms, or days later when the wallet
+// comes back. Charging today's price instead refused a fee paid in full a few hours earlier, forever:
+// 2.573 tSEQ paid for 100 tSEQ of room, then 2.722 asked once the rate fell (21/10/2026).
+//
+// The lowest price quoted to this node for this asset and term, for at least this much room, within
+// `holdMs`; null when there is none. `held` is a list of { node_key, asset, amount, months, due, at }.
+export function heldFeeDue(held, { nodeKey, assetId, amount, months, now = Date.now(), holdMs }) {
+  const asset = String(assetId || '').toLowerCase();
+  let best = null;
+  for (const h of held || []) {
+    if (!h || String(h.node_key || '') !== String(nodeKey || '') || String(h.asset || '').toLowerCase() !== asset) continue;
+    if (Number(h.months) !== Number(months) || Number(h.amount) < Number(amount) || !(now - Number(h.at) <= holdMs)) continue;
+    if (best == null || Number(h.due) < best) best = Number(h.due);
+  }
+  return best;
+}
+
+// The least a fee payment may be to pay `due` today, or `heldDue` as quoted earlier: the lower of the
+// two, less `toleranceBps` for a fee paid at a price the service no longer holds (quoted elsewhere,
+// or before quotes were held), so a rate that moved a little does not turn a paid fee into a debt.
+export function feeDueAccepted(due, heldDue, toleranceBps = 0) {
+  const base = heldDue == null ? Number(due) : Math.min(Number(due), Number(heldDue));
+  return Math.ceil(base * (10000 - Math.max(0, Number(toleranceBps) || 0)) / 10000);
+}

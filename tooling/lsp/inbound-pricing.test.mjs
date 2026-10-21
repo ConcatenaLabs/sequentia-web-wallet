@@ -216,7 +216,10 @@ test('the quote and the purchase both ask the LP, and the purchase asks before c
   const post = src.slice(src.indexOf("req.method === 'POST' && url.pathname === '/channel/inbound'"));
   const stock = post.indexOf('inboundFundingProblem(assetId, openAmount)');
   assert.ok(stock > 0, 'the purchase asks the LP');
-  for (const charge of ['verifyInboundFeePaid(', 'recordFeeUse(', 'debtAdd(']) assert.ok(stock < post.indexOf(charge), 'before ' + charge);
+  assert.ok(stock < post.indexOf('debtAdd('), 'before a debt is added');
+  // A prepaid fee is sent before the purchase is asked for, so it is checked and recorded first: once
+  // seen it keeps its price, and the quote names it to the node until its room opens.
+  for (const seen of ['verifyInboundFeePaid(', 'recordFeeUse(']) assert.ok(post.indexOf(seen) < stock, seen + ' before the stock');
   assert.ok(stock < post.indexOf('provisionInbound('), 'and before funding');
   const prov = src.slice(src.indexOf('async function provisionInbound('));
   assert.ok(prov.indexOf('inboundFundingProblem(assetId, amount)') < prov.indexOf("lnrpc('fundchannel'"), 'provisionInbound asks again before fundchannel');

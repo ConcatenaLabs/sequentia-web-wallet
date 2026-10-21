@@ -3966,17 +3966,44 @@ function lnRoomShortText(x, tk, prec){
     + fmtAtoms(BigInt(m[1]), prec)+' '+tk+' and it is '+fmtAtoms(BigInt(m[2]), prec)+' '+tk+' short.';
   return null;
 }
-// Ask the service to open the room, until it sees the fee (it answers 402 until then).
+// Why the service could not open room to receive, said plainly: its errors name txids and node
+// states, which prettyErr rightly folds into "Something went wrong", and that is all a room purchase
+// ever said when it failed (21/10/2026). Null for an error it does not know.
+function lnRoomErrorText(e, tk, prec){
+  if(e && e.feeShort) return 'The service sees your fee payment of '+fmtAtoms(e.feeShort.paid, prec)+' '+tk+', but it asks at least '+fmtAtoms(e.feeShort.least, prec)+' '+tk+' for this room.';
+  const m=String((e && e.message) || (e && e.body && e.body.error) || '');
+  if(/has not seen your fee payment after/.test(m)) return 'The service has not seen your fee payment yet, after 8 minutes of asking.';
+  if(/could not connect to the user node|no listen binding/i.test(m)) return 'The service could not reach your '+tk+' Lightning node. Reopen the wallet so the node comes online, then try again.';
+  if(/did not reach CHANNELD_NORMAL/i.test(m)) return 'The service opened the channel, but it is not usable yet. It may still finish on its own: look at your Lightning balance again in a few minutes before paying anything more.';
+  if(/can only receive \d+ of the/i.test(m)) return 'The service opened a channel smaller than the room asked for. Nothing more is charged for it; ask the service operator to look at it.';
+  if(/not provisioned/i.test(m)) return 'Your '+tk+' Lightning node is not set up on the service yet. Reopen the wallet, then try again.';
+  if(/could not read the LP wallet/i.test(m)) return 'The service could not check your fee payment just now. Try again in a minute.';
+  return null;
+}
+// Ask the service to open the room, until it sees the fee (it answers 402, paid 0, until then). A fee
+// it sees and finds too little is not waited on: waiting does not mend it, and the dialog says both
+// amounts (e.feeShort). Eight minutes without seeing it end the wait; the record stays, so the next
+// open asks again.
 async function lnClaimInbound(rec, say){
-  const deadline = Date.now() + 8*60_000;
+  const started = Date.now(), deadline = started + 8*60_000;
   for(;;){
     try{
-      say && say('Opening the channel to you…');
+      say && say('Asking the service to open the channel to you…');
       const r = await seqlnChannelInbound({ node_key: rec.node, asset: rec.asset, amount: rec.amount, mode: 'prepaid', fee_txid: rec.fee_txid || undefined, months: rec.months || undefined });
       lnClearInbound();
       return r;
     }catch(e){
-      if(e && e.status===402 && Date.now() < deadline){ say && say('Waiting for your fee payment to confirm (about a block)…'); await new Promise(r=>setTimeout(r, 10_000)); continue; }
+      const j = (e && e.body) || {};
+      if(e && e.status===402 && Number(j.paid) > 0)
+        throw Object.assign(new Error(j.error || 'the fee payment is less than the service asks'), { feeShort: { paid: BigInt(j.paid), least: BigInt(j.least||j.due_now||0) } });
+      if(e && e.status===402 && j.paid===0){
+        if(Date.now() < deadline){
+          const min = Math.floor((Date.now()-started)/60_000);
+          say && say('Waiting for the service to see your fee payment'+(min ? ' ('+min+' min so far)' : '')+': it counts it once a Sequentia block confirms it, usually within a minute or two…');
+          await new Promise(r=>setTimeout(r, 10_000)); continue;
+        }
+        throw new Error('the service has not seen your fee payment after 8 minutes');
+      }
       throw e;
     }
   }
@@ -4078,8 +4105,15 @@ function lnReceiveRoomDialog(leg, startAtoms){
   inp.oninput=()=>{ clearTimeout(t); t=setTimeout(requote, 350); };
   ok.onclick=async()=>{
     if(!last) return;
-    ok.disabled=true; no.disabled=true; inp.disabled=true; terms.lock();
-    const say=(txt)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+esc(txt); };
+    // Closing never stops the purchase: it goes on behind the dialog, a paid fee is kept, and the
+    // outcome comes as a notice. A purchase that waits on the service used to leave no way out but a
+    // page reload.
+    let closed=false;
+    ok.disabled=true; inp.disabled=true; terms.lock();
+    no.textContent='Close'; no.onclick=()=>{ closed=true; m.remove(); };
+    const say=(txt)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+esc(txt)
+      +'<div class="sub" style="margin-top:6px">You can close this window: the purchase goes on, and a paid fee is kept.</div>'; };
+    const done=(txt)=>{ if(closed) toast(txt); };
     try{
       const phrase=(localStorage.getItem(KEY)||'').trim();
       if(!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
@@ -4096,7 +4130,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
         st.className='status ok';
         st.textContent='Done. A channel with room for '+fmtAtoms(last.atoms, prec)+' '+tk+' is opening to you, paid by your earlier fee'
           +(r && r.expires_at ? '; the service keeps it open until '+new Date(r.expires_at).toLocaleDateString()+'.' : '.');
-        no.disabled=false; no.textContent='Close'; no.onclick=()=>m.remove();
+        done('You can now receive '+tk+' over Lightning');
         try{ refreshLnStatus(); }catch{}
         return;
       }
@@ -4122,15 +4156,17 @@ function lnReceiveRoomDialog(leg, startAtoms){
         ? 'You can already receive this much '+tk+' over Lightning; no new channel was needed.'
         : 'Done. A channel with room for '+fmtAtoms(last.atoms, prec)+' '+tk+' is opening to you; you can receive over Lightning once it confirms'
           +(r && r.expires_at ? ', and the service keeps it open until '+new Date(r.expires_at).toLocaleDateString()+'.' : '.');
-      no.disabled=false; no.textContent='Close'; no.onclick=()=>m.remove();
+      done('You can now receive '+tk+' over Lightning');
       try{ refreshLnStatus(); }catch{}
       setTimeout(()=>{ try{ sync(); }catch{} }, 1500);
     }catch(e){
-      const short=lnRoomShortText(e, tk, prec);
+      try{ console.warn('[ln] room to receive:', e?.status, e?.message, e?.body); }catch{}
+      const short=lnRoomShortText(e, tk, prec), why=short || lnRoomErrorText(e, tk, prec);
       const paid=lnLoadInbound() && lnLoadInbound().fee_txid;
       st.className='status err';
-      st.textContent=(short || 'Failed: '+prettyErr(e))+(paid
-        ? (short ? ' Your fee is paid and kept: the wallet asks again each time it opens, and the room opens once the service has the '+tk+'. To use it now for a smaller room, choose at most what the service can open.' : ' Your fee is paid; the wallet finishes this the next time it opens.')
+      if(closed) toast('Room to receive '+tk+': '+(why || prettyErr(e)));
+      st.textContent=(why || 'Failed: '+prettyErr(e))+(paid
+        ? (short ? ' Your fee is paid and kept: the wallet asks again each time it opens, and the room opens once the service has the '+tk+'. To use it now for a smaller room, choose at most what the service can open.' : ' Your fee is paid and kept; the wallet asks again the next time it opens.')
         : (short ? ' Nothing was paid.' : ''));
       no.disabled=false; inp.disabled=false; ok.disabled=false;
     }
@@ -4644,8 +4680,9 @@ function moveToLightningDialog(leg){
           if(backgrounded) toast('You can soon receive '+leg.ticker+' over Lightning');
         }catch(e){
           st.className='status err';
+          try{ console.warn('[ln] room to receive:', e?.status, e?.message, e?.body); }catch{}
           const short=lnRoomShortText(e, leg.ticker, leg.precision);
-          st.textContent = doneText + ' Room to receive failed: '+(short || prettyErr(e))
+          st.textContent = doneText + ' Room to receive failed: '+(short || lnRoomErrorText(e, leg.ticker, leg.precision) || prettyErr(e))
             + (lnLoadInbound() && lnLoadInbound().fee_txid
               ? (short ? ' Its fee is paid and kept for this purchase; the wallet asks again each time it opens.' : ' Its fee is paid; the wallet finishes it the next time it opens.') : '');
         }
