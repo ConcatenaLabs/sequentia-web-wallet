@@ -55,7 +55,9 @@ The mode is kept for each wallet (`swk.mode.<walletTag>`, `leaves.js`), user mod
 and its words are the same in the extension and Ambra: change them in all three together. A
 wallet that joined an operator keeps its leaf wallet syncing in either mode; user mode shows
 nothing of leaves and the page API refuses every leaf method there, but leaves count in each
-asset's figure and the headline. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
+asset's figure and the headline. Each asset's figure counts on-chain, leaves, Lightning and, for
+tSEQ, what is staked (`stakedAtoms` in `index.html`), in both modes; user mode shows that one
+figure with its parts one tap away, and no Move or room to receive. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
 answers as the extension's provider answers, and `leaf-request.js` is copied into the
 extension's `src/`: change it here first.
 

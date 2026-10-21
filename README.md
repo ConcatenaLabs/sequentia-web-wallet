@@ -87,8 +87,13 @@ Help under **More**; Settings behind the gear in the header. On a phone the same
 fixed to the bottom of the screen, icon over label, which steps aside while the keyboard is up.
 
 - **Balance**: a headline portfolio total across parent-chain BTC and every Sequentia asset,
-  valued in your chosen reference currency, then one uniform row per asset. No asset is
-  pinned or privileged; the Sequence token (tSEQ) is one row among equals.
+  valued in your chosen reference currency, then one uniform row per asset, BTC first. No asset
+  is pinned or privileged; the Sequence token (tSEQ) is one row among equals. Each asset's figure
+  counts everything of it the wallet holds: on-chain, leaves, Lightning (the wallet's share of
+  its own channels, reserve included) and, for tSEQ, what is staked (each bonded stake, each
+  unbonding output not yet claimed back, and the delegation record). In user mode a row shows
+  that one figure, and a tap on it opens its parts; developer mode shows the parts in columns,
+  with the controls that move an asset to and from Lightning.
 - **Send**: multi-recipient sends of any owned asset, including BTC (a real Bitcoin testnet4
   transaction) and OpenAMP restricted assets. For Sequentia sends you choose the **fee asset**:
   the fee can be paid in any asset the node publishes an exchange rate for. The fee is
@@ -172,10 +177,13 @@ Sequentia wallet:
 - **Developer mode**: Every rail by name, side by side (on-chain, leaves and Lightning), each
   with its balance and its manual controls, and the developer tools.
 
-The headline total counts every rail of every asset (on-chain, Lightning and leaves) in the
-reference currency, in both modes, and no asset comes first. In developer mode each asset row
-also reads "X on-chain · Y in leaves · Z on Lightning", and the **Leaves** and **Contracts**
-tabs appear. In user mode nothing of leaves is shown or reachable, but a wallet that joined
+The headline total counts every rail of every asset (on-chain, Lightning and leaves) and the
+staked tSEQ in the reference currency, in both modes, and no asset comes first. User mode shows
+one figure per asset, its parts one tap away, and offers no Move and no room to receive: the
+Lightning receive card says only how much can arrive and otherwise points to the on-chain
+address. In developer mode each asset row also reads "X on-chain · Y in leaves · Z on
+Lightning" (and "· S staked" for tSEQ), the Lightning column carries Move and room to receive,
+and the **Leaves** and **Contracts** tabs appear. In user mode nothing of leaves is shown or reachable, but a wallet that joined
 an operator keeps its leaf wallet syncing while the page is open, since its coins have dates
 to keep, and their value counts in each asset's one figure. The wallet's own pages read the
 mode, and in developer mode the leaf rail, through the page API (`window.sequentiaWallet`,
@@ -361,7 +369,7 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   both your hosted node and the node your channel is with: the hosted node collects the
   device's signature on each commitment before the device revokes it, so the two together can
   broadcast a revoked commitment and take the channel's funds.
-- Moving BTC or a Sequentia asset to Lightning is one transaction: your wallet pays the channel's
+- Moving BTC or a Sequentia asset to Lightning (developer mode's Move, on the Balance row) is one transaction: your wallet pays the channel's
   2-of-2 output directly, so the coins are never on the hosted node and there is one fee and one
   confirmation. The wallet builds and blinds the transaction, the node's peer signs the
   channel's first commitment (the way back) against it while it is still unsigned, and only then
@@ -376,7 +384,8 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   choose, for a fee in the same asset, paid on chain: the amount times the asset's yearly rate
   times the months, with a minimum. Receiving uses up the room and spending makes it again. Move to Lightning asks for it with the move, and the fee is one more output of the
   funding transaction; the service opens its channel once that transaction confirms. Once an
-  asset is on Lightning, its Balance row says how much it can receive and offers more room.
+  asset is on Lightning, its Balance row says how much it can receive and offers more room, in
+  developer mode.
 - On a credit channel (one the service opened as its provider) the service can be paid for you
   while your device is away, and then owes you what it was paid: it signs a note for the whole
   amount it owes you. Every commitment of the channel lets that note, with the payment's proof,
