@@ -96,7 +96,8 @@ const lnNodePub = (o) => (o && (o.maker_ln_node_pubkey ?? o.makerLnNodePubkey)) 
 //     the settlement layer can tell them apart. This was the missing family: the unified book
 //     covered cross, submarine, sub-asset and pure-LN, but a same-chain resting order — the
 //     covenant CLOB itself — never entered it, so an asset-paired pair's "one book" silently
-//     excluded its on-chain liquidity.
+//     excluded its on-chain liquidity. caps.leaf_take marks the transparent covenant orders a
+//     wallet holding leaves can take in the operator's round (the leaf rail).
 export function classifyRelayOffer(o, opts) {
   if (!o || o._verified === false) return null;
   const quoteAsset = opts && opts.quote && String(opts.quote).toUpperCase() !== 'BTC' ? opts.quote : null;
@@ -155,7 +156,14 @@ export function classifyRelayOffer(o, opts) {
   // when the offer's two legs are exactly this pair (an offer for a different market never leaks in).
   if (quoteAsset) {
     const covenant = !!(o.covenant || o.Covenant);
-    const caps = { btc_ln: false, interactive: !covenant, asset_onchain: true, maker_ln_node_pubkey: null };
+    // leaf_take: the leaf rail can settle this offer, by a take from leaves in the operator's round
+    // (settlement-router's 'leaf-take'). Only a transparent covenant order under the tapscript
+    // terms qualifies: the round spends it with no signature from its maker. A plain intent needs
+    // its maker live on the chain, a blinded order hides the amounts the round must pay, and an
+    // order under the Simplicity template is not one the round fills. The leaf library checks the
+    // order again itself before anything is signed; this only says which offers to offer.
+    const leafTake = covenant && !(o.confidential || o.Confidential);
+    const caps = { btc_ln: false, interactive: !covenant, asset_onchain: true, leaf_take: leafTake, maker_ln_node_pubkey: null };
     if (wa === quoteAsset && oa && oa !== 'BTC') return mk('ask', 'onchain', assetAtoms || num(o.offer_amount), num(o.want_amount), o,
       { trade_dir: 'sell', samechain: true, covenant, caps });
     if (oa === quoteAsset && wa && wa !== 'BTC') return mk('bid', 'onchain', assetAtoms || num(o.want_amount), num(o.offer_amount), o,

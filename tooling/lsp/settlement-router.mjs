@@ -21,11 +21,26 @@
 // live settlement path (runMixed / the cross-book couriers / pure-LN) will be refactored to
 // obey, and it is exhaustively unit-tested in settlement-router.test.mjs.
 
-/** @typedef {'ln'|'chain'} Rail */
+/** @typedef {'ln'|'chain'|'leaf'} Rail */
+
+// THE LEAF RAIL. A leaf is a coin in an operator's tree (developer mode's leaves). It settles in
+// one of two ways, and never through the LSP or a preimage:
+//   • IN THE TREE: both parties hold leaves on both legs. One reassignment both wallets sign
+//     (offer, accept, complete) moves both assets at once: method 'in-tree'.
+//   • IN A ROUND: one party holds leaves on both legs and the other is an ordinary on-chain
+//     covenant order. The operator's round spends the order, pays its maker on the chain and
+//     gives the taker a leaf: method 'round' (a take from leaves).
+// Every other shape with a leaf has no construction, and is refused rather than planned: a leaf
+// against Lightning needs the operator's gateway, which the composer does not run, and a party
+// with a leaf on one leg and the chain on the other is no trade either side can sign. BTC is
+// never a leaf: native bitcoin lives on its own chain, so a BTC leg stays on Lightning or an
+// on-chain hash-lock, and a pair with BTC in it has no leaf rail at all.
 
 /**
  * @param {object} match
  * @param {string} match.asset   asset id (or ticker) being traded against BTC
+ * @param {string} [match.quote] the pair's quote asset when it is not BTC (a same-chain pair, its
+ *   quote in BTC's structural place). Only a same-chain pair has a leaf rail.
  * @param {object} match.buyer   { btcRail:Rail, assetRail:Rail, assetInbound?:boolean }
  *   buyer PAYS BTC on btcRail, RECEIVES the asset on assetRail. assetInbound: does the
  *   buyer already hold LN inbound for the asset? (only consulted when assetRail==='ln')
@@ -41,6 +56,7 @@ export function planSettlement(match) {
   assertRail(buyer.assetRail, 'buyer.assetRail');
   assertRail(seller.assetRail, 'seller.assetRail');
   assertRail(seller.btcRail, 'seller.btcRail');
+  if ([buyer.btcRail, buyer.assetRail, seller.assetRail, seller.btcRail].includes('leaf')) return planLeafSettlement(match);
 
   // BTC leg: buyer pays, seller receives. Asset leg: seller pays, buyer receives.
   const btcLeg = planLeg('btc', buyer.btcRail, seller.btcRail, !!seller.btcInbound);
@@ -77,6 +93,7 @@ export function planSettlement(match) {
 export function planLeg(unit, payerRail, receiverRail, receiverInbound) {
   assertRail(payerRail, `${unit} payerRail`);
   assertRail(receiverRail, `${unit} receiverRail`);
+  if (payerRail === 'leaf' || receiverRail === 'leaf') return planLeafLeg(unit, payerRail, receiverRail);
   const native = payerRail === receiverRail;
   // A receiver on Lightning must have inbound liquidity to receive at all. If not, a JIT
   // channel is opened toward it first (provisionInbound). This is independent of bridging:
@@ -128,12 +145,22 @@ export function planLeg(unit, payerRail, receiverRail, receiverInbound) {
  *
  * @param {object} match          a planSettlement match ({asset, buyer, seller})
  * @param {object} [offerSignals] the resting offer's caps (or {caps:{...}})
- * @returns {{ path:'native'|'p2p-submarine'|'lsp-bridge', ln_direction:0|1|null, lnSide:'payer'|'receiver'|null }}
+ * @returns {{ path:'native'|'p2p-submarine'|'lsp-bridge'|'leaf-swap'|'leaf-take'|null, ln_direction:0|1|null, lnSide:'payer'|'receiver'|null, reason?:string }}
  */
 export function chooseSettlementPath(match, offerSignals = {}) {
   const plan = planSettlement(match);
-  if (plan.happyCoincidence) return { path: 'native', ln_direction: null, lnSide: null };
   const caps = (offerSignals && offerSignals.caps) || offerSignals || {};
+  // A leaf plan settles by the wallet's leaf library alone: an in-tree swap with another wallet
+  // that holds leaves, or a take from leaves of an on-chain order the round can spend. Neither
+  // is 'native' in the LSP's sense, and neither ever falls back to the LSP: an order the round
+  // cannot spend is no path at all.
+  if (plan.leaf) {
+    if (plan.leaf.shape === 'in-tree') return { path: 'leaf-swap', ln_direction: null, lnSide: null };
+    if (caps.leaf_take) return { path: 'leaf-take', ln_direction: null, lnSide: null };
+    return { path: null, ln_direction: null, lnSide: null,
+      reason: 'this order cannot be taken from leaves: a round spends only a transparent covenant order' };
+  }
+  if (plan.happyCoincidence) return { path: 'native', ln_direction: null, lnSide: null };
   const btc = plan.btcLeg, asset = plan.assetLeg;
   if (btc && btc.bridge) {
     // The BTC leg crosses. Its lnSide fixes the taker side: payer=>buy (taker pays BTC-LN), receiver=>sell.
@@ -177,7 +204,64 @@ function buildSteps(btcLeg, assetLeg) {
 }
 
 function assertRail(r, where) {
-  if (r !== 'ln' && r !== 'chain') throw new Error(`${where} must be 'ln' or 'chain' (got ${JSON.stringify(r)})`);
+  if (r !== 'ln' && r !== 'chain' && r !== 'leaf') throw new Error(`${where} must be 'ln', 'chain' or 'leaf' (got ${JSON.stringify(r)})`);
+}
+
+const isBtc = (a) => a == null || String(a).toUpperCase() === 'BTC';
+
+// One leg with a leaf on at least one end (see THE LEAF RAIL above).
+function planLeafLeg(unit, payerRail, receiverRail) {
+  if (payerRail === 'ln' || receiverRail === 'ln')
+    throw new Error(`${unit} leg: a leaf settles with Lightning only through the operator's gateway, which this composer does not run`);
+  if (payerRail === 'leaf' && receiverRail === 'leaf')
+    return { unit, rail: 'leaf', method: 'in-tree', bridge: false, lnSide: null, jitInbound: false };
+  return { unit, rail: 'round', method: 'round', bridge: false, lnSide: null, jitInbound: false,
+    leafSide: payerRail === 'leaf' ? 'payer' : 'receiver' };
+}
+
+// A whole match with a leaf in it. Only two shapes exist: both parties on leaves (one in-tree
+// swap), or one party on leaves on both legs against an on-chain order (a take in a round).
+function planLeafSettlement(match) {
+  const { buyer, seller } = match;
+  if (isBtc(match.quote))
+    throw new Error('BTC is never a leaf: a pair with BTC settles its BTC leg over Lightning or on the chain, so it has no leaf rail');
+  const leafParty = (p, a, b) => {
+    if (p[a] === 'leaf' && p[b] === 'leaf') return true;
+    if (p[a] === 'leaf' || p[b] === 'leaf') throw new Error('a party pays and receives from leaves on both legs, or on neither');
+    return false;
+  };
+  const buyerLeaf = leafParty(buyer, 'btcRail', 'assetRail');
+  const sellerLeaf = leafParty(seller, 'assetRail', 'btcRail');
+  if (!buyerLeaf && !sellerLeaf) throw new Error('planLeafSettlement: no leaf in the match');
+  const other = buyerLeaf ? seller : buyer;
+  if (!(buyerLeaf && sellerLeaf) && (other.btcRail !== 'chain' || other.assetRail !== 'chain'))
+    throw new Error('a party on leaves trades either with another party on leaves (in the tree) or with an on-chain order (in a round)');
+  const btcLeg = planLeafLeg('btc', buyer.btcRail, seller.btcRail);
+  const assetLeg = planLeafLeg('asset', seller.assetRail, buyer.assetRail);
+  const shape = buyerLeaf && sellerLeaf ? 'in-tree' : 'round';
+  return {
+    asset: match.asset ?? null,
+    takerSide: match.takerSide ?? null,
+    btcLeg,
+    assetLeg,
+    // One reassignment (in the tree) or one round transaction binds both legs: no preimage, and
+    // the LSP is never in the value path.
+    atomic: { sharedPreimage: false, oneTransaction: true, lspCoordinates: false },
+    happyCoincidence: true,
+    leaf: { shape, leafParty: shape === 'in-tree' ? 'both' : (buyerLeaf ? 'buyer' : 'seller') },
+    steps: shape === 'in-tree'
+      ? [{ op: 'swap-offer' }, { op: 'swap-accept' }, { op: 'swap-complete' }]
+      : [{ op: 'take-quote' }, { op: 'take' }, { op: 'forfeits-to-round' }],
+  };
+}
+
+// The leaf library's commands that settle a leaf plan, in order, or null for a plan without a
+// leaf. A leaf plan never has an LSP binary (planExecutionName answers null for it).
+export function leafExecution(plan) {
+  if (!plan || !plan.leaf) return null;
+  return plan.leaf.shape === 'in-tree'
+    ? ['swap_offer', 'swap_read', 'swap_accept', 'swap_complete']
+    : ['take_quote', 'take'];
 }
 
 // --- Current-execution mapping (Stage 1b) ---------------------------------------
@@ -206,6 +290,9 @@ export function settlementPlanForSide(side, payRail, recvRail) {
 // take-amount flag, so it lifts the best resting offer IN FULL and cannot do the
 // partial fills every other rail now does.
 export function planExecutionName(side, plan) {
+  // A leaf plan is the wallet's own leaf library's (leafExecution), never a seqob-cli binary: an
+  // LSP handed one must refuse it, so it maps to null like a shape the binaries cannot run.
+  if (plan.leaf) return null;
   if (plan.btcLeg.bridge || plan.assetLeg.bridge) return null;   // rail crossing -> Stage-2 bridge
   return {
     'buy:ln:chain':   'xsubbuy',      // pay BTC over LN, claim asset on-chain
