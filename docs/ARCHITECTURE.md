@@ -237,6 +237,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.sequentia.oampTransfers`, `swk.sequentia.signerHints` | OpenAMP transfer log; pool signer keys this browser has delegated to |
 | `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |
 | `swk.ln.predating`, `swk.ln.predating.dismissed` | per hosted node, the channels its device found in an older device's store, which it does not carry over; and the notes about them, and about coins on the node outside a channel, that the user dismissed |
+| `swk.ln.credit` | per hosted node and channel, the latest credit note its provider signed while the device was away (the note, the provider's signature, the payment's preimage), kept from the device's reports (`lncredit.js`) |
 | `swk.ln.funding.v1` | a Lightning channel's funding transaction, signed and stored just before it is broadcast; sent again on the next open if the network does not know it, and cleared once it does |
 | `swk.ln.closeTo.v1` | per hosted node, the scripts of this wallet's own addresses its device may close a channel to; named to the device again whenever its signer starts |
 | `swk.ln.inboundBuy.v1` | a purchase of room to receive over Lightning whose fee is paid (or about to be), on its own or inside the funding transaction of a Move to Lightning: finished on the next open |
@@ -270,7 +271,7 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 94 `*.test.mjs` files: 69 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 107 `*.test.mjs` files: 82 hold `node:test` suites, and the
 other 25, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`

@@ -660,6 +660,7 @@
              only when an LSP is configured. -->
         <div class="warn hide" id="lnStrandNote" style="margin-bottom:10px"></div>
         <div class="warn hide" id="lnUpgradeNote" style="margin-bottom:10px"></div>
+        <div class="status hide" id="lnCreditNote" style="margin-bottom:10px"></div>
         <details class="ln-note hide" id="lnHelpNote">
           <summary>About your Lightning balances</summary>
           <ul class="sub ln-help">
@@ -1513,11 +1514,12 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
-  predatingChannels, dismissPredating, idleDismissed,
+  predatingChannels, dismissPredating, idleDismissed, creditNotes,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp, setPaymentRates } from './seqln.js';
 import { lnRatesFor, lnLimitRefusal } from './ln-limit.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
+import { creditLines } from './lncredit.js';
 import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
@@ -3503,8 +3505,9 @@ function lnStatusPill(){
 }
 function initLightning(phrase){
   initSeqln();                       // reads window.SEQ_LSP_URL/_TOKEN + per-node _WS_ASSET/_BTC + _HOST_PUBKEY_ASSET/_BTC (legacy _WS/_HOST_PUBKEY -> asset)
-  onSeqlnStatus(() => { lnStatusPill(); try{ renderUpgradeNote(); }catch{} });
+  onSeqlnStatus(() => { lnStatusPill(); try{ renderUpgradeNote(); }catch{} try{ renderCreditNote(); }catch{} });
   lnStatusPill();
+  try{ renderCreditNote(); }catch{}
   const nodes = lnEnabledNodes();
   if (!nodes.length) return;         // LN not deployed here; composer stays on-chain-only
   const policy = ((typeof window!=='undefined') && window.SEQ_LSP_POLICY) || 'enforce';   // enforce by default; SEQ_LSP_POLICY='permissive' is the kill-switch
@@ -3679,6 +3682,22 @@ function nodeAmountText(label, msat){
   if(/^btc(:|$)/i.test(label)) return fmtAtoms(atoms, 8);
   const hex = (String(label).split(':')[1] || '').toLowerCase();
   return fmtAtoms(atoms, assetMeta(hex).precision || 0);
+}
+// What each node's provider owes the user, signed while the device was away (lncredit.js):
+// the latest note of each channel, kept by the wallet as well as the device.
+function renderCreditNote(){
+  const host = $('lnCreditNote'); if(!host) return;
+  host.textContent = '';
+  let any = false;
+  for(const [label, notes] of Object.entries(creditNotes())){
+    const hex = (String(label).split(':')[1] || '').toLowerCase();
+    const precision = /^btc(:|$)/i.test(label) ? 8 : (assetMeta(hex).precision || 0);
+    const lines = creditLines({ notes, ticker: nodeTicker(label), amountText: (atoms) => fmtAtoms(atoms, precision) });
+    if(!lines) continue;
+    any = true;
+    for(const t of lines) host.appendChild(el('p', null, t));
+  }
+  host.classList.toggle('hide', !any);
 }
 function renderUpgradeNote(){
   const host = $('lnUpgradeNote'); if(!host) return;
