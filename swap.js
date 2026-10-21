@@ -3378,12 +3378,14 @@ async function requoteMixed(route, amtStr){
 
   if (isSubmarine && route.mixedSame){
     // Mixed same-chain with the QUOTE leg over Lightning (the submarine mirror with an
-    // issued asset in BTC's place) is not settled by this build yet. Name it and the
-    // remedy — the OTHER mixed orientation of the same pair is fully wired.
+    // issued asset in BTC's place) is not settled by this build yet. Name the remedy only
+    // when it is one: the OTHER mixed orientation trades only where a maker rests for it
+    // (mixedSameNote), and on a pair without one, sending the user there led to "set
+    // Receive to On-chain" — each answer pointing at the other (21/10/2026, USDX/tSEQ).
     LAST_QUOTE = null; setReviewEnabled(false);
     $('swRoute').textContent = '';
     const btk = (metaOf(route.seqAsset) || {}).ticker || 'the base asset';
-    $('swRate').textContent = `Paying or receiving ${qtk} over Lightning on this pair is not settled by this build yet · put ${qtk} on-chain (and ${btk} over Lightning) to trade now.`;
+    $('swRate').textContent = mixedSameNote(route, side, qHex, qtk, btk);
     paintFee(qHex, null, null);
     renderTiming(route);
     return;
@@ -3534,7 +3536,9 @@ async function requoteMixed(route, amtStr){
   // Place with the shared plain note (never lift a DIFFERENT offer than shown, never give rail advice).
   if (!matchedSub){
     LAST_QUOTE = null; setReviewEnabled(false);
-    $('swErr').textContent = payerBridgeDisabledNote(route);
+    $('swErr').textContent = route.mixedSame
+      ? mixedSameNote(route, side, qHex, qtk, (metaOf(route.seqAsset) || {}).ticker || 'the base asset')
+      : payerBridgeDisabledNote(route);
     return;
   }
   // A MATCH IS NOT A CAPABILITY. The re-quote above can now FIND a sub-asset offer when the
@@ -5436,6 +5440,18 @@ function settlementDispatch(route){
 // ZERO exposure if ever reached). Until that node capability lands this shape must NEVER reach an enabled
 // Place (offer-then-refuse), so EVERY entry point (requoteMixed, onReview, reviewMixed) surfaces THIS note and
 // disables Review — one message, one gate, no path where a priced+enabled "Bridged buy" is offered then refused.
+// What to do on a pair of two Sequentia assets with one side over Lightning. Only the base asset
+// over Lightning with the quote asset on-chain settles, and only against a maker resting for it (a
+// sub-asset offer); without one, both sides on-chain or both over Lightning are what trade.
+function mixedSameNote(route, side, qHex, qtk, btk){
+  const both = 'set both sides on-chain, or both over Lightning, to trade now.';
+  const quoteOnLn = (route.payIsBtc ? route.payRail : route.recvRail) === 'ln';
+  const other = subassetOffers(route.seqAsset, side, qHex).length > 0 && subAssetMixedSupported();
+  if (quoteOnLn) return other
+    ? `Paying or receiving ${qtk} over Lightning on this pair is not settled by this build yet · put ${qtk} on-chain (and ${btk} over Lightning), or ${both}`
+    : `No offer on ${btk}/${qtk} settles with one side over Lightning · ${both}`;
+  return `No offer on ${btk}/${qtk} settles with ${btk} over Lightning and ${qtk} on-chain right now · ${both}`;
+}
 function payerBridgeDisabledNote(route){
   // A genuine cannot-execute: the best offer cannot be settled the way this trade is set up. Retrying
   // changes nothing, so when a side over Lightning is what blocks it, say which and what to do; no
@@ -9313,9 +9329,21 @@ async function requoteLn(route, amtStr){
   paintFee(route.quoteAsset || 'BTC', null, 'You trade at the price shown · the rate already includes the fee.');
   const qprec = qm.precision || 0;
   const assetStr = C.fmtAtoms(offerAtoms, aprec), btcStr = C.fmtAtoms(offerQuote, qprec);
+  // Paint BOTH amounts to what this offer fills, as renderMixedTake does on the mixed rails. The
+  // field not typed in kept the on-chain quote's figure: 13.32 tSEQ shown for 5 USDX, then a review
+  // of 50 tSEQ for 3.758 USDX, the Lightning offer's own (21/10/2026).
+  const capped = typedAtoms > offerAtoms;
+  if (typedRaw > 0n){
+    const buy = side === 'buy';
+    const aStr = takeAtoms != null ? C.fmtAtoms(takeAtoms, aprec) : assetStr;
+    const qStr = takeAtoms != null ? C.fmtAtoms(slice.quoteAtoms, qprec) : btcStr;
+    setNativeField($('swPayAmt'), buy ? qStr : aStr, buy ? qHex : route.seqAsset);
+    setNativeField($('swRecvAmt'), buy ? aStr : qStr, buy ? route.seqAsset : qHex);
+  }
   $('swRate').innerHTML = takeAtoms != null
     ? `${C.fmtAtoms(takeAtoms, aprec)} ${am.ticker} for ${C.fmtAtoms(slice.quoteAtoms, qprec)} ${qtk} · part of the best resting offer (${assetStr} ${am.ticker}) · the remainder stays on the book`
-    : `${assetStr} ${am.ticker} for ${btcStr} ${qtk} · best resting offer`;
+    : `${assetStr} ${am.ticker} for ${btcStr} ${qtk} · best resting offer`
+      + (capped ? ` · limited to that — it is all this offer has right now` : '');
   setReviewEnabled(true);   // LP fixed terms (proven path) — Review is offerable
 }
 
