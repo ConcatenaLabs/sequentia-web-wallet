@@ -127,6 +127,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |
+| `SEQ_DEV_CHAIN` | unset | a private regtest chain for the drives in `tooling/`: `{policyAsset, genesis, recordsV2Height}` makes the wallet's network `Network.regtestWithGenesis(policyAsset, genesis)` and signs stake records for that chain; the explorer is still `origin + '/api'`, which `tooling/leaves-dev-server.mjs --esplora` points at `tooling/esplora-shim.mjs` |
 
 A Lightning leg is **enabled** only when both its WS URL and host pubkey are set; with neither
 node enabled the module never loads the WASM and the UI shows no Lightning surface at all.
