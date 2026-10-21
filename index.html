@@ -3273,6 +3273,13 @@ function initLeaves(){
     onChange: ()=>{ try{ renderBalance(); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
+    // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
+    askFaucet: async (body)=>{
+      const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+      return j;
+    },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
   }, $('leavesRoot'), $('devModeRoot'));
   show('tabLeaves', devMode());
