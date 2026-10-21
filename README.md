@@ -377,6 +377,16 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   times the months, with a minimum. Receiving uses up the room and spending makes it again. Move to Lightning asks for it with the move, and the fee is one more output of the
   funding transaction; the service opens its channel once that transaction confirms. Once an
   asset is on Lightning, its Balance row says how much it can receive and offers more room.
+- On a credit channel (one the service opened as its provider) the service can be paid for you
+  while your device is away, and then owes you what it was paid: it signs a note for the whole
+  amount it owes you. Every commitment of the channel lets that note, with the payment's proof,
+  pay you out of the service's side, whoever brings it; the channel's close pays it; and the
+  service cannot move its balance below it. Your device checks each note it learns when it
+  returns and refuses any channel update or close that would leave the note unpaid. The wallet
+  keeps the latest note of each channel from what the device reports (the signer SDK's
+  `onCredit`, `lncredit.js`), so it holds what a claim needs even if the device's store or the
+  hosted node is lost, and the Balance tab says what you are owed. Until a note reaches you, you
+  have only the service's word: the payment was made to it.
 - A trade with both rails set to Lightning settles both legs atomically on one preimage, fully
   off-chain. A mixed rail (one leg on-chain, one Lightning) is a submarine swap.
 

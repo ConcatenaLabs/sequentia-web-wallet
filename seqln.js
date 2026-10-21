@@ -34,6 +34,7 @@
 // ---------------------------------------------------------------------------
 
 import { makeNoteStore, channelFate } from './lnupgrade.js';
+import { makeCreditStore } from './lncredit.js';
 
 const W = (typeof window !== 'undefined') ? window : {};
 
@@ -222,7 +223,7 @@ export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
 // refusal hooks, and the configured payment limits.
 function signerOpts(key) {
   const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key),
-    onPredating: onPredatingFor(key) };
+    onPredating: onPredatingFor(key), onCredit: onCreditFor(key) };
   const lim = CFG.paymentLimits;
   const rates = { ...payRates, ...((lim && lim.rates) || {}) };
   if (Object.keys(rates).length) o.paymentLimits = { ...(lim || {}), rates };
@@ -270,6 +271,22 @@ export function dismissPredating(label, { closedOnly = false, node = null, oncha
   noteStore.dismiss(label, { channels, onchainMsat: msat });
 }
 export function idleDismissed(label, onchainMsat) { return noteStore.idleDismissed(label, onchainMsat); }
+
+// Credit notes (lncredit.js): what a node's provider owes the user, signed while the device was
+// away. The device reports the notes it holds whenever it learns one (the SDK's `onCredit`); the
+// wallet keeps the latest of each channel, so it holds what a claim needs on its own.
+const creditStore = makeCreditStore({
+  getItem: (k) => localStorage.getItem(k),
+  setItem: (k, v) => localStorage.setItem(k, v),
+});
+function onCreditFor(label) {
+  return (notes) => {
+    if (!creditStore.record(label, notes)) return;
+    if (onChange) { try { onChange(seqlnState()); } catch {} }
+  };
+}
+// { [label]: [note, ...] }: each node's latest note per channel.
+export function creditNotes() { return creditStore.notes(); }
 
 function onRejectFor(label) {
   return ({ name, reason }) => {
