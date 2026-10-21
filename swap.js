@@ -26,7 +26,7 @@
 //  • SEQ/tSEQ equal standing — just one searchable row in the asset pickers.
 //  • Open fee market — a first-class fee-asset selector, valued in native-equiv + ref.
 //  • Reference currency — every amount (pay/receive/fee/rate) carries an "≈ <ref>" value.
-//  • Anchor-aware finality — "confirmed in ~1 block · final once its Bitcoin anchor is buried"; never "instant".
+//  • Anchor-aware finality — "confirmed in about a minute · reverts only if Bitcoin reorgs"; never "instant".
 // ---------------------------------------------------------------------------
 
 import * as seqob from './seqob.js';
@@ -508,6 +508,9 @@ let LNPROV = {};     // provisionedState(): assetHexLower -> { connected, phase 
 // P3.5 — the LSP-advertised 0-conf front ceiling on the BTC leg, in SATS (the SINGLE source of truth for
 // frontCapAtoms). null until the first /status read; frontCapAtoms falls back to the box default then.
 let MAX0CONF_SATS = null;
+// The Bitcoin anchor burial the LSP's mixed rail waits for above that ceiling (its MIN_ANCHOR_DEPTH),
+// read from /status. An LSP that does not say is an older one, whose default was 2.
+let LSP_ANCHOR_DEPTH = 2;
 // P3.2 — the LSP-advertised bridge capability (which rail-crossing shapes it settles). Informational: the
 // wallet's own pre-Review check uses the SHARED pure predicate (bridgedTakeSupported), so a stale/absent
 // value never lets it promise an unsupported bridge.
@@ -1454,6 +1457,7 @@ async function refreshInstant(){
     // single source of truth with the box config, not a hard-coded default. Absent on an older LSP -> the
     // frontCapAtoms box default and the shared pure capability predicate still apply.
     MAX0CONF_SATS = (st && Number.isFinite(Number(st.mixed_max_0conf_sats))) ? Number(st.mixed_max_0conf_sats) : MAX0CONF_SATS;
+    LSP_ANCHOR_DEPTH = (st && Number.isFinite(Number(st.min_anchor_depth))) ? Number(st.min_anchor_depth) : LSP_ANCHOR_DEPTH;
     BRIDGECAPS = (st && st.bridge) || BRIDGECAPS;
     applyStatusConstants(st);   // P5.4a — overlay shared constants (market_slip/min_lot_bps/front_cap/dust)
     // Rebuilt from scratch on every read, summed over every open channel of an asset: a wallet has
@@ -3440,7 +3444,7 @@ async function requoteMixed(route, amtStr){
     // never enables a Place that reviewLspPayerBridge then refuses. A peer-to-peer submarine maker
     // (bp.submarine) settles without those, so it is not gated here.
     if (buy && bp.crosses && bp.supported && !bp.submarine && !(L && L.swap && L.bridgeHold && L.nodePayHash)){
-      LAST_QUOTE = null; setReviewEnabled(false);
+      LAST_QUOTE = null; setReviewEnabled(false); clearTiming();
       $('swErr').textContent = payerBridgeDisabledNote(route);
       return;
     }
@@ -3535,7 +3539,7 @@ async function requoteMixed(route, amtStr){
   // path cannot deliver over LN, there is no matching sub-asset offer to lift — show the SAME fill but DISABLE
   // Place with the shared plain note (never lift a DIFFERENT offer than shown, never give rail advice).
   if (!matchedSub){
-    LAST_QUOTE = null; setReviewEnabled(false);
+    LAST_QUOTE = null; setReviewEnabled(false); clearTiming();
     $('swErr').textContent = route.mixedSame
       ? mixedSameNote(route, side, qHex, qtk, (metaOf(route.seqAsset) || {}).ticker || 'the base asset')
       : payerBridgeDisabledNote(route);
@@ -3715,7 +3719,7 @@ async function requoteCross(route, amtStr){
       // (its BTC leg is Lightning; only makerRailsFromOffer's deliberate 'chain' made it look like
       // one), so bp.crosses alone let that shape reach an enabled Place it could never execute.
       if (bp.crosses || !courierLiftable(bp.offer)){
-        LAST_QUOTE = null; setReviewEnabled(false);
+        LAST_QUOTE = null; setReviewEnabled(false); clearTiming();
         $('swErr').textContent = payerBridgeDisabledNote(route);
         return;
       }
@@ -4220,13 +4224,36 @@ function assetLegAtoms(route){
   const am = C.assetMeta(route.seqAsset) || {};
   try { return C.parseAtoms(v, am.precision || 0); } catch { return 0n; }
 }
-// testnet4 on-chain payment confirmation estimate (the pay leg must confirm before an
-// over-CAP LN front settles). Overridable via window.SEQ_ONCHAIN_CONF = { n, t }.
+// Bitcoin on-chain payment confirmation estimate (the pay leg must confirm before an
+// over-CAP LN front settles): one block, about ten minutes. Overridable via
+// window.SEQ_ONCHAIN_CONF = { n, t }.
 function onchainConf(){
   const w = (typeof window !== 'undefined') ? window : {};
   const o = w.SEQ_ONCHAIN_CONF;
-  return (o && o.n) ? { n: o.n, t: o.t || '~10 min' } : { n: 1, t: '~10 min' };
+  return (o && o.n) ? { n: o.n, t: o.t || (o.n * 10) + ' minutes' } : { n: 1, t: '10 minutes' };
 }
+// How long a payment made on Sequentia holds back the Lightning side of a trade: one Sequentia
+// block (about a minute), plus one Bitcoin block (about ten) for each level of anchor burial past
+// the first. A Sequentia block anchors to the Bitcoin tip (-anchorminconf defaults to 1), so its
+// anchor is already one block deep when it is made.
+//
+// The burial is waited out only where a Lightning payment is made against an on-chain leg. A
+// reorg of Bitcoin reverts both legs of an on-chain swap together, so nobody loses; across rails
+// it reverts the on-chain leg and leaves the Lightning payment standing. seqdex refuses a depth
+// under 2 for that gate (xchain.RunNormal / RunReverse, design §3.2).
+function anchorWaitMinutes(depth){
+  const d = Math.max(0, Math.floor(Number(depth) || 0));
+  return 1 + Math.max(0, d - 1) * 10;
+}
+// "About a minute", "About 10 minutes", "About 20 minutes": past ten minutes, to the nearest five.
+function aboutMinutes(m){
+  if (m <= 1) return 'About a minute';
+  return 'About ' + (m > 10 ? Math.round(m / 5) * 5 : m) + ' minutes';
+}
+// The gate a seqob-maker applies before paying over Lightning against a taker's Sequentia leg: its
+// -sub-anchor-depth, 3 unless its operator set it (2 at the least). Offers do not carry it: their
+// min_anchor_depth is display only.
+const MAKER_LN_ANCHOR_DEPTH = 3;
 // asset units per BTC unit, from the best resting offer (for expressing the CAP in the
 // pay asset's own units when paying an asset). 0 if unknown.
 function assetPerBtc(route){
@@ -4250,8 +4277,9 @@ function capDisplay(route){
   }
   return C.fmtAtoms(cap, 8) + ' BTC';
 }
-// Anchor-honest wording reused across the on-chain-receipt cases.
-const ANCHOR_FINAL = 'final once its Bitcoin anchor is buried';
+// Anchor-honest wording reused across the on-chain-receipt cases: a confirmed Sequentia block
+// reverts only if the Bitcoin block it anchors to is reorged away. Nothing is waited out for it.
+const ANCHOR_FINAL = 'reverts only if Bitcoin reorgs';
 
 // Render the timing banner for the current route. The matrix is keyed off the RECEIVE
 // leg (an on-chain RECEIPT is never made instant by the CAP; the CAP only fronts an
@@ -4283,14 +4311,13 @@ function renderTiming(route){
   if (route.kind === 'same'){
     // Same-chain atomic swap: on-chain receipt (no LN option here), anchor-bound.
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
-    tx.innerHTML = `Appears immediately, confirmed in <b>~1 block</b> · ${ANCHOR_FINAL}.`;
+    tx.innerHTML = `Appears immediately, confirmed in <b>about a minute</b> · ${ANCHOR_FINAL}.`;
     return;
   }
   // Mixed SAME-CHAIN, paying on-chain and receiving over Lightning: the on-chain leg is a Sequentia
-  // asset, so this banner used to quote Bitcoin's "~1 confirmation (~10 min)" and a cap in BTC. The
-  // payment confirms in about a Sequentia block, but the side paying over Lightning waits until that
-  // block's Bitcoin anchor is buried (subswap.js anchorDepthVerdict, the makers' default depth 2)
-  // unless the leg is under the 0-conf cap, which is counted in the on-chain leg's own atoms.
+  // asset. The payment confirms in about a Sequentia block, and the side paying over Lightning
+  // waits for that block's anchor to reach its gate (MAKER_LN_ANCHOR_DEPTH) unless the leg is under
+  // the 0-conf cap, which is counted in the on-chain leg's own atoms and fronted at once.
   if (route.kind === 'mixed' && route.mixedSame && route.payRail === 'chain' && route.recvRail === 'ln'){
     const pm = C.assetMeta(S.payAsset) || {}, ptk = esc(pm.ticker || 'the asset');
     let leg = 0n; try { leg = C.parseAtoms((C.$('swPayAmt').value || '').trim(), pm.precision || 0); } catch {}
@@ -4300,9 +4327,11 @@ function renderTiming(route){
       el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
       tx.innerHTML = `<b>Instant.</b> Your on-chain ${ptk} payment is fronted; you receive ${rtk} over Lightning now.`;
     } else {
+      const extra = MAKER_LN_ANCHOR_DEPTH - 1;
       el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
-      tx.innerHTML = `<b>About 20 minutes:</b> your ${ptk} payment confirms on Sequentia in about a minute, and the ${rtk} over Lightning`
-        + ` is released once that block's Bitcoin anchor is two blocks deep. Trade up to ${esc(C.fmtAtoms(cap, pm.precision || 0))} ${ptk} to be fronted instantly.`;
+      tx.innerHTML = `<b>${aboutMinutes(anchorWaitMinutes(MAKER_LN_ANCHOR_DEPTH))}:</b> your ${ptk} payment confirms on Sequentia in about a minute;`
+        + ` the ${rtk} follows over Lightning ${extra === 1 ? 'one Bitcoin block' : extra + ' Bitcoin blocks'} later, since a Lightning payment cannot be undone if Bitcoin reorgs.`
+        + ` Up to ${esc(C.fmtAtoms(cap, pm.precision || 0))} ${ptk} arrives instantly.`;
     }
     return;
   }
@@ -4319,11 +4348,17 @@ function renderTiming(route){
     // Lightning) promised "you receive final USDX now" — the asset being PAID AWAY.
     tx.innerHTML = `<b>Instant.</b> Your on-chain payment is fronted; you receive final ${route.payIsBtc ? tk : 'Bitcoin'} now.`;
   } else if (rr === 'ln' && pr === 'chain'){
-    const { n, t } = onchainConf();
+    // Paying BTC on-chain waits one Bitcoin block. Paying the asset on-chain (a sell) waits one
+    // Sequentia block plus the anchor burial the service's gate asks for (LSP_ANCHOR_DEPTH).
+    const m = anchorWaitMinutes(LSP_ANCHOR_DEPTH);
+    const head = route.payIsBtc
+      ? `<b>About ${esc(onchainConf().t)}:</b> your Bitcoin payment confirms in the next block, then you receive ${tk} over Lightning at once. `
+      : (m <= 1 ? `<b>About a minute:</b> your ${tk} payment confirms on Sequentia, then you receive Bitcoin over Lightning at once. `
+                : `<b>${aboutMinutes(m)}:</b> your ${tk} payment confirms on Sequentia in about a minute; the Bitcoin follows over Lightning ${LSP_ANCHOR_DEPTH - 1 === 1 ? 'one Bitcoin block' : (LSP_ANCHOR_DEPTH - 1) + ' Bitcoin blocks'} later. `);
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
     // The "pay from Lightning" fix only helps when the PAY leg has a usable channel.
     const canFixPay = ra.payLn.ok;
-    tx.innerHTML = `<b>~${n} confirmation${n > 1 ? 's' : ''} (${esc(t)}):</b> your on-chain payment must confirm first. `
+    tx.innerHTML = head
       + (canFixPay ? `Settle instantly by <span class="swfix" data-fix="pay">paying from Lightning</span>, or trade under ${esc(capDisplay(route))}.`
                    : `Trade under ${esc(capDisplay(route))} to be fronted instantly.`);
     if (canFixPay) wireFix();
@@ -4331,7 +4366,11 @@ function renderTiming(route){
     el.className = 'swtiming wait'; if (ic) ic.textContent = '◷';
     // Offer "switch Receive to Lightning" only when the RECEIVE leg has a usable channel.
     const canFixRecv = ra.recvLn.ok;
-    tx.innerHTML = `Appears immediately, confirmed in <b>~1 block</b> · ${ANCHOR_FINAL}.`
+    // On a BTC pair a sell receives Bitcoin on-chain: one Bitcoin block, not a Sequentia one.
+    const recvBtc = !route.mixedSame && !route.payIsBtc;
+    tx.innerHTML = (recvBtc
+        ? `Appears immediately, confirmed in the next Bitcoin block · <b>about ${esc(onchainConf().t)}</b>.`
+        : `Appears immediately, confirmed in <b>about a minute</b> · ${ANCHOR_FINAL}.`)
       + (canFixRecv ? ` To receive instantly &amp; finally, <span class="swfix" data-fix="recv">switch Receive to Lightning</span>.` : '');
     if (canFixRecv) wireFix();
   }
@@ -5697,10 +5736,11 @@ function subswapStatusLine(b){
   // ABSENT fields mean the current maker-first behavior (slow). Label only, never a
   // settlement decision.
   if (b && b.kind === 'lsp-payer-buy' && (b.state === 'held' || b.state === 'confirming')){
-    if (b.front_mode === 'inventory') return base + ' · fronted from inventory — typically about a minute';
-    const wait = b.expected_wait ? 'expected wait ' + String(b.expected_wait) : 'testnet4 blocks can be hours apart';
+    // The LSP reports 'fronted' (leg-bridge.mjs frontModeFields); expected_wait is a token, not prose.
+    if (b.front_mode === 'fronted' || b.front_mode === 'inventory') return base + ' · fronted by the service — about a minute';
+    const ew = String(b.expected_wait || ''), wait = /\d/.test(ew) ? ew : 'about 10 minutes';
     const age = blockAgeText(testnet4BlockAgeNow());
-    return base + ' · waits on Bitcoin confirmations — ' + wait + ' · safe to leave, resumes + refunds automatically' + (age ? ' · ' + age : '');
+    return base + ' · waits on a Bitcoin block — ' + wait + ' · safe to leave, resumes + refunds automatically' + (age ? ' · ' + age : '');
   }
   return base;
 }
@@ -7489,7 +7529,7 @@ async function takeCovenantWalkReview(q){
     ...rows(pv),
     ['Network fee', amtRow(feeAsset, covFeeAtoms(feeAsset)) + '  (estimate, per fill)'],
     ['How it fills', `Walks the order book now and fills what crosses your price, best price first. Any part that can't fill is NOT rested — a market order never leaves a resting order behind (switch to Limit for that). Each fill settles on-chain; consensus rejects any underpay or redirect.`],
-    ['Finality', 'Each fill confirms in ~1 block · final once its Bitcoin anchor is buried.'],
+    ['Finality', 'Each fill confirms in about a minute · reverts only if Bitcoin reorgs.'],
     ['Settlement', 'Each fill settles in full or not at all.'],
   ];
   // CTA stays modalRows' default 'Confirm & sign' (task 19c): every rail's review sheet uses
@@ -7543,7 +7583,7 @@ async function takeCovenantWalkReview(q){
     } catch (e){
       if (e && e.repriced){
         // Nothing was filled: show the new figures and let the next Confirm accept them.
-        const before = pv.got; pv = e.repriced;
+        const before = pv.got, paidBefore = pv.paid; pv = e.repriced;
         const card = modal.querySelector('.card');
         for (const kvEl of card.querySelectorAll('.kv')){
           const k = kvEl.querySelector('.k'), v = kvEl.querySelector('.v'), hit = rows(pv).find(r => k && r[0] === k.textContent);
@@ -7553,7 +7593,9 @@ async function takeCovenantWalkReview(q){
         st.className = 'status warn';
         const why = e.cause ? 'An offer in this review could not be taken (' + C.prettyErr(e.cause) + ')' : 'The book moved since this review opened';
         st.textContent = pv.paid > 0n
-          ? why + ': you would now receive about ' + C.fmtAtoms(pv.got, rm.precision) + ' ' + rm.ticker
+          ? why + ': you would now pay ' + (pv.paid < paidBefore ? 'only up to ' : 'the same, up to ')
+            + C.fmtAtoms(pv.paid, pm.precision) + ' ' + pm.ticker
+            + ', and receive about ' + C.fmtAtoms(pv.got, rm.precision) + ' ' + rm.ticker
             + ' (' + less.toLocaleString(undefined, { maximumFractionDigits: 2 }) + '% less). Nothing was filled. Confirm again to accept it.'
           : why + ', and nothing within reach of the best price can fill now. Nothing was filled.';
         ok.disabled = pv.paid <= 0n;
@@ -7583,7 +7625,7 @@ async function placeCovenantReview(q){
       : `Rests on-chain at your price and fills · fully or partially · whenever someone crosses it, even while this wallet is closed. A partial fill settles that part and leaves the rest resting. Consensus rejects any underpay or redirect.`],
     ['You can close the wallet', `The order rests on-chain; when it fills you are credited to a payout address only this wallet controls. Reopen any time to see it.`],
     ['If it does not fill', `Cancel any time to take it off the book. The ${pm.ticker} stays locked on-chain until the order expires, ${blocksAsTime(DEFAULT_ORDER_BLOCKS)} after it is placed; then Reclaim returns it.`],
-    ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
+    ['Finality', 'Confirms in about a minute · reverts only if Bitcoin reorgs.'],
   ];
   // Market order bigger than the resting book at this price: show the fill-now / rest split honestly.
   const split = isMarket ? marketFillSplit(payAtoms, recvAtoms) : null;
@@ -8679,7 +8721,7 @@ function renderMixedSwap(){
     [sub.ST.SETTLING]:  'Completing your trade · confirming on Bitcoin.',
     [sub.ST.REFUNDING]: 'Refunding your trade…',
     [sub.ST.REFUNDED]:  'Refund sent · your funds return once it confirms.',
-    [sub.ST.SETTLED]:   'Settled · the on-chain leg is final once its Bitcoin anchor is buried.',
+    [sub.ST.SETTLED]:   'Settled · the on-chain leg reverts only if Bitcoin reorgs.',
     [sub.ST.FAILED]:    MIXED.htlc ? 'Could not complete · refund below to get your funds back.' : 'Could not complete · nothing was spent.',
   }[MIXED.state] || MIXED.state;
   const dir = MIXED.side === 'buy'
@@ -9041,7 +9083,7 @@ async function reviewSame(q){
     ...(q.makerPaysFee
       ? [['Network fee', `Paid by the other side, in ${fm.ticker}: you receive the amount above in full.`]]
       : [['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'], ['Fee paid in', fm.ticker]]),
-    ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
+    ['Finality', 'Confirms in about a minute · reverts only if Bitcoin reorgs.'],
     ['Settlement', 'Settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
@@ -9067,7 +9109,7 @@ async function reviewSame(q){
         fee: (q.feeAmount != null ? Number(big(q.feeAmount)) / Math.pow(10, C.assetMeta(q.feeAsset).precision || 0) : null),
         feeTicker: q.feeAsset ? C.assetMeta(q.feeAsset).ticker : null,
         ...tradeMeta(q.assetP, q.assetR, q.amountP, q.amountR) });
-      C.toast('Swap sent · confirms in ~1 block, final once its Bitcoin anchor is buried:', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
+      C.toast('Swap sent · confirms in about a minute, reverts only if Bitcoin reorgs:', {href:'/explorer/tx/'+txid, label:String(txid).slice(0,18)+'…'});
       resetComposer();
       await C.sync();
       renderSwap();
@@ -9690,7 +9732,7 @@ async function postOfferReview(q){
     ['Price', payU>0 ? ratePerPayToLine(pay, receive, recvU/payU).str : '-'],
     ['Filling', 'Someone can fill it from the other side. This needs your wallet open to complete; for now the offer rests publicly and you can cancel it anytime.'],
     ['Expires', 'In 1 hour (re-post to refresh).'],
-    ['Finality', 'Confirms in ~1 block · final once its Bitcoin anchor is buried.'],
+    ['Finality', 'Confirms in about a minute · reverts only if Bitcoin reorgs.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Start this market', kv });
   if (ok) ok.textContent = 'Post offer';

@@ -1,9 +1,8 @@
 // FINALITY MUST MEAN WHAT THE UI SAYS IT MEANS.
 //
-// The wallet tells the user: "Appears immediately, confirmed in ~1 block · final once its
-// Bitcoin anchor is buried." That is the chain's actual model — a confirmed Sequentia
-// block reverts only if its Bitcoin anchor is reorged, and is final once that anchor is
-// buried.
+// The wallet tells the user: "Appears immediately, confirmed in about a minute · reverts
+// only if Bitcoin reorgs." That is the chain's actual model — a confirmed Sequentia block
+// reverts only if its Bitcoin anchor is reorged.
 //
 // The code did not implement it. anchorDepthVerdict read
 //
