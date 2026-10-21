@@ -367,6 +367,16 @@
   /* two INDEPENDENT settlement rails: "Pay from ⚡/on-chain" + "Receive to ⚡/on-chain" */
   .swrails{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .swrailpick .swrail-lab{display:block;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+  .swleaf{margin-top:10px;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--line, rgba(127,127,127,.25));border-radius:10px}
+  .swleaf.hide{display:none}
+  /* A leg on Leaf: the leaf panel settles the trade; the composer's own placement controls stay hidden. */
+  body.swleaf-on #swReview, body.swleaf-on #swWhy, body.swleaf-on #swFeeRow, body.swleaf-on #swTiming,
+  body.swleaf-on #swOfflineWrap, body.swleaf-on #swConfWrap, body.swleaf-on #swErr, body.swleaf-on #swStatus{display:none !important}
+  .swleaf .swleaf-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .swleaf .swleaf-rows .kv{display:flex;gap:10px;justify-content:space-between;font-size:12.5px}
+  .swleaf .swleaf-rows .kv .k{color:var(--dim);flex:0 0 auto}
+  .swleaf .swleaf-rows .kv .v{text-align:right;overflow-wrap:anywhere}
+  .swleaf textarea{font-size:11px;min-height:54px}
   .swseg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:2px}
   .swseg button{flex:1;border:0;background:transparent;color:var(--dim);font-size:12.5px;font-weight:650;padding:7px 8px;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:5px;white-space:nowrap;transition:none}
   .swseg button:hover{filter:none;color:var(--txt);transform:none}
@@ -903,6 +913,8 @@
                   </div>
                   <div class="sub swrail-note hide" id="swRailNote" style="grid-column:1/-1;margin-top:2px"></div>
                 </div>
+                <!-- developer mode: a leg on Leaf is settled by this panel (leaf-rail.js), not by Place order -->
+                <div class="swleaf hide" id="swLeafBox"></div>
                 <div class="swtiming ok" id="swTiming">
                   <span class="swtiming-ic" id="swTimingIcon" aria-hidden="true">&#8226;</span>
                   <span class="swtiming-tx" id="swTimingText">Pick two assets to see how settlement works.</span>
@@ -1489,7 +1501,7 @@ import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address
 import * as lwk from './pkg/lwk_wasm.js';
 const coinjoinSignInputs = lwk.coinjoinSignInputs;
 const coinjoinUnblindOutputs = lwk.coinjoinUnblindOutputs;
-import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256 } from './btc.js';
+import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256, secp256k1 } from './btc.js';
 import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoConvert,
   conversions as rewardConversions, sliceForWholeHtlc, NATIVE_BTC as AC_BTC } from './rewards.js';
 import * as seqob from './seqob.js';
@@ -1517,6 +1529,9 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn } from './leaves.js';
+import { mountLeafRail } from './leaf-rail.js';
+import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
+import { composerState, setComposerRail } from './swap.js';
 import { mountPageApi } from './wallet-api.js';
 import { mountContracts } from './contracts.js';
 import { watchTips } from './tip-watch.js';
@@ -3309,9 +3324,55 @@ function initLeaves(){
   }, $('leavesRoot'), $('devModeRoot'));
   show('tabLeaves', devMode());
   leavesApi.start();
+  // The composer's Leaf choice (developer mode): settled by the leaf wallet's own commands.
+  try{ initLeafRail(); }catch(e){ console.warn('[leaf rail] init failed:', e?.message??e); }
   // The page API: the wallet's mode and leaf rail for code running in this page, and the
   // mode for the wallet's other pages on this origin (wallet-api.js, docs/PAGE_API.md).
   try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
+}
+
+// ---------- developer mode: the composer's leaf rail ----------
+// leaf-rail.js adds "Leaf" to the Trade tab's Pay from / Receive to for a pair of two Sequentia
+// assets: a take from leaves of an on-chain order, an in-tree swap with another wallet, or an order
+// placed on the chain from leaves. Every amount and refusal is the leaf wallet's.
+let leafRailApi = null;
+function initLeafRail(){
+  if(leafRailApi || !leavesApi) return;
+  leafRailApi = mountLeafRail({
+    $, el, store: localStorage, walletTag, leaves: leavesApi, dev: devMode, assetMeta, fmtAtoms, parseAtoms,
+    composer: composerState, setRail: setComposerRail,
+    // The relay's on-chain book for the pair, both orientations (the relay keys a market by its order).
+    // Each offer is checked as fetchBook checks it, and keeps the relay's own JSON (_relayJson), which
+    // is what the leaf library reads an order from.
+    fetchBook: async (base, quote)=>{
+      const get = async (b, q)=>{
+        const r = await fetch(`${seqob.seqobBase()}/v1/market/${b}/${q}/orderbook`, { cache:'no-store' });
+        if(!r.ok) return [];
+        return ((await r.json()).offers || []).map(o=>{ const raw = JSON.parse(JSON.stringify(o)); seqob.normRelayOffer(o); return { ...o, _verified: seqob.verifyOffer(o), _relayJson: raw }; });
+      };
+      const [a, b] = await Promise.all([get(base, quote), get(quote, base).catch(()=>[])]);
+      const seen = new Set();
+      return [...a, ...b].filter(o=>{ const k=(o.maker_pubkey||'')+':'+(o.offer_id||''); if(seen.has(k)) return false; seen.add(k); return true; });
+    },
+    relayPost: {
+      postExisting, orderFromCovenantTerms,
+      // The relay's base64 byte fields of an order's terms, as the wallet's covenant code reads them (hex).
+      normTerms: (ct)=>{ const o = { covenant: ct }; seqob.normRelayOffer(o); return o.covenant; },
+      postCovenantOffer: (offer, priv)=> seqob.postCovenantOffer(offer, priv),
+      fetchOutput: async (txid, vout)=>{
+        const r = await fetch(`${ESPLORA}/tx/${txid}`); if(!r.ok) return null;
+        const o = ((await r.json()).vout || [])[vout]; if(!o) return null;
+        return { scriptPubKey: o.scriptpubkey, asset: o.asset ?? null, value: o.value ?? null };
+      },
+      // One key per order, from the wallet's phrase, so the relay cannot link two orders of one
+      // wallet by their key (the extension derives the same one).
+      offerKey: async (orderId)=>{
+        const phrase = (localStorage.getItem(KEY) || '').trim();
+        const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('sequentia/leaf-order-offer-key/' + phrase + '/' + orderId)));
+        return { priv: d, pub: [...secp256k1.getPublicKey(d, true)].map(x=>x.toString(16).padStart(2,'0')).join('') };
+      },
+    },
+  });
 }
 
 // ---------- developer mode: contract spends ----------
@@ -4990,6 +5051,7 @@ function initSwapTab(){
     get POLICY(){ return POLICY; }, get POLICY_HEX(){ return POLICY_HEX; },
     get addrIndex(){ return addrIndex; },
     get btcBalance(){ return btcBalance; },   // parent-chain balance, so BTC shows a balance like any other asset
+    get leafRail(){ return leafRailApi; },    // developer mode's Leaf choice and its panel (leaf-rail.js)
     // The recovery phrase (in-memory; used only to re-derive taker funding keys for a
     // covenant FILL) + a fetch against the wallet's OWN Sequentia esplora /api.
     get mnemonic(){ return localStorage.getItem(KEY) || ''; },

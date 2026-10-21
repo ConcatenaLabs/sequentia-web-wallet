@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 102 `*.test.mjs` files (83 at the root, 19 under `tooling/lsp/`), and `node --test` runs
+There are 104 `*.test.mjs` files (84 at the root, 20 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -58,6 +58,16 @@ nothing of leaves and the page API refuses every leaf method there, but leaves c
 asset's figure and the headline. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
 answers as the extension's provider answers, and `leaf-request.js` is copied into the
 extension's `src/`: change it here first.
+
+`leaf-rail.js` is developer mode's Leaf choice in the Trade tab and its panel. The same rule
+holds there: what a choice settles as is the settlement router's (`settlement-router.mjs`), which
+offers a leaf can take is the unified book's (`caps.leaf_take`), and every amount, fee and
+refusal is the leaf wallet's. Its seams into `swap.js` are small on purpose (the rail painter
+skips the Leaf buttons, `autoRails` never overrides a Leaf choice, `onReview` never runs on a Leaf
+leg, `updateRails` repaints it); keep them that way rather than routing a leaf through the
+on-chain or Lightning paths, which would settle it as something it is not. The leaf library reads
+an order as the relay serves it (byte fields in base64), so the panel hands it the relay's own
+JSON, never the copy `normRelayOffer` rewrote to hex.
 
 `contracts.js` is developer mode's Contracts tab. The same rule holds: the kit's contract engine
 (`ContractTemplate`, `ContractInstance`, `ContractSpend`, `ContractApproval` in `pkg/`) reads,

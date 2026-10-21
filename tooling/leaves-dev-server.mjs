@@ -5,12 +5,14 @@
 //
 //   /operator/…  -> the operator's server (its /v1/ calls)
 //   /node        -> the node's JSON-RPC (the wallet's chain source)
+//   /seqob/…     -> an order-book relay (seqobd), when --seqob names one
+//   /api/…       -> an esplora HTTP API, when --esplora names one
 //
 // The operator is the one the operator repository's test harness keeps running for a
 // browser (bark-cli/tests/arca_operator_for_browsers.rs); this server reads where its
 // server and node are from that harness's control address.
 //
-//   node tooling/leaves-dev-server.mjs [--control 127.0.0.1:18640] [--port 0]
+//   node tooling/leaves-dev-server.mjs [--control 127.0.0.1:18640] [--port 0] [--seqob URL] [--esplora URL]
 //
 // It prints one line, `serving <url>`, once it listens. Nothing here is used by the
 // deployed wallet.
@@ -23,6 +25,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const arg = (name, dflt) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt }
 const control = arg('--control', process.env.ARCA_OPERATOR_CONTROL || '127.0.0.1:18640')
 const port = Number(arg('--port', '0'))
+const seqob = arg('--seqob', null)
+const esplora = arg('--esplora', null)
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
@@ -65,6 +69,8 @@ const srv = createServer(async (req, res) => {
       const s = await state()
       return proxy(req, res, s.server.replace(/\/$/, '') + p.slice('/operator'.length) + url.search)
     }
+    if (seqob && p.startsWith('/seqob/')) return proxy(req, res, seqob.replace(/\/$/, '') + p.slice('/seqob'.length) + url.search)
+    if (esplora && p.startsWith('/api/')) return proxy(req, res, esplora.replace(/\/$/, '') + p.slice('/api'.length) + url.search)
     if (p === '/node' || p === '/node/') {
       const s = await state()
       return proxy(req, res, s.node_url)

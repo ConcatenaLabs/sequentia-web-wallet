@@ -75,7 +75,7 @@ test('held coins and what sync must follow now', () => {
   const coins = [{ state: 'live' }, { state: 'spent' }, { state: 'exited' }, { state: 'lost' }, { state: 'given' }]
   assert.deepEqual(heldCoins(coins).map((c) => c.state), ['live', 'given'])
   assert.equal(inFlight([{ state: 'live' }], []), false)
-  for (const s of ['pending', 'sending', 'given', 'forfeited', 'exiting']) assert.equal(inFlight([{ state: s }], []), true, s)
+  for (const s of ['pending', 'sending', 'offered', 'given', 'forfeited', 'exiting']) assert.equal(inFlight([{ state: s }], []), true, s)
   assert.equal(inFlight([], [{ state: 'pending', released: false }]), true)
   assert.equal(inFlight([], [{ state: 'released', released: true }]), false)
   assert.equal(inFlight([], [{ state: 'void' }]), false)
