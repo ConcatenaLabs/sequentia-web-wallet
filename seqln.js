@@ -58,11 +58,13 @@ const DEFAULTS = {
   // The wasm signer SDK (vendored under /lightning). Dynamic-imported so a wallet
   // with LN unconfigured never loads the 1.5MB wasm.
   sdkPath: W.SEQ_LSP_SDK || './lightning/seqln-signer-sdk.js',
-  // The device's payment limits: { default: atoms|null, period: seconds,
-  // assets: { <asset id>|'btc': atoms|null } }, each in the asset's own atoms,
-  // null for no limit. The device approves a payment only within what its
-  // limit leaves for the period. Unset, the device's own default applies
-  // (10,000,000 atoms of each asset per day).
+  // The device's payment limits: { reference: reference atoms|null, default:
+  // atoms|null, period: seconds, assets: { <asset id>|'btc': atoms|null } }.
+  // The device approves a payment only within what its limit leaves for the
+  // period. Unset, the device's own default applies: 1,000 reference units a
+  // day, held in each asset at the rate the wallet gives it (setPaymentRates);
+  // `default` replaces it with the same atoms of every asset, `assets` sets an
+  // asset's own limit in its atoms; null means no limit.
   paymentLimits: W.SEQ_LN_PAYMENT_LIMITS || null,
 };
 
@@ -221,8 +223,23 @@ export function clearSignerRefusal(label) { _lastRefusal.delete(label); }
 function signerOpts(key) {
   const o = { channelStore: chStoreFor(key), onUntracked: onUntrackedFor(key), onReject: onRejectFor(key),
     onPredating: onPredatingFor(key) };
-  if (CFG.paymentLimits) o.paymentLimits = CFG.paymentLimits;
+  const lim = CFG.paymentLimits;
+  const rates = { ...payRates, ...((lim && lim.rates) || {}) };
+  if (Object.keys(rates).length) o.paymentLimits = { ...(lim || {}), rates };
+  else if (lim) o.paymentLimits = lim;
   return o;
+}
+
+// The rates the device converts its default payment limit at ({ <asset id>|'btc': rate }, the
+// node's convention: reference atoms per 10^8 atoms), from the wallet's own feeds (ln-limit.js).
+// Given to every signer built after, and to every signer already running.
+let payRates = {};
+export function setPaymentRates(rates) {
+  payRates = { ...(rates || {}) };
+  const live = [...NODES.map((n) => nodeState[n].signer), ...Object.values(provNodes).map((p) => p.signer)];
+  for (const s of live) {
+    try { if (s) s.setPaymentLimits({ rates: payRates }); } catch {}
+  }
 }
 
 // Channels the device found in a store its predecessor wrote, which validated nothing: the

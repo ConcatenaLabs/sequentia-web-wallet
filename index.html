@@ -1475,17 +1475,9 @@
   window.SEQ_LSP_HOST_PUBKEY_ASSET = '0295374d947dc7e27382a83b2034a10b3d51b6f2fdf7e7da490893e3995141523b';
   window.SEQ_LSP_WS_BTC            = 'wss://sequentiatestnet.com/lsp-ws-btc';
   window.SEQ_LSP_HOST_PUBKEY_BTC   = '020a749af93e2a5a4d67ad28585cec31b55a146969eb77ca3d076eb59ff111ed51';
-  // The page's defaults for a day's spending through each device signer, in each
-  // asset's own atoms (display-order asset ids; precision 8). A channel can hold more.
-  window.SEQ_LN_PAYMENT_LIMITS     = { default: 10000000, period: 86400, assets: {
-    'c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40': 25000000000,   // tSEQ   250
-    '2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de': 10000000000,   // USDX   100
-    'e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13': 9000000000,    // EURX   90
-    '3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1': 2500000,       // GOLD   0.025
-    '57dfa6b0eff594cc3ef1de5555e0526d1eb5590289e014e7663b292edcd63f48': 160000000,     // SILVR  1.6
-    '4dfe69c334a9cdf4005ddf3889bba1bc397703fa8da669254877f3209caf7c8f': 110000000,     // OILX   1.1
-    btc: 120000,                                                                       // BTC    120,000 sats
-  } };
+  // The device signers' payment limit is their own default: 1,000 reference units (US dollars on
+  // the testnet) a day, held in each asset at the node's rate, which the page gives them
+  // (ln-limit.js). Set window.SEQ_LN_PAYMENT_LIMITS only to change it.
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1522,7 +1514,8 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed,
-  disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
+  disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp, setPaymentRates } from './seqln.js';
+import { lnRatesFor, lnLimitRefusal } from './ln-limit.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
 import { signMessage, verifyAddress } from './signmessage.js';
@@ -1962,6 +1955,7 @@ async function fetchFeeRates(){
     // stale (only the assets priced at first paint — often just tSEQ). Refresh both pickers now.
     try{ populateFeeAssets(); }catch{}
     try{ populateIssueFeeAssets(); }catch{}
+    pushLnRates();
   }catch(e){ console.warn('[feerates] fetch failed:', e?.message??e); }   // keep last-good rates on a transient failure (mirrors loadPrices)
 }
 // The published rate (atoms-of-asset per reference unit) the tx must build its fee with.
@@ -1970,6 +1964,14 @@ async function fetchFeeRates(){
 // /feerates is keyed by ticker ("OILX") plus "bitcoin" (=tSEQ); the rest of the wallet keys
 // fee rates by hex. Resolve a hex's published-rate entry by hex OR by its ticker.
 function feeRateEntry(hex){ return feeRates[hex] || feeRates[assetMeta(hex).ticker]; }
+// Give the device signers the rates their daily Lightning payment limit is held at (ln-limit.js):
+// the node's rate for every asset this wallet can name, and Bitcoin's from its price.
+function pushLnRates(){
+  try{
+    const hexes = [POLICY_HEX, ...Object.keys(labels()), ...Object.keys(REGISTRY_ASSETS), ...Object.keys(DEFAULT_ASSETS)];
+    setPaymentRates(lnRatesFor(hexes, (h)=>{ const e=feeRateEntry(h); return e && e.rate; }, _btcUsd()));
+  }catch(e){ console.warn('[ln] payment rates:', e?.message??e); }
+}
 function feeRateFor(hex){
   const e = feeRateEntry(hex);
   const r = e && e.rate;
@@ -2053,7 +2055,7 @@ async function loadPrices(){
     const d = await fetch('/prices', {cache:'no-store'}).then(r=>r.json());
     const m = {};
     for(const [t,v] of Object.entries(d)){ const p=(v&&typeof v==='object')?v.price:v; if(p>0) m[t.toUpperCase()]=p; }
-    if(Object.keys(m).length){ PRICES = m; _pricesTs = Date.now(); try{ localStorage.setItem('swk.pricesCache', JSON.stringify(m)); localStorage.setItem('swk.pricesTs', String(_pricesTs)); }catch{} }   // keep last-good; cache value + timestamp for honest staleness next load
+    if(Object.keys(m).length){ PRICES = m; _pricesTs = Date.now(); try{ pushLnRates(); }catch{} try{ localStorage.setItem('swk.pricesCache', JSON.stringify(m)); localStorage.setItem('swk.pricesTs', String(_pricesTs)); }catch{} }   // keep last-good; cache value + timestamp for honest staleness next load
     try{ initRefSelector(); }catch{}
     try{ if(typeof renderBalance==='function') renderBalance(); }catch{}
     try{ refreshAllRefHints(); }catch{}
@@ -5817,6 +5819,7 @@ function balanceShortText(m){
 function plainErr(e){ const m=(e?.message??String(e)); return balanceShortText(m) || nodeRejectText(m) || m; }
 function prettyErr(e){
   const m=(e?.message??String(e));
+  { const lim=lnLimitRefusal(m); if(lim) return lim; }   // over the device's daily Lightning limit
   { const short=balanceShortText(m); if(short) return short; }
   // A node's refusal of a transaction, by its reject code (node-reject.js).
   const refused=nodeRejectText(m);

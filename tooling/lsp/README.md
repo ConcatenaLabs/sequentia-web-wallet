@@ -116,8 +116,8 @@ window.SEQ_LSP_WS_ASSET          = 'wss://host/lsp-ws-asset';
 window.SEQ_LSP_HOST_PUBKEY_ASSET = '<hosted ASSET node host static pubkey>';
 window.SEQ_LSP_WS_BTC            = 'wss://host/lsp-ws-btc';
 window.SEQ_LSP_HOST_PUBKEY_BTC   = '<hosted BTC node host static pubkey>';
-// optional: the device's payment limits, in each asset's own atoms per period
-window.SEQ_LN_PAYMENT_LIMITS     = { default: 10000000, period: 86400,
+// optional: the device's payment limits per period (reference atoms, or an asset's own atoms)
+window.SEQ_LN_PAYMENT_LIMITS     = { reference: 100000000000, period: 86400,
                                      assets: { '<asset id>': 5000000, btc: 2000000 } };
 ```
 
@@ -125,8 +125,12 @@ The payment limits are enforced by the device signer, not by this service: the
 device approves a payment only when its amount, with a routing-fee allowance,
 fits in what the limit leaves for the period, and charges every HTLC it signs to
 its channel's asset. `null` means no limit; with the global unset the device's
-default applies (10,000,000 atoms of each asset per day). Set a limit for each
-asset to suit its value.
+default applies: 1,000 reference units a day (US dollars on the testnet), held in
+each asset at the rate the wallet gives the device from its own `/feerates` and
+`/prices` (`../../ln-limit.js`), so it is worth the same in every asset. An asset
+without a rate is held to 10,000,000 of its own atoms. `reference` sets that
+value in reference atoms, `default` replaces it with the same atoms of every
+asset, and `assets` sets an asset's own limit.
 
 The wallet derives TWO device identities from the user's ONE mnemonic
 (`../../seqln-keys.js`, single source of truth) and brings up a device signer for
