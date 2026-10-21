@@ -123,6 +123,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_LSP_POLICY` | `enforce` | device-signer policy (`permissive` is the kill-switch that signs without the custody checks) |
 | `SEQ_LN_PAYMENT_LIMITS` | none: the wallet lifts the device signer's own default (`{reference: null}`) | device payment limits: `{default, period, assets: {<asset id>\|'btc': atoms}}`: `default` the same atoms of every asset, `assets` an asset's own limit in its atoms, `null` for none |
 | `SEQ_LSP_FRONT_CAP` | `0.0005` BTC | LSP instant-front cap for mixed swaps |
+| `SEQ_ALLOW_MIXED_RAILS` | `false` | offer one side on-chain and the other over Lightning (refused by default: not safe against a Bitcoin reorg) |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |

@@ -380,10 +380,11 @@ Two price modes, always switchable:
 
 The tab states settlement times plainly: a Sequentia block comes about once a minute, a Bitcoin
 block about every ten minutes, and Lightning settles at once. A confirmed Sequentia transaction
-reverts only if Bitcoin reorgs the block it anchors to, and the tab says so. Only where a
-Lightning payment is made against an on-chain leg does a trade wait for that anchor to be buried
-(one Bitcoin block per level past the first), because a reorg would undo the on-chain leg and
-leave the Lightning payment standing; a trade under the service's 0-conf cap is fronted at once.
+reverts only if Bitcoin reorgs the block it anchors to, and the tab says so. One side on-chain
+and the other over Lightning is not offered, on any pair and in either direction: a reorg could
+undo the on-chain side and leave the Lightning payment standing, and making that safe takes a
+wait of several Bitcoin blocks. The tab refuses those combinations and links the FAQ entry that
+explains them; `window.SEQ_ALLOW_MIXED_RAILS = true` offers them again.
 
 ### Lightning (experimental)
 

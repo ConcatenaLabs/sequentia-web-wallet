@@ -71,6 +71,9 @@ const C = {
 let UNIFIED_FEED = null;
 const XROUTE = { quote: async () => ({}), book: async () => ({ forward: [], reverse: [], unreachable: false }) };
 
+// The wallet does not offer on-chain against Lightning (swap.js mixedRailsAllowed); these paths are
+// tested as they run once the switch offers them again.
+globalThis.window = Object.assign(globalThis.window || {}, { SEQ_ALLOW_MIXED_RAILS: true });
 const swap = await import('./swap.js');
 swap.initSwap({ ...C, xroute: XROUTE,
   ln: { available: () => true, deployed: () => true, status: async () => ({ channels: [] }),
