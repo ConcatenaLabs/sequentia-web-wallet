@@ -1105,12 +1105,13 @@
     <section data-panel="stake" class="hide">
       <div class="card">
         <label class="lbl">Stake tSEQ</label>
-        <p class="sub" style="margin:0 0 12px">Staking locks tSEQ in a time-locked script to support the Sequentia network. Your stake weight equals the amount staked, so there's no benefit to a longer lock; the wallet uses the network minimum unbonding period.</p>
+        <p class="sub" style="margin:0 0 12px">Staking locks tSEQ in a time-locked script to support the Sequentia network. Your stake weight equals the amount staked, so there's no benefit to a longer lock; the wallet uses the network's minimum lock.</p>
         <div class="field"><label class="lbl">Amount</label><input id="stAmount" class="mono" placeholder="0.0"></div>
         <button class="primary" id="btnStake" style="margin-top:14px">Review stake</button>
         <div class="status err" id="stakeErr"></div>
         <div class="kv" style="margin-top:12px"><span class="k">Minimum stake</span><span class="v" id="stMin">40,000 tSEQ</span></div>
-        <div class="kv"><span class="k">Unbonding period</span><span class="v" id="stPeriod">~15 days (network minimum)</span></div>
+        <div class="kv"><span class="k">Lock</span><span class="v" id="stPeriod">about 30 days (43,200 blocks, the network minimum)</span></div>
+        <div class="kv"><span class="k">Then unbonding</span><span class="v">2,016 Bitcoin blocks (about two weeks)</span></div>
         <div class="kv"><span class="k">Your staker key</span><span class="v" id="stPubkey">—</span></div>
       </div>
       <div class="card">
@@ -1541,11 +1542,12 @@ function queued(label, fn){
 }
 const STAKES = 'swk.sequentia.stakes';   // [{pubkey,csv,period,atoms,txid,time}]
 const OAMP_XFERS = 'swk.sequentia.oampTransfers';   // [{asset,ticker,precision,recipient_aid,atoms,txid,time,confirmed,blockHash,anchorDepth}] (WW-6)
-// Network minimum unbonding (~15 days, height-based csv=43200). Bonding longer
-// earns nothing — stake weight is the amount, not the lock duration — so the
-// wallet always uses the minimum.
+// The network's minimum stake lock: a height-based CSV of 43,200 blocks. Consensus judges a
+// height-based lock as that many 30-second slots (15 days, pos.cpp PosStakeLockSeconds), so no
+// shorter one stakes; the chain makes a block a minute, so it lasts about 30 days. Bonding
+// longer earns nothing (stake weight is the amount, not the lock), so the wallet always uses it.
 const STAKE_CSV = 43200;
-const STAKE_PERIOD_LABEL = '~15 days (network minimum)';
+const STAKE_PERIOD_LABEL = 'about 30 days (43,200 blocks, the network minimum)';
 // The height from which the testnet signs stake record spends the
 // second-generation way (the node's consensus.pos_records_v2_height for the
 // testnet in src/chainparams.cpp). SWK carries the same value for this network;
@@ -7484,7 +7486,9 @@ const STAKE_STATES = new Map();
 const BLOCK_SECONDS = 60;
 
 function stakeLine(s, st){
-  const base = `${s.period} · bonded ${new Date(s.time).toLocaleDateString()}`;
+  // The lock from the stake's own CSV, not the words stored with it when it was bonded.
+  const lock = Number(s.csv)===STAKE_CSV ? STAKE_PERIOD_LABEL : `${Number(s.csv).toLocaleString()}-block lock`;
+  const base = `${lock} · bonded ${new Date(s.time).toLocaleDateString()}`;
   if(!st) return base;
   switch(st.state){
     case 'bonded': {
@@ -7979,12 +7983,15 @@ $('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').tex
     if(atoms<STAKE_MIN_ATOMS) throw new Error('stake is below the network minimum of '+fmtAtoms(STAKE_MIN_ATOMS,8)+' tSEQ');
     const ref=(input._refMode && (input.value||'').trim()) ? {typed:(input.value||'').trim(), ccy:(input._refCcy||REF)} : null;
     const pset=network.txBuilder().addStakeOutput(pubkey, csv, atoms).feeRate(DEFAULT_FEERATE).finish(wollet);
-    await reviewBroadcast(pset, 'Confirm Sequentia payment', (txid)=>{
+    // The review says what is being signed: a stake, its lock and the key it pays, not a payment.
+    const extra=[['What it does', 'Locks this tSEQ in a stake that only this wallet\'s staker key can spend. Once its lock has passed it can be unbonded, and '+UNBOND_ANCHOR_DEPTH.toLocaleString()+' Bitcoin blocks (about two weeks) later claimed back into this wallet.'],
+      ['Lock', STAKE_PERIOD_LABEL], ['Staker key', pubkey]];
+    await reviewBroadcast(pset, 'Confirm Sequentia stake', (txid)=>{
       const st=(()=>{try{return JSON.parse(localStorage.getItem(STAKES)||'[]')}catch{return[]}})();
       st.push({pubkey, csv, period:STAKE_PERIOD_LABEL, atoms:atoms.toString(), txid:txid.toString(), time:Date.now()});
       localStorage.setItem(STAKES, JSON.stringify(st));
       $('stAmount').value=''; renderStake();
-    }, POLICY_HEX, {rows:[{atoms, hex:POLICY_HEX, ref}], feeAssetHex:POLICY_HEX});
+    }, POLICY_HEX, {rows:[{atoms, hex:POLICY_HEX, ref}], extra, feeAssetHex:POLICY_HEX});
   }catch(e){ $('stakeErr').textContent=plainErr(e); }
 });
 
