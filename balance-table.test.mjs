@@ -13,8 +13,8 @@ const fn = (name) => { const i = html.indexOf('function ' + name + '('); assert.
 test('every row has the same cells, value last', () => {
   assert.match(fn('balRow'), /cell\('bt-a', null, a\); cell\('bt-o', 'On-chain', onchain\); cell\('bt-l', 'Lightning', ln\); cell\('bt-t', 'Total', total\); cell\('bt-u', null, value\);/);
   const rb = fn('renderBalance');
-  assert.match(rb, /list\.appendChild\(balHeader\(\)\);/);
-  assert.equal((html.match(/appendChild\(balRow\(\{/g) || []).length, 3, 'assets, hidden assets and restricted assets');
+  assert.match(rb, /list\.appendChild\(balHeader\(userMode\)\);/);
+  assert.equal((html.match(/(appendChild\(|const row = )balRow\(\{/g) || []).length, 3, 'assets, hidden assets and restricted assets');
   assert.ok(!/'asset-row arow2'/.test(html), 'no row is left in the old layout');
 });
 
@@ -43,4 +43,43 @@ test('a phone shows one card per asset, Lightning left and on-chain right', () =
   assert.match(css, /grid-template-areas:"a u" "t t" "l o" "x x"/);
   assert.match(css, /border-radius:14px/);
   assert.match(css, /\.bt-o\{grid-area:o;text-align:right\}/);
+});
+
+test('user mode: one figure per asset, no rail columns, no Move or room to receive, the split one tap away', () => {
+  const rb = fn('renderBalance');
+  assert.match(rb, /const userMode = !devMode\(\);/);
+  assert.match(rb, /list\.classList\.toggle\('user', userMode\);/);
+  // The Lightning cell (its figures and its Move / room buttons) is built only in developer mode.
+  assert.match(rb, /if\(userMode\) \{[^}]*\}\s*else if\(!lnOn \|\| !leg\)/);
+  assert.match(html, /\.btable\.user \.bt-o,\.btable\.user \.bt-l\{display:none\}/);
+  assert.match(rb, /if\(userMode && several && _splitOpen\.has\(kind\)\) extra = balSplitLine\(parts, amt\);/);
+  assert.match(rb, /\[\['On-chain', on\], \['Off-chain', leafAtoms\], \['Lightning', lnAtoms\], \['Staked', staked\]\]/);
+  // The headline's on-chain / Lightning split is developer mode's.
+  assert.match(rb, /if\(totalLn>0 && !userMode\)/);
+  const hd = new Function('el', 'priceOf', 'REF', 'return ' + fn('balHeader'))(
+    (t, c, x) => ({ t, c, x, kids: [], appendChild(k) { this.kids.push(k); } }), () => 1, 'USD');
+  assert.deepEqual(hd(true).kids.map(k => k.x), ['Asset', 'Balance', 'Value (USD)']);
+  assert.deepEqual(hd(false).kids.map(k => k.x), ['Asset', 'On-chain', 'Lightning', 'Total', 'Value (USD)']);
+});
+
+test('staked tokens count in the figure and the headline, each stake once', () => {
+  const rb = fn('renderBalance');
+  assert.match(rb, /const totalAtoms = on \+ lnAtoms \+ leafAtoms \+ staked;/);
+  assert.match(rb, /addToTotal\(h, BigInt\(b\[h\]\|\|0n\) \+ ln \+ leafFor\(h\) \+ stakedFor\(h\), ln\)/);
+  assert.match(rb, /const totalOf=\(h\)=> BigInt\(b\[h\]\|\|0n\) \+ \(lnOn\?lnAtomsFor\(h\):0n\) \+ leafFor\(h\) \+ stakedFor\(h\);/);
+  const stakes = [
+    { txid: 'a', atoms: '4000000000000' },                       // not read yet: its bond
+    { txid: 'b', atoms: '5000000000000' },                       // bonded
+    { txid: 'c', atoms: '6000000000000' },                       // unbonding: the unbonding output
+    { txid: 'd', atoms: '7000000000000' },                       // claimed: back in the wallet
+    { txid: 'e', atoms: '8000000000000' },                       // spent some other way
+  ];
+  const states = new Map([
+    ['b', { state: 'bonded', stake: { value: '5000000000000' } }],
+    ['c', { state: 'unbonding', stake: { value: '6000000000000' }, unbonding: { value: '5999999990000' } }],
+    ['d', { state: 'claimed' }], ['e', { state: 'left' }],
+  ]);
+  const staked = new Function('localStorage', 'STAKES', 'STAKE_STATES', 'DELEG', 'return ' + fn('stakedAtoms'))(
+    { getItem: () => JSON.stringify(stakes) }, 'k', states, { atoms: '100000' });
+  assert.equal(staked(), 4000000000000n + 5000000000000n + 5999999990000n + 100000n);
 });

@@ -197,6 +197,13 @@
   .bt-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
   .bt-acts button{padding:2px 10px;font-size:11.5px;white-space:nowrap}
   .bt-x{grid-column:1/-1}
+  /* User mode: one figure per asset. The table drops the on-chain and Lightning columns; a tap on
+     a row opens its split (balSplitLine) under it. */
+  .btable.user .bt-hd,.btable.user .bt-row{grid-template-columns:minmax(110px,1.4fr) 1fr minmax(90px,.8fr)}
+  .btable.user .bt-o,.btable.user .bt-l{display:none}
+  .btable.user .bt-row.tappable{cursor:pointer}
+  .bt-split{font-size:12px;color:var(--dim);display:flex;flex-wrap:wrap;gap:2px 14px}
+  .bt-split b{color:var(--txt);font:500 12px ui-monospace,SFMono-Regular,Consolas,monospace}
   .bt-wide{padding:10px 2px;border-bottom:1px solid var(--line)}
   .bt-wide.fold{cursor:pointer}
   @media (max-width:640px){
@@ -209,6 +216,7 @@
     .bt-lbl{display:block;font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
     .bt-wide{border:0;padding:6px 2px 12px}
     .bt-unit{display:inline;font-size:inherit} .bt-ref{display:inline;font-weight:400;color:var(--dim)}
+    .btable.user .bt-row,.btable.user .bt-row:last-child{grid-template-areas:"a u" "t t" "x x"}
   }
   .bal-total-split{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 16px;margin-top:4px;font-size:12.5px;color:var(--dim)}
   .bal-total-split b{color:var(--txt);font-weight:600}
@@ -3315,7 +3323,7 @@ function initLeaves(){
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
-    onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} if(pageApi) pageApi.modeChanged(m); },
+    onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
@@ -4409,7 +4417,8 @@ async function refreshLnStatus(){
   try{ renderUpgradeNote(); refreshNodeNotes(); }catch(e){ console.warn('[ln] upgrade note:', e?.message??e); }
   try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); }   // wire + refresh the LN send/receive cards
   if(!seqlnState().deployed){ if(note) note.classList.add('hide'); try{ renderBalance(); }catch{} try{ lnStatusPill(); }catch{} return; }
-  if(note) note.classList.remove('hide');
+  // The note explains moving to Lightning and room to receive, which only developer mode offers.
+  if(note) note.classList.toggle('hide', !devMode());
   try{ await refreshOwnLnNodeKeys(); }catch{}   // so /status includes this device's own nodes across reloads
   try{ lnLastStatus = await seqlnGetStatus(); $('lnBalStatus').textContent=''; }
   catch(e){ $('lnBalStatus').className='status err'; $('lnBalStatus').textContent='Lightning status unavailable: '+prettyErr(e); }
@@ -4459,6 +4468,8 @@ function lnPaintRecvRoom(){
   const hex=sel.value, meta=assetMeta(hex), room=lnReceivableFor(hex==='BTC' ? 'BTC' : hex);
   box.innerHTML='';
   if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'; return; }
+  // User mode offers no room to receive and no Move: the wallet says only where it can receive.
+  if(!devMode()){ box.textContent='You cannot receive '+meta.ticker+' over Lightning now. Receive it on-chain with your address above.'; return; }
   box.appendChild(document.createTextNode('You cannot receive '+meta.ticker+' over Lightning yet: a channel needs room for it on the other side. '));
   if(hex==='BTC') return;
   if(lnOnLightning(hex)){
@@ -4506,7 +4517,10 @@ function initLnSendReceive(){
     const room = lnReceivableFor(asset === 'BTC' ? 'BTC' : asset);
     if (asset !== 'BTC' && room < BigInt(amt)){
       st.className = 'status err';
-      st.textContent = room > 0n
+      st.textContent = !devMode()
+        ? (room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. Ask for less, or receive on-chain.'
+                     : 'You cannot receive ' + meta.ticker + ' over Lightning now. Receive it on-chain with your address above.')
+        : room > 0n
         ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning. Add room to receive more, or ask for less.'
         : (lnOnLightning(asset)
           ? 'You cannot receive ' + meta.ticker + ' over Lightning yet. Add room to receive first; it takes about a block.'
@@ -5324,7 +5338,7 @@ async function _syncImpl(){
     // Cross-chain address cycling: advance the shared receive address past anything
     // that's been used on either chain (never backward, so a manual "New address" sticks).
     addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
-    renderBalance(); renderHistory(); renderReceive(); refreshStakes(); populateFeeAssets(); refreshRecipientAssets();
+    renderBalance(); renderHistory(); renderReceive(); refreshStakes(); refreshDelegationHeld(); populateFeeAssets(); refreshRecipientAssets();
     { const sw=document.querySelector('[data-panel="swap"]'); if(sw && !sw.classList.contains('hide')) try{ renderActiveSwap(); }catch{} }   // its balances are real now
     const t = wollet.tip();
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
@@ -5351,11 +5365,39 @@ function balRow({ a, onchain, ln, total, value, extra, cls }){
   for(const x of [].concat(extra||[])) if(x){ const d=el('div','bt-x'); d.appendChild(x); r.appendChild(d); }
   return r;
 }
-function balHeader(){
+function balHeader(user){
   const h=el('div','bt-hd');
   const ref = priceOf(REF)>0 ? REF : 'USD';
-  for(const [t, c] of [['Asset',''], ['On-chain',''], ['Lightning',''], ['Total','r'], ['Value ('+ref+')','r']]) h.appendChild(el('div', c||null, t));
+  const cols = user ? [['Asset',''], ['Balance','r'], ['Value ('+ref+')','r']]
+    : [['Asset',''], ['On-chain',''], ['Lightning',''], ['Total','r'], ['Value ('+ref+')','r']];
+  for(const [t, c] of cols) h.appendChild(el('div', c||null, t));
   return h;
+}
+// The parts of an asset's one figure, in plain words, for user mode's split one tap away: only
+// the parts it holds. Developer mode names them its own way (rowFull).
+function balSplitLine(parts, amt){
+  const d=el('div','bt-split');
+  for(const [k, v] of parts){ if(v>0n){ const x=el('span'); x.appendChild(document.createTextNode(k+' ')); x.appendChild(el('b',null,amt(v))); d.appendChild(x); } }
+  return d;
+}
+// Rows whose split is open in user mode, by asset, kept across renders.
+const _splitOpen = new Set();
+// The Sequence token this wallet holds at its staking key (m/2/0): each bonded stake, each
+// unbonding output not yet claimed back, and the delegation record. It is the holder's, so it
+// counts in the token's figure and in the headline, in both modes; a stake claimed back is in
+// the wallet again and counted there. Read from what the Stake tab last found on the chain.
+function stakedAtoms(){
+  let n=0n, states=null, deleg=null;
+  try{ states=STAKE_STATES; deleg=DELEG; }catch{ /* read before the stake module's state exists */ }
+  let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }
+  for(const s of st){
+    const state = states && states.get(s.txid);
+    if(!state){ n += BigInt(s.atoms||0); continue; }
+    if(['claimed','claiming','left','unknown'].includes(state.state)) continue;
+    n += BigInt((state.unbonding && state.unbonding.value) || (state.stake && state.stake.value) || s.atoms || 0);
+  }
+  if(deleg && deleg.atoms!=null) n += BigInt(deleg.atoms);
+  return n;
 }
 function balAmt(text){ return el('div','bt-amt', text); }
 // The ticker and the currency sit under the figure on a desktop (the header names the currency) and
@@ -5389,7 +5431,11 @@ function renderBalance(){
     }
   }
   const list=$('assetList'); list.innerHTML=''; list.classList.add('btable');
-  list.appendChild(balHeader());
+  // User mode shows one figure per asset; developer mode splits it by rail in its columns.
+  const userMode = !devMode();
+  list.classList.toggle('user', userMode);
+  list.appendChild(balHeader(userMode));
+  const stakedFor = (h)=> (h===POLICY_HEX) ? stakedAtoms() : 0n;
   // Equal-standing + dual-chain: a headline portfolio total across BTC (parent chain) and
   // every Sequentia asset in the chosen reference currency, then per-asset rows in a uniform
   // order with NOTHING pinned. No asset is privileged; the staking note lives only in the
@@ -5413,7 +5459,8 @@ function renderBalance(){
     // Leaves count in the asset's one figure in both modes; developer mode also splits it.
     const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
     const on = onchainAtoms||0n;
-    const totalAtoms = on + lnAtoms + leafAtoms;
+    const staked = stakedFor(kind);
+    const totalAtoms = on + lnAtoms + leafAtoms + staked;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
@@ -5429,7 +5476,8 @@ function renderBalance(){
     // Lightning: the balance, what it can send and receive, and the buttons that move the asset.
     // Room to receive is "not yet" until the service opens a channel toward the wallet.
     const l=el('div');
-    if(!lnOn || !leg) l.appendChild(el('div','bt-dim','—'));
+    if(userMode) { /* user mode: no rail, no Move, no room to receive; the split is one tap away */ }
+    else if(!lnOn || !leg) l.appendChild(el('div','bt-dim','—'));
     else {
       const opening = lnOpeningFor(kind);
       const has = own.length > 0 || lnAtoms > 0n || opening;
@@ -5461,11 +5509,21 @@ function renderBalance(){
       if(acts.children.length) l.appendChild(acts);
     }
     // Developer mode: every rail of the asset on one line (leaves.js holds the leaf figure).
-    const extra = (kind!=='BTC' && leavesApi && devMode() && known)
-      ? el('div','leaf-split', fmtAtoms(on, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning')
-      : null;
-    list.appendChild(balRow({ a, onchain: balAmt(amt(on)), ln: l, total: balTotalCell(amt(totalAtoms), ticker),
-      value: balValueCell(known ? refKey : null, totalAtoms), extra }));
+    // User mode: the same parts in plain words, under the row once it is tapped.
+    let extra = null;
+    if(!userMode && kind!=='BTC' && known && (leavesApi || staked>0n))
+      extra = el('div','leaf-split', fmtAtoms(on, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning'
+        + (staked>0n ? ' · '+fmtAtoms(staked, precision)+' staked' : ''));
+    const parts = [['On-chain', on], ['Off-chain', leafAtoms], ['Lightning', lnAtoms], ['Staked', staked]];
+    const several = parts.filter(([,v])=>v>0n).length > 1;
+    if(userMode && several && _splitOpen.has(kind)) extra = balSplitLine(parts, amt);
+    const row = balRow({ a, onchain: balAmt(amt(on)), ln: l, total: balTotalCell(amt(totalAtoms), ticker),
+      value: balValueCell(known ? refKey : null, totalAtoms), extra });
+    if(userMode && several){
+      row.classList.add('tappable'); row.title='Show where this balance is';
+      row.onclick=(ev)=>{ if(ev.target.closest('a,button')) return; if(_splitOpen.has(kind)) _splitOpen.delete(kind); else _splitOpen.add(kind); renderBalance(); };
+    }
+    list.appendChild(row);
   };
 
   // The Sequentia assets to show: everything held on-chain PLUS anything that still has a live
@@ -5473,6 +5531,8 @@ function renderBalance(){
   const seqKeys = new Set(Object.keys(b));
   // An asset held only as leaves still has its row, in both modes.
   if(leavesApi) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
+  // So does the Sequence token when all of it is staked.
+  if(POLICY_HEX && stakedFor(POLICY_HEX)>0n) seqKeys.add(POLICY_HEX);
   if(lnLastStatus && lnLastStatus.channels){
     for(const c of lnLastStatus.channels){
       const isBtc=(c.asset_label==='BTC'||c.leg==='btc');
@@ -5482,14 +5542,14 @@ function renderBalance(){
     }
   }
 
-  // Headline total across BTC + every asset, every rail (on-chain, Lightning, leaves), in
-  // the reference currency, in both modes. No asset comes first.
+  // Headline total across BTC + every asset, every rail (on-chain, Lightning, leaves) and what is
+  // staked, in the reference currency, in both modes. No asset comes first.
   let total=0, totalLn=0, totalRef=null, anyPriced=false, allPriced=true;
   const addToTotal=(refKey, atoms, lnPart)=>{ const rv=refValue(refKey, atoms); if(rv){ total+=rv.v; totalRef=rv.ref; anyPriced=true;
       const lv=lnPart>0n ? refValue(refKey, lnPart) : null; if(lv) totalLn+=lv.v; } else if((atoms||0n)>0n) allPriced=false; };
   { const ln=lnOn?lnAtomsFor('BTC'):0n; addToTotal('BTC', btcBal + ln, ln); }
   const leafFor = (h)=> leavesApi ? leavesApi.leafAtoms(h) : 0n;
-  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h), ln); }
+  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h) + stakedFor(h), ln); }
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
   // (WW-4 / spec 1.5(a)). Keyed 'oamp:'+id so assetMeta/priceTicker resolve the real ticker+precision;
   // an unpriced restricted asset falls into the allPriced=false path like any other unpriced asset.
@@ -5504,7 +5564,7 @@ function renderBalance(){
       const line=el('div','bal-total-split');
       if(ref!=='BTC' && oneBtc && oneBtc.ref===ref && oneBtc.v>0)
         line.appendChild(el('span','bal-total-btc', '≈ '+(total/oneBtc.v).toLocaleString(undefined,{maximumFractionDigits:8})+' BTC'));
-      if(totalLn>0){
+      if(totalLn>0 && !userMode){
         const sp=el('span','bal-total-rails');
         const part=(k, v)=>{ const x=el('span'); x.appendChild(document.createTextNode(k+' ')); x.appendChild(el('b',null, fmtRef(v, ref))); return x; };
         sp.appendChild(part('On-chain', total-totalLn)); sp.appendChild(document.createTextNode(' · ')); sp.appendChild(part('Lightning', totalLn));
@@ -5532,7 +5592,7 @@ function renderBalance(){
   // move to the collapsed "Hidden assets" section at the bottom of the list; they also
   // leave the default asset-picker dropdowns but stay findable there by search (swap.js
   // pickerMatches). BTC (the parent chain) is never partitioned out.
-  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h);
+  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h) + stakedFor(h);
   // Auto-fold UNLABELED assets (unknown precision — the wallet can't name/scale them, so the
   // user never deliberately holds them) into the collapsed hidden section, so a few
   // received-by-accident dust tokens no longer clutter the main balance list. Still labelable
@@ -7778,6 +7838,7 @@ async function refreshStakes(){
     localStorage.setItem(STAKES, JSON.stringify(merged));
   }
   renderStake();
+  try{ renderBalance(); }catch{}   // staked tokens count in the figure and the headline
 }
 
 // Unbonding, step 1: the stake leaves staking for its unbonding output, still
@@ -8429,8 +8490,19 @@ async function refreshDelegation(){
   // its two broadcasts) is finished first, so the record it creates is found.
   try{ await stakeRecords.resumeJoin(stakeCtx()); }catch{}
   try{ DELEG = await discoverDelegation(); }catch{ DELEG = null; }
+  _delegReadAt = Date.now();
   renderPools();
   renderDelegation();
+  try{ renderBalance(); }catch{}   // the record's tokens count in the figure and the headline
+}
+// The delegation record is read again after a sync at most every five minutes, so its tokens
+// count in the balance without the Stake tab being opened.
+let _delegReadAt = 0;
+async function refreshDelegationHeld(){
+  if(Date.now() - _delegReadAt < 5*60*1000) return;
+  _delegReadAt = Date.now();
+  try{ if(!stakeRecords.delegationSupported(lwk)) return; }catch{ return; }
+  try{ DELEG = await discoverDelegation(); renderBalance(); }catch{}
 }
 
 // The seed, from where every other signing flow in this wallet reads it. A
