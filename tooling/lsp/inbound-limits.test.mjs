@@ -2,7 +2,7 @@
 // And a prepaid fee pays for one purchase.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee } from './inbound-limits.mjs';
+import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted } from './inbound-limits.mjs';
 
 const USDX = '1f'.repeat(32), TSEQ = 'c8'.repeat(32), GOLD = '3a'.repeat(32);
 // Reference limits: 10 to 10,000 reference units, a fee of at least 1 (in reference atoms, 1e8 a unit).
@@ -94,4 +94,38 @@ test('a fee paid for room never opened is found for that node and asset, and an 
   assert.deepEqual(paidWaitingFee(fees, 'n1', USDX), { fee_txid: 'bb', amount: 600e8, months: 3 });
   assert.equal(paidWaitingFee(fees, 'n3', USDX), null);
   assert.deepEqual(paidWaitingFee(Object.fromEntries(fees), 'n2', USDX), { fee_txid: 'dd', amount: 999e8, months: null });
+});
+
+// 21/10/2026: 2.573 tSEQ paid for 100 tSEQ of room, confirmed, then refused for hours because the
+// purchase priced it again at 2.722 once the rate fell. The fee is good at the price held for the
+// node, or within the tolerance of today's, and an output the LP already spent still counts.
+test('a fee is judged at the price quoted before it was paid, spent or not', () => {
+  const TSEQ = 'c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40';
+  const TX = '87da058cd55a4c83f269a470453adcca4e1e29c6c40f1a865952b5d9560e07d6';
+  const lf = { outputs: [
+    { txid: TX, output: 0, amount_msat: 257333066000, asset: TSEQ, status: 'spent' },
+    { txid: TX, output: 1, amount_msat: 5000, asset: 'ab'.repeat(32), status: 'confirmed' },
+    { txid: 'cd'.repeat(32), output: 0, amount_msat: 9e12, asset: TSEQ, status: 'confirmed' },
+  ] };
+  assert.equal(feePaidAtoms(lf, TX.toUpperCase(), TSEQ), 257333066);
+  assert.equal(feePaidAtoms({ outputs: [{ txid: TX, amount_msat: 7000 }] }, TX, TSEQ, TSEQ), 7, 'the policy asset rides untagged');
+  assert.equal(feePaidAtoms(lf, 'ef'.repeat(32), TSEQ), 0);
+
+  const node = 'seq:' + TSEQ + ':02aa', now = 1792600000000, holdMs = 7 * 86400_000;
+  const held = [
+    { node_key: node, asset: TSEQ, amount: 10000000000, months: 6, due: 257333066, at: now - 3600_000 },
+    { node_key: node, asset: TSEQ, amount: 10000000000, months: 6, due: 262000000, at: now - 60_000 },
+    { node_key: node, asset: TSEQ, amount: 10000000000, months: 6, due: 1, at: now - holdMs - 1 },        // past the hold
+    { node_key: node, asset: TSEQ, amount: 10000000000, months: 12, due: 2, at: now },                    // another term
+    { node_key: node, asset: TSEQ, amount: 5000000000, months: 6, due: 3, at: now },                      // less room
+    { node_key: 'seq:' + TSEQ + ':03bb', asset: TSEQ, amount: 10000000000, months: 6, due: 4, at: now },  // another node
+  ];
+  const h = heldFeeDue(held, { nodeKey: node, assetId: TSEQ, amount: 10000000000, months: 6, now, holdMs });
+  assert.equal(h, 257333066);
+  assert.equal(heldFeeDue(held, { nodeKey: node, assetId: TSEQ, amount: 20000000000, months: 6, now, holdMs }), null);
+  assert.equal(feeDueAccepted(272200422, h, 0), 257333066, 'the held price, not today\'s');
+  assert.equal(feeDueAccepted(272200422, null, 0), 272200422);
+  assert.equal(feeDueAccepted(272200422, null, 1000), 244980380, 'today\'s, less the tolerance');
+  assert.ok(257333066 >= feeDueAccepted(272200422, null, 1000), 'the payment of 21/10/2026 passes');
+  assert.ok(200000000 < feeDueAccepted(272200422, null, 1000), 'a fee well short does not');
 });

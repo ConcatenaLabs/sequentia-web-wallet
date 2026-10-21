@@ -110,7 +110,7 @@ import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, asse
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
-import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee } from './inbound-limits.mjs';
+import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
@@ -252,6 +252,10 @@ const CFG = {
   // from becoming unlimited free liquidity for a caller that simply never settles.
   inboundCollectMode: (process.env.INBOUND_COLLECT_MODE || 'deferred').toLowerCase(),
   inboundDebtCap: Number(process.env.INBOUND_DEBT_CAP || 50000),
+  // A prepaid fee is good at the price quoted to the node before it paid, for this long (heldFeeDue),
+  // and within this share of today's price when no quote is held (a payment older than the hold).
+  inboundQuoteHoldMs: Number(process.env.INBOUND_QUOTE_HOLD_H || 168) * 3600_000,
+  inboundFeeToleranceBps: Number(process.env.INBOUND_FEE_TOLERANCE_BPS ?? 1000),
   subasInboundFeeBps: Number(process.env.SUBAS_INBOUND_FEE_BPS || 0),     // legacy JIT-inbound fee (recorded only)
   // SUB-ASSET SELL: pay the asset OVER LIGHTNING, receive BTC ON-CHAIN (mirror of the buy).
   // A sub-asset-SELL maker (ln_direction=5) on SUBAS_SELL_RELAY locks BTC on-chain + holds
@@ -1794,6 +1798,22 @@ function recordFeeUse(txid, use) {
   try { fs.writeFileSync(FEES_FILE, JSON.stringify(Object.fromEntries(inboundFees)), 'utf8'); }
   catch (e) { console.error('[lsp] could not persist inbound fees:', e && e.message); }
 }
+// The prices quoted to each node before it paid (heldFeeDue), kept for the hold and persisted, so a
+// restart between the quote and the payment's confirmation does not reprice a fee already paid.
+const QUOTES_FILE = CFG.provDir ? path.join(CFG.provDir, 'inbound-quotes.json') : '';
+let heldQuotes = (() => {
+  if (!QUOTES_FILE) return [];
+  try { const a = JSON.parse(fs.readFileSync(QUOTES_FILE, 'utf8')); return Array.isArray(a) ? a : []; }
+  catch { return []; }
+})();
+function holdQuote(q) {
+  const now = Date.now();
+  heldQuotes = heldQuotes.filter(h => now - Number(h.at) <= CFG.inboundQuoteHoldMs).slice(-499);
+  heldQuotes.push({ ...q, at: now });
+  if (!QUOTES_FILE) return;
+  try { fs.writeFileSync(QUOTES_FILE, JSON.stringify(heldQuotes), 'utf8'); }
+  catch (e) { console.error('[lsp] could not persist inbound quotes:', e && e.message); }
+}
 // THE SERVICE'S BOOKS, for GET /stats/inbound (inbound-stats.mjs): one line per channel actually
 // sold, one per purchase or priced quote refused for lack of stock, and an hourly snapshot of what the
 // LP holds and has locked. Append-only JSONL beside the other ledgers; a line is small and the files
@@ -1927,27 +1947,21 @@ async function inboundFundingProblem(assetId, amount) {
     reason: `the service can open at most ${fundable} of room in this asset right now, not ${amount}` };
 }
 
-// Verify a prepaid fee actually landed. Reads the LP's OWN funds for an output from that txid worth
-// at least the fee in the right asset.
+// Verify a prepaid fee actually landed. Reads the LP's OWN funds, spent outputs included, for outputs
+// from that txid in the right asset worth at least `least`.
 //
-// It fails CLOSED and it does NOT accept an unconfirmed-and-unknown tx: a fee that cannot be seen is
-// not a fee that was paid, and opening a channel on an unverified claim is how you give liquidity
-// away to anyone willing to type a plausible txid.
-async function verifyInboundFeePaid({ txid, assetId, fee }) {
+// It fails CLOSED: a fee that cannot be seen is not a fee that was paid, and opening a channel on an
+// unverified claim is how you give liquidity away to anyone willing to type a plausible txid. The
+// error carries what was seen (`paid`), so the caller can tell a fee not confirmed yet (0) from one
+// that pays too little, which waiting does not mend.
+async function verifyInboundFeePaid({ txid, assetId, least }) {
   if (!txid || !/^[0-9a-fA-F]{64}$/.test(String(txid))) throw new Error('fee_txid must be a 32-byte hex txid');
-  const lf = await lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS).catch(() => null);
+  const lf = await lnrpc('listfunds', ['spent=true'], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS)
+    .catch(() => lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS)).catch(() => null);
   if (!lf) throw new Error('could not read the LP wallet to verify the fee payment');
-  const want = String(txid).toLowerCase();
-  let paid = 0;
-  for (const o of (lf.outputs || [])) {
-    if (String(o.txid || '').toLowerCase() !== want) continue;
-    // Match the asset: an asset-denominated output must carry that asset id, and BTC must not.
-    const oAsset = String(o.asset || o.asset_id || '').toLowerCase();
-    if (assetId) { if (oAsset !== String(assetId).toLowerCase()) continue; }
-    else if (oAsset && oAsset !== '') continue;
-    paid += Number(o.amount_msat != null ? Math.floor(Number(o.amount_msat) / 1000) : (o.value || 0));
-  }
-  if (paid < fee) throw new Error(`the fee payment ${txid} pays ${paid}, which is less than the ${fee} quoted`);
+  const paid = feePaidAtoms(lf, txid, assetId, await policyAssetHex());
+  if (!(paid > 0)) throw Object.assign(new Error(`the service does not see the fee payment ${txid} yet`), { paid: 0 });
+  if (paid < least) throw Object.assign(new Error(`the fee payment ${txid} pays ${paid}, which is less than the ${least} due`), { paid });
   return { ok: true, paid };
 }
 
@@ -4976,6 +4990,7 @@ const server = http.createServer(async (req, res) => {
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
       // A fee this node already paid for room in this asset that was never opened.
       const paidWaiting = nodeKey && !isBtc ? paidWaitingFee(inboundFees, nodeKey, assetId) : null;
+      if (q.ok && nodeKey && !isBtc) holdQuote({ node_key: nodeKey, asset: assetId, amount: q.amount, months, due: q.fee + owed });
       // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
       // when the LP is unreachable, so the mode is simply reported as unavailable rather than 500ing.
       let payTo = null, payErr = null;
@@ -5017,46 +5032,54 @@ const server = http.createServer(async (req, res) => {
       let openAmount = amount;
       if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc: false, assetId, months, ...lim }); }
       else if (!q.ok && q.max != null && amount > q.max) return send(res, 400, { ok: false, error: q.reason, min: q.min, max: q.max });
-      // Before anything is charged: room the LP cannot fund is not sold. A prepaid fee already sent
-      // stays unused (it is recorded only when a purchase goes ahead), so a retry once the LP holds
-      // the coins uses it.
-      {
-        const short = await inboundFundingProblem(assetId, openAmount);
-        if (short) { logRefused(assetId, openAmount, body.node_key, 'purchase'); return send(res, 503, { ok: false, error: short.reason, lp_short: true, fundable: short.fundable, asset: assetId }); }
-      }
       // The service keeps the channel open until then; after it, it may close it.
       const until = expiresAt(Date.now(), months);
       const owed = debtOwed(body.node_key, assetId);
       const due = (q.ok ? q.fee : 0) + owed;
       const mode = String(body.mode || CFG.inboundCollectMode || 'deferred').toLowerCase();
-      if (q.ok && due > 0 && CFG.inboundFeeBps > 0) {
-        if (mode === 'prepaid') {
-          const prior = inboundFees.get(String(body.fee_txid || '').toLowerCase());
-          const reused = feeReuseProblem(prior, { nodeKey: body.node_key, assetId, amount });
-          if (reused) return send(res, 409, { ok: false, error: reused, mode });
-          // Its room is open already (a retry whose answer was lost): done, and nothing new is opened
-          // on that payment.
-          if (prior && prior.opened_at) return send(res, 200, { ok: true, already_opened: true, already_had_inbound: true,
-            channel_id: prior.channel_id || null, opened_at: prior.opened_at, months: prior.months, expires_at: prior.expires_at, mode });
-          try { await verifyInboundFeePaid({ txid: body.fee_txid, assetId, fee: due }); }
+      const charged = q.ok && due > 0 && CFG.inboundFeeBps > 0;
+      if (charged && mode !== 'prepaid' && mode !== 'deferred') {
+        return send(res, 400, { ok: false, error: `unknown collection mode ${mode} (use "prepaid" or "deferred")` });
+      }
+      // A prepaid fee is checked and recorded before the stock: once seen it keeps its price and its
+      // purchase, whether or not the LP can open the room right now, and the quote names it to the
+      // node (paid_waiting) until that room opens. A recorded fee is not checked again: the price it
+      // was checked at may have moved since, and the LP may have spent its output.
+      if (charged && mode === 'prepaid') {
+        const feeKey = String(body.fee_txid || '').toLowerCase();
+        const prior = inboundFees.get(feeKey);
+        const reused = feeReuseProblem(prior, { nodeKey: body.node_key, assetId, amount });
+        if (reused) return send(res, 409, { ok: false, error: reused, mode });
+        // Its room is open already (a retry whose answer was lost): done, and nothing new is opened
+        // on that payment.
+        if (prior && prior.opened_at) return send(res, 200, { ok: true, already_opened: true, already_had_inbound: true,
+          channel_id: prior.channel_id || null, opened_at: prior.opened_at, months: prior.months, expires_at: prior.expires_at, mode });
+        if (!prior) {
+          const held = heldFeeDue(heldQuotes, { nodeKey: body.node_key, assetId, amount: openAmount, months, holdMs: CFG.inboundQuoteHoldMs });
+          const least = feeDueAccepted(due, held, CFG.inboundFeeToleranceBps);
+          let seen;
+          try { seen = await verifyInboundFeePaid({ txid: body.fee_txid, assetId, least }); }
           catch (e) {
-            // 402: the request is well-formed, the payment is what is missing. Hand back the price
-            // and the address so the caller can pay and retry without re-quoting.
+            // 402: the request is well-formed, the payment is what is missing. Hand back the price,
+            // what was seen of the payment, and the address, so the caller can tell waiting for a
+            // confirmation from a payment too small, and pay and retry without re-quoting.
             let payTo = null; try { payTo = await inboundFeeAddress(); } catch {}
-            return send(res, 402, { ok: false, error: String((e && e.message) || e),
-              fee: q.fee, already_owed: owed, due_now: due, pay_to: payTo, asset: assetId, mode });
+            return send(res, 402, { ok: false, error: String((e && e.message) || e), paid: e && e.paid != null ? e.paid : null,
+              least, fee: q.fee, already_owed: owed, due_now: due, pay_to: payTo, asset: assetId, mode });
           }
-          if (!inboundFees.has(String(body.fee_txid).toLowerCase()))
-            recordFeeUse(body.fee_txid, { node_key: body.node_key || '', asset: assetId, amount, months, expires_at: until });
+          recordFeeUse(body.fee_txid, { node_key: body.node_key || '', asset: assetId, amount, months, expires_at: until, paid: seen.paid });
           debtClear(body.node_key, assetId);
-        } else if (mode === 'deferred') {
-          if (owed > CFG.inboundDebtCap) {
-            return send(res, 402, { ok: false, mode, already_owed: owed, cap: CFG.inboundDebtCap,
-              error: `this node already owes ${owed} for inbound liquidity, which is over the ${CFG.inboundDebtCap} limit · settle it (mode "prepaid") before buying more` });
-          }
-        } else {
-          return send(res, 400, { ok: false, error: `unknown collection mode ${mode} (use "prepaid" or "deferred")` });
         }
+      }
+      // Room the LP cannot fund is not sold. A prepaid fee already recorded stays good for this same
+      // purchase, or a smaller one, once the LP holds the coins.
+      {
+        const short = await inboundFundingProblem(assetId, openAmount);
+        if (short) { logRefused(assetId, openAmount, body.node_key, 'purchase'); return send(res, 503, { ok: false, error: short.reason, lp_short: true, fundable: short.fundable, asset: assetId }); }
+      }
+      if (charged && mode === 'deferred' && owed > CFG.inboundDebtCap) {
+        return send(res, 402, { ok: false, mode, already_owed: owed, cap: CFG.inboundDebtCap,
+          error: `this node already owes ${owed} for inbound liquidity, which is over the ${CFG.inboundDebtCap} limit · settle it (mode "prepaid") before buying more` });
       }
       try {
         const r = await provisionInbound({ nodeKey: body.node_key, assetId, amount: openAmount });
