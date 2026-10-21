@@ -138,8 +138,9 @@ async function board (w, asset, amount, fund, fee) {
   const script = await w.eval("document.querySelector('#leafAddress').dataset.script")
   for (const [a, v] of fund) await ctl('/fund', { script, asset: a, amount: v })
   await ctl('/produce')
-  await w.sync()
-  await w.page.waitFor(`document.querySelector('#leafBoardAsset') && [...document.querySelector('#leafBoardAsset').options].some(o=>o.value==='${asset}')`, 60000)
+  // The coin shows once a sync reads it; a sync can meet the node's scan lock, so sync again.
+  const shown = `document.querySelector('#leafBoardAsset') && [...document.querySelector('#leafBoardAsset').options].some(o=>o.value==='${asset}')`
+  await until(`${w.name}'s on-chain coin`, async () => { await w.sync(); return w.eval(shown) }, 180000, 3000)
   // Two leaf wallets on one node can meet the node's one-at-a-time UTXO scan ("Scan already in
   // progress", the library's open finding): such a refusal is asked again, nothing else is.
   for (let i = 0; ; i++) {
