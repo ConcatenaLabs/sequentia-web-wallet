@@ -166,27 +166,53 @@
   .swmk-row{cursor:pointer} .swmk-row:hover{background:rgba(255,183,51,0.06)}
   .swmk-row.nodepth{opacity:0.55} .swmk-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
   .swmk-dot.on{background:var(--green)} .swmk-dot.off{background:var(--line)}
-  .asset-row{display:flex;align-items:baseline;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
-  .asset-row:first-child{border-top:none}
   .tk{font-weight:700} .aid{font:12px ui-monospace,monospace;color:var(--dim);word-break:break-all}
-  /* Consolidated balance row: a header line (ticker · name · total) with a nested Lightning
-     "metacard" beneath it — the on-chain/Lightning split and the move/close actions, clearly
-     labelled so the buttons read as Lightning actions. All still inside the one Assets card. */
-  .arow2{flex-direction:column;align-items:stretch;gap:0}
-  .arow-head{display:flex;align-items:baseline;gap:10px}
   .ln-meta{margin-top:9px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:rgba(255,198,41,.045)}
   .ln-help{margin:6px 0 0;padding-left:18px}
   .ln-help li{margin:3px 0}
-  .rails{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin:7px 0 0 14px;padding:6px 10px;border-left:2px solid var(--line);border-radius:0 8px 8px 0;background:rgba(255,255,255,.025)}
-  .rail .rl{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:700}
-  .rail .ra{font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:1px}
-  .rail .rs{font-size:10.5px;color:var(--dim);margin-top:1px}
-  .rail.right{text-align:right}
-  .rail-recv{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:5px;font-size:11.5px;color:var(--dim)}
-  .rail-recv button{padding:2px 10px;font-size:11.5px;white-space:nowrap}
-  .rail-one{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:5px}
-  .rail-one .rs{font-size:11px;color:var(--dim)}
-  .rails .mv,.rail-one .mv{padding:2px 10px;font-size:11.5px;white-space:nowrap}
+  /* The balance table (balRow): one row per asset under one header, the value in the right-hand
+     column. The Balance tab is wider than the other tabs on a desktop, so the five columns hold
+     their figures on one line. On a phone (below) each asset is a card of its own. */
+  @media (min-width:641px){ section[data-panel="balance"]{--bw:min(780px,calc(100vw - 32px));width:var(--bw);margin-inline:calc((100% - var(--bw)) / 2)} }
+  .bt-hd,.bt-row{display:grid;grid-template-columns:minmax(110px,1.15fr) 1fr 1.3fr 1fr minmax(90px,.8fr);gap:12px;align-items:start}
+  .bt-hd{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;padding:4px 2px 8px;border-bottom:1px solid var(--line)}
+  .bt-hd .r,.bt-t,.bt-u{text-align:right}
+  .bt-row{padding:12px 2px;border-bottom:1px solid var(--line)}
+  .bt-row:last-child{border-bottom:0}
+  .bt-row.bt-hidden{opacity:.75}
+  .bt-tk{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .bt-tk .tk{font-size:15.5px}
+  .bt-name{font-size:12px;color:var(--dim);margin-top:2px;overflow-wrap:anywhere}
+  .bt-name a{white-space:nowrap}
+  .bt-amt{font:13px ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+  .bt-amt b{font-weight:600}
+  .bt-unit{display:block;font-size:11.5px;color:var(--dim)}
+  .bt-ref{display:none}
+  .bt-usd{white-space:nowrap;font:700 14.5px ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums}
+  .bt-dim{font-size:12px;color:var(--dim)}
+  .bt-lbl{display:none}
+  .bt-cap{display:flex;flex-direction:column;gap:1px;margin-top:4px;font-size:12px;color:var(--dim)}
+  .bt-cap b{color:var(--txt);font:500 12px ui-monospace,SFMono-Regular,Consolas,monospace}
+  .bt-cap b.none{color:var(--amber2);font-family:inherit}
+  .bt-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+  .bt-acts button{padding:2px 10px;font-size:11.5px;white-space:nowrap}
+  .bt-x{grid-column:1/-1}
+  .bt-wide{padding:10px 2px;border-bottom:1px solid var(--line)}
+  .bt-wide.fold{cursor:pointer}
+  @media (max-width:640px){
+    .bt-hd{display:none}
+    .bt-row,.bt-row:last-child{grid-template-columns:1fr auto;grid-template-areas:"a u" "t t" "l o" "x x";gap:8px 12px;padding:14px;margin-bottom:12px;
+      border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.025)}
+    .bt-a{grid-area:a} .bt-u{grid-area:u} .bt-t{grid-area:t} .bt-l{grid-area:l} .bt-o{grid-area:o;text-align:right}
+    .bt-t{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:2px 0 10px;border-bottom:1px solid var(--line)}
+    .bt-t .bt-lbl{margin:0}
+    .bt-lbl{display:block;font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
+    .bt-wide{border:0;padding:6px 2px 12px}
+    .bt-unit{display:inline;font-size:inherit} .bt-ref{display:inline;font-weight:400;color:var(--dim)}
+  }
+  .bal-total-split{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 16px;margin-top:4px;font-size:12.5px;color:var(--dim)}
+  .bal-total-split b{color:var(--txt);font-weight:600}
+  .bal-total-split span>span{white-space:nowrap}
   .move-dirs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
   .move-dirs button{text-align:left;padding:10px 12px}
   .move-dirs .md-t{font-weight:700;font-size:13px}
@@ -1830,17 +1856,12 @@ function oampComposeLegend(a){
 // custody qualifier, terms link, and a Send affordance (WW-5). Legacy rows are read-only.
 function oampAssetRow(list, id, atoms, opts){
   opts=opts||{}; const a=oampAssets[id]||{}; const meta=assetMeta('oamp:'+id);
-  const r=el('div','asset-row arow2');
-  const head=el('div','arow-head');
-  head.appendChild(el('span','tk', meta.ticker));
-  const mid=el('div','grow'); const sub=el('div');
+  const cellA=el('div'), head=el('div','bt-tk');
+  head.appendChild(el('span','tk', meta.ticker)); cellA.appendChild(head);
+  const sub=el('div','bt-name');
   sub.appendChild(txLink('/explorer/asset/'+id, id.slice(0,10)+'…'+id.slice(-6)));
   if(opts.legacy){ const w=el('span','sub'); w.textContent=' · legacy identity (read-only)'; w.style.cssText='color:var(--amber2);margin-left:6px'; sub.appendChild(w); }
-  mid.appendChild(sub); head.appendChild(mid);
-  const amt=el('span','amt');
-  amt.appendChild(el('div',null, fmtAtoms(atoms, meta.precision)));
-  const ref=refValueStr('oamp:'+id, atoms); if(ref) amt.appendChild(el('div','sub', ref));
-  head.appendChild(amt); r.appendChild(head);
+  cellA.appendChild(sub);
   const det=el('div','ln-meta');
   det.appendChild(el('div','sub', oampComposeLegend(a)));
   det.appendChild(el('div','sub','Self-custodial subject to disclosed clawback and co-sign powers.'));
@@ -1849,7 +1870,9 @@ function oampAssetRow(list, id, atoms, opts){
     tl.appendChild(txLink('/explorer/asset/'+id, th.slice(0,16)+'…')); det.appendChild(tl); }
   if(opts.legacy){ det.appendChild(el('div','sub','Held by this wallet’s legacy m/3/0 identity. Not spendable from here; moving it to the m/5/0 identity needs the platform.')); }
   else { const acts=el('div','bal-acts'); const sb=el('button','ghost','Send'); sb.onclick=()=>oampStartSend(id); acts.appendChild(sb); det.appendChild(acts); }
-  r.appendChild(det); list.appendChild(r);
+  // Restricted assets live on the enclave ledger: no Lightning.
+  list.appendChild(balRow({ a: cellA, onchain: balAmt(fmtAtoms(atoms, meta.precision)), ln: el('div','bt-dim','—'),
+    total: balTotalCell(fmtAtoms(atoms, meta.precision), meta.ticker), value: balValueCell('oamp:'+id, atoms), extra: det }));
 }
 // Open the Send tab with this restricted asset preselected on the first recipient row, and
 // optionally a recipient AID + amount (atoms) already filled in. Shared by the row-level Send
@@ -3906,6 +3929,17 @@ function lnSpendableFor(kind /* 'BTC' | assetHex */){
   }
   return { units, channels: n };
 }
+// The wallet's share of its own channels for a leg, the reserve included: its Lightning balance. An
+// LSP that predates balance_units reports only what can be sent, which stands in for it.
+function lnBalanceFor(kind /* 'BTC' | assetHex */){
+  let units=0;
+  for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
+    if(!c.node_key || !String(c.state||'').startsWith('CHANNELD')) continue;
+    const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
+    if(kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase())) units += Number(c.balance_units ?? c.spendable_units ?? 0);
+  }
+  return BigInt(Math.round(units));
+}
 // Whether one of the wallet's own channels for a leg is funded but not yet confirmed.
 function lnOpeningFor(kind /* 'BTC' | assetHex */){
   for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
@@ -5224,6 +5258,36 @@ function availableFor(hex){ if(hex==='BTC') return (typeof btcBalance!=='undefin
   const b=balObj(); return b[hex]||0n; }
 // Re-run every recipient row's "Available:" line after a sync changes balances.
 function refreshAllAvail(){ const box=document.getElementById('recipients'); if(!box) return; for(const r of box.children){ if(typeof r._refreshAvail==='function'){ try{ r._refreshAvail(); }catch{} } } }
+// One balance row: the same five cells for every asset. On a desktop they read as a table under one
+// header (balHeader), the value in the right-hand column; on a phone as one card per asset, its value
+// beside its name, the total under it, then Lightning on the left and on-chain on the right.
+function balRow({ a, onchain, ln, total, value, extra, cls }){
+  const r=el('div','bt-row'+(cls?' '+cls:''));
+  const cell=(c, label, node)=>{ const d=el('div','bt-c '+c); if(label) d.appendChild(el('div','bt-lbl', label)); if(node) d.appendChild(node); r.appendChild(d); };
+  cell('bt-a', null, a); cell('bt-o', 'On-chain', onchain); cell('bt-l', 'Lightning', ln); cell('bt-t', 'Total', total); cell('bt-u', null, value);
+  for(const x of [].concat(extra||[])) if(x){ const d=el('div','bt-x'); d.appendChild(x); r.appendChild(d); }
+  return r;
+}
+function balHeader(){
+  const h=el('div','bt-hd');
+  const ref = priceOf(REF)>0 ? REF : 'USD';
+  for(const [t, c] of [['Asset',''], ['On-chain',''], ['Lightning',''], ['Total','r'], ['Value ('+ref+')','r']]) h.appendChild(el('div', c||null, t));
+  return h;
+}
+function balAmt(text){ return el('div','bt-amt', text); }
+// The ticker and the currency sit under the figure on a desktop (the header names the currency) and
+// beside it on a phone, so a long figure never wraps mid-number.
+function balTotalCell(text, ticker){ const d=el('div','bt-amt'); d.appendChild(el('b',null,text)); d.appendChild(el('span','bt-unit',' '+ticker)); return d; }
+// The value of `atoms` in the reference currency, or a dash when the asset has no price.
+function balValueCell(refKey, atoms){
+  const rv=refKey ? refValue(refKey, atoms) : null, d=el('div','bt-usd');
+  if(!rv){ d.textContent='—'; return d; }
+  d.appendChild(document.createTextNode(fmtRef(rv.v, rv.ref).slice(0, -(rv.ref.length+1))));
+  d.appendChild(el('span','bt-ref',' '+rv.ref));
+  return d;
+}
+// A line across the whole list: the frozen notice, the hidden-assets fold.
+function balWide(node, cls){ const r=el('div','bt-wide'+(cls?' '+cls:'')); r.appendChild(node); return r; }
 function renderBalance(){
   try{ populateFeeAssets(); populateIssueFeeAssets(); fillReissuePick(); }catch{}   // keep the fee and reissue pickers in sync as balances load
   let live = {}; try{ live = balObj(); }catch{}   // wollet.balance() can throw before the first scan
@@ -5241,7 +5305,8 @@ function renderBalance(){
       const left=BigInt(b[o.hex]||0)-BigInt(o.atoms); b[o.hex]=(left>0n?left:0n).toString();
     }
   }
-  const list=$('assetList'); list.innerHTML='';
+  const list=$('assetList'); list.innerHTML=''; list.classList.add('btable');
+  list.appendChild(balHeader());
   // Equal-standing + dual-chain: a headline portfolio total across BTC (parent chain) and
   // every Sequentia asset in the chosen reference currency, then per-asset rows in a uniform
   // order with NOTHING pinned. No asset is privileged; the staking note lives only in the
@@ -5251,93 +5316,73 @@ function renderBalance(){
   // textContent), so build nodes, never HTML strings.
   const lnOn = (()=>{ try { return seqlnState().deployed; } catch { return false; } })();
   const btcFunding = !!(lnLastStatus && lnLastStatus.funding && lnLastStatus.funding.btc);
-  const lnAtomsFor = (kind)=>{ try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } };
-  const lnChansFor = (kind)=>{ try { return lnSpendableFor(kind).channels||0; } catch { return 0; } };
+  const lnAtomsFor = (kind)=>{ try { return lnBalanceFor(kind); } catch { return 0n; } };
+  const lnSendFor = (kind)=>{ try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } };
   const ownChansFor = (kind)=>{ try { return lnOwnChannelsFor(kind)||[]; } catch { return []; } };
 
-  // One consolidated row: a header line (ticker · name · combined total) with a nested,
-  // clearly-labelled Lightning metacard beneath it (the split + move/close actions). movable
-  // = the asset can be moved to Lightning (a producer prices it for fees, uniform across assets
-  // — first-principle #3); leg drives the move/close modals.
+  // One row per asset (balRow): the asset; what is on-chain; what is on Lightning, with what it can
+  // send and receive there and the buttons that move it; the total of both; and its value. movable =
+  // the asset can be moved to Lightning (a producer prices it for fees, the same rule for every
+  // asset); leg drives the move, close and room dialogs.
   const rowFull = ({ticker, refKey, precision, onchainAtoms, kind, nameNode, movable, leg, known, alwaysShow})=>{
     const lnAtoms = lnOn ? lnAtomsFor(kind) : 0n;
-    const chans   = lnOn ? lnChansFor(kind) : 0;
     const own     = lnOn ? ownChansFor(kind) : [];
     // Leaves count in the asset's one figure in both modes; developer mode also splits it.
     const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
-    const totalAtoms = (onchainAtoms||0n) + lnAtoms + leafAtoms;
+    const on = onchainAtoms||0n;
+    const totalAtoms = on + lnAtoms + leafAtoms;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
     if(!alwaysShow && totalAtoms <= 0n) return;
-    const r=el('div','asset-row arow2');
-    // Header line: ticker · name/id · combined total (on-chain + Lightning) + ref value.
-    const head=el('div','arow-head');
+    const amt=(x)=> known ? fmtAtoms(x, precision) : (BigInt(x).toString()+' atoms');
+    const a=el('div');
+    const head=el('div','bt-tk');
     head.appendChild(el('span','tk', ticker));
     const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: verified ✓ / unregistered ⚠
     const sb=supervisionBadge(kind); if(sb) head.appendChild(sb);   // issuer can freeze holders
-    const mid=el('div','grow');
-    if(nameNode){ const nd=el('div'); nd.appendChild(nameNode); mid.appendChild(nd); }
-    head.appendChild(mid);
-    const a=el('span','amt');
-    a.appendChild(el('div',null, known ? fmtAtoms(totalAtoms, precision) : (BigInt(totalAtoms).toString()+' atoms')));
-    const ref = (known && refKey) ? refValueStr(refKey, totalAtoms) : '';
-    if(ref) a.appendChild(el('div','sub', ref));
-    head.appendChild(a);
-    r.appendChild(head);
-    // Developer mode: every rail of the asset on one line (leaves.js holds the leaf figure).
-    if(kind!=='BTC' && leavesApi && devMode() && known){
-      r.appendChild(el('div','leaf-split', fmtAtoms(onchainAtoms||0n, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning'));
-    }
-    // Where the asset is, under its total. Held in both places: a sub-row, indented and hung off
-    // the asset by a rule, with on-chain on the left, Lightning on the right and one Move ⇄
-    // between them. Held in one place only: no split, just the button that moves it to the other.
-    if(lnOn && leg){
-      const on=(onchainAtoms||0n);
+    a.appendChild(head);
+    if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
+    // Lightning: the balance, what it can send and receive, and the buttons that move the asset.
+    // Room to receive is "not yet" until the service opens a channel toward the wallet.
+    const l=el('div');
+    if(!lnOn || !leg) l.appendChild(el('div','bt-dim','—'));
+    else {
       const opening = lnOpeningFor(kind);
+      const has = own.length > 0 || lnAtoms > 0n || opening;
       const toLn = movable && on > 0n, toChain = own.length > 0 && lnAtoms > 0n && !opening;
-      const button=(label, title, go)=>{
-        const b=el('button','ghost mv', label); b.title=title; b.onclick=go; return b;
-      };
-      if(on > 0n && lnAtoms > 0n){   // in both places: a channel that only receives holds nothing of yours
-        const rails=el('div','rails');
-        const side=(cls, label, atoms, note)=>{
-          const d=el('div','rail'+(cls?' '+cls:''));
-          d.appendChild(el('div','rl', label));
-          d.appendChild(el('div','ra', fmtAtoms(atoms, precision)));
-          if(note) d.appendChild(el('div','rs', note));
-          return d;
-        };
-        rails.appendChild(side('', 'On-chain', on, ''));
+      l.appendChild(has ? balAmt(amt(lnAtoms)) : el('div','bt-dim','No channel'));
+      if(opening) l.appendChild(el('div','bt-dim','channel opening'));
+      if(has){
+        const cap=el('div','bt-cap');
+        const line=(k, v, cls)=>{ const d=el('div'); d.appendChild(el('span',null,k+' ')); d.appendChild(el('b',cls||null,v)); cap.appendChild(d); };
+        line('can send', amt(lnSendFor(kind)));
+        const room=lnReceivableFor(kind);
+        line('can receive', room>0n ? amt(room) : 'not yet', room>0n ? null : 'none');
+        l.appendChild(cap);
+      }
+      const acts=el('div','bt-acts');
+      const button=(label, title, go)=>{ const b=el('button','ghost mv', label); b.title=title; b.onclick=go; acts.appendChild(b); return b; };
+      if(on > 0n && lnAtoms > 0n){   // in both places: one button moves either way
         const mv=button('Move ⇄', 'Move '+ticker+' between on-chain and Lightning',
           ()=>moveRailsDialog({ leg, own, ticker, precision, onchain: on, ln: lnAtoms, toLn, toChain }));
         mv.disabled = !(toLn || toChain);
-        rails.appendChild(mv);
-        rails.appendChild(side('right', 'Lightning', lnAtoms, opening ? 'channel opening' : ''));
-        r.appendChild(rails);
-      } else if(toLn){
-        const one=el('div','rail-one');
-        if(opening) one.appendChild(el('span','rs', 'Lightning channel opening'));
-        one.appendChild(button('Move to Lightning', 'Move '+ticker+' into a Lightning channel', ()=>moveToLightningDialog(leg)));
-        r.appendChild(one);
-      } else if(lnAtoms > 0n || opening){
-        const one=el('div','rail-one');
-        if(opening) one.appendChild(el('span','rs', 'Lightning channel opening'));
-        else one.appendChild(el('span','rs', 'on Lightning'));
-        if(toChain) one.appendChild(button('Move on-chain', 'Move '+ticker+' out of Lightning, on chain', ()=>closeToChainDialog(leg, own)));
-        r.appendChild(one);
-      }
-      // Room to receive over Lightning: how much the asset can arrive with, and a way to buy more.
-      // Before the asset is on Lightning there is no line: Move to Lightning asks for room itself.
+      } else if(toLn) button('Move to Lightning', 'Move '+ticker+' into a Lightning channel', ()=>moveToLightningDialog(leg));
+      else if(toChain) button('Move on-chain', 'Move '+ticker+' out of Lightning, on chain', ()=>closeToChainDialog(leg, own));
+      // Room to receive over Lightning. Before the asset is on Lightning there is no button: Move to
+      // Lightning asks for room itself.
       if(leg.chain==='seq' && movable && (own.length > 0 || opening)){
         const room=lnReceivableFor(kind);
-        const line=el('div','rail-recv');
-        line.appendChild(el('span',null, room>0n ? 'Can receive '+fmtAtoms(room, precision)+' '+ticker+' over Lightning' : 'Cannot receive '+ticker+' over Lightning yet'));
-        line.appendChild(button(room>0n ? 'More room to receive' : 'Add room to receive', 'Have the service open a channel to you, so '+ticker+' can arrive over Lightning', ()=>lnReceiveRoomDialog(leg)));
-        r.appendChild(line);
+        button(room>0n ? 'More room to receive' : 'Add room to receive', 'Have the service open a channel to you, so '+ticker+' can arrive over Lightning', ()=>lnReceiveRoomDialog(leg));
       }
+      if(acts.children.length) l.appendChild(acts);
     }
-    list.appendChild(r);
+    // Developer mode: every rail of the asset on one line (leaves.js holds the leaf figure).
+    const extra = (kind!=='BTC' && leavesApi && devMode() && known)
+      ? el('div','leaf-split', fmtAtoms(on, precision)+' on-chain · '+fmtAtoms(leafAtoms, precision)+' in leaves · '+fmtAtoms(lnAtoms, precision)+' on Lightning')
+      : null;
+    list.appendChild(balRow({ a, onchain: balAmt(amt(on)), ln: l, total: balTotalCell(amt(totalAtoms), ticker),
+      value: balValueCell(known ? refKey : null, totalAtoms), extra }));
   };
 
   // The Sequentia assets to show: everything held on-chain PLUS anything that still has a live
@@ -5356,11 +5401,12 @@ function renderBalance(){
 
   // Headline total across BTC + every asset, every rail (on-chain, Lightning, leaves), in
   // the reference currency, in both modes. No asset comes first.
-  let total=0, totalRef=null, anyPriced=false, allPriced=true;
-  const addToTotal=(refKey, atoms)=>{ const rv=refValue(refKey, atoms); if(rv){ total+=rv.v; totalRef=rv.ref; anyPriced=true; } else if((atoms||0n)>0n) allPriced=false; };
-  addToTotal('BTC', btcBal + (lnOn?lnAtomsFor('BTC'):0n));
+  let total=0, totalLn=0, totalRef=null, anyPriced=false, allPriced=true;
+  const addToTotal=(refKey, atoms, lnPart)=>{ const rv=refValue(refKey, atoms); if(rv){ total+=rv.v; totalRef=rv.ref; anyPriced=true;
+      const lv=lnPart>0n ? refValue(refKey, lnPart) : null; if(lv) totalLn+=lv.v; } else if((atoms||0n)>0n) allPriced=false; };
+  { const ln=lnOn?lnAtomsFor('BTC'):0n; addToTotal('BTC', btcBal + ln, ln); }
   const leafFor = (h)=> leavesApi ? leavesApi.leafAtoms(h) : 0n;
-  for(const h of seqKeys) addToTotal(h, BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h));
+  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h), ln); }
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
   // (WW-4 / spec 1.5(a)). Keyed 'oamp:'+id so assetMeta/priceTicker resolve the real ticker+precision;
   // an unpriced restricted asset falls into the allPriced=false path like any other unpriced asset.
@@ -5369,6 +5415,20 @@ function renderBalance(){
   if(card){ card.innerHTML='';
     card.appendChild(el('div','bal-total-label','Total balance'));
     card.appendChild(el('div','bal-total-amt', anyPriced ? fmtRef(total, totalRef||REF) : 'unavailable'));
+    // The same total in bitcoin, and how much of it is on Lightning.
+    if(anyPriced){
+      const ref=totalRef||REF, oneBtc=refValue('BTC', 100000000n);
+      const line=el('div','bal-total-split');
+      if(ref!=='BTC' && oneBtc && oneBtc.ref===ref && oneBtc.v>0)
+        line.appendChild(el('span','bal-total-btc', '≈ '+(total/oneBtc.v).toLocaleString(undefined,{maximumFractionDigits:8})+' BTC'));
+      if(totalLn>0){
+        const sp=el('span','bal-total-rails');
+        const part=(k, v)=>{ const x=el('span'); x.appendChild(document.createTextNode(k+' ')); x.appendChild(el('b',null, fmtRef(v, ref))); return x; };
+        sp.appendChild(part('On-chain', total-totalLn)); sp.appendChild(document.createTextNode(' · ')); sp.appendChild(part('Lightning', totalLn));
+        line.appendChild(sp);
+      }
+      if(line.children.length) card.appendChild(line);
+    }
     if(anyPriced && !allPriced) card.appendChild(el('div','bal-total-note','priced assets only'));
     else if(refUnpriced()) card.appendChild(el('div','bal-total-note', REF+' has no live price; shown in USD'));
     // P5.4b — never present a stale-rate total as fresh: flag it honestly right under the headline.
@@ -5436,12 +5496,10 @@ function renderBalance(){
     .sort((x,y)=> (oampAssets[x]?.ticker||x).localeCompare(oampAssets[y]?.ticker||y));
   // Frozen banner (spec 1.5(c)): the freeze is GLOBAL per user across every restricted asset.
   if(oampUser && oampUser.frozen && (oids.length || legacyIds.length)){
-    const banner=el('div','asset-row arow2'); const h=el('div','arow-head');
-    h.appendChild(el('span','tk','⚠'));
-    const mid=el('div','grow');
-    mid.appendChild(el('div',null,'OpenAMP account frozen'));
+    const mid=el('div');
+    mid.appendChild(el('div',null,'⚠ OpenAMP account frozen'));
     mid.appendChild(el('div','sub','The policy server has frozen this account across every restricted asset. Transfers are refused until the freeze is lifted.'));
-    h.appendChild(mid); banner.appendChild(h); list.appendChild(banner);
+    list.appendChild(balWide(mid, 'warnrow'));
   }
   for(const id of oids) oampAssetRow(list, id, BigInt(oampBalances[id].atoms||0n), {});
   for(const id of legacyIds) oampAssetRow(list, id, BigInt(oampLegacyBalances[id].atoms||0n), {legacy:true});
@@ -5449,23 +5507,19 @@ function renderBalance(){
   // place a hidden balance is listed, and the way back (Unhide). These balances were already
   // counted into the headline total above: hiding never changes accounting.
   if(hidKeys.length){
-    const hdr=el('div','asset-row arow2'); hdr.style.cursor='pointer';
-    const hh=el('div','arow-head');
-    hh.appendChild(el('span','tk', _hiddenOpen ? '▾' : '▸'));
-    const hm=el('div','grow'); hm.appendChild(el('div','sub','Hidden assets ('+hidKeys.length+')'));
-    hh.appendChild(hm); hdr.appendChild(hh);
+    const hdr=balWide(el('div','sub', (_hiddenOpen ? '▾ ' : '▸ ')+'Hidden assets ('+hidKeys.length+')'), 'fold');
     hdr.title = _hiddenOpen ? 'Collapse the hidden assets' : 'Show the hidden assets';
     hdr.onclick=()=>{ _hiddenOpen=!_hiddenOpen; renderBalance(); };
     list.appendChild(hdr);
     if(_hiddenOpen){
       for(const h of hidKeys){
         const meta=assetMeta(h), known=precisionKnown(h);
-        const r=el('div','asset-row arow2'); r.style.opacity='.75';
-        const head=el('div','arow-head');
+        const a=el('div'), head=el('div','bt-tk');
         head.appendChild(el('span','tk', meta.ticker));
         const tb=trustBadge(h); if(tb) head.appendChild(tb);
         const sb=supervisionBadge(h); if(sb) head.appendChild(sb);
-        const mid=el('div','grow'); const sub=el('div');
+        a.appendChild(head);
+        const sub=el('div','bt-name');
         sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
         if(!known){
           // Auto-folded unlabeled dust: keep it actionable — label it (ticker/name/precision)
@@ -5479,14 +5533,11 @@ function renderBalance(){
           const ub=el('button','ghost','Unhide'); ub.title='Show this asset in the balance list and the default asset pickers again.';
           ub.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px'; ub.onclick=(ev)=>{ ev.stopPropagation(); setAssetHidden(h,false); renderBalance(); }; sub.appendChild(ub);
         }
-        mid.appendChild(sub); head.appendChild(mid);
-        const totalAtoms=totalOf(h);
-        const a=el('span','amt');
-        a.appendChild(el('div',null, known ? fmtAtoms(totalAtoms, meta.precision) : (totalAtoms.toString()+' atoms')));
-        const ref = known ? refValueStr(h, totalAtoms) : '';
-        if(ref) a.appendChild(el('div','sub', ref));
-        head.appendChild(a);
-        r.appendChild(head); list.appendChild(r);
+        a.appendChild(sub);
+        const amt=(x)=> known ? fmtAtoms(x, meta.precision) : (BigInt(x).toString()+' atoms');
+        const on=BigInt(b[h]||0n), ln=lnOn?lnAtomsFor(h):0n, totalAtoms=totalOf(h);
+        list.appendChild(balRow({ a, onchain: balAmt(amt(on)), ln: ln>0n ? balAmt(amt(ln)) : el('div','bt-dim','—'),
+          total: balTotalCell(amt(totalAtoms), meta.ticker), value: balValueCell(known ? h : null, totalAtoms), cls: 'bt-hidden' }));
       }
     }
   }

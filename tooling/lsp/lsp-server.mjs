@@ -699,6 +699,9 @@ async function nodeStatus(rpc, leg) {
       .map((c) => {
         const asset = c.channel_asset || c.asset || 'policy';
         const spendable = Math.round((c.spendable_msat ?? c.to_us_msat ?? 0) / 1000);
+        // What is this side's in the channel, the reserve included: the balance. spendable is what
+        // can be sent now, which the reserve and the commitment fee keep below it.
+        const balance = Math.round((c.to_us_msat ?? c.spendable_msat ?? 0) / 1000);
         const receivable = Math.round((c.receivable_msat
           ?? ((c.total_msat ?? 0) - (c.to_us_msat ?? 0))) / 1000);
         return {
@@ -706,7 +709,7 @@ async function nodeStatus(rpc, leg) {
           peer_id: (c.peer_id || '').slice(0, 16),
           short_channel_id: c.short_channel_id || null,
           state: c.state, asset, asset_label: assetLabel(asset),
-          spendable_units: spendable, receivable_units: receivable,
+          spendable_units: spendable, receivable_units: receivable, balance_units: balance,
           // A CHANNEL WITH NO OWNING DAEMON CANNOT MOVE AN HTLC, WHATEVER ITS STATE SAYS.
           //
           // CLN reports CHANNELD_NORMAL and a full spendable balance for a channel whose channeld has
