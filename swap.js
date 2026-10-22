@@ -1162,6 +1162,25 @@ async function bookSignals(base, quote){
   const mid = (bestAsk != null && bestBid != null) ? (bestAsk + bestBid) / 2 : (bestAsk != null ? bestAsk : bestBid);
   return { count, baseDepth, bestAsk, bestBid, spread, mid };
 }
+// The last day of a pair's candles (canonical frame, t in unix seconds): high, low, volume and change
+// over the candles of the last 24 hours. When nothing traded in that window there are no 24-hour
+// figures (inDay false): the caller says when the last trade was, rather than present an old candle
+// as the day's.
+function dayStats(cN, nowSec){
+  const win = cN.filter(c => (c.t || 0) >= nowSec - 86400);
+  const lastc = cN[cN.length - 1] || null;
+  if (!win.length) return { inDay: false, last: lastc ? lastc.c : null, lastT: lastc ? lastc.t : null, hi: null, lo: null, vol: 0n, changePct: null, pts: [] };
+  let hi = -Infinity, lo = Infinity, vol = 0n;
+  for (const c of win){ if (c.h > hi) hi = c.h; if (c.l < lo) lo = c.l; vol += big(String(c.v || 0)); }
+  const first = win[0], end = win[win.length - 1];
+  const changePct = (first && first.o > 0) ? ((end.c - first.o) / first.o * 100) : 0;
+  return { inDay: true, last: end.c, lastT: end.t, hi: hi > -Infinity ? hi : null, lo: lo < Infinity ? lo : null, vol, changePct, pts: win.map(c => c.c).filter(isFinite) };
+}
+// How long ago a unix time was, in the largest whole unit: "3 days", "5 hours", "12 minutes".
+function agoText(tSec, nowSec){
+  const d = Math.max(0, nowSec - (tSec || 0)), u = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+  return d >= 86400 ? u(Math.floor(d / 86400), 'day') : d >= 3600 ? u(Math.floor(d / 3600), 'hour') : u(Math.max(1, Math.floor(d / 60)), 'minute');
+}
 // 24h last / change% / volume for a pair, from /candles — the SAME one-canonical-direction handling as
 // renderPairStats (query the pair's direction, else the inverse and invert each candle).
 async function candleSignals(base, quote){
@@ -1175,13 +1194,10 @@ async function candleSignals(base, quote){
   if (!candles.length){ const alt = await fetchDir(quote, base); if (alt.length){ candles = alt; inv = true; } }
   if (!candles.length) return null;
   const ivn = (x) => { const n = Number(x); return n > 0 ? 1 / n : 0; };
-  const cN = candles.map(c => inv ? { t: c.t, o: ivn(c.o), c: ivn(c.c), v: c.v } : { t: c.t, o: Number(c.o), c: Number(c.c), v: c.v });
-  const cutoff = Math.floor(Date.now() / 1000) - 86400;
-  const win = cN.filter(c => (c.t || 0) >= cutoff), use = win.length ? win : cN.slice(-1);
-  let vol = 0n; for (const c of use) vol += big(String(c.v || 0));
-  const first = use[0], last = use[use.length - 1];
-  const changePct = (first && first.o > 0) ? ((last.c - first.o) / first.o * 100) : null;
-  return { last: last.c, changePct, vol };
+  const cN = candles.map(c => inv ? { t: c.t, o: ivn(c.o), c: ivn(c.c), h: ivn(c.l), l: ivn(c.h), v: c.v } : { t: c.t, o: Number(c.o), c: Number(c.c), h: Number(c.h), l: Number(c.l), v: c.v });
+  // No trade in the last day: the last price stands, with no 24-hour change or volume.
+  const d = dayStats(cN, Math.floor(Date.now() / 1000));
+  return { last: d.last, changePct: d.changePct, vol: d.vol };
 }
 function _mkRowId(p){ return 'mk_' + (p.base + '_' + p.quote).replace(/[^a-zA-Z0-9]/g, ''); }
 function patchMarketRow(id, p, bk, cd){
@@ -9962,15 +9978,17 @@ async function renderPairStats(){
   const cN = candles.map(c => inv
     ? { t: c.t, o: iv(c.o), c: iv(c.c), h: iv(c.l), l: iv(c.h), v: c.v }
     : { t: c.t, o: Number(c.o), c: Number(c.c), h: Number(c.h), l: Number(c.l), v: c.v });
-  const cutoff = Math.floor(Date.now() / 1000) - 86400;
-  const win = cN.filter(c => (c.t || 0) >= cutoff);
-  const use = win.length ? win : cN.slice(-1);   // nothing in 24h → show the latest as a flat point
-  let hi = -Infinity, lo = Infinity, vol = 0n;
-  for (const c of use){ if (c.h > hi) hi = c.h; if (c.l < lo) lo = c.l; vol += big(String(c.v || 0)); }
-  const first = use[0], lastc = use[use.length - 1];
-  const changePct = (first && first.o > 0) ? ((lastc.c - first.o) / first.o * 100) : 0;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const d = dayStats(cN, nowSec);
   const bm = C.assetMeta(sizeAsset);
-  const pts = use.map(c => c.c).filter(isFinite);
+  // Nothing traded in the last day: say when the last trade was, at what price, instead of
+  // presenting that old candle as the day's change, range and volume.
+  if (!d.inDay){
+    host.innerHTML = '<div style="padding:4px 2px;font-size:12px" class="sub">No trades in the last 24 hours · last trade '
+      + '<span class="mono">' + esc(trim(d.last)) + '</span>, ' + esc(agoText(d.lastT, nowSec)) + ' ago</div>';
+    return;
+  }
+  const { hi, lo, vol, changePct, pts } = d;
   const up = changePct >= 0, col = up ? '#3ddc84' : 'var(--amber2)';
   let spark = '';
   if (pts.length >= 2){
@@ -9982,7 +10000,7 @@ async function renderPairStats(){
   host.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:4px 2px;font-size:12px" class="sub">'
     + spark
     + '<span>24h <b style="color:' + col + '">' + chg + '</b></span>'
-    + (hi > -Infinity ? '<span>H <span class="mono">' + trim(hi) + '</span></span><span>L <span class="mono">' + trim(lo) + '</span></span>' : '')
+    + (hi != null ? '<span>H <span class="mono">' + trim(hi) + '</span></span><span>L <span class="mono">' + trim(lo) + '</span></span>' : '')
     + '<span>vol <span class="mono">' + esc(C.fmtAtoms(vol, bm.precision || 0)) + '</span> ' + esc(bm.ticker) + '</span>'
     + '</div>';
 }
@@ -10650,7 +10668,7 @@ export const __test__ = { crossableDepthAtoms, ratioRecvPerPay, stripBip32, feeA
   // F1/F2 — asset picker default-vs-search visibility, paste-an-id tradability, and the
   // hidden-asset store, exposed so the REAL candidate construction + filtering are pinned
   // headlessly (no popover DOM needed).
-  pickerCandidates, pickerMatches, pickerGroups, metaOf, notePasted, pastedIds: () => PASTED,
+  pickerCandidates, pickerMatches, pickerGroups, dayStats, agoText, metaOf, notePasted, pastedIds: () => PASTED,
   hiddenAssets, setAssetHidden, isAssetHidden, partitionHidden, ensureDefaults,
   acceptedFee, defaultFeeAsset,
   // Take/Post + rail-combo helpers, for headless verification of the composer's gating.
