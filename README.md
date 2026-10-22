@@ -276,6 +276,24 @@ nothing else; developer mode shows a "Paying through the next round" card while 
 release costs the refresh fee the asset's schedule asks then (none in the leaf's free window).
 User mode shows none of this: a claim taken up is counted in its asset's one figure.
 
+#### Supervised assets
+
+An asset whose issuer can freeze holdings by a rule of the chain (on the testnet, USDC.e and
+EURC.e) is held, received and paid like any other, and counted in its one figure. The library
+holds a coin of such an asset only as a landing-1 leaf, whose way out of the tree pays one key of
+the wallet's own, its landing key (the first on-chain key of the phrase, `landing_address` in the
+leaf wallet's `info`). A board, a refresh, a payment received (the receive request names the
+landing) and the change of a payment sent all land there; the page computes none of it.
+
+When the issuer freezes that key, or pauses the asset, the frozen part shows under the asset's
+figure in either mode, as one sentence ("… is frozen by its issuer: it can't be sent until the
+issuer lifts the freeze"); it is never hidden. A payment of it is refused, in user mode in the
+same plain words. Developer mode shows each leaf's landing and whether it is frozen, with the
+library's note; such a leaf leaves the tree only into the landing key (Exit drill, or sync before
+its exit date), where the coin stays frozen on the chain until the issuer lifts the freeze, and is
+then spent like any coin. The operator serves no take, no resting order and no Lightning payment
+in a supervised asset, so the user composer offers such an asset only through an in-tree swap.
+
 Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
 library itself (the same code as the operator's command-line wallet), compiled to WebAssembly
 and run in a dedicated worker (`leaves/`), so nothing about a leaf is computed by the page.

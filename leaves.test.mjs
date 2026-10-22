@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -305,4 +305,44 @@ test('a release that never frees its coins gives up in plain words, having paid 
   await assert.rejects(api.pay('send', { request: 'r' }), /did not free the coins this payment needs in time; nothing was paid/)
   assert.equal(sends, 1)
   api.stop()
+})
+
+test('supervised assets are the ones the operator serves with a landing allowance', () => {
+  const info = { server_info: { assets: [{ asset: X }, { asset: Y, supervised: { landing_allowance: '100' } }] } }
+  assert.deepEqual(supervisedAssets(info), [Y])
+  assert.deepEqual(supervisedAssets(null), [])
+})
+
+test('what is frozen counts frozen and paused leaves and frozen on-chain coins, nothing else', () => {
+  const coins = [
+    { leaf_id: 'a', asset: Y, value: '1000', state: 'live', frozen: { frozen: true, paused: false } },
+    { leaf_id: 'b', asset: Y, value: '20', state: 'live', frozen: { frozen: false, paused: true } },
+    { leaf_id: 'c', asset: Y, value: '300', state: 'live', frozen: { frozen: false, paused: false } },
+    { leaf_id: 'd', asset: Y, value: '4000', state: 'spent', frozen: { frozen: true } },
+    { leaf_id: 'e', asset: X, value: '5', state: 'live' },
+  ]
+  const m = frozenAtoms(coins, { sequentia_onchain_frozen: { [Y]: '700' } })
+  assert.equal(m.get(Y), 1720n)
+  assert.equal(m.get(X), undefined)
+  assert.equal(frozenSentence('17.2', 'USDC.e'), "17.2 USDC.e is frozen by its issuer: it can't be sent until the issuer lifts the freeze.")
+})
+
+test('user mode says a frozen refusal plainly, and leaves every other refusal as it is', () => {
+  const f = plainRefusal(new LeafError({ kind: 'server_refused', code: 'frozen', status: 409, message: 'the server refused cosign_transfer (409 frozen): …' }))
+  assert.equal(f.message, 'This asset is frozen by its issuer for this wallet: nothing was sent.')
+  const g = plainRefusal(new LeafError({ kind: 'refused', message: 'refused: the issuer has frozen this coin\'s landing' }))
+  assert.match(g.message, /frozen by its issuer/)
+  const o = new LeafError({ kind: 'refused', message: 'refused: no' })
+  assert.equal(plainRefusal(o), o)
+})
+
+test('a pair with a supervised asset keeps only the in-tree swap', () => {
+  const pairs = { chains: { g: { pairs: [
+    { pay: X, receive: Y, sources: ['leaf-maker', 'covenant-round', 'leaf-resting'] },
+    { pay: 'BTC', receive: Y, sources: ['btc-gateway'] },
+    { pay: X, receive: 'BTC', sources: ['btc-gateway'] },
+  ] } } }
+  const s = servedPairs(pairs, [Y])
+  assert.deepEqual(s.chains.g.pairs.map((p) => p.sources), [['leaf-maker'], [], ['btc-gateway']])
+  assert.equal(servedPairs(pairs, []), pairs)
 })
