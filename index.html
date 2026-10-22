@@ -4689,6 +4689,54 @@ function refreshLnSendReceive(){
   if (rc) rc.classList.toggle('hide', !on);
   if (on){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
 }
+// The one step that lets an asset be paid or received over Lightning, when the wallet can take it
+// now: Move to Lightning (coins on-chain and no channel yet; the move asks for room to receive in
+// the same step), or Add room to receive (a Sequentia asset with a channel and no room). The same
+// buttons the asset's row on Balance offers, in every mode. null when there is no such step.
+function lnStepFor(hex, { receive = false } = {}){
+  let lnOn = false; try { lnOn = seqlnState().deployed; } catch {}
+  if(!lnOn || !lnLastStatus) return null;
+  if(hex==='BTC'){
+    // The service sells no room in BTC; paying needs BTC moved into a channel.
+    const funding = !!(lnLastStatus.funding && lnLastStatus.funding.btc);
+    if(receive || !funding || !(btcBalance > 0n) || lnOnLightning('BTC')) return null;
+    return { label:'Move to Lightning', go:()=>moveToLightningDialog({ kind:'BTC', ticker:'BTC', precision:8, onchain:btcBalance, chain:'btc', asset:null }) };
+  }
+  const priced = !!(feeRateEntry(hex) && feeRateEntry(hex).rate > 0);
+  if(!priced) return null;
+  if(lnOnLightning(hex)) return receive ? { label:'Add room to receive', go:()=>lnReceiveRoomDialog(lnLegFor(hex)) } : null;
+  return BigInt(balObj()[hex]||0) > 0n ? { label:'Move to Lightning', go:()=>moveToLightningDialog(lnLegFor(hex)) } : null;
+}
+// One sentence that says what to do, and the button that does it, written into a status box.
+function lnSayStep(box, text, step){
+  box.innerHTML=''; box.appendChild(document.createTextNode(text));
+  if(!step) return;
+  box.appendChild(document.createTextNode(' '));
+  const b=el('button','ghost',step.label); b.style.cssText='padding:2px 10px;font-size:12px'; b.onclick=step.go; box.appendChild(b);
+}
+// Whether the wallet's own channels can pay an invoice in an asset: null when they can (or when
+// the Lightning status is not known yet, so nothing is refused on a guess), otherwise the sentence
+// and the step. A channel still opening is said as such.
+function lnPayShortfall(hex, bolt11){
+  if(!lnLastStatus) return null;
+  const t=assetMeta(hex).ticker, prec=hex==='BTC' ? 8 : assetMeta(hex).precision;
+  const can=BigInt(Math.floor(Number(lnSpendableFor(hex).units||0)));
+  const d=decodeBolt11(bolt11), msat=d && d.ok && d.amountMsat!=null ? BigInt(d.amountMsat) : null;
+  const want=msat!=null ? (msat+999n)/1000n : null;
+  if(can > 0n && (want==null || want <= can)) return null;
+  if(lnOpeningFor(hex)) return { text:'Your '+t+' on Lightning is ready to pay in about a minute. Pay the invoice then.', step:null };
+  if(can > 0n) return { text:'You can pay up to '+fmtAtoms(can, prec)+' '+t+' over Lightning now; this invoice asks for '+fmtAtoms(want, prec)+' '+t+'.', step:null };
+  const step=lnStepFor(hex);
+  return { text: step ? 'You have no '+t+' on Lightning to pay this from. Move some '+t+' to Lightning first; it takes about two minutes.'
+                      : 'You have no '+t+' on Lightning to pay this from.', step };
+}
+// What to do when an asset cannot be received over Lightning now (no room, none opening).
+function lnRecvAdvice(hex){
+  const t=assetMeta(hex).ticker, step=lnStepFor(hex, { receive:true });
+  if(step && step.label==='Move to Lightning') return { text:'To receive '+t+' over Lightning, move some '+t+' to Lightning first; you choose how much you can receive in the same step.', step };
+  if(step) return { text:'To receive '+t+' over Lightning, add room to receive first; it is ready in about a block.', step };
+  return { text:'You cannot receive '+t+' over Lightning now. Receive it on-chain with your address above.', step:null };
+}
 // How much of the chosen asset can arrive over Lightning, said before an invoice is made for more.
 function lnPaintRecvRoom(){
   const box=$('lnRecvRoom'), sel=$('lnRecvAsset'); if(!box || !sel || !sel.value) return;
@@ -4698,16 +4746,8 @@ function lnPaintRecvRoom(){
   if(soon) lnRecheckRoomSoon(); else _lnRoomRechecks=0;
   if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'+(soon?' More is ready to receive in about a minute.':''); return; }
   if(soon){ box.textContent='Ready to receive '+meta.ticker+' over Lightning in about a minute.'; return; }
-  // User mode offers no room to receive and no Move: the wallet says only where it can receive.
-  if(!devMode()){ box.textContent='You cannot receive '+meta.ticker+' over Lightning now. Receive it on-chain with your address above.'; return; }
-  box.appendChild(document.createTextNode('You cannot receive '+meta.ticker+' over Lightning yet: a channel needs room for it on the other side. '));
-  if(hex==='BTC') return;
-  if(lnOnLightning(hex)){
-    const b=el('button','ghost','Add room to receive'); b.style.cssText='padding:2px 10px;font-size:12px';
-    b.onclick=()=>lnReceiveRoomDialog(lnLegFor(hex)); box.appendChild(b);
-  } else {
-    box.appendChild(document.createTextNode('Move some '+meta.ticker+' to Lightning first, from Balance; you choose the room to receive in the same step.'));
-  }
+  if(hex==='BTC') return;   // BTC room is not sold: the invoice is made, and says itself whether it can be paid
+  const a=lnRecvAdvice(hex); lnSayStep(box, a.text, a.step);
 }
 // The leg a Balance row would hand to the Lightning dialogs, for an asset.
 function lnLegFor(hex){ const m=assetMeta(hex); return { chain:'seq', asset:hex, ticker:m.ticker, precision:m.precision, onchain: BigInt(balObj()[hex]||0) }; }
@@ -4751,17 +4791,12 @@ function initLnSendReceive(){
     if (asset !== 'BTC' && room < BigInt(amt)){
       st.className = 'status err';
       // Room that is still opening is said as such: the invoice is made once it is ready.
-      st.textContent = lnReceiveOpeningFor(asset)
-        ? (room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. More is ready to receive in about a minute: ask for less, or make the invoice then.'
-                     : 'Ready to receive ' + meta.ticker + ' over Lightning in about a minute. Make the invoice then.')
-        : !devMode()
-        ? (room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. Ask for less, or receive on-chain.'
-                     : 'You cannot receive ' + meta.ticker + ' over Lightning now. Receive it on-chain with your address above.')
-        : room > 0n
-        ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning. Add room to receive more, or ask for less.'
-        : (lnOnLightning(asset)
-          ? 'You cannot receive ' + meta.ticker + ' over Lightning yet. Add room to receive first; it takes about a block.'
-          : 'You cannot receive ' + meta.ticker + ' over Lightning yet. Move some ' + meta.ticker + ' to Lightning first, from Balance, and choose the room to receive in the same step.');
+      if (lnReceiveOpeningFor(asset))
+        st.textContent = room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. More is ready to receive in about a minute: ask for less, or make the invoice then.'
+                                   : 'Ready to receive ' + meta.ticker + ' over Lightning in about a minute. Make the invoice then.';
+      // Otherwise one sentence and the step that fixes it: more room, or the move that brings the asset to Lightning.
+      else if (room > 0n){ const step = lnStepFor(asset, { receive: true }); lnSayStep(st, 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. Ask for less' + (step ? ', or add room to receive.' : ', or receive on-chain.'), step); }
+      else { const a = lnRecvAdvice(asset); lnSayStep(st, a.text, a.step); }
       lnPaintRecvRoom();
       return;
     }
@@ -4816,6 +4851,15 @@ function initLnSendReceive(){
     const inv = lnInvoiceAsset(bolt11);
     if (inv.error){ st.className = 'status err'; st.textContent = inv.error; return; }
     if (inv.want !== asset){ st.className = 'status err'; st.textContent = 'This invoice is paid in ' + inv.name + '; choose ' + inv.name + ' to pay it.'; return; }
+    // Nothing (or too little) of the asset on Lightning: say so at once, with the step that fixes it,
+    // rather than bring the node online and come back ten seconds later with "no route".
+    if (!lnLastStatus){   // just opened: read the balance first, so the check below is not skipped
+      st.className = 'status'; st.innerHTML = '<span class="spin"></span>Reading your Lightning balance…';
+      try { await refreshLnStatus(); } catch {}
+      st.textContent = '';
+    }
+    { const short = lnPayShortfall(asset, bolt11);
+      if (short){ st.className = 'status err'; lnSayStep(st, short.text, short.step); return; } }
     sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Bringing your ' + esc(meta.ticker) + ' node online…';
     try {
       if (!lnApi) throw new Error('open your wallet first');
@@ -4824,7 +4868,14 @@ function initLnSendReceive(){
       const r = await lnApi.nodePay({ node_key, bolt11 });
       if (r && r.paid){ st.className = 'status'; st.textContent = 'Paid ✓' + (r.preimage ? ' · preimage ' + String(r.preimage).slice(0, 16) + '…' : ''); $('lnSendBolt11').value = ''; try { renderLightningBalance(); } catch {} }
       else throw new Error((r && r.error) || 'payment did not complete');
-    } catch(e){ st.className = 'status err'; st.textContent = 'Payment failed: ' + prettyErr(e); }
+    } catch(e){
+      // A payment has no "offer": the no-route case is said in the payer's terms, the rest as prettyErr says it.
+      const raw = String((e && e.message) || e || '');
+      st.className = 'status err';
+      st.textContent = /no route|route not found|failed to find a route|routehints were unusable|not reachable|WIRE_UNKNOWN_NEXT_PEER/i.test(raw)
+        ? 'No Lightning route to the person you are paying had room for this amount, so nothing was sent. Try a smaller amount, or ask them for a new invoice in a minute.'
+        : 'Payment failed: ' + prettyErr(e);
+    }
     finally { sendBtn.disabled = false; }
   };
 }

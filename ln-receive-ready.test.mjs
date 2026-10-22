@@ -61,6 +61,6 @@ test('no invoice is made for more than the ready room', () => {
   const handler = html.slice(i, html.indexOf('if (copyBtn)', i));
   const guard = handler.indexOf('room < BigInt(amt)'), node = handler.indexOf('lnConnectLeg(');
   assert.ok(guard > 0 && node > guard, 'the room check comes before the node is asked for an invoice');
-  assert.match(handler, /lnReceiveOpeningFor\(asset\)\s*\? \(room > 0n \? 'You can receive up to '/);
+  assert.match(handler, /if \(lnReceiveOpeningFor\(asset\)\)\s*st\.textContent = room > 0n \? 'You can receive up to '/);
   assert.match(handler, /'Ready to receive ' \+ meta\.ticker \+ ' over Lightning in about a minute\. Make the invoice then\.'/);
 });
