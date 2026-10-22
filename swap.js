@@ -180,6 +180,10 @@ function tradeMeta(pay, receive, payAtoms, recvAtoms){
              price: baseU > 0 ? quoteU / baseU : null, size: baseU || null, sizeTicker: bm.ticker };
   } catch { return {}; }
 }
+// The trades of the log that settled over Lightning (a pure-Lightning take, a sub-asset or submarine
+// swap, a bridged leg), for the History's Lightning card. Newest first, as the log keeps them.
+const LN_TRADE_RAILS = new Set(['ln', 'sub-asset', 'submarine', 'bridged']);
+export function lnTradeHistory(){ try { return loadHist().filter(x => x && LN_TRADE_RAILS.has(x.rail)); } catch { return []; } }
 export function logTrade(e){
   if (!e || !e.id) return;
   try {
