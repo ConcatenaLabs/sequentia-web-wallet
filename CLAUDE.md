@@ -177,11 +177,15 @@ canonical bytes and signature for an offer served at its funding outpoint and ag
 and `covenant-offer-move.test.mjs` verifies both through `normRelayOffer` and `verifyOffer`.
 The Simplicity order of the template `seqdex/order` (`covenant-sim.js`: its address from the terms
 and the pinned commitment root, and a fill's witness from the template's pinned programs, no
-compiler) is held to `seqdex-order-vectors.json` and `seqdex-order-fills.json`, copies of seqdex's
-`daemon/pkg/covenant/seqdex_order/vectors.json` and `fills.json`, and its offer member
+compiler) has two versions, each with its own root: version 2, which every new order uses and
+which refuses an annex, and version 1, kept for the orders resting under it. An order's
+`template_hash` names its version. Version 2 is held to `seqdex-order-2-vectors.json` and
+`seqdex-order-2-fills.json`, copies of seqdex's `daemon/pkg/covenant/seqdex_order_2/`
+`vectors.json` and `fills.json`, version 1 to `seqdex-order-vectors.json` and
+`seqdex-order-fills.json`, copies of `daemon/pkg/covenant/seqdex_order/`'s; its offer member
 (`simplicity_covenant`, field 25) to `simplicity-offer-vectors.json`, a copy of seqdex's
 `daemon/internal/seqob/offer/testdata/simplicity_offer_vectors.json`, by `covenant-sim.test.mjs`.
-When seqdex re-pins the template, copy all three here. An order resting as a leaf in an operator's
+When seqdex re-pins a version, copy its files here. An order resting as a leaf in an operator's
 tree (`resting_leaf`, field 26) signs its terms, operator and order id and leaves its locator (the
 coin it rests at, what that coin holds) out: `resting-offer-vectors.json`, a copy of seqdex's
 `daemon/internal/seqob/offer/testdata/resting_leaf_offer_vectors.json`, holds

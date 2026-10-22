@@ -733,7 +733,9 @@ covenant scripts (`covenant.test.mjs`, `covenant-byteorder.test.mjs`, `covenant-
 the vectors seqdex's Go planner writes (`covenant-fill-vectors.json`), and
 `covenant-offer-move.test.mjs` verifies Go-signed covenant offers before and after the relay moves
 their outpoint (`covenant-offer-vectors.json`). `covenant-sim.test.mjs` holds the Simplicity order
-to the template's vectors and programs (`seqdex-order-vectors.json`, `seqdex-order-fills.json`)
+to each version's vectors and programs (version 2, which every new order uses and which refuses
+an annex: `seqdex-order-2-vectors.json`, `seqdex-order-2-fills.json`; version 1, for orders
+resting from before it: `seqdex-order-vectors.json`, `seqdex-order-fills.json`)
 and its offers to Go's signed bytes (`simplicity-offer-vectors.json`); `covenant-terms.test.mjs` holds
 the tapscript leaf's refusal of a term of 2^63 or more to Go's (`covenant-terms-vectors.json`), and
 `time-in-force-offer.test.mjs` verifies Go-signed offers carrying each `time_in_force`
