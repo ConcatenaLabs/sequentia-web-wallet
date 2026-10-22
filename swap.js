@@ -7608,12 +7608,12 @@ async function takeCovenantWalkReview(q){
         ...tradeMeta(pay, receive, res.paidPay, res.gotRecv) });
       const gotStr = C.fmtAtoms(res.gotRecv, rm.precision);
       if (res.stopped)
-        C.toast(`Filled part of the order · received ${gotStr} ${rm.ticker}. An offer it was counting on could not be taken, so it stopped rather than take worse ones; place the rest again to see the price now.`);
+        C.toast(`Filled part of the order · received ${gotStr} ${rm.ticker}. An offer it was counting on could not be taken, so it stopped rather than take worse ones; place the rest again to see the price now.`, undefined, { sticky: true });
       else if (res.full)
         C.toast(`Market order filled · received ${gotStr} ${rm.ticker}.`,
           res.txids[0] ? { href: '/explorer/tx/' + res.txids[0], label: String(res.txids[0]).slice(0, 18) + '…' } : undefined);
       else
-        C.toast(`Filled what the book had · received ${gotStr} ${rm.ticker}. The rest did not fill (thin book) and was NOT rested — switch to Limit to rest an order.`);
+        C.toast(`Filled what the book had · received ${gotStr} ${rm.ticker}. The rest did not fill (thin book) and was NOT rested — switch to Limit to rest an order.`, undefined, { sticky: true });
       resetComposer();
       await C.sync();
       renderSwap();
