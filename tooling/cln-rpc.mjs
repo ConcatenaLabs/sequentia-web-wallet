@@ -51,7 +51,7 @@ export function clnBitcoinWallet (rpc) {
       const d = await rpc('decode', { string: invoice })
       if (!d.valid) throw new Error('the invoice does not decode')
       return { sats: msatOf(d.amount_msat) / 1000n, msat: msatOf(d.amount_msat), payment_hash: d.payment_hash, expires_at: Number(d.created_at) + Number(d.expiry),
-        min_final_cltv: Number(d.min_final_cltv_expiry ?? 18), payee: d.payee, currency: d.currency }
+        min_final_cltv: Number(d.min_final_cltv_expiry ?? 18), payee: d.payee, currency: d.currency, routes: d.routes || [] }
     },
     // An invoice of its own: 'paid' (with the preimage), 'unpaid' or 'expired'.
     async invoiceStatus (hash) {
@@ -78,6 +78,35 @@ export function clnBitcoinWallet (rpc) {
         if (st && st.state !== 'failed') return st
         return { state: 'failed', reason: e.message }
       }
+    },
+    // The route a payment of the invoice would take now: { fee (sats, rounded up), delay (blocks,
+    // the whole lock) }.
+    // A payee behind a private channel (a hosted node) is reached through its invoice's route hint:
+    // a route to the hint's first node, then the hint's hops at their fees and deltas.
+    async payRoute (invoice) {
+      const d = await this.decode(invoice)
+      const viaGraph = await rpc('getroute', { id: d.payee, amount_msat: Number(d.msat), riskfactor: 10, cltv: d.min_final_cltv }).catch(() => null)
+      const hop = viaGraph && (viaGraph.route || [])[0]
+      if (hop) return { fee: (msatOf(hop.amount_msat) - d.msat + 999n) / 1000n, delay: Number(hop.delay) }
+      let best = null
+      for (const hint of d.routes || []) {
+        // Walk the hint backwards from the payee: what each hop must be handed, and the lock.
+        let amt = d.msat, cltv = d.min_final_cltv
+        for (const h of [...hint].reverse()) {
+          amt += BigInt(h.fee_base_msat ?? 0) + (amt * BigInt(h.fee_proportional_millionths ?? 0) + 999999n) / 1000000n
+          cltv += Number(h.cltv_expiry_delta ?? 0)
+        }
+        const entry = hint[0] && hint[0].pubkey
+        if (!entry) continue
+        const r = entry === (await rpc('getinfo')).id ? { route: [{ amount_msat: amt, delay: cltv }] }
+          : await rpc('getroute', { id: entry, amount_msat: Number(amt), riskfactor: 10, cltv }).catch(() => null)
+        const h0 = r && (r.route || [])[0]
+        if (!h0) continue
+        const cand = { fee: (msatOf(h0.amount_msat) - d.msat + 999n) / 1000n, delay: Number(h0.delay) }
+        if (!best || cand.fee < best.fee) best = cand
+      }
+      if (!best) throw new Error('no route to the payee now')
+      return best
     },
     async payStatus (hash) {
       const r = await rpc('listpays', { payment_hash: hash })

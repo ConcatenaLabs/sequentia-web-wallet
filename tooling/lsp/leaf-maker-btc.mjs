@@ -24,7 +24,8 @@
 //   GET  /v1/btc/swap/<id>             -> { swap, state }
 //
 // Its configuration, under the maker's own: "btc": { "rpc": "/…/lightning-rpc" (its node's socket),
-//   "keep_sats": "100000" (what its channels keep), "invoice_seconds": 3600,
+//   "keep_sats": "100000" (what its channels keep), "invoice_seconds": 3600, "max_route_fee_sats":
+//   "1000" (the most it pays to route a payment to a wallet's node),
 //   "pairs": [ { "give": "BTC", "want": "<hex>", "rate_num", "rate_den", "min_give" },
 //              { "give": "<hex>", "want": "BTC", … } ] } — or "price": true with the maker's price
 // feed, its "assets" naming "BTC" too. Swaps are kept in the store directory (btc-swaps.json), so a
@@ -126,11 +127,16 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
       const d = await node.decode(String(body.invoice || ''))
       if (d.sats !== give) return [409, { error: `the invoice asks ${d.sats} sat, not ${give}` }]
       if (d.expires_at - Date.now() / 1000 < ttl + 1800) return [409, { error: 'the invoice expires too soon' }]
+      // The route to the wallet's node, its fee the maker's to pay and its whole lock what the
+      // maker's leaf must outlast (a hosted node is reached through its service's node).
+      let rt
+      try { rt = await node.payRoute(String(body.invoice)) } catch (e) { return [409, { error: 'no route to the invoice\'s node now' }] }
+      if (big(rt.fee) > big(b.max_route_fee_sats ?? 1000)) return [409, { error: `the route to the invoice's node costs ${rt.fee} sat, more than the maker pays` }]
       let r
       try { r = await cmd('lightning_receive', { asset: p.want, amount: String(want), hash: d.payment_hash, description: 'trade' }, true) }
       catch (e) { const h = capOf(e.message); if (h != null) caps.set(p.want, { headroom: h, at: Date.now() }); throw e }
       const s = { swap: id, give_asset: 'BTC', want_asset: p.want, give: String(give), want: String(want), hash: d.payment_hash, invoice_btc: body.invoice,
-        min_final_cltv: d.min_final_cltv, invoice_x: r.invoice, state: 'offered', at: Date.now(), expires: Date.now() + ttl * 1000 }
+        min_final_cltv: d.min_final_cltv, route_delay: rt.delay, route_fee: String(rt.fee), invoice_x: r.invoice, state: 'offered', at: Date.now(), expires: Date.now() + ttl * 1000 }
       swaps.set(id, s); save()
       log('btc firm', id, 'gives', String(give), 'sat for', String(want), p.want.slice(0, 8))
       return [200, { swap: id, invoice: r.invoice, give: String(give), want: String(want), expires_at: Math.floor(s.expires / 1000) }]
@@ -193,7 +199,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
       if (s.state === 'offered') {
         if (rcv.state !== 'issuing') { if (Date.now() > s.expires + 3600 * 1000 && rcv.state === 'waiting') s.state = 'lapsed'; return }
-        const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.min_final_cltv) }).catch((e) => ({ ready: false, never: e.message }))
+        const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.route_delay || s.min_final_cltv) }).catch((e) => ({ ready: false, never: e.message }))
         if (r.never) { s.state = 'void'; log('btc swap', s.swap, 'not paid:', r.never); return }
         if (!r.ready) return
         const d = await node.decode(s.invoice_btc)
@@ -202,7 +208,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
       }
       if (s.state === 'paying') {
         let st = await node.payStatus(s.hash)
-        if (st.state === 'none') st = await node.pay({ invoice: s.invoice_btc, maxFeeSats: big(b.max_route_fee_sats ?? 0), maxDelay: Number(s.min_final_cltv || 18) + EXTRA_BLOCKS })
+        if (st.state === 'none') st = await node.pay({ invoice: s.invoice_btc, maxFeeSats: big(s.route_fee ?? b.max_route_fee_sats ?? 0), maxDelay: Number(s.route_delay || s.min_final_cltv || 18) + EXTRA_BLOCKS })
         if (st.state === 'failed') { s.state = 'offered'; log('btc swap', s.swap, 'payment failed:', st.reason || ''); return }
         if (st.state !== 'complete') return
         s.preimage = st.preimage

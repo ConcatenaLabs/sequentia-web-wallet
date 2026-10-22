@@ -1581,7 +1581,7 @@ import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasRev
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
-  seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodeHistory, seqlnNodePay, seqlnNodePayHash, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
+  seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodeHistory, seqlnNodePay, seqlnNodePayHash, seqlnNodePayStatus, seqlnNodePayQuote, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed, creditNotes,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
@@ -1595,6 +1595,7 @@ import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
 import { createEngine as createUserTrade } from './user-trade.js';
+import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
 import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
 import { composerState, setComposerRail } from './swap.js';
@@ -3465,6 +3466,32 @@ function applyTradeMode(){
   for(const c of sec.children){ if(c.id === 'userComposerRoot') c.classList.toggle('hide', !user); else c.classList.toggle('uc-dev-hidden', user); }
   if(user && userComposer){ userComposer.render(); userComposer.follow(); }
 }
+// The wallet's own hosted Bitcoin node, as the composer's BTC trades drive it: holds under the
+// wallet's own hash, payments capped at the ticket's route.
+let _userBtc = null, _userBtcUp = null;
+function userBtcLightning(){
+  if(!lnApi || !(typeof seqlnState === 'function' && seqlnState().deployed)) return null;
+  if(_userBtc) return _userBtc;
+  const connect = ()=>{
+    // Brought up once, and again after a failure (the node may have restarted).
+    if(!_userBtcUp) _userBtcUp = lnConnectLeg('BTC').catch((e)=>{ _userBtcUp = null; throw e; });
+    return _userBtcUp;
+  };
+  _userBtc = hostedBtcLightning({
+    lsp: { invoice: seqlnNodeInvoice, invoiceStatus: seqlnInvoiceStatus, settle: seqlnNodeSettle, pay: seqlnNodePay,
+      payStatus: seqlnNodePayStatus, payQuote: seqlnNodePayQuote },
+    nodeKey: ()=> connect(), connect,
+    spendable: async ()=> { try{ await refreshLnStatus(); }catch{} return lnSpendableFor('BTC').units; },
+    // Read fresh: the node may just have come up, or room been opened to it.
+    receivable: async ()=> { try{ await refreshLnStatus(); }catch{} return lnReceivableFor('BTC'); },
+    decode: (s)=> decodeBolt11(s),
+    store: localStorage, tag: walletTag,
+    random: (n)=> crypto.getRandomValues(new Uint8Array(n)),
+    sha256: async (b)=> new Uint8Array(await crypto.subtle.digest('SHA-256', b)),
+    log: (...a)=> console.log(...a),
+  });
+  return _userBtc;
+}
 function initUserComposer(){
   if(userComposer) return;
   userTrade = createUserTrade({
@@ -3481,7 +3508,8 @@ function initUserComposer(){
       if(!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
       return j;
     },
-    makers: ()=> (typeof window!=='undefined' && Array.isArray(window.SEQ_LEAF_MAKERS)) ? window.SEQ_LEAF_MAKERS : [location.origin + '/leafmaker'],
+    // The live makers: the one of in-tree swaps, and the one of BTC (its own Bitcoin node).
+    makers: ()=> (typeof window!=='undefined' && Array.isArray(window.SEQ_LEAF_MAKERS)) ? window.SEQ_LEAF_MAKERS : [location.origin + '/leafmaker', location.origin + '/leafmaker-btc'],
     relayBook: (pay, receive)=> relayPairBook(receive, pay),
     // The relay's fill records of the pair, both orientations: a fill of an order resting in the
     // tree is Settled once its record (keyed by the operator's transfer id) is final.
@@ -3495,6 +3523,9 @@ function initUserComposer(){
       const o = ((await r.json()).vout || [])[vout]; return o && o.value != null ? String(o.value) : null;
     },
     admitted: async ()=> ({ pairs: servedPairs(await userModePairs(), leavesApi ? leavesApi.supervisedAssets() : []), genesis: await chainGenesis() }),
+    // The wallet's Bitcoin Lightning (btc-lightning.js), once the service runs it; until then no
+    // trade is made for or with BTC.
+    get btc(){ return userBtcLightning(); },
     store: localStorage, tag: walletTag,
     log: (...a)=> console.log(...a),
   });

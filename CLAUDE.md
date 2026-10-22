@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 112 `*.test.mjs` files (90 at the root, 22 under `tooling/lsp/`), and `node --test` runs
+There are 113 `*.test.mjs` files (91 at the root, 22 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -107,7 +107,11 @@ Root is flat: production modules and tests sit side by side.
   (`order_fill_resting`), or BTC for an asset in one hash-lock with a
   maker's BTC desk, `user-trade-btc.js`), never a bridge and never a second route. In a BTC trade
   the hash is always the BTC receiver's and BTC is paid only once the coin received under it is
-  held for good (`lightning_receive_ready`); keep that order whatever else changes. The
+  held for good (`lightning_receive_ready`); keep that order whatever else changes. On the page
+  the wallet's Bitcoin Lightning is `btc-lightning.js` over its own hosted Bitcoin node: a sale's
+  hold is under a hash whose preimage the page draws and keeps, and the page gives it to the node
+  only to settle a payment held there for the whole amount; never let the node make that
+  preimage or learn it first, or the service hosting it could hand it to the maker. The
   engine (`user-trade.js`) has no DOM so the drill runs it in Node; every amount on its ticket is
   the leaf library's answer (`swap_read`, `take_quote` with `spends`, `settle_quote`). Every word
   it shows is in `USER_WORDS`, and none may be in `USER_MODE_FORBIDDEN_WORDS` (rail, round, leaf,

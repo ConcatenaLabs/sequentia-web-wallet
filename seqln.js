@@ -625,10 +625,13 @@ export async function seqlnInboundQuote({ asset, amount, node_key, months }) {
 // LSP-sized bridge_terms.hold_expiry_secs so its hold on H stays SETTLEABLE until strictly after the maker's
 // latest asset claim (T_seq) + margin — without it a short hold could lapse before the maker reveals P,
 // stranding the taker (dead hold, asset gone). Omitted for the sub-asset HODL buy (plugin default).
-export function seqlnNodeInvoice({ node_key, asset, amount, payment_hash, expiry }) {
-  return lspFetch('/node/invoice', { method: 'POST', body: JSON.stringify({ node_key, asset, amount, payment_hash, expiry }) });
+// `bolt11: true` (with a payment_hash) also asks for a BOLT11 under H that the node signed, for a
+// payer that pays only an invoice; the node still never learns P (lsp/hold-bolt11.mjs).
+export function seqlnNodeInvoice({ node_key, asset, amount, payment_hash, expiry, bolt11, description }) {
+  return lspFetch('/node/invoice', { method: 'POST', body: JSON.stringify({ node_key, asset, amount, payment_hash, expiry, ...(bolt11 ? { bolt11: true } : {}), ...(description ? { description } : {}) }) });
 }
-// Poll the HODL invoice state on the user's node: { state, held /* maker's payment accepted+held */, settled }.
+// Poll the HODL invoice state on the user's node: { state, held /* maker's payment accepted+held */, settled,
+// amount_msat /* registered */, received_msat /* held */, htlc_expiry, btc_tip }.
 export function seqlnInvoiceStatus({ node_key, payment_hash }) {
   return lspFetch('/node/invoice-status?node=' + encodeURIComponent(node_key) + '&payment_hash=' + encodeURIComponent(payment_hash));
 }
@@ -659,13 +662,22 @@ export function seqlnNodeHistory(node_key) {
 // (payment_hash === H, amount == the offer price, min_final_cltv can't settle past T_seq) remain the PRIMARY
 // guard; the /node/pay handler now ENFORCES them too: it refuses an invoice whose payment_hash, amount or
 // min_final_cltv disagree, and passes maxCltv to CLN as maxdelay (the direct-hop fallback is bounded alike).
-export function seqlnNodePay({ node_key, bolt11, wantHash, amountMsat, minFinalCltv, maxCltv }) {
+export function seqlnNodePay({ node_key, bolt11, wantHash, amountMsat, minFinalCltv, maxCltv, maxFeeMsat }) {
   const body = { node_key, bolt11 };
+  if (maxFeeMsat != null) body.maxfee_msat = Number(maxFeeMsat);
   if (wantHash) body.wantHash = String(wantHash).toLowerCase();
   if (amountMsat != null) body.amount_msat = Number(amountMsat);
   if (minFinalCltv != null) body.min_final_cltv = Number(minFinalCltv);
   if (maxCltv != null) body.max_cltv = Number(maxCltv);
   return lspFetch('/node/pay', { method: 'POST', body: JSON.stringify(body) });
+}
+// How the node's payments under a hash stand: { state: 'none'|'pending'|'complete'|'failed', preimage }.
+export function seqlnNodePayStatus({ node_key, payment_hash }) {
+  return lspFetch('/node/pay-status?node=' + encodeURIComponent(node_key) + '&payment_hash=' + encodeURIComponent(payment_hash));
+}
+// The route a payment of `bolt11` from the node would take now: { route_found, fee_msat, delay }.
+export function seqlnNodePayQuote({ node_key, bolt11 }) {
+  return lspFetch('/node/pay-quote?node=' + encodeURIComponent(node_key) + '&bolt11=' + encodeURIComponent(bolt11));
 }
 // BARE-HASH Lightning SEND — the user's own hosted node commits an HTLC to `node_id` keyed on `hash`
 // (NO bolt11) with a final-hop CLTV of min_final_cltv blocks. This is the LSP PAYER leg-bridge primitive:

@@ -436,9 +436,13 @@ in the middle of a trade:
   can take what it gets before paying (`user-trade-btc.js`). Selling for BTC is Settled once the
   BTC has come and the wallet's payment is settled with the same preimage; buying with BTC once
   the coin bought is claimed and its round final. BTC is never a coin in the tree and never
-  pegged. The engine trades BTC only through a Bitcoin Lightning wallet it is given to drive
-  (the drill's wallets each run a node of their own); the page gives it none, so on the page BTC
-  heads both pickers and no BTC trade is offered.
+  pegged. On the page the wallet's Bitcoin Lightning is its own hosted Bitcoin node, keyless and
+  co-signed by the page (`btc-lightning.js`); its first BTC trade brings the node up. Selling for
+  BTC, the page draws the preimage and the node holds the payment under its hash until the page
+  settles it, which it does only for the whole amount, so neither the node nor the service
+  hosting it learns the preimage first. Buying with BTC, the node pays the maker's invoice, its
+  routing fee capped at the one the ticket shows. A sale for more BTC than the node has room to
+  receive, or a purchase with more than it can pay, is not offered.
 
 Of the trades that can fill the amount you pay, it takes the one that gives you the most, then
 the one with the fewest parties left to act. It offers no more than the wallet can pay now. A
@@ -669,6 +673,7 @@ a backend (the public testnet services work):
 | `/anchor/<blockhash>`, `/anchorstatus` | Anchor lookups used by the cross-chain maker's safety gate |
 | `/openamp` | OpenAMP restricted-asset API (optional; wallet degrades gracefully) |
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | Hosted-SeqLN LSP + per-node signer WebSockets (optional; Lightning rails stay off without them) |
+| `/leafmaker`, `/leafmaker-btc` | The live leaf makers user mode trades with: in-tree swaps, and BTC in one hash-lock (optional; user mode offers what answers) |
 | `/coinjoin` | seqcj CoinJoin coordinator (optional; the Mix tab reports it missing; override `window.SEQ_COINJOIN_URL`) |
 | `/sbtc` | SBTC custody bridge (optional; only the "keep resting while offline" BTC limit orders use it) |
 | `/pools/pools.json` | The staking pool board's feed, listing pools to delegate to |
@@ -774,6 +779,13 @@ and, when every trade passed, the chain's entry for `user-mode/pairs.json`. With
 harness started with `ARCA_OPERATOR_LIGHTNING` and `ARCA_OPERATOR_BTC_LIGHTNING`, BTC trades with
 the maker's BTC desk join, each wallet on a Bitcoin Lightning node of its own
 (`tooling/cln-rpc.mjs`).
+
+`node tooling/user-mode-btc-drive.mjs <evidence-dir>` drives user mode's BTC trades in headless
+Chromium against the same harness started with `ARCA_OPERATOR_LIGHTNING=1` and
+`ARCA_OPERATOR_BTC_LIGHTNING=1`, the hosted-node service (`tooling/lsp/lsp-server.mjs`) provisioning
+the page's own keyless Bitcoin node, co-signed by the page over the service's websocket
+(`SEQLN_DIR` names a SeqLN build, `SEQUENTIA_DIR` a Sequentia one): XLEAF for BTC and BTC for XLEAF, each Settled, and a sale whose
+maker goes away once the wallet's side is locked, Returned with no BTC moved.
 
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see

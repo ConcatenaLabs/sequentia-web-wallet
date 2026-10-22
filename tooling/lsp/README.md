@@ -266,6 +266,13 @@ satoshis.
 A pair may say `"price": true` in place of its rate, priced from the maker's feed, whose
 `assets` then names `"BTC"` too.
 
+The desk pays a wallet's invoice only through a route it has read first (`payRoute` in
+`../cln-rpc.mjs`, through the invoice's route hint when the wallet's node sits behind a private
+channel): its fee, at most `max_route_fee_sats` (default 1000), is the maker's, and its whole lock
+is what the maker's leaf received under the hash must outlast. What the desk gives of an asset is
+boarded as an in-tree pair's is.
+
 `leaf-maker.service` beside it is a systemd unit for it. The page reaches it at
 `/leafmaker` on its own origin (a reverse-proxy route to `listen`), or at the URLs
-`window.SEQ_LEAF_MAKERS` names.
+`window.SEQ_LEAF_MAKERS` names. A maker of BTC runs as a second instance with its own wallet,
+node and port, which the page reaches at `/leafmaker-btc`.

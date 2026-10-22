@@ -236,12 +236,14 @@ async function main () {
       // fallback to one privileged asset).
       try {
         const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}
-        for (const a of new Set((cfg.pairs || []).map((x) => x.give))) {
+        // The assets it gives: in-tree, and for BTC at its desk.
+        const gives = [...(cfg.pairs || []), ...((cfg.btc && cfg.btc.pairs) || []).filter((x) => x.give !== 'BTC')]
+        for (const a of new Set(gives.map((x) => x.give))) {
           let amount = big(onchain[a]) - big(cfg.board_keep ?? 100000)
           // In coins of `coin_size`, one a pass: a firm offer holds the coins it spends until it
           // is taken or released, so a maker of one coin serves one taker at a time.
           if (cfg.coin_size && amount > big(cfg.coin_size)) amount = big(cfg.coin_size)
-          if (amount < big(((cfg.pairs || []).find((x) => x.give === a) || {}).min_give || 1)) continue
+          if (amount < big((gives.find((x) => x.give === a) || {}).min_give || 1)) continue
           const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
           let done = false, why = null
           for (const fee of feeAssets) {
