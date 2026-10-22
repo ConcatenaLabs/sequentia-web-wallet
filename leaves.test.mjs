@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { careDue, careSummary, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -209,10 +209,100 @@ test('a joined wallet in user mode runs care when it opens, with the kit\'s scan
     claimScan: () => 47, onChange: () => { changes++ }, onEvent: (n, d) => events.push([n, d]), tickMs: 3_600_000 }, null, null)
   await api.start()
   const care = runs.filter((r) => Array.isArray(r) && r[0] === 'care')
-  assert.deepEqual(care, [['care', { scan: 47 }]])
+  assert.deepEqual(care, [['care', { plan_within: PLAN_EVERY_ROUND_LEAF, scan: 47 }]])
   // The claim taken up: the balance read again, and the page told.
   assert.ok(runs.lastIndexOf('balance') > runs.findIndex((r) => Array.isArray(r)), 'balance re-read after care')
   assert.ok(changes >= 2)
   assert.deepEqual(events.find((e) => e[0] === 'leafArrived'), ['leafArrived', { leaf_id: 'l1', value: '7', kind: 'claim' }])
   api.stop && api.stop()
+})
+
+test('care plans every leaf of a round: its arguments', () => {
+  assert.equal(PLAN_EVERY_ROUND_LEAF, 4294967295)
+  assert.deepEqual(careArgs(), { plan_within: 4294967295 })
+  assert.deepEqual(careArgs(21), { plan_within: 4294967295, scan: 21 })
+})
+
+test('a release is done once no coin it gave up is still live or in its round', () => {
+  assert.equal(releaseDone([{ leaf_id: 'a', state: 'given' }], ['a']), false)
+  assert.equal(releaseDone([{ leaf_id: 'a', state: 'forfeited' }, { leaf_id: 'n', state: 'live' }], ['a']), false)
+  assert.equal(releaseDone([{ leaf_id: 'a', state: 'spent' }, { leaf_id: 'n', state: 'live' }], ['a']), true)
+  assert.equal(releaseDone([], ['a']), true, 'a coin gone from the list is done with')
+})
+
+test('the planned coins are the current coins of open and stopped plans', () => {
+  const m = plannedCoins([
+    { plan_id: 'p1', state: 'open', coin: 'c1', steps: [{ state: 'waiting' }] },
+    { plan_id: 'p2', state: 'open', coin: 'c2', steps: [{ state: 'done', leaf_id: 's1' }, { state: 'waiting' }] },
+    { plan_id: 'p3', state: 'cancelled', coin: 'c3', steps: [] },
+    { plan_id: 'p4', state: 'stopped', coin: 'c4', steps: [] },
+  ])
+  assert.deepEqual([...m.keys()].sort(), ['c1', 'c4', 's1'])
+  assert.equal(m.get('s1').plan_id, 'p2')
+})
+
+test('a payment the planned coins cover is made through the next round, by itself', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const runs = []
+  let sends = 0
+  let synced = 0
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    runs.push(c === 'plan_release' ? ['plan_release', m.args.args] : c)
+    if (c === 'send') {
+      sends++
+      if (sends === 1) return { id: m.id, ok: false, error: { kind: 'planned', asset: X, release: ['big'], message: 'refused: the wallet holds 0 of asset … in live coins' } }
+      return { id: m.id, ok: true, value: { result: { transfer: 't1' }, start: {} } }
+    }
+    if (c === 'sync') synced++
+    const result = c === 'coins' ? [{ leaf_id: 'big', state: synced >= 3 ? 'spent' : 'given' }, { leaf_id: 'new', state: synced >= 3 ? 'live' : 'pending' }]
+      : c === 'plan_release' ? { plans: [{ coin: 'big', plan_id: 'p' }], participations: [{ state: 'pending' }] }
+      : c === 'schedule' ? { now: 1, due: false, next_sync_at: null }
+      : c === 'care' ? { claims: [], planned: [], cancelled: [] }
+      : c === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    sleep: async (ms) => { clock += ms }, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  const before = synced
+  const v = await api.pay('send', { request: 'r', amount: '500000', asset: X })
+  assert.deepEqual(v, { transfer: 't1' })
+  assert.deepEqual(runs.find((r) => Array.isArray(r) && r[0] === 'plan_release'), ['plan_release', { leaves: ['big'] }])
+  assert.equal(sends, 2, 'asked again once')
+  assert.ok(synced - before >= 2, 'synced until the round freed the coin')
+  assert.equal(api.state.releasing, null)
+  // Any other refusal is the library's, untouched.
+  const w2 = fakeWorker((m) => m.op === 'exists' ? { id: m.id, ok: true, value: true } : m.op === 'open' ? { id: m.id, ok: true, value: {} }
+    : m.args.command === 'send' ? { id: m.id, ok: false, error: { kind: 'refused', message: 'refused: no' } }
+      : { id: m.id, ok: true, value: { result: m.args.command === 'schedule' ? { now: 1 } : m.args.command === 'balance' ? {} : [], start: {} } })
+  const api2 = mountLeaves({ makeWorker: () => w2, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock, tickMs: 3_600_000 }, null, null)
+  await api2.start()
+  await assert.rejects(api2.pay('send', { request: 'r' }), (e) => e.kind === 'refused' && e.message === 'refused: no')
+  api.stop(); api2.stop()
+})
+
+test('a release that never frees its coins gives up in plain words, having paid nothing', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  let sends = 0
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    if (c === 'send') { sends++; return { id: m.id, ok: false, error: { kind: 'planned', asset: X, release: ['big'], message: 'short' } } }
+    const result = c === 'coins' ? [{ leaf_id: 'big', state: 'given' }] : c === 'schedule' ? { now: 1 } : c === 'balance' ? {} : c === 'care' ? {} : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    sleep: async (ms) => { clock += ms }, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  await assert.rejects(api.pay('send', { request: 'r' }), /did not free the coins this payment needs in time; nothing was paid/)
+  assert.equal(sends, 1)
+  api.stop()
 })

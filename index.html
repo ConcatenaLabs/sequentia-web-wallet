@@ -3469,10 +3469,11 @@ function initUserComposer(){
   if(userComposer) return;
   userTrade = createUserTrade({
     // The leaf wallet's worker answers one command at a time; the composer asks it directly,
-    // without the Leaves tab's reload after each command (which reads five more).
+    // without the Leaves tab's reload after each command (which reads five more). A trade
+    // that needs a planned coin is made through the next round, by itself (leaves.js pay).
     leaves: { command: async (cmd, args)=>{
       if(!leavesApi || !leavesApi.isOpen() || !leavesApi.state || !leavesApi.state.client) throw new Error('this wallet holds no leaves');
-      return (await leavesApi.state.client.run(cmd, args || {})).result;
+      return await leavesApi.pay(cmd, args || {});
     } },
     fetchJson: async (url, init)=>{
       const r = await fetch(url, init ? { ...init, headers: { 'content-type':'application/json' } } : { cache:'no-store' });
