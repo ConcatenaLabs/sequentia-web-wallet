@@ -1682,7 +1682,11 @@ function wireBookSeg(){
 function paintBookSeg(){
   const seg = C.$('swBookSeg'); if (!seg) return;
   seg.querySelectorAll('button[data-book]').forEach(b => b.classList.toggle('on', b.dataset.book === _book));
+  // The book choice is developer detail on the default (unblinded) book; on the blinded book it
+  // stays in view in every mode, so a wallet left there can always come back.
+  seg.classList.toggle('dev-only', !isConfBook());
   const note = C.$('swBookNote');
+  if (note) note.classList.toggle('dev-only', !isConfBook());
   if (note) note.textContent = isConfBook()
     ? 'Blinded book: both sides settle confidentially (amounts and assets hidden on-chain). Sequentia assets only.'
     : 'Unblinded book: transparent settlement, the default. Bitcoin pairs trade here.';
@@ -2399,7 +2403,7 @@ function paintGuide(){
   const $ = C.$, g = $('swGuide'); if (!g) return;
   fitAmounts();
   const step = guideStep();
-  const names = ['Assets', 'Amount', 'Settlement', 'Place'];
+  const names = ['Assets', 'Amount', 'Payment', 'Place'];
   g.innerHTML = names.map((n, i) => {
     const k = i + 1, cls = k < step ? 'gs done' : (k === step ? 'gs now' : 'gs');
     return `<span class="${cls}"><b>${k < step ? '✓' : k}</b><span class="gn">${n}</span></span>`;
@@ -4403,7 +4407,7 @@ function renderTiming(route){
   const ra = ln ? railAvail(S.payAsset, S.receiveAsset) : { payLn: { ok: false }, recvLn: { ok: false } };
   if (!route){
     el.className = 'swtiming ok'; if (ic) ic.textContent = '•';
-    tx.innerHTML = 'Pick two assets to see how settlement works.';
+    tx.innerHTML = 'Pick two assets to see how long it takes.';
     return;
   }
   if (route.kind === 'same'){
@@ -7516,7 +7520,7 @@ function walkPreview(pay, receive, payAtoms, blindOk){
 function blindedConsent(card, onChange){
   const box = document.createElement('div'); box.className = 'blind-ask';
   box.innerHTML = '<label><input type="checkbox"> <b>Also take offers that pay a blinded address of this wallet</b></label>'
-    + '<div class="sub">Some offers here come from a maker who completes the swap and blinds the output that pays you, so it can only pay a blinded address. '
+    + '<div class="sub">Some offers here can only pay you at a blinded address of this wallet. '
     + 'The coins stay in this wallet: they count in your balance, spend like any other and come back with your recovery phrase. On chain their amount and asset are hidden. '
     + 'You can bring them to your usual address at any time by sending them to yourself. '
     + '<a href="#" data-help="faq-blinded">What a blinded address means</a></div>'
@@ -7645,9 +7649,8 @@ async function takeCovenantWalkReview(q){
   const kv = [
     ...rows(pv),
     ['Network fee', amtRow(feeAsset, covFeeAtoms(feeAsset)) + '  (estimate, per fill)'],
-    ['How it fills', `Walks the order book now and fills what crosses your price, best price first. Any part that can't fill is NOT rested — a market order never leaves a resting order behind (switch to Limit for that). Each fill settles on-chain; consensus rejects any underpay or redirect.`],
+    ['How it fills', `Walks the order book now and fills what crosses your price, best price first. Any part that can't fill is NOT rested — a market order never leaves a resting order behind (switch to Limit for that). Each fill is one transaction that pays you in full or not at all.`],
     ['Finality', 'Each fill confirms in about a minute · reverts only if Bitcoin reorgs.'],
-    ['Settlement', 'Each fill settles in full or not at all.'],
   ];
   // CTA stays modalRows' default 'Confirm & sign' (task 19c): every rail's review sheet uses
   // one confirm label; the old 'Place market order' override made this one modal read
@@ -7745,8 +7748,8 @@ async function placeCovenantReview(q){
     ['Network fee', amtRow(feeAsset, feeAtoms) + refSuffix(feeAsset, feeAtoms) + '  (estimate)'],
     ['Fee paid in', C.assetMeta(feeAsset).ticker],
     ['How it fills', isMarket
-      ? `Fills against the order book now at your price or better. If your order is larger than what's resting, the filled part settles on-chain and the unfilled remainder keeps resting at the same price until it's crossed · even while this wallet is closed. Consensus rejects any underpay or redirect.`
-      : `Rests on-chain at your price and fills · fully or partially · whenever someone crosses it, even while this wallet is closed. A partial fill settles that part and leaves the rest resting. Consensus rejects any underpay or redirect.`],
+      ? `Fills against the order book now at your price or better. If your order is larger than what's resting, the filled part settles on-chain and the unfilled remainder keeps resting at the same price until it's crossed · even while this wallet is closed.`
+      : `Rests on-chain at your price and fills · fully or partially · whenever someone crosses it, even while this wallet is closed. A partial fill settles that part and leaves the rest resting.`],
     ['You can close the wallet', `The order rests on-chain; when it fills you are credited to a payout address only this wallet controls. Reopen any time to see it.`],
     ['If it does not fill', `Cancel any time to take it off the book. The ${pm.ticker} stays locked on-chain until the order expires, ${blocksAsTime(DEFAULT_ORDER_BLOCKS)} after it is placed; then Reclaim returns it.`],
     ['Finality', 'Confirms in about a minute · reverts only if Bitcoin reorgs.'],
@@ -9097,7 +9100,7 @@ async function takePeggedCovenantReview(q, offer){
     ['You pay', amtRow(assetHex, assetAtoms) + refSuffix(assetHex, assetAtoms)],
     ['You receive', C.fmtAtoms(btcSats, 8) + ' BTC'],
     ['Price', assetU>0 ? `1 ${am.ticker} = ${trim(btcU/assetU)} BTC` : '-'],
-    ['How it settles', 'You fill this on-chain and receive Bitcoin.'],
+    ['How it works', 'You fill this on-chain and receive Bitcoin.'],
     ['Finality', 'Reverts only if Bitcoin reverts.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: `Sell ${am.ticker} for BTC`, kv });
@@ -9208,7 +9211,7 @@ async function reviewSame(q){
       ? [['Network fee', `Paid by the other side, in ${fm.ticker}: you receive the amount above in full.`]]
       : [['Network fee', amtRow(q.feeAsset, q.feeAmount) + '  (estimate)'], ['Fee paid in', fm.ticker]]),
     ['Finality', 'Confirms in about a minute · reverts only if Bitcoin reorgs.'],
-    ['Settlement', 'Settles in full or not at all.'],
+    ['Outcome', 'Settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
   // This offer is an interactive maker's: it can only pay a blinded address. Ask, unticked.

@@ -207,8 +207,10 @@ export function mountFeePanel(box, deps) {
     const totTxt = st.vsize && per > 0 ? atomsToUnits(tot, precision) + ' ' + ticker
       + (price > 0 ? ' (≈ ' + fmtRefNum(atomsToRef(tot, price, precision)) + ' ' + ccy + ')' : '') : '';
     const rateTxt = per > 0 ? rateUnits(per, precision) + ' ' + ticker + ' ' + perLabel.toLowerCase() : '';
-    sumText.textContent = 'Network fee: ' + (totTxt || rateTxt || '…') + ' · '
-      + (st.mode === 'custom' ? 'custom' : tSel.options[tSel.selectedIndex].textContent.replace(/ \(.*\)$/, '') + ' target');
+    // Folded, the line says what the fee comes to and how soon, never a rate per byte: until the
+    // transaction's size is known it says the total is still to come (the rate is in the details).
+    sumText.textContent = 'Network fee: ' + (totTxt || (rateTxt ? 'set once the amount is entered' : '…')) + ' · '
+      + (st.mode === 'custom' ? 'custom' : 'confirms in about ' + tSel.options[tSel.selectedIndex].textContent.replace(/ \(.*\)$/, ''));
     prevBox.textContent = '';
     if (deps.previous) {
       const p = deps.previous, pm = deps.meta(p.hex) || { ticker: '', precision: 8 }, pp = deps.price(p.hex);

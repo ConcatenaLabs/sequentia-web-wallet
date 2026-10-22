@@ -114,7 +114,8 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
 - **Receive**: one address for both chains. The default is the non-confidential `tb1...` form,
   which is Bitcoin-compatible: the same address receives parent-chain BTC and Sequentia assets.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
-  Sequentia is transparent by default and confidentiality is opt-in. **Show xpub** reveals the
+  Sequentia is transparent by default and confidentiality is opt-in (**Show blinded address**).
+  **Show xpub** (developer mode) reveals the
   account key for a watch-only import — one key for both chains, since they share the
   `m/84'/1'/0'` account — as the extended public key
   (`[fingerprint/84h/1h/0h]tpub...`) or as an importable descriptor pair, receive and change,
@@ -134,7 +135,7 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
 - **Mix**: a CoinJoin round through the seqcj coordinator. The wallet picks the coins, proves
   it owns them, hands out fresh blinded addresses, and verifies the coordinator's transaction
   pays it what was promised before signing its own inputs. A BTC lane, when the coordinator
-  opens one, pegs the BTC into SBTC through the custody bridge for the round and back out
+  opens one, pegs the BTC into SBTC (pegged bitcoin) for the round and back out
   afterwards. Without a reachable coordinator the tab shows a status line and no lanes.
 - **Issuance**: faucet, issue a new asset (amount, 0 to 8 decimal places, and whether more can be
   issued later, which gives the wallet one reissuance token), reissue an asset whose token the
@@ -198,9 +199,12 @@ Sequentia wallet:
 
 The headline total counts every rail of every asset (on-chain, Lightning and leaves) and the
 staked tSEQ in the reference currency, in both modes, and no asset comes first. User mode shows
-one figure per asset, its parts one tap away, and offers no Move and no room to receive: the
-Lightning receive card says only how much can arrive and otherwise points to the on-chain
-address. In developer mode each asset row also reads "X on-chain · Y in leaves · Z on
+one figure per asset, its parts one tap away, with Move to Lightning and room to receive among
+them; where an asset cannot be paid or received over Lightning yet, the Lightning cards say what
+to do in one sentence and offer that step. User mode carries no developer vocabulary: the xpub,
+the Settings backend card, the staker key, the order book's unblinded/blinded switch (shown in
+user mode only while the blinded book is chosen), a payment's preimage and the Lightning
+channel count are developer mode's. In developer mode each asset row also reads "X on-chain · Y in leaves · Z on
 Lightning" (and "· S staked" for tSEQ), the Lightning column carries Move and room to receive,
 and the **Leaves** and **Contracts** tabs appear. In user mode nothing of leaves is shown, but a wallet that joined
 an operator keeps its leaf wallet syncing while the page is open, since its coins have dates
@@ -563,9 +567,11 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
 - A trade with both rails set to Lightning settles both legs atomically on one preimage, fully
   off-chain. A mixed rail (one leg on-chain, one Lightning) is a submarine swap.
 
-The status pill next to the wallet title reports the rail: "LN ready" (both device signers
-serving), "LN 1/2" (one leg up), or an error state; when Lightning is not configured the pill
-is hidden and the composer quietly uses the on-chain rails only.
+The status pill next to the wallet title says whether Lightning works: "⚡ Lightning" once the
+service answers, "⚡ Lightning…" while it connects and "⚡ Lightning offline" when it cannot be
+reached; developer mode says "LN 2 ch" (the wallet's own open channels), "LN ready",
+"LN connecting…" or "LN offline" instead. When Lightning is not configured the pill is hidden
+and the composer quietly uses the on-chain rails only.
 
 Honest caveats: this is a demo deployment. The live page ships a shared testnet-demo bearer
 token for the LSP API rather than per-wallet authentication, the backend is a single

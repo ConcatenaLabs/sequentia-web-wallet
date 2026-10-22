@@ -62,6 +62,8 @@
   .warn{background:#2a1d0a;border:1px solid #6b4e12;color:#ffcf7a;border-radius:10px;padding:10px 12px;font-size:13px;margin-top:12px}
   .status{font-size:13px;min-height:18px;margin-top:10px}
   .ok{color:var(--green)} .err{color:var(--red)}
+  /* shown in developer mode only (body.devmode is set from the wallet's mode) */
+  body:not(.devmode) .dev-only{display:none !important}
   a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
   /* user mode's Trade tab: the user composer only (user-composer.js) */
@@ -623,7 +625,7 @@
     <span class="net lnpill hide" id="lnStatus" title="Lightning device signer status">⚡ LN</span>
     <button class="gear hide" id="btnGear" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.33 4.32c.43-1.76 2.91-1.76 3.34 0a1.72 1.72 0 0 0 2.57 1.07c1.54-.94 3.3.82 2.37 2.37a1.72 1.72 0 0 0 1.06 2.57c1.76.43 1.76 2.91 0 3.34a1.72 1.72 0 0 0-1.07 2.57c.94 1.54-.82 3.3-2.37 2.37a1.72 1.72 0 0 0-2.57 1.06c-.43 1.76-2.91 1.76-3.34 0a1.72 1.72 0 0 0-2.57-1.07c-1.54.94-3.3-.82-2.37-2.37a1.72 1.72 0 0 0-1.06-2.57c-1.76-.43-1.76-2.91 0-3.34a1.72 1.72 0 0 0 1.07-2.57c-.94-1.54.82-3.3 2.37-2.37 1 .61 2.3.07 2.57-1.06z"/><circle cx="12" cy="12" r="3"/></svg></button>
   </div>
-  <div class="sub" id="tipline">A self-custodial wallet powered by SWK (Sequentia Wallet Kit), running entirely in your browser.</div>
+  <div class="sub" id="tipline">A self-custodial wallet that runs entirely in your browser.</div>
 
   <!-- boot -->
   <div class="card" id="boot"><span class="spin"></span>Loading wallet engine…</div>
@@ -749,7 +751,7 @@
       </div>
       <div class="card hide" id="lnSendCard">
         <label class="lbl">⚡ Pay a Lightning invoice</label>
-        <p class="sub" style="margin:0 0 10px">Your hosted node pays the invoice and your device co-signs. Pick the asset to pay from.</p>
+        <p class="sub" style="margin:0 0 10px">Pay a Lightning invoice. Pick the asset to pay from.</p>
         <select id="lnSendAsset" style="width:100%"></select>
         <textarea id="lnSendBolt11" class="mono" placeholder="Paste a Lightning invoice (lntsqt… or lntb…)" style="width:100%;margin-top:8px;min-height:64px;resize:vertical"></textarea>
         <button type="button" class="ghost scanbtn" id="lnSendScan" title="Scan the invoice's QR code" style="margin-top:8px">⊡ Scan</button>
@@ -762,16 +764,16 @@
     <section data-panel="receive" class="hide">
       <div class="card">
         <label class="lbl">Receive</label>
-        <p class="sub" id="recvTip" style="margin:0 0 10px">Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.</p>
+        <p class="sub" id="recvTip" style="margin:0 0 10px">Your address for BTC and every Sequentia asset: the same tb1 address on both chains.</p>
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
         <div class="row" style="margin-top:12px">
           <button id="btnCopy">Copy</button>
           <button id="btnNewAddr">New address</button>
-          <button class="ghost" id="btnConf">Show confidential</button>
-          <button class="ghost" id="btnXpub">Show xpub</button>
+          <button class="ghost" id="btnConf">Show blinded address</button>
+          <button class="ghost dev-only" id="btnXpub">Show xpub</button>
         </div>
-        <div class="rec hide" id="xpubReveal">
+        <div class="rec hide dev-only" id="xpubReveal">
           <label class="lbl">Account key</label>
           <select id="xpubForm" style="margin-bottom:8px">
             <option value="xpub">Extended public key</option>
@@ -791,7 +793,7 @@
       </div>
       <div class="card hide" id="lnRecvCard">
         <label class="lbl">⚡ Receive over Lightning</label>
-        <p class="sub" style="margin:0 0 10px">Generate a Lightning invoice paid into your hosted node. Your device must be online to sign it.</p>
+        <p class="sub" style="margin:0 0 10px">Make an invoice to be paid over Lightning. Keep this page open until it is paid: the wallet signs for it here.</p>
         <div class="row">
           <select id="lnRecvAsset" style="flex:1"></select>
           <input id="lnRecvAmt" class="mono" placeholder="amount" style="width:130px">
@@ -805,7 +807,7 @@
       </div>
       <div class="card hide" id="recvOampCard">
         <label class="lbl">Receive a restricted asset (OpenAMP)</label>
-        <p class="sub" style="margin:0 0 10px">Restricted assets settle on the OpenAMP enclave ledger. Give a sender your account id (AID), or the enclave deposit address for a specific asset.</p>
+        <p class="sub" style="margin:0 0 10px">Restricted assets are held in your OpenAMP account. Give a sender your account id (AID), or the deposit address for one asset.</p>
         <label class="lbl">Your account id (AID)</label>
         <div class="mono" id="recvOampAid" style="margin:4px 0 10px">—</div>
         <img id="recvOampAidQr" alt="AID QR" style="image-rendering:pixelated;border:12px solid #fff;width:180px;height:180px;display:none;margin:0 0 10px">
@@ -951,7 +953,7 @@
               <!-- HOW IT SETTLES: per-leg rail (BTC<->asset pairs, when the signer is live) + the
                    honest timing banner. Both rails hidden by JS for non-BTC pairs (renders just the banner). -->
               <div class="swsec" id="swSettleSec">
-                <span class="swsec-lab">How it settles</span>
+                <span class="swsec-lab">How you pay and receive</span>
                 <div class="swrails hide" id="swRailPicks">
                   <div class="swrailpick">
                     <span class="swrail-lab">Pay from</span>
@@ -973,7 +975,7 @@
                 <div class="swleaf hide" id="swLeafBox"></div>
                 <div class="swtiming ok" id="swTiming">
                   <span class="swtiming-ic" id="swTimingIcon" aria-hidden="true">&#8226;</span>
-                  <span class="swtiming-tx" id="swTimingText">Pick two assets to see how settlement works.</span>
+                  <span class="swtiming-tx" id="swTimingText">Pick two assets to see how long it takes.</span>
                 </div>
               </div>
 
@@ -1011,7 +1013,7 @@
                    paintConfControl(). -->
               <label class="swconf hide" id="swConfWrap" style="align-items:center;gap:9px;margin-top:2px;font-size:12.5px;color:var(--dim);cursor:pointer">
                 <input type="checkbox" id="swConfChk" style="width:16px;height:16px;flex:0 0 auto">
-                <span>Receive this swap <b style="color:var(--txt);font-weight:650">confidentially</b> (a blinded address). Off by default: swaps receive to your transparent tb1 address, like the Receive tab.</span>
+                <span>Receive this swap at a <b style="color:var(--txt);font-weight:650">blinded address</b>, which hides its amount and asset on the chain. Off by default: swaps receive to your usual tb1 address, like the Receive tab.</span>
               </label>
 
               <!-- PLACE -->
@@ -1094,13 +1096,13 @@
         <label class="lbl">Mix</label>
         <p class="sub" style="margin:0 0 10px">A mix spends your coins into one transaction together with other people's, so that
           nobody watching the chain can say which coin came out of which. On Sequentia the amounts are hidden as well:
-          every output of the mix, your change included, is a blinded commitment. That is the part Bitcoin cannot do,
+          every output of the mix, your change included, is blinded. That is the part Bitcoin cannot do,
           and it is why the change output here is not the give-away it is there.</p>
         <div class="status" id="cjStatus">Looking for a coordinator…</div>
         <details class="ln-note" id="cjNote" style="margin-top:10px">
           <summary>What a mix does and does not hide</summary>
           <p class="sub"><b>Hidden from the chain:</b> every amount in the round, and which asset each output holds.
-            An observer sees a transaction with many inputs and many commitments.</p>
+            An observer sees a transaction with many inputs and many blinded outputs.</p>
           <p class="sub"><b>Hidden from the coordinator:</b> which of your coins paid for which of your mixed outputs.
             That is what the blind signatures buy, and it is all they buy.</p>
           <p class="sub"><b>Not hidden from the coordinator:</b> your amounts, and the link between your coins and your
@@ -1123,15 +1125,15 @@
         <div class="sub" id="cjPlan" style="margin-top:8px"></div>
         <div class="row" style="margin-top:12px">
           <button class="primary" id="cjGo">Mix</button>
-          <button class="ghost" id="cjRefresh">Refresh rounds</button>
+          <button class="ghost" id="cjRefresh">Refresh</button>
         </div>
         <div class="status" id="cjRunStatus"></div>
       </div>
 
       <div class="card hide" id="cjBtcCard">
         <label class="lbl">Mix Bitcoin</label>
-        <p class="sub" style="margin:0 0 10px">Bitcoin has no confidential transactions, so parent-chain BTC is bridged to SBTC,
-          mixed here, and sent back out to a fresh Bitcoin address of yours. Be clear-eyed about the trade: the bridge is a
+        <p class="sub" style="margin:0 0 10px">Bitcoin has no confidential transactions, so BTC is pegged into SBTC (pegged bitcoin),
+          mixed here, and sent back out to a fresh Bitcoin address of yours. Be clear-eyed about the trade: the peg is a
           custodian for as long as your coins are pegged, and it sees the Bitcoin going in and the Bitcoin coming out. What the
           mix removes is its ability to pair the two.</p>
         <div class="row">
@@ -1206,7 +1208,7 @@
         <div class="kv" style="margin-top:12px"><span class="k">Minimum stake</span><span class="v" id="stMin">40,000 tSEQ</span></div>
         <div class="kv"><span class="k">Lock</span><span class="v" id="stPeriod">about 30 days (43,200 blocks, the network minimum)</span></div>
         <div class="kv"><span class="k">Then unbonding</span><span class="v">2,016 Bitcoin blocks (about two weeks)</span></div>
-        <div class="kv"><span class="k">Your staker key</span><span class="v" id="stPubkey">—</span></div>
+        <div class="kv dev-only"><span class="k">Your staker key</span><span class="v" id="stPubkey">—</span></div>
       </div>
       <div class="card">
         <label class="lbl">Your stakes</label>
@@ -1269,7 +1271,7 @@
       <div class="card hide" id="histEmptyCard"><div class="muted">No transactions yet.</div></div>
       <div class="card" id="btcHistCard">
         <label class="lbl">Bitcoin (testnet4) history</label>
-        <p class="sub" style="margin:0 0 6px">Parent-chain BTC on the shared tb1 address. Links open the testnet4 explorer.</p>
+        <p class="sub" style="margin:0 0 6px">BTC on your tb1 address. Links open the Bitcoin testnet4 explorer.</p>
         <div class="list" id="btcHistList"><div class="muted">Loading…</div></div>
       </div>
       <div class="card" id="seqHistCard">
@@ -1431,7 +1433,7 @@
           <p>Every address of this wallet has two forms. The usual one, starting tb1, receives in the clear: anyone can see on the explorer how much of which asset arrived. The blinded one, starting tsqb1, hides the amount and the asset from everyone but you. Both belong to this wallet and to the same recovery phrase.</p>
           <p>Coins received at a blinded address count in your balance, spend like any other and come back with your recovery phrase. An explorer shows that a payment happened, not how much or of what. Transactions that carry hidden amounts are a little larger, because each hidden amount comes with a proof, so they cost a slightly higher network fee.</p>
           <p>To bring them back to your usual address, send them to yourself: in Send, paste your tb1 address from Receive and the amount. That one transaction makes them visible again; sending the whole balance of that asset also gathers its coins into one.</p>
-          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap confidentially</i>. Some offers come from a maker who completes the swap and blinds the output that pays you, so they can only pay a blinded address: the swap asks before using one, with the box unticked, and skips those offers unless you tick it.</p>
+          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap at a blinded address</i>. Some offers come from a maker who completes the swap and blinds the output that pays you, so they can only pay a blinded address: the swap asks before using one, with the box unticked, and skips those offers unless you tick it.</p>
         </details>
         <details id="faq-final"><summary>When is a payment final?</summary>
           <p>It shows at once and is confirmed in about a minute. A confirmed payment stands as long as Bitcoin does not reorganise the block it anchors to.</p>
@@ -1510,7 +1512,7 @@
     </section>
     <section data-panel="settings" class="hide">
       <div id="devModeRoot"></div>
-      <div class="card">
+      <div class="card dev-only">
         <label class="lbl">Backend</label>
         <div class="kv"><span class="k">Explorer API</span><span class="v" id="setApi"></span></div>
         <div class="kv"><span class="k">Network</span><span class="v" id="setNet"></span></div>
@@ -1530,7 +1532,7 @@
 
   <div class="foot">
     Sequentia testnet · <a href="/explorer/">Block explorer</a> · <a href="/download/">Desktop wallet</a><br>
-    Open-source: <a href="https://github.com/ConcatenaLabs/SWK" target="_blank" rel="noopener">SWK on GitHub</a>
+    <a href="https://github.com/ConcatenaLabs/sequentia-web-wallet" target="_blank" rel="noopener">Open source on GitHub</a>
   </div>
 </div>
 
@@ -3372,6 +3374,11 @@ async function openWallet(phrase){
 // but its value in each asset's figure and the headline.
 let leavesApi = null, pageApi = null;
 const devMode = ()=> devModeOn(localStorage, walletTag());
+// body.devmode drives the .dev-only elements; the Lightning pill words differ by mode too.
+function applyModeClass(){
+  document.body.classList.toggle('devmode', devMode());
+  try{ lnStatusPill(); }catch{}
+}
 function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
@@ -3385,7 +3392,7 @@ function initLeaves(){
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
-    onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
+    onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
@@ -3400,6 +3407,7 @@ function initLeaves(){
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
   }, $('leavesRoot'), $('devModeRoot'));
   show('tabLeaves', devMode());
+  applyModeClass();
   leavesApi.start();
   // The composer's Leaf choice (developer mode): settled by the leaf wallet's own commands.
   try{ initLeafRail(); }catch(e){ console.warn('[leaf rail] init failed:', e?.message??e); }
@@ -3683,14 +3691,16 @@ function lnStatusPill(){
   // as "0 of 2 channels" when it meant "0 of 2 signers connected". The channel count is the
   // only number shown; every pre-channel state is a WORD (connecting/ready/offline), never a
   // fraction that mimics the "N ch" form. The signer detail lives in the tooltip.
+  // Default mode says only whether Lightning works; developer mode adds the channel count.
+  const dev = (()=>{ try { return devMode(); } catch { return false; } })();
   if(activeChannels){
-    el.textContent = '⚡ LN '+activeChannels+' ch';
+    el.textContent = dev ? '⚡ LN '+activeChannels+' ch' : '⚡ Lightning';
   } else if (serviceUp){
-    el.textContent = '⚡ LN ready';                 // the service answers; no channel yet
+    el.textContent = dev ? '⚡ LN ready' : '⚡ Lightning';   // the service answers; no channel yet
   } else if (st.phase==='error'){
-    el.textContent = '⚡ LN offline';
+    el.textContent = dev ? '⚡ LN offline' : '⚡ Lightning offline';
   } else {
-    el.textContent = '⚡ LN connecting…';           // signers still connecting (count is in the tooltip)
+    el.textContent = dev ? '⚡ LN connecting…' : '⚡ Lightning…';   // signers still connecting (count is in the tooltip)
   }
   const legs = ['asset','btc'].filter(n=>st.nodes[n].enabled)
     .map(n=>`${n}: ${st.nodes[n].connected?'serving':(st.nodes[n].phase||'…')}${st.nodes[n].detail?(' ('+st.nodes[n].detail+')'):''}`);
@@ -4866,7 +4876,7 @@ function initLnSendReceive(){
       const node_key = await lnConnectLeg(asset, (t) => { st.innerHTML = '<span class="spin"></span>' + esc(t); });
       st.innerHTML = '<span class="spin"></span>Paying over Lightning…';
       const r = await lnApi.nodePay({ node_key, bolt11 });
-      if (r && r.paid){ st.className = 'status'; st.textContent = 'Paid ✓' + (r.preimage ? ' · preimage ' + String(r.preimage).slice(0, 16) + '…' : ''); $('lnSendBolt11').value = ''; try { renderLightningBalance(); } catch {} }
+      if (r && r.paid){ st.className = 'status'; st.textContent = 'Paid ✓' + (r.preimage && devMode() ? ' · preimage ' + String(r.preimage).slice(0, 16) + '…' : ''); $('lnSendBolt11').value = ''; try { renderLightningBalance(); } catch {} }
       else throw new Error((r && r.error) || 'payment did not complete');
     } catch(e){
       // A payment has no "offer": the no-route case is said in the payer's terms, the rest as prettyErr says it.
@@ -4977,9 +4987,15 @@ function moveToLightningDialog(leg){
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl','Move '+leg.ticker+' to Lightning'));
   { const ul=el('ul','sub ln-help'); ul.style.margin='6px 0 14px';
-    for(const t of ['Your wallet pays this amount into a Lightning channel on your hosted node, in one on-chain transaction.',
-                    'It signs that transaction only after the channel’s way back is signed.',
-                    'Your device signs every transaction and channel update for the channel.'])
+    // Developer mode names the machinery; default mode says the same in a newcomer's words.
+    const lines = devMode()
+      ? ['Your wallet pays this amount into a Lightning channel on your hosted node, in one on-chain transaction.',
+         'It signs that transaction only after the channel’s way back is signed.',
+         'Your device signs every transaction and channel update for the channel.']
+      : ['Your wallet moves this amount to Lightning in one transaction. From then on it can pay instantly.',
+         'It signs that transaction only once it is sure it can bring the amount back.',
+         'This device signs every payment, so keep this page open while you use Lightning.'];
+    for(const t of lines)
       ul.appendChild(el('li',null,t));
     c.appendChild(ul); }
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
@@ -6098,13 +6114,13 @@ function renderReceive(){
   // bare address, or a `sequentia:` scheme) and a wasm rebuild — out of scope for a JS-only change.
   // Until then the visible/copied address above is correct; only the encoded QR carries the scheme.
   try{ $('qr').src = a.QRCodeUri(); }catch{ $('qr').removeAttribute('src'); }
-  $('btnConf').textContent = showConf ? 'Show non-confidential' : 'Show confidential';
+  $('btnConf').textContent = showConf ? 'Show usual address' : 'Show blinded address';
   $('btnXpub').textContent = showXpub ? 'Hide xpub' : 'Show xpub';
   $('xpubReveal').classList.toggle('hide', !showXpub);
   if(showXpub) renderXpubForm();
   $('recvTip').textContent = showConf
-    ? 'Confidential (tsqb1…): amounts and assets are hidden on-chain. A separate, opt-in private receive; the Bitcoin side always uses the non-confidential form.'
-    : 'Non-confidential (tb1…), Bitcoin-compatible: the same address also receives parent-chain BTC. Confidential addresses are opt-in on Sequentia.';
+    ? 'Blinded address (tsqb1…): what it receives on Sequentia has its amount and asset hidden on the chain. BTC always arrives at your usual tb1 address.'
+    : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.';
   renderOampReceive();
 }
 // Restricted-asset (OpenAMP) receive panel: show the wallet's AID plus the enclave deposit address
@@ -6220,7 +6236,7 @@ function prettyErr(e){
   // default, by design, so this is a completely ordinary thing to hit -- and it arrived as the raw
   // Rust error "Address must be confidential", which tells a user nothing and hides the one-click fix.
   if(/must be confidential|NotConfidentialAddress/i.test(m))
-    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap confidentially" and place it again - nothing was sent.';
+    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap at a blinded address" and place it again - nothing was sent.';
   if(/redeem ?script mismatch|does not match quote/i.test(m))
     return 'The other side of this trade changed before it completed, so it was refused rather than paid to the wrong party. Nothing was sent; anything already locked is returned automatically.';
   if(/WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS|unknown payment|payment_hash.*unknown/i.test(m))
@@ -6664,7 +6680,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
   const builtFee = psetFee(pset);
   const kv=[];
   // First line: this is a Sequentia (testnet) payment, NOT a parent-chain BTC one.
-  kv.push(['Network', 'Sequentia (testnet); not parent-chain BTC']);
+  kv.push(['Network', 'Sequentia testnet']);
   if(review && Array.isArray(review.rows)){
     for(const r of review.rows){
       const m=assetMeta(r.hex);
@@ -6819,7 +6835,7 @@ async function oampReviewBroadcast(assetId, recipientAid, atoms, onDone){
 
   // Build the confirm modal from the DECODED, LOCALLY VERIFIED effects (never the server's word).
   const kv=[];
-  kv.push(['Network', 'OpenAMP restricted asset (enclave ledger)']);
+  kv.push(['Network', 'OpenAMP (restricted asset)']);
   kv.push(['Recipient AID', recipientAid]);
   kv.push(['Amount', fmtAtoms(atoms, meta.precision)+' '+meta.ticker]);
   if(draft.convert_atoms!=null && BigInt(draft.convert_atoms)>0n)
@@ -7158,9 +7174,9 @@ async function renderMix(){
     show('cjBtcCard', !!(st.btc && st.btc.lane_asset && cjLanes.some(l=>l.asset===st.btc.lane_asset)));
     $('cjStatus').className='status';
     $('cjStatus').textContent = cjLanes.length
-      ? `Coordinator ready · ${cjLanes.length} open lane${cjLanes.length>1?'s':''} · ${st.recent?.length||0} recent round${(st.recent?.length||0)===1?'':'s'}`
-      + (cjLanes.every(l=>l.waiting) ? ' · a round starts when a second person joins, so registering is what gets it going' : '')
-      : 'Coordinator reachable, but no round is open for registration right now.';
+      ? (devMode() ? `Coordinator ready · ${cjLanes.length} open lane${cjLanes.length>1?'s':''} · ${st.recent?.length||0} recent round${(st.recent?.length||0)===1?'':'s'}` : 'Ready to mix')
+      + (cjLanes.every(l=>l.waiting) ? ' · a mix starts when a second person joins, so joining is what gets it going' : '')
+      : 'Ready, but no mix is open to join right now.';
     cjPlan();
   }catch(e){
     show('cjLaneCard', false); show('cjBtcCard', false);
@@ -8192,7 +8208,7 @@ async function reviewUnbond(s, state){
   const built = await stakeRecords.buildUnbond(ctx, state);
   const fee = BigInt(state.stake.value) - BigInt(built.unbondingValue);
   const {m, ok, st} = modalRows({title:'Unbond this stake', kv:[
-    ['Network', 'Sequentia (testnet); not parent-chain BTC'],
+    ['Network', 'Sequentia testnet'],
     ['Stake', tSEQ(state.stake.value)],
     ['Network fee', tSEQ(fee)+' (out of the stake)'],
     ['Then', `it stops counting as stake at once, and can be claimed back into this wallet ${UNBOND_ANCHOR_DEPTH.toLocaleString()} Bitcoin blocks (about two weeks) after this confirms`],
@@ -8215,7 +8231,7 @@ async function reviewClaim(s, state){
   const built = await stakeRecords.buildClaim(ctx, state, addr);
   const fee = BigInt(state.unbonding.value) - BigInt(built.outValue);
   const {m, ok, st} = modalRows({title:'Claim unbonded stake', kv:[
-    ['Network', 'Sequentia (testnet); not parent-chain BTC'],
+    ['Network', 'Sequentia testnet'],
     ['→ '+addr, tSEQ(built.outValue)],
     ['Network fee', tSEQ(fee)],
   ]});
@@ -8750,11 +8766,13 @@ function renderPools(){
     item.style.cursor='pointer';
     if(DELEG_SEL===p.signer || (DELEG && DELEG.signer===p.signer)) item.style.outline='1px solid var(--gold, #f5b301)';
     const mid = el('div','grow');
-    mid.appendChild(el('div', 'mono', p.signer.slice(0,16)+'…'));
+    mid.appendChild(el('div', 'mono', 'Pool '+p.signer.slice(0,12)+'…'));
     const share = total ? (Number(p.weight)/total*100).toFixed(1)+'%' : '—';
-    const rel = (p.reliability===undefined) ? 'no blocks owed yet'
-              : ('produces '+p.reliability.toFixed(2)+' of its share');
-    mid.appendChild(el('div','sub', `${fmtAtoms(BigInt(p.weight),8)} tSEQ (${share} of the network) · ${p.delegators} delegator(s) · ${rel}`));
+    // Reliability is the share of the blocks its stake was due that it produced, said as a percentage.
+    const rel = (p.reliability===undefined) ? 'no blocks due yet'
+              : ('made '+Math.round(p.reliability*100)+'% of the blocks it was due');
+    const n = Number(p.delegators)||0;
+    mid.appendChild(el('div','sub', `${fmtAtoms(BigInt(p.weight),8)} tSEQ (${share} of the network) · ${n} ${n===1?'wallet':'wallets'} delegating · ${rel}`));
     mid.appendChild(el('div','sub', poolPayoutLine(p)));
     if((p.policy_pending||[]).length){
       const w = el('div','sub','⚠ has announced a payout change that binds in '+p.policy_pending[0].blocks_away+' blocks');
@@ -8867,7 +8885,7 @@ async function reviewJoin(target){
   const ctx = stakeCtx();
   const p = await stakeRecords.prepareJoin(ctx, target);
   const kv = [
-    ['Network', 'Sequentia (testnet); not parent-chain BTC'],
+    ['Network', 'Sequentia testnet'],
     ['Pool signer', p.signer],
     ['1. Pays your staking key', tSEQ(p.recordAtoms + p.createFee)],
     ['2. Creates the delegation record', tSEQ(p.recordAtoms)+' (comes back when you leave)'],

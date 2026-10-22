@@ -18,7 +18,7 @@ const PRETTY_MACHINERY = /\b(rpc|hsmd|wasm|htlc|redeem|scriptpubkey|psbt|sendpay
 const looksPlain = (m) => /^[A-Z0-9]/.test(m) && m.length < 300 && !/[{}<>]/.test(m);
 function prettyErr(m) {
   if (/must be confidential|NotConfidentialAddress/i.test(m))
-    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap confidentially" and place it again - nothing was sent.';
+    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap at a blinded address" and place it again - nothing was sent.';
   if (/redeem ?script mismatch|does not match quote/i.test(m))
     return 'The other side of this trade changed before it completed, so it was refused rather than paid to the wrong party. Nothing was sent; anything already locked is returned automatically.';
   if (/WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS|unknown payment|payment_hash.*unknown/i.test(m))
