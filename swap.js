@@ -2389,6 +2389,10 @@ function fitAmounts(){
   for (const id of ['swPayAmt', 'swRecvAmt']){
     const i = C.$(id); if (!i) continue;
     i.style.width = (Math.max(3, String(i.value || i.placeholder || '').length) + 1) + 'ch';
+    // The ticker after it reads as part of the figure: the same font, size, weight and colour the
+    // field really has (other rules can resize it), never a size written here.
+    const d = i.parentNode && i.parentNode.querySelector('.denom');
+    if (d) try { const cs = getComputedStyle(i); for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'color']) d.style[k] = cs[k]; } catch {}
   }
 }
 function paintGuide(){
