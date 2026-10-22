@@ -13,10 +13,13 @@
 //   GET  /health              -> { ok, operator, genesis_hash }
 //   GET  /v1/quotes           -> { operator, genesis_hash, quotes: [{ give_asset, want_asset, rate_num, rate_den,
 //                                  min_give, max_give }] }   (the maker gives give_asset and wants
-//                                  ceil(give × rate_num / rate_den) of want_asset)
+//                                  ceil(give × rate_num / rate_den) of want_asset; with a ladder, one
+//                                  quote a level, each carrying the depth of the levels before it)
 //   POST /v1/firm {give_asset, want_asset, give}  -> { swap, offer, give, want, expires_at }: an in-tree swap
 //                                  offer of the leaf library's (`swap_offer`), its coins held until it is
-//                                  completed, released or lapses (`offer_ttl_seconds`)
+//                                  completed, released or lapses (`offer_ttl_seconds`), priced by walking
+//                                  the ladder's levels: never above ceil(give × the rate of any quote
+//                                  whose max_give carries `give`)
 //   POST /v1/accept {swap, accept} -> { swap, state: 'done' }: completes the swap (`swap_complete`, the
 //                                  operator co-signing); asked again it answers the same
 //   POST /v1/release {swap}       -> { swap, state }: cancels a firm offer nobody took
@@ -48,10 +51,21 @@
 //                 "spread_bps": 100,             maker's side, read every minute; a pair whose
 //                 "assets": { "<hex>": { "ticker": "USDX", "precision": 8 } } },   price is missing
 //                                                or older than ten minutes is not quoted
+//     "ladder": { "levels": 8, "step_bps": 25, "growth": 1.25 },   optional, and a pair may carry its own:
+//                                                what it holds of an asset it gives is quoted at
+//                                                `levels` price levels, each `step_bps` further from
+//                                                its rate and `growth` times larger than the one
+//                                                before, one quote a level, cumulative (quote k: level
+//                                                k's rate, the depth of levels 1..k); a firm offer
+//                                                walks the levels (leaf-maker-ladder.mjs). Without it,
+//                                                one level of all it holds
 //     "fee_margin": "2000",                      atoms of each asset kept back for a swap's fees
 //     "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600,
 //     "board_keep": "100000",                    on-chain atoms of each asset it gives that it keeps
-//                                                (for exit fees); what it holds above that is boarded
+//                                                (for exit fees); what it holds above that is boarded.
+//                                                This, coin_size and fee_margin each take one figure
+//                                                for every asset, or { "<asset hex>": "atoms", …,
+//                                                "default": "atoms" }
 //     "coin_size": "2000000",                    optional: boards in coins of at most this many atoms,
 //                                                one a pass, so several takers are served at once
 //     "exit_delay_units": 36,                    optional; the operator's default otherwise
@@ -67,6 +81,7 @@ import { fileURLToPath } from 'node:url'
 import { leafLibraryThread } from '../leaf-node.mjs'
 import { spendableFrom } from '../../user-trade.js'
 import { btcDesk } from './leaf-maker-btc.mjs'
+import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
@@ -107,19 +122,27 @@ export function checkConfig (c) {
   return c
 }
 
-// The quotes, from what the library can pay now and what open offers hold.
-export function quotesFrom (pairs, spendable, held, margin, rates = new Map()) {
+// The quotes, from what the library can pay now and what open offers hold: a pair's depth at the
+// levels of its ladder (leaf-maker-ladder.mjs), one quote a level, cumulative.
+export function quotesFrom (pairs, spendable, held, margin, rates = new Map(), cfg = null) {
   const out = []
   for (const p0 of pairs || []) {
-    const r = p0.price ? rates.get(p0.give + ':' + p0.want) : null
-    if (p0.price && !r) continue
-    const p = r ? { ...p0, ...r } : p0
-    const have = (spendable.get(p.give) || 0n) - (held.get(p.give) || 0n) - big(margin)
-    const min = big(p.min_give || 1)
-    if (have < min) continue
-    out.push({ give_asset: p.give, want_asset: p.want, rate_num: String(p.rate_num), rate_den: String(p.rate_den), min_give: String(min), max_give: String(have) })
+    const sl = slicesFor(p0, spendable, held, margin, rates, cfg)
+    if (sl) out.push(...ladderQuotes(p0.give, p0.want, sl.slices, sl.min))
   }
   return out
+}
+
+// A pair's ladder now: its rate (fixed, or from the feed), what the maker can give of it, and the
+// slices of that. Null when the pair is not quoted (no live price, or not enough to give).
+export function slicesFor (p0, spendable, held, margin, rates = new Map(), cfg = null) {
+  const r = p0.price ? rates.get(p0.give + ':' + p0.want) : null
+  if (p0.price && !r) return null
+  const p = r ? { ...p0, ...r } : p0
+  const have = (spendable.get(p.give) || 0n) - (held.get(p.give) || 0n) - big(perAsset(margin, p.give, 0))
+  const min = big(p.min_give || 1)
+  const slices = slicesOf(p, have, min, ladderOf(p0, cfg))
+  return slices.length ? { slices, min, pair: p } : null
 }
 
 async function main () {
@@ -240,10 +263,11 @@ async function main () {
         // The assets it gives: in-tree, and for BTC at its desk.
         const gives = [...(cfg.pairs || []), ...((cfg.btc && cfg.btc.pairs) || []).filter((x) => x.give !== 'BTC')]
         for (const a of new Set(gives.map((x) => x.give))) {
-          let amount = big(onchain[a]) - big(cfg.board_keep ?? 100000)
+          let amount = big(onchain[a]) - big(perAsset(cfg.board_keep, a, '100000'))
           // In coins of `coin_size`, one a pass: a firm offer holds the coins it spends until it
           // is taken or released, so a maker of one coin serves one taker at a time.
-          if (cfg.coin_size && amount > big(cfg.coin_size)) amount = big(cfg.coin_size)
+          const coin = perAsset(cfg.coin_size, a, null)
+          if (coin && amount > big(coin)) amount = big(coin)
           if (amount < big((gives.find((x) => x.give === a) || {}).min_give || 1)) continue
           const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
           let done = false, why = null
@@ -298,7 +322,7 @@ async function main () {
       if (req.method === 'GET' && p === '/v1/quotes') {
         const sp = await spendable()
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash,
-          quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates()), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
+          quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
       }
       if (req.method === 'GET' && p.startsWith('/v1/swap/')) { const id = p.slice('/v1/swap/'.length); return send(res, 200, { swap: id, state: await swapState(id, true) }) }
       if (desk && req.method === 'GET' && p.startsWith('/v1/btc/')) { const r = await desk.route('GET', p, {}); if (r) return send(res, r[0], r[1]) }
@@ -313,10 +337,11 @@ async function main () {
         const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
         if (!pair0) return send(res, 404, { error: 'the maker quotes no such pair' })
         const give = big(b.give)
-        const q = quotesFrom([pair0], await spendable(), new Map(), cfg.fee_margin || 0, liveRates())[0]
-        const pair = q ? { ...pair0, rate_num: q.rate_num, rate_den: q.rate_den } : pair0
-        if (!q || give < big(q.min_give) || give > big(q.max_give)) return send(res, 409, { error: 'the maker does not hold that much now', quote: q || null })
-        const want = ceilDiv(give * big(pair.rate_num), big(pair.rate_den))
+        const sl = slicesFor(pair0, await spendable(), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
+        const w = sl && give >= sl.min ? walkWant(sl.slices, give) : null
+        if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
+        const pair = sl.pair
+        const want = w.want
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, expires })
