@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { makerEntries, covenantRoundEntries, sizeEntry, chooseCandidate, admittedSources, admittedReceives, SOURCE_PARTIES } from './single-step-book.mjs'
+import { makerEntries, covenantRoundEntries, restingEntries, sizeEntry, chooseCandidate, admittedSources, admittedReceives, SOURCE_PARTIES } from './single-step-book.mjs'
 import { planSingleStep, SINGLE_STEP_SOURCES } from './settlement-router.mjs'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32)
@@ -47,7 +47,7 @@ test('the router names one settlement per source and refuses any other', () => {
   assert.equal(planSingleStep('covenant-round', { payAsset: X, receiveAsset: Y, caps: { leaf_take: true } }).path, 'leaf-take')
   assert.throws(() => planSingleStep('covenant-round', { payAsset: X, receiveAsset: Y, caps: { leaf_take: false } }), /does not settle in one step/)
   for (const s of ['submarine', 'lsp-bridge', 'pureln', 'native']) assert.throws(() => planSingleStep(s, { payAsset: X, receiveAsset: Y }), /not a single-step source/)
-  assert.deepEqual(Object.keys(SINGLE_STEP_SOURCES).sort(), ['btc-gateway', 'covenant-round', 'leaf-maker'])
+  assert.deepEqual(Object.keys(SINGLE_STEP_SOURCES).sort(), ['btc-gateway', 'covenant-round', 'leaf-maker', 'leaf-resting'])
 })
 
 test('a BTC trade is one hash-lock: BTC over Lightning, the asset in the tree, and never a leaf of BTC', () => {
@@ -77,4 +77,22 @@ test('a pair is offered only as the drill admitted it, on its chain', () => {
   assert.deepEqual(admittedReceives(pairs, 'g1', Y), [])
   const shipped = JSON.parse(readFileSync(new URL('../../user-mode/pairs.json', import.meta.url), 'utf8'))
   assert.ok(shipped && typeof shipped.chains === 'object', 'user-mode/pairs.json is the list the page reads')
+})
+
+test('an order resting in the tree: only the joined operator\'s, sized at the relay\'s live size, one transfer', () => {
+  const op = 'ab'.repeat(32)
+  const rest = (o) => ({ offer_asset: Y, want_asset: X, _verified: true, _status: { active_amount: '400000' },
+    resting_leaf: { operator_key: op, order_id: 'cd'.repeat(32), asset_a: Y, asset_b: X, rate_num: '2', rate_den: '1', min_lot: '10000', value: '600000', ...o } })
+  const es = restingEntries([rest({}), rest({ operator_key: 'ef'.repeat(32) }), { ...rest({}), _verified: false }, rest({ asset_a: X, asset_b: Y })], { payAsset: X, receiveAsset: Y, operator: op })
+  assert.equal(es.length, 1)
+  assert.equal(es[0].source, 'leaf-resting'); assert.equal(es[0].id, 'cd'.repeat(32))
+  assert.equal(es[0].maxReceive, 400000n, 'the relay\'s live size, not the signed one'); assert.equal(es[0].lot, 10000n)
+  // A fill leaves nothing or at least a lot, as a covenant order's does.
+  assert.deepEqual(sizeEntry(es[0], 785000n), { receive: 390000n, pay: 780000n })
+  assert.deepEqual(restingEntries([rest({})], { payAsset: X, receiveAsset: Y, operator: null }), [], 'no operator joined, nothing to fill')
+  const p = planSingleStep('leaf-resting', { payAsset: X, receiveAsset: Y })
+  assert.equal(p.path, 'leaf-fill-resting'); assert.equal(p.plan.leaf.shape, 'resting')
+  assert.deepEqual(p.commands, ['order_fill_resting_quote', 'order_fill_resting'])
+  assert.throws(() => planSingleStep('leaf-resting', { payAsset: 'BTC', receiveAsset: Y }), /BTC is never a leaf/)
+  assert.equal(SOURCE_PARTIES['leaf-resting'], 1, 'the operator is the one party left to act')
 })

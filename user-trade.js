@@ -19,6 +19,8 @@
 //   relayBook(pay, receive)    -> the relay's offers that sell `receive` for `pay` (each with
 //                                 `_verified`, its relay JSON `_relayJson`, and its order
 //                                 status `_status`, the book's statuses[i] of offers[i])
+//   relayFills(pay, receive)   -> the relay's fill records of the pair (an order resting in the
+//                                 tree is settled once its fill's record is final), or absent
 //   outputValue(txid, vout)    -> the atoms an order's output holds on the chain now, or null
 //                                 (the relay keeps an offer's signed amount after a part fill)
 //   admitted()                 -> { pairs, genesis }: user-mode/pairs.json and this chain's genesis
@@ -28,7 +30,7 @@
 //   now()                      -> milliseconds
 //   sleep(ms), log(...)        -> optional
 
-import { makerEntries, covenantRoundEntries, sizeEntry, chooseCandidate, admittedSources } from './tooling/lsp/single-step-book.mjs'
+import { makerEntries, covenantRoundEntries, restingEntries, sizeEntry, chooseCandidate, admittedSources } from './tooling/lsp/single-step-book.mjs'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
 
@@ -161,9 +163,16 @@ export function createEngine (deps) {
         } catch (e) { log('[user trade] maker', m, 'did not answer:', e && e.message) }
       }
     }
+    const wantBook = (sources.includes('covenant-round') || sources.includes('leaf-resting')) && deps.relayBook
+    const book = wantBook ? await Promise.resolve(deps.relayBook(payAsset, receiveAsset)).catch((e) => { log('[user trade] the book did not answer:', e && e.message); return [] }) : []
+    if (sources.includes('leaf-resting') && book.length) {
+      // Only orders resting in the tree of the operator the wallet joined.
+      const operator = await run('info').then((i) => i && i.operator).catch(() => null)
+      out.push(...restingEntries(book, { payAsset, receiveAsset, operator }))
+    }
     if (sources.includes('covenant-round') && deps.relayBook) {
       try {
-        for (const e of covenantRoundEntries(await deps.relayBook(payAsset, receiveAsset), { payAsset, receiveAsset })) {
+        for (const e of covenantRoundEntries(book, { payAsset, receiveAsset })) {
           // What the order can be filled for now: the relay's status of it (statuses[i] of
           // offers[i]; the signed offer_amount overstates it after a part fill), else the chain.
           const active = e.raw && e.raw._status && e.raw._status.active_amount
@@ -189,6 +198,7 @@ export function createEngine (deps) {
     const size = sizeEntry(entry, pay)
     if (!size) return null
     if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size)
+    if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size)
     if (entry.source === 'covenant-round') {
       // The take's price and the operator's fee come from the library: size down until what it
       // gives fits what the person pays and what the wallet can pay now.
@@ -263,6 +273,40 @@ export function createEngine (deps) {
           settle: { received: s, change: sc }, fees }
       }
       return null
+    }
+    return null
+  }
+
+  // Firm terms of a fill of an order resting in the tree, priced by the library
+  // (`order_fill_resting_quote`, from the operator's own view of the order): what leaves the wallet
+  // is the coins it gives less the change, and the coins the fill brings (what it gets, and the
+  // change) are settled in the next round, at the fee a coin of their expiry pays.
+  async function firmResting (entry, payAsset, receiveAsset, pay, have, size) {
+    const limit = pay < have ? pay : have
+    let r = size.receive
+    for (let i = 0; i < 4; i++) {
+      let q
+      try { q = await run('order_fill_resting_quote', { order: entry.id, amount: String(r) }) } catch (e) { log('[user trade] order_fill_resting_quote:', e.message); return null }
+      if (!q.gets || q.gets.asset !== receiveAsset || big(q.gets.amount) !== r || !q.fee || q.fee.asset !== payAsset) { log('[user trade] the resting fill is not the one asked'); return null }
+      const coins = (await run('coins')) || []
+      const given = coins.filter((c) => (q.gives || []).includes(c.leaf_id))
+      if (given.length !== (q.gives || []).length) return null
+      const spends = given.reduce((n, c) => n + big(c.value), 0n) - big(q.change)
+      const expiry = Math.min(...given.map((c) => Number(c.expiry)).filter((x) => x > 0), Number((q.served && q.served.expiry) || Infinity))
+      let s, sc = null
+      try {
+        s = await run('settle_quote', { asset: receiveAsset, value: String(r), expiry })
+        if (big(q.change) > 0n) sc = await run('settle_quote', { asset: payAsset, value: String(q.change), expiry })
+      } catch (e) { log('[user trade] settle_quote:', e.message); return null }
+      const total = spends + (sc ? big(sc.fee) : 0n)
+      if (total <= limit) {
+        return { source: entry.source, id: entry.id, entry, receive: big(s.after), give: total, quote: q,
+          settle: { received: s, change: sc },
+          fees: [{ asset: payAsset, atoms: spends - big(q.paid) + (sc ? big(sc.fee) : 0n) }, { asset: receiveAsset, atoms: big(s.fee) }] }
+      }
+      const s2 = sizeEntry(entry, (r * entry.rateNum) / entry.rateDen - (total - limit) - 1n)
+      if (!s2 || s2.receive >= r) return null
+      r = s2.receive
     }
     return null
   }
@@ -366,6 +410,30 @@ export function createEngine (deps) {
         return put(rec)
       }
       if (choice.source === 'btc-gateway') return await btcT.confirm(choice, rec)
+      if (choice.source === 'leaf-resting') {
+        rec.order = choice.entry.id
+        rec.receiveAsset = choice.quote.gets.asset
+        rec.settleTargets = [{ asset: choice.settle.received.asset, value: choice.settle.received.value, fee: choice.settle.received.fee },
+          ...(choice.settle.change ? [{ asset: choice.settle.change.asset, value: choice.settle.change.value, fee: choice.settle.change.fee }] : [])]
+        rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
+        put(rec)
+        const args = { order: rec.order, amount: choice.quote.filled }
+        let r
+        try { r = await run('order_fill_resting', { ...args, shown: choice.quote }) } catch (e) {
+          if (!(e && (e.code === 'order_moved' || /order_moved/.test(String(e.message))))) throw e
+          // Another taker filled first and the order rests at a new coin: filled there only for the
+          // same amount at the same price and no higher fee, as shown.
+          const again = await run('order_fill_resting_quote', args)
+          const same = again.filled === choice.quote.filled && again.paid === choice.quote.paid && again.fee && again.fee.asset === choice.quote.fee.asset &&
+            big(again.fee.amount) <= big(choice.quote.fee.amount) && big(again.change) === big(choice.quote.change)
+          if (!same) { const x = new Error('the price is no longer held'); x.code = 'lapsed'; throw x }
+          rec.movedFrom = choice.quote.coin
+          r = await run('order_fill_resting', { ...args, shown: again })
+        }
+        rec.transfer = r.answer && r.answer.transfer_id
+        rec.state = 'sent'; rec.sentAt = now()
+        return put(rec)
+      }
       throw new Error('no such source')
     } catch (e) {
       // Nothing was signed if the record never reached 'sent'.
@@ -389,6 +457,12 @@ export function createEngine (deps) {
         const known = new Set([...(rec.beforeParts || []), ...records().map((r) => r.take).filter(Boolean)])
         const p = ((await run('participations')) || []).find((x) => !known.has(x.participation) && (x.new_leaves || []).some((n) => n.asset === rec.ticket.receiveAsset))
         if (p) { rec.take = p.participation; rec.state = 'sent'; rec.sentAt = now() } else { rec.state = 'failed'; rec.error = 'not taken' }
+      } else if (rec.source === 'leaf-resting') {
+        // A fill the page closed on is sent again by the library's next sync; the coin it brings
+        // is then the wallet's.
+        await run('sync').catch(() => {})
+        const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
+        if (got) { rec.state = 'sent'; rec.sentAt = now() } else { rec.state = 'failed'; rec.error = 'not filled' }
       } else if (rec.source === 'btc-gateway' && rec.hash) {
         // Selling: a payment under the hash is the wallet's lock. Buying: a receive under it.
         const mine = rec.dir === 'sell' ? ((await run('lightning_payments')) || {})[rec.hash] : ((await run('lightning_receives')) || {})[rec.hash]
@@ -400,7 +474,22 @@ export function createEngine (deps) {
     if (rec.source === 'covenant-round') return advanceTake(rec)
     if (rec.source === 'leaf-maker') return advanceSwap(rec)
     if (rec.source === 'btc-gateway') return btcT.advance(rec)
+    if (rec.source === 'leaf-resting') return advanceResting(rec)
     return rec
+  }
+
+  // A fill of a resting order: Settled once the relay records the fill final and the coins it
+  // brought are settled in a round that is final.
+  async function advanceResting (rec) {
+    await run('sync').catch((e) => log('[user trade] sync:', e.message))
+    if (deps.relayFills && rec.transfer && !rec.fillFinal) {
+      const fills = await Promise.resolve(deps.relayFills(rec.ticket.payAsset, rec.ticket.receiveAsset)).catch(() => [])
+      const f = (fills || []).find((x) => x && x.txid === rec.transfer)
+      rec.fillState = f ? f.state : null
+      if (f && f.state === 'final') rec.fillFinal = true
+    }
+    if ((await settleStep(rec)) === 'settled' && (rec.fillFinal || !deps.relayFills)) { rec.state = 'settled'; rec.settledAt = now() }
+    return put(rec)
   }
 
   async function participation (pid) {

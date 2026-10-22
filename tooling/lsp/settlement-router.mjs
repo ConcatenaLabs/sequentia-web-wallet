@@ -316,6 +316,7 @@ export const SINGLE_STEP_SOURCES = Object.freeze({
   'leaf-maker': { path: 'leaf-swap', taker: { leaf: true }, maker: 'leaf' },
   'covenant-round': { path: 'leaf-take', taker: { leaf: true }, maker: 'chain' },
   'btc-gateway': { path: 'leaf-ln', taker: { leaf: true, btc: 'ln' }, maker: 'leaf' },
+  'leaf-resting': { path: 'leaf-fill-resting', taker: { leaf: true }, maker: 'resting-leaf' },
 });
 
 // The one hash-lock of a BTC trade: BTC over Lightning on both ends (native), the asset from a
@@ -345,6 +346,22 @@ export function planSingleStep(source, { payAsset, receiveAsset, caps } = {}) {
   const s = SINGLE_STEP_SOURCES[source];
   if (!s) throw new Error(`${JSON.stringify(source)} is not a single-step source`);
   if (!payAsset || !receiveAsset || payAsset === receiveAsset) throw new Error('a trade names two assets');
+  if (s.path === 'leaf-fill-resting') {
+    if (isBtc(payAsset) || isBtc(receiveAsset)) throw new Error(`${source} trades no BTC: BTC is never a leaf`);
+    // One transfer in the operator's tree, which the operator co-signs: the order's coin and the
+    // taker's coins in, what the taker gets, the order's credit and its remainder out. The maker
+    // may be away; the operator is the one party left to act.
+    const plan = {
+      asset: receiveAsset, quote: payAsset, takerSide: 'buy',
+      btcLeg: { unit: 'btc', rail: 'leaf', method: 'in-tree', bridge: false, lnSide: null, jitInbound: false },
+      assetLeg: { unit: 'asset', rail: 'leaf', method: 'in-tree', bridge: false, lnSide: null, jitInbound: false },
+      atomic: { sharedPreimage: false, oneTransaction: true, lspCoordinates: false },
+      happyCoincidence: true,
+      leaf: { shape: 'resting', leafParty: 'both' },
+      steps: [{ op: 'order-fill-resting-quote' }, { op: 'order-fill-resting' }],
+    };
+    return { path: s.path, plan, commands: ['order_fill_resting_quote', 'order_fill_resting'] };
+  }
   if (s.path === 'leaf-ln') {
     const plan = planLeafLightning({ payAsset, receiveAsset });
     return { path: s.path, plan, commands: payAsset === 'BTC'

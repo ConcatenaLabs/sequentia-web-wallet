@@ -8,6 +8,10 @@
 //      swap; the ticket shows what you pay, what you get and the fees; "Sent", then "Settled";
 //   3. a take of an on-chain covenant order: the maker stops, so the order is the best; the same
 //      three lines, "Sent", "Settled", and the order rests again on the chain with less;
+//   3b. a fill of an order resting in the operator's tree: a wallet of the drive's own rested one at
+//      the start and went away; for an amount the covenant order's remainder cannot match, the page
+//      fills it in one transfer, "Sent", and "Settled" once the relay records the fill final and
+//      the coins it brought are settled in a final round;
 //   4. a pair with no one-step liquidity is not offered, in plain words;
 //   5. developer mode is as before: the composer with every rail, the Leaf choice, no user
 //      composer.
@@ -27,7 +31,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Page } from './cdp-page.mjs'
 import { startEsploraShim } from './esplora-shim.mjs'
-import { harness, startRelay, placeOrder, startMaker, makerReady, freePort, sleep, lwkFrom } from './user-mode-stack.mjs'
+import { harness, startRelay, placeOrder, restOrder, startMaker, makerReady, freePort, sleep, lwkFrom } from './user-mode-stack.mjs'
 import { USER_MODE_FORBIDDEN_WORDS, forbiddenIn } from '../user-trade.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -162,8 +166,35 @@ async function main () {
   note(`covenant order at ${order.at}, listed ${order.posted.status}`)
   await makerReady(H, maker, Y)
 
+  // An order resting in the operator's tree, rested now by a wallet of the drive's own (the drill's
+  // wallet process), which then goes away: Y for X at 11 X per 8 Y, the worst price of the three,
+  // so steps 2 and 3 go to the maker and the covenant order. It is rested before A's coins are
+  // settled in later rounds: a fill spends coins expiring no earlier than the order's coin.
+  const rDir = join(out, 'rester'); mkdirSync(rDir, { recursive: true })
+  const rCfg = join(rDir, 'config.json')
+  writeFileSync(rCfg, JSON.stringify({ operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
+    makers: [], relay: relay.url, genesis: st.genesis_hash, pairs_file: join(out, 'pairs-used.json'), exit_delay_units: 1 }), { mode: 0o600 })
+  const rPort = await freePort()
+  const rProc = spawn(process.execPath, [join(here, 'user-mode-wallet.mjs'), '--dir', rDir, '--port', String(rPort), '--config', rCfg], { stdio: ['ignore', 'pipe', 'pipe'] })
+  children.push(rProc)
+  rProc.stdout.on('data', (d) => appendFileSync(join(rDir, 'wallet.log'), d)); rProc.stderr.on('data', (d) => appendFileSync(join(rDir, 'wallet.log'), d))
+  const rester = { call: async (path, body) => { const r = await fetch(`http://127.0.0.1:${rPort}${path}`, body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }); const j = await r.json(); if (!r.ok) throw new Error(`${path}: ${j.error || r.status}`); return j } }
+  await until('the resting maker\'s wallet up', async () => { try { return (await fetch(`http://127.0.0.1:${rPort}/health`)).ok } catch { return false } }, 120000, 1000)
+  const ra = await rester.call('/run', { command: 'address' })
+  await H.fund(ra.script_pubkey, Y, 3000000); await H.fund(ra.script_pubkey, X, 1000000); await H.produce()
+  await until('the resting maker\'s board', async () => {
+    try { await rester.call('/run', { command: 'sync' }); const q = await rester.call('/run', { command: 'board_quote', args: { asset: Y, amount: '2500000', fee_asset: X } }); await rester.call('/run', { command: 'board', args: { asset: Y, amount: '2500000', fee_asset: X, shown: q.fee } }); return true } catch { await H.produce(); return false }
+  }, 120000, 2000)
+  await H.produce(); await H.bury()
+  await until('the board live', async () => { await rester.call('/run', { command: 'sync' }); const b = await rester.call('/balance'); return BigInt(b.live[Y] || 0) >= 2500000n }, 180000, 3000)
+  // Its round and the operator's publishing of it need the operator's clock: run it meanwhile.
+  const restPump = setInterval(() => { H.pump().catch(() => {}) }, 2500)
+  const restId = await restOrder(H, rester, relay.url, { assetA: Y, assetB: X, sell: 2000000, rateNum: 11, rateDen: 8, minLot: 10000 }).finally(() => clearInterval(restPump))
+  note(`     an order of 2,000,000 YLEAF rests in the tree (${restId.slice(0, 12)}…), listed on the relay; its maker goes away`)
+  try { rProc.kill('SIGTERM') } catch {}
+
   const pairs = pairsArg ? JSON.parse(readFileSync(pairsArg, 'utf8'))
-    : { chains: { [st.genesis_hash]: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker', 'covenant-round'] }, { pay: Y, receive: X, sources: ['leaf-maker', 'covenant-round'] }] } } }
+    : { chains: { [st.genesis_hash]: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker', 'covenant-round', 'leaf-resting'] }, { pay: Y, receive: X, sources: ['leaf-maker', 'covenant-round', 'leaf-resting'] }] } } }
   note(pairsArg ? `pairs admitted by ${pairsArg}` : 'pairs: the drive admits X→Y and Y→X itself (no drill list given)')
   writeFileSync(join(out, 'pairs-used.json'), JSON.stringify(pairs, null, 2))
 
@@ -173,7 +204,7 @@ async function main () {
   children.push(srv)
   const base = await new Promise((ok) => srv.stdout.on('data', (d) => { const m = String(d).match(/serving (\S+)/); if (m) ok(m[1]) }))
   note(`page ${base}`)
-  const init = `window.SEQ_SEQOB_URL=${JSON.stringify(base + 'seqob')}; window.SEQ_LEAF_MAKERS=[${JSON.stringify(base + 'leafmaker')}]; window.SEQ_USER_MODE_PAIRS=${JSON.stringify('data:application/json,' + encodeURIComponent(JSON.stringify(pairs)))}`
+  const init = `window.SEQ_USER_TRADE=true; window.SEQ_SEQOB_URL=${JSON.stringify(base + 'seqob')}; window.SEQ_LEAF_MAKERS=[${JSON.stringify(base + 'leafmaker')}]; window.SEQ_USER_MODE_PAIRS=${JSON.stringify('data:application/json,' + encodeURIComponent(JSON.stringify(pairs)))}`
 
   const A = wallet('A')
   await start(A, base, st, labels, init)
@@ -235,6 +266,31 @@ async function main () {
   }, 120000, 2000).catch(() => null)
   check('the relay records the fill of the order by the round, final', !!fill && /final/.test(JSON.stringify(fill)), fill ? { txid: fill.txid, state: fill.state || fill.status } : 'no record')
   check('the order\'s first output is spent and it rests again with less', before === '600000' && !(await H.outputValue(order.at.split(':')[0], Number(order.at.split(':')[1]))), { before })
+
+  // ---- 3b. a fill of the order resting in the operator's tree ----
+  // The maker is gone, and the covenant order's remainder gives less for 800,000 XLEAF than the
+  // resting order does: the most received is the resting order.
+  // The relay lists a new resting order at 0 until its follower has the operator's word for it.
+  await until('the relay lists the resting order at its size', async () => {
+    const j = await (await fetch(`${relay.url}/v1/market/${Y}/${X}/orderbook`)).json().catch(() => ({}))
+    const i = (j.offers || []).findIndex((o) => o.resting_leaf && o.resting_leaf.order_id === restId)
+    return i >= 0 && BigInt(((j.statuses || [])[i] || {}).active_amount || 0) > 0n
+  }, 120000, 2000)
+  const t5 = await review(A, X, Y, '800000')
+  check('the ticket for the resting order shows the same three lines', /You pay\s*\d+ XLEAF/.test(t5.in) && /You get\s*\d+ YLEAF/.test(t5.out) && /^(Fees .* included above|No fees)$/.test(t5.cost.trim()), t5)
+  await A.shot('ticket-resting-order')
+  await wordsCheck(A, 'user mode, the resting ticket')
+  await A.click('#ucConfirm')
+  const r5 = await until('the fill recorded', async () => { const l = await A.trades(); return l.find((r) => r.source === 'leaf-resting' && r.state !== 'confirming') || null }, 120000, 1000)
+  check('the trade went to the order resting in the tree, filled in one transfer', r5.source === 'leaf-resting' && r5.order === restId && !!r5.transfer, { source: r5.source, order: r5.order, transfer: r5.transfer })
+  await until('the resting fill Settled', async () => /Settled/.test(await A.text(`#ucTrades [data-trade="${r5.id}"]`)), 300000, 2000)
+  await A.shot('resting-settled')
+  const rfill = await until('the relay\'s record of the resting fill, final', async () => {
+    for (const [b, q] of [[Y, X], [X, Y]]) { const j = await (await fetch(`${relay.url}/v1/market/${b}/${q}/fills`)).json().catch(() => ({})); const f = (j.fills || []).find((x) => x.txid === r5.transfer); if (f) return f.state === 'final' ? f : null }
+    return null
+  }, 120000, 2000).catch(() => null)
+  check('"Settled" once the relay records the fill (keyed by the operator\'s transfer id) final', !!rfill, rfill ? { txid: rfill.txid, state: rfill.state, via: rfill.taker && rfill.taker.via } : 'no record')
+  await wordsCheck(A, 'user mode, the resting fill settled')
 
   // ---- 4. not offered ----
   const t3 = await review(A, Y, X, '10000')

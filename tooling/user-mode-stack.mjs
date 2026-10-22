@@ -78,6 +78,60 @@ export function relayBook (base) {
   }
 }
 
+// An order resting in the operator's tree, rested from the wallet `w` (a drill wallet's process,
+// its `call(path, body)`) and listed on the relay at `relayUrl` once the operator publishes it, as
+// the browser extension's leaf-resting.js lists one: an offer with the `resting_leaf` member,
+// signed by a key of its own. `sell` atoms of `assetA` for `assetB` at rateNum/rateDen (a whole
+// price), REFUND `days` out. -> the order id.
+export async function restOrder (H, w, relayUrl, { assetA, assetB, sell, rateNum, rateDen, minLot, days = 7 }) {
+  const med = (await H.rpc('getblockchaininfo')).mediantime
+  const args = { sell: assetA, amount: String(sell), want: assetB, rate_num: String(rateNum), rate_den: String(rateDen), min_lot: String(minLot), expiry: med + days * 86400 }
+  const q = await w.call('/run', { command: 'order_rest_quote', args })
+  const r = await w.call('/run', { command: 'order_rest', args: { ...args, shown: q } })
+  let order = null
+  for (let k = 0; k < 180 && !order; k++) {
+    await w.call('/run', { command: 'sync' }).catch(() => {})
+    const mine = ((await w.call('/run', { command: 'order_resting', args: {} })).orders || []).find((o) => o.rested_by === r.order)
+    if (mine && mine.state === 'not_rested') throw new Error('the order was not rested: ' + JSON.stringify(mine))
+    if (mine && mine.order) order = mine.order
+    else await sleep(2000)
+  }
+  if (!order) throw new Error('the operator never published the resting order ' + r.order)
+  let served = null
+  for (let k = 0; k < 60; k++) {
+    served = ((await w.call('/run', { command: 'order_resting', args: { orders: [order] } })).others || []).find((o) => o.order === order)
+    if (served && served.state === 'resting') break
+    await sleep(2000)
+  }
+  if (!served || served.state !== 'resting') throw new Error('the order does not rest at the operator: ' + JSON.stringify(served))
+  const info = await w.call('/run', { command: 'info' })
+  const t = served.terms || {}
+  const now = Math.floor(Date.now() / 1000)
+  const want = (BigInt(sell) * BigInt(t.rate_num)) / BigInt(t.rate_den)
+  const margin = Number(((info.server_info || {}).fills || {}).order_margin_seconds || 0)
+  const delist = Math.min(Number(t.expiry) - (margin || 6 * 3600), served.expiry != null ? Number(served.expiry) - 3 * 86400 : Infinity)
+  const offer = {
+    offer_id: hex(randomBytes(16)), schema_version: 1, pair: { base_asset: served.asset, quote_asset: t.asset_b }, trade_dir: 'TRADE_DIR_SELL',
+    base_amount: String(sell), offer_amount: String(sell), offer_asset: served.asset, want_amount: want.toString(), want_asset: t.asset_b,
+    allow_partial: true, min_fill: String(t.min_lot), created_at_unix: String(now), expires_at_unix: String(Math.min(now + 7 * 86400 - 60, delist)),
+    resting_leaf: { operator_url: info.server, operator_key: info.operator, order_id: served.order, asset_a: served.asset, asset_b: t.asset_b,
+      rate_num: String(t.rate_num), rate_den: String(t.rate_den), min_lot: String(t.min_lot), landed_maker: t.maker, landed_expiry: Number(t.expiry),
+      refund_key: t.refund_key, coin: served.coin, value: String(served.value) },
+  }
+  seqob.setSeqobBase(relayUrl)
+  await seqob.postRestingOffer(offer, randomBytes(32))
+  return order
+}
+
+// The relay's fill records of a pair, both orientations (an order resting in the tree is settled
+// once its fill's record, keyed by the operator's transfer id, is final).
+export function relayFills (base) {
+  return async (pay, receive) => {
+    const get = async (b, q) => { const r = await fetch(`${base}/v1/market/${b}/${q}/fills?limit=500`); return r.ok ? ((await r.json()).fills || []) : [] }
+    return [...await get(receive, pay), ...await get(pay, receive)]
+  }
+}
+
 // A transparent covenant order selling `sell` atoms of `assetA` for `assetB` at rateNum/rateDen,
 // funded from the harness's coins, buried, and listed on the relay.
 export async function placeOrder (H, relayUrl, { assetA, assetB, sell, rateNum, rateDen, minLot, ttl = 7 * 86400 }) {

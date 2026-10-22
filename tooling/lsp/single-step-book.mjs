@@ -12,6 +12,9 @@
 //                     for the pay asset in one reassignment in the operator's tree.
 //   'covenant-round'  a transparent covenant order on the relay's on-chain book that a round
 //                     can take (unified-book caps.leaf_take), taken from leaves.
+//   'leaf-resting'    an order resting as a leaf in the operator's tree, listed on the relay's
+//                     book (its `resting_leaf` member) by a maker who may be away: one transfer
+//                     in the tree that the operator co-signs, filled from the wallet's leaves.
 //   'btc-gateway'     a live maker's quote of BTC for an asset, or of an asset for BTC: one
 //                     hash-lock, the asset moving in the operator's tree under the hash and the
 //                     BTC over Bitcoin Lightning under the same hash (user-trade-btc.js). BTC
@@ -30,7 +33,7 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
 
 // The fewest parties who must act after the person confirms, per source (design 3.2).
-export const SOURCE_PARTIES = Object.freeze({ 'onchain-fill': 0, 'covenant-round': 1, 'leaf-maker': 2, 'btc-gateway': 2 })
+export const SOURCE_PARTIES = Object.freeze({ 'onchain-fill': 0, 'covenant-round': 1, 'leaf-resting': 1, 'leaf-maker': 2, 'btc-gateway': 2 })
 
 // The entries of a maker's quotes for the pair: the maker gives `receiveAsset` for `payAsset`.
 // A quote names { give_asset, want_asset, rate_num, rate_den, max_give, min_give }, and the
@@ -64,6 +67,27 @@ export function covenantRoundEntries (offers, { payAsset, receiveAsset }) {
     if (rateNum <= 0n || rateDen <= 0n || locked <= 0n) continue
     out.push({ source: 'covenant-round', id: `${c.covenant_txid}:${c.covenant_vout}`, rateNum, rateDen,
       maxReceive: locked, minReceive: lot > 0n ? lot : 1n, lot, raw: o })
+  }
+  return out
+}
+
+// The entries of the relay's orders resting in the tree of the wallet's operator (`operator`, its
+// key) that sell `receiveAsset` for `payAsset`: an order of another operator cannot be filled from
+// this wallet's leaves. Sized at the relay's live size (statuses[i].active_amount, kept on an offer
+// as `_status`); a fill takes at least a lot and leaves nothing or at least a lot.
+export function restingEntries (offers, { payAsset, receiveAsset, operator }) {
+  const out = []
+  for (const o of offers || []) {
+    if (!o || o._verified === false) continue
+    const t = o.resting_leaf || o.restingLeaf
+    if (!t || !operator || String(t.operator_key ?? t.operatorKey ?? '').toLowerCase() !== String(operator).toLowerCase()) continue
+    if (String(t.asset_a ?? t.assetA) !== receiveAsset || String(t.asset_b ?? t.assetB) !== payAsset) continue
+    const id = String(t.order_id ?? t.orderId ?? '').toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(id)) continue
+    const rateNum = big(t.rate_num ?? t.rateNum), rateDen = big(t.rate_den ?? t.rateDen), lot = big(t.min_lot ?? t.minLot)
+    const live = o._status && o._status.active_amount != null ? big(o._status.active_amount) : big(t.value)
+    if (rateNum <= 0n || rateDen <= 0n || live <= 0n) continue
+    out.push({ source: 'leaf-resting', id, rateNum, rateDen, maxReceive: live, minReceive: lot > 0n ? lot : 1n, lot, raw: o })
   }
   return out
 }
