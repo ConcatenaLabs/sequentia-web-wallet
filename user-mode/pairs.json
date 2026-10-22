@@ -23,6 +23,24 @@
           ],
           "proven": "regtest",
           "report": "REPORT.md"
+        },
+        {
+          "pay": "2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de",
+          "receive": "BTC",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc.md"
+        },
+        {
+          "pay": "BTC",
+          "receive": "2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc.md"
         }
       ]
     }
