@@ -448,7 +448,8 @@ in the middle of a trade:
   the operator's tree under a payment hash and the BTC over Bitcoin Lightning under the same
   hash, the hash always the BTC receiver's and the asset's giver locking first, so neither side
   can take what it gets before paying (`user-trade-btc.js`). Selling for BTC is Settled once the
-  BTC has come and the wallet's payment is settled with the same preimage; buying with BTC once
+  BTC has come, the wallet's payment is settled with the same preimage and the change it left is
+  settled in a round that is final; buying with BTC once
   the coin bought is claimed and its round final. BTC is never a coin in the tree and never
   pegged. On the page the wallet's Bitcoin Lightning is its own hosted Bitcoin node, keyless and
   co-signed by the page (`btc-lightning.js`); its first BTC trade brings the node up. Selling for

@@ -199,7 +199,10 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
       if (s.state === 'offered') {
         if (rcv.state !== 'issuing') { if (Date.now() > s.expires + 3600 * 1000 && rcv.state === 'waiting') s.state = 'lapsed'; return }
-        const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.route_delay || s.min_final_cltv) }).catch((e) => ({ ready: false, never: e.message }))
+        // Only the library's refusal says the leaf will never do; an operator that does not answer
+        // now (a restart) is asked again at the next pass, the wallet's payment held meanwhile.
+        const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.route_delay || s.min_final_cltv) })
+          .catch((e) => (e && (e.kind === 'refused' || /^refused\b/i.test(String(e.message))) ? { ready: false, never: e.message } : { ready: false, why: e.message }))
         if (r.never) { s.state = 'void'; log('btc swap', s.swap, 'not paid:', r.never); return }
         if (!r.ready) return
         const d = await node.decode(s.invoice_btc)
