@@ -364,7 +364,7 @@
   .swamt-wrap .sub{margin-top:3px!important}
   .swamt-wrap .amt-row{justify-content:flex-start;gap:6px}
   .swamt-wrap .amt-row .swamt{flex:0 1 auto;min-width:3ch;max-width:100%}
-  .swamt-wrap .denom{font:600 38px/1.05 ui-monospace,Menlo,Consolas,monospace;color:var(--txt);letter-spacing:-.01em}
+  .swamt-wrap .denom{color:var(--txt)}   /* its font is the amount's own, copied from the field (fitAmounts) */
   /* The amount is the hero content: large, mono, borderless — it reads as a number, not a form field. */
   .swamt{width:100%;background:transparent;border:none;border-radius:0;padding:2px 0;
          font:600 38px/1.05 ui-monospace,Menlo,Consolas,monospace;color:var(--txt);min-width:0;letter-spacing:-.01em}
@@ -604,7 +604,7 @@
     .swguide .gs.done{padding-right:3px}
   }
   @media (max-width:480px){
-    .swamt,.swamt-wrap .denom{font-size:26px}
+    .swamt{font-size:26px}
     .swpane{padding:16px}
     .swrails{grid-template-columns:1fr}
   }
