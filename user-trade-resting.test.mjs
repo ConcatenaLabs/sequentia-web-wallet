@@ -118,3 +118,35 @@ test('a fill that did not answer is followed, not called failed: the library may
   await assert.rejects(e3.confirm(q3.choice, q3.ticket), /refused/)
   assert.equal(e3.records()[0].state, 'failed')
 })
+
+test('a resting fill the wallet\'s eligible coins cannot pay in full is sized to what they hold', async () => {
+  const s = standIn()
+  const orig = s.lib.command.bind(s.lib)
+  // Only 300,000 of the wallet's coins are no older than the order's.
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting_quote') {
+      const takes = BigInt(a.amount) * 2n + 500n
+      if (takes > 300000n) throw new Error(`refused: the outputs take ${takes} of asset ${X}, more than the 300000 the inputs hold`)
+    }
+    return orig(cmd, a)
+  }
+  const q = await engineOf(s).quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(q.ok, q.why)
+  assert.equal(q.ticket.source, 'leaf-resting')
+  assert.ok(BigInt(q.choice.quote.filled) * 2n + 500n <= 300000n, 'the fill fits what the eligible coins hold')
+  assert.ok(BigInt(q.choice.quote.filled) > 100000n, 'and is not sized down further than that')
+})
+
+test('orders that cannot be filled make way for the next one: the engine does not stop at three', async () => {
+  const s = standIn()
+  const ids = ['01', '02', '03', '04'].map((x) => x.repeat(32))
+  const order = (id, num) => ({ offer_asset: Y, want_asset: X, _verified: true, _status: { active_amount: '600000' },
+    resting_leaf: { operator_key: OP, order_id: id, asset_a: Y, asset_b: X, rate_num: num, rate_den: '10', min_lot: '10000', value: '600000' } })
+  // Four orders at a better price than the fifth, each refused by the library.
+  s.relayBook = async () => [...ids.map((id) => order(id, '19')), order(ORDER, '20')]
+  const orig = s.lib.command.bind(s.lib)
+  s.lib.command = (cmd, a) => { if (cmd === 'order_fill_resting_quote' && ids.includes(a.order)) throw new Error('refused: the order is filled'); return orig(cmd, a) }
+  const q = await engineOf(s).quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(q.ok, q.why)
+  assert.equal(q.choice.id, ORDER)
+})
