@@ -157,8 +157,14 @@ export function encodeSwapRequest(reqJson){
 // finalize only needs the maker's co-signed PSET in `transaction`).
 export function decodeSwapAccept(bytes){
   const f = readFields(bytes);
+  // A seqdex.v1.SwapFail shares fields 1-2 and has the failure code at 3 (a varint) and its
+  // message at 4: a maker that cannot co-sign answers one at once, sealed like an accept.
+  const v3 = f[3] && f[3][0];
+  if (typeof v3 === 'bigint' || (f[4] && f[4][0] instanceof Uint8Array && !firstStrSafe(f, 3)))
+    return { id: firstStr(f,1), request_id: firstStr(f,2), transaction: '', failure_code: typeof v3 === 'bigint' ? Number(v3) : 0, failure_message: firstStr(f,4) };
   return { id: firstStr(f,1), request_id: firstStr(f,2), transaction: firstStr(f,3) };
 }
+function firstStrSafe(fields, n){ const v = fields[n] && fields[n][0]; return (v instanceof Uint8Array) ? td.decode(v) : ''; }
 
 // seqdex.v1.SwapComplete -> wire bytes.
 export function encodeSwapComplete(c){
@@ -695,6 +701,9 @@ export async function lift(offer, takeAtoms, feeAsset, hooks){
       if (sm && sm.ciphertext){
         const opened = await crypter.open(b64decode(sm.ciphertext));
         acc = decodeSwapAccept(opened);
+        // The maker refused the co-sign and said so: stop now, nothing is signed.
+        if (acc.failure_message != null && !acc.transaction)
+          throw new Error('maker refused: ' + (acc.failure_message || 'the maker could not co-sign this lift') + '; this wallet signed nothing, so nothing was traded');
       }
     }
     if (!acc || !acc.transaction) throw new Error('no co-signed swap returned by the maker');

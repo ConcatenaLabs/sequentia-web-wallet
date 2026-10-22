@@ -6348,6 +6348,9 @@ function prettyErr(e){
     return 'Your hosted Lightning node did not complete that request, so nothing was created. It may still be starting up — try again shortly, or with a smaller amount.';
   if(/lightning-rpc|connection refused|ECONNREFUSED/i.test(m))
     return 'Your Lightning node is not reachable right now, so nothing was sent. Reopen the wallet to reconnect it, then try again.';
+  // A maker that refuses says why in plain words of its own (seqdex SealSwapFail).
+  { const r=/maker refused: (the maker cannot fund this lift right now|the request does not match the offer|the maker could not co-sign this lift)/.exec(m);
+    if(r) return 'The other side declined: '+r[1]+'. This wallet signed nothing, so nothing was traded.'; }
   if(/maker did not answer: /.test(m))
     return 'The other side did not answer in time. This wallet signed nothing, so nothing was traded.';
   if(/timed? ?out|timeout|deadline exceeded/i.test(m))
