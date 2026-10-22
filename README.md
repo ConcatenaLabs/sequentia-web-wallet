@@ -276,6 +276,20 @@ nothing else; developer mode shows a "Paying through the next round" card while 
 release costs the refresh fee the asset's schedule asks then (none in the leaf's free window).
 User mode shows none of this: a claim taken up is counted in its asset's one figure.
 
+#### The operator's bond
+
+The operator posts an equivocation bond: two different messages its key signs under one coin's
+salt prove it signed twice, and burn the bond whole. At `care`'s pace, in either mode, the page
+reads the bond (once the wallet has seen it bonded, it requires it from then on) and runs the
+library's `watch_bond`, which checks the wallet's own evidence against the chain and the mempool
+and sends the slash itself should the operator key have signed twice. The library's gate does
+the rest by itself: a receive or a swap is refused while the bond is missing or in notice, or
+when what the wallet would hold out of round is worth more than it. Nothing is said while the
+bond stands; a refusal reads, in user mode, "Not accepted: the security deposit that backs these
+instant payments is missing or being withdrawn, so this wallet takes no payment that rests on it.
+Nothing was signed." Developer mode shows the bond (its asset and value, state, coin, when it can
+be withdrawn, whether this wallet requires it) and the last watch, with **Watch now**.
+
 #### Supervised assets
 
 An asset whose issuer can freeze holdings by a rule of the chain (on the testnet, USDC.e and

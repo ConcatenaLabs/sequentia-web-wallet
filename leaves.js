@@ -138,11 +138,21 @@ export function frozenSentence (amount, ticker) {
 // A refusal for user mode: a frozen coin said plainly; every other refusal as it is.
 export function plainRefusal (e) {
   const m = String((e && e.message) || '')
+  if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
   if ((e && e.code === 'frozen') || /\bfrozen\b|\bpaused\b/i.test(m)) {
     return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: 'This asset is frozen by its issuer for this wallet: nothing was sent.' })
   }
   return e
 }
+
+// A refusal of the operator's equivocation bond (missing, in notice, or worth less than
+// what the wallet would hold out of round on it): the library's gate, said plainly.
+export function bondRefusal (e) {
+  return /\bbond\b/i.test(String((e && e.message) || ''))
+}
+export const BOND_WORDS = Object.freeze({
+  refused: 'Not accepted: the security deposit that backs these instant payments is missing or being withdrawn, so this wallet takes no payment that rests on it. Nothing was signed.',
+})
 
 // The user composer's pairs, as the operator serves them: a pair with a supervised asset
 // keeps only the in-tree swap with a live maker, since the operator serves no take, no
@@ -534,6 +544,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
       for (const c of (v && v.claims) || []) if (c && c.taken_up && !c.error) emit('leafArrived', { leaf_id: c.leaf_id, value: String(c.value ?? ''), kind: 'claim' })
     } catch (e) { S.lastCare = { at: now(), error: e } }
+    await watchBond()
+  }
+
+  // The operator's bond, at care's pace, in either mode: read (a bond seen bonded is
+  // required from then on, so a wallet that saw one refuses to receive once it is gone or
+  // in notice), and watched: the wallet's evidence against the chain and the mempool, and
+  // a slash sent should the operator key have signed twice under one salt.
+  async function watchBond () {
+    try { S.bond = await run('bond') } catch (e) { S.bond = { error: e } }
+    try { S.lastWatch = { at: now(), value: await run('watch_bond', {}) } } catch (e) { S.lastWatch = { at: now(), error: e } }
   }
 
   // ---- the schedule: sync by itself while the page is open ----
@@ -641,7 +661,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       c.appendChild(el('div', 'status', `${S.releasing.command}: the unplanned leaves fall short, so ${S.releasing.coins.length} planned leaf(s) (${S.releasing.coins.map(short).join(', ')}) are given up in the next round for leaves no plan names; the payment is asked again once that round is final.`))
       root.appendChild(c)
     }
-    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
+    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderBond(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
   }
 
   function renderJoin () {
@@ -940,6 +960,42 @@ export function mountLeaves (ctx, root, settingsRoot) {
       const pre = el('pre', 'mono leaf-result'); pre.textContent = JSON.stringify(S.distributions, null, 1)
       const d = el('details'); d.open = true; d.appendChild(el('summary', 'sub', 'Distributions')); d.appendChild(pre); c.appendChild(d)
     }
+    root.appendChild(c)
+  }
+
+  // Developer mode's view of the operator's bond: its asset, value and state, and the watch.
+  function renderBond () {
+    const c = card('The operator\'s bond')
+    c.id = 'leafBond'
+    c.appendChild(el('p', 'sub', 'The operator\'s equivocation bond: two messages its key signed under one coin\'s salt burn it whole. The wallet reads it at care\'s pace and, once it has seen it bonded, takes no payment out of round while it is missing or in notice, nor more than it is worth. It also watches its evidence against the chain and sends the slash itself should the operator key sign twice.'))
+    const b = S.bond
+    if (!b) c.appendChild(el('div', 'muted', 'Not read yet in this page.'))
+    else if (b.error) c.appendChild(errBox(b.error))
+    else {
+      c.dataset.state = String(b.state || '')
+      c.appendChild(kv('State', b.state))
+      if (b.asset) c.appendChild(kv('Bond', amt(b.asset, b.value)))
+      if (b.coin) c.appendChild(kv('Coin', b.coin))
+      if (b.withdrawable_at != null) c.appendChild(kv('Withdrawable', when(b.withdrawable_at, (S.schedule || {}).now)))
+      c.appendChild(kv('Required by this wallet', b.required ? 'yes: seen bonded' : 'no: never seen bonded'))
+      c.appendChild(kv('Covers what this wallet holds out of round', b.covers ? 'yes' : 'no'))
+      if (b.why) c.appendChild(el('div', 'sub', b.why))
+    }
+    const w = S.lastWatch
+    if (w) {
+      if (w.error) c.appendChild(errBox(w.error))
+      else {
+        const v = w.value || {}
+        const ev = v.evidence || {}
+        c.dataset.slashed = String((v.slashed || []).length)
+        c.appendChild(kv('Last watch', `${new Date(w.at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}: ${ev.lines ?? 0} evidence line(s), ${ev.salts ?? 0} salt(s), ${(v.slashed || []).length} slash(es) sent`))
+        const pre = el('pre', 'mono leaf-result'); pre.textContent = JSON.stringify(v, null, 1)
+        const d = el('details'); d.appendChild(el('summary', 'sub', 'What watch_bond answered')); d.appendChild(pre); c.appendChild(d)
+      }
+    }
+    const r = el('div', 'row'); r.style.marginTop = '10px'
+    const go = button('Watch now', async () => { try { await act('watch_bond', () => watchBond()) } catch {} }, 'ghost'); go.id = 'btnLeafWatchBond'; go.disabled = S.busy
+    r.appendChild(go); c.appendChild(r)
     root.appendChild(c)
   }
 

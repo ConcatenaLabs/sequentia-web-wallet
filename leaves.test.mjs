@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { bondRefusal, BOND_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -345,4 +345,35 @@ test('a pair with a supervised asset keeps only the in-tree swap', () => {
   const s = servedPairs(pairs, [Y])
   assert.deepEqual(s.chains.g.pairs.map((p) => p.sources), [['leaf-maker'], [], ['btc-gateway']])
   assert.equal(servedPairs(pairs, []), pairs)
+})
+
+test('a refusal of the bond reads plainly in user mode', () => {
+  for (const m of ['refused: the operator\'s bond is missing: it was seen bonded …', 'refused: the operator\'s bond is noticed …', 'refused: more than the bond\'s 5000000 …']) {
+    const e = new LeafError({ kind: 'refused', message: m })
+    assert.equal(bondRefusal(e), true)
+    assert.equal(plainRefusal(e).message, BOND_WORDS.refused)
+  }
+  assert.equal(bondRefusal(new LeafError({ kind: 'refused', message: 'refused: no' })), false)
+  for (const w of ['leaf', 'operator', 'round', 'tree']) assert.ok(!new RegExp(`\\b${w}\\b`, 'i').test(BOND_WORDS.refused), w)
+})
+
+test('the bond is read and watched at care\'s pace, in either mode', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const runs = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    runs.push(m.args.command)
+    const c = m.args.command
+    const result = c === 'bond' ? { state: 'bonded', required: true } : c === 'watch_bond' ? { state: 'bonded', slashed: [], evidence: { lines: 2 } }
+      : c === 'schedule' ? { now: 1 } : c === 'balance' ? {} : c === 'care' ? {} : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  assert.ok(runs.indexOf('bond') > runs.indexOf('care') && runs.indexOf('watch_bond') > runs.indexOf('bond'), runs.join(' '))
+  assert.equal(api.state.bond.state, 'bonded')
+  assert.equal(api.state.lastWatch.value.evidence.lines, 2)
+  api.stop()
 })
