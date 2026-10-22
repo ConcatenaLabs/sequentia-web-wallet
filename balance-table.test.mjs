@@ -18,11 +18,28 @@ test('every row has the same cells, value last', () => {
   assert.ok(!/'asset-row arow2'/.test(html), 'no row is left in the old layout');
 });
 
-test('Lightning says what it can send and receive, "not yet" when it cannot receive', () => {
+test('Lightning says what it can send and receive, "not yet" when it cannot', () => {
   const rb = fn('renderBalance');
-  assert.match(rb, /line\('You can send', amt\(lnSendFor\(kind\)\)\);/);
+  assert.match(rb, /const lnSendFor = \(kind\)=>\{ try \{ return BigInt\(Math\.round\(lnSendableNow\(kind\)\.units\|\|0\)\); \} catch \{ return 0n; \} \};/);
+  assert.match(rb, /line\('You can send', send>0n \? amt\(send\) : 'not yet', send>0n \? null : 'none'\);/);
   assert.match(rb, /line\('You can receive', room>0n \? amt\(room\) : 'not yet', room>0n \? null : 'none'\);/);
   assert.match(rb, /'Add room to receive'/);
+});
+
+test('a channel still opening is in the balance but sends nothing yet', () => {
+  const status = { channels: [
+    { node_key: 'b', leg: 'btc', asset_label: 'BTC', state: 'CHANNELD_AWAITING_LOCKIN', spendable_units: 190_000_000, balance_units: 191_000_000 },
+    { node_key: 'n', asset: 'aa'.repeat(32), state: 'CHANNELD_NORMAL', spendable_units: 5000 },
+    { leg: 'btc', asset_label: 'BTC', state: 'CHANNELD_NORMAL', spendable_units: 7 },   // not this wallet's
+  ] };
+  const make = (name) => new Function('lnLastStatus', 'lnChannelAsset', 'return ' + fn(name))(status, (c) => c.asset);
+  assert.deepEqual(make('lnSendableNow')('BTC'), { units: 0, channels: 0 }, 'the BTC channel is opening: nothing to send');
+  assert.equal(make('lnSpendableFor')('BTC').units, 190_000_000, 'its coins still count as the wallet\'s');
+  assert.equal(make('lnBalanceFor')('BTC'), 191_000_000n);
+  assert.deepEqual(make('lnSendableNow')('aa'.repeat(32)), { units: 5000, channels: 1 });
+  // Paying an invoice and a BTC sale ask what can be sent now.
+  assert.match(fn('lnPayShortfall'), /const can=BigInt\(Math\.floor\(Number\(lnSendableNow\(hex\)\.units\|\|0\)\)\);/);
+  assert.match(html, /spendable: async \(\)=> \{ try\{ await refreshLnStatus\(\); \}catch\{\} return lnSendableNow\('BTC'\)\.units; \},/);
 });
 
 test('the Lightning balance is the channel share, what can be sent its fallback', () => {
