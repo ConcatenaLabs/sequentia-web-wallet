@@ -30,7 +30,9 @@ const H = '11'.repeat(32), GOLD = 'ab'.repeat(31) + '01', SILV = 'cd'.repeat(32)
 // The node's own invoice.
 let d = decodeBolt11(SEQ_INV);
 assert.deepStrictEqual(d, { ok: true, network: 'sequentia-regtest', chain: 'seq', asset: SEQ_ASSET,
-  amountMsat: 250000000n, paymentHash: SEQ_HASH, minFinalCltv: d.minFinalCltv });
+  amountMsat: 250000000n, paymentHash: SEQ_HASH, minFinalCltv: d.minFinalCltv, timestamp: 1791447707, expiry: 604800 });
+// BOLT 11's own example: made at 1496314658, its `x` field one minute.
+{ const b = decodeBolt11(BTC_INV); assert.equal(b.timestamp, 1496314658); assert.equal(b.expiry, 60); }
 assert.ok(d.minFinalCltv > 18, 'a Sequentia invoice asks for its network final CLTV');
 assert.equal(bolt11Asset(SEQ_INV), SEQ_ASSET);
 assert.equal(bolt11Asset(' lightning:' + SEQ_INV.toUpperCase() + ' '), SEQ_ASSET, 'case, a URI scheme and spaces do not matter');

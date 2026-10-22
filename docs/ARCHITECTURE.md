@@ -100,6 +100,7 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | the operator's server, the node's JSON-RPC | leaves/worker.js | the URLs the user enters when joining an operator in developer mode, then whenever this wallet's leaf wallet syncs, in either mode. Each is fetched with a synchronous XHR from the worker, so a server on another origin must answer CORS |
 | `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
 | `/leafmaker` | user-trade.js, user-trade-btc.js | a live leaf maker (`tooling/lsp/leaf-maker.mjs`): its quotes, firm in-tree swap offers and, from its BTC desk, BTC trades in one hash-lock, for user mode's Trade tab (override: `window.SEQ_LEAF_MAKERS`, a list of base URLs) |
+| `/leafmaker-btc` | user-trade.js, user-trade-btc.js | the live BTC maker: the same program with its BTC desk on a Bitcoin Lightning node of its own |
 | `user-mode/pairs.json` | index.html | the pairs, and their sources, user mode offers per chain (override: `window.SEQ_USER_MODE_PAIRS`) |
 
 Every backend beyond the two Esplora APIs is optional at runtime: fetch failures degrade the
@@ -129,7 +130,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
 | `SEQ_USER_TRADE` | `false` | show user mode's Trade tab as the user composer (three inputs, one button); off, the full composer serves both modes. A deployment turns it on once a live leaf maker runs and `user-mode/pairs.json` admits pairs on its chain |
-| `SEQ_LEAF_MAKERS` | `[origin + '/leafmaker']` | the live leaf makers user mode's Trade tab asks for in-tree swaps |
+| `SEQ_LEAF_MAKERS` | `[origin + '/leafmaker', origin + '/leafmaker-btc']` | the live leaf makers user mode's Trade tab asks for in-tree swaps and BTC trades |
 | `SEQ_USER_MODE_PAIRS` | `user-mode/pairs.json` | the list of pairs user mode offers (a URL) |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |

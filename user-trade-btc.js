@@ -22,7 +22,12 @@
 //
 // deps.btc, the wallet's Bitcoin Lightning (null when it has none): balance(), invoice({sats}),
 // decode(invoice), invoiceStatus(hash), cancelInvoice(hash), pay({invoice, maxFeeSats, maxDelay}),
-// payStatus(hash), payFee?(invoice) — see tooling/cln-rpc.mjs clnBitcoinWallet for one.
+// payStatus(hash), payRoute?(invoice) -> {fee, delay} or payFee?(invoice) — see tooling/cln-rpc.mjs
+// clnBitcoinWallet and btc-lightning.js for two.
+//
+// A payment of BTC is bounded by the whole lock of its route (`delay`, the final delta and every hop's
+// on the way), when the wallet can say what it is; else by the invoice's final delta alone, which only a
+// payment to a direct peer meets.
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
@@ -43,7 +48,8 @@ export function needSeconds (minFinalCltv) {
 }
 
 export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, firmMarginMs }) {
-  const btc = deps.btc
+  // Read at each use: a page learns whether its Bitcoin Lightning is there after it starts.
+  const B = () => deps.btc
   const post = (url, b) => deps.fetchJson(url, { method: 'POST', body: JSON.stringify(b) })
   const release = (maker, swap) => { if (maker && swap) Promise.resolve(post(maker + '/v1/btc/release', { swap })).catch(() => {}) }
   // Before a smaller offer is asked for, the larger one is let go of and the maker has answered:
@@ -52,7 +58,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
 
   // Firm terms of one entry (source 'btc-gateway') for `pay` of the pay asset.
   async function firm (entry, payAsset, receiveAsset, pay, have, sized) {
-    if (!btc) return null
+    if (!B()) return null
     let size = sized
     if (receiveAsset === 'BTC') {
       // Selling an asset for BTC: the wallet's invoice first, so the maker's receive is under the
@@ -60,10 +66,10 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       let sats = size.receive
       for (let i = 0; i < 4; i++) {
         let inv, o, q
-        try { inv = await btc.invoice({ sats, description: 'trade' }) } catch (e) { log('[user trade] btc invoice:', e.message); return null }
+        try { inv = await B().invoice({ sats, description: 'trade' }) } catch (e) { log('[user trade] btc invoice:', e.message); return null }
         try { o = await post(entry.maker + '/v1/btc/firm', { give_asset: 'BTC', want_asset: payAsset, give: String(sats), invoice: inv.invoice }) }
-        catch (e) { log('[user trade] maker btc firm:', e.message); btc.cancelInvoice(inv.payment_hash).catch(() => {}); return null }
-        const drop = () => { release(entry.maker, o.swap); btc.cancelInvoice(inv.payment_hash).catch(() => {}) }
+        catch (e) { log('[user trade] maker btc firm:', e.message); B().cancelInvoice(inv.payment_hash).catch(() => {}); return null }
+        const drop = () => { release(entry.maker, o.swap); B().cancelInvoice(inv.payment_hash).catch(() => {}) }
         try { q = await run('lightning_pay_quote', { invoice: o.invoice, asset: payAsset, max_fee_ppm: maxFeePpm }) } catch (e) { log('[user trade] lightning_pay_quote:', e.message); drop(); return null }
         // The maker's invoice is under the wallet's own hash, for the asset paid, at the price quoted.
         const fair = ceilDiv(sats * entry.rateNum, entry.rateDen)
@@ -71,7 +77,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         const spends = big(q.spends)
         const limit = pay < have ? pay : have
         if (spends > limit) {
-          btc.cancelInvoice(inv.payment_hash).catch(() => {})
+          B().cancelInvoice(inv.payment_hash).catch(() => {})
           await releaseNow(entry.maker, o.swap)
           sats = sats - ((spends - limit) * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
           if (sats < entry.minReceive) return null
@@ -88,12 +94,16 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       let o, d, rq, sq
       try { o = await post(entry.maker + '/v1/btc/firm', { give_asset: receiveAsset, want_asset: 'BTC', give: String(give) }) }
       catch (e) { log('[user trade] maker btc firm:', e.message); return null }
-      try { d = await btc.decode(o.invoice) } catch (e) { log('[user trade] btc decode:', e.message); release(entry.maker, o.swap); return null }
+      try { d = await B().decode(o.invoice) } catch (e) { log('[user trade] btc decode:', e.message); release(entry.maker, o.swap); return null }
       const fair = ceilDiv(give * entry.rateNum, entry.rateDen)
       if (big(d.sats) !== big(o.want) || big(d.sats) > fair || d.expires_at * 1000 - now() < (INVOICE_LEFT_SECONDS + 1800) * 1000) {
         log('[user trade] the maker\'s btc invoice is not the quote\'s'); release(entry.maker, o.swap); return null
       }
-      const fee = big(btc.payFee ? await btc.payFee(o.invoice).catch(() => null) : 0n)
+      // The route's fee and whole lock, which the payment is held to (a payment to the maker's
+      // node through another takes the hops' deltas as well as the invoice's).
+      const rt = B().payRoute ? await B().payRoute(o.invoice).catch(() => null) : null
+      const fee = rt ? big(rt.fee) : big(B().payFee ? await B().payFee(o.invoice).catch(() => null) : 0n)
+      const routeDelay = rt && Number(rt.delay) > 0 ? Number(rt.delay) : Number(d.min_final_cltv || 18)
       try {
         rq = await run('lightning_receive_quote', { asset: receiveAsset, amount: String(give), max_fee_ppm: maxFeePpm })
         // The leaf is settled in the operator's next round, at the fee a fresh coin pays.
@@ -110,7 +120,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       const fees = [{ asset: receiveAsset, atoms: big(rq.fee) + big(rq.claim_margins) + big(sq.fee) }]
       if (fee > 0n) fees.unshift({ asset: 'BTC', atoms: fee })
       return { source: entry.source, id: entry.id, entry, receive: big(sq.after), give: spends, dir: 'buy', fees,
-        btc: { offer: o, decoded: d, receiveQuote: rq, settle: sq, routeFee: fee } }
+        btc: { offer: o, decoded: d, receiveQuote: rq, settle: sq, routeFee: fee, routeDelay } }
     }
     return null
   }
@@ -121,7 +131,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     if (o.expires_at && Number(o.expires_at) * 1000 - now() < firmMarginMs) {
       rec.state = 'failed'; rec.error = 'the firm offer lapsed before it was confirmed'; put(rec)
       release(choice.entry.maker, o.swap)
-      if (choice.btc.invoice) btc.cancelInvoice(choice.btc.invoice.payment_hash).catch(() => {})
+      if (choice.btc.invoice) B().cancelInvoice(choice.btc.invoice.payment_hash).catch(() => {})
       const e = new Error('the price is no longer held'); e.code = 'lapsed'; throw e
     }
     rec.maker = choice.entry.maker; rec.swap = o.swap; rec.dir = choice.dir
@@ -138,7 +148,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       return rec
     }
     rec.hash = choice.btc.decoded.payment_hash; rec.invoiceBtc = o.invoice; rec.sats = String(choice.btc.decoded.sats)
-    rec.minFinalCltv = choice.btc.decoded.min_final_cltv; rec.routeFee = String(choice.btc.routeFee)
+    rec.minFinalCltv = choice.btc.decoded.min_final_cltv; rec.routeFee = String(choice.btc.routeFee); rec.routeDelay = choice.btc.routeDelay
     rec.receiveAsset = choice.btc.receiveQuote.asset; rec.claimed = choice.btc.receiveQuote.claimed
     rec.settleTargets = [{ asset: choice.btc.settle.asset, value: choice.btc.settle.value, fee: choice.btc.settle.fee }]
     put(rec)
@@ -165,7 +175,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     const pays = (await run('lightning_payments')) || {}
     const p = pays[rec.hash] || {}
     rec.payState = p.state || null
-    const inv = await btc.invoiceStatus(rec.hash).catch(() => ({ status: 'unknown' }))
+    const inv = await B().invoiceStatus(rec.hash).catch(() => ({ status: 'unknown' }))
     if (inv.status === 'paid') {
       rec.btcPaid = true
       if (p.state !== 'paid' && inv.preimage && !rec.posted) {
@@ -177,7 +187,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     if (p.state === 'returned') {
       // The maker never paid: the payment failed back and its leaf came back, less its margins.
       rec.state = 'returned'; rec.returnedAt = now()
-      btc.cancelInvoice(rec.hash).catch(() => {})
+      B().cancelInvoice(rec.hash).catch(() => {})
       const back = ((await run('coins')) || []).filter((c) => c.state === 'live' && !(rec.before || []).includes(c.leaf_id) && c.asset === rec.ticket.payAsset)
         .reduce((n, c) => n + big(c.value), 0n) - big(rec.change)
       const lost = big(rec.spends) - back
@@ -196,15 +206,15 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       // The maker's lock, asked for again in case it missed it.
       if (rcv.state === 'waiting') post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: rec.invoiceX }).catch(() => {})
       let r
-      try { r = await run('lightning_receive_ready', { hash: rec.hash, need_seconds: needSeconds(rec.minFinalCltv) }) }
+      try { r = await run('lightning_receive_ready', { hash: rec.hash, need_seconds: needSeconds(rec.routeDelay || rec.minFinalCltv) }) }
       catch (e) { log('[user trade] the leaf will not do:', e.message); rec.state = 'returned'; rec.returnedAt = now(); rec.why = e.message; return put(rec) }
       if (!r.ready) return put(rec)
       rec.state = 'sent'; rec.sentAt = now(); rec.paying = true
       put(rec)
     }
     if (rec.state === 'sent' && !rec.preimage) {
-      let st = await btc.payStatus(rec.hash).catch(() => ({ state: 'none' }))
-      if (st.state === 'none') st = await btc.pay({ invoice: rec.invoiceBtc, maxFeeSats: big(rec.routeFee), maxDelay: Number(rec.minFinalCltv || 18) + EXTRA_BLOCKS })
+      let st = await B().payStatus(rec.hash).catch(() => ({ state: 'none' }))
+      if (st.state === 'none') st = await B().pay({ invoice: rec.invoiceBtc, maxFeeSats: big(rec.routeFee), maxDelay: Number(rec.routeDelay || rec.minFinalCltv || 18) + EXTRA_BLOCKS })
       if (st.state === 'failed') {
         // Nothing was paid: the leaf stays unclaimed and goes back to the maker.
         rec.state = 'returned'; rec.returnedAt = now(); rec.why = st.reason || 'the payment failed'; return put(rec)
