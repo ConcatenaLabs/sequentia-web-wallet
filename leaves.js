@@ -115,6 +115,13 @@ export function supervisedAssets (info) {
     .filter((a) => a && a.supervised && typeof a.asset === 'string').map((a) => a.asset)
 }
 
+// The assets the operator serves issuer-operated (`info`'s `issuer` entry): their batches'
+// sweeps can only burn, and the issuer mints each round's float through a mint limiter.
+export function issuerAssets (info) {
+  return ((info && info.server_info && Array.isArray(info.server_info.assets)) ? info.server_info.assets : [])
+    .filter((a) => a && a.issuer && typeof a.asset === 'string').map((a) => a.asset)
+}
+
 // What of each asset its issuer has frozen for this wallet: every held leaf whose landing
 // the node shows frozen (or the asset paused), and every on-chain coin the leaf wallet
 // counts frozen (a leaf taken home by its landing stays frozen there).
@@ -661,7 +668,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       c.appendChild(el('div', 'status', `${S.releasing.command}: the unplanned leaves fall short, so ${S.releasing.coins.length} planned leaf(s) (${S.releasing.coins.map(short).join(', ')}) are given up in the next round for leaves no plan names; the payment is asked again once that round is final.`))
       root.appendChild(c)
     }
-    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderBond(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
+    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderBond(); renderSupply(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
   }
 
   function renderJoin () {
@@ -999,6 +1006,35 @@ export function mountLeaves (ctx, root, settingsRoot) {
     root.appendChild(c)
   }
 
+  // Developer mode: each asset the operator serves issuer-operated, with its supply report,
+  // every mint and burn the operator lists read again from the wallet's own node.
+  function renderSupply () {
+    const assets = issuerAssets(S.info)
+    if (!assets.length) return
+    const c = card('Issuer-operated assets')
+    c.id = 'leafSupply'
+    c.appendChild(el('p', 'sub', 'The operator serves these assets issuer-operated: each round\'s float is minted by the issuer through its mint limiter, and every batch\'s sweep can only burn. Supply asks the operator for its report and reads each mint and burn it lists again on this wallet\'s node; it does not prove the list complete.'))
+    S.supply = S.supply || {}
+    for (const a of assets) {
+      const row = el('div', 'leaf-supply'); row.dataset.asset = a
+      row.appendChild(el('div', null, tick(a)))
+      const r = S.supply[a]
+      if (r && r.error) row.appendChild(errBox(r.error))
+      else if (r) {
+        row.dataset.checked = String(!!r.checked_on_the_node)
+        for (const k of ['minted', 'burned', 'in_batches']) if (r[k] != null && typeof r[k] !== 'object') row.appendChild(kv(k.replace('_', ' '), amt(a, r[k])))
+        row.appendChild(kv('Checked on this node', r.checked_on_the_node ? 'yes: every listed mint and burn agrees' : 'no'))
+        const pre = el('pre', 'mono leaf-result'); pre.textContent = JSON.stringify(r, null, 1)
+        const d = el('details'); d.appendChild(el('summary', 'sub', 'The report')); d.appendChild(pre); row.appendChild(d)
+      }
+      const b = button('Supply', async () => { try { S.supply[a] = await act('supply', () => run('supply', { asset: a })) } catch (e) { S.supply[a] = { error: e } } render() }, 'ghost')
+      b.dataset.action = 'supply'; b.disabled = S.busy
+      row.appendChild(b)
+      c.appendChild(row)
+    }
+    root.appendChild(c)
+  }
+
   async function cancelPlan (id) {
     try { await act('plan_cancel', () => run('plan_cancel', { plan: id })) } catch {}
     schedule()
@@ -1074,6 +1110,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (co[k] != null) d.appendChild(kv(label, when(co[k], s.now)))
     }
     if (co.exit_fee) d.appendChild(kv('Exit fee coin', [co.exit_fee.fee_coin, co.exit_fee.note].filter(Boolean).join(': ')))
+    if (co.batch_profile) { d.dataset.batchProfile = co.batch_profile; d.appendChild(kv('Batch', co.batch_profile === 'issuer-operated' ? 'issuer-operated: its sweep can only burn' : co.batch_profile + ': its sweep pays the operator')) }
     if (co.landing) {
       d.dataset.landing = co.landing
       d.appendChild(kv('Lands at', `${co.landing} (this wallet's landing key: a supervised asset's leaf leaves the tree only there)`))
