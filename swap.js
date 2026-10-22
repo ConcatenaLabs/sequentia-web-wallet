@@ -3145,7 +3145,10 @@ function executableQuote(o, payAsset, receiveAsset, editedAsset, typedAtoms){
   else if (baseAsset === receiveAsset) take = wantAmt > 0n ? (typedAtoms * baseAmt) / wantAmt : 0n;   // typed the pay leg
   else                                 take = offerAmt > 0n ? ceilDiv(typedAtoms * baseAmt, offerAmt) : 0n; // typed the receive leg
   if (take < 1n) take = 1n;
-  if (take > baseAmt) take = baseAmt;
+  // Never past what the offer still rests at (the relay refuses a take beyond its active amount);
+  // the legs stay the daemon's proRata of the signed amounts.
+  const most = offerRests(o).act;
+  if (take > most) take = most;
   const recv = (offerAmt * take) / baseAmt;
   const pay  = ceilDiv(wantAmt * take, baseAmt);
   const feeAsset = feeAssetPolicy().asset;
@@ -3167,7 +3170,7 @@ function executableQuote(o, payAsset, receiveAsset, editedAsset, typedAtoms){
   if (makerPaysFee) feeAmount = 0n;
   return { kind:'same', offer:o, takeBase:take,
     assetP: payAsset, amountP: pay, assetR: receiveAsset, amountR: recv,
-    feeAsset, feeAmount, feeRate, makerPaysFee, capped: take >= baseAmt };
+    feeAsset, feeAmount, feeRate, makerPaysFee, capped: take >= most };
 }
 
 function paintEmptyRate(pay, receive, n){
@@ -7481,6 +7484,17 @@ function walkAsks(pay, receive, mine){
     .filter((o) => String(o.maker_pubkey || o.makerPubkey || '').toLowerCase() !== me);   // never self-fill
 }
 function isCovenantOffer(o){ return !!(o && (o.covenant || o.Covenant)); }
+// What a resting offer can still be filled for, both legs in its own terms: the signed amounts scaled
+// to the relay's active_amount (seqob.offerActive). A part fill lowers the active amount while the
+// signed amounts stay as signed; sizing a take from the signed ones was refused by the relay
+// ("take_amount exceeds active_amount") once the offer had been part filled.
+function offerRests(o){
+  const base = big(o.base_amount || o.baseAmount || 0);
+  const off = big(o.offer_amount || o.offerAmount || 0), want = big(o.want_amount || o.wantAmount || 0);
+  const act = (o.base_amount != null || o.baseAmount != null) ? seqob.offerActive(o) : base;
+  if (base <= 0n || act >= base) return { recv: off, pay: want, base, act: base };
+  return { recv: off * act / base, pay: want * act / base, base, act };
+}
 // Whether a fill receives at a blinded address: the holder ticked the box for this order, or
 // receives confidentially anyway (the wallet-wide opt-in, or the Blinded book). Otherwise every
 // fill, an interactive maker's included, receives at the usual address in the clear.
@@ -7504,7 +7518,7 @@ function walkPreview(pay, receive, payAtoms){
   const budget = BigInt(payAtoms);
   for (const o of asks){
     if (paid >= budget) break;
-    const oRecv = big(o.offer_amount || o.offerAmount || 0), oPay = big(o.want_amount || o.wantAmount || 0);
+    const { recv: oRecv, pay: oPay } = offerRests(o);   // what it still rests at, not what it was signed for
     if (oPay <= 0n || oRecv <= 0n) continue;
     if (Number(oRecv) / Number(oPay) + 1e-9 < floor) break;
     const take = budget - paid < oPay ? budget - paid : oPay;
@@ -7571,8 +7585,8 @@ export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus
     if (paidPay >= payAtoms) break;
     const oid = String(o.offer_id || o.offerId || '');
     if (oid && seen.has(oid)) continue; if (oid) seen.add(oid);
-    const oRecv = big(o.offer_amount || o.offerAmount || 0);   // asset A offered = what we RECEIVE
-    const oPay  = big(o.want_amount  || o.wantAmount  || 0);   // asset B wanted  = what we PAY
+    // What it still rests at (asset A offered = what we RECEIVE, asset B wanted = what we PAY).
+    const { recv: oRecv, pay: oPay } = offerRests(o);
     if (oPay <= 0n || oRecv <= 0n) continue;
     if (Number(oRecv) / Number(oPay) + 1e-9 < floor) break;    // asks are best-first: once past the slippage floor, stop
     const payLeft = payAtoms - paidPay;
