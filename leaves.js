@@ -108,6 +108,56 @@ export function releaseDone (coins, released) {
   return (released || []).every((id) => { const c = by.get(id); return !c || !RELEASING.has(c.state) })
 }
 
+// The assets the operator serves under the supervised profile (`info`'s `supervised`
+// entry): a coin of one is held only as a landing-1 leaf, landing in the wallet's own key.
+export function supervisedAssets (info) {
+  return ((info && info.server_info && Array.isArray(info.server_info.assets)) ? info.server_info.assets : [])
+    .filter((a) => a && a.supervised && typeof a.asset === 'string').map((a) => a.asset)
+}
+
+// What of each asset its issuer has frozen for this wallet: every held leaf whose landing
+// the node shows frozen (or the asset paused), and every on-chain coin the leaf wallet
+// counts frozen (a leaf taken home by its landing stays frozen there).
+// -> Map(asset -> BigInt atoms)
+export function frozenAtoms (coins, balance) {
+  const out = new Map()
+  const add = (a, v) => { if (!a) return; out.set(a, (out.get(a) || 0n) + big(v)) }
+  for (const c of coins || []) {
+    if (!HELD.has(c.state) || !c.frozen) continue
+    if (c.frozen.frozen || c.frozen.paused) add(c.asset, c.value)
+  }
+  for (const [a, v] of Object.entries((balance && balance.sequentia_onchain_frozen) || {})) add(a, v)
+  return out
+}
+
+// The one plain sentence a frozen holding gets, in either mode, beside its asset's figure.
+export function frozenSentence (amount, ticker) {
+  return `${amount} ${ticker} is frozen by its issuer: it can't be sent until the issuer lifts the freeze.`
+}
+
+// A refusal for user mode: a frozen coin said plainly; every other refusal as it is.
+export function plainRefusal (e) {
+  const m = String((e && e.message) || '')
+  if ((e && e.code === 'frozen') || /\bfrozen\b|\bpaused\b/i.test(m)) {
+    return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: 'This asset is frozen by its issuer for this wallet: nothing was sent.' })
+  }
+  return e
+}
+
+// The user composer's pairs, as the operator serves them: a pair with a supervised asset
+// keeps only the in-tree swap with a live maker, since the operator serves no take, no
+// resting order and no Lightning payment in such an asset.
+export function servedPairs (pairs, supervised) {
+  const sup = new Set(supervised || [])
+  if (!pairs || !pairs.chains || !sup.size) return pairs
+  const chains = {}
+  for (const [g, c] of Object.entries(pairs.chains)) {
+    chains[g] = { ...c, pairs: (c.pairs || []).map((p) => (sup.has(p.pay) || sup.has(p.receive))
+      ? { ...p, sources: (p.sources || []).filter((x) => x === 'leaf-maker') } : p) }
+  }
+  return { ...pairs, chains }
+}
+
 // The current coin of each open or stopped plan: the leaf its next step gives up.
 export function plannedCoins (plans) {
   const out = new Map()
@@ -968,6 +1018,17 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (co[k] != null) d.appendChild(kv(label, when(co[k], s.now)))
     }
     if (co.exit_fee) d.appendChild(kv('Exit fee coin', [co.exit_fee.fee_coin, co.exit_fee.note].filter(Boolean).join(': ')))
+    if (co.landing) {
+      d.dataset.landing = co.landing
+      d.appendChild(kv('Lands at', `${co.landing} (this wallet's landing key: a supervised asset's leaf leaves the tree only there)`))
+    }
+    if (co.frozen) {
+      const fz = !!(co.frozen.frozen || co.frozen.paused)
+      d.dataset.frozen = String(fz)
+      d.appendChild(kv('Frozen', fz ? (co.frozen.paused ? 'yes: the issuer paused the asset' : 'yes: the issuer froze this landing') : 'no'))
+      if (fz) d.appendChild(el('div', 'warn leaf-frozen', frozenSentence(ctx.fmtAtoms(big(co.value), prec(co.asset)), tick(co.asset))))
+      if (co.frozen.note) d.appendChild(el('div', 'sub', co.frozen.note))
+    }
     const plan = plannedCoins(S.plans).get(co.leaf_id)
     if (plan) { d.dataset.planned = plan.plan_id; d.appendChild(kv('Planned', `plan ${short(plan.plan_id)}, ${plan.state}: paid out of round only once released into the next round`)) }
     if (co.note) d.appendChild(el('div', 'sub', co.note))
@@ -1142,8 +1203,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // the next round when it needs a planned coin.
     pay: (cmd, args) => {
       if (!S.open) return Promise.reject(new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' }))
-      return paying(cmd, args || {})
+      return paying(cmd, args || {}).catch((e) => { throw dev() ? e : plainRefusal(e) })
     },
+    // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
+    frozenAtoms: (hex) => frozenAtoms(S.coins, S.balance).get(hex) || 0n,
+    // The assets the operator serves supervised.
+    supervisedAssets: () => supervisedAssets(S.info),
     address,
     leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
     leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),

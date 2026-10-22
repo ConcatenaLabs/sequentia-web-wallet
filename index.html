@@ -1591,7 +1591,7 @@ import { creditLines } from './lncredit.js';
 import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
-import { mountLeaves, devModeOn } from './leaves.js';
+import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
 import { createEngine as createUserTrade } from './user-trade.js';
@@ -3494,14 +3494,14 @@ function initUserComposer(){
       const r = await fetch(`${ESPLORA}/tx/${txid}`, { cache:'no-store' }); if(!r.ok) return null;
       const o = ((await r.json()).vout || [])[vout]; return o && o.value != null ? String(o.value) : null;
     },
-    admitted: async ()=> ({ pairs: await userModePairs(), genesis: await chainGenesis() }),
+    admitted: async ()=> ({ pairs: servedPairs(await userModePairs(), leavesApi ? leavesApi.supervisedAssets() : []), genesis: await chainGenesis() }),
     store: localStorage, tag: walletTag,
     log: (...a)=> console.log(...a),
   });
   userComposer = mountUserComposer({
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, parseAtoms,
     knownAssets: userKnownAssets, held: userHeld,
-    admittedReceives: (pay)=> admittedReceives(_userPairs, _genesis, pay),
+    admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
   });
   // The pairs and the chain are read once; the composer draws when they are in.
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
@@ -5640,6 +5640,9 @@ function renderBalance(){
     const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: verified ✓ / unregistered ⚠
     const sb=supervisionBadge(kind); if(sb) head.appendChild(sb);   // issuer can freeze holders
     a.appendChild(head);
+    // A holding its issuer has frozen for this wallet: one plain sentence, in both modes, never hidden.
+    let frozenAt = 0n; try { if(kind!=='BTC' && leavesApi) frozenAt = leavesApi.frozenAtoms(kind) || 0n; } catch {}
+    if(frozenAt > 0n){ const fz=el('div','bt-frozen', frozenSentence(amt(frozenAt), ticker)); fz.style.cssText='color:var(--amber2,#e0a800);font-size:12px;margin-top:2px'; a.appendChild(fz); }
     if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
     // ONE VIEW FOR EVERY MODE. A bolt beside the ticker says whether the asset has a Lightning
     // channel (yellow) or not yet (grey); the row's details, one tap away, hold its parts (on-chain |
