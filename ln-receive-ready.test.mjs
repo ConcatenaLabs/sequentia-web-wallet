@@ -36,11 +36,12 @@ test('room on its way is known as such', () => {
 function paint (status) {
   const box = { textContent: '', innerHTML: '', appendChild () {} };
   const scheduled = [];
-  const paintFn = new Function('lnLastStatus', 'lnChannelAsset', '$', 'assetMeta', 'fmtAtoms', 'devMode', 'lnRecheckRoomSoon', 'el', 'lnOnLightning', 'lnReceiveRoomDialog', 'lnLegFor', 'state',
+  const paintFn = new Function('lnLastStatus', 'lnChannelAsset', '$', 'assetMeta', 'fmtAtoms', 'fmtAmount', 'devMode', 'lnRecheckRoomSoon', 'el', 'lnOnLightning', 'lnReceiveRoomDialog', 'lnLegFor', 'state',
     'let _lnRoomRechecks = 0;' + fn('lnReceivableFor') + fn('lnReceiveOpeningFor') + 'return ' + fn('lnPaintRecvRoom'))(
     status, (c) => c.asset,
     (id) => (id === 'lnRecvRoom' ? box : { value: ASSET }),
     () => ({ ticker: 'USDX', precision: 8 }),
+    (a, d) => (Number(a) / 10 ** d).toString(),
     (a, d) => (Number(a) / 10 ** d).toString(),
     () => false,
     () => scheduled.push(1),
