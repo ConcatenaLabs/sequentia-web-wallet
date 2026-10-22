@@ -1262,6 +1262,11 @@
     <!-- history -->
     <section data-panel="history" class="hide" id="historyPanel">
       <div class="card hide" id="histEmptyCard"><div class="muted">No transactions yet.</div></div>
+      <div class="card" id="btcHistCard">
+        <label class="lbl">Bitcoin (testnet4) history</label>
+        <p class="sub" style="margin:0 0 6px">Parent-chain BTC on the shared tb1 address. Links open the testnet4 explorer.</p>
+        <div class="list" id="btcHistList"><div class="muted">Loading…</div></div>
+      </div>
       <div class="card" id="seqHistCard">
         <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:2px">
           <label class="lbl" style="margin:0">Sequentia history</label>
@@ -1274,11 +1279,6 @@
         <label class="lbl">Lightning history</label>
         <p class="sub" style="margin:0 0 6px">Payments your Lightning nodes sent and received, and the swaps that settled over Lightning.</p>
         <div class="list" id="lnHistList"><div class="muted">Loading…</div></div>
-      </div>
-      <div class="card" id="btcHistCard">
-        <label class="lbl">Bitcoin (testnet4) history</label>
-        <p class="sub" style="margin:0 0 6px">Parent-chain BTC on the shared tb1 address. Links open the testnet4 explorer.</p>
-        <div class="list" id="btcHistList"><div class="muted">Loading…</div></div>
       </div>
       <div class="card" id="oampHistCard">
         <label class="lbl">Restricted transfers (OpenAMP)</label>
@@ -7381,8 +7381,7 @@ function arrangeHistory(){
   seq.classList.toggle('hide', none);
   btcC.classList.toggle('hide', none);
   if(oamp) oamp.classList.toggle('hide', !_histCounts.oamp);
-  if(_histCounts.btc > 0){ if(btcC.nextElementSibling!==seq) panel.insertBefore(btcC, seq); }
-  else if(seq.nextElementSibling!==btcC) panel.insertBefore(seq, btcC);
+  // Always Bitcoin, then Sequentia, then Lightning: the order the markup gives them.
 }
 // Lightning in the History: each own node's paid invoices and completed payments (GET /node/history),
 // and the trades of the log that settled over Lightning. A node that does not answer (its device
