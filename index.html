@@ -751,6 +751,7 @@
         <p class="sub" style="margin:0 0 10px">Your hosted node pays the invoice and your device co-signs. Pick the asset to pay from.</p>
         <select id="lnSendAsset" style="width:100%"></select>
         <textarea id="lnSendBolt11" class="mono" placeholder="Paste a Lightning invoice (lntsqt… or lntb…)" style="width:100%;margin-top:8px;min-height:64px;resize:vertical"></textarea>
+        <button type="button" class="ghost scanbtn" id="lnSendScan" title="Scan the invoice's QR code" style="margin-top:8px">⊡ Scan</button>
         <button class="primary" id="lnSendBtn" style="margin-top:10px">Pay invoice</button>
         <div class="status" id="lnSendStatus" style="margin-top:8px"></div>
       </div>
@@ -4672,6 +4673,7 @@ let _lnSRWired = false;
 function initLnSendReceive(){
   if (_lnSRWired) return; _lnSRWired = true;
   const recvBtn = $('lnRecvBtn'), sendBtn = $('lnSendBtn'), copyBtn = $('lnRecvCopy');
+  { const sc = $('lnSendScan'); if (sc) sc.onclick = () => openScanner($('lnSendBolt11'), null); }   // a phone pays what it scans
   if ($('lnRecvAsset')) $('lnRecvAsset').addEventListener('change', lnPaintRecvRoom);
   if (recvBtn) recvBtn.onclick = async () => {
     const asset = $('lnRecvAsset').value, meta = assetMeta(asset);
@@ -6183,6 +6185,7 @@ async function openScanner(addrInput, amtInput){
     if(done) return;                                                 // a result already won (camera vs in-flight file decode)
     let s=(text||'').trim(); if(!s) return;
     if(s.includes(':')) s=s.slice(s.indexOf(':')+1);                 // drop any URI scheme (mirror the mobile wallet)
+    if(/^LN[A-Z0-9]+$/.test(s)) s=s.toLowerCase();                   // a Lightning invoice QR is upper case; the invoice is the same
     let amt=null; const q=s.indexOf('?');
     if(q>=0){ try{ amt=new URLSearchParams(s.slice(q+1)).get('amount'); }catch{} s=s.slice(0,q); }
     cleanup();

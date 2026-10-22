@@ -169,6 +169,15 @@ check('user_limit_not_overwritten',
     await settleFill(matched, { ...fillHooks, fetchUtxoSpk: async () => placed.plan.spkHex.slice(0,-2) + '00' });
   } catch { rejected = true; }
   ok('settle_rejects_tampered_spk', rejected, 'a lying relay spk must be refused');
+
+  // -- the locked amount comes from the coin, not the relay's advertisement --
+  builtRecipe = null;
+  await settleFill(matched, { ...fillHooks, fetchUtxoValue: async () => 180n*100000000n });
+  check('settle_locked_from_chain', builtRecipe && String(builtRecipe.covenantLocked), String(180n*100000000n));
+  check('settle_remainder_from_chain', builtRecipe && String(builtRecipe.remainderValue), String(90n*100000000n));
+  let short = false;
+  try { await settleFill(matched, { ...fillHooks, fetchUtxoValue: async () => 60n*100000000n }); } catch { short = true; }
+  ok('settle_refuses_fill_over_held', short, 'a fill larger than what the coin holds is refused before building');
 }
 
 // --- market fill/rest split (shared by same-chain + cross-chain routes) -----
