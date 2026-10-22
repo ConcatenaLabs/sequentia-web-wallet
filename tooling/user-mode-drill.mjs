@@ -30,6 +30,11 @@
 // node and each wallet on a Bitcoin Lightning node of its own, and the trades cycle X for Y, Y for
 // X, X for BTC and BTC for X (the operator's Lightning leg is in X). --btc-only runs those last
 // two directions alone, and admits only the BTC pairs.
+// With --every-pair tooling/user-mode-every-pair.json, on a harness started with
+// ARCA_OPERATOR_MORE_ASSETS=7 ARCA_OPERATOR_SUPERVISED=2, it trades every directed pair of the
+// testnet's assets on regtest (everyPairStack below), admits each pair with the sources that
+// settled one of its trades, and writes DIR/pairs-testnet.json, the same pairs under the
+// testnet's ids.
 //
 // It writes DIR/REPORT.md, DIR/pairs.json (this chain's admitted pairs when every trade passed),
 // DIR/trades.jsonl and the logs. Nothing here is used by the deployed wallet.
@@ -80,6 +85,41 @@ function httpCall (url, body) {
     if (data != null) req.write(data)
     req.end()
   })
+}
+
+// Each wallet holds `coins` coins of `coin` atoms of each asset of `list` ([{asset, coin}]), boarded
+// from the harness's purse, and three coins of 1,000,000 of `feeAsset` on the chain for the boards'
+// fees.
+async function boardCoins (wallets, list, coins, feeAsset) {
+  for (const w of wallets) {
+    const a = await w.call('/run', { command: 'address' })
+    // The harness's purse chains its payments: a block every few keeps the chain short.
+    let n = 0
+    for (let k = 0; k < coins; k++) for (const { asset, coin } of list) { await H.fund(a.script_pubkey, asset, coin + Math.floor(coin / 30)); if (++n % 6 === 0) await H.produce() }
+    for (let k = 0; k < 3; k++) await H.fund(a.script_pubkey, feeAsset, 1000000)
+    await H.produce()
+  }
+  for (let k = 0; k < coins; k++) {
+    for (const { asset, coin } of list) {
+      for (const w of wallets) {
+        for (let t = 0; ; t++) {
+          try {
+            await w.call('/run', { command: 'sync' })
+            // A board asked before may have gone through: count what is boarded first.
+            const bal = await w.call('/run', { command: 'balance' })
+            const boarded = Object.values((bal.arca || {})[asset] || {}).reduce((n, v) => n + big(v), 0n)
+            if (boarded >= BigInt(coin) * BigInt(k + 1)) break
+            const q = await w.call('/run', { command: 'board_quote', args: { asset, amount: String(coin), fee_asset: feeAsset } })
+            await w.call('/run', { command: 'board', args: { asset, amount: String(coin), fee_asset: feeAsset, shown: q.fee } })
+            break
+          } catch (e) { if (t > 20) throw e; await H.produce(); await sleep(1000) }
+        }
+      }
+      await H.produce()
+    }
+  }
+  await H.produce(); await H.bury()
+  for (const w of wallets) await w.call('/run', { command: 'sync' })
 }
 
 // ---- the wallets ----
@@ -152,34 +192,7 @@ async function regtestStack () {
   // does: what a trade leaves as change, and must settle in the next round, is then small.
   const COINS = 10, COIN = 3000000
   async function fund (wallets) {
-    for (const w of wallets) {
-      const a = await w.call('/run', { command: 'address' })
-      // The harness's purse chains its payments: a block every few keeps the chain short.
-      for (let k = 0; k < COINS; k++) { await H.fund(a.script_pubkey, X, COIN + 100000); await H.fund(a.script_pubkey, Y, COIN + 100000); if (k % 4 === 3) await H.produce() }
-      for (let k = 0; k < 3; k++) await H.fund(a.script_pubkey, X, 1000000)
-      await H.produce()
-    }
-    for (let k = 0; k < COINS; k++) {
-      for (const asset of [X, Y]) {
-        for (const w of wallets) {
-          for (let t = 0; ; t++) {
-            try {
-              await w.call('/run', { command: 'sync' })
-              // A board asked before may have gone through: count what is boarded first.
-              const bal = await w.call('/run', { command: 'balance' })
-              const boarded = Object.values((bal.arca || {})[asset] || {}).reduce((n, v) => n + big(v), 0n)
-              if (boarded >= BigInt(COIN) * BigInt(k + 1)) break
-              const q = await w.call('/run', { command: 'board_quote', args: { asset, amount: String(COIN), fee_asset: X } })
-              await w.call('/run', { command: 'board', args: { asset, amount: String(COIN), fee_asset: X, shown: q.fee } })
-              break
-            } catch (e) { if (t > 20) throw e; await H.produce(); await sleep(1000) }
-          }
-        }
-        await H.produce()
-      }
-    }
-    await H.produce(); await H.bury()
-    for (const w of wallets) await w.call('/run', { command: 'sync' })
+    await boardCoins(wallets, [{ asset: X, coin: COIN }, { asset: Y, coin: COIN }], COINS, X)
     note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of ${COIN} of X and of Y each`)
   }
   // A maker who rests orders in the tree and goes away: a wallet of the stack's own, funded as the
@@ -240,6 +253,136 @@ async function regtestStack () {
   }
 }
 
+// ---- every pair (--every-pair FILE): every directed pair of the testnet's assets, on regtest ----
+// FILE (tooling/user-mode-every-pair.json) names the testnet's assets, their precisions and prices.
+// Each stands in as one of the harness's extra assets (ARCA_OPERATOR_MORE_ASSETS for the plain
+// ones, ARCA_OPERATOR_SUPERVISED for the supervised ones), priced the same per atom. Every directed
+// pair is traded: a pair with a supervised asset through the live maker only (the operator serves
+// no take, resting order or Lightning payment in it), the others through the maker, covenant
+// orders and orders resting in the tree, priced around the mid (resting 0.5%, covenant 1%, maker
+// 2% from it) so the cheapest source leads until its depth is taken. A trade is sized in value, so
+// that neither side is below 20,000 atoms. X pays the boards' fees.
+const EVERY = opt('--every-pair', null)
+const MIN_SIDE = 20000
+async function everyPairStack (file) {
+  const table = JSON.parse(readFileSync(file, 'utf8'))
+  const st = await H.state()
+  const plain = [...(st.more || [])], sup = [...(st.supervised_all || [])]
+  const A = []
+  for (const t of table.assets) {
+    const id = t.supervised ? sup.shift() : plain.shift()
+    if (!id) throw new Error(`the harness serves too few ${t.supervised ? 'supervised' : 'plain'} assets for ${t.ticker}: start it with ARCA_OPERATOR_MORE_ASSETS=${table.assets.filter((a) => !a.supervised).length} ARCA_OPERATOR_SUPERVISED=${table.assets.filter((a) => a.supervised).length}`)
+    A.push({ id, ticker: t.ticker, testnet: t.id, perAtom: Number(t.price) / 10 ** Number(t.precision), sup: !!t.supervised })
+  }
+  const X = st.x
+  const of = new Map(A.map((a) => [a.id, a]))
+  const atomsOf = (asset, value) => Math.ceil(value / of.get(asset).perAtom)
+  const valueOf = (asset, atoms) => atoms * of.get(asset).perAtom
+  // `want` atoms per atom of `give`, `spread` above the mid, as a rate over 10^12.
+  const rateOf = (give, want, spread) => [String(BigInt(Math.ceil((of.get(give).perAtom / of.get(want).perAtom) * (1 + spread) * 1e12))), '1000000000000']
+  // An order's rate as the relay takes it: want/offer equal to the rate exactly, so the rate is a
+  // reduced fraction over the least power of ten that keeps it to 0.1%, and an order's size a
+  // multiple of its denominator. -> [num, den, size]
+  const gcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a }
+  const orderTerms = (sell, want, spread, atoms) => {
+    const r = (of.get(sell).perAtom / of.get(want).perAtom) * (1 + spread)
+    let den = 1n
+    while (BigInt(Math.ceil(r * Number(den))) < 1000n) den *= 10n
+    let num = BigInt(Math.ceil(r * Number(den)))
+    const g = gcd(num, den); num /= g; den /= g
+    const size = ((BigInt(atoms) + den - 1n) / den) * den
+    return [String(num), String(den), Number(size)]
+  }
+  // The least value a trade between two assets has: neither side under MIN_SIDE atoms.
+  const vmin = (a, b) => Math.max(valueOf(a, MIN_SIDE), valueOf(b, MIN_SIDE))
+  const pairs = []
+  for (const a of A) for (const b of A) if (a !== b) pairs.push({ pay: a.id, receive: b.id, sources: (a.sup || b.sup) ? ['leaf-maker'] : ['leaf-maker', 'covenant-round', 'leaf-resting'] })
+  const lwk = await lwkFrom()
+  const relay = await startRelay(SEQOBD, st, await freePort()); children.push(relay.proc)
+  note(`relay seqobd pid ${relay.proc.pid}`)
+  // The live maker quotes every directed pair, holding $1,500 of each asset.
+  const makerPairs = pairs.map((p) => { const [n, d] = rateOf(p.receive, p.pay, 0.02); return { give: p.receive, want: p.pay, rate_num: n, rate_den: d, min_give: String(MIN_SIDE / 2) } })
+  const maker = await startMaker(H, st, join(out, 'maker'), { pairs: makerPairs, fund: A.map((a) => [a.id, atomsOf(a.id, 1500)]), port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, exitDelayUnits: 1 })
+  children.push(maker.proc)
+  note(`leaf maker pid ${maker.proc.pid}`)
+  // Covenant orders and resting orders, each four times the pair's least trade.
+  const depth = (sell, want) => atomsOf(sell, 4 * vmin(sell, want))
+  const order = async (sell, want) => { const [n, d, size] = orderTerms(sell, want, 0.01, depth(sell, want)); return placeOrder(H, relay.url, { assetA: sell, assetB: want, sell: size, rateNum: n, rateDen: d, minLot: MIN_SIDE / 2 }) }
+  const open = pairs.filter((p) => p.sources.includes('covenant-round'))
+  for (const p of open) await order(p.receive, p.pay)
+  note(`placed ${open.length} covenant orders`)
+  for (const a of A) await makerReady(H, maker, a.id)
+  // The operator fronts every coin a round refreshes from its own: $5,000 of each asset to start
+  // (fifty of the wallets' coins), $2,000 more every 25 trades.
+  for (const a of A) await H.c('/fund_server', { asset: a.id, amount: atomsOf(a.id, 5000) })
+  await H.produce()
+  const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
+    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: 1 }
+  // Each wallet holds five coins of $100 of each asset.
+  const COINS = 5
+  const coinList = A.map((a) => ({ asset: a.id, coin: atomsOf(a.id, 100) }))
+  async function fund (wallets) {
+    await boardCoins(wallets, coinList, COINS, X)
+    note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of $100 of each of ${A.length} assets`)
+  }
+  let rester = null
+  const rest = async (sell, want) => { const [n, d, size] = orderTerms(sell, want, 0.005, depth(sell, want)); return restOrder(H, rester, relay.url, { assetA: sell, assetB: want, sell: size, rateNum: n, rateDen: d, minLot: MIN_SIDE / 2 }) }
+  async function prepare () {
+    const cfgFile = join(out, 'wallet-config-rester.json')
+    writeFileSync(cfgFile, JSON.stringify({ ...walletConfig, pairs_file: join(out, 'pairs-run.json') }), { mode: 0o600 })
+    rester = walletProc('rester', cfgFile); await rester.start(); children.push({ kill: () => rester.kill() })
+    await boardCoins([rester], A.filter((a) => !a.sup).map((a) => ({ asset: a.id, coin: atomsOf(a.id, 150) })), COINS, X)
+    let n = 0
+    for (const p of open) { try { await rest(p.receive, p.pay); n++ } catch (e) { note(`rest ${of.get(p.receive).ticker} for ${of.get(p.pay).ticker}: ${e.message}`) } }
+    note(`rested ${n} orders in the tree, listed on the relay`)
+  }
+  async function topUp () {
+    try { for (const a of A) await H.c('/fund_server', { asset: a.id, amount: atomsOf(a.id, 2000) }); await H.produce() } catch (e) { note('top-up: ' + e.message) }
+    const book = relayBook(relay.url)
+    for (const p of open) {
+      const sell = p.receive, want = p.pay
+      const offers = await book(want, sell).catch(() => [])
+      const active = (f) => offers.filter((o) => f(o) && o.offer_asset === sell).reduce((n, o) => n + big(o._status && o._status.active_amount), 0n)
+      const least = BigInt(atomsOf(sell, vmin(sell, want)))
+      if (active((o) => o.covenant) < least) { try { await order(sell, want) } catch (e) { note('order: ' + e.message) } }
+      if (rester && active((o) => o.resting_leaf) < least) { try { await rest(sell, want) } catch (e) { note('rest: ' + e.message) } }
+    }
+    try {
+      const q = await (await fetch(maker.url + '/v1/quotes')).json()
+      const low = new Set()
+      for (const x of q.quotes || []) if (of.has(x.give_asset) && valueOf(x.give_asset, Number(x.max_give)) < 300) low.add(x.give_asset)
+      for (const a of low) { await H.fund(await H.scriptOf(maker.address), a, atomsOf(a, 1000)); note(`funded the maker $1,000 of ${of.get(a).ticker}`) }
+      if (low.size) await H.produce()
+    } catch {}
+  }
+  let stop = false
+  const pumpLoop = (async () => { while (!stop) { try { await H.pump() } catch (e) { note('pump: ' + e.message) } await sleep(2000) } })()
+  const names = Object.fromEntries([...A.map((a) => [a.id, a.ticker]), [X, 'X'], ['BTC', 'BTC']])
+  return {
+    kind: 'regtest', genesis: st.genesis_hash, X: A[0].id, Y: A[1].id, names, walletConfig, fund, prepare, topUp, btcRpcs: null,
+    pairs, dirs: pairs.map((p) => [p.pay, p.receive]),
+    // The pairs as the testnet's: the table's ids on its chain.
+    forTestnet: (admitted) => ({ chains: { [table.genesis]: { pairs: admitted.map((p) => ({ ...p, pay: of.get(p.pay).testnet, receive: of.get(p.receive).testnet })) } } }),
+    amount: (pay, receive) => atomsOf(pay, vmin(pay, receive) * (1 + Math.random() * 4)),
+    restart: async () => { await H.restart() },
+    contest: async (round) => {
+      const tx = await H.rpc('getrawtransaction', [round, true]).catch(() => null)
+      if (!tx || !tx.blockhash) return null
+      const hdr = await H.rpc('getblockheader', [tx.blockhash, true])
+      const o = await H.orphan(hdr.anchorheight)
+      return `parent chain reorganised from anchor ${hdr.anchorheight} (${o.orphaned} parent blocks) under round ${round.slice(0, 12)}`
+    },
+    stop: async () => { stop = true; await pumpLoop },
+    logs: () => { writeFileSync(join(out, 'seqobd.log'), relay.log.join('')); writeFileSync(join(out, 'maker.log'), maker.log.join('')) },
+    describe: [
+      `- Chain: \`${st.genesis_hash}\` (regtest, the operator repository's harness \`arca_operator_for_browsers\` with ${st.more.length} more plain assets and ${st.supervised_all.length} supervised ones, anchored proof of stake).`,
+      `- The testnet's assets (\`tooling/user-mode-every-pair.json\`), each a harness asset priced the same per atom: ${A.map((a) => `${a.ticker}${a.sup ? ' (supervised)' : ''}`).join(', ')}; ${pairs.length} directed pairs, a trade's direction cycling through them all.`,
+      '- The operator, rounds built every 2 s by the drill\'s clock, leaves with an exit delay of one 512 s unit; SeqDEX\'s relay with `-fill-anchor-depth=2`; one live leaf maker quoting every directed pair 2% above the mid; transparent covenant orders 1% above it and orders resting in the tree 0.5% above it on every pair without a supervised asset, each four times the pair\'s least trade, restocked every 25 trades.',
+      `- ${K} wallets, one trade at a time each, each trade worth between its pair's least (neither side under ${MIN_SIDE.toLocaleString('en-US')} atoms) and five times that; each wallet starts with five coins of $100 of every asset.`,
+    ],
+  }
+}
+
 // The testnet stack, from a configuration the owner script writes on the server:
 //   { operator: {server, node_url, node_user, node_password_file}, relay, makers: [url], genesis,
 //     assets: { x: {id, ticker}, y: {id, ticker} }, fund_each: atoms of each asset per wallet,
@@ -294,12 +437,12 @@ async function testnetStack (file) {
 }
 
 async function main () {
-  const S = STACK ? await testnetStack(STACK) : await regtestStack()
+  const S = STACK ? await testnetStack(STACK) : EVERY ? await everyPairStack(EVERY) : await regtestStack()
   const { X, Y } = S
   note(`drill: ${N} trades, ${K} wallets, ${S.kind}; chain ${S.genesis}; ${S.names[X]} ${X}, ${S.names[Y]} ${Y}`)
   // The pairs the drill runs; it admits them only when every trade passes.
   const xy = ['leaf-maker', 'covenant-round', ...(S.prepare ? ['leaf-resting'] : [])]
-  const pairsDrill = { chains: { [S.genesis]: { pairs: [...(BTC_ONLY ? [] : [{ pay: X, receive: Y, sources: xy }, { pay: Y, receive: X, sources: xy }]),
+  const pairsDrill = { chains: { [S.genesis]: { pairs: S.pairs || [...(BTC_ONLY ? [] : [{ pay: X, receive: Y, sources: xy }, { pay: Y, receive: X, sources: xy }]),
     ...(S.btcRpcs ? [{ pay: X, receive: 'BTC', sources: ['btc-gateway'] }, { pay: 'BTC', receive: X, sources: ['btc-gateway'] }] : [])] } } }
   writeFileSync(join(out, 'pairs-run.json'), JSON.stringify(pairsDrill, null, 2))
   const wallets = []
@@ -335,13 +478,13 @@ async function main () {
 
   async function oneTrade (w) {
     const id = ++nextId
-    const dirs = BTC_ONLY ? [[X, 'BTC'], ['BTC', X]] : S.btcRpcs ? [[Y, X], [X, Y], [X, 'BTC'], ['BTC', X]] : [[Y, X], [X, Y]]
+    const dirs = S.dirs || (BTC_ONLY ? [[X, 'BTC'], ['BTC', X]] : S.btcRpcs ? [[Y, X], [X, Y], [X, 'BTC'], ['BTC', X]] : [[Y, X], [X, Y]])
     const [pay, receive] = dirs[id % dirs.length]
-    const amount = S.amount(pay)
+    const amount = S.amount(pay, receive)
     const before = await quietBalance(w)
     const t0 = Date.now()
     const r = await w.call('/trade', { pay, receive, amount })
-    const res = { trade: id, wallet: w.i, pay: S.names[pay], amount, at: new Date().toISOString() }
+    const res = { trade: id, wallet: w.i, pay: S.names[pay], receive: S.names[receive], amount, at: new Date().toISOString() }
     if (!r.ok) {
       if (r.why === 'confirm') { res.outcome = 'returned'; res.note = 'confirm refused before anything was signed: ' + r.error }
       else { res.outcome = 'not-offered'; res.note = r.why }
@@ -413,7 +556,7 @@ async function main () {
     }
     results.push(res)
     appendFileSync(tradesFile, JSON.stringify(res) + '\n')
-    note(`trade ${id} wallet ${w.i} ${res.pay}→ ${amount}: ${res.outcome}${res.source ? ' via ' + res.source : ''}${res.settledMs ? ` in ${(res.settledMs / 1000).toFixed(0)} s` : ''}${res.disruption ? ' [' + res.disruption.join('; ') + ']' : ''}${res.note ? ' — ' + res.note : ''}`)
+    note(`trade ${id} wallet ${w.i} ${res.pay}→${S.pairs ? res.receive : ''} ${amount}: ${res.outcome}${res.source ? ' via ' + res.source : ''}${res.settledMs ? ` in ${(res.settledMs / 1000).toFixed(0)} s` : ''}${res.disruption ? ' [' + res.disruption.join('; ') + ']' : ''}${res.note ? ' — ' + res.note : ''}`)
     if (id % 25 === 0) await topUp()
   }
 
@@ -442,6 +585,19 @@ async function main () {
   lines.push(`- By source: in-tree swaps with the live leaf maker ${by('leaf-maker').length}, covenant orders taken in a round ${by('covenant-round').length}, orders resting in the tree filled ${by('leaf-resting').length}${S.btcRpcs ? `, BTC in one hash-lock with the maker's desk ${by('btc-gateway').length} (selling for BTC ${by('btc-gateway').filter((r) => r.pay !== 'BTC').length}, buying with BTC ${by('btc-gateway').filter((r) => r.pay === 'BTC').length})` : ''}.`)
   const sent = traded.filter((r) => r.sentMs).map((r) => r.sentMs), sett = traded.filter((r) => r.outcome === 'settled').map((r) => r.settledMs)
   lines.push(`- Time to Sent: median ${((pct(sent, 0.5) || 0) / 1000).toFixed(1)} s, 95th percentile ${((pct(sent, 0.95) || 0) / 1000).toFixed(1)} s. Time to Settled: median ${((pct(sett, 0.5) || 0) / 1000).toFixed(1)} s, 95th percentile ${((pct(sett, 0.95) || 0) / 1000).toFixed(1)} s.`)
+  // Run over many pairs, a pair is admitted with the sources that settled at least one of its
+  // trades in this run, and only when the run passed.
+  const perPair = S.pairs ? S.pairs.map((p) => {
+    const rs = results.filter((r) => r.pay === S.names[p.pay] && r.receive === S.names[p.receive])
+    const settled = rs.filter((r) => r.outcome === 'settled')
+    return { ...p, sources: p.sources.filter((src) => settled.some((r) => r.source === src)), n: rs.length, settled: settled.length,
+      returned: rs.filter((r) => r.outcome === 'returned').length, notOffered: rs.filter((r) => r.outcome === 'not-offered').length,
+      bySource: Object.fromEntries(p.sources.map((src) => [src, settled.filter((r) => r.source === src).length])) }
+  }) : null
+  if (perPair) {
+    lines.push('', '## By pair', '', 'What was paid → what was received: trades settled by source, returned, and quotes that found nothing to fill.', '')
+    for (const q of perPair) lines.push(`- ${S.names[q.pay]} → ${S.names[q.receive]}: settled ${q.settled} (${Object.entries(q.bySource).map(([k, v]) => `${k} ${v}`).join(', ')}), returned ${q.returned}, not offered ${q.notOffered}${q.settled ? '' : ' — not admitted: no trade settled'}`)
+  }
   lines.push('', '## The stack', '')
   lines.push(`- The web wallet at \`${commit}\`, its leaf library (\`leaves/pkg\`) in Node, each wallet a process of its own running \`user-trade.js\`, the code the page runs.`)
   for (const l of S.describe) lines.push(l)
@@ -452,8 +608,10 @@ async function main () {
   lines.push('', '## Every trade', '', 'One line per trade in `trades.jsonl`: its source, ticket, what moved, its disruptions and its outcome.', '')
   writeFileSync(join(out, 'REPORT.md'), lines.join('\n') + '\n')
   if (passed) {
-    const admitted = { chains: { [S.genesis]: { pairs: pairsDrill.chains[S.genesis].pairs.map((p) => ({ ...p, proven: S.kind, report: 'REPORT.md' })) } } }
+    const run = perPair ? perPair.filter((q) => q.sources.length).map(({ pay, receive, sources }) => ({ pay, receive, sources })) : pairsDrill.chains[S.genesis].pairs
+    const admitted = { chains: { [S.genesis]: { pairs: run.map((p) => ({ ...p, proven: S.kind, report: 'REPORT.md' })) } } }
     writeFileSync(join(out, 'pairs.json'), JSON.stringify(admitted, null, 2) + '\n')
+    if (S.forTestnet) writeFileSync(join(out, 'pairs-testnet.json'), JSON.stringify(S.forTestnet(admitted.chains[S.genesis].pairs), null, 2) + '\n')
   }
   note(`done: ${JSON.stringify(counts)}; ${passed ? 'passed' : 'NOT PASSED'}`)
   S.logs()

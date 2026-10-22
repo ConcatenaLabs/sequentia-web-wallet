@@ -1,0 +1,15 @@
+{
+  "about": "The testnet's assets for the drill's --every-pair run: each one's id on the testnet, its precision, a price per whole unit in the price feed's reference unit (USD), and whether it is supervised. On regtest each stands in as one of the harness's extra assets (ARCA_OPERATOR_MORE_ASSETS for the plain ones, ARCA_OPERATOR_SUPERVISED for the supervised ones), priced the same per atom, and the pairs that pass are written for the testnet under these ids.",
+  "genesis": "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e",
+  "assets": [
+    { "ticker": "USDX", "id": "2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de", "precision": 8, "price": 1.0 },
+    { "ticker": "EURX", "id": "e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13", "precision": 8, "price": 1.12 },
+    { "ticker": "tSEQ", "id": "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40", "precision": 8, "price": 0.357 },
+    { "ticker": "GOLD", "id": "3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1", "precision": 8, "price": 4071 },
+    { "ticker": "SILVR", "id": "57dfa6b0eff594cc3ef1de5555e0526d1eb5590289e014e7663b292edcd63f48", "precision": 8, "price": 55.3 },
+    { "ticker": "OILX", "id": "4dfe69c334a9cdf4005ddf3889bba1bc397703fa8da669254877f3209caf7c8f", "precision": 8, "price": 98.1 },
+    { "ticker": "SBTC", "id": "288677892fa3ce0d3b0f789b6fc8c4a23fe5271f398c30da60d4827639de3e8b", "precision": 8, "price": 81440 },
+    { "ticker": "USDC.e", "id": "9121a8204fda7aab6108b8e09b3a07aa5b7858df7b536393a5a8d636801aebfa", "precision": 6, "price": 1.0, "supervised": true },
+    { "ticker": "EURC.e", "id": "d1bb6f4d0d12dde93405c23da8da38c6d00270930d75b7cdcb91ad8f0646efef", "precision": 6, "price": 1.12, "supervised": true }
+  ]
+}
