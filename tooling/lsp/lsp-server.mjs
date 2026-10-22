@@ -115,6 +115,7 @@ import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-fun
 import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
+import { withPaymentHash } from './hold-bolt11.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
 
 function reqEnv(name) {
@@ -4619,6 +4620,10 @@ const server = http.createServer(async (req, res) => {
     //       AFTER the maker's payment is held. Requires the holdinvoice plugin on the node.
     //     NORMAL (weaker): pass `preimage` (= P). The node is created WITH P and auto-settles
     //       on payment, so the node/LSP learns P at mint time (see the buy P-custody note).
+    //   HODL with `bolt11: true` also answers a BOLT11 under H that the node signed, for a payer
+    //   that pays only an invoice (hold-bolt11.mjs): the node's own invoice under a throwaway
+    //   hash, deleted, H put in its place, signed by `signinvoice`. `expiry` (seconds, default
+    //   3600) is then the invoice's expiry too.
     if (req.method === 'POST' && url.pathname === '/node/invoice') {
       if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
       const body = await readBody(req);
@@ -4652,9 +4657,20 @@ const server = http.createServer(async (req, res) => {
           const holdArgs = [`payment_hash=${H}`, `amount_msat=${amtMsat}`, `label=${label}`, 'description=asset buy (HODL)'];
           if (Number(body && body.expiry) > 0) holdArgs.push(`cltv=${Math.ceil(Number(body.expiry))}`);
           if (assetId) holdArgs.push(`asset=${assetId}`);
+          if (!/^[0-9a-f]{64}$/.test(H)) return send(res, 400, { ok: false, error: 'payment_hash is 32 bytes of hex' });
           inv = await lnrpcKw('holdinvoice', holdArgs, rec.rpc, SIGNER_RPC_TIMEOUT_MS);
           const ni = await lnrpc('getinfo', [], rec.rpc, SIGNER_RPC_TIMEOUT_MS).catch(() => ({}));
-          return send(res, 200, { ok: true, bolt11: null, payment_hash: H, hodl: true, node_id: ni.id || rec.node_id || null, amount_msat: Number(amtMsat) });
+          let bolt11 = null;
+          if (body && body.bolt11 === true) {
+            const tmpLabel = 'holdtpl-' + crypto.randomUUID();
+            const expiry = Number(body.expiry) > 0 ? Math.ceil(Number(body.expiry)) : 3600;
+            const desc = body.description ? String(body.description).slice(0, 128) : 'trade';
+            const tpl = await lnrpcKw('invoice', [`amount_msat=${amtMsat}`, `label=${tmpLabel}`, `description=${desc}`, `expiry=${expiry}`,
+              `preimage=${crypto.randomBytes(32).toString('hex')}`, ...hostedInvoiceArgs(rec)], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+            await lnrpcKw('delinvoice', [`label=${tmpLabel}`, 'status=unpaid'], rec.rpc, SIGNER_RPC_TIMEOUT_MS).catch(() => {});
+            bolt11 = (await lnrpcKw('signinvoice', [`invstring=${withPaymentHash(tpl.bolt11, H)}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS)).bolt11;
+          }
+          return send(res, 200, { ok: true, bolt11, payment_hash: H, hodl: true, node_id: ni.id || rec.node_id || null, amount_msat: Number(amtMsat) });
         } else {
           // NORMAL invoice. Use keyword args so the optional `preimage` can be set without
           // positional padding: lightning-cli -k invoice amount_msat=.. label=.. preimage=..
@@ -4671,7 +4687,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // GET /node/invoice-status?node=<key>&payment_hash=<H> -> { state, held, settled }. Poll this
+    // GET /node/invoice-status?node=<key>&payment_hash=<H> -> { state, held, settled, htlc_expiry, btc_tip,
+    // amount_msat, received_msat }. Poll this
     // after /swap {side:buy} so the wallet knows when the maker's payment is HELD (state 'accepted')
     // and it is safe to /node/settle. Uses the holdinvoice plugin's holdinvoicelookup (registry-scoped).
     if (req.method === 'GET' && url.pathname === '/node/invoice-status') {
@@ -4698,8 +4715,11 @@ const server = http.createServer(async (req, res) => {
             && x.direction === 'in' && Number.isFinite(Number(x.expiry)));
           if (mine.length) htlcExpiry = Math.min(...mine.map((x) => Number(x.expiry)));
         } catch { /* leave htlc_expiry/btc_tip null -> the taker fails closed */ }
+        // amount_msat is what the hold was registered for, received_msat what the HTLCs held under
+        // it carry: the plugin holds any amount, so whoever settles compares the two first.
         return send(res, 200, { ok: true, state: l.state,
-          held: l.state === 'accepted', settled: l.state === 'settled', htlc_expiry: htlcExpiry, btc_tip: btcTip });
+          held: l.state === 'accepted', settled: l.state === 'settled', htlc_expiry: htlcExpiry, btc_tip: btcTip,
+          amount_msat: l.amount_msat != null ? Number(l.amount_msat) : null, received_msat: l.received_msat != null ? Number(l.received_msat) : null });
       } catch (e) { return send(res, 502, { ok: false, error: `lookup: ${e.message}` }); }
     }
 
@@ -4794,6 +4814,8 @@ const server = http.createServer(async (req, res) => {
       const wantHash = String((body && body.wantHash) || '').toLowerCase();
       const wantMsat = body && body.amount_msat != null ? Math.round(Number(body.amount_msat)) : null;
       const maxCltv = body && body.max_cltv != null ? Math.round(Number(body.max_cltv)) : null;
+      // The most the payer pays in routing fees (msat), when it names one: the fee its ticket showed.
+      const maxFeeMsat = body && body.maxfee_msat != null ? Math.max(0, Math.round(Number(body.maxfee_msat))) : null;
       let decoded = null;
       try {
         decoded = await lnrpcKw('decode', [`string=${bolt11}`], rec.rpc, 8000);
@@ -4819,6 +4841,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const args = [`bolt11=${bolt11}`, 'retry_for=45'];
         if (maxCltv != null) args.push(`maxdelay=${maxCltv}`);
+        if (maxFeeMsat != null) args.push(`maxfee=${maxFeeMsat}`);
         if (payAsset) args.push(`asset=${payAsset}`);
         const r = await lnrpcKw('pay', args, rec.rpc, 60_000);
         return send(res, 200, { ok: true, paid: r.status === 'complete', preimage: r.payment_preimage || null,
@@ -4859,6 +4882,51 @@ const server = http.createServer(async (req, res) => {
           return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))} (direct-hop fallback: ${scrubDetail(String((e2 && e2.message) || e2))})` });
         }
       }
+    }
+
+    // GET /node/pay-status?node=<key>&payment_hash=<H> -> { state: 'none'|'pending'|'complete'|'failed', preimage }.
+    // How the node's payments under H stand (listpays): complete with its preimage once any part of
+    // one completed, pending while any is in flight, failed only when every attempt failed and none
+    // is in flight. A payer whose /node/pay answered nothing it could read asks this before it
+    // calls a payment failed.
+    if (req.method === 'GET' && url.pathname === '/node/pay-status') {
+      if (!PROV) return send(res, 501, { ok: false, error: 'provisioning not enabled' });
+      const nodeKey = (url.searchParams.get('node') || '').toLowerCase();
+      const H = (url.searchParams.get('payment_hash') || '').toLowerCase();
+      if (!nodeKey || !/^[0-9a-f]{64}$/.test(H)) return send(res, 400, { ok: false, error: '?node=<key>&payment_hash=<H> required' });
+      const rec = PROV.getByKey(nodeKey);
+      if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
+      try {
+        const sp = await lnrpcKw('listsendpays', [`payment_hash=${H}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+        const ps = (sp && sp.payments) || [];
+        const done = ps.find((p) => p.status === 'complete');
+        const state = !ps.length ? 'none' : done ? 'complete' : ps.some((p) => p.status === 'pending') ? 'pending' : 'failed';
+        return send(res, 200, { ok: true, state, preimage: done ? (done.payment_preimage || null) : null });
+      } catch (e) { return send(res, 502, { ok: false, error: `pay-status: ${scrubDetail(String((e && e.message) || e))}` }); }
+    }
+
+    // GET /node/pay-quote?node=<key>&bolt11=<invoice> -> { fee_msat, route_found }. The routing fee a
+    // payment of the invoice from the node would pay now (getroute to the payee, in the node's own
+    // asset): what a ticket shows before the payment, and what /node/pay's maxfee_msat then caps.
+    if (req.method === 'GET' && url.pathname === '/node/pay-quote') {
+      if (!PROV) return send(res, 501, { ok: false, error: 'provisioning not enabled' });
+      const nodeKey = (url.searchParams.get('node') || '').toLowerCase();
+      const bolt11 = String(url.searchParams.get('bolt11') || '').trim();
+      const rec = nodeKey ? PROV.getByKey(nodeKey) : null;
+      if (!rec || !rec.rpc || !bolt11) return send(res, 400, { ok: false, error: '?node=<key>&bolt11=<invoice> required' });
+      try {
+        const dec = await lnrpcKw('decode', [`string=${bolt11}`], rec.rpc, 8000);
+        const dest = String(dec.payee || '').toLowerCase();
+        const amt = Math.round(Number(dec.amount_msat));
+        if (!/^[0-9a-f]{66}$/.test(dest) || !(amt > 0)) return send(res, 400, { ok: false, error: 'the invoice names no payee or amount' });
+        const asset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
+        const rArgs = [`id=${dest}`, `amount_msat=${amt}`, 'riskfactor=10', `cltv=${Number(dec.min_final_cltv_expiry || 18)}`];
+        if (asset) rArgs.push(`asset=${asset}`);
+        const r = await lnrpcKw('getroute', rArgs, rec.rpc, SIGNER_RPC_TIMEOUT_MS).catch(() => null);
+        const route = (r && r.route) || [];
+        if (!route.length) return send(res, 200, { ok: true, route_found: false, fee_msat: null });
+        return send(res, 200, { ok: true, route_found: true, fee_msat: (parseInt(String(route[0].amount_msat), 10) || amt) - amt, delay: Number(route[0].delay) });
+      } catch (e) { return send(res, 502, { ok: false, error: `pay-quote: ${scrubDetail(String((e && e.message) || e))}` }); }
     }
 
     // POST /node/payhash { node_key, node_id, hash, amount_msat, min_final_cltv, connect_hints? } -> { committed, status }.

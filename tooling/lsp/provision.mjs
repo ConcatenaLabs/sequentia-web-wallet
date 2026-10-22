@@ -335,7 +335,7 @@ export function makeProvisioner(opts) {
       // non-custodial external-BTC BUY, and the BTC node for the p2p SELL (the taker mints
       // the hold the maker pays; "Unknown command 'holdinvoice'" killed every such sell
       // because this line used to add the plugin to seq nodes only).
-      'plugin=/root/sequentia/seqln/contrib/holdinvoice-seq/holdinvoice.py',
+      `plugin=${process.env.SEQLN_HOLDINVOICE_PLUGIN || '/root/sequentia/seqln/contrib/holdinvoice-seq/holdinvoice.py'}`,
       ...(chainCfg.extra || []),
     ].join('\n') + '\n';
     fs.writeFileSync(path.join(dir, 'config'), config);
