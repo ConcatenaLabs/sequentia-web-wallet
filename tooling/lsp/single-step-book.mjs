@@ -71,6 +71,25 @@ export function covenantRoundEntries (offers, { payAsset, receiveAsset }) {
   return out
 }
 
+// The entries of the relay's transparent covenant orders selling `receiveAsset` for `payAsset`,
+// taken on the chain from the wallet's own coins: every covenant order, whether or not a round
+// could take it. Sized at the relay's live size when it has one.
+export function onchainFillEntries (offers, { payAsset, receiveAsset }) {
+  const out = []
+  for (const o of offers || []) {
+    if (!o || o._verified === false) continue
+    if ((o.offer_asset ?? o.offerAsset) !== receiveAsset || (o.want_asset ?? o.wantAsset) !== payAsset) continue
+    const c = o.covenant || o.Covenant
+    if (!c) continue
+    const rateNum = big(c.rate_num), rateDen = big(c.rate_den), lot = big(c.min_lot)
+    const live = o._status && o._status.active_amount != null ? big(o._status.active_amount) : big(o.offer_amount)
+    if (rateNum <= 0n || rateDen <= 0n || live <= 0n) continue
+    out.push({ source: 'onchain-fill', id: `${c.covenant_txid}:${c.covenant_vout}`, rateNum, rateDen,
+      maxReceive: live, minReceive: lot > 0n ? lot : 1n, lot, raw: o })
+  }
+  return out
+}
+
 // The entries of the relay's orders resting in the tree of the wallet's operator (`operator`, its
 // key) that sell `receiveAsset` for `payAsset`: an order of another operator cannot be filled from
 // this wallet's leaves. Sized at the relay's live size (statuses[i].active_amount, kept on an offer

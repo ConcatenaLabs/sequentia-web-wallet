@@ -194,7 +194,7 @@ async function main () {
   try { rProc.kill('SIGTERM') } catch {}
 
   const pairs = pairsArg ? JSON.parse(readFileSync(pairsArg, 'utf8'))
-    : { chains: { [st.genesis_hash]: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker', 'covenant-round', 'leaf-resting'] }, { pay: Y, receive: X, sources: ['leaf-maker', 'covenant-round', 'leaf-resting'] }] } } }
+    : { chains: { [st.genesis_hash]: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker', 'covenant-round', 'leaf-resting', 'onchain-fill'] }, { pay: Y, receive: X, sources: ['leaf-maker', 'covenant-round', 'leaf-resting', 'onchain-fill'] }] } } }
   note(pairsArg ? `pairs admitted by ${pairsArg}` : 'pairs: the drive admits X→Y and Y→X itself (no drill list given)')
   writeFileSync(join(out, 'pairs-used.json'), JSON.stringify(pairs, null, 2))
 
@@ -309,6 +309,40 @@ async function main () {
   await A.page.waitFor("document.querySelector('#swPayPick') && document.querySelector('#swPayPick').offsetParent !== null", 30000)
   check('developer mode: the composer with its rails, and no user composer', await A.visible('#swComposer') && await A.visible('#swPayPick') && !(await A.visible('#userComposer')))
   await A.shot('developer-mode-composer')
+  // ---- 6. a wallet that holds nothing in the tree trades from its on-chain coins ----
+  // A fresh wallet, never joined to an operator and never in developer mode, holding X only on
+  // the chain: the composer takes the covenant order on the chain in one FILL.
+  const B = wallet('B')
+  await B.page.open()
+  // Its on-chain wallet on this chain: the page's regtest network, by genesis and policy asset.
+  const side = await H.rpc('getsidechaininfo', [])
+  const devChain = `window.SEQ_DEV_CHAIN=${JSON.stringify({ policyAsset: side.pegged_asset, genesis: st.genesis_hash })}`
+  await B.page.send('Page.addScriptToEvaluateOnNewDocument', { source: `${init}; ${devChain}; try { localStorage.setItem('swk.registryCache', ${JSON.stringify(JSON.stringify(labels))}) } catch {}` })
+  await B.page.go(base)
+  await B.page.waitFor("document.querySelector('#btnCreate') && document.querySelector('#btnCreate').offsetParent !== null", 60000)
+  await B.click('#btnCreate')
+  await B.page.waitFor("document.querySelector('#btnConfirm') && document.querySelector('#btnConfirm').offsetParent !== null")
+  await B.click('#btnConfirm')
+  await B.page.waitFor("document.querySelector('#app') && document.querySelector('#app').offsetParent !== null", 60000)
+  await B.eval(`localStorage.setItem('swk.sequentia.assets', ${JSON.stringify(JSON.stringify(labels))})`)
+  await B.click('[data-tab=receive]')
+  const addrB = await until("B's address", async () => { const t = (await B.text('#addr')).trim(); return /^[a-z0-9]{20,}$/.test(t) ? t : null }, 60000, 500)
+  const vB = await H.rpc('validateaddress', [addrB]).catch((e) => ({ error: e.message }))
+  note(`     B's address ${addrB}: ${JSON.stringify(vB).slice(0, 300)}`)
+  await H.fund(await H.scriptOf(addrB), X, 1000000); await H.produce(); await H.bury()
+  note(`     B (fresh, default mode) holds 1,000,000 XLEAF on the chain at ${addrB}`)
+  const t6 = await until("B's ticket", async () => { const t = await review(B, X, Y, '300000'); return (await B.has('#ucConfirm')) ? t : null }, 300000, 5000)
+  check('a wallet with nothing in the tree is offered the order on the chain: the same three lines', /You pay\s*\d+ XLEAF/.test(t6.in) && /You get\s*\d+ YLEAF/.test(t6.out) && /^(Fees .* included above|No fees|Fees .*)$/.test(t6.cost.trim()), t6)
+  await B.shot('ticket-onchain-fill')
+  await B.click('#ucConfirm')
+  const r6 = await until('B\'s trade sent', async () => { const l = await B.trades(); const r = l[l.length - 1]; return l.length >= 1 && r.state !== 'confirming' ? r : null }, 180000)
+  check('the trade went to the covenant order, filled on the chain in one transaction', r6.source === 'onchain-fill' && /^[0-9a-f]{64}$/.test(r6.txid || ''), { source: r6.source, txid: r6.txid, state: r6.state, error: r6.error })
+  await until('B\'s trade Settled', async () => /Settled/.test(await B.text(`#ucTrades [data-trade="${r6.id}"]`)), 300000, 2000)
+  const tx6 = await H.rpc('getrawtransaction', [r6.txid, true]).catch(() => null)
+  check('"Settled" once the FILL is in a block', !!(tx6 && tx6.blockhash), tx6 ? { blockhash: tx6.blockhash } : 'not found')
+  await wordsCheck(B, 'user mode, a fill on the chain settled')
+  await B.shot('onchain-fill-settled')
+
   clearInterval(pump)
   const bal = await A.eval("window.sequentiaWallet.request({method:'getLeafBalances'})")
   note(`     A's leaves at the end (developer mode's page API): ${JSON.stringify(bal.leaves)}`)

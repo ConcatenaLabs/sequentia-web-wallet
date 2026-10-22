@@ -47,7 +47,7 @@ test('the router names one settlement per source and refuses any other', () => {
   assert.equal(planSingleStep('covenant-round', { payAsset: X, receiveAsset: Y, caps: { leaf_take: true } }).path, 'leaf-take')
   assert.throws(() => planSingleStep('covenant-round', { payAsset: X, receiveAsset: Y, caps: { leaf_take: false } }), /does not settle in one step/)
   for (const s of ['submarine', 'lsp-bridge', 'pureln', 'native']) assert.throws(() => planSingleStep(s, { payAsset: X, receiveAsset: Y }), /not a single-step source/)
-  assert.deepEqual(Object.keys(SINGLE_STEP_SOURCES).sort(), ['btc-gateway', 'covenant-round', 'leaf-maker', 'leaf-resting'])
+  assert.deepEqual(Object.keys(SINGLE_STEP_SOURCES).sort(), ['btc-gateway', 'covenant-round', 'leaf-maker', 'leaf-resting', 'onchain-fill'])
 })
 
 test('a BTC trade is one hash-lock: BTC over Lightning, the asset in the tree, and never a leaf of BTC', () => {

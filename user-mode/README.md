@@ -11,7 +11,9 @@ exactly what its ticket showed.
   (`leaf-maker`, an in-tree swap with a live leaf maker; `covenant-round`, a transparent covenant
   order taken in the operator's round; `leaf-resting`, an order resting as a leaf in the
   operator's tree, filled in one transfer; `btc-gateway`, BTC for an asset in one hash-lock with a
-  maker's BTC desk, BTC written `"BTC"`), where the drill that admitted it ran (`proven`), and its
+  maker's BTC desk, BTC written `"BTC"`; `onchain-fill`, a transparent covenant order taken on the
+  chain from the wallet's own on-chain coins in one transaction, which needs no operator and no
+  leaves), where the drill that admitted it ran (`proven`), and its
   report (`report`). A chain, pair or source not in it is not offered.
 - `"proven": "regtest"` admits a pair on the testnet on the strength of a 500-trade drill on
   regtest with the testnet's shape (the same operator, relay, maker and composer code, with short

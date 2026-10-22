@@ -8,6 +8,7 @@
 //   /seqob/…     -> an order-book relay (seqobd), when --seqob names one
 //   /api/…       -> an esplora HTTP API, when --esplora names one
 //   /prices      -> a price feed read from a JSON file, when --prices names one
+//   /feerates    -> the node's fee exchange rates (getfeeexchangerates), as the testnet serves them
 //   /leafmaker/… -> a live leaf maker (tooling/lsp/leaf-maker.mjs), when --maker names one
 //   /lsp/…       -> the hosted-node service (tooling/lsp/lsp-server.mjs), when --lsp names one
 //
@@ -80,6 +81,12 @@ const srv = createServer(async (req, res) => {
     if (maker && p.startsWith('/leafmaker/')) return proxy(req, res, maker.replace(/\/$/, '') + p.slice('/leafmaker'.length) + url.search)
     if (esplora && p.startsWith('/api/')) return proxy(req, res, esplora.replace(/\/$/, '') + p.slice('/api'.length) + url.search)
     if (prices && p === '/prices') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(readFileSync(prices)); return }
+    // The node's fee exchange rates, as the testnet's /feerates serves them: the assets it takes
+    // fees in, which the page's on-chain transactions pay their fee in.
+    if (p === '/feerates') {
+      const r = await fetch(`http://${control}/rpc`, { method: 'POST', body: JSON.stringify({ method: 'getfeeexchangerates', params: [] }) })
+      res.writeHead(r.ok ? 200 : 502, { 'Content-Type': 'application/json' }); res.end(await r.text()); return
+    }
     if (p === '/node' || p === '/node/') {
       const s = await state()
       return proxy(req, res, s.node_url)

@@ -317,6 +317,9 @@ export const SINGLE_STEP_SOURCES = Object.freeze({
   'covenant-round': { path: 'leaf-take', taker: { leaf: true }, maker: 'chain' },
   'btc-gateway': { path: 'leaf-ln', taker: { leaf: true, btc: 'ln' }, maker: 'leaf' },
   'leaf-resting': { path: 'leaf-fill-resting', taker: { leaf: true }, maker: 'resting-leaf' },
+  // A transparent covenant order taken on the chain from the wallet's own on-chain coins: one
+  // transaction, no operator, no leaves.
+  'onchain-fill': { path: 'native', taker: { chain: true }, maker: 'chain' },
 });
 
 // The one hash-lock of a BTC trade: BTC over Lightning on both ends (native), the asset from a
@@ -369,6 +372,12 @@ export function planSingleStep(source, { payAsset, receiveAsset, caps } = {}) {
       : ['lightning_pay_quote', 'lightning_pay', 'lightning_post_preimage', 'sync'] };
   }
   if (isBtc(payAsset) || isBtc(receiveAsset)) throw new Error(`${source} trades no BTC: BTC is never a leaf`);
+  if (source === 'onchain-fill') {
+    // Both sides on the chain: the taker's coins and the order's covenant in one FILL transaction.
+    const chain = { btcRail: 'chain', assetRail: 'chain' };
+    const plan = planSettlement({ asset: receiveAsset, quote: payAsset, buyer: chain, seller: chain, takerSide: 'buy' });
+    return { path: s.path, plan, commands: ['covenant_fill'] };
+  }
   const leaves = { btcRail: 'leaf', assetRail: 'leaf' };
   const other = s.maker === 'leaf' ? leaves : { btcRail: 'chain', assetRail: 'chain' };
   // The wallet buys `receiveAsset` with `payAsset`: the receive asset in the base's place.

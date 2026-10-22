@@ -416,7 +416,10 @@ it cannot account for) is refused before anything is signed, in the engine's wor
 
 The user composer below is the Trade tab in user mode. It trades only against a live leaf
 maker, orders and the pairs `user-mode/pairs.json` admits; a pair nobody offers right now is shown
-as not offered. A page configured with `window.SEQ_USER_TRADE = false`
+as not offered. It pays from the wallet's leaves when it holds them, and from its on-chain coins
+otherwise: a covenant order is then taken on the chain in one transaction (`user-onchain.js`), so a
+new wallet trades without joining an operator first. The network fee of such a fill is paid in the
+asset paid for the order, and the asset must be one the node takes fees in. A page configured with `window.SEQ_USER_TRADE = false`
 ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) shows the full composer (developer mode's, below)
 in both modes instead.
 
@@ -628,6 +631,7 @@ works normally without the restricted rows.
 | `leaves.js` | The mode setting, and developer mode's Leaves tab, which shows what the leaf wallet answers. |
 | `user-trade.js` | The user-mode composer's engine: the ticket for a trade from the single-step book, priced by the leaf library, the trade's record written before anything is signed, and the trade followed to Settled or Returned. No DOM: the page and the drill run the same code. |
 | `user-trade-btc.js` | The engine's BTC trades: an asset for BTC or BTC for an asset in one hash-lock with a maker's BTC desk, BTC paid only once the coin received under the hash is held for good. |
+| `user-onchain.js` | The engine's on-chain coins: a transparent covenant order taken on the chain in one FILL from the wallet's own coins (`onchain-fill`), its fee in the asset paid. |
 | `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
 | `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
@@ -815,8 +819,9 @@ it from leaves, its fill round checked at the node.
 mode in headless Chromium against the same harness, SeqDEX's relay (`SEQOBD`), a live leaf maker
 it starts and a covenant order it places: the user composer and nothing of developer mode's, BTC
 first in both pickers, the word list checked on every screen; a trade settled in the tree against
-the maker; a take of the covenant order once the maker stops; a pair not offered; and developer
-mode as before.
+the maker; a take of the covenant order once the maker stops; a pair not offered; developer
+mode as before; and a new wallet, never joined to an operator, that holds an asset only on the
+chain and trades it in default mode by taking the covenant order on the chain.
 
 `node tooling/user-mode-drill.mjs --trades 500 --wallets 3 --out DIR` is the reliability bar for
 user mode: that many trades through the composer's own engine (each wallet a process of its own,
