@@ -4437,9 +4437,11 @@ function lnReceiveRoomDialog(leg, startAtoms){
 // without anything the node already owes, which the move adds once it knows the node).
 function lnMoveRoomField(card, leg, moveAtoms){
   const tk=leg.ticker, prec=leg.precision;
-  { const l=el('label','lbl','Room to receive (optional)'); l.style.marginTop='18px'; card.appendChild(l); }
-  { const p=el('div','sub','Once open, the channel lets you send payments. To receive right away too, use this option: ');
-    p.appendChild(helpLink('faq-ln-sides', 'how room to receive works')); p.appendChild(document.createTextNode('.')); card.appendChild(p); }
+  { const l=el('label','lbl','Room to receive (optional) '); l.style.marginTop='18px';
+    const how=helpLink('faq-ln-sides', 'how it works'); how.style.cssText='color:var(--amber);text-transform:none;letter-spacing:0;font-weight:500;margin-left:6px';
+    l.appendChild(how); card.appendChild(l); }
+  card.appendChild(el('div','sub','Once open, the channel lets you send payments. To receive right away too, use this option.'));
+  { const p=el('div','sub','Set the amount you will be able to receive'); p.style.marginTop='8px'; card.appendChild(p); }
   const inp=el('input','mono'); inp.placeholder='0.0'; inp.style.marginTop='4px'; card.appendChild(inp);
   const terms=lnRoomTerms(card, ()=>{ clearTimeout(t); recheck(); });
   const line=el('div','sub'); line.style.marginTop='6px'; card.appendChild(line);
@@ -4815,8 +4817,7 @@ function moveToLightningDialog(leg){
   { const ul=el('ul','sub ln-help'); ul.style.margin='6px 0 14px';
     for(const t of ['Your wallet pays this amount into a Lightning channel on your hosted node, in one on-chain transaction.',
                     'It signs that transaction only after the channel’s way back is signed.',
-                    'Your device signs every transaction and channel update for the channel.',
-                    'The transaction pays a network fee through the open fee market. If no block producer accepts a fee you can pay, the move cannot be mined and fails with a clear message.'])
+                    'Your device signs every transaction and channel update for the channel.'])
       ul.appendChild(el('li',null,t));
     c.appendChild(ul); }
   c.appendChild(el('label','lbl','Amount ('+leg.ticker+')'));
@@ -4843,7 +4844,12 @@ function moveToLightningDialog(leg){
     const room = recv ? recv.value() : null;
     if(room && room.problem){ st.className='status err'; st.textContent=room.problem; return; }
     if(room && atoms + room.fee > avail){ st.className='status err'; st.textContent='The amount and the fee for room to receive together exceed your on-chain '+leg.ticker+' balance.'; return; }
-    ok.disabled=true; no.disabled=true; if(recv) recv.lock();
+    ok.disabled=true; if(recv) recv.lock();
+    // Setting the node up can take minutes: the user may leave it to finish in the background from
+    // the start. Until the deposit is sent nothing is committed, so a closed page loses nothing.
+    no.textContent='Continue in background';
+    no.onclick=()=>{ backgrounded=true; m.remove();
+      try{ toast('Setting up your '+leg.ticker+' Lightning channel in the background. Keep the wallet open; we’ll let you know when it’s ready.'); }catch{} };
     const say=(txt)=>{ st.className='status'; st.innerHTML='<span class="spin"></span>'+txt; };
     try{
       const phrase=(localStorage.getItem(KEY)||'').trim();
@@ -4970,7 +4976,7 @@ function moveToLightningDialog(leg){
         // the fee. Guide the user to leave a little behind rather than showing a raw shortfall.
         msg = 'Not enough '+leg.ticker+' to cover the amount plus the on-chain network fee (the fee is paid in '+leg.ticker+'). Move a slightly smaller amount so a little '+leg.ticker+' is left for the fee.';
       st.className='status err'; st.textContent='Failed: '+msg;
-      ok.disabled=false; no.disabled=false;
+      ok.disabled=false; no.disabled=false; no.textContent='Cancel'; no.onclick=()=>m.remove();
       // If the user already closed the modal, surface the failure as a toast + keep the banner
       // (the move is still resumable — reopening the wallet / a later Move retries from the deposit).
       if(backgrounded){ try{ toast('Couldn’t finish moving '+leg.ticker+' to Lightning: '+msg); }catch{} }

@@ -28,6 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 
 // Derive a secp256k1 compressed pubkey (33-byte hex) from a 32-byte hex privkey, the
@@ -224,6 +225,25 @@ export function makeProvisioner(opts) {
   // save sequence has awaits in the middle (getinfo, bootNode), so two overlapping calls both read
   // seq=N, both take idx=N (identical ports -> a half-booted EADDRINUSE node), and the later save drops
   // the earlier call's nodes[key]. A one-at-a-time promise chain makes each operation atomic.
+  // Whether nothing listens on 127.0.0.1:<port>. The port ranges can overlap another service on
+  // the box (seqdexd listens on 9945, inside the signer range), and a node given a port in use
+  // can never bring its signer up: every boot dies on "signer listen bind … Address already in
+  // use" and the wallet reports that its device signer could not come online.
+  function portFree(port) {
+    return new Promise((resolve) => {
+      const s = net.createServer();
+      s.once('error', () => resolve(false));
+      s.listen(port, '127.0.0.1', () => s.close(() => resolve(true)));
+    });
+  }
+  // The next port slot whose three ports are all free; a taken slot is skipped for good.
+  async function freeSlot(reg) {
+    for (;;) {
+      const idx = reg.seq++;
+      if (await portFree(CFG.addrBase + idx) && await portFree(CFG.signerBase + idx) && await portFree(CFG.wsBase + idx)) return idx;
+    }
+  }
+
   let _provQueue = Promise.resolve();
   function provision(args) {
     const run = _provQueue.then(() => provisionImpl(args));
@@ -265,13 +285,19 @@ export function makeProvisioner(opts) {
       // the node stayed wedged forever while the wallet showed "could not create the
       // invoice". Kill the wedged instance first; the fresh one's signer slot is clean.
       await reviveIfWedged(rec);
+      // A node whose signer or relay port another service has taken since it was provisioned
+      // moves both to a free slot: they are passed at boot, and the router reads them from here.
+      if (!(await portFree(rec.signerPort)) || !(await portFree(rec.wsPort))) {
+        const idx = await freeSlot(reg);
+        rec.signerPort = CFG.signerBase + idx; rec.wsPort = CFG.wsBase + idx; save(reg);
+      }
       bootNode(rec, deviceTransportPubkey);
       rec.status = 'booting'; save(reg);
       return rec;
     }
 
-    // Fresh provision: claim the next port slot + write the node dir.
-    const idx = reg.seq++;
+    // Fresh provision: claim the next free port slot + write the node dir.
+    const idx = await freeSlot(reg);
     const addrPort = CFG.addrBase + idx;
     const signerPort = CFG.signerBase + idx;
     const wsPort = CFG.wsBase + idx;
