@@ -34,6 +34,7 @@
 // It writes DIR/REPORT.md, DIR/pairs.json (this chain's admitted pairs when every trade passed),
 // DIR/trades.jsonl and the logs. Nothing here is used by the deployed wallet.
 import { spawn } from 'node:child_process'
+import http from 'node:http'
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -65,6 +66,22 @@ const H = harness(control)
 const children = []
 const rand = (a, b) => a + Math.floor(Math.random() * (b - a + 1))
 
+// One request to a wallet's process, with no timeout of the client's own: { status, text }.
+function httpCall (url, body) {
+  return new Promise((ok, no) => {
+    const data = body === undefined ? null : JSON.stringify(body)
+    const req = http.request(url, { method: data == null ? 'GET' : 'POST', headers: data == null ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+      const parts = []
+      res.on('data', (d) => parts.push(d))
+      res.on('end', () => ok({ status: res.statusCode, text: Buffer.concat(parts).toString() }))
+      res.on('error', no)
+    })
+    req.on('error', no)
+    if (data != null) req.write(data)
+    req.end()
+  })
+}
+
 // ---- the wallets ----
 function walletProc (i, cfgFile) {
   const dir = join(out, `wallet-${i}`); mkdirSync(dir, { recursive: true })
@@ -78,14 +95,18 @@ function walletProc (i, cfgFile) {
     throw new Error(`wallet ${i} did not start`)
   }
   w.kill = () => new Promise((ok) => { if (!w.proc || w.proc.exitCode != null) return ok(); w.proc.once('exit', ok); w.proc.kill('SIGKILL') })
+  // Over node:http with no client timeout: a trade on a loaded machine can take longer than
+  // fetch's five minutes to answer, and a request given up on is still carried out. Only a
+  // connection refused (the request never arrived: the wallet is starting again) is sent again;
+  // a trade asked twice would be two trades.
   w.call = async (path, body) => {
     for (let k = 0; ; k++) {
       try {
-        const r = await fetch(w.url + path, body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) })
-        const j = await r.json()
-        if (!r.ok) throw new Error(`${path}: ${j.error || r.status}`)
+        const { status, text } = await httpCall(w.url + path, body)
+        let j; try { j = JSON.parse(text) } catch { throw new Error(`${path}: HTTP ${status}: ${text.slice(0, 200)}`) }
+        if (status < 200 || status > 299) throw new Error(`${path}: ${j.error || status}`)
         return j
-      } catch (e) { if (k < 3 && /fetch failed|ECONNREFUSED/.test(String(e.message))) { await sleep(1000); continue } throw e }
+      } catch (e) { if (k < 3 && e.code === 'ECONNREFUSED') { await sleep(1000); continue } throw e }
     }
   }
   return w
