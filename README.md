@@ -483,10 +483,11 @@ The route is inferred from the pair:
   are still taken through the co-signed PSET lift. Before signing, the wallet checks the
   maker's transaction against the swap it proposed, and refuses one that pays it less, pays
   elsewhere, changes the form it asked for or spends any other coin of the wallet: it says so,
-  and nothing is signed or moved. The maker completes that transaction and
-  blinds the output that pays you, so it can only pay a blinded address: the review asks before
-  receiving there, with the box unticked, and a market order skips those offers unless you tick
-  it. The review shows what the book holds within reach of the best price, not the amount
+  and nothing is signed or moved. The maker completes that transaction; it pays your usual
+  address in the clear, like any transfer, unless you tick the review's box to receive at a
+  blinded address of this wallet, which the maker then blinds to. A swap paid at the usual
+  address spends coins held in the clear, so coins of the paying asset held at a blinded address
+  are refused before anything is sent, with what to do about it. The review shows what the book holds within reach of the best price, not the amount
   typed times the best price, and a dash where nothing is within reach. When an offer cannot be
   taken and nothing else within reach can fill, the review closes, says that nothing was filled,
   and leaves the order in the form to review again.
@@ -753,12 +754,14 @@ tooling/interactive-maker-drive.mjs [honest|shortpay|blind] [--tick] <evidence-d
 developer mode's Swap tab in a headless Chromium against a live interactive maker on a private
 regtest chain (`tooling/interactive-maker-stack.mjs`): SeqDEX's wallet daemon and order-book
 maker (`oceand`, `seqob-maker`, `seqob-octl` from the `seqdex` repository) rest an offer and
-co-sign each lift over the relay's courier. A market buy of tSEQ with USDX fills, and both
-sides' balances move by exactly the trade and its fee; against a maker built to pay one atom
+co-sign each lift over the relay's courier. A market buy of tSEQ with USDX fills with the review
+as it opens: every output paying the wallet is at its usual address in the clear, and both sides'
+balances move by exactly the trade and its fee (`--tick` receives it blinded instead). With the
+wallet's USDX only at its blinded address (`blinded-coins`) the order is refused before anything
+is sent, saying why. Against a maker built to pay one atom
 less (`shortpay`) or to blind the output that pays the wallet to its own key (`blind`)
 (`seqob-maker` built from a `seqdex` checkout with `tooling/hostile-maker.patch` applied; the drive
 sets `SEQOB_HOSTILE` to the mode), the page says that nothing was signed and nothing moves.
-`--tick` ticks the review's blinded-address box first.
 
 `SEQUENTIA_BIN=<Sequentia>/src node tooling/contracts-regtest.mjs <evidence-dir>` drives the
 Contracts tab in a headless Chromium against a private regtest chain: a faucet drip covenant

@@ -1433,7 +1433,7 @@
           <p>Every address of this wallet has two forms. The usual one, starting tb1, receives in the clear: anyone can see on the explorer how much of which asset arrived. The blinded one, starting tsqb1, hides the amount and the asset from everyone but you. Both belong to this wallet and to the same recovery phrase.</p>
           <p>Coins received at a blinded address count in your balance, spend like any other and come back with your recovery phrase. An explorer shows that a payment happened, not how much or of what. Transactions that carry hidden amounts are a little larger, because each hidden amount comes with a proof, so they cost a slightly higher network fee.</p>
           <p>To bring them back to your usual address, send them to yourself: in Send, paste your tb1 address from Receive and the amount. That one transaction makes them visible again; sending the whole balance of that asset also gathers its coins into one.</p>
-          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap at a blinded address</i>. Some offers come from a maker who completes the swap and blinds the output that pays you, so they can only pay a blinded address: the swap asks before using one, with the box unticked, and skips those offers unless you tick it.</p>
+          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap at a blinded address</i>, or tick <i>Receive at a blinded address of this wallet</i> in the review of a swap with a maker who completes it: that maker then blinds the output that pays you. Unticked, it pays your usual address in the clear, like any transfer.</p>
         </details>
         <details id="faq-final"><summary>When is a payment final?</summary>
           <p>It shows at once and is confirmed in about a minute. A confirmed payment stands as long as Bitcoin does not reorganise the block it anchors to.</p>
@@ -6251,12 +6251,12 @@ function prettyErr(e){
   //
   // Each of these names WHAT happened and WHAT the user can do, without exposing the machinery.
   // Order matters: the most specific cause wins, since several can appear in one message.
-  // The same-chain swap builder blinds the receive output to the maker's blinding pubkey, so it
-  // REQUIRES a confidential receive address (lwk_wollet seqdex_swap.rs). Transparent is the wallet's
-  // default, by design, so this is a completely ordinary thing to hit -- and it arrived as the raw
-  // Rust error "Address must be confidential", which tells a user nothing and hides the one-click fix.
-  if(/must be confidential|NotConfidentialAddress/i.test(m))
-    return 'This swap has to pay you to a blinded address. Turn on "Receive this swap at a blinded address" and place it again - nothing was sent.';
+  // A same-chain swap that receives at the usual address spends coins held in the clear only: a
+  // blinded coin's blinding factors can only be absorbed by a blinded output (lwk_wollet
+  // seqdex_swap.rs). A wallet whose coins of the asset sit at a blinded address is refused before
+  // anything is sent.
+  if(/transparent receive spends only explicit coins/i.test(m))
+    return 'The coins that would pay for this swap are held at a blinded address, and a swap that pays you at your usual address spends coins held in the clear. Send them to your usual address first, or tick "Receive at a blinded address of this wallet" - nothing was sent.';
   // The maker's co-signed swap was not the one this wallet proposed (swap.js checkMakerAnswer): it
   // paid less, paid elsewhere, changed the form of an output or touched another coin. Refused before
   // any signature.

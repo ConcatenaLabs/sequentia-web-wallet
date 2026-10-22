@@ -7481,16 +7481,17 @@ function walkAsks(pay, receive, mine){
     .filter((o) => String(o.maker_pubkey || o.makerPubkey || '').toLowerCase() !== me);   // never self-fill
 }
 function isCovenantOffer(o){ return !!(o && (o.covenant || o.Covenant)); }
-// Whether a fill may receive at a blinded address: the user agreed for this order, or receives
-// confidentially anyway (the wallet-wide opt-in, or the Blinded book).
+// Whether a fill receives at a blinded address: the holder ticked the box for this order, or
+// receives confidentially anyway (the wallet-wide opt-in, or the Blinded book). Otherwise every
+// fill, an interactive maker's included, receives at the usual address in the clear.
 function blindedReceiveOk(opts){ return !!(opts && opts.blindInteractive) || _confidentialReceive || isConfBook(); }
 // What a market order of `payAtoms` takes from the book right now, walked exactly as
-// takeMarketWalk walks it (best first, down to the slippage floor of the best offer it may take,
-// interactive makers only when `blindOk`): { paid, got, interactive } where interactive says
-// whether an interactive maker lies within that range at all.
-function walkPreview(pay, receive, payAtoms, blindOk){
+// takeMarketWalk walks it (best first, down to the slippage floor of the best offer):
+// { paid, got, interactive } where interactive says whether an interactive maker's offer lies
+// within that range, so the review can offer to receive those fills at a blinded address.
+function walkPreview(pay, receive, payAtoms){
   const all = walkAsks(pay, receive);
-  const asks = blindOk ? all : all.filter(isCovenantOffer);
+  const asks = all;
   const reach = (list) => {
     if (!list.length) return null;
     const best = Number(big(list[0].offer_amount || list[0].offerAmount || 0)) / Number(big(list[0].want_amount || list[0].wantAmount || 1));
@@ -7511,28 +7512,25 @@ function walkPreview(pay, receive, payAtoms, blindOk){
   }
   return { paid, got, interactive };
 }
-// The question asked before receiving at a blinded address, unticked: the wallet is transparent by
-// default and confidentiality is the holder's choice for each transfer, so nothing is received
-// blinded unless the box is ticked. Says what it means, that the coins stay this wallet's, and how to
-// bring them back to the usual address. Inserted in a review card before its buttons; onChange(checked)
-// as it is toggled, and once at the start with false, so the card shows what fills without it.
-function blindedConsent(card, onChange){
+// The holder's choice, unticked, to receive an interactive maker's fills at a blinded address of this
+// wallet instead of the usual one: the wallet is transparent by default and confidentiality is the
+// holder's choice for each transfer. Says what it means, that the coins stay this wallet's, and how
+// to bring them back to the usual address. Inserted in a review card before its buttons.
+function blindedConsent(card){
   const box = document.createElement('div'); box.className = 'blind-ask';
-  box.innerHTML = '<label><input type="checkbox"> <b>Also take offers that pay a blinded address of this wallet</b></label>'
-    + '<div class="sub">Some offers here can only pay you at a blinded address of this wallet. '
-    + 'The coins stay in this wallet: they count in your balance, spend like any other and come back with your recovery phrase. On chain their amount and asset are hidden. '
-    + 'You can bring them to your usual address at any time by sending them to yourself. '
-    + '<a href="#" data-help="faq-blinded">What a blinded address means</a></div>'
-    + '<div class="sub blind-off">Unticked, the offers that can only pay a blinded address are skipped.</div>';
+  box.innerHTML = '<label><input type="checkbox"> <b>Receive at a blinded address of this wallet</b></label>'
+    + '<div class="sub">Unticked, you receive at your usual address and the amount and asset are public on chain, like any transfer. '
+    + 'Ticked, a maker who completes the swap blinds the output that pays you: on chain its amount and asset are hidden. '
+    + 'The coins stay in this wallet: they count in your balance, spend like any other and come back with your recovery phrase, '
+    + 'and you can bring them to your usual address at any time by sending them to yourself. '
+    + '<a href="#" data-help="faq-blinded">What a blinded address means</a></div>';
   const actions = card.querySelector('.row'); card.insertBefore(box, actions || null);
-  const cb = box.querySelector('input'), off = box.querySelector('.blind-off');
-  cb.onchange = () => { off.classList.toggle('hide', cb.checked); onChange && onChange(cb.checked); };
-  if (onChange) onChange(false);
+  const cb = box.querySelector('input');
   return { checked: () => cb.checked };
 }
-// opts.blindInteractive: the user agreed to receive what interactive makers pay at a blinded address
-// of this wallet; without it (and without the wallet-wide confidential receive) those offers are
-// skipped, since they can only pay a blinded output.
+// opts.blindInteractive: the holder chose to receive what interactive makers pay at a blinded address
+// of this wallet; without it (and without the wallet-wide confidential receive) they pay the usual
+// address in the clear.
 export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus, opts = {}){
   payAtoms = BigInt(payAtoms);
   // Re-fetch BOTH orientations so we cross the CURRENT resting offers, not a stale compose
@@ -7554,17 +7552,14 @@ export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus
   // Execute only what THIS walk can settle: the direct same-chain rows (covenant or interactive
   // lift). Display-only families stay on the ladder but are never crossed here.
   const blindOk = blindedReceiveOk(opts);
-  const all = walkAsks(pay, receive, mine);
-  const asks = blindOk ? all : all.filter(isCovenantOffer);
-  if (!asks.length) throw new Error(all.length
-    ? 'The orders resting here can only pay a blinded address. Allow receiving at a blinded address of this wallet, or switch to Limit to rest an order.'
-    : 'No resting orders are on the book to fill right now. Switch to Limit to rest an order.');
+  const asks = walkAsks(pay, receive, mine);
+  if (!asks.length) throw new Error('No resting orders are on the book to fill right now. Switch to Limit to rest an order.');
   // The book was just read again. If it moved since the review against the user (what this order
   // now takes falls short of what the review showed by more than half a percent), stop before any
   // fill and hand back the new figures to confirm: a maker re-pricing between the two used to
   // fill the order at the new price with nothing said.
   if (opts.expectRecv != null){
-    const now = walkPreview(pay, receive, payAtoms, blindOk);
+    const now = walkPreview(pay, receive, payAtoms);
     if (now.got * 1000n < BigInt(opts.expectRecv) * 995n){
       const e = new Error('the book moved since the review'); e.repriced = now; throw e;
     }
@@ -7600,8 +7595,8 @@ export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus
         ({ txid } = await covSettleFill(synth, fillHooksFor(synth)));
       } else {
         // Interactive maker offer: co-sign lift q.takeBase of the base with the online maker, receiving at
-        // the blinded address it requires (asks only holds these when that was allowed).
-        txid = await liftOffer({ ...q, blindReceive: true }, onStatus).catch((e) => { throw staleMakerError(e); });
+        // the usual address in the clear unless the holder chose a blinded receive.
+        txid = await liftOffer({ ...q, blindReceive: blindOk }, onStatus).catch((e) => { throw staleMakerError(e); });
       }
       txids.push(txid);
       paidPay += q.amountP; gotRecv += q.amountR;
@@ -7614,7 +7609,7 @@ export async function takeMarketWalk(pay, receive, payAtoms, recvAtoms, onStatus
       // new figures. After a fill: stop there and say so, rather than walk on to worse offers.
       if (opts.expectRecv != null){
         if (!txids.length){
-          const now = walkPreview(pay, receive, payAtoms, blindOk);
+          const now = walkPreview(pay, receive, payAtoms);
           if (now.got * 1000n < BigInt(opts.expectRecv) * 995n){
             const r = new Error('an offer in the review could not be taken'); r.repriced = now; r.cause = e; throw r;
           }
@@ -7636,9 +7631,10 @@ async function takeCovenantWalkReview(q){
   const feeAsset = feeAssetPolicy().asset;
   // What the walk takes from the book as it stands, not the typed amount times the best price: the
   // best offer can hold less than the order, and the next ones can lie past the slippage floor.
-  // Interactive makers count only when the user ticks the blinded receive (asked below, unticked).
+  // Interactive makers' offers count like any other: they pay the usual address in the clear unless
+  // the holder ticks the blinded receive (offered below, unticked).
   const askBlind = !blindedReceiveOk();
-  let pv = walkPreview(pay, receive, payAtoms, !askBlind);
+  const pv = walkPreview(pay, receive, payAtoms);
   // Nothing within reach is shown as a dash with the reason beneath, never as "up to 0".
   const rows = (p) => p.paid > 0n ? [
     ['You pay', 'up to ' + amtRow(pay, p.paid) + refSuffix(pay, p.paid)],
@@ -7657,22 +7653,7 @@ async function takeCovenantWalkReview(q){
   const { m: modal, ok, st } = C.modalRows({ title: 'Review market order', kv });
   if (pv.paid < payAtoms && pv.paid > 0n){ st.className = 'status'; st.textContent = 'The book holds only this much within reach of the best price now; the rest does not fill and is not rested.'; }
   let consent = null;
-  if (askBlind && pv.interactive){
-    const card = modal.querySelector('.card');
-    const repaint = (keep) => {
-      pv = walkPreview(pay, receive, payAtoms, keep);
-      const vals = rows(pv);
-      for (const kvEl of card.querySelectorAll('.kv')){
-        const k = kvEl.querySelector('.k'), v = kvEl.querySelector('.v'), hit = vals.find(r => k && r[0] === k.textContent);
-        if (hit && v) v.textContent = hit[1];
-      }
-      ok.disabled = pv.paid <= 0n;
-      st.className = pv.paid <= 0n ? 'status err' : 'status';
-      st.textContent = pv.paid <= 0n ? 'Without the blinded address nothing within reach of the best price can fill. Tick it, or switch to Limit to rest an order.'
-        : (pv.paid < payAtoms ? 'The book holds only this much within reach of the best price now; the rest does not fill and is not rested.' : '');
-    };
-    consent = blindedConsent(card, repaint);
-  }
+  if (askBlind && pv.interactive) consent = blindedConsent(modal.querySelector('.card'));
   ok.onclick = async () => {
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Walking the order book…';
     try {
@@ -9213,15 +9194,10 @@ async function reviewSame(q){
     ['Outcome', 'Settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
-  // This offer is an interactive maker's: it can only pay a blinded address. Ask, unticked.
+  // This offer is an interactive maker's: it pays the usual address in the clear unless the holder
+  // ticks the blinded receive (offered, unticked).
   let consent = null;
-  if (!q.confidential && !blindedReceiveOk()){
-    consent = blindedConsent(modal.querySelector('.card'), (on) => {
-      ok.disabled = !on;
-      st.className = on ? 'status' : 'status err';
-      st.textContent = on ? '' : 'This offer can only pay a blinded address. Tick it, or pick another offer.';
-    });
-  }
+  if (!q.confidential && !blindedReceiveOk()) consent = blindedConsent(modal.querySelector('.card'));
   ok.onclick = async () => {
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Opening lift…';
     try {
@@ -9803,8 +9779,8 @@ async function liftOffer(q, onStatusArg){
   // Blinded receive when: the offer is a confidential-book lift (q.confidential), the
   // wallet-wide opt-in is on, OR the Blinded book is active (both legs MUST blind, so a
   // transparent taker output would leak the amount via the swap ratio).
-  // q.blindReceive: the user agreed, in the review, to receive this one fill at the blinded form of
-  // the address, because an interactive maker can only pay a blinded output (seqdex_swap.rs).
+  // q.blindReceive: the holder chose, in the review, to receive this one fill at the blinded form of
+  // the address. Otherwise the half is explicit and spends coins held in the clear (seqdex_swap.rs).
   const receiveAddr = (q.confidential || q.blindReceive || _confidentialReceive || isConfBook()) ? _raw : (_raw.toUnconfidential ? _raw.toUnconfidential() : _raw);
   let sreq = null;
   const buildRequest = async () => {
