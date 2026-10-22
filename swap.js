@@ -7652,6 +7652,9 @@ async function takeCovenantWalkReview(q){
   // differently for no reason.
   const { m: modal, ok, st } = C.modalRows({ title: 'Review market order', kv });
   if (pv.paid < payAtoms && pv.paid > 0n){ st.className = 'status'; st.textContent = 'The book holds only this much within reach of the best price now; the rest does not fill and is not rested.'; }
+  // Nothing within reach: say why at once and offer nothing to confirm (the composer's quote can be
+  // older than the book: the last offer was just taken, or its maker went away).
+  if (pv.paid <= 0n){ ok.disabled = true; st.className = 'status err'; st.textContent = 'Nothing on the book can fill this now. Try again in a minute, or switch to Limit to rest an order at your price.'; }
   let consent = null;
   if (askBlind && pv.interactive) consent = blindedConsent(modal.querySelector('.card'));
   ok.onclick = async () => {
