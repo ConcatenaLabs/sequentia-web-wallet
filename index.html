@@ -1600,6 +1600,7 @@ import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
 import { createEngine as createUserTrade } from './user-trade.js';
+import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
 import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
@@ -3561,6 +3562,17 @@ function initUserComposer(){
     // The wallet's Bitcoin Lightning (btc-lightning.js), once the service runs it; until then no
     // trade is made for or with BTC.
     get btc(){ return userBtcLightning(); },
+    // The wallet's own on-chain coins, which take a covenant order on the chain in one FILL: a
+    // wallet that holds nothing in the tree trades from them (user-onchain.js).
+    onchain: makeUserOnchain({
+      wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction, scriptToAddress, buildCovenantFillTx },
+      wollet: ()=> wollet, network: ()=> network, mnemonic: ()=> (localStorage.getItem(KEY) || '').trim(),
+      esploraFetch: (path, opts)=> fetch(ESPLORA + path, opts), noteOwnTx,
+      // Transparent by default: the order's asset comes to the usual address.
+      receiveAddress: ()=> { const a = wollet.address(addrIndex == null ? undefined : addrIndex).address(); return (a.toUnconfidential ? a.toUnconfidential() : a).toString(); },
+      balance: (a)=> { try { return BigInt(balObj()[a] || 0); } catch { return 0n; } },
+      feeRateFor, feerate: DEFAULT_FEERATE, rateScale: EXCHANGE_RATE_SCALE,
+    }),
     store: localStorage, tag: walletTag,
     log: (...a)=> console.log(...a),
   });

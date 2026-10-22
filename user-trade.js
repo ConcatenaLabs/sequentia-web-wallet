@@ -26,11 +26,19 @@
 //   admitted()                 -> { pairs, genesis }: user-mode/pairs.json and this chain's genesis
 //   btc                        -> the wallet's Bitcoin Lightning, for BTC trades (user-trade-btc.js),
 //                                 or null: then nothing is traded for or with BTC
+//   onchain                    -> the wallet's own on-chain coins, for covenant orders taken on the
+//                                 chain ('onchain-fill'), or null: { balance(asset) -> atoms it can
+//                                 spend now, fee(payAsset) -> { asset, atoms } of one fill's network
+//                                 fee, take(matched, { fee, onTxid }) -> { txid } (builds, signs and
+//                                 broadcasts the FILL at the fee shown; onTxid(txid) before the
+//                                 broadcast),
+//                                 status(txid) -> 'final' | 'confirmed' | 'pending' | 'unknown' }
 //   store                      -> getItem/setItem (the trade records, persisted before signing)
 //   now()                      -> milliseconds
 //   sleep(ms), log(...)        -> optional
 
-import { makerEntries, covenantRoundEntries, restingEntries, sizeEntry, chooseCandidate, admittedSources } from './tooling/lsp/single-step-book.mjs'
+import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries, sizeEntry, chooseCandidate, admittedSources } from './tooling/lsp/single-step-book.mjs'
+import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
 
@@ -166,13 +174,15 @@ export function createEngine (deps) {
         } catch (e) { log('[user trade] maker', m, 'did not answer:', e && e.message) }
       }
     }
-    const wantBook = (sources.includes('covenant-round') || sources.includes('leaf-resting')) && deps.relayBook
+    const onchain = sources.includes('onchain-fill') && deps.onchain
+    const wantBook = (sources.includes('covenant-round') || sources.includes('leaf-resting') || onchain) && deps.relayBook
     const book = wantBook ? await Promise.resolve(deps.relayBook(payAsset, receiveAsset)).catch((e) => { log('[user trade] the book did not answer:', e && e.message); return [] }) : []
     if (sources.includes('leaf-resting') && book.length) {
       // Only orders resting in the tree of the operator the wallet joined.
       const operator = await run('info').then((i) => i && i.operator).catch(() => null)
       out.push(...restingEntries(book, { payAsset, receiveAsset, operator }))
     }
+    if (onchain && book.length) out.push(...onchainFillEntries(book, { payAsset, receiveAsset }))
     if (sources.includes('covenant-round') && deps.relayBook) {
       try {
         for (const e of covenantRoundEntries(book, { payAsset, receiveAsset })) {
@@ -202,6 +212,7 @@ export function createEngine (deps) {
     if (!size) return null
     if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size)
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size)
+    if (entry.source === 'onchain-fill') return firmOnchain(entry, payAsset, receiveAsset, pay, have)
     if (entry.source === 'covenant-round') {
       // The take's price and the operator's fee come from the library: size down until what it
       // gives fits what the person pays and what the wallet can pay now.
@@ -324,6 +335,37 @@ export function createEngine (deps) {
     return null
   }
 
+  // Firm terms of a covenant order taken on the chain: the FILL's own amounts (covenant-order.js
+  // plans them exactly, as the taker's transaction must pay them) and one fill's network fee, in
+  // the asset the wallet pays fees in. What leaves the wallet is the price, plus the fee when it is
+  // paid in the same asset.
+  async function firmOnchain (entry, payAsset, receiveAsset, pay, have) {
+    let fee
+    try { fee = await deps.onchain.fee(payAsset) } catch (e) { log('[user trade] on-chain fee:', e.message); return null }
+    if (!fee || !fee.asset || big(fee.atoms) <= 0n) return null
+    const sameFee = fee.asset === payAsset
+    let limit = (pay < have ? pay : have) - (sameFee ? big(fee.atoms) : 0n)
+    for (let i = 0; i < 4 && limit > 0n; i++) {
+      const size = sizeEntry(entry, limit)
+      if (!size) return null
+      const c = entry.raw.covenant || entry.raw.Covenant
+      const matched = { offer_id: entry.raw.offer_id, resting_is_covenant: true, covenant: c, covenant_locked: String(entry.maxReceive), fill_base_amount: String(size.receive) }
+      let recipe
+      try { recipe = planFillFromMatched(matched, null, {}) } catch (e) { log('[user trade] the order cannot be filled:', e.message); return null }
+      // A covenant names its assets in the chain's internal byte order, the wallet in display order.
+      const internal = (h) => String(h).match(/../g).reverse().join('')
+      if (recipe.covenantAsset !== internal(receiveAsset) || recipe.creditAsset !== internal(payAsset)) { log('[user trade] the order does not sell what it is listed as selling'); return null }
+      const price = big(recipe.creditValue)
+      const give = price + (sameFee ? big(fee.atoms) : 0n)
+      if (give <= (pay < have ? pay : have)) {
+        return { source: entry.source, id: entry.id, entry, receive: size.receive, give, matched, price,
+          fees: [{ asset: fee.asset, atoms: big(fee.atoms) }], fee }
+      }
+      limit -= give - (pay < have ? pay : have)
+    }
+    return null
+  }
+
   function release (maker, swap) {
     if (!maker || !swap) return
     Promise.resolve(deps.fetchJson(maker + '/v1/release', { method: 'POST', body: JSON.stringify({ swap }) })).catch(() => {})
@@ -367,16 +409,19 @@ export function createEngine (deps) {
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
     const sources = admittedSources(ad.pairs, ad.genesis, payAsset, receiveAsset)
     if (!sources.length) return { ok: false, why: 'not-listed' }
-    // BTC is paid over the wallet's Bitcoin Lightning, never from a leaf.
-    const have = payAsset === 'BTC'
+    // BTC is paid over the wallet's Bitcoin Lightning, never from a leaf. An order taken on the
+    // chain is paid from the wallet's on-chain coins, the rest from its leaves.
+    const haveLeaf = payAsset === 'BTC'
       ? (deps.btc ? big(await Promise.resolve(deps.btc.balance()).catch(() => 0n)) : 0n)
       : (await spendable()).get(payAsset) || 0n
-    if (have <= 0n) return { ok: false, why: 'no-funds' }
-    const es = await entries(payAsset, receiveAsset, sources)
+    const haveChain = payAsset !== 'BTC' && deps.onchain && sources.includes('onchain-fill')
+      ? big(await Promise.resolve(deps.onchain.balance(payAsset)).catch(() => 0n)) : 0n
+    if (haveLeaf <= 0n && haveChain <= 0n) return { ok: false, why: 'no-funds' }
+    const haveOf = (e) => (e.source === 'onchain-fill' ? haveChain : haveLeaf)
+    const es = (await entries(payAsset, receiveAsset, sources)).filter((e) => haveOf(e) > 0n)
     // Indicative first, so only the best few are asked for firm terms (a maker holds its coins
     // for a firm offer).
-    const limit = A < have ? A : have
-    const ind = es.map((e) => { const s = sizeEntry(e, limit); return s ? { e, receive: s.receive } : null }).filter(Boolean)
+    const ind = es.map((e) => { const h = haveOf(e); const s = sizeEntry(e, A < h ? A : h); return s ? { e, receive: s.receive } : null }).filter(Boolean)
       .sort((a, b) => (b.receive > a.receive ? 1 : b.receive < a.receive ? -1 : 0))
       // A maker quoting several levels of one pair is asked once, at the level that gives the
       // most for this size: each firm offer holds its coins.
@@ -388,7 +433,7 @@ export function createEngine (deps) {
     for (const { e } of ind) {
       if (cands.length >= 3 || tried >= 8) break
       tried++
-      const c = await firm(e, payAsset, receiveAsset, A, have)
+      const c = await firm(e, payAsset, receiveAsset, A, haveOf(e))
       if (c) cands.push(c)
     }
     const best = chooseCandidate(cands)
@@ -396,6 +441,7 @@ export function createEngine (deps) {
     if (!best) return { ok: false, why: es.length ? 'too-small' : 'not-offered' }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }
+    const have = haveOf(best.entry)
     if (have < A && best.give <= have) ticket.upTo = String(have)
     return { ok: true, ticket, choice: best }
   }
@@ -443,6 +489,14 @@ export function createEngine (deps) {
         return put(rec)
       }
       if (choice.source === 'btc-gateway') return await btcT.confirm(choice, rec)
+      if (choice.source === 'onchain-fill') {
+        rec.order = choice.entry.id
+        rec.fee = { asset: choice.fee.asset, atoms: String(choice.fee.atoms) }
+        put(rec)
+        const r = await deps.onchain.take(choice.matched, { fee: choice.fee, onTxid: (txid) => { rec.txid = txid; put(rec) } })
+        rec.txid = r.txid; rec.state = 'sent'; rec.sentAt = now()
+        return put(rec)
+      }
       if (choice.source === 'leaf-resting') {
         rec.order = choice.entry.id
         rec.receiveAsset = choice.quote.gets.asset
@@ -506,6 +560,10 @@ export function createEngine (deps) {
         await run('sync').catch(() => {})
         const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
         if (got) { rec.state = 'sent'; rec.sentAt = now() } else notFound('not filled')
+      } else if (rec.source === 'onchain-fill') {
+        // A FILL whose broadcast did not answer: it is the wallet's once the node knows it.
+        const st = rec.txid ? await Promise.resolve(deps.onchain.status(rec.txid)).catch(() => 'unknown') : 'unknown'
+        if (st !== 'unknown') { rec.state = 'sent'; rec.sentAt = now() } else notFound('not broadcast')
       } else if (rec.source === 'btc-gateway' && rec.hash) {
         // Selling: a payment under the hash is the wallet's lock. Buying: a receive under it.
         const mine = rec.dir === 'sell' ? ((await run('lightning_payments')) || {})[rec.hash] : ((await run('lightning_receives')) || {})[rec.hash]
@@ -518,7 +576,22 @@ export function createEngine (deps) {
     if (rec.source === 'leaf-maker') return advanceSwap(rec)
     if (rec.source === 'btc-gateway') return btcT.advance(rec)
     if (rec.source === 'leaf-resting') return advanceResting(rec)
+    if (rec.source === 'onchain-fill') return advanceOnchain(rec)
     return rec
+  }
+
+  // A covenant order taken on the chain: Settled once its FILL is final. A FILL the chain never
+  // takes (another taker spent the order first, and the node dropped it) moved nothing: Returned
+  // once it has not been seen for UNCERTAIN_MS.
+  async function advanceOnchain (rec) {
+    const st = await Promise.resolve(deps.onchain.status(rec.txid)).catch(() => 'unknown')
+    rec.chainState = st
+    if (st === 'final') { rec.state = 'settled'; rec.settledAt = now() }
+    else if (st === 'unknown') {
+      if (rec.missingSince == null) rec.missingSince = now()
+      if (now() - rec.missingSince >= UNCERTAIN_MS) { rec.state = 'returned'; rec.error = 'the fill never reached the chain' }
+    } else rec.missingSince = null
+    return put(rec)
   }
 
   // A fill of a resting order: Settled once the relay records the fill final and the coins it
