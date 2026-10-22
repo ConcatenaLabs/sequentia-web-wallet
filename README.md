@@ -614,6 +614,7 @@ works normally without the restricted rows.
 | `noble-ciphers.js` | Vendored `@noble/ciphers` (MIT): AES-256-GCM for the end-to-end swap encryption. |
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
 | `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md), and the live leaf maker (`leaf-maker.mjs`) user mode trades with. Four of its modules (`settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
+| `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from an arca checkout's `wallet-wasm/`, every build-machine path remapped. |
 | `tooling/leaf-node.mjs` | The leaf library (`leaves/pkg`) run in Node, with its storage and synchronous requests given to it: for the leaf maker and the drill. |
 | `*.test.mjs` | Node test suites (no browser needed). |
 
