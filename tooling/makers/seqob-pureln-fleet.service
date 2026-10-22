@@ -1,0 +1,11 @@
+[Unit]
+Description=SeqOB pure-LN maker fleet (six assets against BTC and every asset pair, both sides)
+After=network.target seq-explorer-web.service seqob-relay-9965.service
+
+[Service]
+ExecStart=/root/seqob-test/pureln-fleet.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
