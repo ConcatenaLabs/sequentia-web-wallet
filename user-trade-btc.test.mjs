@@ -3,7 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createEngine } from './user-trade.js'
-import { needSeconds } from './user-trade-btc.js'
+import { MAKER_LOCK_MS, needSeconds } from './user-trade-btc.js'
 
 const X = 'aa'.repeat(32)
 const H = 'cd'.repeat(32), P = 'ef'.repeat(32)
@@ -182,4 +182,23 @@ test('buying with BTC: an operator that does not answer the readiness check is a
   mode = 'refused'
   r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'returned'); assert.equal(s.btcPaid.length, 0)
+})
+
+test('buying with BTC: a maker that never pays its side in is given up on after the wait, nothing paid', async () => {
+  const s = standIn()
+  s.makerSats = 50000n
+  let t = 1_000_000
+  const posts = []
+  const fetchJson = s.fetchJson
+  s.fetchJson = async (url, init) => { posts.push(url.split('/v1/')[1]); return fetchJson(url, init) }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc, now: () => t })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  await eng.confirm(q.choice, q.ticket)
+  // The maker answers the lock and never pays: the receive stays waiting.
+  let r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'waiting')
+  t += MAKER_LOCK_MS
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned'); assert.equal(s.btcPaid.length, 0, 'no BTC paid')
+  assert.ok(posts.includes('btc/release'), 'the maker is told to let its offer go')
 })

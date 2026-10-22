@@ -365,7 +365,7 @@ async function everyPairStack (file) {
     try {
       const q = await (await fetch(maker.url + '/v1/quotes')).json()
       const low = new Set()
-      for (const x of q.quotes || []) if (of.has(x.give_asset) && valueOf(x.give_asset, Number(x.max_give)) < 300) low.add(x.give_asset)
+      for (const x of q.quotes || []) if (x.give_asset !== 'BTC' && of.has(x.give_asset) && valueOf(x.give_asset, Number(x.max_give)) < 300) low.add(x.give_asset)
       for (const a of low) { await H.fund(await H.scriptOf(maker.address), a, atomsOf(a, 1000)); note(`funded the maker $1,000 of ${of.get(a).ticker}`) }
       if (low.size) await H.produce()
     } catch {}
