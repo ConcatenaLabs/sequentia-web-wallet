@@ -597,7 +597,7 @@ works normally without the restricted rows.
 | `user-trade.js` | The user-mode composer's engine: the ticket for a trade from the single-step book, priced by the leaf library, the trade's record written before anything is signed, and the trade followed to Settled or Returned. No DOM: the page and the drill run the same code. |
 | `user-trade-btc.js` | The engine's BTC trades: an asset for BTC or BTC for an asset in one hash-lock with a maker's BTC desk, BTC paid only once the coin received under the hash is held for good. |
 | `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
-| `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and `REPORT.md`, the drill report that admitted them. |
+| `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
@@ -779,7 +779,8 @@ returned with no user action and its ticket checked against what moved. It write
 and, when every trade passed, the chain's entry for `user-mode/pairs.json`. With `--btc`, on a
 harness started with `ARCA_OPERATOR_LIGHTNING` and `ARCA_OPERATOR_BTC_LIGHTNING`, BTC trades with
 the maker's BTC desk join, each wallet on a Bitcoin Lightning node of its own
-(`tooling/cln-rpc.mjs`).
+(`tooling/cln-rpc.mjs`); `--btc-only` runs the BTC directions alone and admits only the BTC
+pairs.
 
 `node tooling/user-mode-btc-drive.mjs <evidence-dir>` drives user mode's BTC trades in headless
 Chromium against the same harness started with `ARCA_OPERATOR_LIGHTNING=1` and
