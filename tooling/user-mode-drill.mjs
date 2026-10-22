@@ -34,7 +34,9 @@
 // ARCA_OPERATOR_MORE_ASSETS=7 ARCA_OPERATOR_SUPERVISED=2, it trades every directed pair of the
 // testnet's assets on regtest (everyPairStack below), admits each pair with the sources that
 // settled one of its trades, and writes DIR/pairs-testnet.json, the same pairs under the
-// testnet's ids.
+// testnet's ids. With --btc as well (a harness with ARCA_OPERATOR_LIGHTNING and
+// ARCA_OPERATOR_BTC_LIGHTNING too), BTC against every plain asset joins; --btc-only runs those
+// pairs alone.
 //
 // It writes DIR/REPORT.md, DIR/pairs.json (this chain's admitted pairs when every trade passed),
 // DIR/trades.jsonl and the logs. Nothing here is used by the deployed wallet.
@@ -277,7 +279,11 @@ async function everyPairStack (file) {
     A.push({ id, ticker: t.ticker, testnet: t.id, perAtom: Number(t.price) / 10 ** Number(t.precision), sup: !!t.supervised })
   }
   const X = st.x
+  // With --btc, BTC against every plain asset through the maker's BTC desk (the operator's
+  // Lightning leg in each: a harness with ARCA_OPERATOR_LIGHTNING and ARCA_OPERATOR_BTC_LIGHTNING).
+  if (BTC && !(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length >= K)) throw new Error(`--every-pair --btc needs a harness with ARCA_OPERATOR_LIGHTNING and ARCA_OPERATOR_BTC_LIGHTNING=${K}`)
   const of = new Map(A.map((a) => [a.id, a]))
+  if (BTC) of.set('BTC', { id: 'BTC', ticker: 'BTC', perAtom: Number(table.btc.price) / 1e8, sup: false })
   const atomsOf = (asset, value) => Math.ceil(value / of.get(asset).perAtom)
   const valueOf = (asset, atoms) => atoms * of.get(asset).perAtom
   // `want` atoms per atom of `give`, `spread` above the mid, as a rate over 10^12.
@@ -299,12 +305,19 @@ async function everyPairStack (file) {
   const vmin = (a, b) => Math.max(valueOf(a, MIN_SIDE), valueOf(b, MIN_SIDE))
   const pairs = []
   for (const a of A) for (const b of A) if (a !== b) pairs.push({ pay: a.id, receive: b.id, sources: (a.sup || b.sup) ? ['leaf-maker'] : ['leaf-maker', 'covenant-round', 'leaf-resting'] })
+  // BTC is paid and received over Lightning, so only against an asset the operator has a leg in.
+  if (BTC) for (const a of A.filter((x) => !x.sup)) pairs.push({ pay: a.id, receive: 'BTC', sources: ['btc-gateway'] }, { pay: 'BTC', receive: a.id, sources: ['btc-gateway'] })
+  // --btc-only: the BTC pairs alone.
+  if (BTC_ONLY) pairs.splice(0, pairs.length, ...pairs.filter((p) => p.sources.includes('btc-gateway')))
+  const exitUnits = BTC ? 3 : 1
+  const btcDesk = BTC ? { rpc: st.btc_lightning.hub, keep_sats: '200000', invoice_seconds: 3600,
+    pairs: pairs.filter((p) => p.sources.includes('btc-gateway')).map((p) => { const [n, d] = rateOf(p.receive, p.pay, 0.02); return { give: p.receive, want: p.pay, rate_num: n, rate_den: d, min_give: String(MIN_SIDE / 2) } }) } : null
   const lwk = await lwkFrom()
   const relay = await startRelay(SEQOBD, st, await freePort()); children.push(relay.proc)
   note(`relay seqobd pid ${relay.proc.pid}`)
   // The live maker quotes every directed pair, holding $1,500 of each asset.
-  const makerPairs = pairs.map((p) => { const [n, d] = rateOf(p.receive, p.pay, 0.02); return { give: p.receive, want: p.pay, rate_num: n, rate_den: d, min_give: String(MIN_SIDE / 2) } })
-  const maker = await startMaker(H, st, join(out, 'maker'), { pairs: makerPairs, fund: A.map((a) => [a.id, atomsOf(a.id, 1500)]), port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, exitDelayUnits: 1 })
+  const makerPairs = pairs.filter((p) => !p.sources.includes('btc-gateway')).map((p) => { const [n, d] = rateOf(p.receive, p.pay, 0.02); return { give: p.receive, want: p.pay, rate_num: n, rate_den: d, min_give: String(MIN_SIDE / 2) } })
+  const maker = await startMaker(H, st, join(out, 'maker'), { pairs: makerPairs, fund: A.map((a) => [a.id, atomsOf(a.id, 1500)]), port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, exitDelayUnits: exitUnits, btc: btcDesk })
   children.push(maker.proc)
   note(`leaf maker pid ${maker.proc.pid}`)
   // Covenant orders and resting orders, each four times the pair's least trade.
@@ -313,13 +326,13 @@ async function everyPairStack (file) {
   const open = pairs.filter((p) => p.sources.includes('covenant-round'))
   for (const p of open) await order(p.receive, p.pay)
   note(`placed ${open.length} covenant orders`)
-  for (const a of A) await makerReady(H, maker, a.id)
+  for (const a of A) if (pairs.some((p) => p.receive === a.id)) await makerReady(H, maker, a.id)
   // The operator fronts every coin a round refreshes from its own: $5,000 of each asset to start
   // (fifty of the wallets' coins), $2,000 more every 25 trades.
   for (const a of A) await H.c('/fund_server', { asset: a.id, amount: atomsOf(a.id, 5000) })
   await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
-    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: 1 }
+    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits }
   // Each wallet holds five coins of $100 of each asset.
   const COINS = 5
   const coinList = A.map((a) => ({ asset: a.id, coin: atomsOf(a.id, 100) }))
@@ -361,10 +374,10 @@ async function everyPairStack (file) {
   const pumpLoop = (async () => { while (!stop) { try { await H.pump() } catch (e) { note('pump: ' + e.message) } await sleep(2000) } })()
   const names = Object.fromEntries([...A.map((a) => [a.id, a.ticker]), [X, 'X'], ['BTC', 'BTC']])
   return {
-    kind: 'regtest', genesis: st.genesis_hash, X: A[0].id, Y: A[1].id, names, walletConfig, fund, prepare, topUp, btcRpcs: null,
+    kind: 'regtest', genesis: st.genesis_hash, X: A[0].id, Y: A[1].id, names, walletConfig, fund, prepare, topUp, btcRpcs: BTC ? st.btc_lightning.wallets : null,
     pairs, dirs: pairs.map((p) => [p.pay, p.receive]),
     // The pairs as the testnet's: the table's ids on its chain.
-    forTestnet: (admitted) => ({ chains: { [table.genesis]: { pairs: admitted.map((p) => ({ ...p, pay: of.get(p.pay).testnet, receive: of.get(p.receive).testnet })) } } }),
+    forTestnet: (admitted) => ({ chains: { [table.genesis]: { pairs: admitted.map((p) => ({ ...p, pay: p.pay === 'BTC' ? 'BTC' : of.get(p.pay).testnet, receive: p.receive === 'BTC' ? 'BTC' : of.get(p.receive).testnet })) } } }),
     amount: (pay, receive) => atomsOf(pay, vmin(pay, receive) * (1 + Math.random() * 4)),
     restart: async () => { await H.restart() },
     contest: async (round) => {
@@ -381,6 +394,7 @@ async function everyPairStack (file) {
       `- The testnet's assets (\`tooling/user-mode-every-pair.json\`), each a harness asset priced the same per atom: ${A.map((a) => `${a.ticker}${a.sup ? ' (supervised)' : ''}`).join(', ')}; ${pairs.length} directed pairs, a trade's direction cycling through them all.`,
       '- The operator, rounds built every 2 s by the drill\'s clock, leaves with an exit delay of one 512 s unit; SeqDEX\'s relay with `-fill-anchor-depth=2`; one live leaf maker quoting every directed pair 2% above the mid; transparent covenant orders 1% above it and orders resting in the tree 0.5% above it on every pair without a supervised asset, each four times the pair\'s least trade, restocked every 25 trades.',
       `- ${K} wallets, one trade at a time each, each trade worth between its pair's least (neither side under ${MIN_SIDE.toLocaleString('en-US')} atoms) and five times that; each wallet starts with five coins of $100 of every asset.`,
+      ...(BTC ? ['- BTC against every plain asset over Lightning: the maker\'s BTC desk on a hub node with a channel of 10,000,000 sat to each wallet\'s own node, half of it the wallet\'s; the operator\'s Lightning leg in each plain asset (SeqLN, the hold-invoice plugin); the wallets\' and the maker\'s exit delay three units.'] : []),
     ],
   }
 }
