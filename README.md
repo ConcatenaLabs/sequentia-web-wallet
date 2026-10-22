@@ -414,11 +414,11 @@ it cannot account for) is refused before anything is signed, in the engine's wor
 
 ### The Trade tab in user mode
 
-The user composer below is the Trade tab in user mode on a page configured with
-`window.SEQ_USER_TRADE = true` ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)): it trades only
-against a live leaf maker, orders and the pairs `user-mode/pairs.json` admits, so a deployment
-turns it on once those exist on its chain. Otherwise the full composer (developer mode's, below)
-serves both modes.
+The user composer below is the Trade tab in user mode. It trades only against a live leaf
+maker, orders and the pairs `user-mode/pairs.json` admits; a pair nobody offers right now is shown
+as not offered. A page configured with `window.SEQ_USER_TRADE = false`
+([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) shows the full composer (developer mode's, below)
+in both modes instead.
 
 Three inputs and one button: **You pay** (an asset and an amount), **You get** (an asset), and
 **Review**. Both pickers list BTC first. **You pay** then lists what the wallet holds; **You get**
