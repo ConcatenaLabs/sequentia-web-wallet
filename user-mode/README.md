@@ -17,8 +17,8 @@ exactly what its ticket showed.
   regtest with the testnet's shape (the same operator, relay, maker and composer code, with short
   exit delays). The drill run against the testnet itself then marks it `"testnet"`, or takes the
   pair out if it fails there.
-- `REPORT.md` is the drill's report for the run that admitted them, and `REPORT-<chain>.md` for
-  any other chain listed.
+- Each pair names the report of the drill run that admitted it (`report`): `REPORT.md`, and a
+  `REPORT-<what>.md` beside it for each other run (the BTC pairs' own run, `--btc-only`).
 
 The drill writes both into its output directory; a pull request copies them here, so what user
 mode offers and the run that earned it are reviewed together.

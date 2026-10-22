@@ -28,7 +28,8 @@
 // With --btc, on a harness started with ARCA_OPERATOR_LIGHTNING and ARCA_OPERATOR_BTC_LIGHTNING
 // set to the number of wallets, BTC trades join: the maker's BTC desk runs on the harness's hub
 // node and each wallet on a Bitcoin Lightning node of its own, and the trades cycle X for Y, Y for
-// X, X for BTC and BTC for X (the operator's Lightning leg is in X).
+// X, X for BTC and BTC for X (the operator's Lightning leg is in X). --btc-only runs those last
+// two directions alone, and admits only the BTC pairs.
 //
 // It writes DIR/REPORT.md, DIR/pairs.json (this chain's admitted pairs when every trade passed),
 // DIR/trades.jsonl and the logs. Nothing here is used by the deployed wallet.
@@ -49,7 +50,8 @@ const CLOSE_EVERY = Number(opt('--close-every', '7'))
 const RESTART_EVERY = Number(opt('--restart-every', '20'))
 const CONTEST_EVERY = Number(opt('--contest-every', '25'))
 const WAIT_MS = Number(opt('--wait-seconds', '900')) * 1000
-const BTC = argv.includes('--btc')
+const BTC_ONLY = argv.includes('--btc-only')
+const BTC = argv.includes('--btc') || BTC_ONLY
 const control = process.env.ARCA_OPERATOR_CONTROL || '127.0.0.1:18640'
 const SEQOBD = process.env.SEQOBD
 if (!SEQOBD && !opt('--stack', null)) { console.error('SEQOBD must name the relay binary'); process.exit(2) }
@@ -209,7 +211,7 @@ async function regtestStack () {
     describe: [
       `- Chain: \`${st.genesis_hash}\` (regtest, the operator repository's harness \`arca_operator_for_browsers\`, anchored proof of stake).`,
       '- The operator, rounds built every 2 s by the drill\'s clock, leaves with an exit delay of one 512 s unit (the one difference from the testnet\'s shape); SeqDEX\'s relay with `-fill-anchor-depth=2`; one live leaf maker (`tooling/lsp/leaf-maker.mjs`) quoting both directions from coins of 2,000,000; transparent covenant orders both ways, priced a little better than the maker and of little depth, restocked every 25 trades.',
-      `- ${K} wallets, one trade at a time each, amounts between 50,000 and 400,000 atoms${BTC ? ' (25,000 to 190,000 sat when BTC is paid)' : ''}, the direction ${BTC ? 'cycling X for Y, Y for X, X for BTC and BTC for X' : 'alternating'}; each wallet starts with ten coins of 3,000,000 of each asset.`,
+      `- ${K} wallets, one trade at a time each, amounts between 50,000 and 400,000 atoms${BTC ? ' (25,000 to 190,000 sat when BTC is paid)' : ''}, the direction ${BTC_ONLY ? 'alternating X for BTC and BTC for X' : BTC ? 'cycling X for Y, Y for X, X for BTC and BTC for X' : 'alternating'}; each wallet starts with ten coins of 3,000,000 of each asset.`,
       ...(BTC ? ['- BTC over Lightning on a Bitcoin regtest chain beside the harness: the maker\'s desk on a hub node with a channel of 10,000,000 sat to each wallet\'s own node, half of it the wallet\'s; the operator\'s Lightning leg in X (SeqLN, the hold-invoice plugin), its payments out of the tree timing out four to eight days out; the wallets\' and the maker\'s exit delay three units.'] : []),
       '- A maker who rests an order of 2,500,000 each way in the operator\'s tree and goes away (`order_rest`, listed on the relay with its `resting_leaf` member), the best price for Y and between the covenant order and the live maker for X, rested again whenever one holds less than 600,000.',
       '- The operator fronts, from its own coins, every coin a round settles: each in-tree trade settles both the coin it brings and the change, so the operator needs as much of each asset as the trades move until the old batches expire. The drill gives it 200,000,000 of each asset at the start and every 25 trades.',
@@ -276,7 +278,7 @@ async function main () {
   note(`drill: ${N} trades, ${K} wallets, ${S.kind}; chain ${S.genesis}; ${S.names[X]} ${X}, ${S.names[Y]} ${Y}`)
   // The pairs the drill runs; it admits them only when every trade passes.
   const xy = ['leaf-maker', 'covenant-round', ...(S.prepare ? ['leaf-resting'] : [])]
-  const pairsDrill = { chains: { [S.genesis]: { pairs: [{ pay: X, receive: Y, sources: xy }, { pay: Y, receive: X, sources: xy },
+  const pairsDrill = { chains: { [S.genesis]: { pairs: [...(BTC_ONLY ? [] : [{ pay: X, receive: Y, sources: xy }, { pay: Y, receive: X, sources: xy }]),
     ...(S.btcRpcs ? [{ pay: X, receive: 'BTC', sources: ['btc-gateway'] }, { pay: 'BTC', receive: X, sources: ['btc-gateway'] }] : [])] } } }
   writeFileSync(join(out, 'pairs-run.json'), JSON.stringify(pairsDrill, null, 2))
   const wallets = []
@@ -312,7 +314,7 @@ async function main () {
 
   async function oneTrade (w) {
     const id = ++nextId
-    const dirs = S.btcRpcs ? [[Y, X], [X, Y], [X, 'BTC'], ['BTC', X]] : [[Y, X], [X, Y]]
+    const dirs = BTC_ONLY ? [[X, 'BTC'], ['BTC', X]] : S.btcRpcs ? [[Y, X], [X, Y], [X, 'BTC'], ['BTC', X]] : [[Y, X], [X, Y]]
     const [pay, receive] = dirs[id % dirs.length]
     const amount = S.amount(pay)
     const before = await quietBalance(w)

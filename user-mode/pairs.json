@@ -1,3 +1,30 @@
 {
-  "chains": {}
+  "chains": {
+    "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e": {
+      "pairs": [
+        {
+          "pay": "2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de",
+          "receive": "e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13",
+          "sources": [
+            "leaf-maker",
+            "covenant-round",
+            "leaf-resting"
+          ],
+          "proven": "regtest",
+          "report": "REPORT.md"
+        },
+        {
+          "pay": "e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13",
+          "receive": "2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de",
+          "sources": [
+            "leaf-maker",
+            "covenant-round",
+            "leaf-resting"
+          ],
+          "proven": "regtest",
+          "report": "REPORT.md"
+        }
+      ]
+    }
+  }
 }
