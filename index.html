@@ -3825,6 +3825,15 @@ const _lnReconnectedLegs = new Set();
 const STRAND_BLOCKED = 'swk.ln.strandBlocked';   // { [nodeKey]: { at, reason } } — recoveries not to retry
 function strandBlocked(){ try{ return JSON.parse(localStorage.getItem(STRAND_BLOCKED)||'{}'); }catch{ return {}; } }
 const _lnLegNodeKey = {};               // leg ('btc' | assethex) -> resolved LSP registry key, for liveness checks
+// The wallet's own node for an asset, when it has one: the key it reconnected under, else the node of
+// one of its channels in that asset. Pricing room to receive with it lets the service say, before any
+// fee, that the room is there already.
+function lnOwnNodeKeyFor(asset){
+  const a=String(asset||'').toLowerCase();
+  if(_lnLegNodeKey[a]) return _lnLegNodeKey[a];
+  for(const c of ((lnLastStatus && lnLastStatus.channels) || [])) if(c && c.node_key && lnChannelAsset(c)===a) return c.node_key;
+  return undefined;
+}
 let _lnDiscoveryDone = false;   // the registry discovery pass runs once (per successful call) per session
 let _reconnectInFlight = false; // single-flight: the /status poll and the wake/interval driver can call concurrently
 async function reconnectOwnNodes(){
@@ -4492,7 +4501,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
     quote.textContent='Getting the price…';
     try{
       const months=terms.months();
-      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), months });
+      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), node_key: lnOwnNodeKeyFor(leg.asset), months });
       if(String(atoms)!==String(parseAtoms((inp.value||'').trim(), prec)) || months!==terms.months()) return;   // changed meanwhile
       terms.adopt(q);
       const paid=lnPaidRoom(leg.asset);
@@ -4612,7 +4621,7 @@ function lnMoveRoomField(card, leg, moveAtoms){
     state={ problem:'The price of the room to receive is still loading.' }; line.textContent='Getting the price…';
     try{
       const months=terms.months();
-      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), months });
+      const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(atoms), node_key: lnOwnNodeKeyFor(leg.asset), months });
       if(my!==seq) return;
       terms.adopt(q);
       if(!q.ok){
