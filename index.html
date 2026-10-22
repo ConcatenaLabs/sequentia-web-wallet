@@ -1885,8 +1885,14 @@ async function oampInit(){
     }catch(e){ OAMP_LEGACY_AID=''; }
     // Most wallets never registered the legacy identity. Ask once whether it exists, rather than
     // asking for its balance in every restricted asset on every sync and reading a 404 each time.
+    // The answer is kept for the wallet: an identity of the old derivation cannot be registered from
+    // here any more, so once the service says it does not exist, later loads do not ask again (each
+    // ask was a 404 in the console at every load).
     if(OAMP_LEGACY_AID && OAMP_LEGACY_AID!==localAid){
-      try{ const r=await fetch(OPENAMP+'/v1/users/'+encodeURIComponent(OAMP_LEGACY_AID)); if(r.status===404) OAMP_LEGACY_AID=''; }
+      const absentKey='swk.oamp.legacyAbsent.'+OAMP_LEGACY_AID;
+      let known=false; try{ known=localStorage.getItem(absentKey)==='1'; }catch{}
+      if(known) OAMP_LEGACY_AID='';
+      else try{ const r=await fetch(OPENAMP+'/v1/users/'+encodeURIComponent(OAMP_LEGACY_AID)); if(r.status===404){ OAMP_LEGACY_AID=''; try{ localStorage.setItem(absentKey,'1'); }catch{} } }
       catch{ /* unreachable: keep it, the balance refresh tolerates failures */ }
     }
     await oampLoadAssets();
@@ -5437,9 +5443,6 @@ function initSwapTab(){
     DEFAULT_FEERATE, EXCHANGE_RATE_SCALE, applyFee,   // open-fee-market fee estimate + real any-asset covenant funding fee
     get feeRates(){ return feeRates; },   // reassigned by fetchFeeRates — read fresh
     modalRows, toast, sync,
-    // Where the daemon's same-chain Trade API lives. A reverse-proxy prefix in
-    // production (same-origin /dex), overridable for local testing via a global.
-    DEX: (typeof window!=='undefined' && window.SEQ_DEX_BASE) || (location.origin + '/dex'),
     // The SeqOB order-book relay (same-origin proxy -> seqobd). Same-chain swaps are
     // order-book driven; this is where the book + lift + post offers live.
     SEQOB: (typeof window!=='undefined' && window.SEQ_SEQOB_URL) || (location.origin + '/seqob'),

@@ -91,7 +91,6 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/faucet` | index.html | POST, testnet funds to the current address |
 | `/registry/index.minimal.json` | index.html | asset-metadata index (override: `window.SEQ_REGISTRY_URL`) |
 | `/seqob` + `/seqob/v1/ws` | seqob.js, xcourier.js | order-book relay REST + the swap courier WebSocket |
-| `/dex` | swap.js, xswap.js | the SeqDEX daemon, market seeding only |
 | `/anchor/<blockhash>`, `/anchorstatus` | xmaker.js | anchor height / certification for the maker's reveal gate |
 | `/openamp` | index.html | OpenAMP REST (`/v1/users`, `/v1/assets`, `/v1/transfers`, balances, deposit addresses) |
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | seqln.js | hosted-SeqLN LSP HTTP API + per-node signer WebSockets |
@@ -114,8 +113,8 @@ deployment; everything else defaults to same-origin paths):
 | Global | Default | Meaning |
 |---|---|---|
 | `SEQ_SEQOB_URL` | `origin + '/seqob'` | order-book relay base |
-| `SEQ_DEX_BASE` | `origin + '/dex'` | SeqDEX daemon base (market seeding) |
-| `SEQ_XDEX_BASE` | falls back to `SEQ_DEX_BASE` | cross-chain daemon base (market seeding) |
+| `SEQ_DEX_BASE` | `origin + '/dex'` | not requested; read only as `SEQ_XDEX_BASE`'s fallback |
+| `SEQ_XDEX_BASE` | falls back to `SEQ_DEX_BASE` | not requested; `xrswap.js` derives the order-book relay base from it when no `SEQOB` base is given |
 | `SEQ_COINJOIN_URL` | `origin + '/coinjoin'` | seqcj coordinator base |
 | `SEQ_REGISTRY_URL` | `/registry/index.minimal.json` | asset registry index |
 | `SEQ_LSP_URL` | `origin + '/lsp'` | LSP HTTP API |

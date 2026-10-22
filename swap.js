@@ -15,7 +15,6 @@
 //     (xswap.js: quote -> lock BTC -> propose -> anchor gate -> claim -> poll).
 //
 // The proven same-chain backend internals are preserved verbatim:
-//   - dexPost to /v1/markets|market/price|trade/preview|trade/propose|trade/complete
 //   - the SwapRequest via Wollet.seqdexSwapRequest(...)
 //   - sign = new Pset -> addDetails(wollet) -> Signer.sign -> stripBip32 -> complete
 //     (with the self-broadcast fallback). stripBip32 + the signing sequence are
@@ -587,22 +586,6 @@ const MIXED_KEY = 'swk.sequentia.submarine';   // localStorage key for the in-fl
 
 const TRADE_TYPE = { BUY: 0, SELL: 1 };   // seqdex.v1 TradeType enum
 
-// POST <DEX>/v1/... as JSON; returns parsed JSON (or throws a useful message).
-async function dexPost(path, body){
-  const r = await fetch(C.DEX + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  const txt = await r.text();
-  let j; try { j = txt ? JSON.parse(txt) : {}; } catch { j = { _raw: txt }; }
-  if (!r.ok) {
-    const msg = (j && (j.message || j.error)) || j._raw || ('HTTP ' + r.status);
-    throw new Error(msg);
-  }
-  return j;
-}
-
 const big = v => BigInt(v == null ? 0 : v);
 
 // grpc-gateway emits camelCase but accepts either case; read a field by either name.
@@ -1055,13 +1038,9 @@ function showReverse(on){
 async function loadMarkets(){
   const status = C.$('swStatus');
   if (status){ status.className = 'status'; status.innerHTML = '<span class="spin"></span>Loading markets…'; }
-  // Same-chain markets.
-  try {
-    const resp = await dexPost('/v1/markets', {});
-    MARKETS = (Array.isArray(resp.markets) ? resp.markets : []).map(m => ({
-      market: normMarket(m), fee: pick(m, 'fee') || {},
-    }));
-  } catch (e){ MARKETS = []; }
+  // Same-chain markets come from the registry and the order books (overviewPairs, startableAssets).
+  // The legacy RFQ list (POST /dex/v1/markets) is no longer served, so it is not asked for: asking
+  // only put a 404 in the console at every load and every minute. MARKETS stays for the test hook.
   // Cross-chain markets (BTC <-> asset). Best-effort; absence just hides BTC routes.
   XMARKETS = (X && X.markets) ? await X.markets().catch(()=>[]) : [];
   if (status) status.textContent = '';
@@ -10647,7 +10626,7 @@ function stripBip32(b64){
 
 // Test-only exports: drive the REAL same-chain pipeline + the composer mapping
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
-export const __test__ = { crossableDepthAtoms, ratioRecvPerPay, stripBip32, dexPost, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
+export const __test__ = { crossableDepthAtoms, ratioRecvPerPay, stripBip32, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,
   // an LSP or a chain: these are the ordering + accounting rules, and they are what
   // decide how much of a user's order actually fills.
