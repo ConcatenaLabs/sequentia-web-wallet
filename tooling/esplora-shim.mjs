@@ -183,10 +183,15 @@ export function startEsploraShim({ rpc, port, pools = null }) {
         if (sp && await live(sp.txid)) return json({ spent: true, txid: sp.txid, vin: sp.vin, status: status(sp.txid) });
         return json({ spent: false });
       }
-      if ((m = p.match(/^\/address\/([^/]+)\/txs$/))) {
+      // An address's history, paged as a script hash's (below): a wallet that has seen 25
+      // confirmed transactions asks for the next 25 after the last one.
+      if ((m = p.match(/^\/address\/([^/]+)\/txs(?:\/chain\/([0-9a-f]{64}))?$/))) {
         const v = await call('validateaddress', [decodeURIComponent(m[1])]);
         if (!v.isvalid) return send(400, 'invalid address');
-        return json(await history(sha(v.scriptPubKey)));
+        const all = await history(sha(v.scriptPubKey));
+        const conf = all.filter((t) => t.status.confirmed);
+        if (m[2]) { const at = conf.findIndex((t) => t.txid === m[2]); return json(at < 0 ? [] : conf.slice(at + 1, at + 26)); }
+        return json([...all.filter((t) => !t.status.confirmed), ...conf.slice(0, 25)]);
       }
       // Paged as esplora pages: unconfirmed plus the newest 25 confirmed, then
       // 25 confirmed at a time after the last one seen.

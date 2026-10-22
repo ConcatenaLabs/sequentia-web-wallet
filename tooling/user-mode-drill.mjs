@@ -47,6 +47,7 @@ import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { harness, startRelay, placeOrder, restOrder, startMaker, launchMaker, makerReady, freePort, sleep, lwkFrom, relayBook } from './user-mode-stack.mjs'
+import { startEsploraShim } from './esplora-shim.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // The commit the run's code is at, read when it starts: the checkout may move on before it ends.
@@ -61,6 +62,10 @@ const RESTART_EVERY = Number(opt('--restart-every', '20'))
 const CONTEST_EVERY = Number(opt('--contest-every', '25'))
 const WAIT_MS = Number(opt('--wait-seconds', '900')) * 1000
 const BTC_ONLY = argv.includes('--btc-only')
+// --onchain: each wallet also holds coins on the chain, as a page does, and covenant orders are
+// also taken on the chain from them ('onchain-fill'); the last wallet holds coins on the chain
+// only, as a new wallet that never joined an operator does.
+const ONCHAIN = argv.includes('--onchain')
 const BTC = argv.includes('--btc') || BTC_ONLY
 const control = process.env.ARCA_OPERATOR_CONTROL || '127.0.0.1:18640'
 const SEQOBD = process.env.SEQOBD
@@ -124,6 +129,24 @@ async function boardCoins (wallets, list, coins, feeAsset) {
   }
   await H.produce(); await H.bury()
   for (const w of wallets) await w.call('/run', { command: 'sync' })
+}
+
+// With --onchain: the stack's esplora (over the harness's node) and its policy asset, which the
+// wallets' on-chain coins are read and spent through.
+async function onchainConfig (st) {
+  const shim = await startEsploraShim({ rpc: { url: st.node_url, auth: `${st.node_user}:${st.node_password}` }, port: await freePort() })
+  children.push({ kill: () => shim.close() })
+  return { esplora: shim.url, policy_asset: (await H.rpc('getsidechaininfo', [])).pegged_asset }
+}
+// Each wallet's on-chain address paid `coins` coins of `coin` atoms of each asset of `list`.
+async function fundOnchain (wallets, list, coins) {
+  for (const w of wallets) {
+    const { address } = await w.call('/onchain-address')
+    const script = await H.scriptOf(address)
+    let n = 0
+    for (let k = 0; k < coins; k++) for (const { asset, coin } of list) { await H.fund(script, asset, coin); if (++n % 6 === 0) await H.produce() }
+  }
+  await H.produce(); await H.bury()
 }
 
 // ---- the wallets ----
@@ -190,14 +213,18 @@ async function regtestStack () {
   // The operator fronts every coin a round refreshes from its own: give it enough to start.
   await H.c('/fund_server', { asset: X, amount: 200000000 }); await H.c('/fund_server', { asset: Y, amount: 200000000 }); await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
-    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits }
+    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits, ...(ONCHAIN ? { onchain: await onchainConfig(st) } : {}) }
   const btcRpcs = BTC ? st.btc_lightning.wallets : null
   // Each wallet holds ten coins of 3,000,000 of each asset, as a wallet funded a little at a time
   // does: what a trade leaves as change, and must settle in the next round, is then small.
   const COINS = 10, COIN = 3000000
   async function fund (wallets) {
-    await boardCoins(wallets, [{ asset: X, coin: COIN }, { asset: Y, coin: COIN }], COINS, X)
-    note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of ${COIN} of X and of Y each`)
+    const xy = [{ asset: X, coin: COIN }, { asset: Y, coin: COIN }]
+    const chainOnly = ONCHAIN ? wallets.filter((w) => w.i === K - 1) : []
+    await boardCoins(wallets.filter((w) => !chainOnly.includes(w)), xy, COINS, X)
+    const onchain = ONCHAIN ? wallets.filter((w) => w.i !== 'rester') : []
+    if (onchain.length) await fundOnchain(onchain, xy, COINS)
+    note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of ${COIN} of X and of Y each${onchain.length ? ` on the chain${chainOnly.length ? `, and in the tree too but for wallet ${K - 1}` : ' and in the tree'}` : ''}`)
   }
   // A maker who rests orders in the tree and goes away: a wallet of the stack's own, funded as the
   // drill's wallets are, resting an order of 2,500,000 each way, listed on the relay, and rested
@@ -304,7 +331,7 @@ async function everyPairStack (file) {
   // The least value a trade between two assets has: neither side under MIN_SIDE atoms.
   const vmin = (a, b) => Math.max(valueOf(a, MIN_SIDE), valueOf(b, MIN_SIDE))
   const pairs = []
-  for (const a of A) for (const b of A) if (a !== b) pairs.push({ pay: a.id, receive: b.id, sources: (a.sup || b.sup) ? ['leaf-maker'] : ['leaf-maker', 'covenant-round', 'leaf-resting'] })
+  for (const a of A) for (const b of A) if (a !== b) pairs.push({ pay: a.id, receive: b.id, sources: (a.sup || b.sup) ? ['leaf-maker'] : ['leaf-maker', 'covenant-round', 'leaf-resting', ...(ONCHAIN ? ['onchain-fill'] : [])] })
   // BTC is paid and received over Lightning, so only against an asset the operator has a leg in.
   if (BTC) for (const a of A.filter((x) => !x.sup)) pairs.push({ pay: a.id, receive: 'BTC', sources: ['btc-gateway'] }, { pay: 'BTC', receive: a.id, sources: ['btc-gateway'] })
   // --btc-only: the BTC pairs alone.
@@ -335,13 +362,16 @@ async function everyPairStack (file) {
   for (const a of A) await H.c('/fund_server', { asset: a.id, amount: atomsOf(a.id, 5000) })
   await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
-    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits }
+    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits, ...(ONCHAIN ? { onchain: await onchainConfig(st) } : {}) }
   // Each wallet holds five coins of $100 of each asset.
   const COINS = 5
   const coinList = A.map((a) => ({ asset: a.id, coin: atomsOf(a.id, 100) }))
   async function fund (wallets) {
-    await boardCoins(wallets, coinList, COINS, X)
-    note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of $100 of each of ${A.length} assets`)
+    const chainOnly = ONCHAIN ? wallets.filter((w) => w.i === K - 1) : []
+    await boardCoins(wallets.filter((w) => !chainOnly.includes(w)), coinList, COINS, X)
+    const onchain = ONCHAIN ? wallets.filter((w) => w.i !== 'rester') : []
+    if (onchain.length) await fundOnchain(onchain, coinList, COINS)
+    note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of $100 of each of ${A.length} assets${onchain.length ? ` on the chain${chainOnly.length ? `, and in the tree too but for wallet ${K - 1}` : ' and in the tree'}` : ''}`)
   }
   let rester = null
   const rest = async (sell, want) => { const [n, d, size] = orderTerms(sell, want, 0.005, depth(sell, want)); return restOrder(H, rester, relay.url, { assetA: sell, assetB: want, sell: size, rateNum: n, rateDen: d, minLot: MIN_SIDE / 2 }) }
@@ -460,7 +490,7 @@ async function main () {
   const { X, Y } = S
   note(`drill: ${N} trades, ${K} wallets, ${S.kind}; chain ${S.genesis}; ${S.names[X]} ${X}, ${S.names[Y]} ${Y}`)
   // The pairs the drill runs; it admits them only when every trade passes.
-  const xy = ['leaf-maker', 'covenant-round', ...(S.prepare ? ['leaf-resting'] : [])]
+  const xy = ['leaf-maker', 'covenant-round', ...(S.prepare ? ['leaf-resting'] : []), ...(ONCHAIN && S.kind === 'regtest' ? ['onchain-fill'] : [])]
   const pairsDrill = { chains: { [S.genesis]: { pairs: S.pairs || [...(BTC_ONLY ? [] : [{ pay: X, receive: Y, sources: xy }, { pay: Y, receive: X, sources: xy }]),
     ...(S.btcRpcs ? [{ pay: X, receive: 'BTC', sources: ['btc-gateway'] }, { pay: 'BTC', receive: X, sources: ['btc-gateway'] }] : [])] } } }
   writeFileSync(join(out, 'pairs-run.json'), JSON.stringify(pairsDrill, null, 2))
@@ -603,16 +633,16 @@ async function main () {
   lines.push(`- By source: in-tree swaps with the live leaf maker ${by('leaf-maker').length}, covenant orders taken in a round ${by('covenant-round').length}, orders resting in the tree filled ${by('leaf-resting').length}${S.btcRpcs ? `, BTC in one hash-lock with the maker's desk ${by('btc-gateway').length} (selling for BTC ${by('btc-gateway').filter((r) => r.pay !== 'BTC').length}, buying with BTC ${by('btc-gateway').filter((r) => r.pay === 'BTC').length})` : ''}.`)
   const sent = traded.filter((r) => r.sentMs).map((r) => r.sentMs), sett = traded.filter((r) => r.outcome === 'settled').map((r) => r.settledMs)
   lines.push(`- Time to Sent: median ${((pct(sent, 0.5) || 0) / 1000).toFixed(1)} s, 95th percentile ${((pct(sent, 0.95) || 0) / 1000).toFixed(1)} s. Time to Settled: median ${((pct(sett, 0.5) || 0) / 1000).toFixed(1)} s, 95th percentile ${((pct(sett, 0.95) || 0) / 1000).toFixed(1)} s.`)
-  // Run over many pairs, a pair is admitted with the sources that settled at least one of its
-  // trades in this run, and only when the run passed.
-  const perPair = S.pairs ? S.pairs.map((p) => {
+  // A pair is admitted with the sources that settled at least one of its trades in this run, and
+  // only when the run passed.
+  const perPair = (S.pairs || pairsDrill.chains[S.genesis].pairs).map((p) => {
     const rs = results.filter((r) => r.pay === S.names[p.pay] && r.receive === S.names[p.receive])
     const settled = rs.filter((r) => r.outcome === 'settled')
     return { ...p, sources: p.sources.filter((src) => settled.some((r) => r.source === src)), n: rs.length, settled: settled.length,
       returned: rs.filter((r) => r.outcome === 'returned').length, notOffered: rs.filter((r) => r.outcome === 'not-offered').length,
       bySource: Object.fromEntries(p.sources.map((src) => [src, settled.filter((r) => r.source === src).length])) }
-  }) : null
-  if (perPair) {
+  })
+  {
     lines.push('', '## By pair', '', 'What was paid → what was received: trades settled by source, returned, and quotes that found nothing to fill.', '')
     for (const q of perPair) lines.push(`- ${S.names[q.pay]} → ${S.names[q.receive]}: settled ${q.settled} (${Object.entries(q.bySource).map(([k, v]) => `${k} ${v}`).join(', ')}), returned ${q.returned}, not offered ${q.notOffered}${q.settled ? '' : ' — not admitted: no trade settled'}`)
   }
@@ -626,7 +656,7 @@ async function main () {
   lines.push('', '## Every trade', '', 'One line per trade in `trades.jsonl`: its source, ticket, what moved, its disruptions and its outcome.', '')
   writeFileSync(join(out, 'REPORT.md'), lines.join('\n') + '\n')
   if (passed) {
-    const run = perPair ? perPair.filter((q) => q.sources.length).map(({ pay, receive, sources }) => ({ pay, receive, sources })) : pairsDrill.chains[S.genesis].pairs
+    const run = perPair.filter((q) => q.sources.length).map(({ pay, receive, sources }) => ({ pay, receive, sources }))
     const admitted = { chains: { [S.genesis]: { pairs: run.map((p) => ({ ...p, proven: S.kind, report: 'REPORT.md' })) } } }
     writeFileSync(join(out, 'pairs.json'), JSON.stringify(admitted, null, 2) + '\n')
     if (S.forTestnet) writeFileSync(join(out, 'pairs-testnet.json'), JSON.stringify(S.forTestnet(admitted.chains[S.genesis].pairs), null, 2) + '\n')

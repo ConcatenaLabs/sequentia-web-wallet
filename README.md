@@ -839,8 +839,12 @@ supervised asset through the live maker only, the others through the maker, cove
 orders resting in the tree. With `--btc` as well, on a harness that also has
 `ARCA_OPERATOR_LIGHTNING=1 ARCA_OPERATOR_BTC_LIGHTNING=3` (a Lightning leg in every plain asset),
 BTC is traded against every plain asset through the maker's BTC desk; `--btc-only` runs those
-pairs alone. A pair is admitted with the sources that settled at least one of its trades, and the
-run also writes `pairs-testnet.json`, the same pairs under the testnet's ids.
+pairs alone. The run also writes `pairs-testnet.json`, the same pairs under the testnet's ids.
+With `--onchain` (either mode), each wallet also holds coins on the chain, read and spent with
+the wallet kit as the page does (`tooling/user-mode-onchain-node.mjs`, needing a kit build with
+`Network.regtestWithGenesis` in `LWK_PKG`), and the last wallet holds coins on the chain only, as a
+new wallet does: covenant orders are then also taken on the chain (`onchain-fill`). In every mode
+a pair is admitted with the sources that settled at least one of its trades.
 
 `node tooling/user-mode-btc-drive.mjs <evidence-dir>` drives user mode's BTC trades in headless
 Chromium against the same harness started with `ARCA_OPERATOR_LIGHTNING=1` and

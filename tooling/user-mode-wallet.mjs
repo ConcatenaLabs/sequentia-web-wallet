@@ -8,14 +8,17 @@
 //   node tooling/user-mode-wallet.mjs --dir DIR --port PORT --config CONFIG.json
 //
 // CONFIG: { operator: {server, node_url, node_user, node_password}, makers: [url], relay: url,
-//           pairs_file: path, genesis, exit_delay_units?, btc_rpc? }
+//           pairs_file: path, genesis, exit_delay_units?, btc_rpc?, onchain? }
 // btc_rpc names the socket of the wallet's Bitcoin Lightning node, for BTC trades (cln-rpc.mjs).
+// onchain { esplora, policy_asset } gives it on-chain coins of its own, as the page has, for
+// covenant orders taken on the chain (user-mode-onchain-node.mjs); its balance then counts them.
 // DIR holds `mnemonic` (written on the first start), `store/` and `trades.json`.
 //
 // HTTP: GET /health; GET /balance -> live atoms per asset; GET /records;
 //       POST /quote {pay, receive, amount}; POST /trade {pay, receive, amount} (quote, then confirm
 //       the ticket) -> { ok, ticket, record } | { ok: false, why }; POST /advance -> the open trades
-//       moved on; POST /run {command, args} (setup only: address, board_quote, board, sync).
+//       moved on; POST /run {command, args} (setup only: address, board_quote, board, sync);
+//       GET /onchain-address -> its on-chain address, for funding.
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
@@ -23,6 +26,7 @@ import { leafLibrary } from './leaf-node.mjs'
 import { createEngine } from '../user-trade.js'
 import { relayBook, relayFills, lwkFrom } from './user-mode-stack.mjs'
 import { clnRpc, clnBitcoinWallet } from './cln-rpc.mjs'
+import { nodeOnchain } from './user-mode-onchain-node.mjs'
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
 const dir = arg('--dir'), port = Number(arg('--port')), cfg = JSON.parse(readFileSync(arg('--config'), 'utf8'))
@@ -48,11 +52,20 @@ const fetchJson = async (url, init) => {
   return j
 }
 const book = relayBook(cfg.relay)
+// The node's fee exchange rates, read with the operator's node credentials.
+const nodeRpc = async (method, params) => {
+  const r = await fetch(op.node_url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Basic ' + Buffer.from(`${op.node_user}:${op.node_password}`).toString('base64') },
+    body: JSON.stringify({ jsonrpc: '1.0', id: 'w', method, params }) })
+  const j = await r.json(); if (j.error) throw new Error(j.error.message); return j.result
+}
+const onchain = cfg.onchain ? await nodeOnchain({ lwk: await lwkFrom(), mnemonic, esplora: cfg.onchain.esplora, policyAsset: cfg.onchain.policy_asset,
+  genesis: cfg.genesis, feeRates: () => nodeRpc('getfeeexchangerates', []) }) : null
 const engine = createEngine({
   leaves: w, fetchJson, makers: () => cfg.makers || [], relayBook: (pay, receive) => book(pay, receive), relayFills: relayFills(cfg.relay),
   admitted: () => ({ pairs: JSON.parse(readFileSync(cfg.pairs_file, 'utf8')), genesis: cfg.genesis }),
   store, tag: () => 'drill', log: (...a) => console.log(new Date().toISOString(), ...a),
   btc: cfg.btc_rpc ? clnBitcoinWallet(clnRpc(cfg.btc_rpc)) : null,
+  onchain,
 })
 const btc = cfg.btc_rpc ? clnBitcoinWallet(clnRpc(cfg.btc_rpc)) : null
 
@@ -78,11 +91,18 @@ createServer(async (req, res) => {
   try {
     if (p === '/health') return send(res, 200, { ok: true, pid: process.pid })
     if (p === '/records') return send(res, 200, engine.records())
+    if (p === '/onchain-address') return send(res, onchain ? 200 : 404, onchain ? { address: onchain.address() } : { error: 'no on-chain coins in this wallet' })
     if (p === '/balance') {
       return send(res, 200, await serial(async () => {
         const b = liveBalance()
         // BTC is what the wallet's Bitcoin Lightning channels can send, read as the leaves are.
         if (btc) b.live.BTC = String(await btc.balance())
+        // Its on-chain coins count with its leaves; a transaction not yet in a block is moving.
+        if (onchain) {
+          await onchain.sync().catch(() => {})
+          for (const [a, v] of Object.entries(onchain.balances())) b.live[a] = String(BigInt(b.live[a] || 0) + BigInt(v))
+          b.moving += onchain.pending()
+        }
         return b
       }))
     }
@@ -99,9 +119,11 @@ createServer(async (req, res) => {
         }
       }))
     }
-    if (p === '/quote') return send(res, 200, await serial(() => engine.quote({ payAsset: b.pay, receiveAsset: b.receive, amount: String(b.amount) })))
+    if (p === '/quote') return send(res, 200, await serial(async () => { if (onchain) await onchain.sync().catch(() => {}); return engine.quote({ payAsset: b.pay, receiveAsset: b.receive, amount: String(b.amount) }) }))
     if (p === '/trade') {
       return send(res, 200, await serial(async () => {
+        // What it holds on the chain now, as the page knows it from its own scans.
+        if (onchain) await onchain.sync().catch(() => {})
         const q = await engine.quote({ payAsset: b.pay, receiveAsset: b.receive, amount: String(b.amount) })
         if (!q.ok) return q
         try { return { ok: true, ticket: q.ticket, record: await engine.confirm(q.choice, q.ticket) } }
