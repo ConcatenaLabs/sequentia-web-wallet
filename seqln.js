@@ -642,6 +642,11 @@ export function seqlnNodeSettle({ node_key, payment_hash, preimage }) {
 export function seqlnNodeReceive({ node_key, amount, description }) {
   return lspFetch('/node/receive', { method: 'POST', body: JSON.stringify({ node_key, amount, description }) });
 }
+// What the user's own hosted node received and paid over Lightning: { items: [{ dir: 'in'|'out',
+// amount_msat, at (unix seconds), payment_hash, description }] }, newest first.
+export function seqlnNodeHistory(node_key) {
+  return lspFetch('/node/history?node_key=' + encodeURIComponent(node_key), { method: 'GET' });
+}
 // Generic Lightning SEND: the user's own hosted node PAYS `bolt11` (device co-signs every HTLC).
 // Returns { paid, preimage, amount_msat, destination }.
 //
