@@ -1604,6 +1604,7 @@ import { mountPageApi } from './wallet-api.js';
 import { mountContracts } from './contracts.js';
 import { watchTips } from './tip-watch.js';
 import { reapplyUnseen } from './own-txs.js';
+import { watchInvoicePaid } from './ln-invoice-watch.js';
 
 const ESPLORA = location.origin + '/api';
 let _tipWatch = null;   // the new-block watch (tip-watch.js), started once the wallet is open
@@ -4731,6 +4732,7 @@ async function lnConnectLeg(asset, say){
   return node_key;
 }
 let _lnSRWired = false;
+let _lnRecvWatchStop = () => {};   // the watch of the Receive card's current invoice
 function initLnSendReceive(){
   if (_lnSRWired) return; _lnSRWired = true;
   const recvBtn = $('lnRecvBtn'), sendBtn = $('lnSendBtn'), copyBtn = $('lnRecvCopy');
@@ -4740,6 +4742,7 @@ function initLnSendReceive(){
     const asset = $('lnRecvAsset').value, meta = assetMeta(asset);
     const amt = Math.round(Number($('lnRecvAmt').value) * Math.pow(10, meta.precision || 0));
     const st = $('lnRecvStatus'), out = $('lnRecvBolt11');
+    _lnRecvWatchStop();   // a new invoice replaces the one on the card
     out.textContent = ''; $('lnRecvCopy').classList.add('hide');
     if (!(amt > 0)){ st.className = 'status err'; st.textContent = 'Enter an amount.'; return; }
     // An invoice for more than can arrive would only fail in the payer's wallet. Room to receive
@@ -4772,7 +4775,15 @@ function initLnSendReceive(){
       if (!inv || !inv.bolt11) throw new Error((inv && inv.error) || 'no invoice returned');
       out.textContent = inv.bolt11; $('lnRecvCopy').classList.remove('hide');
       oampSetQr('lnRecvQr', String(inv.bolt11).toUpperCase());   // upper case: the same invoice, a smaller QR
-      st.className = 'status'; st.textContent = 'Invoice ready. Share it to receive ' + esc($('lnRecvAmt').value) + ' ' + esc(meta.ticker) + '.';
+      st.className = 'status'; st.textContent = 'Invoice ready. Share it to receive ' + $('lnRecvAmt').value + ' ' + meta.ticker + '.';
+      // The card turns to Received when the payment lands: the hosted node lists the invoice as paid.
+      _lnRecvWatchStop = watchInvoicePaid({ history: () => lnApi.nodeHistory(node_key), paymentHash: inv.payment_hash,
+        onPaid: (item) => {
+          const got = BigInt(Math.floor(Number(item.amount_msat || inv.amount_msat || amt * 1000) / 1000));
+          st.className = 'status ok'; st.textContent = 'Received ✓ ' + fmtAtoms(got, meta.precision) + ' ' + meta.ticker + ' over Lightning.';
+          out.textContent = ''; oampSetQr('lnRecvQr', ''); $('lnRecvCopy').classList.add('hide');
+          try { renderLightningBalance(); } catch {}
+        } });
     } catch(e){ st.className = 'status err'; st.textContent = 'Could not create the invoice: ' + prettyErr(e); }
     finally { recvBtn.disabled = false; }
   };

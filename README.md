@@ -123,6 +123,8 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   arrive, counting only channels that are open: room still opening (bought with a Move to
   Lightning or on its own, about a block away) reads "ready to receive in about a minute", and
   no invoice is made for more than the open channels can take, since nobody could pay it.
+  Once the invoice is paid, the card reads "Received" with the amount, as soon as the hosted
+  node lists the payment.
 - **Swap** (the Trade tab): see below.
 - **Mix**: a CoinJoin round through the seqcj coordinator. The wallet picks the coins, proves
   it owns them, hands out fresh blinded addresses, and verifies the coordinator's transaction
@@ -596,6 +598,7 @@ works normally without the restricted rows.
 | `node-reject.js` | What a node's refusal of a transaction means, and a shortfall the wallet kit reports in atoms and ids (`shortfallText`) said in the asset's units: its reject code (`bad-txns-inputs-missingorspent`, `dust`, `min relay fee not met`…) as a sentence that says nothing was sent and what to do. `prettyErr` in `index.html` asks it first. |
 | `tip-watch.js` | Keeps the open wallet up to date: it reads both chains' tips every 30 s while the page is visible, and on becoming visible, and syncs when either has a new block, so a payment received shows without Refresh. |
 | `own-txs.js` | The page's own broadcasts of the last hour, put back into the wallet after a scan that has not returned them yet, and only then: the kit's `applyTransaction`, given a transaction the wallet already holds, would make spendable again a change output that the leaf wallet, another device or a covenant has spent since. |
+| `ln-invoice-watch.js` | Watches an invoice the Receive card made until the hosted node lists it as paid (`/node/history`), so the card can say "Received". |
 | `bolt11.js` | What the wallet reads from a Lightning invoice: its network, amount, payment hash, final CLTV and, on Sequentia, the asset it is paid in (field `a`, which a Sequentia invoice must carry). Copied into the browser extension's `vendor/`. |
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
