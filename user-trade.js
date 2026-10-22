@@ -368,6 +368,9 @@ export function createEngine (deps) {
     const limit = A < have ? A : have
     const ind = es.map((e) => { const s = sizeEntry(e, limit); return s ? { e, receive: s.receive } : null }).filter(Boolean)
       .sort((a, b) => (b.receive > a.receive ? 1 : b.receive < a.receive ? -1 : 0))
+      // A maker quoting several levels of one pair is asked once, at the level that gives the
+      // most for this size: each firm offer holds its coins.
+      .filter((x, i, l) => !x.e.maker || l.findIndex((y) => y.e.maker === x.e.maker && y.e.source === x.e.source) === i)
     const cands = []
     for (const { e } of ind.slice(0, 3)) {
       const c = await firm(e, payAsset, receiveAsset, A, have)
