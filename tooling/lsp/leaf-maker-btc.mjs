@@ -58,8 +58,11 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
   const file = join(cfg.store_dir, 'btc-swaps.json')
   const swaps = new Map(existsSync(file) ? Object.entries(JSON.parse(readFileSync(file, 'utf8'))) : [])
   const save = () => { writeFileSync(file + '.tmp', JSON.stringify(Object.fromEntries(swaps), null, 1)); renameSync(file + '.tmp', file) }
-  let sats = 0n
-  const refreshBalance = async () => { try { sats = await node.balance() } catch (e) { log('btc balance:', e.message) } }
+  let sats = 0n, inbound = null
+  const refreshBalance = async () => {
+    try { sats = await node.balance() } catch (e) { log('btc balance:', e.message) }
+    try { if (node.receivable) inbound = await node.receivable() } catch (e) { log('btc receivable:', e.message) }
+  }
   await refreshBalance()
 
   // The operator caps what payments into its tree may hold, not yet claimed, in each asset (a
@@ -106,10 +109,19 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     // BTC given only for as much of the asset as the operator's cap lets the maker receive, at the
     // ladder's worst rate.
     const lad = ladderOf(p0, cfg)
+    // the ladder's worst rate, as an exact fraction: want atoms per give atom = wNum / wDen
+    const wNum = big(p.rate_num) * BigInt(10000 + lad.stepBps * (lad.levels - 1)), wDen = big(p.rate_den) * 10000n
     const cap = p.give === 'BTC' ? caps.get(p.want) : null
     if (cap) {
-      const worst = ceilDiv(big(p.rate_num) * BigInt(10000 + lad.stepBps * (lad.levels - 1)), 10000n)
-      const fits = (cap.headroom * 9n / 10n) * big(p.rate_den) / worst
+      const fits = (cap.headroom * 9n / 10n) * wDen / wNum
+      if (fits < have) have = fits
+    }
+    // An asset given for BTC only for as much as the maker's channels can be paid, less what open
+    // swaps will pay it: a quote past that would ask a wallet for a payment the node cannot take.
+    if (p.want === 'BTC' && inbound != null) {
+      const owed = [...swaps.values()].filter((s) => OPEN.has(s.state) && s.want_asset === 'BTC').reduce((n, s) => n + big(s.want), 0n)
+      const room = inbound * 9n / 10n - owed
+      const fits = room > 0n ? room * wDen / wNum : 0n
       if (fits < have) have = fits
     }
     const min = big(p.min_give || 1)
