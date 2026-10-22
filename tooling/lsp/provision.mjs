@@ -287,7 +287,12 @@ export function makeProvisioner(opts) {
       await reviveIfWedged(rec);
       // A node whose signer or relay port another service has taken since it was provisioned
       // moves both to a free slot: they are passed at boot, and the router reads them from here.
-      if (!(await portFree(rec.signerPort)) || !(await portFree(rec.wsPort))) {
+      // Only when nothing of the node itself is running: a node still starting holds its own
+      // ports, and moving them then points the router where no signer listens, again on every
+      // reconnect, while the starting node keeps the old ones.
+      const ours = matchNodeProcs(readProcTable(), rec.dir);
+      if (!ours.lightningd.length && !ours.related.length
+          && (!(await portFree(rec.signerPort)) || !(await portFree(rec.wsPort)))) {
         const idx = await freeSlot(reg);
         rec.signerPort = CFG.signerBase + idx; rec.wsPort = CFG.wsBase + idx; save(reg);
       }
