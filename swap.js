@@ -7495,20 +7495,23 @@ function walkPreview(pay, receive, payAtoms, blindOk){
   }
   return { paid, got, interactive };
 }
-// The question asked before receiving at a blinded address, with the suggested answer ticked: what
-// it means, that the coins stay this wallet's, and how to bring them back to the usual address.
-// Inserted in a review card before its buttons; onChange(checked) as it is toggled.
+// The question asked before receiving at a blinded address, unticked: the wallet is transparent by
+// default and confidentiality is the holder's choice for each transfer, so nothing is received
+// blinded unless the box is ticked. Says what it means, that the coins stay this wallet's, and how to
+// bring them back to the usual address. Inserted in a review card before its buttons; onChange(checked)
+// as it is toggled, and once at the start with false, so the card shows what fills without it.
 function blindedConsent(card, onChange){
   const box = document.createElement('div'); box.className = 'blind-ask';
-  box.innerHTML = '<label><input type="checkbox" checked> <b>Receive at a blinded address of this wallet</b> (suggested)</label>'
-    + '<div class="sub">The best offers here come from a maker who completes the swap and blinds the output that pays you, so it can only pay a blinded address. '
+  box.innerHTML = '<label><input type="checkbox"> <b>Also take offers that pay a blinded address of this wallet</b></label>'
+    + '<div class="sub">Some offers here come from a maker who completes the swap and blinds the output that pays you, so it can only pay a blinded address. '
     + 'The coins stay in this wallet: they count in your balance, spend like any other and come back with your recovery phrase. On chain their amount and asset are hidden. '
     + 'You can bring them to your usual address at any time by sending them to yourself. '
     + '<a href="#" data-help="faq-blinded">What a blinded address means</a></div>'
-    + '<div class="sub blind-off hide">Unticked, the offers that can only pay a blinded address are skipped.</div>';
+    + '<div class="sub blind-off">Unticked, the offers that can only pay a blinded address are skipped.</div>';
   const actions = card.querySelector('.row'); card.insertBefore(box, actions || null);
   const cb = box.querySelector('input'), off = box.querySelector('.blind-off');
   cb.onchange = () => { off.classList.toggle('hide', cb.checked); onChange && onChange(cb.checked); };
+  if (onChange) onChange(false);
   return { checked: () => cb.checked };
 }
 // opts.blindInteractive: the user agreed to receive what interactive makers pay at a blinded address
@@ -7617,9 +7620,9 @@ async function takeCovenantWalkReview(q){
   const feeAsset = feeAssetPolicy().asset;
   // What the walk takes from the book as it stands, not the typed amount times the best price: the
   // best offer can hold less than the order, and the next ones can lie past the slippage floor.
-  // Interactive makers count when the user keeps the suggested blinded receive (asked below).
+  // Interactive makers count only when the user ticks the blinded receive (asked below, unticked).
   const askBlind = !blindedReceiveOk();
-  let pv = walkPreview(pay, receive, payAtoms, true);
+  let pv = walkPreview(pay, receive, payAtoms, !askBlind);
   const rows = (p) => [
     ['You pay', 'up to ' + amtRow(pay, p.paid) + refSuffix(pay, p.paid)],
     ['You receive', '~' + amtRow(receive, p.got) + refSuffix(receive, p.got)],
@@ -9187,7 +9190,7 @@ async function reviewSame(q){
     ['Settlement', 'Settles in full or not at all.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Review swap', kv });
-  // This offer is an interactive maker's: it can only pay a blinded address. Ask, suggesting yes.
+  // This offer is an interactive maker's: it can only pay a blinded address. Ask, unticked.
   let consent = null;
   if (!q.confidential && !blindedReceiveOk()){
     consent = blindedConsent(modal.querySelector('.card'), (on) => {
