@@ -48,9 +48,10 @@ test('the quote refuses room that is there before it names a fee or an address',
   assert.ok(check > 0, 'the quote asks the node');
   assert.match(quote, /if \(there\) q = \{ \.\.\.q, ok: false, already_have_room: true, pending: there\.pending,/);
   // A refused quote asks for nothing: no fee due, no address to pay, no held price.
-  assert.ok(quote.indexOf('holdQuote(') > check && quote.indexOf('inboundFeeAddress()') > check);
-  assert.match(quote, /if \(q\.ok && nodeKey && !isBtc\) holdQuote/);
-  assert.match(quote, /if \(q\.ok\) \{ try \{ payTo = await inboundFeeAddress\(\)/);
+  assert.ok(quote.indexOf('holdQuote(') > check && quote.indexOf('inboundFeeAddress(assetId)') > check);
+  // The same for room in BTC ('BTC' is its asset here).
+  assert.match(quote, /if \(q\.ok && nodeKey\) holdQuote/);
+  assert.match(quote, /if \(q\.ok\) \{ try \{ payTo = await inboundFeeAddress\(assetId\)/);
   assert.match(quote, /due_now: q\.ok \? q\.fee \+ owed : 0,/);
 });
 

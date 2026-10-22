@@ -1468,6 +1468,7 @@
           <p>The dialog does this calculation with the service's real percentage before you pay. Why it is priced this way: what the service gives up is its own coins, held in your channel for that time, so the price grows with the amount and with the months. The percentage differs by asset because a coin that would earn something elsewhere, lent out or staked, costs more to hold than one that would not.</p>
           <p>What is guaranteed is the channel, kept open for the months paid for, not a fixed amount of room. Receiving uses room up and spending makes it again. When the time is over the service may close the channel: what is on your side then comes back to you on chain. To keep receiving, buy room again.</p>
           <p>You can ask for room when you move an asset to Lightning: its fee travels in the same transaction, and the service opens its channel as soon as that transaction confirms.</p>
+          <p>Room to receive BTC is bought on its own, with Add room to receive, and needs no BTC channel of yours first. Its fee is paid in BTC on Bitcoin testnet4, and the channel is ready once a Bitcoin block confirms it, often ten minutes or more.</p>
         </details>
         <details id="faq-room-full"><summary>I need more room to receive, or more to send. What can I do?</summary>
           <p>Add capacity on the side you need, without giving up any you have:</p>
@@ -4334,7 +4335,7 @@ function lnRoomShortText(x, tk, prec){
   const j = (x && x.body) || x || {};
   // Room the wallet has already, or has opening: the service sells none on top, and nothing is paid.
   if(j.already_have_room) return j.pending
-    ? 'Room to receive this much '+tk+' is already opening to you; it is ready in about a minute.'
+    ? 'Room to receive this much '+tk+' is already opening to you; it is ready '+(tk==='BTC' ? 'once a Bitcoin block confirms it' : 'in about a minute')+'.'
     : 'You can already receive up to '+fmtAtoms(BigInt(j.receivable||0), prec)+' '+tk+' over Lightning in one channel. Ask for more room than that.';
   if(j.lp_short){
     const n=BigInt(j.fundable||0);
@@ -4352,7 +4353,8 @@ function lnRoomShortText(x, tk, prec){
 function lnRoomErrorText(e, tk, prec){
   if(e && e.feeShort) return 'The service sees your fee payment of '+fmtAtoms(e.feeShort.paid, prec)+' '+tk+', but it asks at least '+fmtAtoms(e.feeShort.least, prec)+' '+tk+' for this room.';
   const m=String((e && e.message) || (e && e.body && e.body.error) || '');
-  if(/has not seen your fee payment after/.test(m)) return 'The service has not seen your fee payment yet, after 8 minutes of asking.';
+  { const w=/has not seen your fee payment after (\d+) minutes/.exec(m);
+    if(w) return 'The service has not seen your fee payment yet, after '+w[1]+' minutes of asking.'; }
   if(/could not connect to the user node|no listen binding/i.test(m)) return 'The service could not reach your '+tk+' Lightning node. Reopen the wallet so the node comes online, then try again.';
   if(/did not reach CHANNELD_NORMAL/i.test(m)) return 'The service opened the channel, but it is not usable yet. It may still finish on its own: look at your Lightning balance again in a few minutes before paying anything more.';
   if(/can only receive \d+ of the/i.test(m)) return 'The service opened a channel smaller than the room asked for. Nothing more is charged for it; ask the service operator to look at it.';
@@ -4365,7 +4367,9 @@ function lnRoomErrorText(e, tk, prec){
 // amounts (e.feeShort). Eight minutes without seeing it end the wait; the record stays, so the next
 // open asks again.
 async function lnClaimInbound(rec, say){
-  const started = Date.now(), deadline = started + 8*60_000;
+  // A fee paid in BTC is seen once a testnet4 block confirms it, often ten minutes or more.
+  const btc = rec.asset==='BTC', waitMin = btc ? 45 : 8;
+  const started = Date.now(), deadline = started + waitMin*60_000;
   for(;;){
     try{
       say && say('Asking the service to open the channel to you…');
@@ -4379,10 +4383,11 @@ async function lnClaimInbound(rec, say){
       if(e && e.status===402 && j.paid===0){
         if(Date.now() < deadline){
           const min = Math.floor((Date.now()-started)/60_000);
-          say && say('Waiting for the service to see your fee payment'+(min ? ' ('+min+' min so far)' : '')+': it counts it once a Sequentia block confirms it, usually within a minute or two…');
-          await new Promise(r=>setTimeout(r, 10_000)); continue;
+          say && say('Waiting for the service to see your fee payment'+(min ? ' ('+min+' min so far)' : '')
+            +(btc ? ': it counts it once a Bitcoin block confirms it, often ten minutes or more…' : ': it counts it once a Sequentia block confirms it, usually within a minute or two…'));
+          await new Promise(r=>setTimeout(r, btc ? 30_000 : 10_000)); continue;
         }
-        throw new Error('the service has not seen your fee payment after 8 minutes');
+        throw new Error('the service has not seen your fee payment after '+waitMin+' minutes');
       }
       throw e;
     }
@@ -4476,7 +4481,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
           : 'No price for this amount: '+(q.reason||q.error||'the service did not answer'));
         return;
       }
-      const have=BigInt(balObj()[leg.asset]||0);
+      const have=lnLegHeld(leg);
       const fee=BigInt(q.fee);
       quote.textContent=lnRoomPriceText(q, tk, prec, leg.asset)+' Paid now on chain, plus the network fee of that payment.'
         + (fee > have ? ' You hold '+fmtAtoms(have, prec)+' '+tk+', not enough for it.' : '');
@@ -4500,7 +4505,9 @@ function lnReceiveRoomDialog(leg, startAtoms){
       const phrase=(localStorage.getItem(KEY)||'').trim();
       if(!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
       say('Connecting your '+tk+' Lightning node…');
-      const prov = await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: tk, policy:lnPolicy(), deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
+      const prov = leg.chain==='btc'
+        ? await provisionAndConnect({ chain:'btc', label:'BTC', policy:lnPolicy(), deriveIdentity: ()=>{ const k=lnNodeIdentity(phrase,'btc'); return { transportPrivkey:k.deviceTransportPrivkey, signingSeed:k.deviceSigningSeed }; } })
+        : await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: tk, policy:lnPolicy(), deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
       if(!(prov && prov.connected)) throw new Error('Could not bring your device signer online. Check your connection and try again.');
       if(!last.paid) lnRoomSlotFree();
       await waitNodeReady({ nodeKey: prov.key, onProgress: ()=>say('Preparing your Lightning node…') });
@@ -4528,7 +4535,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
         if(!q.pay_to) throw new Error('the service gave no address for the fee'+(q.prepaid_unavailable ? ' ('+q.prepaid_unavailable+')' : ''));
         say('Paying the fee, '+fmtAtoms(due, prec)+' '+tk+'…');
         lnSaveInbound(rec);
-        const sent=await lnSendDeposit({ chain:'seq', asset: leg.asset, amount: due, address: q.pay_to });
+        const sent=await lnSendDeposit({ chain: leg.chain==='btc' ? 'btc' : 'seq', asset: leg.asset, amount: due, address: q.pay_to });
         rec.fee_txid=sent.txid; lnSaveInbound(rec);
       }
       say('Opening the channel to you…');
@@ -4730,9 +4737,14 @@ function lnStepFor(hex, { receive = false } = {}){
   let lnOn = false; try { lnOn = seqlnState().deployed; } catch {}
   if(!lnOn || !lnLastStatus) return null;
   if(hex==='BTC'){
-    // The service sells no room in BTC; paying needs BTC moved into a channel.
+    // Room to receive BTC is bought on its own, from a service that sells it (funding.btc_room): a
+    // move of BTC does not ask for it, so it needs no channel of the wallet's own first. Paying
+    // needs BTC moved into a channel.
+    if(receive) return (lnLastStatus.funding && lnLastStatus.funding.btc_room)
+      ? { label:'Add room to receive', go:()=>lnReceiveRoomDialog({ chain:'btc', asset:'BTC', ticker:'BTC', precision:8, onchain: btcBalance || 0n }) }
+      : null;
     const funding = !!(lnLastStatus.funding && lnLastStatus.funding.btc);
-    if(receive || !funding || !(btcBalance > 0n) || lnOnLightning('BTC')) return null;
+    if(!funding || !(btcBalance > 0n) || lnOnLightning('BTC')) return null;
     return { label:'Move to Lightning', go:()=>moveToLightningDialog({ kind:'BTC', ticker:'BTC', precision:8, onchain:btcBalance, chain:'btc', asset:null }) };
   }
   const priced = !!(feeRateEntry(hex) && feeRateEntry(hex).rate > 0);
@@ -4777,13 +4789,19 @@ function lnPaintRecvRoom(){
   const soon=lnReceiveOpeningFor(hex==='BTC' ? 'BTC' : hex);
   box.innerHTML='';
   if(soon) lnRecheckRoomSoon(); else _lnRoomRechecks=0;
-  if(room>0n){ box.textContent='You can receive up to '+fmtAmount(room, meta.precision)+' '+meta.ticker+' over Lightning.'+(soon?' More is ready to receive in about a minute.':''); return; }
-  if(soon){ box.textContent='Ready to receive '+meta.ticker+' over Lightning in about a minute.'; return; }
-  if(hex==='BTC') return;   // BTC room is not sold: the invoice is made, and says itself whether it can be paid
+  const when=hex==='BTC' ? 'once a Bitcoin block confirms it' : 'in about a minute';
+  if(room>0n){ box.textContent='You can receive up to '+fmtAmount(room, meta.precision)+' '+meta.ticker+' over Lightning.'+(soon?' More is ready to receive '+when+'.':''); return; }
+  if(soon){ box.textContent='Ready to receive '+meta.ticker+' over Lightning '+when+'.'; return; }
+  // Where the service sells no room in BTC, the invoice is made and says itself whether it can be paid.
+  if(hex==='BTC' && !lnBtcRoomSold()) return;
   const a=lnRecvAdvice(hex); lnSayStep(box, a.text, a.step);
 }
 // The leg a Balance row would hand to the Lightning dialogs, for an asset.
 function lnLegFor(hex){ const m=assetMeta(hex); return { chain:'seq', asset:hex, ticker:m.ticker, precision:m.precision, onchain: BigInt(balObj()[hex]||0) }; }
+// Whether the service sells room to receive BTC.
+function lnBtcRoomSold(){ return !!(lnLastStatus && lnLastStatus.funding && lnLastStatus.funding.btc_room); }
+// What a leg holds on chain now, to pay a fee from.
+function lnLegHeld(leg){ return leg.chain==='btc' ? (btcBalance || 0n) : BigInt(balObj()[leg.asset]||0); }
 // Whether an asset is on Lightning already: a channel of the wallet's own node holds or receives it,
 // or one is opening. Room to receive is bought on its own only then; before, it is asked for with
 // the move that opens the first channel.
@@ -4821,12 +4839,14 @@ function initLnSendReceive(){
     // An invoice for more than can arrive would only fail in the payer's wallet. Room to receive
     // is bought openly, with its price, in its own dialog; it is never bought here on the side.
     const room = lnReceivableFor(asset === 'BTC' ? 'BTC' : asset);
-    if (asset !== 'BTC' && room < BigInt(amt)){
+    if ((asset !== 'BTC' || lnBtcRoomSold()) && room < BigInt(amt)){
       st.className = 'status err';
+      // Room still opening is ready in about a minute on Sequentia, once a Bitcoin block confirms it for BTC.
+      const when = asset === 'BTC' ? 'once a Bitcoin block confirms it' : 'in about a minute';
       // Room that is still opening is said as such: the invoice is made once it is ready.
       if (lnReceiveOpeningFor(asset))
-        st.textContent = room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. More is ready to receive in about a minute: ask for less, or make the invoice then.'
-                                   : 'Ready to receive ' + meta.ticker + ' over Lightning in about a minute. Make the invoice then.';
+        st.textContent = room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. More is ready to receive ' + when + ': ask for less, or make the invoice then.'
+                                   : 'Ready to receive ' + meta.ticker + ' over Lightning ' + when + '. Make the invoice then.';
       // Otherwise one sentence and the step that fixes it: more room, or the move that brings the asset to Lightning.
       else if (room > 0n){ const step = lnStepFor(asset, { receive: true }); lnSayStep(st, 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. Ask for less' + (step ? ', or add room to receive.' : ', or receive on-chain.'), step); }
       else { const a = lnRecvAdvice(asset); lnSayStep(st, a.text, a.step); }

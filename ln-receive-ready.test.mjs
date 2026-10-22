@@ -63,5 +63,7 @@ test('no invoice is made for more than the ready room', () => {
   const guard = handler.indexOf('room < BigInt(amt)'), node = handler.indexOf('lnConnectLeg(');
   assert.ok(guard > 0 && node > guard, 'the room check comes before the node is asked for an invoice');
   assert.match(handler, /if \(lnReceiveOpeningFor\(asset\)\)\s*st\.textContent = room > 0n \? 'You can receive up to '/);
-  assert.match(handler, /'Ready to receive ' \+ meta\.ticker \+ ' over Lightning in about a minute\. Make the invoice then\.'/);
+  assert.match(handler, /'Ready to receive ' \+ meta\.ticker \+ ' over Lightning ' \+ when \+ '\. Make the invoice then\.'/);
+  // A BTC channel is ready once a Bitcoin block confirms it, not in a minute.
+  assert.match(handler, /const when = asset === 'BTC' \? 'once a Bitcoin block confirms it' : 'in about a minute';/);
 });

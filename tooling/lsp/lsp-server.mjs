@@ -69,6 +69,9 @@
 //   --- "Move to Lightning" channel funding ---
 //   CHANNEL_PEER_BTC   routing peer the BTC hosted node opens its channel to (id@host:port)
 //   CHANNEL_PEER_ASSET routing peer the asset hosted node opens its channel to (id@host:port)
+//   INBOUND_BTC_LP_RPC lightning-rpc of the testnet4 node that sells room to receive BTC: it opens
+//                      the channel to the user's BTC node and takes the fee. Its id is the one in
+//                      CHANNEL_PEER_BTC_PROVISIONED. Unset => room to receive BTC is not sold.
 //   CHANNEL_WATCH_MS   how long POST /channel/open waits for the deposit + lock-in (default 1h)
 //   --- MIXED (submarine) rail only ---
 //   SEQ_RPC            Sequentia node RPC http://user:pass@host:port WITH -txindex,
@@ -218,6 +221,9 @@ const CFG = {
   // the maker can then pay over it). Unset => POST /channel/inbound + the per-user
   // sub-asset receive fail closed. The LP peer id/addr is CHANNEL_PEER_ASSET.
   subasLpRpc: process.env.SUBAS_LP_RPC || '',
+  // The same sale in BTC: the testnet4 LP that opens room to receive BTC toward the user's BTC
+  // node and takes its fee on its own wallet (INBOUND_BTC_LP_RPC above).
+  inboundBtcLpRpc: process.env.INBOUND_BTC_LP_RPC || '',
   subasInboundReserve: Number(process.env.SUBAS_INBOUND_RESERVE || 5000), // flat extra asset sat funded above the receive amount
   // PROPORTIONAL headroom on top of that flat reserve. CLN holds back a 1% channel reserve plus the
   // commitment fee, which together cost ~9% of capacity at these sizes -- so a flat 5000 sat covered
@@ -848,6 +854,8 @@ async function status(deviceKeys = []) {
       btc: !!(CFG.channelPeerBtc && CFG.hostedBtcRpc),
       assets: fundableAssets(),
       provisioning: !!PROV,
+      // Room to receive BTC is for sale (POST /channel/inbound with asset 'BTC').
+      btc_room: !!(CFG.inboundBtcLpRpc && CFG.channelPeerBtcProvisioned),
     },
     // P3.5 — the 0-conf LP-fronting ceiling on the BTC leg, in SATS, as the SINGLE SOURCE OF TRUTH the
     // wallet reads (frontCapAtoms) instead of hard-coding a default that can drift from the box config.
@@ -1932,12 +1940,30 @@ async function inboundLimitsFor(assetId) {
   return lim || {};
 }
 
+// The LP that sells room to receive in `assetId`, where 'BTC' is bitcoin on testnet4: its RPC, its
+// node id as the user's node sees it, and how its on-chain outputs name the coin. A testnet4 output
+// carries no asset, so bitcoin is the untagged coin there (lpFreeAtoms, feePaidAtoms with '' and '').
+// One table for the sale in both, so the quote, the fee check and the open cannot disagree on which
+// node is meant.
+async function inboundLp(assetId) {
+  if (assetId === 'BTC') {
+    if (!CFG.inboundBtcLpRpc) throw new Error('room to receive BTC is not sold on this LSP (set INBOUND_BTC_LP_RPC)');
+    return { isBtc: true, rpc: CFG.inboundBtcLpRpc, lpId: (CFG.channelPeerBtcProvisioned || '').split('@')[0],
+      coin: '', policy: '', chain: 'btc' };
+  }
+  if (!CFG.subasLpRpc) throw new Error('inbound provisioning is not configured on this LSP (set SUBAS_LP_RPC)');
+  return { isBtc: false, rpc: CFG.subasLpRpc, lpId: (CFG.channelPeerAsset || '').split('@')[0],
+    coin: assetId, policy: await policyAssetHex(), chain: 'seq' };
+}
+
 // Where a prepaid fee is sent: an address on the LP's OWN on-chain wallet, which is also the node
 // that funds the channel — so the party bearing the cost is the party paid, with no separate
 // treasury to reconcile.
-async function inboundFeeAddress() {
-  if (!CFG.subasLpRpc) throw new Error('inbound fee collection is not configured on this LSP (set SUBAS_LP_RPC)');
-  const a = await lnrpc('newaddr', ['bech32'], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS);
+async function inboundFeeAddress(assetId) {
+  const lp = await inboundLp(assetId).catch(() => null);
+  if (!lp) throw new Error(assetId === 'BTC' ? 'room to receive BTC is not sold on this LSP (set INBOUND_BTC_LP_RPC)'
+    : 'inbound fee collection is not configured on this LSP (set SUBAS_LP_RPC)');
+  const a = await lnrpc('newaddr', ['bech32'], lp.rpc, STATUS_RPC_TIMEOUT_MS);
   const addr = a && (a.bech32 || a.address || a.p2tr);
   if (!addr) throw new Error('could not allocate a fee address on the LP');
   return addr;
@@ -1949,11 +1975,13 @@ async function inboundFeeAddress() {
 // can fund `amount`, else { lp_short: true, fundable, reason }; null too when the LP cannot be read,
 // so a quote still renders and provisionInbound stays the last word.
 async function inboundFundingProblem(assetId, amount) {
-  if (!CFG.subasLpRpc || !assetId || !(amount > 0)) return null;
-  const lf = await lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS).catch(() => null);
+  if (!assetId || !(amount > 0)) return null;
+  const lp = await inboundLp(assetId).catch(() => null);
+  if (!lp) return null;
+  const lf = await lnrpc('listfunds', [], lp.rpc, STATUS_RPC_TIMEOUT_MS).catch(() => null);
   if (!lf) return null;
   const k = { headroomBps: CFG.subasInboundHeadroomBps, reserve: CFG.subasInboundReserve };
-  const have = lpFreeAtoms(lf, assetId, await policyAssetHex());
+  const have = lpFreeAtoms(lf, lp.coin, lp.policy);
   if (have >= inboundFundAtoms(amount, k)) return null;
   const fundable = inboundRoomFundable(have, k);
   return { lp_short: true, fundable,
@@ -1969,10 +1997,11 @@ async function inboundFundingProblem(assetId, amount) {
 // that pays too little, which waiting does not mend.
 async function verifyInboundFeePaid({ txid, assetId, least }) {
   if (!txid || !/^[0-9a-fA-F]{64}$/.test(String(txid))) throw new Error('fee_txid must be a 32-byte hex txid');
-  const lf = await lnrpc('listfunds', ['spent=true'], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS)
-    .catch(() => lnrpc('listfunds', [], CFG.subasLpRpc, STATUS_RPC_TIMEOUT_MS)).catch(() => null);
+  const lp = await inboundLp(assetId);
+  const lf = await lnrpc('listfunds', ['spent=true'], lp.rpc, STATUS_RPC_TIMEOUT_MS)
+    .catch(() => lnrpc('listfunds', [], lp.rpc, STATUS_RPC_TIMEOUT_MS)).catch(() => null);
   if (!lf) throw new Error('could not read the LP wallet to verify the fee payment');
-  const paid = feePaidAtoms(lf, txid, assetId, await policyAssetHex());
+  const paid = feePaidAtoms(lf, txid, lp.coin, lp.policy);
   if (!(paid > 0)) throw Object.assign(new Error(`the service does not see the fee payment ${txid} yet`), { paid: 0 });
   if (paid < least) throw Object.assign(new Error(`the fee payment ${txid} pays ${paid}, which is less than the ${least} due`), { paid });
   return { ok: true, paid };
@@ -1981,28 +2010,30 @@ async function verifyInboundFeePaid({ txid, assetId, least }) {
 // The room a user's node already has from the LP for `amount` (asset sats), as roomAlreadyThere
 // says, or null. Null too when the node or the LP is unknown here: the purchase then says why.
 async function inboundRoomThere(nodeKey, assetId, amount) {
-  const lpId = (CFG.channelPeerAsset || '').split('@')[0];
+  const lp = await inboundLp(assetId).catch(() => null);
+  const lpId = lp && lp.lpId;
   if (!lpId || !(amount > 0)) return null;
   let userRpc, rec;
-  try { ({ rpc: userRpc, rec } = targetFor('seq', assetId, nodeKey)); } catch { return null; }
-  if (!userRpc || !rec) return null;
+  try { ({ rpc: userRpc, rec } = targetFor(lp.chain, lp.isBtc ? null : assetId, nodeKey)); } catch { return null; }
+  if (!userRpc || !rec || (rec.chain && rec.chain !== lp.chain)) return null;
   const pc = await lnrpc('listpeerchannels', [], userRpc).catch(() => ({ channels: [] }));
   return roomAlreadyThere(pc.channels, lpId, amount * 1000);
 }
-// provisionInbound gives the user's OWN hosted asset node INBOUND liquidity so it
-// can RECEIVE the asset (Move-to-Lightning only funds outbound). The LP (SUBAS_LP_RPC,
-// e.g. ln-asset) connects to the user node and opens a 0-conf asset channel TOWARD it,
-// funded from the LP's on-chain asset — the exact JIT/pay-to-open step proven at the
+// provisionInbound gives the user's OWN hosted node INBOUND liquidity so it can RECEIVE
+// (Move-to-Lightning only funds outbound). The LP (inboundLp: SUBAS_LP_RPC, e.g. ln-asset,
+// for an asset; INBOUND_BTC_LP_RPC for 'BTC') connects to the user node and opens a channel
+// TOWARD it, funded from the LP's own coins — the exact JIT/pay-to-open step proven at the
 // CLI. Idempotent: a no-op (already_had_inbound) if the user already has >= amount
 // receivable from the LP. Fails closed (throws) if unconfigured, the node is not
-// provisioned, or the LP lacks asset liquidity. amount is in ASSET SATS.
+// provisioned, or the LP lacks the coins. amount is in the asset's atoms, or sat for BTC.
 async function provisionInbound({ nodeKey, assetId, amount }) {
-  if (!CFG.subasLpRpc) throw new Error('inbound provisioning is not configured on this LSP (set SUBAS_LP_RPC)');
-  const lpId = (CFG.channelPeerAsset || '').split('@')[0];
-  if (!lpId) throw new Error('inbound: no LP peer configured (CHANNEL_PEER_ASSET)');
+  const lp = await inboundLp(assetId);
+  const lpId = lp.lpId;
+  if (!lpId) throw new Error(lp.isBtc ? 'inbound: no BTC LP peer configured (CHANNEL_PEER_BTC_PROVISIONED)' : 'inbound: no LP peer configured (CHANNEL_PEER_ASSET)');
   if (!(amount > 0)) throw new Error('inbound: amount (asset sats) must be > 0');
-  const { rpc: userRpc, rec } = targetFor('seq', assetId, nodeKey);
+  const { rpc: userRpc, rec } = targetFor(lp.chain, lp.isBtc ? null : assetId, nodeKey);
   if (!userRpc || !rec) throw new Error('user node not provisioned for this asset (POST /node/provision first)');
+  if (rec.chain && rec.chain !== lp.chain) throw new Error(`that node is a ${rec.chain} node, not one for ${lp.isBtc ? 'BTC' : 'this asset'}`);
   const need = amount * 1000; // msat
   // Idempotent: reuse an existing NORMAL channel from the LP with enough receivable.
   const pc = await lnrpc('listpeerchannels', [], userRpc).catch(() => ({ channels: [] }));
@@ -2034,7 +2065,7 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   const bind = (uinfo.binding || []).find(b => b.port) || {};
   if (!bind.port) throw new Error('user node has no listen binding for the LP to connect to');
   const host = bind.address || '127.0.0.1';
-  await lnrpc('connect', [`id=${userId}`, `host=${host}`, `port=${bind.port}`], CFG.subasLpRpc, SIGNER_RPC_TIMEOUT_MS)
+  await lnrpc('connect', [`id=${userId}`, `host=${host}`, `port=${bind.port}`], lp.rpc, SIGNER_RPC_TIMEOUT_MS)
     .catch(e => { throw new Error(`LP could not connect to the user node: ${e.message}`); });
   // LP funds a 0-conf asset channel TOWARD the user (all liquidity on the LP side =
   // the user's inbound). Fails closed if the LP lacks the asset on-chain.
@@ -2045,7 +2076,7 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   // count it, and the NEXT attempt opened another undersized channel. That is how one wallet ended up
   // with thirteen GOLD channels, not one of which could carry the trade it was opened for.
   const fundAmt = inboundFundAtoms(amount, { headroomBps: CFG.subasInboundHeadroomBps, reserve: CFG.subasInboundReserve });
-  const fc = await lnrpc('fundchannel', [`id=${userId}`, `amount=${fundAmt}sat`, `asset=${assetId}`, 'mindepth=0', 'announce=false'], CFG.subasLpRpc);
+  const fc = await lnrpc('fundchannel', [`id=${userId}`, `amount=${fundAmt}sat`, ...(lp.isBtc ? [] : [`asset=${assetId}`]), 'mindepth=0', 'announce=false'], lp.rpc);
   // Wait for CHANNELD_NORMAL on the user side (0-conf -> seconds).
   const deadline = Date.now() + 90000;
   let chan;
@@ -2053,7 +2084,17 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
     const pc2 = await lnrpc('listpeerchannels', [], userRpc).catch(() => ({ channels: [] }));
     chan = (pc2.channels || []).find(c => c.peer_id === lpId && (c.funding_txid === fc.txid || c.channel_id === fc.channel_id));
     if (chan && chan.state === 'CHANNELD_NORMAL') break;
-    if (Date.now() > deadline) throw new Error('inbound channel did not reach CHANNELD_NORMAL in time');
+    if (Date.now() > deadline) {
+      // A BTC channel the user's node may take only once testnet4 confirms its funding: a block,
+      // often ten minutes or more, not the seconds a Sequentia one takes. It exists and is the room
+      // sold, so it is reported as opening, as one found opening above is, not as a failure.
+      if (lp.isBtc && chan && /AWAITING_LOCKIN/.test(String(chan.state || ''))) {
+        return { ok: true, already_had_inbound: false, pending: true, state: chan.state, channel_id: fc.channel_id || null,
+          funding_txid: fc.txid || null, receivable_msat: chan.receivable_msat ?? null, fee_msat: 0,
+          note: 'the channel is opening; it is usable once a Bitcoin block confirms it' };
+      }
+      throw new Error('inbound channel did not reach CHANNELD_NORMAL in time');
+    }
     await sleep(3000);
   }
   // VERIFY WHAT WE OPENED. This returned ok:true without ever checking the channel it had just
@@ -5091,12 +5132,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/channel/inbound/quote') {
       const rawAsset = url.searchParams.get('asset') || '';
       const isBtc = !rawAsset || /^btc$/i.test(rawAsset);
-      const assetId = isBtc ? '' : resolveAsset(rawAsset);
+      const assetId = isBtc ? 'BTC' : resolveAsset(rawAsset);
       if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
       const months = parseMonths(url.searchParams.get('months'), CFG.inboundMonths, CFG.inboundDefaultMonths);
       if (months == null) return send(res, 400, { ok: false, error: `months must be one of ${CFG.inboundMonths.join(', ')}`, months_allowed: CFG.inboundMonths });
       let q = quoteInboundFee(Number(url.searchParams.get('amount') || 0), { isBtc, assetId, months, ...(isBtc ? {} : await inboundLimitsFor(assetId)) });
-      if (q.ok && !isBtc) {
+      if (q.ok) {
         const short = await inboundFundingProblem(assetId, q.amount);
         if (short) { logRefused(assetId, q.amount, url.searchParams.get('node_key') || '', 'quote'); q = { ...q, ok: false, ...short }; }
       }
@@ -5104,7 +5145,7 @@ const server = http.createServer(async (req, res) => {
       // Room this node already has (or has opening) for this amount is not sold again: the open
       // would add nothing (provisionInbound's already_had_inbound), so a fee paid for it bought
       // nothing. Refused here, before any payment, with what the node can already receive.
-      if (q.ok && nodeKey && !isBtc) {
+      if (q.ok && nodeKey) {
         const there = await inboundRoomThere(nodeKey, assetId, q.amount);
         if (there) q = { ...q, ok: false, already_have_room: true, pending: there.pending,
           receivable: Math.floor(Number(there.channel.receivable_msat || 0) / 1000),
@@ -5112,17 +5153,17 @@ const server = http.createServer(async (req, res) => {
             ? 'a channel with this much room to receive is already opening to this node; it is ready in about a block'
             : `this node can already receive ${Math.floor(Number(there.channel.receivable_msat || 0) / 1000)} in one channel; ask for more room than that` };
       }
-      const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
+      const owed = nodeKey ? debtOwed(nodeKey, assetId) : 0;
       // A fee this node already paid for room in this asset that was never opened.
-      const paidWaiting = nodeKey && !isBtc ? paidWaitingFee(inboundFees, nodeKey, assetId) : null;
-      if (q.ok && nodeKey && !isBtc) holdQuote({ node_key: nodeKey, asset: assetId, amount: q.amount, months, due: q.fee + owed });
+      const paidWaiting = nodeKey ? paidWaitingFee(inboundFees, nodeKey, assetId) : null;
+      if (q.ok && nodeKey) holdQuote({ node_key: nodeKey, asset: assetId, amount: q.amount, months, due: q.fee + owed });
       // A prepaid purchase needs somewhere to send the fee. Best-effort: a quote must still render
       // when the LP is unreachable, so the mode is simply reported as unavailable rather than 500ing.
       let payTo = null, payErr = null;
-      if (q.ok) { try { payTo = await inboundFeeAddress(); } catch (e) { payErr = String((e && e.message) || e); } }
+      if (q.ok) { try { payTo = await inboundFeeAddress(assetId); } catch (e) { payErr = String((e && e.message) || e); } }
       return send(res, q.ok ? 200 : 400, {
         ...q,
-        asset: isBtc ? 'BTC' : assetId,
+        asset: assetId,
         asset_label: isBtc ? 'BTC' : (assetLabel(assetId) || assetId.slice(0, 8)),
         // Both ways to pay, and what each means, so the caller can offer a real choice.
         modes: ['prepaid', 'deferred'],
@@ -5140,22 +5181,26 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/channel/inbound') {
       const body = await readBody(req);
       if (!body) return send(res, 400, { ok: false, error: 'bad json body' });
-      const assetId = resolveAsset(body.asset);
-      if (!assetId || assetId === CFG.btcx) return send(res, 400, { ok: false, error: 'asset must be a Sequentia asset id' });
+      // 'BTC' is room to receive bitcoin, from the testnet4 LP (inboundLp); anything else names a
+      // Sequentia asset.
+      const isBtc = /^btc$/i.test(String(body.asset || ''));
+      const assetId = isBtc ? 'BTC' : resolveAsset(body.asset);
+      if (!assetId || (!isBtc && assetId === CFG.btcx)) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
+      if (isBtc && !CFG.inboundBtcLpRpc) return send(res, 400, { ok: false, error: 'room to receive BTC is not sold on this LSP' });
       const amount = Number(body.amount || 0);
       if (!(amount > 0)) return send(res, 400, { ok: false, error: 'amount (asset sats to be receivable) is required' });
       // CHARGE FOR IT. The fee is quoted here from the same function the quote endpoint uses, so the
       // price cannot drift between what was shown and what is charged, and any debt already carried
       // by this node falls due now.
-      const lim = await inboundLimitsFor(assetId);
+      const lim = isBtc ? {} : await inboundLimitsFor(assetId);
       const months = parseMonths(body.months, CFG.inboundMonths, CFG.inboundDefaultMonths);
       if (months == null) return send(res, 400, { ok: false, error: `months must be one of ${CFG.inboundMonths.join(', ')}`, months_allowed: CFG.inboundMonths });
-      let q = quoteInboundFee(amount, { isBtc: false, assetId, months, ...lim });
+      let q = quoteInboundFee(amount, { isBtc, assetId, months, ...lim });
       // Out of range is not free. Below the smallest sale the room opened (and charged) is that
       // smallest sale; above the largest there is no sale. Both used to skip the fee and open the
       // channel anyway, because the charge below runs only for a quote that is ok.
       let openAmount = amount;
-      if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc: false, assetId, months, ...lim }); }
+      if (!q.ok && q.min != null && amount < q.min) { openAmount = q.min; q = quoteInboundFee(openAmount, { isBtc, assetId, months, ...lim }); }
       else if (!q.ok && q.max != null && amount > q.max) return send(res, 400, { ok: false, error: q.reason, min: q.min, max: q.max });
       // The service keeps the channel open until then; after it, it may close it.
       const until = expiresAt(Date.now(), months);
@@ -5188,7 +5233,7 @@ const server = http.createServer(async (req, res) => {
             // 402: the request is well-formed, the payment is what is missing. Hand back the price,
             // what was seen of the payment, and the address, so the caller can tell waiting for a
             // confirmation from a payment too small, and pay and retry without re-quoting.
-            let payTo = null; try { payTo = await inboundFeeAddress(); } catch {}
+            let payTo = null; try { payTo = await inboundFeeAddress(assetId); } catch {}
             return send(res, 402, { ok: false, error: String((e && e.message) || e), paid: e && e.paid != null ? e.paid : null,
               least, fee: q.fee, already_owed: owed, due_now: due, pay_to: payTo, asset: assetId, mode });
           }
