@@ -108,7 +108,9 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   Bitcoin testnet4's fee estimates; a testnet4 estimate above 50 sat/vB is someone flooding
   testnet4 and is not followed. **Max** fills
   an amount with everything that can be sent after the fee. Every send shows a review dialog
-  before broadcast.
+  before broadcast. A Lightning card pays an invoice from the hosted node. When the wallet has
+  none (or too little) of the invoice's asset on Lightning, it says so before asking the node,
+  and offers **Move to Lightning** when the asset is on-chain.
 - **Receive**: one address for both chains. The default is the non-confidential `tb1...` form,
   which is Bitcoin-compatible: the same address receives parent-chain BTC and Sequentia assets.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
@@ -123,6 +125,9 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   arrive, counting only channels that are open: room still opening (bought with a Move to
   Lightning or on its own, about a block away) reads "ready to receive in about a minute", and
   no invoice is made for more than the open channels can take, since nobody could pay it.
+  Where an asset cannot arrive over Lightning yet, the card says what to do in one sentence
+  and offers the step, in every mode: **Move to Lightning** when the asset has no channel (the
+  move asks for room to receive in the same step), **Add room to receive** when it has one.
   Once the invoice is paid, the card reads "Received" with the amount, as soon as the hosted
   node lists the payment.
 - **Swap** (the Trade tab): see below.
