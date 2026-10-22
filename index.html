@@ -548,6 +548,7 @@
   .swlrow:hover{background:#1d242d;filter:none;transform:none} .swlrow.picked{outline:1.5px solid var(--amber2);outline-offset:-1.5px}
   .swlrow.noclick{cursor:default} .swlrow.noclick:hover{background:transparent}
   .lnmove-banner{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 14px;font:12.5px/1.4 inherit;color:var(--txt);box-shadow:0 6px 20px rgba(0,0,0,.35);max-width:92vw}
+  .lnmove-banner .x{background:none;border:0;color:var(--dim);cursor:pointer;font-size:14px;line-height:1;padding:2px 0 2px 6px} .lnmove-banner .x:hover{color:var(--txt)}
   /* Your own resting orders, marked inline in the book (a subtle amber left-rail + a "you" tag). */
   .swlrow.mine{background:rgba(240,185,66,.09)} .swlrow.mine:hover{background:rgba(240,185,66,.16)}
   .swlrow.mine::before{content:"";position:absolute;left:0;top:3px;bottom:3px;width:2.5px;border-radius:2px;background:var(--amber2);z-index:2}
@@ -5190,16 +5191,24 @@ function moveToLightningDialog(leg){
   };
 }
 
-// A small persistent banner shown while a Move-to-Lightning is finishing in the background (the
-// modal has been closed but the deposit is on the node and the channel open is still completing,
-// via the running job or resumeMove on the next open). Driven purely by the persisted move state,
-// so it is correct across reloads; cleared when the move completes.
+// A small banner shown while a Move-to-Lightning is finishing in the background (the modal has
+// been closed but the deposit is on the node and the channel open is still completing, via the
+// running job or resumeMove on the next open). Driven purely by the persisted move state, so it is
+// correct across reloads; cleared when the move completes. Once read it can be closed: the move
+// goes on, and a toast says when the channel is open. Closing is kept on the move's own record, so
+// the next move shows its banner again.
 function updateLnMoveBanner(){
   let b=document.getElementById('_lnMoveBanner');
   const rec=loadMoveState();
-  if(!rec || !rec.ticker){ if(b) b.remove(); return; }
+  if(!rec || !rec.ticker || rec.bannerClosed){ if(b) b.remove(); return; }
   if(!b){ b=el('div'); b.id='_lnMoveBanner'; b.className='lnmove-banner'; document.body.appendChild(b); }
-  b.innerHTML='<span class="spin"></span><span>Opening your '+esc(rec.ticker)+' Lightning channel in the background…</span>';
+  b.innerHTML='<span class="spin"></span><span>Opening your '+esc(rec.ticker)+' Lightning channel in the background. We’ll let you know when it’s open.</span>'
+    +'<button class="x" title="Close" aria-label="Close">✕</button>';
+  b.querySelector('.x').onclick=()=>{
+    const cur=loadMoveState();
+    if(cur){ cur.bannerClosed=true; saveMoveState(cur); }
+    b.remove();
+  };
 }
 // Hand the Swap module everything it needs from the app: the wasm classes, the
 // live wallet/signer/network handles (read fresh via getters so a re-open keeps
