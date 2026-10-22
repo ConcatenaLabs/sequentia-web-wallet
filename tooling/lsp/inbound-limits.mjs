@@ -84,6 +84,20 @@ export function lpFreeAtoms(listfunds, assetId, policyHex = '') {
   return atoms;
 }
 
+// Room the user's node already has from the LP, enough for `needMsat`: a channel that is open
+// (CHANNELD_NORMAL), else one still opening for that much (AWAITING_LOCKIN and the like; a channel
+// closing or closed, CLOSINGD_* and AWAITING_UNILATERAL included, is not room). `channels` is the
+// user node's listpeerchannels. One rule for the quote and the open: the quote refuses before any
+// fee is paid for room the open would not add.
+// Returns { channel, pending } or null.
+export function roomAlreadyThere(channels, lpId, needMsat) {
+  const from = (channels || []).filter((c) => lpId && c.peer_id === lpId && Number(c.receivable_msat || 0) >= needMsat);
+  const ready = from.find((c) => c.state === 'CHANNELD_NORMAL');
+  if (ready) return { channel: ready, pending: false };
+  const opening = from.find((c) => c.state !== 'CHANNELD_NORMAL' && !/CLOS|ONCHAIN|UNILATERAL|FUNDING_SPEND/i.test(String(c.state || '')));
+  return opening ? { channel: opening, pending: true } : null;
+}
+
 // A prepaid fee this node paid for room in `assetId` whose channel the service has not opened yet
 // (the LP was short of the asset, or the purchase never got that far): { fee_txid, amount, months },
 // the largest such, or null. The quote hands it back, so a wallet uses that fee instead of paying

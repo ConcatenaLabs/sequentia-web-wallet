@@ -50,6 +50,7 @@ test('a fee the service knows was paid and never used is used, from any browser'
   }
   const src = readFileSync(new URL('./tooling/lsp/lsp-server.mjs', import.meta.url), 'utf8');
   assert.match(src, /paid_waiting: paidWaiting,/);
-  assert.match(src, /if \(mode === 'prepaid' && body\.fee_txid\) markFeeOpened\(/);
+  // a fee whose purchase opened nothing (the room was there) stays waiting for the next room
+  assert.match(src, /if \(mode === 'prepaid' && body\.fee_txid && !r\.already_had_inbound\) markFeeOpened\(/);
   assert.match(src, /if \(prior && prior\.opened_at\) return send\(res, 200, \{ ok: true, already_opened: true/);
 });

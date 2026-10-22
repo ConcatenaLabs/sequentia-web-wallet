@@ -112,7 +112,7 @@ import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, asse
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
-import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted } from './inbound-limits.mjs';
+import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted, roomAlreadyThere } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 import { withPaymentHash } from './hold-bolt11.mjs';
@@ -1978,6 +1978,17 @@ async function verifyInboundFeePaid({ txid, assetId, least }) {
   return { ok: true, paid };
 }
 
+// The room a user's node already has from the LP for `amount` (asset sats), as roomAlreadyThere
+// says, or null. Null too when the node or the LP is unknown here: the purchase then says why.
+async function inboundRoomThere(nodeKey, assetId, amount) {
+  const lpId = (CFG.channelPeerAsset || '').split('@')[0];
+  if (!lpId || !(amount > 0)) return null;
+  let userRpc, rec;
+  try { ({ rpc: userRpc, rec } = targetFor('seq', assetId, nodeKey)); } catch { return null; }
+  if (!userRpc || !rec) return null;
+  const pc = await lnrpc('listpeerchannels', [], userRpc).catch(() => ({ channels: [] }));
+  return roomAlreadyThere(pc.channels, lpId, amount * 1000);
+}
 // provisionInbound gives the user's OWN hosted asset node INBOUND liquidity so it
 // can RECEIVE the asset (Move-to-Lightning only funds outbound). The LP (SUBAS_LP_RPC,
 // e.g. ln-asset) connects to the user node and opens a 0-conf asset channel TOWARD it,
@@ -1995,7 +2006,8 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   const need = amount * 1000; // msat
   // Idempotent: reuse an existing NORMAL channel from the LP with enough receivable.
   const pc = await lnrpc('listpeerchannels', [], userRpc).catch(() => ({ channels: [] }));
-  const already = (pc.channels || []).find(c => c.peer_id === lpId && c.state === 'CHANNELD_NORMAL' && Number(c.receivable_msat || 0) >= need);
+  const there = roomAlreadyThere(pc.channels, lpId, need);
+  const already = there && !there.pending ? there.channel : null;
   if (already) return { ok: true, already_had_inbound: true, channel_id: already.channel_id || null, receivable_msat: already.receivable_msat ?? null, fee_msat: 0 };
   // A channel that is ALREADY OPENING for this amount counts. Without this, a request whose channel
   // was still confirming opened ANOTHER one -- the wait below gives up after a bounded time, and the
@@ -2006,9 +2018,7 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   // a force-closing channel masquerade as "inbound already confirming" and the
   // JIT open silently no-op'd (seen live: a buy proceeded with no deliverable
   // channel and unwound at the maker). AWAITING_LOCKIN stays a legit opening state.
-  const opening = (pc.channels || []).find(c => c.peer_id === lpId
-    && c.state !== 'CHANNELD_NORMAL' && !/CLOSE|ONCHAIN|UNILATERAL/i.test(String(c.state || ''))
-    && Number(c.receivable_msat || 0) >= need);
+  const opening = there && there.pending ? there.channel : null;
   if (opening) {
     return { ok: true, already_had_inbound: true, pending: true, state: opening.state,
       channel_id: opening.channel_id || null, receivable_msat: opening.receivable_msat ?? null, fee_msat: 0,
@@ -5091,6 +5101,17 @@ const server = http.createServer(async (req, res) => {
         if (short) { logRefused(assetId, q.amount, url.searchParams.get('node_key') || '', 'quote'); q = { ...q, ok: false, ...short }; }
       }
       const nodeKey = url.searchParams.get('node_key') || '';
+      // Room this node already has (or has opening) for this amount is not sold again: the open
+      // would add nothing (provisionInbound's already_had_inbound), so a fee paid for it bought
+      // nothing. Refused here, before any payment, with what the node can already receive.
+      if (q.ok && nodeKey && !isBtc) {
+        const there = await inboundRoomThere(nodeKey, assetId, q.amount);
+        if (there) q = { ...q, ok: false, already_have_room: true, pending: there.pending,
+          receivable: Math.floor(Number(there.channel.receivable_msat || 0) / 1000),
+          reason: there.pending
+            ? 'a channel with this much room to receive is already opening to this node; it is ready in about a block'
+            : `this node can already receive ${Math.floor(Number(there.channel.receivable_msat || 0) / 1000)} in one channel; ask for more room than that` };
+      }
       const owed = nodeKey ? debtOwed(nodeKey, isBtc ? '' : assetId) : 0;
       // A fee this node already paid for room in this asset that was never opened.
       const paidWaiting = nodeKey && !isBtc ? paidWaitingFee(inboundFees, nodeKey, assetId) : null;
@@ -5191,11 +5212,13 @@ const server = http.createServer(async (req, res) => {
         // to open would be billing for nothing. An idempotent no-op is not a new sale either.
         let nowOwed = owed;
         if (mode === 'deferred' && q.ok && !r.already_had_inbound && CFG.inboundFeeBps > 0) nowOwed = debtAdd(body.node_key, assetId, q.fee);
-        if (mode === 'prepaid' && body.fee_txid) markFeeOpened(body.fee_txid, { room: openAmount, channel_id: r.channel_id || null });
+        // A fee whose purchase opened nothing stays the node's, waiting (paid_waiting in the quote),
+        // for the next room it buys.
+        if (mode === 'prepaid' && body.fee_txid && !r.already_had_inbound) markFeeOpened(body.fee_txid, { room: openAmount, channel_id: r.channel_id || null });
         // A sale is a channel that exists now and did not before.
         if (!r.already_had_inbound) appendLine(SALES_FILE, { at: Date.now(), asset: assetId, room: openAmount, months,
           fee: q.ok ? q.fee : 0, mode, rate: await feeRateNow(assetId).catch(() => null), expires_at: until });
-        return send(res, 200, { ...r, fee_charged: mode === 'prepaid' ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode,
+        return send(res, 200, { ...r, fee_charged: mode === 'prepaid' && !r.already_had_inbound ? due : 0, fee_owed: mode === 'deferred' ? nowOwed : 0, mode,
           months, expires_at: until });
       } catch (e) {
         if (e && e.lp_short) return send(res, 503, { ok: false, error: e.message, lp_short: true, fundable: e.fundable, asset: assetId });
