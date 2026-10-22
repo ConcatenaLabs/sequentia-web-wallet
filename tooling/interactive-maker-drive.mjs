@@ -7,7 +7,11 @@
 // A wallet holding 1,000 USDX in the clear buys tSEQ with 37 USDX at market, on the Unblinded book:
 //
 //   honest    the market order fills: one swap transaction in a block, the wallet gets exactly
-//             100 tSEQ and pays 37 USDX and its fee, and the maker gets exactly 37 USDX;
+//             100 tSEQ and pays 37 USDX and its fee, and the maker gets exactly 37 USDX. With
+//             the review's box unticked every output paying the wallet is at its usual address
+//             in the clear; ticked, the maker blinds the one that pays it;
+//   blinded-coins  the wallet's USDX sits at its blinded address: with the box unticked the
+//             order is refused before anything is sent, saying why, and nothing moves;
 //   shortpay  the maker answers with a swap that pays the wallet one atom less (and keeps it);
 //   blind     the maker answers with the output that pays the wallet blinded to a key of its own.
 //
@@ -31,9 +35,10 @@ import { startChain, startInteractiveMaker, startBackends } from './interactive-
 const { SEQUENTIA_BIN, SEQOBD, OCEAND, SEQOB_MAKER, SEQOB_OCTL } = process.env
 if (!SEQUENTIA_BIN || !SEQOBD || !OCEAND || !SEQOB_MAKER || !SEQOB_OCTL) { console.log('skipped: set SEQUENTIA_BIN, SEQOBD, OCEAND, SEQOB_MAKER and SEQOB_OCTL'); process.exit(0) }
 const args = process.argv.slice(2)
-const MODE = args.find((a) => ['honest', 'shortpay', 'blind'].includes(a)) || 'honest'
+const MODES = ['honest', 'shortpay', 'blind', 'blinded-coins']
+const MODE = args.find((a) => MODES.includes(a)) || 'honest'
 const TICK = args.includes('--tick')
-const EVIDENCE = args.find((a) => !a.startsWith('--') && !['honest', 'shortpay', 'blind'].includes(a)) || null
+const EVIDENCE = args.find((a) => !a.startsWith('--') && !MODES.includes(a)) || null
 if (EVIDENCE) mkdirSync(EVIDENCE, { recursive: true })
 const tag = `${MODE}${TICK ? '-tick' : ''}`
 const work = mkdtempSync(join(tmpdir(), 'wallet-interactive-'))
@@ -49,7 +54,7 @@ try {
   const SEQ = chain.policy, Y = chain.Y
   maker = await startInteractiveMaker({ chain, oceand: OCEAND, seqobMaker: SEQOB_MAKER, seqobOctl: SEQOB_OCTL, work,
     give: { asset: SEQ, atoms: 1000n * COIN }, want: { asset: Y, atoms: 370n * COIN }, fund: [{ asset: Y, amount: 1 }],
-    env: MODE === 'honest' ? {} : { SEQOB_HOSTILE: MODE }, log: note })
+    env: ['shortpay', 'blind'].includes(MODE) ? { SEQOB_HOSTILE: MODE } : {}, log: note })
   const assets = { [SEQ]: ['tSEQ', 'Sequence (test)', 8], [Y]: ['USDX', 'Dollar (test)', 8] }
   be = await startBackends({ chain, assets, prices: { USDX: 1, tSEQ: 0.37, tBTC: 84200 } })
   note(`the page and its backends at ${be.url}`)
@@ -69,7 +74,14 @@ try {
   await ev("document.querySelector('[data-tab=receive]').click()")
   const addr = await page.waitFor("(()=>{const t=document.getElementById('addr').innerText; return /^ert1/.test(t) ? t : ''})()", 30000)
   note(`the wallet's address ${addr}`)
-  await chain.fund(addr, Y, 1000); await chain.mine(1)
+  let fundTo = addr
+  if (MODE === 'blinded-coins') {
+    await ev("document.getElementById('btnConf').click()")
+    fundTo = await page.waitFor("(()=>{const t=document.getElementById('addr').innerText; return /^el1/.test(t) ? t : ''})()", 30000)
+    await ev("document.getElementById('btnConf').click()")
+    note(`funded at the wallet's blinded address ${fundTo}`)
+  }
+  await chain.fund(fundTo, Y, 1000); await chain.mine(1)
 
   // The coins the node sees at the wallet's address, by asset (explicit outputs only).
   const held = async () => {
@@ -167,7 +179,10 @@ try {
   note(`the page's own figures after the trade: ${figures}`)
   await shot('balance')
 
-  if (MODE === 'honest') {
+  if (MODE === 'blinded-coins') {
+    check('refused before anything was sent, saying why', outcome.startsWith('refused') && /held at a blinded address/.test(outcome), outcome)
+    check('nothing moved', /tSEQ 0,/.test(figures) && /USDX 1,000$/.test(figures), figures)
+  } else if (MODE === 'honest') {
     check('the market order filled', outcome.startsWith('filled'))
     const txid = (outcome.match(/([0-9a-f]{18})…/) || [])[1]
     const blocks = await chain.call('getblockcount')
@@ -177,7 +192,22 @@ try {
     if (tx) {
       for (const o of tx.vout) note(`  out ${o.n}: ${o.value != null ? o.value + ' ' + String(o.asset).slice(0, 8) + ' in the clear' : 'blinded'} -> ${o.scriptPubKey.address || o.scriptPubKey.type || 'fee'}`)
       if (EVIDENCE) writeFileSync(join(EVIDENCE, `web-interactive-${tag}-tx.json`), JSON.stringify(tx, null, 1))
+      // The swap pays a fresh address of the wallet: the one its receive output (100 tSEQ) pays.
+      const atoms = (o) => BigInt(Math.round(o.value * 1e8))
+      const rcv = tx.vout.find((o) => o.asset === SEQ && o.value != null && atoms(o) === 100n * COIN)
+      const at = rcv && rcv.scriptPubKey.address
+      const mine = at ? tx.vout.filter((o) => o.scriptPubKey && o.scriptPubKey.address === at) : []
+      if (!TICK) {
+        check('the 100 tSEQ are paid in the clear at an unblinded address of the wallet', !!rcv && (await chain.call('getaddressinfo', [at])).iswitness, at || '')
+        check('every output paying the wallet is there, in the clear: the tSEQ and the USDX change', mine.length >= 2 && mine.every((o) => o.value != null && o.asset), `${mine.length} outputs`)
+        const change = mine.filter((o) => o.asset === Y).reduce((t, o) => t + atoms(o), 0n)
+        const paid = 1000n * COIN - change
+        check('37 USDX and a fee under 0.01 USDX paid', paid > 37n * COIN && paid < 37n * COIN + COIN / 100n, String(paid))
+      } else {
+        check('ticked: the output paying the tSEQ is blinded', tx.vout.some((o) => o.value == null) && dS === 0n, String(dS))
+      }
     }
+    check('the page counts 100 tSEQ', /tSEQ 100,/.test(figures), figures)
     let m1
     for (let i = 0; i < 60; i++) { m1 = await maker.balance(); if ((m1[Y]?.total || 0n) > (m0[Y]?.total || 0n)) break; await sleep(500) }
     const mY = (m1[Y]?.total || 0n) - (m0[Y]?.total || 0n), mS = (m0[SEQ]?.total || 0n) - (m1[SEQ]?.total || 0n)
