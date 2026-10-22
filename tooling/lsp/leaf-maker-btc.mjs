@@ -34,6 +34,7 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { clnRpc, clnBitcoinWallet } from '../cln-rpc.mjs'
 import { needSeconds, EXTRA_BLOCKS, INVOICE_LEFT_SECONDS } from '../../user-trade-btc.js'
+import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
@@ -96,30 +97,44 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     return out
   }
 
+  // A pair's ladder now (leaf-maker-ladder.mjs): what the desk can give of it, in slices.
+  function slicesFor (p0, spendable, margin, held = reserved()) {
+    const p = pairOf(p0.give, p0.want)
+    if (!p) return null
+    let have = p.give === 'BTC' ? sats - big(b.keep_sats ?? 100000) - (held.get('BTC') || 0n)
+      : (spendable.get(p.give) || 0n) - (held.get(p.give) || 0n) - big(perAsset(margin, p.give, 0))
+    // BTC given only for as much of the asset as the operator's cap lets the maker receive, at the
+    // ladder's worst rate.
+    const lad = ladderOf(p0, cfg)
+    const cap = p.give === 'BTC' ? caps.get(p.want) : null
+    if (cap) {
+      const worst = ceilDiv(big(p.rate_num) * BigInt(10000 + lad.stepBps * (lad.levels - 1)), 10000n)
+      const fits = (cap.headroom * 9n / 10n) * big(p.rate_den) / worst
+      if (fits < have) have = fits
+    }
+    const min = big(p.min_give || 1)
+    const slices = slicesOf(p, have, min, lad)
+    return slices.length ? { slices, min, pair: p } : null
+  }
+
   function quotes (spendable, margin) {
     const held = reserved(), out = []
     for (const p0 of b.pairs || []) {
-      const p = pairOf(p0.give, p0.want)
-      if (!p) continue
-      let have = p.give === 'BTC' ? sats - big(b.keep_sats ?? 100000) - (held.get('BTC') || 0n)
-        : (spendable.get(p.give) || 0n) - (held.get(p.give) || 0n) - big(margin)
-      // BTC given only for as much of the asset as the operator's cap lets the maker receive.
-      const cap = p.give === 'BTC' ? caps.get(p.want) : null
-      if (cap) { const fits = (cap.headroom * 9n / 10n) * big(p.rate_den) / big(p.rate_num); if (fits < have) have = fits }
-      const min = big(p.min_give || 1)
-      if (have < min) continue
-      out.push({ give_asset: p.give, want_asset: p.want, rate_num: String(p.rate_num), rate_den: String(p.rate_den), min_give: String(min), max_give: String(have) })
+      const sl = slicesFor(p0, spendable, margin, held)
+      if (sl) out.push(...ladderQuotes(p0.give, p0.want, sl.slices, sl.min))
     }
     return out
   }
 
   async function firm (body, spendable, margin) {
-    const p = pairOf(body.give_asset, body.want_asset)
+    const p0 = (b.pairs || []).find((x) => x.give === body.give_asset && x.want === body.want_asset)
+    const p = p0 ? pairOf(p0.give, p0.want) : null
     if (!p) return [404, { error: 'the maker quotes no such pair' }]
-    const q = quotes(spendable, margin).find((x) => x.give_asset === p.give && x.want_asset === p.want)
     const give = big(body.give)
-    if (!q || give < big(q.min_give) || give > big(q.max_give)) return [409, { error: 'the maker does not hold that much now', quote: q || null }]
-    const want = ceilDiv(give * big(p.rate_num), big(p.rate_den))
+    const sl = slicesFor(p0, spendable, margin)
+    const w = sl && give >= sl.min ? walkWant(sl.slices, give) : null
+    if (!w) return [409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(p0.give, p0.want, sl.slices, sl.min).pop() : null }]
+    const want = w.want
     const id = `btc-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
     const ttl = (cfg.offer_ttl_seconds ?? 300)
     if (p.give === 'BTC') {
