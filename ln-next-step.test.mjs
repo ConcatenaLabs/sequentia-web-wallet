@@ -19,7 +19,7 @@ function world ({ status, onchain = {}, btc = 0n, rates = { [USDX]: 1 }, spend =
     feeRateEntry: (h) => (rates[h] ? { rate: rates[h] } : null),
     balObj: () => Object.fromEntries(Object.entries(onchain).map(([k, v]) => [k, String(v)])),
     lnOnLightning: (h) => !!onLn[h], lnOpeningFor: (h) => !!opening[h],
-    lnSpendableFor: (h) => ({ units: spend[h] || 0 }),
+    lnSendableNow: (h) => ({ units: spend[h] || 0 }),
     lnLegFor: (h) => ({ asset: h }),
     moveToLightningDialog: (leg) => calls.push(['move', leg.asset ?? leg.kind]),
     lnReceiveRoomDialog: (leg) => calls.push(['room', leg.asset]),
@@ -52,6 +52,8 @@ test('enough on Lightning pays; too little says how much; opening says when; unk
   assert.equal(world({ status: STATUS, spend: { [USDX]: 1000 } }).lnPayShortfall(USDX, 'x'), null)
   assert.equal(world({ status: null }).lnPayShortfall(USDX, 'x'), null)
   assert.match(world({ status: STATUS, opening: { [USDX]: true } }).lnPayShortfall(USDX, 'x').text, /ready to pay in about a minute/)
+  assert.equal(world({ status: STATUS, opening: { BTC: true } }).lnPayShortfall('BTC', 'x').text,
+    'Your BTC on Lightning is ready to pay once a Bitcoin block confirms its channel. Pay the invoice then.')
   const src = fn('lnPayShortfall')
   assert.match(src, /'You can pay up to '\+fmtAtoms\(can, prec\)\+' '\+t\+' over Lightning now; this invoice asks for '/)
 })

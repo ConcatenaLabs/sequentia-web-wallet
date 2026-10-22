@@ -3516,7 +3516,7 @@ function userBtcLightning(){
     lsp: { invoice: seqlnNodeInvoice, invoiceStatus: seqlnInvoiceStatus, settle: seqlnNodeSettle, pay: seqlnNodePay,
       payStatus: seqlnNodePayStatus, payQuote: seqlnNodePayQuote },
     nodeKey: ()=> connect(), connect,
-    spendable: async ()=> { try{ await refreshLnStatus(); }catch{} return lnSpendableFor('BTC').units; },
+    spendable: async ()=> { try{ await refreshLnStatus(); }catch{} return lnSendableNow('BTC').units; },
     // Read fresh: the node may just have come up, or room been opened to it.
     receivable: async ()=> { try{ await refreshLnStatus(); }catch{} return lnReceivableFor('BTC'); },
     decode: (s)=> decodeBolt11(s),
@@ -4252,6 +4252,19 @@ function lnSpendableFor(kind /* 'BTC' | assetHex */){
   }
   return { units, channels: n };
 }
+// What the wallet's own channels for a leg can send NOW: open channels only. A channel still
+// opening (CHANNELD_AWAITING_LOCKIN) already holds the coins, and lnSpendableFor counts them in the
+// balance, but it sends nothing until its funding confirms: "You can send" said 1.9 BTC while the
+// only BTC channel was still waiting for its block. Same shape as lnSpendableFor.
+function lnSendableNow(kind /* 'BTC' | assetHex */){
+  let units = 0, n = 0;
+  for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
+    if(!c.node_key || c.state!=='CHANNELD_NORMAL') continue;
+    const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
+    if(kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase())){ units += Number(c.spendable_units||0); n++; }
+  }
+  return { units, channels: n };
+}
 // The wallet's share of its own channels for a leg, the reserve included: its Lightning balance. An
 // LSP that predates balance_units reports only what can be sent, which stands in for it.
 function lnBalanceFor(kind /* 'BTC' | assetHex */){
@@ -4766,11 +4779,11 @@ function lnSayStep(box, text, step){
 function lnPayShortfall(hex, bolt11){
   if(!lnLastStatus) return null;
   const t=assetMeta(hex).ticker, prec=hex==='BTC' ? 8 : assetMeta(hex).precision;
-  const can=BigInt(Math.floor(Number(lnSpendableFor(hex).units||0)));
+  const can=BigInt(Math.floor(Number(lnSendableNow(hex).units||0)));
   const d=decodeBolt11(bolt11), msat=d && d.ok && d.amountMsat!=null ? BigInt(d.amountMsat) : null;
   const want=msat!=null ? (msat+999n)/1000n : null;
   if(can > 0n && (want==null || want <= can)) return null;
-  if(lnOpeningFor(hex)) return { text:'Your '+t+' on Lightning is ready to pay in about a minute. Pay the invoice then.', step:null };
+  if(lnOpeningFor(hex)) return { text:'Your '+t+' on Lightning is ready to pay '+(hex==='BTC' ? 'once a Bitcoin block confirms its channel' : 'in about a minute')+'. Pay the invoice then.', step:null };
   if(can > 0n) return { text:'You can pay up to '+fmtAtoms(can, prec)+' '+t+' over Lightning now; this invoice asks for '+fmtAtoms(want, prec)+' '+t+'.', step:null };
   const step=lnStepFor(hex);
   return { text: step ? 'You have no '+t+' on Lightning to pay this from. Move some '+t+' to Lightning first; it takes about two minutes.'
@@ -5809,7 +5822,7 @@ function renderBalance(){
   const lnOn = (()=>{ try { return seqlnState().deployed; } catch { return false; } })();
   const btcFunding = !!(lnLastStatus && lnLastStatus.funding && lnLastStatus.funding.btc);
   const lnAtomsFor = (kind)=>{ try { return lnBalanceFor(kind); } catch { return 0n; } };
-  const lnSendFor = (kind)=>{ try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } };
+  const lnSendFor = (kind)=>{ try { return BigInt(Math.round(lnSendableNow(kind).units||0)); } catch { return 0n; } };
   const ownChansFor = (kind)=>{ try { return lnOwnChannelsFor(kind)||[]; } catch { return []; } };
 
   // One row per asset (balRow): the asset; what is on-chain; what is on Lightning, with what it can
@@ -5863,7 +5876,9 @@ function renderBalance(){
       if(opening) l.appendChild(el('div','bt-dim','channel opening'));
       const cap=el('div','bt-cap');
       const line=(k, v, cls)=>{ const d=el('div'); d.appendChild(el('span',null,k+' ')); d.appendChild(el('b',cls||null,v)); cap.appendChild(d); };
-      line('You can send', amt(lnSendFor(kind)));
+      // Like room to receive: nothing to send until a channel is open, said as "not yet".
+      const send=lnSendFor(kind);
+      line('You can send', send>0n ? amt(send) : 'not yet', send>0n ? null : 'none');
       const room=lnReceivableFor(kind);
       line('You can receive', room>0n ? amt(room) : 'not yet', room>0n ? null : 'none');
       l.appendChild(cap);
