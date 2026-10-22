@@ -119,7 +119,10 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   in either the `wpkh(...)` form that matches this wallet's addresses or the legacy `pkh(...)`
   form that `verifymessage` uses. A separate panel appears for OpenAMP restricted-asset
   deposits once the wallet is registered with the enclave. A Lightning card generates an
-  invoice against the hosted node for native BTC or any fee-rated asset.
+  invoice against the hosted node for native BTC or any fee-rated asset. It says how much can
+  arrive, counting only channels that are open: room still opening (bought with a Move to
+  Lightning or on its own, about a block away) reads "ready to receive in about a minute", and
+  no invoice is made for more than the open channels can take, since nobody could pay it.
 - **Swap** (the Trade tab): see below.
 - **Mix**: a CoinJoin round through the seqcj coordinator. The wallet picks the coins, proves
   it owns them, hands out fresh blinded addresses, and verifies the coordinator's transaction

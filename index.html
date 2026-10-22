@@ -4235,15 +4235,36 @@ function lnOpeningFor(kind /* 'BTC' | assetHex */){
   }
   return false;
 }
-// What the wallet's own channels for a leg can still receive, in base units.
+// What the wallet's own channels for a leg can receive now, in base units. Only a channel that is
+// ready (CHANNELD_NORMAL) counts: one still opening (CHANNELD_AWAITING_LOCKIN) already reports its
+// room, but no payment can reach it until its funding confirms, so an invoice made against that
+// room is one nobody can pay.
 function lnReceivableFor(kind /* 'BTC' | assetHex */){
   let units=0;
   for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
-    if(!c.node_key || !String(c.state||'').startsWith('CHANNELD')) continue;
+    if(!c.node_key || c.state!=='CHANNELD_NORMAL') continue;
     const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
     if(kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase())) units += Number(c.receivable_units||0);
   }
   return BigInt(Math.floor(units));
+}
+// Whether room to receive for a leg is on its way: a channel of the wallet's own node that is still
+// opening and has room on it (the room bought with a Move to Lightning, about a block away).
+function lnReceiveOpeningFor(kind /* 'BTC' | assetHex */){
+  for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
+    if(!c.node_key || c.state!=='CHANNELD_AWAITING_LOCKIN' || !(Number(c.receivable_units||0) > 0)) continue;
+    const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
+    if(kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase())) return true;
+  }
+  return false;
+}
+// While room to receive is opening, ask the service again every 20 seconds (for at most ten minutes)
+// so the Receive card turns to "You can receive up to …" by itself, without waiting for a sync.
+let _lnRoomRecheck = null, _lnRoomRechecks = 0;
+function lnRecheckRoomSoon(){
+  if(_lnRoomRecheck || _lnRoomRechecks >= 30) return;
+  _lnRoomRechecks++;
+  _lnRoomRecheck = setTimeout(()=>{ _lnRoomRecheck = null; refreshLnStatus().catch(()=>{}); }, 20000);
 }
 // Room to receive over Lightning, bought from the service: it opens a channel to the wallet's own
 // node with that much on its side, for a fee in the same asset, paid on chain first. The fee is
@@ -4666,8 +4687,11 @@ function refreshLnSendReceive(){
 function lnPaintRecvRoom(){
   const box=$('lnRecvRoom'), sel=$('lnRecvAsset'); if(!box || !sel || !sel.value) return;
   const hex=sel.value, meta=assetMeta(hex), room=lnReceivableFor(hex==='BTC' ? 'BTC' : hex);
+  const soon=lnReceiveOpeningFor(hex==='BTC' ? 'BTC' : hex);
   box.innerHTML='';
-  if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'; return; }
+  if(soon) lnRecheckRoomSoon(); else _lnRoomRechecks=0;
+  if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'+(soon?' More is ready to receive in about a minute.':''); return; }
+  if(soon){ box.textContent='Ready to receive '+meta.ticker+' over Lightning in about a minute.'; return; }
   // User mode offers no room to receive and no Move: the wallet says only where it can receive.
   if(!devMode()){ box.textContent='You cannot receive '+meta.ticker+' over Lightning now. Receive it on-chain with your address above.'; return; }
   box.appendChild(document.createTextNode('You cannot receive '+meta.ticker+' over Lightning yet: a channel needs room for it on the other side. '));
@@ -4718,7 +4742,11 @@ function initLnSendReceive(){
     const room = lnReceivableFor(asset === 'BTC' ? 'BTC' : asset);
     if (asset !== 'BTC' && room < BigInt(amt)){
       st.className = 'status err';
-      st.textContent = !devMode()
+      // Room that is still opening is said as such: the invoice is made once it is ready.
+      st.textContent = lnReceiveOpeningFor(asset)
+        ? (room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. More is ready to receive in about a minute: ask for less, or make the invoice then.'
+                     : 'Ready to receive ' + meta.ticker + ' over Lightning in about a minute. Make the invoice then.')
+        : !devMode()
         ? (room > 0n ? 'You can receive up to ' + fmtAtoms(room, meta.precision) + ' ' + meta.ticker + ' over Lightning now. Ask for less, or receive on-chain.'
                      : 'You cannot receive ' + meta.ticker + ' over Lightning now. Receive it on-chain with your address above.')
         : room > 0n

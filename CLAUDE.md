@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 114 `*.test.mjs` files (91 at the root, 23 under `tooling/lsp/`), and `node --test` runs
+There are 115 `*.test.mjs` files (92 at the root, 23 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
