@@ -163,7 +163,7 @@ export async function startMaker (H, st, dir, { pairs, fund, port, lwk, settleSe
     operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
     ...(exitDelayUnits ? { exit_delay_units: exitDelayUnits, min_exit_delay_units: exitDelayUnits } : {}),
     pairs, fee_margin: '2000', sync_seconds: syncSeconds, settle_seconds: settleSeconds, offer_ttl_seconds: ttl, board_keep: '100000',
-    ...(coinSize ? { coin_size: String(coinSize) } : {}), ...(btc ? { btc } : {}) }
+    ...(coinSize ? { coin_size: typeof coinSize === 'object' ? coinSize : String(coinSize) } : {}), ...(btc ? { btc } : {}) }
   writeFileSync(join(dir, 'maker.json'), JSON.stringify(cfg, null, 2))
   return launchMaker(H, dir, port, fund)
 }
