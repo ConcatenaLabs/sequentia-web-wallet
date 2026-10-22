@@ -170,3 +170,18 @@ test('engine: what can be received for an asset is what the book offers on an ad
   assert.deepEqual((await withBtc.offered(X)).sort(), ['BTC', Y].sort())
   assert.deepEqual(await createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => [], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) }).offered(X), [], 'no maker, no order: nothing offered')
 })
+
+test('engine: a maker quoting levels of one pair is asked for one firm offer, at the level that gives the most', async () => {
+  const s = standIn()
+  const levels = [
+    { give_asset: Y, want_asset: X, rate_num: '4', rate_den: '3', max_give: '100000', min_give: '10000' },   // best rate, shallow
+    { give_asset: Y, want_asset: X, rate_num: '5', rate_den: '3', max_give: '1000000', min_give: '10000' },  // deeper, worse
+    { give_asset: Y, want_asset: X, rate_num: '6', rate_den: '3', max_give: '2000000', min_give: '10000' },
+  ]
+  const fetchJson = async (url, init) => url.endsWith('/v1/quotes') ? { quotes: levels } : s.fetchJson(url, init)
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  // 400,000 at 5/3 gives 240,000, more than the first level's 100,000 cap or 200,000 at 6/3.
+  assert.deepEqual(s.posts.filter(([p]) => p === 'firm').map(([, b]) => b.give), ['240000'], 'one firm offer, at the deeper level')
+})
