@@ -64,6 +64,16 @@
   .ok{color:var(--green)} .err{color:var(--red)}
   a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
+  /* user mode's Trade tab: the user composer only (user-composer.js) */
+  .uc-dev-hidden{display:none!important}
+  .ucomp{display:flex;flex-direction:column;gap:12px;max-width:520px}
+  .ucomp .uc-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .ucomp .uc-row .lbl{flex-basis:100%}
+  .ucomp .uc-pick{min-width:120px}
+  .ucomp .uc-amount{flex:1;min-width:140px}
+  .ucomp .uc-ticket .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
+  .ucomp .uc-note.err{color:var(--bad,#c33)}
+  .ucomp .uc-trade{display:flex;justify-content:space-between;gap:12px}
   /* The fee section (fee-panel.js), laid out as Sequentia Qt's. */
   .fee-summary{display:flex;align-items:center;gap:10px;justify-content:space-between}
   .fee-adv-btn{padding:6px 12px;font-size:13px}
@@ -792,6 +802,10 @@
     <!-- swap (SeqDEX: one symmetric Pay -> Receive composer; routes to the
          same-chain atomic swap or the cross-chain BTC HTLC wizard automatically) -->
     <section data-panel="swap" class="hide">
+
+      <!-- user mode: the composer is three inputs and one button (user-composer.js); the rest of
+           this tab is developer mode's -->
+      <div id="userComposerRoot" class="hide"></div>
 
       <!-- ===== the composer (the signature) ===== -->
       <div id="swComposer">
@@ -1558,6 +1572,9 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn } from './leaves.js';
 import { mountLeafRail } from './leaf-rail.js';
+import { mountUserComposer } from './user-composer.js';
+import { createEngine as createUserTrade } from './user-trade.js';
+import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
 import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
 import { composerState, setComposerRail } from './swap.js';
 import { mountPageApi } from './wallet-api.js';
@@ -3344,7 +3361,7 @@ function initLeaves(){
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
-    onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
+    onModeChange: (m)=>{ const on = m==='developer'; show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
@@ -3362,9 +3379,100 @@ function initLeaves(){
   leavesApi.start();
   // The composer's Leaf choice (developer mode): settled by the leaf wallet's own commands.
   try{ initLeafRail(); }catch(e){ console.warn('[leaf rail] init failed:', e?.message??e); }
+  // The Trade tab in user mode: the user composer (user-composer.js, user-trade.js).
+  try{ initUserComposer(); }catch(e){ console.warn('[user composer] init failed:', e?.message??e); }
   // The page API: the wallet's mode and leaf rail for code running in this page, and the
   // mode for the wallet's other pages on this origin (wallet-api.js, docs/PAGE_API.md).
   try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
+}
+
+// ---------- user mode: the composer ----------
+// Pay asset, receive asset, one amount, one button: a market trade in one native step, from the
+// single-step book (tooling/lsp/single-step-book.mjs), settled by the wallet's leaf library and
+// followed to "Settled". A pair is offered only once the drill has admitted it on this chain
+// (user-mode/pairs.json). Developer mode keeps the composer below unchanged.
+let userComposer = null, userTrade = null, _userPairs = null;
+async function userModePairs(){
+  if(_userPairs) return _userPairs;
+  const url = (typeof window!=='undefined' && window.SEQ_USER_MODE_PAIRS) || 'user-mode/pairs.json';
+  try { const r = await fetch(url, { cache:'no-store' }); _userPairs = r.ok ? await r.json() : { chains:{} }; } catch { _userPairs = { chains:{} }; }
+  return _userPairs;
+}
+let _genesis = null;
+async function chainGenesis(){
+  if(_genesis) return _genesis;
+  try { const h = await (await fetch(ESPLORA + '/block-height/0', { cache:'no-store' })).text(); if(/^[0-9a-f]{64}$/.test(h.trim())) _genesis = h.trim(); } catch {}
+  if(!_genesis && leavesApi && leavesApi.isOpen()){ try { _genesis = (await leavesApi.command('info')).genesis_hash; } catch {} }
+  return _genesis;
+}
+// The relay's on-chain book for a pair, both orientations, each offer checked and kept with the
+// relay's own JSON (what the leaf library reads an order from).
+async function relayPairBook(base, quote){
+  const get = async (b, q)=>{
+    const r = await fetch(`${seqob.seqobBase()}/v1/market/${b}/${q}/orderbook`, { cache:'no-store' });
+    if(!r.ok) return [];
+    // statuses[i] is the order status of offers[i]: what the order can be filled for now.
+    const j = await r.json();
+    return (j.offers || []).map((o, i)=>{ const raw = JSON.parse(JSON.stringify(o)); seqob.normRelayOffer(o); return { ...o, _verified: seqob.verifyOffer(o), _relayJson: raw, _status: (j.statuses || [])[i] || null }; });
+  };
+  const [a, b] = await Promise.all([get(base, quote), get(quote, base).catch(()=>[])]);
+  const seen = new Set();
+  return [...a, ...b].filter(o=>{ const k=(o.maker_pubkey||'')+':'+(o.offer_id||''); if(seen.has(k)) return false; seen.add(k); return true; });
+}
+function userHeld(a){
+  let n = 0n;
+  try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0)); } catch {}
+  try { if(leavesApi) n += leavesApi.leafAtoms(a) || 0n; } catch {}
+  try { n += BigInt(Math.round(lnSpendableFor(a).units || 0)); } catch {}
+  return n;
+}
+function userKnownAssets(){
+  const s = new Set(['BTC']);
+  try { for(const k of Object.keys(balObj())) s.add(k); } catch {}
+  try { if(leavesApi) for(const k of leavesApi.leafAssets()) s.add(k); } catch {}
+  try { for(const k of Object.keys(REGISTRY_ASSETS || {})) s.add(k); } catch {}
+  try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
+  return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
+}
+function applyTradeMode(){
+  const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
+  const user = !devMode();
+  for(const c of sec.children){ if(c.id === 'userComposerRoot') c.classList.toggle('hide', !user); else c.classList.toggle('uc-dev-hidden', user); }
+  if(user && userComposer){ userComposer.render(); userComposer.follow(); }
+}
+function initUserComposer(){
+  if(userComposer) return;
+  userTrade = createUserTrade({
+    // The leaf wallet's worker answers one command at a time; the composer asks it directly,
+    // without the Leaves tab's reload after each command (which reads five more).
+    leaves: { command: async (cmd, args)=>{
+      if(!leavesApi || !leavesApi.isOpen() || !leavesApi.state || !leavesApi.state.client) throw new Error('this wallet holds no leaves');
+      return (await leavesApi.state.client.run(cmd, args || {})).result;
+    } },
+    fetchJson: async (url, init)=>{
+      const r = await fetch(url, init ? { ...init, headers: { 'content-type':'application/json' } } : { cache:'no-store' });
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      return j;
+    },
+    makers: ()=> (typeof window!=='undefined' && Array.isArray(window.SEQ_LEAF_MAKERS)) ? window.SEQ_LEAF_MAKERS : [location.origin + '/leafmaker'],
+    relayBook: (pay, receive)=> relayPairBook(receive, pay),
+    outputValue: async (txid, vout)=>{
+      const r = await fetch(`${ESPLORA}/tx/${txid}`, { cache:'no-store' }); if(!r.ok) return null;
+      const o = ((await r.json()).vout || [])[vout]; return o && o.value != null ? String(o.value) : null;
+    },
+    admitted: async ()=> ({ pairs: await userModePairs(), genesis: await chainGenesis() }),
+    store: localStorage, tag: walletTag,
+    log: (...a)=> console.log(...a),
+  });
+  userComposer = mountUserComposer({
+    root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, parseAtoms,
+    knownAssets: userKnownAssets, held: userHeld,
+    admittedReceives: (pay)=> admittedReceives(_userPairs, _genesis, pay),
+  });
+  // The pairs and the chain are read once; the composer draws when they are in.
+  Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
+  applyTradeMode();
 }
 
 // ---------- developer mode: the composer's leaf rail ----------
