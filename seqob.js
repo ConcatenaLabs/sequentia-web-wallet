@@ -523,10 +523,28 @@ export function normRelayOffer(o){
   }
   return o;
 }
+// What each resting offer can still be filled for, in base atoms, as the relay reports it (the
+// book's statuses, and order_status deltas on the live book): a part fill lowers it while the
+// offer's signed amounts stay as signed, and a take past it is refused by the relay ("take_amount
+// exceeds active_amount"). Keyed by maker:offer_id; read with offerActive().
+const _active = new Map();
+function noteActive(st){
+  const id = st && (st.offer_id || st.offerId), mk = st && (st.maker_pubkey || st.makerPubkey);
+  const a = st && (st.active_amount ?? st.activeAmount);
+  if (!id || a == null) return;
+  _active.set(String(mk || '').toLowerCase() + ':' + id, BigInt(a));
+}
+// The offer's remaining size in base atoms: what the relay last said, never above what it signed.
+export function offerActive(o){
+  const base = BigInt(o.base_amount ?? o.baseAmount ?? 0);
+  const a = _active.get(String(o.maker_pubkey || o.makerPubkey || '').toLowerCase() + ':' + (o.offer_id || o.offerId));
+  return (a == null || a > base) ? base : (a < 0n ? 0n : a);
+}
 export async function fetchBook(baseAsset, quoteAsset, opts){
   const conf = !!(opts && opts.confidential);
   const q = conf ? '?confidential=1' : '';
   const j = await getJSON(`/v1/market/${baseAsset}/${quoteAsset}/orderbook${q}`, conf ? SEQOB_CONF : undefined);
+  for (const st of (j.statuses || j.Statuses || [])) noteActive(st);
   const offers = (j.offers || j.Offers || []).map(o => { normRelayOffer(o); return { ...o, _verified: verifyOffer(o) }; });
   return { pair: j.pair || { base_asset: baseAsset, quote_asset: quoteAsset }, offers };
 }
@@ -758,6 +776,7 @@ export function openRelay(markets, handlers){
     }
     if (created && handlers.onOfferCreated){ try { normRelayOffer(created); handlers.onOfferCreated({ ...created, _verified: verifyOffer(created) }); } catch {} }
     if (matched && handlers.onMatched)         { try { handlers.onMatched(matched); } catch {} }
+    if (status) noteActive(status);
     if (status && handlers.onOrderStatus)      { try { handlers.onOrderStatus(status); } catch {} }
     if (removed && handlers.onOfferRemoved)    { try { handlers.onOfferRemoved(removed); } catch {} }
     if (m.error && handlers.onError)           { try { handlers.onError(m.error); } catch {} }
@@ -789,4 +808,4 @@ export function makerKeyFromSeed(seedHex){
 }
 
 // test surface
-export const __test__ = { encodeSwapRequest, decodeSwapAccept, encodeSwapComplete, canonicalOfferBytes, encodeCovenantTerms, signOffer, verifyOffer, bytesToHex, hexToBytes, derEncode, derDecode };
+export const __test__ = { noteActive, encodeSwapRequest, decodeSwapAccept, encodeSwapComplete, canonicalOfferBytes, encodeCovenantTerms, signOffer, verifyOffer, bytesToHex, hexToBytes, derEncode, derDecode };
