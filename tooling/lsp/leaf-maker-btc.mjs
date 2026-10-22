@@ -39,7 +39,10 @@ import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-mak
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
 const HEX = /^[0-9a-f]{64}$/
-const OPEN = new Set(['offered', 'locked', 'paying', 'claiming'])
+const OPEN = new Set(['offered', 'locking', 'locked', 'paying', 'claiming'])
+// How long a payment the maker began may go unrecorded by its library before the swap is offered
+// again, so the wallet's next lock pays it.
+const LOCKING_SECONDS = 120
 
 export function checkBtcConfig (b) {
   if (!b) return null
@@ -54,6 +57,7 @@ export function checkBtcConfig (b) {
 export async function btcDesk ({ cfg, cmd, log, liveRates }) {
   const b = checkBtcConfig(cfg.btc)
   if (!b) return null
+  const lockingMs = Number(b.locking_seconds ?? LOCKING_SECONDS) * 1000
   const node = clnBitcoinWallet(clnRpc(b.rpc))
   const file = join(cfg.store_dir, 'btc-swaps.json')
   const swaps = new Map(existsSync(file) ? Object.entries(JSON.parse(readFileSync(file, 'utf8'))) : [])
@@ -95,7 +99,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     for (const s of swaps.values()) {
       if (!OPEN.has(s.state)) continue
       if (s.give_asset === 'BTC' && ['offered', 'paying'].includes(s.state)) out.set('BTC', (out.get('BTC') || 0n) + big(s.give))
-      if (s.give_asset !== 'BTC' && s.state === 'offered') out.set(s.give_asset, (out.get(s.give_asset) || 0n) + big(s.give))
+      if (s.give_asset !== 'BTC' && ['offered', 'locking'].includes(s.state)) out.set(s.give_asset, (out.get(s.give_asset) || 0n) + big(s.give))
     }
     return out
   }
@@ -180,19 +184,32 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
   async function lock (body) {
     const s = swaps.get(String(body.swap || ''))
     if (!s || s.give_asset === 'BTC') return [404, { error: 'no such swap' }]
+    // A payment begun and not recorded within LOCKING_SECONDS is offered again (tick), and a lock
+    // asked while one is under way answers its state: the swap is paid once.
+    if (s.state === 'locking' && Date.now() - (s.locking_at || 0) > lockingMs) s.state = 'offered'
     if (s.state !== 'offered') return [200, { swap: s.swap, state: s.state }]
     if (Date.now() > s.expires) return [409, { error: 'the offer lapsed' }]
     // The maker's own coins can move between its quote and its payment (a board, a settle, another
     // swap): the payment is then quoted again, for the same invoice, and made on the new quote.
-    s.state = 'locked'; s.invoice_x = body.invoice; save()
+    // The swap is 'locking' while the library pays, and 'locked' only once it has: a payment that
+    // never completes (no coin free to spend it) cannot leave the swap 'locked' and unpaid.
+    // Each attempt carries its own token: a call that returns or fails after a later attempt took
+    // over changes nothing.
+    const attempt = Date.now() + ':' + Math.random().toString(16).slice(2, 8)
+    s.state = 'locking'; s.locking_at = Date.now(); s.attempt = attempt; s.invoice_x = body.invoice; save()
+    const mine = () => s.attempt === attempt && s.state === 'locking'
+    const back = () => { if (mine()) { s.state = 'offered'; save() } }
     for (let i = 0; ; i++) {
-      const q = await cmd('lightning_pay_quote', { invoice: String(body.invoice || ''), asset: s.give_asset }, true)
-      if (q.payment_hash !== s.hash || q.asset !== s.give_asset || q.amount !== s.give) { s.state = 'offered'; save(); return [409, { error: 'the invoice is not for this swap' }] }
+      let q
+      try { q = await cmd('lightning_pay_quote', { invoice: String(body.invoice || ''), asset: s.give_asset }, true) } catch (e) { back(); throw e }
+      if (q.payment_hash !== s.hash || q.asset !== s.give_asset || q.amount !== s.give) { back(); return [409, { error: 'the invoice is not for this swap' }] }
+      if (!mine()) return [200, { swap: s.swap, state: s.state }]
       try { await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true); break } catch (e) {
-        if (i < 2 && /changed since it was shown/.test(String(e.message))) continue
-        s.state = 'offered'; save(); throw e
+        if (i < 2 && /changed since it was shown/.test(String(e.message)) && mine()) continue
+        back(); throw e
       }
     }
+    if (mine() || s.state === 'offered') { s.state = 'locked'; save() }
     log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8))
     return [200, { swap: s.swap, state: s.state }]
   }
@@ -250,6 +267,13 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
       return
     }
     // The maker gives an asset.
+    // A payment its library records is a lock, whenever it was made (a pay call that outlived its
+    // request); one begun and never recorded is offered again after LOCKING_SECONDS.
+    if ((s.state === 'offered' || s.state === 'locking') && pay.state) { s.state = 'locked'; log('btc locked', s.swap, 'payment recorded') }
+    if (s.state === 'locking') {
+      if (Date.now() - (s.locking_at || 0) > lockingMs) { s.state = 'offered'; log('btc swap', s.swap, 'its payment never began: offered again') }
+      return
+    }
     if (s.state === 'offered') {
       if (Date.now() > s.expires) { s.state = 'lapsed'; node.cancelInvoice(s.hash).catch(() => {}) }
       return
