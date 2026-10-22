@@ -172,10 +172,9 @@ check('user_limit_not_overwritten',
 
   // -- the locked amount comes from the coin, not the relay's advertisement --
   builtRecipe = null;
-  await settleFill({ ...matched, fill_base_amount: String(30n*100000000n) },
-    { ...fillHooks, fetchUtxoValue: async () => 60n*100000000n });
-  check('settle_locked_from_chain', builtRecipe && String(builtRecipe.covenantLocked), String(60n*100000000n));
-  check('settle_remainder_from_chain', builtRecipe && String(builtRecipe.remainderValue), String(30n*100000000n));
+  await settleFill(matched, { ...fillHooks, fetchUtxoValue: async () => 180n*100000000n });
+  check('settle_locked_from_chain', builtRecipe && String(builtRecipe.covenantLocked), String(180n*100000000n));
+  check('settle_remainder_from_chain', builtRecipe && String(builtRecipe.remainderValue), String(90n*100000000n));
   let short = false;
   try { await settleFill(matched, { ...fillHooks, fetchUtxoValue: async () => 60n*100000000n }); } catch { short = true; }
   ok('settle_refuses_fill_over_held', short, 'a fill larger than what the coin holds is refused before building');
