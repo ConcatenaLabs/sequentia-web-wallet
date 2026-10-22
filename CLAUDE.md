@@ -120,8 +120,8 @@ Root is flat: production modules and tests sit side by side.
   operator, covenant, expiry, atom and the rest): its test checks both. A pair reaches user mode
   only through `user-mode/pairs.json`, which only a passing drill run
   (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it: in
-  user mode the tab's other children are hidden (`applyTradeMode` in `index.html`), and only on a
-  page with `window.SEQ_USER_TRADE = true`; without it the full composer serves both modes.
+  user mode the tab's other children are hidden (`applyTradeMode` in `index.html`), except on a
+  page with `window.SEQ_USER_TRADE = false`, where the full composer serves both modes.
 - `xswap.js`, `xrswap.js`, `xcourier.js`, `xmaker.js` — the cross-chain courier path. **These are
   live.** The RFQ client that used to sit alongside them was retired; the `xchain`/`xswap` naming
   survives on code that is very much in use. Do not delete them on the assumption they are dead
