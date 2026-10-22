@@ -4297,6 +4297,10 @@ function lnWaitingFee(q, atoms){
 // refusal, whose "sat" are the asset's atoms. Null for any other failure.
 function lnRoomShortText(x, tk, prec){
   const j = (x && x.body) || x || {};
+  // Room the wallet has already, or has opening: the service sells none on top, and nothing is paid.
+  if(j.already_have_room) return j.pending
+    ? 'Room to receive this much '+tk+' is already opening to you; it is ready in about a minute.'
+    : 'You can already receive up to '+fmtAtoms(BigInt(j.receivable||0), prec)+' '+tk+' over Lightning in one channel. Ask for more room than that.';
   if(j.lp_short){
     const n=BigInt(j.fundable||0);
     return 'The service does not hold enough '+tk+' to open that room to receive right now'
@@ -4479,7 +4483,7 @@ function lnReceiveRoomDialog(leg, startAtoms){
       }
       // The price again, for this node: anything it already owes is due with it.
       const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(last.atoms), node_key: prov.key, months: last.months });
-      if(!q.ok) throw new Error(lnRoomShortText(q, tk, prec) || q.reason || q.error || 'the service gave no price');
+      if(!q.ok) throw Object.assign(new Error(lnRoomShortText(q, tk, prec) || q.reason || q.error || 'the service gave no price'), { body: q });
       const rec={ asset: leg.asset, ticker: tk, amount: Number(last.atoms), months: last.months, node: prov.key, fee_txid: null, at: Date.now() };
       // A fee this node already paid, from this browser or another, for room never opened.
       const waiting=lnWaitingFee(q, last.atoms);
@@ -4981,6 +4985,9 @@ function moveToLightningDialog(leg){
         lnRoomSlotFree();
         say('Pricing the room to receive…');
         const q=await seqlnInboundQuote({ asset: leg.asset, amount: Number(room.atoms), node_key: prov.key, months: room.months });
+        // The room is there already (or opening): nothing to buy, and the move goes ahead without it.
+        if(!q.ok && q.already_have_room) say(lnRoomShortText(q, leg.ticker, leg.precision));
+        else {
         if(!q.ok) throw new Error(lnRoomShortText(q, leg.ticker, leg.precision) || ('room to receive: '+(q.reason || q.error || 'the service gave no price')));
         roomRec={ asset: leg.asset, ticker: leg.ticker, amount: Number(room.atoms), months: room.months, node: prov.key, fee_txid: null, at: Date.now() };
         const waiting=lnWaitingFee(q, room.atoms);
@@ -4993,6 +5000,7 @@ function moveToLightningDialog(leg){
           extra={ address: q.pay_to, amount: due, onTxid: (txid)=>{ roomRec.fee_txid=txid; lnSaveInbound(roomRec); } };
         }
         roomRec.due=due;
+        }
       }
       const res = await lnFundChannel({
         chain: leg.chain, asset: leg.asset || undefined, amount: Number(atoms), node: prov.key, extra,
