@@ -81,7 +81,8 @@ export const REFUSED_WALLETS = /(treasury|reserve|faucet|bridge|sbtc|pool|fee|se
 // `rate_num` atoms of what it wants for every `rate_den` atoms it gives. Null when either price is
 // missing, so nothing is quoted on a price the maker does not have.
 export function rateFromPrices (prices, give, want, spreadBps) {
-  const p = (t) => { const v = prices && prices[String(t.ticker).toUpperCase()]; const n = Number(v && typeof v === 'object' ? v.price : v); return n > 0 ? n : null }
+  // The feed's own key first (it names bitcoin `tBTC` on the testnet), then the ticker in capitals.
+  const p = (t) => { const v = prices && (prices[String(t.ticker)] ?? prices[String(t.ticker).toUpperCase()]); const n = Number(v && typeof v === 'object' ? v.price : v); return n > 0 ? n : null }
   const pg = p(give), pw = p(want)
   if (!pg || !pw) return null
   const DEN = 100000000n
