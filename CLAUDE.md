@@ -58,9 +58,12 @@ nothing of leaves and the page API refuses every leaf method there, but leaves c
 asset's figure and the headline. Each asset's figure counts on-chain, leaves, Lightning and, for
 tSEQ, what is staked (`stakedAtoms` in `index.html`), in both modes; user mode shows that one
 figure with its parts one tap away, and no Move or room to receive. After a sync, at most every ten minutes, `leaves.js` runs the library's `care` (claims taken up,
-refresh plans kept, a plan whose leaf moved cancelled) in either mode, with `claimScan` from the
-page (the kit's next receive index and 20 more); developer mode lists plans with Cancel and
-Release. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
+every leaf of a round planned, a plan whose leaf moved cancelled) in either mode, with `claimScan`
+from the page (the kit's next receive index and 20 more) and `plan_within` set to plan every leaf
+of a round; developer mode lists plans with Cancel and Release (`plan_release`). Every leaf
+command a person or a page starts goes through `paying` in `leaves.js` (the API's `command` and
+`pay`, the user composer's commands included): a refusal of kind `planned` releases the leaves
+it names, waits for their round, and asks again. Keep that one path. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
 answers as the extension's provider answers, and `leaf-request.js` is copied into the
 extension's `src/`: change it here first.
 

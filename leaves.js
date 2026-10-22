@@ -21,13 +21,17 @@
 // at most every ten minutes and at the first sync after the page opens, it takes up
 // every open claim named for one of the wallet's receive keys (scanning the addresses
 // the kit handed out and 20 more), cancels each refresh plan whose coin has moved, and
-// signs a plan for each coin whose refresh step could run within ten days (a coin
-// received or boarded out of round is refreshed into a round first), so that a
-// wallet closed across that coin's expiry keeps it. A coin younger than that stays
-// unplanned, free to pay out of round; a wallet closed within a coin's first two weeks
-// or so and kept closed through its step window can lose the coin to the operator's
-// sweep, as any absent holder can. Developer mode lists distributions, claims and plans,
-// with Cancel, and Release for a planned coin (cancel, then refresh it in a round).
+// signs a plan for every leaf of a round at once (`plan_within`: PLAN_EVERY_ROUND_LEAF),
+// so that a wallet closed across that coin's expiry keeps it, whenever it closes. A coin
+// received or boarded out of round is refreshed into a round first once its refresh
+// could run within ten days, since that refresh costs a fee; it is free to pay until
+// then. A planned coin is paid out of round by no wallet, so a payment the unplanned
+// coins cannot cover is paid through the next round, by itself: the library refuses it
+// naming the planned coins whose release covers it (kind `planned`), the wallet gives
+// those up in the next round (`plan_release`) for leaves of its own no plan names, syncs
+// until that round is final, and asks again. The person waits one round and sees
+// nothing else. Developer mode lists distributions, claims and plans, marks each planned
+// leaf, and has Cancel, and Release (`plan_release` of the plan's current leaf).
 //
 // Nothing about a leaf is computed here. The operator wallet library runs in a
 // dedicated worker (leaves/worker.js, its wasm in leaves/pkg): every script, record,
@@ -78,6 +82,42 @@ export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const TICK_MS = 60_000
 // How often `care` runs at most, after a sync or a tick of the schedule.
 export const CARE_EVERY_MS = 10 * 60_000
+// `care`'s planning reach: every leaf of a round is planned at the first care after it
+// is made (the library's PLAN_EVERY_ROUND_LEAF).
+export const PLAN_EVERY_ROUND_LEAF = 4294967295
+// A payment through a release: how often the wallet syncs while it waits for the round
+// that frees the planned coins, how long it waits at most, and how many releases one
+// payment may need (a release can fall short by the new leaf's own margins).
+export const RELEASE_POLL_MS = 15_000
+export const RELEASE_WAIT_MS = 3 * 3600_000
+export const RELEASE_TRIES = 3
+
+// The arguments `care` runs with: the page's claim scan, and every leaf of a round planned.
+export function careArgs (scan) {
+  const a = { plan_within: PLAN_EVERY_ROUND_LEAF }
+  if (scan) a.scan = scan
+  return a
+}
+
+// Whether the coins a release gave up are done with: none of them is still the wallet's
+// to spend or in the round that gives them up (their round final, the forfeits handed
+// over at sync), so the new leaves are held and the payment can be asked again.
+const RELEASING = new Set(['live', 'pending', 'given', 'offered', 'sending', 'forfeited'])
+export function releaseDone (coins, released) {
+  const by = new Map((coins || []).map((c) => [c.leaf_id, c]))
+  return (released || []).every((id) => { const c = by.get(id); return !c || !RELEASING.has(c.state) })
+}
+
+// The current coin of each open or stopped plan: the leaf its next step gives up.
+export function plannedCoins (plans) {
+  const out = new Map()
+  for (const p of plans || []) {
+    if (p.state !== 'open' && p.state !== 'stopped') continue
+    const current = ((p.steps || []).filter((st) => st.leaf_id).map((st) => st.leaf_id).pop()) || p.coin
+    out.set(current, p)
+  }
+  return out
+}
 
 // Whether `care` runs now: at the first chance after the page opens, then at most every
 // CARE_EVERY_MS. `last` is when it last ran (ms), or null.
@@ -145,6 +185,9 @@ export class LeafError extends Error {
     this.kind = (e && e.kind) || 'error'
     this.code = e && e.code
     this.status = e && e.status
+    // A payment that planned coins could cover: their asset, and which to give up.
+    if (e && e.asset) this.asset = e.asset
+    if (e && Array.isArray(e.release)) this.release = e.release
   }
 }
 
@@ -322,6 +365,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const now = ctx.now || (() => Date.now())
   const tickMs = ctx.tickMs || TICK_MS
   const careEvery = ctx.careEveryMs || CARE_EVERY_MS
+  const sleep = ctx.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
     refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
     careAt: null, lastCare: null, plans: null, claims: null, distributions: null }
@@ -434,9 +478,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
     S.careAt = now()
     try {
-      const args = {}
-      const scan = claimScan(); if (scan) args.scan = scan
-      const v = await run('care', args)
+      const v = await run('care', careArgs(claimScan()))
       S.lastCare = { at: now(), value: v }
       const sum = careSummary(v)
       if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
@@ -496,6 +538,40 @@ export function mountLeaves (ctx, root, settingsRoot) {
     schedule()
   }
 
+  // ---- paying from a planned coin: through the next round, by itself ----
+  // A command the library refuses with kind `planned` (the unplanned coins fall short, the
+  // planned ones it names would cover it) is asked again once those coins are given up in
+  // the next round for leaves no plan names: plan_release, then sync until that round is
+  // final and the new leaves are held. Every other answer and refusal is the library's.
+  async function paying (command, args) {
+    for (let i = 0; ; i++) {
+      try { return await run(command, args) } catch (e) {
+        if (!(e instanceof LeafError) || e.kind !== 'planned' || !e.release || !e.release.length || i >= RELEASE_TRIES) throw e
+        S.releasing = { coins: e.release, asset: e.asset, since: now(), command }
+        render()
+        try {
+          const r = await run('plan_release', { leaves: e.release })
+          S.releasing.answer = r
+          await waitReleased(e.release)
+        } finally { S.releasing = null; render() }
+      }
+    }
+  }
+
+  async function waitReleased (coins) {
+    const until = now() + RELEASE_WAIT_MS
+    for (;;) {
+      try { const v = await run('sync'); arrivals(v && v.mailbox); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
+      let cs = null
+      try { cs = await run('coins'); S.coins = cs || [] } catch {}
+      if (cs && releaseDone(cs, coins)) return
+      if (now() >= until) {
+        throw new LeafError({ kind: 'refused', message: 'the next round did not free the coins this payment needs in time; nothing was paid, and the payment can be asked again' })
+      }
+      await sleep(RELEASE_POLL_MS)
+    }
+  }
+
   // ---- render ----
   function render () {
     if (settingsRoot) renderSettings()
@@ -510,6 +586,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (S.error) { const c = card('Refused: ' + S.error.what); c.appendChild(errBox(S.error.e)); root.appendChild(c) }
     if (S.reloadError) { const c = card('Could not read the wallet'); c.appendChild(errBox(S.reloadError)); root.appendChild(c) }
     if (S.startNote) { const c = card('At the start of the last command'); c.appendChild(el('div', 'warn', S.startNote)); root.appendChild(c) }
+    if (S.releasing) {
+      const c = card('Paying through the next round'); c.id = 'leafReleasing'
+      c.appendChild(el('div', 'status', `${S.releasing.command}: the unplanned leaves fall short, so ${S.releasing.coins.length} planned leaf(s) (${S.releasing.coins.map(short).join(', ')}) are given up in the next round for leaves no plan names; the payment is asked again once that round is final.`))
+      root.appendChild(c)
+    }
     renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
   }
 
@@ -707,7 +788,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const a = el('input'); a.id = 'leafSendAmount'; field(c, 'Amount, in atoms', bind(a))
     const b = button('Send', () => {
       const args = { request: val('leafSendRequest'), amount: val('leafSendAmount') || null, asset: val('leafSendAsset') || null }
-      act('send', () => run('send', args)).catch(() => {})
+      act('send', () => paying('send', args)).catch(() => {})
     }, 'primary')
     b.id = 'btnLeafSend'; b.disabled = S.busy
     const r = el('div', 'row'); r.style.marginTop = '12px'; r.appendChild(b); c.appendChild(r)
@@ -756,7 +837,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function renderCare () {
     const c = card('Kept by itself: claims and refresh plans')
     c.id = 'leafCare'
-    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for each leaf whose refresh could run within ten days, so a closed wallet keeps it across its expiry. A younger leaf stays unplanned and free to pay; a wallet closed in a leaf\'s first two weeks or so and kept closed through its refresh can lose it to the operator\'s sweep. A planned leaf is paid only once refreshed in a round: Release cancels its plan and quotes that refresh.'))
+    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for every leaf of a round, so a closed wallet keeps it across its expiry. A leaf received or boarded out of round is free to pay, and is refreshed into a round once its refresh could run within ten days. A planned leaf is paid out of round by no wallet: a payment the unplanned leaves cannot cover gives the planned leaves it needs up in the next round and is made once that round is final, by itself. Release does that for one plan now.'))
     const lc = S.lastCare
     if (lc) {
       c.dataset.careAt = String(lc.at)
@@ -817,11 +898,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     schedule()
   }
 
-  // Release: the plan cancelled, then its leaf's refresh quoted (and confirmed below the
-  // leaves, as Settle now), so a new leaf free to pay comes out of the next round.
+  // Release: the plan's current leaf given up in the next round for a leaf of the wallet's
+  // own that no plan names (plan_release); the plan ends once that round is final.
   async function releasePlan (id, leaf) {
-    try { await act('plan_cancel', () => run('plan_cancel', { plan: id })) } catch { schedule(); return }
-    await settle([leaf])
+    try { await act('plan_release', () => run('plan_release', { leaves: [leaf] })) } catch {}
     schedule()
   }
 
@@ -888,6 +968,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (co[k] != null) d.appendChild(kv(label, when(co[k], s.now)))
     }
     if (co.exit_fee) d.appendChild(kv('Exit fee coin', [co.exit_fee.fee_coin, co.exit_fee.note].filter(Boolean).join(': ')))
+    const plan = plannedCoins(S.plans).get(co.leaf_id)
+    if (plan) { d.dataset.planned = plan.plan_id; d.appendChild(kv('Planned', `plan ${short(plan.plan_id)}, ${plan.state}: paid out of round only once released into the next round`)) }
     if (co.note) d.appendChild(el('div', 'sub', co.note))
     if (co.spent_by) d.appendChild(kv('Spent by', co.spent_by))
     if (HELD.has(co.state) && co.state !== 'exiting') {
@@ -1034,7 +1116,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- for the page API (wallet-api.js): the library's commands, one at a time ----
   async function command (cmd, args) {
     if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet has not joined a leaf operator: join one in the wallet\u2019s Leaves tab' })
-    return await act(cmd, () => run(cmd, args || {}))
+    return await act(cmd, () => paying(cmd, args || {}))
   }
   // One on-chain address of the leaf wallet, the same each time a page asks: taking a
   // new one on every ask would let a page grow the wallet's scan without end.
@@ -1056,6 +1138,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     setMode: (m) => changeMode(m),
     isOpen: () => S.open,
     command,
+    // A command for the user composer, asked directly (no reload after it), paid through
+    // the next round when it needs a planned coin.
+    pay: (cmd, args) => {
+      if (!S.open) return Promise.reject(new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' }))
+      return paying(cmd, args || {})
+    },
     address,
     leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
     leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),

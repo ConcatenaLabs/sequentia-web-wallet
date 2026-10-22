@@ -242,8 +242,9 @@ must answer CORS. The tab then has:
   next; run it again until the claim is final.
 - **Kept by itself: claims and refresh plans**: what the wallet last did by itself (below),
   every refresh plan with its leaf, its steps and until when it covers the leaf, with
-  **Cancel**, and **Release** for a planned leaf (the plan cancelled, then its refresh quoted as
-  in Settle now, so the next round makes a leaf that can be paid). **Look up claims** lists the
+  **Cancel**, and **Release** for a planned leaf (the leaf given up in the next round for a leaf
+  of the wallet's own that no plan names, which ends the plan once that round is final). Each
+  planned leaf is marked under Leaves and their dates. **Look up claims** lists the
   claims under this wallet's addresses, and **Distributions paid from here** the wallet's own.
 - **Participations** and **Refusals**: every participation and where it stands, and every
   refusal the leaf wallet made.
@@ -255,19 +256,25 @@ page is open: it syncs on the library's schedule (above), and after a sync, at m
 minutes and at the first one after the page opens, it runs the library's `care`. That takes up
 every open claim of a distribution named for one of the wallet's addresses, looking under every
 address the wallet handed out and 20 more, so the asset appears in its figure on the Balance tab.
-It signs a refresh plan for each leaf whose refresh step could run within ten days, two
-expiries ahead, the operator's fee for a step bounded at 0.2% of the leaf and taken from the
+It signs a refresh plan for every leaf of a round at the first `care` after the leaf is made,
+two expiries ahead, the operator's fee for a step bounded at 0.2% of the leaf and taken from the
 leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
-leaf of a round, so a leaf received or boarded out of round is first refreshed into a round,
-under the same bound, and its new leaf planned later. A leaf the operator will
-not plan stays unplanned, with the operator's reason in developer mode, and is refreshed by
-sync while the page is open. A wallet then closed across that leaf's expiry keeps it: the
+leaf of a round, so a leaf received or boarded out of round is refreshed into a round, under the
+same bound, once its refresh could run within ten days (that refresh costs a fee, so it waits),
+and its new leaf is planned at the next `care`. A leaf the operator will not plan stays
+unplanned, with the operator's reason in developer mode, and is refreshed by sync while the page
+is open. A wallet then closed across that leaf's expiry keeps it, whenever it closes: the
 operator runs the plan's steps and the wallet takes the new leaf up when it opens again. And it
-cancels a plan whose leaf has moved. A leaf younger than that stays unplanned, because a planned
-leaf can be paid only once refreshed in a round; so a wallet closed within a leaf's first two
-weeks or so and kept closed through its refresh can lose that leaf to the operator's sweep, as
-any holder who stays away past an expiry can. User mode shows none of this: a claim taken up is
-counted in its asset's one figure.
+cancels a plan whose leaf has moved.
+
+A planned leaf carries refund halves the wallet signed, so no wallet pays it out of round. A
+payment, a trade or an order that the unplanned leaves cannot cover is made through the next
+round, by itself: the library refuses it naming the planned leaves whose release covers it, the
+page gives those up in the next round for leaves of its own that no plan names, syncs until that
+round is final and the new leaves are held, and asks again. The person waits one round and sees
+nothing else; developer mode shows a "Paying through the next round" card while it waits. A
+release costs the refresh fee the asset's schedule asks then (none in the leaf's free window).
+User mode shows none of this: a claim taken up is counted in its asset's one figure.
 
 Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
 library itself (the same code as the operator's command-line wallet), compiled to WebAssembly
