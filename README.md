@@ -480,7 +480,10 @@ The route is inferred from the pair:
 - **Same-chain** (asset ↔ asset on Sequentia): the order funds a SeqOB tapscript covenant
   that rests on-chain; a fill is one transaction that spends it under the script's own rules
   (no co-signature, no escrow, no intermediary). Maker-signed relay offers, where one rests,
-  are still taken through the co-signed PSET lift. The maker completes that transaction and
+  are still taken through the co-signed PSET lift. Before signing, the wallet checks the
+  maker's transaction against the swap it proposed, and refuses one that pays it less, pays
+  elsewhere, changes the form it asked for or spends any other coin of the wallet: it says so,
+  and nothing is signed or moved. The maker completes that transaction and
   blinds the output that pays you, so it can only pay a blinded address: the review asks before
   receiving there, with the box unticked, and a market order skips those offers unless you tick
   it. The review shows what the book holds within reach of the best price, not the amount
@@ -744,6 +747,18 @@ deployed wallet instead of this checkout. It needs a Chromium (`CHROMIUM=/path/t
 Esplora shim over the node's RPC. It bonds, joins a pool, finds the record, moves, leaves,
 unbonds and claims, each transaction confirmed in a block, and checks that a spend built on
 one side of the height where stake record signatures change is rebuilt on the other.
+
+`SEQUENTIA_BIN=<Sequentia>/src SEQOBD=… OCEAND=… SEQOB_MAKER=… SEQOB_OCTL=… node
+tooling/interactive-maker-drive.mjs [honest|shortpay|blind] [--tick] <evidence-dir>` drives
+developer mode's Swap tab in a headless Chromium against a live interactive maker on a private
+regtest chain (`tooling/interactive-maker-stack.mjs`): SeqDEX's wallet daemon and order-book
+maker (`oceand`, `seqob-maker`, `seqob-octl` from the `seqdex` repository) rest an offer and
+co-sign each lift over the relay's courier. A market buy of tSEQ with USDX fills, and both
+sides' balances move by exactly the trade and its fee; against a maker built to pay one atom
+less (`shortpay`) or to blind the output that pays the wallet to its own key (`blind`)
+(`seqob-maker` built from a `seqdex` checkout with `tooling/hostile-maker.patch` applied; the drive
+sets `SEQOB_HOSTILE` to the mode), the page says that nothing was signed and nothing moves.
+`--tick` ticks the review's blinded-address box first.
 
 `SEQUENTIA_BIN=<Sequentia>/src node tooling/contracts-regtest.mjs <evidence-dir>` drives the
 Contracts tab in a headless Chromium against a private regtest chain: a faucet drip covenant

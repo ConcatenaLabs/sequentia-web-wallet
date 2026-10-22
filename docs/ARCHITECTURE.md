@@ -148,8 +148,11 @@ integrity. Taking an offer (`seqob.lift`) opens the relay WebSocket, exchanges
 `start_lift`/`lift_accepted`, then runs the swap handshake as AES-256-GCM-sealed frames keyed
 by ECDH between an ephemeral taker session key and the maker pubkey **from the signed offer**
 (a relay substituting keys aborts the session). Settlement is one PSET: the taker builds a
-`SwapRequest` via `wollet.seqdexSwapRequest(...)`, the maker co-signs, the taker finalizes,
-signs, and broadcasts.
+`SwapRequest` via `wollet.seqdexSwapRequest(...)`, the maker co-signs, and the taker checks the
+co-signed transaction against its own request (`wollet.seqdexVerifyAccept`, `checkMakerAnswer`
+in `swap.js`) before it signs: its inputs unchanged and signed over the whole transaction, no
+other coin of the wallet spent, every output of its half paying the same script, asset and
+amount in the form it asked for. Only then does it finalize, sign and broadcast.
 
 Placing a same-chain order does not rest a signed intent that needs the maker back: it funds
 a SeqOB passive-CLOB **covenant** (`covenant.js` derives the tapscript leaf and scriptPubKey,
@@ -287,6 +290,8 @@ also run on their own with `node <file>`. The swap modules additionally export `
 hooks (leg operations, state accessors) for headless driving, and the real
 WASM-signer-over-Noise path is proven by `tooling/lsp/device-harness.mjs` against a live
 backend. `tooling/stake-records-regtest.mjs` runs the staking flows against a real node.
+`tooling/interactive-maker-drive.mjs` drives developer mode's Swap tab against a live SeqDEX
+maker on a private regtest chain, honest and hostile (see the README).
 `tooling/contracts-regtest.mjs` and `tooling/contracts-vault-regtest.mjs` drive developer mode's
 Contracts tab against a private regtest chain (see the README). `tooling/leaves-drive.mjs` drives developer mode's Leaves tab in a headless Chromium against a
 local regtest operator (see the README).
