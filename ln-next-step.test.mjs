@@ -64,7 +64,11 @@ test('receiving: Move to Lightning when not on Lightning, Add room when it is, o
   a = w.lnRecvAdvice(USDX); assert.equal(a.step.label, 'Add room to receive'); a.step.go(); assert.deepEqual(w.calls, [['room', USDX]])
   a = world({ status: STATUS, onchain: { [GOLD]: 5n } }).lnRecvAdvice(GOLD)   // not priced for fees: nothing to move
   assert.equal(a.text, 'You cannot receive GOLD over Lightning now. Receive it on-chain with your address above.'); assert.equal(a.step, null)
-  assert.equal(world({ status: STATUS }).lnStepFor('BTC', { receive: true }), null, 'no room is sold in BTC')
+  assert.equal(world({ status: STATUS }).lnStepFor('BTC', { receive: true }), null, 'a service that sells no room in BTC: no step')
+  // A service that sells it: Add room to receive, with no BTC channel of the wallet's own first.
+  w = world({ status: { channels: [], funding: { btc: true, btc_room: true } } })
+  a = w.lnRecvAdvice('BTC'); assert.equal(a.step.label, 'Add room to receive'); a.step.go(); assert.deepEqual(w.calls, [['room', 'BTC']])
+  assert.equal(a.text, 'To receive BTC over Lightning, add room to receive first; it is ready in about a block.')
 })
 
 test('the cards use them, in every mode', () => {
