@@ -696,7 +696,6 @@ a backend (the public testnet services work):
 | `/faucet` | Testnet faucet |
 | `/registry/index.minimal.json` | Asset Registry minimal index (asset metadata; overridable via `window.SEQ_REGISTRY_URL`) |
 | `/seqob` (+ WebSocket at `/seqob/v1/ws`) | SeqDEX order-book relay (`seqobd`) |
-| `/dex` | The SeqDEX daemon, used only for market seeding |
 | `/anchor/<blockhash>`, `/anchorstatus` | Anchor lookups used by the cross-chain maker's safety gate |
 | `/openamp` | OpenAMP restricted-asset API (optional; wallet degrades gracefully) |
 | `/lsp`, `/lsp-ws-asset`, `/lsp-ws-btc` | Hosted-SeqLN LSP + per-node signer WebSockets (optional; Lightning rails stay off without them) |
