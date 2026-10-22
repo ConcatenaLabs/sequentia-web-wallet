@@ -42,6 +42,11 @@ export function clnBitcoinWallet (rpc) {
       const r = await rpc('listpeerchannels')
       return (r.channels || []).filter((c) => c.state === 'CHANNELD_NORMAL').reduce((n, c) => n + msatOf(c.spendable_msat), 0n) / 1000n
     },
+    // What its channels can be paid now.
+    async receivable () {
+      const r = await rpc('listpeerchannels')
+      return (r.channels || []).filter((c) => c.state === 'CHANNELD_NORMAL').reduce((n, c) => n + msatOf(c.receivable_msat), 0n) / 1000n
+    },
     async invoice ({ sats, description = 'trade', expiry = 3600 }) {
       const label = `trade-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
       const r = await rpc('invoice', { amount_msat: Number(sats) * 1000, label, description, expiry })
