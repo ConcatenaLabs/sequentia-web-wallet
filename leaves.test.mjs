@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { bondRefusal, BOND_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { issuerAssets, bondRefusal, BOND_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, PLAN_EVERY_ROUND_LEAF, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -376,4 +376,10 @@ test('the bond is read and watched at care\'s pace, in either mode', async () =>
   assert.equal(api.state.bond.state, 'bonded')
   assert.equal(api.state.lastWatch.value.evidence.lines, 2)
   api.stop()
+})
+
+test('issuer-operated assets are the ones the operator serves with an issuer entry', () => {
+  const info = { server_info: { assets: [{ asset: X, issuer: { limiter: 'l' } }, { asset: Y }] } }
+  assert.deepEqual(issuerAssets(info), [X])
+  assert.deepEqual(issuerAssets({}), [])
 })
