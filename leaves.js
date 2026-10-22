@@ -131,6 +131,8 @@ export function frozenAtoms (coins, balance) {
   const add = (a, v) => { if (!a) return; out.set(a, (out.get(a) || 0n) + big(v)) }
   for (const c of coins || []) {
     if (!HELD.has(c.state) || !c.frozen) continue
+    // A leaf whose exit's claim is out is the on-chain coin the claim made, counted below.
+    if (c.state === 'exiting' && String(c.note || '').startsWith('claimed by')) continue
     if (c.frozen.frozen || c.frozen.paused) add(c.asset, c.value)
   }
   for (const [a, v] of Object.entries((balance && balance.sequentia_onchain_frozen) || {})) add(a, v)
@@ -301,6 +303,11 @@ export class LeafClient {
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
 // The library's balance: per asset, leaf atoms by state, and on-chain atoms.
+// `leaves` is what the asset's figure counts: the library's `held` (leaves and its own
+// on-chain coins together, a leaf whose exit's claim is out counted once, as the claim's
+// output, and a leaf awaiting a preimage nowhere) less its `sequentia_onchain`, whose coins
+// sit at the phrase's own keys and are counted by the page's on-chain scan. A library that
+// gives no `held` is read by its states.
 // -> Map(asset -> { leaves, states: { state: BigInt }, onchain })
 export function leafBalances (balance) {
   const out = new Map()
@@ -310,6 +317,11 @@ export function leafBalances (balance) {
     for (const [s, v] of Object.entries(states || {})) { r.states[s] = (r.states[s] || 0n) + big(v); r.leaves += big(v) }
   }
   for (const [a, v] of Object.entries((balance && balance.sequentia_onchain) || {})) row(a).onchain += big(v)
+  const held = balance && balance.held
+  if (held && typeof held === 'object') {
+    for (const r of out.values()) r.leaves = 0n
+    for (const [a, v] of Object.entries(held)) { const r = row(a); const l = big(v) - r.onchain; r.leaves = l > 0n ? l : 0n }
+  }
   return out
 }
 
