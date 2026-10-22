@@ -29,9 +29,9 @@ There is no connection step: the page API is the wallet's own, on its own origin
 wallet, user mode until the user changes it. The words are the same in every Sequentia
 wallet:
 
-- **User mode**: One figure per asset, and the wallet chooses how value moves.
-- **Developer mode**: Every rail by name, side by side (on-chain, leaves and Lightning), each
-  with its balance and its manual controls, and the developer tools.
+- **User mode**: The wallet chooses how value moves.
+- **Developer mode**: Leaves as a rail you can choose, and the developer tools (the Leaves and
+  Contracts tabs). The Balance tab is the same in both modes.
 
 A page follows the mode: its developer features show in developer mode only. `modeChanged`
 (`{ mode }`) fires when the user changes it.
