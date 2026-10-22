@@ -41,7 +41,8 @@ A page follows the mode: its developer features show in developer mode only. `mo
 Leaves are coins of Sequentia assets held in an operator's tree, off the chain. In user mode
 every method below refuses, and no leaf event reaches the page; the wallet's leaf wallet
 keeps syncing all the same once the wallet has joined an operator, and its value counts in
-each asset's figure and the headline. Native BTC is never a leaf: a tree on Sequentia holds
+each asset's figure and the headline; the wallet's own Trade tab trades from it in user mode
+without naming it, and no page method reaches that. Native BTC is never a leaf: a tree on Sequentia holds
 no BTC.
 
 Every answer and refusal is the leaf wallet library's (it runs in `leaves/worker.js`).

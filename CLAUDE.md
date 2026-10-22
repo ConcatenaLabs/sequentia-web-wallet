@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 106 `*.test.mjs` files (86 at the root, 20 under `tooling/lsp/`), and `node --test` runs
+There are 110 `*.test.mjs` files (89 at the root, 21 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -97,14 +97,28 @@ Root is flat: production modules and tests sit side by side.
   Routing is derived from the chosen assets. It imports the rail modules (`seqob.js`, `btc.js`,
   `covenant*.js`, `ln-rail.js`, `seqln.js`, `submarine.js`, `sbtc.js`, `subswap.js`) and three
   files from `tooling/lsp/`.
+- `user-trade.js` and `user-composer.js` — the Trade tab in user mode: three inputs and one
+  button, a market trade in one native step from the single-step book
+  (`tooling/lsp/single-step-book.mjs`: an in-tree swap with a live leaf maker, a transparent
+  covenant order taken in the operator's round, or BTC for an asset in one hash-lock with a
+  maker's BTC desk, `user-trade-btc.js`), never a bridge and never a second route. In a BTC trade
+  the hash is always the BTC receiver's and BTC is paid only once the coin received under it is
+  held for good (`lightning_receive_ready`); keep that order whatever else changes. The
+  engine (`user-trade.js`) has no DOM so the drill runs it in Node; every amount on its ticket is
+  the leaf library's answer (`swap_read`, `take_quote` with `spends`, `settle_quote`). Every word
+  it shows is in `USER_WORDS`, and none may be in `USER_MODE_FORBIDDEN_WORDS` (rail, round, leaf,
+  operator, covenant, expiry, atom and the rest): its test checks both. A pair reaches user mode
+  only through `user-mode/pairs.json`, which only a passing drill run
+  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it: in
+  user mode the tab's other children are hidden (`applyTradeMode` in `index.html`).
 - `xswap.js`, `xrswap.js`, `xcourier.js`, `xmaker.js` — the cross-chain courier path. **These are
   live.** The RFQ client that used to sit alongside them was retired; the `xchain`/`xswap` naming
   survives on code that is very much in use. Do not delete them on the assumption they are dead
   RFQ leftovers.
 - `tooling/lsp/` — the hosted-SeqLN LSP backend and its provisioning harnesses. Mostly Node-only,
-  **but `settlement-router.mjs`, `unified-book.mjs` and `bridge-driver.mjs` are imported into the
-  browser by `swap.js`.** They contain no `require`, no `node:` imports and no `process.` access by
-  construction. Adding any of those to those three files breaks the shipped page.
+  **but `settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs` and `bridge-driver.mjs`
+  are imported into the browser** (by `swap.js` and `user-trade.js`). They contain no `require`, no `node:` imports and no `process.` access by
+  construction. Adding any of those to those four files breaks the shipped page.
 - `coinjoin.js` — the Mix tab's wallet side: coin selection, ownership proofs, blinded addresses and,
   above all, `verifyRoundOutputs`, the check that decides whether to sign a transaction the
   coordinator built. `blindsig.js` and `coinjoin-protocol.js` beside it are **vendored from the

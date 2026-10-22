@@ -37,7 +37,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Wallet create / restore from a 12-word phrase; balances, send, receive on both chains
 - Portfolio and per-amount display in a user-chosen reference currency (USD, BTC, or any priced asset)
 - Any-asset fees on Sequentia transactions (open fee market), with fee-asset selection on every send
-- Trade tab: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
+- Trade tab in user mode: what you pay, what you get, one amount and one button; a market
+  trade that settles in one step, offered only for the pairs the reliability drill has passed
+- Trade tab in developer mode: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
   self-enforcing SeqOB covenants and fill without the wallet being open. An order's locked coins
   come back through Reclaim once its lock has passed: a median time a day after it is placed (a
   block height a day ahead when the explorer gives no median time)
@@ -190,9 +192,10 @@ one figure per asset, its parts one tap away, and offers no Move and no room to 
 Lightning receive card says only how much can arrive and otherwise points to the on-chain
 address. In developer mode each asset row also reads "X on-chain · Y in leaves · Z on
 Lightning" (and "· S staked" for tSEQ), the Lightning column carries Move and room to receive,
-and the **Leaves** and **Contracts** tabs appear. In user mode nothing of leaves is shown or reachable, but a wallet that joined
+and the **Leaves** and **Contracts** tabs appear. In user mode nothing of leaves is shown, but a wallet that joined
 an operator keeps its leaf wallet syncing while the page is open, since its coins have dates
-to keep, and their value counts in each asset's one figure. The wallet's own pages read the
+to keep, and their value counts in each asset's one figure; the Trade tab's user composer pays
+from them and settles in them without naming them (below). The wallet's own pages read the
 mode, and in developer mode the leaf rail, through the page API (`window.sequentiaWallet`,
 [docs/PAGE_API.md](docs/PAGE_API.md)), in the shape the browser extension's provider serves.
 
@@ -342,7 +345,48 @@ the purchase in its own terms (what is bought, against which cap, what the treas
 the engine refuses (a relative lock not yet passed, an amount the program forbids, an output
 it cannot account for) is refused before anything is signed, in the engine's words.
 
-### The Trade tab
+### The Trade tab in user mode
+
+Three inputs and one button: **You pay** (an asset and an amount), **You get** (an asset), and
+**Review**. Both pickers list BTC first, then what the wallet holds. Review shows three lines
+before anything is signed: what you pay, what you get, and the fees ("Fees 192 XLEAF, included
+above"), each fee in the asset it is paid in, the price not counted as one. **Trade** confirms
+it; the trade then reads **Sent**, and **Settled** once it is final, or **Returned: nothing
+traded.** when it could not go through, with nothing to do either way. A take that first paid the
+wallet a coin of exactly its price has spent that payment's small fees even when it is returned;
+the return says so ("Fees of … were paid"), and those fees come back to the wallet at that coin's
+next refresh. A trade whose price
+lapsed before you confirmed it is priced again and shown again.
+
+User mode trades only what settles in one native step, and never falls back to another route
+in the middle of a trade:
+
+- **An in-tree swap with a live maker**: a maker holding coins in the operator's tree quotes a
+  price; the wallet reads its firm offer with its own library, signs its side, the maker
+  completes it, and the coins the trade brings are settled in the operator's next round. Settled
+  means that round is final.
+- **A transparent covenant order taken from the wallet's coins in the tree**: the operator's round
+  spends the order, pays its maker on the chain, and gives the wallet its coin. Settled means the
+  round is final, as the relay also records it.
+- **BTC for an asset, or an asset for BTC, with a maker, in one hash-lock**: the asset moves in
+  the operator's tree under a payment hash and the BTC over Bitcoin Lightning under the same
+  hash, the hash always the BTC receiver's and the asset's giver locking first, so neither side
+  can take what it gets before paying (`user-trade-btc.js`). Selling for BTC is Settled once the
+  BTC has come and the wallet's payment is settled with the same preimage; buying with BTC once
+  the coin bought is claimed and its round final. BTC is never a coin in the tree and never
+  pegged. The engine trades BTC only through a Bitcoin Lightning wallet it is given to drive
+  (the drill's wallets each run a node of their own); the page gives it none, so on the page BTC
+  heads both pickers and no BTC trade is offered.
+
+Of the trades that can fill the amount you pay, it takes the one that gives you the most, then
+the one with the fewest parties left to act. It offers no more than the wallet can pay now. A
+pair nobody fills in one step reads "Not offered right now: nobody offers YLEAF for XLEAF in one
+step.", and a pair the drill has not passed is not offered at all. Which pairs those are, per
+chain, is [`user-mode/pairs.json`](user-mode/pairs.json), with the drill's report beside it.
+No screen of it names a rail, a round, a leaf, the operator, a covenant, an expiry or an atom
+(`USER_MODE_FORBIDDEN_WORDS` in `user-trade.js`).
+
+### The Trade tab in developer mode
 
 One symmetric composer: "You pay X" / "You receive Y". The route is inferred from the pair:
 
@@ -484,6 +528,10 @@ works normally without the restricted rows.
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record, and its stakes on the chain for a browser that does not remember them (a restore), and drives the transactions SWK builds over the staking key's bare scripts. |
 | `leaves.js` | The mode setting, and developer mode's Leaves tab, which shows what the leaf wallet answers. |
+| `user-trade.js` | The user-mode composer's engine: the ticket for a trade from the single-step book, priced by the leaf library, the trade's record written before anything is signed, and the trade followed to Settled or Returned. No DOM: the page and the drill run the same code. |
+| `user-trade-btc.js` | The engine's BTC trades: an asset for BTC or BTC for an asset in one hash-lock with a maker's BTC desk, BTC paid only once the coin received under the hash is held for good. |
+| `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
+| `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and `REPORT.md`, the drill report that admitted them. |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |

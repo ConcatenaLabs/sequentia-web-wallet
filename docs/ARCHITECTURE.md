@@ -99,6 +99,8 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/sbtc` | sbtc.js | SBTC custody bridge: peg-in / peg-out address allocation for offline-resting BTC limit orders |
 | the operator's server, the node's JSON-RPC | leaves/worker.js | the URLs the user enters when joining an operator in developer mode, then whenever this wallet's leaf wallet syncs, in either mode. Each is fetched with a synchronous XHR from the worker, so a server on another origin must answer CORS |
 | `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
+| `/leafmaker` | user-trade.js, user-trade-btc.js | a live leaf maker (`tooling/lsp/leaf-maker.mjs`): its quotes, firm in-tree swap offers and, from its BTC desk, BTC trades in one hash-lock, for user mode's Trade tab (override: `window.SEQ_LEAF_MAKERS`, a list of base URLs) |
+| `user-mode/pairs.json` | index.html | the pairs, and their sources, user mode offers per chain (override: `window.SEQ_USER_MODE_PAIRS`) |
 
 Every backend beyond the two Esplora APIs is optional at runtime: fetch failures degrade the
 corresponding feature instead of breaking the wallet.
@@ -126,6 +128,8 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_ALLOW_MIXED_RAILS` | `false` | offer one side on-chain and the other over Lightning (refused by default: not safe against a Bitcoin reorg) |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
+| `SEQ_LEAF_MAKERS` | `[origin + '/leafmaker']` | the live leaf makers user mode's Trade tab asks for in-tree swaps |
+| `SEQ_USER_MODE_PAIRS` | `user-mode/pairs.json` | the list of pairs user mode offers (a URL) |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |
 | `SEQ_LSP_DEV_KEY_ASSET/_BTC`, `SEQ_LSP_DEV_SEED_ASSET/_BTC` | unset | dev overrides pinning device keys against a fixed harness |
 | `SEQ_DEV_CHAIN` | unset | a private regtest chain for the drives in `tooling/`: `{policyAsset, genesis, recordsV2Height}` makes the wallet's network `Network.regtestWithGenesis(policyAsset, genesis)` and signs stake records for that chain; the explorer is still `origin + '/api'`, which `tooling/leaves-dev-server.mjs --esplora` points at `tooling/esplora-shim.mjs` |
@@ -246,6 +250,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.ln.inboundBuy.v1` | a purchase of room to receive over Lightning whose fee is paid (or about to be), on its own or inside the funding transaction of a Move to Lightning: finished on the next open |
 | `swk.ln.pendingMove.v1` | a Move to Lightning past its on-chain transaction but not yet open, to finish on the next open |
 | `swk.mode.<tag>` | per wallet (the tag is a 32-bit FNV-1a of its descriptor), `developer` or `user`; absent is user mode. A `swk.devMode` of `1` left from before is taken as the first wallet's that reads it |
+| `swk.usertrade.<tag>` | user mode's trades, each written before anything is signed: its ticket, the step it took (an in-tree swap's offer and acceptance, a take's id, a BTC trade's hash and invoices), the coins it brought and the round that settles them; resumed on every open until Settled or Returned |
 | `swk.leaves.joined.<tag>` | `1` once this wallet has joined a leaf operator: its leaf wallet then opens and syncs in either mode |
 | `swk.leaves.address.<tag>` | the leaf wallet's on-chain address handed to the page API, the same each time it is asked |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
@@ -254,7 +259,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.snapshot:<descriptor>` | what the last completed sync found, per wallet: balances on both chains, the history rows of both chains and when. Shown, dated, until the session's first sync completes and whenever a sync fails; never used to build or sign. Safe to clear |
 | `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
-The fund-bearing keys are the mnemonic, the pool join in flight, a channel funding not yet broadcast, and the in-flight swap, walk, peg and bridge records;
+The fund-bearing keys are the mnemonic, the pool join in flight, a channel funding not yet broadcast, and the in-flight swap, walk, peg, bridge and user-mode trade records;
 the rest can be cleared without loss. The leaf wallet's store is not in `localStorage`: it is a SQLite file in the
 origin's private file system (OPFS), one per mnemonic, and it holds what the mnemonic cannot rebuild (which leaves
 were spent off-chain, forfeits signed, the operator's record heads). Clearing the site's data loses it.
