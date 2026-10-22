@@ -457,7 +457,9 @@ No screen of it names a rail, a round, a leaf, the operator, a covenant, an expi
 
 ### The Trade tab in developer mode
 
-One symmetric composer: "You pay X" / "You receive Y". The route is inferred from the pair:
+One symmetric composer: "You pay X" / "You receive Y". Both pickers list BTC first, even at 0,
+then what the wallet holds; the asset already chosen on a side is marked, never greyed out.
+The route is inferred from the pair:
 
 - **Same-chain** (asset ↔ asset on Sequentia): the order funds a SeqOB tapscript covenant
   that rests on-chain; a fill is one transaction that spends it under the script's own rules
