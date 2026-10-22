@@ -362,7 +362,9 @@ traded.** when it could not go through, with nothing to do either way. A take th
 wallet a coin of exactly its price has spent that payment's small fees even when it is returned;
 the return says so ("Fees of … were paid"), and those fees come back to the wallet at that coin's
 next refresh. A trade whose price
-lapsed before you confirmed it is priced again and shown again.
+lapsed before you confirmed it is priced again and shown again. A trade whose step met no answer
+(the operator restarting, say) reads **Working…** while the wallet looks for it, and then Sent, or
+Returned if it never went through.
 
 User mode trades only what settles in one native step, and never falls back to another route
 in the middle of a trade:

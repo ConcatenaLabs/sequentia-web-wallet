@@ -40,6 +40,9 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 // takes its coins back (the maker completes in seconds; the cancel and a late completion exclude
 // each other at the operator's signer).
 export const MAKER_COMPLETE_MS = 120_000
+// A step whose outcome is unknown (the operator did not answer, so the library may still complete
+// it at its next sync) is looked for this long before the trade is called returned.
+export const UNCERTAIN_MS = 10 * 60 * 1000
 // A maker's firm offer is accepted only while at least this long is left before it lapses.
 export const FIRM_MARGIN_MS = 20_000
 // The most the operator's fee may be of a price, in millionths, for a trade in user mode.
@@ -436,8 +439,16 @@ export function createEngine (deps) {
       }
       throw new Error('no such source')
     } catch (e) {
-      // Nothing was signed if the record never reached 'sent'.
-      if (rec.state === 'confirming') { rec.state = 'failed'; rec.error = e.message; put(rec) }
+      // A refusal (the library's or the operator's) leaves nothing moved. Any other error leaves
+      // the outcome unknown: the library may still complete the step at its next sync, so the trade
+      // stays open and is looked for (advance), and is called returned only if it never shows.
+      const refused = e && (e.code === 'lapsed' || e.kind === 'refused' || e.kind === 'server_refused' || /^refused\b/i.test(String(e.message)))
+      if (rec.state === 'confirming') {
+        if (refused) { rec.state = 'failed'; rec.error = e.message; put(rec); throw e }
+        rec.uncertain = true; rec.uncertainAt = now(); rec.error = e.message
+        log('[user trade] the step did not answer; the trade is followed:', e.message)
+        return put(rec)
+      }
       throw e
     }
   }
@@ -446,28 +457,30 @@ export function createEngine (deps) {
   async function advance (rec) {
     if (!rec || ['settled', 'returned', 'failed'].includes(rec.state)) return rec
     if (rec.state === 'confirming') {
-      // The page closed between the record and the step. A take or an acceptance the library
-      // made is in its own store; read it there.
+      // The page closed between the record and the step, or the step did not answer. A take or an
+      // acceptance the library made is in its own store; read it there. A step that did not answer
+      // is looked for until UNCERTAIN_MS has passed.
+      const notFound = (why) => { if (rec.uncertain && now() - (rec.uncertainAt || 0) < UNCERTAIN_MS) return; rec.state = 'failed'; rec.error = why }
       if (rec.source === 'leaf-maker' && rec.swap) {
         const s = ((await run('swaps')) || []).find((x) => x.swap === rec.swap)
-        if (s && s.role === 'taker') { rec.state = 'sent'; rec.sentAt = now() } else { rec.state = 'failed'; rec.error = 'not accepted' }
+        if (s && s.role === 'taker') { rec.state = 'sent'; rec.sentAt = now() } else notFound('not accepted')
       } else if (rec.source === 'covenant-round') {
         // A take is a participation; one the wallet did not have before, and no other trade
         // names, is this trade's.
         const known = new Set([...(rec.beforeParts || []), ...records().map((r) => r.take).filter(Boolean)])
         const p = ((await run('participations')) || []).find((x) => !known.has(x.participation) && (x.new_leaves || []).some((n) => n.asset === rec.ticket.receiveAsset))
-        if (p) { rec.take = p.participation; rec.state = 'sent'; rec.sentAt = now() } else { rec.state = 'failed'; rec.error = 'not taken' }
+        if (p) { rec.take = p.participation; rec.state = 'sent'; rec.sentAt = now() } else notFound('not taken')
       } else if (rec.source === 'leaf-resting') {
         // A fill the page closed on is sent again by the library's next sync; the coin it brings
         // is then the wallet's.
         await run('sync').catch(() => {})
         const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
-        if (got) { rec.state = 'sent'; rec.sentAt = now() } else { rec.state = 'failed'; rec.error = 'not filled' }
+        if (got) { rec.state = 'sent'; rec.sentAt = now() } else notFound('not filled')
       } else if (rec.source === 'btc-gateway' && rec.hash) {
         // Selling: a payment under the hash is the wallet's lock. Buying: a receive under it.
         const mine = rec.dir === 'sell' ? ((await run('lightning_payments')) || {})[rec.hash] : ((await run('lightning_receives')) || {})[rec.hash]
-        if (mine) { rec.state = rec.dir === 'sell' ? 'sent' : 'waiting'; rec.sentAt = now() } else { rec.state = 'failed'; rec.error = 'not made' }
-      } else { rec.state = 'failed'; rec.error = 'not made' }
+        if (mine) { rec.state = rec.dir === 'sell' ? 'sent' : 'waiting'; rec.sentAt = now() } else notFound('not made')
+      } else notFound('not made')
       put(rec)
       if (rec.state !== 'sent' && rec.state !== 'waiting') return rec
     }
@@ -488,7 +501,9 @@ export function createEngine (deps) {
       rec.fillState = f ? f.state : null
       if (f && f.state === 'final') rec.fillFinal = true
     }
-    if ((await settleStep(rec)) === 'settled' && (rec.fillFinal || !deps.relayFills)) { rec.state = 'settled'; rec.settledAt = now() }
+    // A fill whose answer never came carries no transfer id to find at the relay: its coins' round
+    // alone says it is final.
+    if ((await settleStep(rec)) === 'settled' && (rec.fillFinal || !deps.relayFills || !rec.transfer)) { rec.state = 'settled'; rec.settledAt = now() }
     return put(rec)
   }
 

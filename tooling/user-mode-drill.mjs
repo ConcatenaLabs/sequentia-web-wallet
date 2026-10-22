@@ -290,6 +290,9 @@ async function main () {
   if (S.prepare) await S.prepare()
 
   let done = 0
+  let notOfferedInRow = 0
+  let aborted = null
+  const MAX_NOT_OFFERED = 100
   const results = []
   const counts = { settled: 0, returned: 0, failed: 0, notOffered: 0, closes: 0, restarts: 0, contests: 0, reorgsMet: 0 }
   let nextId = 0
@@ -372,10 +375,19 @@ async function main () {
         if (kept > 0n) res.feesPaid = String(kept)
         res.outcome = ok ? 'returned' : 'failed'
         if (!ok) res.note = `returned, but ${-d(pay)} of the pay asset left (its fees paid ${kept}) and ${d(receive)} of the receive asset came`
+      } else if (res.state === 'failed' && d(pay) === 0n && d(receive) === 0n) {
+        // A step that did not answer and never showed: nothing traded, nothing moved.
+        res.outcome = 'returned'; res.note = 'the step did not answer and never went through: ' + (rec && rec.error)
       } else { res.outcome = 'failed'; res.note = `neither settled nor returned within ${WAIT_MS / 1000} s (state ${res.state})` }
     }
     counts[res.outcome === 'not-offered' ? 'notOffered' : res.outcome]++
-    if (res.outcome !== 'not-offered') done++
+    if (res.outcome !== 'not-offered') { done++; notOfferedInRow = 0 } else {
+      // Nothing to fill now (a maker that ran short, an order book drained): wait before asking
+      // again, and end the run once nothing has been offered for a long while.
+      notOfferedInRow++
+      if (notOfferedInRow >= MAX_NOT_OFFERED && !aborted) { aborted = `nothing offered for ${MAX_NOT_OFFERED} quotes in a row: the stack has nothing left to trade against`; note('stopping: ' + aborted) }
+      else await sleep(10000)
+    }
     results.push(res)
     appendFileSync(tradesFile, JSON.stringify(res) + '\n')
     note(`trade ${id} wallet ${w.i} ${res.pay}→ ${amount}: ${res.outcome}${res.source ? ' via ' + res.source : ''}${res.settledMs ? ` in ${(res.settledMs / 1000).toFixed(0)} s` : ''}${res.disruption ? ' [' + res.disruption.join('; ') + ']' : ''}${res.note ? ' — ' + res.note : ''}`)
@@ -384,7 +396,7 @@ async function main () {
 
   // Each wallet trades one trade at a time until N trades ran (not-offered quotes are not trades).
   await Promise.all(wallets.map(async (w) => {
-    while (done < N) {
+    while (done < N && !aborted) {
       try { await oneTrade(w) } catch (e) { note(`wallet ${w.i}: ${e.message}`); try { if (w.proc.exitCode != null) await w.start() } catch {} await sleep(2000) }
     }
   }))
@@ -394,13 +406,14 @@ async function main () {
   const traded = results.filter((r) => r.outcome !== 'not-offered')
   const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))] }
   const by = (src) => traded.filter((r) => r.source === src)
-  const passed = counts.failed === 0 && traded.length >= N
+  const passed = counts.failed === 0 && traded.length >= N && !aborted
   const commit = (() => { try { return execFileSync('git', ['-C', resolve(here, '..'), 'rev-parse', '--short', 'HEAD']).toString().trim() } catch { return '?' } })()
   const lines = []
   lines.push('# User-mode drill report', '')
   lines.push(`The user-mode composer's trades on one stack, each settled or cleanly returned with no user action, the ticket checked against what moved. This report is written by \`tooling/user-mode-drill.mjs\`; \`pairs.json\` beside it lists what user mode offers on each chain.`, '')
   lines.push('## Result', '')
   lines.push(`- Trades: ${traded.length}; settled ${counts.settled}, returned ${counts.returned} (of them ${traded.filter((r) => r.outcome === 'returned' && r.feesPaid).length} with the fees of a payment to itself spent, which come back at that coin's next refresh), failed ${counts.failed}. Quotes that found nothing to fill (not trades): ${counts.notOffered}.`)
+  if (aborted) lines.push(`- Stopped early: ${aborted}.`)
   lines.push(`- Verdict: ${passed ? 'passed: every trade settled or was cleanly returned, every settled trade moved exactly what its ticket showed, and every returned one nothing but the fees it named' : 'not passed'}.`)
   lines.push(`- Disruptions: the wallet closed mid-trade ${counts.closes} times, the operator restarted ${counts.restarts} times, the parent chain reorganised under a trade's round ${counts.contests} times${S.contest ? '' : ' (not forced on this chain)'}.`)
   lines.push(`- By source: in-tree swaps with the live leaf maker ${by('leaf-maker').length}, covenant orders taken in a round ${by('covenant-round').length}, orders resting in the tree filled ${by('leaf-resting').length}${S.btcRpcs ? `, BTC in one hash-lock with the maker's desk ${by('btc-gateway').length} (selling for BTC ${by('btc-gateway').filter((r) => r.pay !== 'BTC').length}, buying with BTC ${by('btc-gateway').filter((r) => r.pay === 'BTC').length})` : ''}.`)

@@ -94,3 +94,27 @@ test('an order of another operator is not offered', async () => {
   const q = await engineOf(s).quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
   assert.equal(q.why, 'not-offered')
 })
+
+test('a fill that did not answer is followed, not called failed: the library may still complete it', async () => {
+  const s = standIn()
+  const orig = s.lib.command.bind(s.lib)
+  let once = true
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting' && once) { once = false; orig(cmd, a); const e = new Error('cannot reach the operator: order_fill'); e.kind = 'unreachable'; throw e }
+    return orig(cmd, a)
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  const r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'confirming'); assert.equal(r.uncertain, true)
+  const r2 = await eng.advance(eng.records()[0])
+  assert.equal(r2.state, 'sent', 'the coin it brought is found: the fill went through')
+  // One refused outright is failed at once: nothing moved.
+  const s3 = standIn()
+  const o3 = s3.lib.command.bind(s3.lib)
+  s3.lib.command = (cmd, a) => { if (cmd === 'order_fill_resting') { const e = new Error('refused: the order is filled'); e.kind = 'server_refused'; throw e } return o3(cmd, a) }
+  const e3 = engineOf(s3)
+  const q3 = await e3.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  await assert.rejects(e3.confirm(q3.choice, q3.ticket), /refused/)
+  assert.equal(e3.records()[0].state, 'failed')
+})

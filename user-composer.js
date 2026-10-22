@@ -138,6 +138,7 @@ export function mountUserComposer (ctx) {
     if (r.state === 'settled') return USER_WORDS.settled
     if (r.state === 'returned' && (r.feesPaid || []).length) return USER_WORDS.returnedFees(r.feesPaid.map((f) => amt(f.asset, f.atoms)).join(' and '))
     if (r.state === 'returned' || r.state === 'failed') return USER_WORDS.returned
+    if (r.state === 'confirming') return USER_WORDS.working
     // Buying with BTC: nothing has left the wallet until its asset is held for it.
     if (r.state === 'waiting') return USER_WORDS.working
     return USER_WORDS.sent
@@ -146,7 +147,8 @@ export function mountUserComposer (ctx) {
   function paintTrades () {
     const list = ctx.root.querySelector('#ucTrades'); if (!list) return
     list.innerHTML = ''
-    const recs = ctx.engine.records().filter((r) => r.state !== 'confirming' && r.ticket).slice(-8).reverse()
+    // A trade whose step did not answer is shown while it is looked for.
+    const recs = ctx.engine.records().filter((r) => (r.state !== 'confirming' || r.uncertain) && r.ticket).slice(-8).reverse()
     if (!recs.length) return
     list.appendChild(el('label', 'lbl', USER_WORDS.recent))
     for (const r of recs) {
