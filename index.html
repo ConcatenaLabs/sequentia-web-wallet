@@ -3473,6 +3473,13 @@ function initUserComposer(){
     },
     makers: ()=> (typeof window!=='undefined' && Array.isArray(window.SEQ_LEAF_MAKERS)) ? window.SEQ_LEAF_MAKERS : [location.origin + '/leafmaker'],
     relayBook: (pay, receive)=> relayPairBook(receive, pay),
+    // The relay's fill records of the pair, both orientations: a fill of an order resting in the
+    // tree is Settled once its record (keyed by the operator's transfer id) is final.
+    relayFills: async (pay, receive)=>{
+      const get = async (b, q)=>{ const r = await fetch(`${seqob.seqobBase()}/v1/market/${b}/${q}/fills?limit=500`, { cache:'no-store' }); return r.ok ? ((await r.json()).fills || []) : []; };
+      const [a, b] = await Promise.all([get(receive, pay).catch(()=>[]), get(pay, receive).catch(()=>[])]);
+      return [...a, ...b];
+    },
     outputValue: async (txid, vout)=>{
       const r = await fetch(`${ESPLORA}/tx/${txid}`, { cache:'no-store' }); if(!r.ok) return null;
       const o = ((await r.json()).vout || [])[vout]; return o && o.value != null ? String(o.value) : null;

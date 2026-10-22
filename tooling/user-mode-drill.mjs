@@ -37,7 +37,7 @@ import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } fr
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { harness, startRelay, placeOrder, startMaker, launchMaker, makerReady, freePort, sleep, lwkFrom, relayBook } from './user-mode-stack.mjs'
+import { harness, startRelay, placeOrder, restOrder, startMaker, launchMaker, makerReady, freePort, sleep, lwkFrom, relayBook } from './user-mode-stack.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const argv = process.argv
@@ -159,6 +159,21 @@ async function regtestStack () {
     for (const w of wallets) await w.call('/run', { command: 'sync' })
     note(`wallets ${wallets.map((w) => w.proc.pid).join(', ')} hold ${COINS} coins of ${COIN} of X and of Y each`)
   }
+  // A maker who rests orders in the tree and goes away: a wallet of the stack's own, funded as the
+  // drill's wallets are, resting an order of 2,500,000 each way, listed on the relay, and rested
+  // again whenever one holds less than 600,000. Y for X at 47 X per 40 Y, the best price that way
+  // (the covenant order asks 6 per 5, the maker 5 per 4); X for Y at 31 Y per 40 X, between the
+  // covenant order (3 per 4) and the maker (4 per 5): so every source leads one way or the other.
+  const RESTING = { [`${Y}:${X}`]: [47, 40], [`${X}:${Y}`]: [31, 40] }
+  let rester = null
+  const rest = async (sell, want) => { const [n, d] = RESTING[`${sell}:${want}`]; const id = await restOrder(H, rester, relay.url, { assetA: sell, assetB: want, sell: 2500000, rateNum: n, rateDen: d, minLot: 10000 }); note(`rested an order of 2,500,000 ${sell === X ? 'X' : 'Y'} in the tree (${id.slice(0, 12)}), listed on the relay`) }
+  async function prepare () {
+    const cfgFile = join(out, 'wallet-config-rester.json')
+    writeFileSync(cfgFile, JSON.stringify({ ...walletConfig, pairs_file: join(out, 'pairs-run.json') }), { mode: 0o600 })
+    rester = walletProc('rester', cfgFile); await rester.start(); children.push({ kill: () => rester.kill() })
+    await fund([rester])
+    await rest(Y, X); await rest(X, Y)
+  }
   async function topUp () {
     // The operator pays a round's makers and fronts every refresh from its own coins: the drill
     // keeps them topped up, as an operator does, and keeps the covenant book stocked and the
@@ -169,13 +184,15 @@ async function regtestStack () {
       const offers = await book(want, sell).catch(() => [])
       const active = offers.filter((o) => o.covenant && o.offer_asset === sell).reduce((n, o) => n + big(o._status && o._status.active_amount), 0n)
       if (active < 400000n) { await order(sell, want, 1500000); note(`stocked a covenant order of 1,500,000 ${sell === X ? 'X' : 'Y'}`) }
+      const resting = offers.filter((o) => o.resting_leaf && o.offer_asset === sell).reduce((n, o) => n + big(o._status && o._status.active_amount), 0n)
+      if (rester && resting < 600000n) { try { await rest(sell, want) } catch (e) { note('rest: ' + e.message) } }
     }
     try { const a = await (await fetch(maker.url + '/v1/quotes')).json(); for (const q of a.quotes || []) if (big(q.max_give) < 3000000n) { const sc = await H.scriptOf(maker.address); await H.fund(sc, q.give_asset, 20000000); await H.produce(); note('funded the maker 20,000,000 ' + (q.give_asset === X ? 'X' : 'Y')) } } catch {}
   }
   let stop = false
   const pumpLoop = (async () => { while (!stop) { try { await H.pump() } catch (e) { note('pump: ' + e.message) } await sleep(2000) } })()
   return {
-    kind: 'regtest', genesis: st.genesis_hash, X, Y, names: { [X]: 'X', [Y]: 'Y', BTC: 'BTC' }, walletConfig, fund, topUp, btcRpcs,
+    kind: 'regtest', genesis: st.genesis_hash, X, Y, names: { [X]: 'X', [Y]: 'Y', BTC: 'BTC' }, walletConfig, fund, prepare, topUp, btcRpcs,
     amount: (pay) => (pay === 'BTC' ? rand(25000, 190000) : rand(50000, 400000)),
     restart: async () => { await H.restart() },
     // The round of a trade, once it is in a block: the parent chain reorganised from that block's
@@ -194,6 +211,7 @@ async function regtestStack () {
       '- The operator, rounds built every 2 s by the drill\'s clock, leaves with an exit delay of one 512 s unit (the one difference from the testnet\'s shape); SeqDEX\'s relay with `-fill-anchor-depth=2`; one live leaf maker (`tooling/lsp/leaf-maker.mjs`) quoting both directions from coins of 2,000,000; transparent covenant orders both ways, priced a little better than the maker and of little depth, restocked every 25 trades.',
       `- ${K} wallets, one trade at a time each, amounts between 50,000 and 400,000 atoms${BTC ? ' (25,000 to 190,000 sat when BTC is paid)' : ''}, the direction ${BTC ? 'cycling X for Y, Y for X, X for BTC and BTC for X' : 'alternating'}; each wallet starts with ten coins of 3,000,000 of each asset.`,
       ...(BTC ? ['- BTC over Lightning on a Bitcoin regtest chain beside the harness: the maker\'s desk on a hub node with a channel of 10,000,000 sat to each wallet\'s own node, half of it the wallet\'s; the operator\'s Lightning leg in X (SeqLN, the hold-invoice plugin), its payments out of the tree timing out four to eight days out; the wallets\' and the maker\'s exit delay three units.'] : []),
+      '- A maker who rests an order of 2,500,000 each way in the operator\'s tree and goes away (`order_rest`, listed on the relay with its `resting_leaf` member), the best price for Y and between the covenant order and the live maker for X, rested again whenever one holds less than 600,000.',
       '- The operator fronts, from its own coins, every coin a round settles: each in-tree trade settles both the coin it brings and the change, so the operator needs as much of each asset as the trades move until the old batches expire. The drill gives it 200,000,000 of each asset at the start and every 25 trades.',
     ],
   }
@@ -257,7 +275,8 @@ async function main () {
   const { X, Y } = S
   note(`drill: ${N} trades, ${K} wallets, ${S.kind}; chain ${S.genesis}; ${S.names[X]} ${X}, ${S.names[Y]} ${Y}`)
   // The pairs the drill runs; it admits them only when every trade passes.
-  const pairsDrill = { chains: { [S.genesis]: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker', 'covenant-round'] }, { pay: Y, receive: X, sources: ['leaf-maker', 'covenant-round'] },
+  const xy = ['leaf-maker', 'covenant-round', ...(S.prepare ? ['leaf-resting'] : [])]
+  const pairsDrill = { chains: { [S.genesis]: { pairs: [{ pay: X, receive: Y, sources: xy }, { pay: Y, receive: X, sources: xy },
     ...(S.btcRpcs ? [{ pay: X, receive: 'BTC', sources: ['btc-gateway'] }, { pay: 'BTC', receive: X, sources: ['btc-gateway'] }] : [])] } } }
   writeFileSync(join(out, 'pairs-run.json'), JSON.stringify(pairsDrill, null, 2))
   const wallets = []
@@ -268,6 +287,7 @@ async function main () {
     const w = walletProc(i, cfgFile); await w.start(); wallets.push(w); children.push({ kill: () => w.kill() })
   }
   await S.fund(wallets)
+  if (S.prepare) await S.prepare()
 
   let done = 0
   const results = []
@@ -383,7 +403,7 @@ async function main () {
   lines.push(`- Trades: ${traded.length}; settled ${counts.settled}, returned ${counts.returned} (of them ${traded.filter((r) => r.outcome === 'returned' && r.feesPaid).length} with the fees of a payment to itself spent, which come back at that coin's next refresh), failed ${counts.failed}. Quotes that found nothing to fill (not trades): ${counts.notOffered}.`)
   lines.push(`- Verdict: ${passed ? 'passed: every trade settled or was cleanly returned, every settled trade moved exactly what its ticket showed, and every returned one nothing but the fees it named' : 'not passed'}.`)
   lines.push(`- Disruptions: the wallet closed mid-trade ${counts.closes} times, the operator restarted ${counts.restarts} times, the parent chain reorganised under a trade's round ${counts.contests} times${S.contest ? '' : ' (not forced on this chain)'}.`)
-  lines.push(`- By source: in-tree swaps with the live leaf maker ${by('leaf-maker').length}, covenant orders taken in a round ${by('covenant-round').length}${S.btcRpcs ? `, BTC in one hash-lock with the maker's desk ${by('btc-gateway').length} (selling for BTC ${by('btc-gateway').filter((r) => r.pay !== 'BTC').length}, buying with BTC ${by('btc-gateway').filter((r) => r.pay === 'BTC').length})` : ''}.`)
+  lines.push(`- By source: in-tree swaps with the live leaf maker ${by('leaf-maker').length}, covenant orders taken in a round ${by('covenant-round').length}, orders resting in the tree filled ${by('leaf-resting').length}${S.btcRpcs ? `, BTC in one hash-lock with the maker's desk ${by('btc-gateway').length} (selling for BTC ${by('btc-gateway').filter((r) => r.pay !== 'BTC').length}, buying with BTC ${by('btc-gateway').filter((r) => r.pay === 'BTC').length})` : ''}.`)
   const sent = traded.filter((r) => r.sentMs).map((r) => r.sentMs), sett = traded.filter((r) => r.outcome === 'settled').map((r) => r.settledMs)
   lines.push(`- Time to Sent: median ${((pct(sent, 0.5) || 0) / 1000).toFixed(1)} s, 95th percentile ${((pct(sent, 0.95) || 0) / 1000).toFixed(1)} s. Time to Settled: median ${((pct(sett, 0.5) || 0) / 1000).toFixed(1)} s, 95th percentile ${((pct(sett, 0.95) || 0) / 1000).toFixed(1)} s.`)
   lines.push('', '## The stack', '')

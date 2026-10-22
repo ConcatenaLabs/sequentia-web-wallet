@@ -21,7 +21,7 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { leafLibrary } from './leaf-node.mjs'
 import { createEngine } from '../user-trade.js'
-import { relayBook, lwkFrom } from './user-mode-stack.mjs'
+import { relayBook, relayFills, lwkFrom } from './user-mode-stack.mjs'
 import { clnRpc, clnBitcoinWallet } from './cln-rpc.mjs'
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
@@ -49,7 +49,7 @@ const fetchJson = async (url, init) => {
 }
 const book = relayBook(cfg.relay)
 const engine = createEngine({
-  leaves: w, fetchJson, makers: () => cfg.makers || [], relayBook: (pay, receive) => book(pay, receive),
+  leaves: w, fetchJson, makers: () => cfg.makers || [], relayBook: (pay, receive) => book(pay, receive), relayFills: relayFills(cfg.relay),
   admitted: () => ({ pairs: JSON.parse(readFileSync(cfg.pairs_file, 'utf8')), genesis: cfg.genesis }),
   store, tag: () => 'drill', log: (...a) => console.log(new Date().toISOString(), ...a),
   btc: cfg.btc_rpc ? clnBitcoinWallet(clnRpc(cfg.btc_rpc)) : null,
@@ -87,7 +87,18 @@ createServer(async (req, res) => {
       }))
     }
     const b = await body(req)
-    if (p === '/run') return send(res, 200, await serial(() => w.command(b.command, b.args || {})))
+    // The node scans one wallet at a time: a command that meets another's scan is asked again, as
+    // the engine asks it (nothing else is retried).
+    if (p === '/run') {
+      return send(res, 200, await serial(async () => {
+        for (let i = 0; ; i++) {
+          try { return await w.command(b.command, b.args || {}) } catch (e) {
+            if (i < 8 && /Scan already in progress/.test(String(e && e.message))) { await new Promise((r) => setTimeout(r, 500 + 500 * i)); continue }
+            throw e
+          }
+        }
+      }))
+    }
     if (p === '/quote') return send(res, 200, await serial(() => engine.quote({ payAsset: b.pay, receiveAsset: b.receive, amount: String(b.amount) })))
     if (p === '/trade') {
       return send(res, 200, await serial(async () => {

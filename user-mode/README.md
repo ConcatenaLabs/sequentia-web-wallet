@@ -9,7 +9,8 @@ exactly what its ticket showed.
 - `pairs.json` is the list the page reads: per chain, keyed by its genesis hash, each admitted
   pair (`pay` and `receive`, asset ids in display order), the sources it may trade through
   (`leaf-maker`, an in-tree swap with a live leaf maker; `covenant-round`, a transparent covenant
-  order taken in the operator's round; `btc-gateway`, BTC for an asset in one hash-lock with a
+  order taken in the operator's round; `leaf-resting`, an order resting as a leaf in the
+  operator's tree, filled in one transfer; `btc-gateway`, BTC for an asset in one hash-lock with a
   maker's BTC desk, BTC written `"BTC"`), where the drill that admitted it ran (`proven`), and its
   report (`report`). A chain, pair or source not in it is not offered.
 - `"proven": "regtest"` admits a pair on the testnet on the strength of a 500-trade drill on

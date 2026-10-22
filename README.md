@@ -347,6 +347,12 @@ it cannot account for) is refused before anything is signed, in the engine's wor
 
 ### The Trade tab in user mode
 
+The user composer below is the Trade tab in user mode on a page configured with
+`window.SEQ_USER_TRADE = true` ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)): it trades only
+against a live leaf maker, orders and the pairs `user-mode/pairs.json` admits, so a deployment
+turns it on once those exist on its chain. Otherwise the full composer (developer mode's, below)
+serves both modes.
+
 Three inputs and one button: **You pay** (an asset and an amount), **You get** (an asset), and
 **Review**. Both pickers list BTC first, then what the wallet holds. Review shows three lines
 before anything is signed: what you pay, what you get, and the fees ("Fees 192 XLEAF, included
@@ -368,6 +374,11 @@ in the middle of a trade:
 - **A transparent covenant order taken from the wallet's coins in the tree**: the operator's round
   spends the order, pays its maker on the chain, and gives the wallet its coin. Settled means the
   round is final, as the relay also records it.
+- **An order resting in the operator's tree**: a maker rested it as a leaf and may be away; the
+  wallet fills it from its own coins in one transfer the operator co-signs, on the terms its
+  library quoted, and fills it at its new place only on the same terms if another taker filled it
+  first. Settled means the relay records the fill final and the coins it brought are settled in a
+  round that is final. Only orders resting with the operator the wallet joined are offered.
 - **BTC for an asset, or an asset for BTC, with a maker, in one hash-lock**: the asset moves in
   the operator's tree under a payment hash and the BTC over Bitcoin Lightning under the same
   hash, the hash always the BTC receiver's and the asset's giver locking first, so neither side

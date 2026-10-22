@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 110 `*.test.mjs` files (89 at the root, 21 under `tooling/lsp/`), and `node --test` runs
+There are 111 `*.test.mjs` files (90 at the root, 21 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -100,7 +100,8 @@ Root is flat: production modules and tests sit side by side.
 - `user-trade.js` and `user-composer.js` — the Trade tab in user mode: three inputs and one
   button, a market trade in one native step from the single-step book
   (`tooling/lsp/single-step-book.mjs`: an in-tree swap with a live leaf maker, a transparent
-  covenant order taken in the operator's round, or BTC for an asset in one hash-lock with a
+  covenant order taken in the operator's round, an order resting in the operator's tree
+  (`order_fill_resting`), or BTC for an asset in one hash-lock with a
   maker's BTC desk, `user-trade-btc.js`), never a bridge and never a second route. In a BTC trade
   the hash is always the BTC receiver's and BTC is paid only once the coin received under it is
   held for good (`lightning_receive_ready`); keep that order whatever else changes. The
@@ -110,7 +111,8 @@ Root is flat: production modules and tests sit side by side.
   operator, covenant, expiry, atom and the rest): its test checks both. A pair reaches user mode
   only through `user-mode/pairs.json`, which only a passing drill run
   (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it: in
-  user mode the tab's other children are hidden (`applyTradeMode` in `index.html`).
+  user mode the tab's other children are hidden (`applyTradeMode` in `index.html`), and only on a
+  page with `window.SEQ_USER_TRADE = true`; without it the full composer serves both modes.
 - `xswap.js`, `xrswap.js`, `xcourier.js`, `xmaker.js` — the cross-chain courier path. **These are
   live.** The RFQ client that used to sit alongside them was retired; the `xchain`/`xswap` naming
   survives on code that is very much in use. Do not delete them on the assumption they are dead
