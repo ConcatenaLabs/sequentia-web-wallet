@@ -6257,6 +6257,11 @@ function prettyErr(e){
   // Rust error "Address must be confidential", which tells a user nothing and hides the one-click fix.
   if(/must be confidential|NotConfidentialAddress/i.test(m))
     return 'This swap has to pay you to a blinded address. Turn on "Receive this swap at a blinded address" and place it again - nothing was sent.';
+  // The maker's co-signed swap was not the one this wallet proposed (swap.js checkMakerAnswer): it
+  // paid less, paid elsewhere, changed the form of an output or touched another coin. Refused before
+  // any signature.
+  if(/different swap from the one you reviewed|refusing the maker's swap/i.test(m))
+    return 'The other side answered with a different swap from the one you reviewed (paying you less, paying elsewhere or changing how you are paid), so this wallet signed nothing and nothing moved. Take another offer.';
   if(/redeem ?script mismatch|does not match quote/i.test(m))
     return 'The other side of this trade changed before it completed, so it was refused rather than paid to the wrong party. Nothing was sent; anything already locked is returned automatically.';
   if(/WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS|unknown payment|payment_hash.*unknown/i.test(m))

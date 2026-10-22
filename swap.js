@@ -9791,8 +9791,9 @@ function fmtPrice(n){
 // Lift a resting offer to settlement over the SeqOB courier. The two wasm-bound
 // steps are passed as hooks; seqob.js owns the WS + E2E + protobuf transport.
 // The taker builds its half (seqdexSwapRequest), the maker co-signs over the
-// relay, then the taker signs + self-broadcasts (the proven 6d-1 finalize path)
-// and couriers the SwapComplete receipt back.
+// relay, the taker checks the maker's answer against its own half
+// (seqdexVerifyAccept), then signs + self-broadcasts (the proven 6d-1 finalize
+// path) and couriers the SwapComplete receipt back.
 async function liftOffer(q, onStatusArg){
   const { wasm } = C;
   // Receive TRANSPARENTLY by default (principle #6: transparent-by-default). Only a confidential
@@ -9805,8 +9806,9 @@ async function liftOffer(q, onStatusArg){
   // q.blindReceive: the user agreed, in the review, to receive this one fill at the blinded form of
   // the address, because an interactive maker can only pay a blinded output (seqdex_swap.rs).
   const receiveAddr = (q.confidential || q.blindReceive || _confidentialReceive || isConfBook()) ? _raw : (_raw.toUnconfidential ? _raw.toUnconfidential() : _raw);
+  let sreq = null;
   const buildRequest = async () => {
-    const sreq = C.wollet.seqdexSwapRequest(
+    sreq = C.wollet.seqdexSwapRequest(
       new wasm.AssetId(q.assetP), q.amountP,
       new wasm.AssetId(q.assetR), q.amountR,
       receiveAddr,
@@ -9816,7 +9818,12 @@ async function liftOffer(q, onStatusArg){
   };
   const finalizeAccept = async (acc) => {
     const pset = new wasm.Pset(acc.transaction);
+    // Nothing is signed until the maker's answer is the swap this wallet proposed: its inputs
+    // untouched, no other coin spent, every output of its half paying the amount it asked for
+    // in the form it asked for. A maker that pays less, pays elsewhere or blinds what was asked
+    // in the clear is refused here, before any signature.
     const exec = async () => {
+      checkMakerAnswer(C.wollet, sreq, pset);
       pset.addDetails(C.wollet);
       const signed = C.signer.sign(pset);
       const strippedB64 = stripBip32(signed.toString());
@@ -9834,6 +9841,20 @@ async function liftOffer(q, onStatusArg){
     ? onStatusArg
     : (msg) => { if (onStatusArg) onStatusArg.innerHTML = '<span class="spin"></span>' + msg; };
   return seqob.lift(q.offer, q.takeBase, q.feeAsset, { buildRequest, finalizeAccept, onStatus });
+}
+
+// The maker's co-signed swap checked against this wallet's own half, before signing it
+// (Wollet.seqdexVerifyAccept). A refusal says that nothing was signed and nothing moved, then
+// what the maker changed.
+export function checkMakerAnswer(wollet, sreq, pset){
+  if (!sreq) throw new Error('This wallet has no swap of its own to check the other side\'s answer against, so it signed nothing.');
+  try { wollet.seqdexVerifyAccept(sreq, pset); }
+  catch (e){
+    const why = String((e && e.message) || e).replace(/^refusing the maker's swap: /, '');
+    const r = new Error('The other side answered with a different swap from the one you reviewed, so this wallet signed nothing and nothing moved (' + why + ').');
+    r.makerAnswerRefused = true;
+    throw r;
+  }
 }
 
 // Start a market: post the user's desired trade as a resting offer (they become
