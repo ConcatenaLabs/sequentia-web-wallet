@@ -261,6 +261,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
 | `swk.txSeen:<descriptor>` | per wallet, the block height and time the explorer gave for this wallet's own transactions before a sync recorded them; shown in History at once, and each one starts a sync. Safe to clear |
 | `swk.snapshot:<descriptor>` | what the last completed sync found, per wallet: balances on both chains, the history rows of both chains and when. Shown, dated, until the session's first sync completes and whenever a sync fails; never used to build or sign. Safe to clear |
+| `swk.lnKept:<descriptor>` | the wallet's own Lightning channels as the service's last `/status` gave them (state, asset, balance), per wallet. The balance counts them only until the service answers again, so a reload opens on the last known Lightning part; what can be sent or received always waits for the service. Safe to clear |
 | `swk.feeRatesCache`, `swk.pricesCache`, `swk.registryCache` | display caches, safe to clear |
 
 The fund-bearing keys are the mnemonic, the pool join in flight, a channel funding not yet broadcast, and the in-flight swap, walk, peg, bridge and user-mode trade records;

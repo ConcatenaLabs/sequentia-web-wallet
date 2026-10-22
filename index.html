@@ -3873,7 +3873,7 @@ async function reconnectOwnNodes(){
   // Re-poll directly (not via refreshLnStatus, which would re-enter this function).
   if(readyKeys.length){
     for(const k of readyKeys){ try{ await waitNodeReady({ nodeKey:k, onProgress:()=>{} }); }catch{} }
-    try{ lnLastStatus = await seqlnGetStatus(); }catch{}
+    try{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); }catch{}
     try{ renderBalance(); lnStatusPill(); }catch{}
     // A node that booted holding coins on chain and no channel (a Move to Lightning cut short
     // before the open, or what a channel's close paid it): read what it reports, and say so in
@@ -3981,7 +3981,7 @@ async function openAfterUpgrade(label){
     dismissPredating(label, { closedOnly: true, node: info });
     delete _lnNodeInfo[label];
     toast(job && job.reused_existing ? 'Your Lightning channel is already open' : 'New Lightning channel open');
-    try{ lnLastStatus = await seqlnGetStatus(); renderBalance(); lnStatusPill(); }catch{}
+    try{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); renderBalance(); lnStatusPill(); }catch{}
   }catch(e){
     toast('Could not open the channel: ' + String((e && e.message) || e).slice(0, 200));
   }finally{
@@ -4235,6 +4235,19 @@ function lnChannelAsset(c){
 }
 // Cache of the last /status so the Balance card + the pill share one poll.
 let lnLastStatus = null;
+// The wallet's own channels as the last /status gave them, kept per wallet, so the balance opens on
+// its last known Lightning part instead of the on-chain part alone until the service answers (that
+// first answer can take a minute, and the figure then jumped by the Lightning part). Only the
+// balance reads it: what can be sent or received waits for the service's own answer.
+function lnKeptKey(){ return 'swk.lnKept:'+wolletKey(); }
+function lnKeepStatus(st){
+  try{
+    if(st && Array.isArray(st.channels)) localStorage.setItem(lnKeptKey(), JSON.stringify(st.channels.filter(c=>c && c.node_key)
+      .map(c=>({ node_key:c.node_key, state:c.state, asset:c.asset, asset_label:c.asset_label, leg:c.leg, balance_units:c.balance_units, spendable_units:c.spendable_units }))));
+  }catch{}
+  return st;
+}
+function lnKeptChannels(){ try{ const k=JSON.parse(localStorage.getItem(lnKeptKey())||'null'); return Array.isArray(k) ? k : []; }catch{ return []; } }
 // Sum in-channel spendable (send-side) balance, in base units, for a chain/asset. BTC
 // legs are tagged asset_label 'BTC'; a Sequentia asset channel is tagged channel_asset.
 function lnSpendableFor(kind /* 'BTC' | assetHex */){
@@ -4269,7 +4282,7 @@ function lnSendableNow(kind /* 'BTC' | assetHex */){
 // LSP that predates balance_units reports only what can be sent, which stands in for it.
 function lnBalanceFor(kind /* 'BTC' | assetHex */){
   let units=0;
-  for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
+  for(const c of (lnLastStatus ? (lnLastStatus.channels || []) : lnKeptChannels())){
     if(!c.node_key || !String(c.state||'').startsWith('CHANNELD')) continue;
     const isBtc = (c.asset_label==='BTC' || c.leg==='btc');
     if(kind==='BTC' ? isBtc : (!isBtc && lnChannelAsset(c)===String(kind).toLowerCase())) units += Number(c.balance_units ?? c.spendable_units ?? 0);
@@ -4701,7 +4714,7 @@ async function refreshLnStatus(){
   // The note explains moving to Lightning and room to receive, which only developer mode offers.
   if(note) note.classList.toggle('hide', !devMode());
   try{ await refreshOwnLnNodeKeys(); }catch{}   // so /status includes this device's own nodes across reloads
-  try{ lnLastStatus = await seqlnGetStatus(); $('lnBalStatus').textContent=''; }
+  try{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); $('lnBalStatus').textContent=''; }
   catch(e){ $('lnBalStatus').className='status err'; $('lnBalStatus').textContent='Lightning status unavailable: '+prettyErr(e); }
   try{ renderBalance(); }catch{}   // fold the fresh LN spendable into the asset rows
   try{ lnStatusPill(); }catch{}
@@ -5830,7 +5843,8 @@ function renderBalance(){
   // the asset can be moved to Lightning (a producer prices it for fees, the same rule for every
   // asset); leg drives the move, close and room dialogs.
   const rowFull = ({ticker, refKey, precision, onchainAtoms, kind, nameNode, foot, movable, leg, known, alwaysShow})=>{
-    const lnAtoms = lnOn ? lnAtomsFor(kind) : 0n;
+    // Before Lightning is wired up and the service has answered, the last known Lightning part.
+    const lnAtoms = (lnOn || !lnLastStatus) ? lnAtomsFor(kind) : 0n;
     const own     = lnOn ? ownChansFor(kind) : [];
     // Leaves count in the asset's one figure in both modes; developer mode also splits it.
     const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
