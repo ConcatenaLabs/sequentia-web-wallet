@@ -51,14 +51,16 @@
 //                 "spread_bps": 100,             maker's side, read every minute; a pair whose
 //                 "assets": { "<hex>": { "ticker": "USDX", "precision": 8 } } },   price is missing
 //                                                or older than ten minutes is not quoted
-//     "ladder": { "levels": 8, "step_bps": 25, "growth": 1.25 },   optional, and a pair may carry its own:
-//                                                what it holds of an asset it gives is quoted at
-//                                                `levels` price levels, each `step_bps` further from
-//                                                its rate and `growth` times larger than the one
-//                                                before, one quote a level, cumulative (quote k: level
-//                                                k's rate, the depth of levels 1..k); a firm offer
-//                                                walks the levels (leaf-maker-ladder.mjs). Without it,
-//                                                one level of all it holds
+//     "ladder": { "levels": 8, "step_bps": 25, "growth": 1.25, "first": "5000000" },   optional, and a
+//                                                pair may carry its own: what it holds of an asset it
+//                                                gives is quoted at `levels` price levels, each
+//                                                `step_bps` further from its rate and `growth` times
+//                                                larger than the one before, level 1 `first` atoms
+//                                                (else the holding split over the levels), one quote
+//                                                a level, cumulative (quote k: level k's rate, the
+//                                                depth of levels 1..k); a firm offer walks the levels
+//                                                (leaf-maker-ladder.mjs). Without it, one level of
+//                                                all it holds
 //     "fee_margin": "2000",                      atoms of each asset kept back for a swap's fees
 //     "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600,
 //     "board_keep": "100000",                    on-chain atoms of each asset it gives that it keeps

@@ -11,8 +11,12 @@
 // or a worse one.
 //
 // Configuration (the maker's, and each pair's own to override it):
-//   "ladder": { "levels": 8, "step_bps": 25, "growth": 1.25 }
-// Without one, a pair is quoted at one level, as before.
+//   "ladder": { "levels": 8, "step_bps": 25, "growth": 1.25, "first": "5000000" }
+// `first`, optional, is level 1's size in atoms of the asset given: each level after it is
+// `growth` times larger, and the levels stop where the holding does (the last one takes what is
+// left), so a trade of ordinary size crosses several levels whatever the maker holds. Without
+// `first` the holding is split over the levels. Without a ladder, a pair is quoted at one
+// level, as before.
 //
 // Per-asset settings (`coin_size`, `board_keep`): a string of atoms for every asset, or an object
 // { "<asset hex>": "atoms", …, "default": "atoms" }.
@@ -33,7 +37,8 @@ export function ladderOf (pair, cfg) {
   const levels = Math.max(1, Math.min(64, Math.floor(Number(l && l.levels) || 1)))
   const stepBps = Math.max(0, Math.floor(Number(l && l.step_bps) || 0))
   const growth = Math.max(1, Number(l && l.growth) || 1)
-  return { levels, stepBps, growth }
+  const first = l && l.first != null && big(l.first) > 0n ? big(l.first) : null
+  return { levels, stepBps, growth, first }
 }
 
 // The slices: [{ rate_num, rate_den, size }], touch first. Every slice shares the pair's
@@ -42,7 +47,25 @@ export function ladderOf (pair, cfg) {
 export function slicesOf ({ rate_num, rate_den }, have, min, lad) {
   have = big(have); min = big(min || 1)
   if (have < min || have <= 0n) return []
-  const num = big(rate_num), den = big(rate_den)
+  // A rate of small integers (5/4) is scaled to a numerator of at least 10^8 first, so that a
+  // level's step of a few basis points is not rounded up to a whole unit of the numerator.
+  let num = big(rate_num), den = big(rate_den)
+  if (lad.levels > 1 && num > 0n && num < 100000000n) { const m = ceilDiv(100000000n, num); num *= m; den *= m }
+  const rateAt = (k) => ceilDiv(num * BigInt(10000 + lad.stepBps * k), 10000n)
+  if (lad.first) {
+    // Fixed sizes from `first`, growing, as far as the holding reaches.
+    const out = []
+    let left = have
+    for (let k = 0; k < lad.levels && left > 0n; k++) {
+      let size = BigInt(Math.floor(Number(lad.first) * Math.pow(lad.growth, k)))
+      if (size < min) size = min
+      if (size > left || k === lad.levels - 1) size = left
+      if (size < min) break
+      out.push({ rate_num: rateAt(k), rate_den: den, size })
+      left -= size
+    }
+    return out
+  }
   for (let n = lad.levels; n >= 1; n--) {
     const w = Array.from({ length: n }, (_, k) => Math.pow(lad.growth, k))
     const total = w.reduce((a, b) => a + b, 0)
@@ -54,11 +77,7 @@ export function slicesOf ({ rate_num, rate_den }, have, min, lad) {
       sizes.push(s); used += s
     }
     if (sizes.every((s) => s >= min) || n === 1) {
-      return sizes.map((size, k) => ({
-        rate_num: ceilDiv(num * BigInt(10000 + lad.stepBps * k), 10000n),
-        rate_den: den,
-        size,
-      }))
+      return sizes.map((size, k) => ({ rate_num: rateAt(k), rate_den: den, size }))
     }
   }
   return []

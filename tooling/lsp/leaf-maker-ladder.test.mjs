@@ -18,8 +18,8 @@ test('eight slices, the touch smallest, sizes growing, every atom held quoted on
     assert.ok(s[k].rate_num > s[k - 1].rate_num, 'each level further from the touch')
     assert.equal(s[k].rate_den, s[0].rate_den, 'one denominator')
   }
-  assert.equal(s[0].rate_num, 89250000n)
-  assert.equal(s[7].rate_num, ceilDiv(89250000n * 10175n, 10000n)) // 7 × 25 bps further
+  assert.equal(Number(s[0].rate_num) / Number(s[0].rate_den), 0.8925)
+  assert.ok(Math.abs(Number(s[7].rate_num) / Number(s[7].rate_den) / 0.8925 - 1.0175) < 1e-8, '7 × 25 bps further')
 })
 
 test('published cumulatively: quote k has level k\'s rate and the depth of levels 1..k', () => {
@@ -80,5 +80,31 @@ test('per-asset settings: the asset\'s own, else default, else the old value; a 
   assert.equal(perAsset({ aa: '5' }, 'bb', '1'), '1')
   assert.equal(perAsset('9', 'bb', '1'), '9')
   assert.equal(perAsset(undefined, 'bb', '1'), '1')
-  assert.deepEqual(ladderOf({}, null), { levels: 1, stepBps: 0, growth: 1 })
+  assert.deepEqual(ladderOf({}, null), { levels: 1, stepBps: 0, growth: 1, first: null })
+})
+
+test('a fixed first level: sizes grow from it and stop where the holding does', () => {
+  const lad = { levels: 8, stepBps: 25, growth: 1.4, first: 50000n }
+  const s = slicesOf(RATE, 60_000_000n, 1000n, lad)
+  assert.equal(s.length, 8)
+  assert.equal(s[0].size, 50000n)
+  assert.equal(s[1].size, 70000n)
+  assert.equal(s.reduce((n, x) => n + x.size, 0n), 60_000_000n, 'the last level takes what is left')
+  const small = slicesOf(RATE, 200_000n, 1000n, lad)
+  assert.deepEqual(small.map((x) => x.size), [50000n, 70000n, 80000n], 'stops where the holding does')
+  // a trade of 300,000 atoms crosses levels 1-5 and pays more than the touch
+  const big = slicesOf(RATE, 60_000_000n, 1000n, lad)
+  const w = walkWant(big, 300_000n)
+  assert.ok(w.rate_num > big[0].rate_num, 'ended past level 1')
+  assert.ok(w.want > ceilDiv(300_000n * big[0].rate_num, big[0].rate_den))
+  assert.equal(ladderOf({ ladder: { levels: 4, first: '123' } }, null).first, 123n)
+})
+
+test('a rate of small integers steps by basis points, not by a unit of its numerator', () => {
+  const s = slicesOf({ rate_num: '5', rate_den: '4' }, 10_000_000n, 1000n, { levels: 8, stepBps: 25, growth: 1.4, first: 50000n })
+  const r = (x) => Number(x.rate_num) / Number(x.rate_den)
+  assert.equal(r(s[0]), 1.25)
+  assert.ok(Math.abs(r(s[7]) / 1.25 - 1.0175) < 1e-6, 'level 8 is 175 bps over level 1: ' + r(s[7]))
+  const w = walkWant(s, 300_000n)
+  assert.ok(Number(w.want) / 300000 < 1.25 * 1.0175 && Number(w.want) / 300000 > 1.25, 'walked between the touch and the worst level')
 })
