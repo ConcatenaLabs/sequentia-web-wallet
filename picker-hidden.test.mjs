@@ -206,4 +206,29 @@ function searchRows(side, q){ const { list } = T.pickerCandidates(side); return 
   console.log('ok: the pinned tap-to-swap-sides row is visibility-proof');
 }
 
+// ===========================================================================
+// 6) BTC FIRST, never greyed for being BTC (every wallet is dual-chain): BTC leads the
+//    candidate list and the "Your assets" group even at 0 beside held assets, and the
+//    side's current choice is a normal row marked as current, not a disabled one.
+// ===========================================================================
+{
+  S.payAsset = 'BTC'; S.receiveAsset = null;
+  const rows = defaultRows('pay');
+  assert.equal(rows[0].hex, 'BTC', 'BTC is the first candidate at 0 BTC, ahead of held assets');
+  const btc = rows.find(r => r.hex === 'BTC');
+  assert.equal(btc.enabled, true, 'the current choice is not disabled');
+  assert.equal(btc.cur, true, 'it is marked as the current choice');
+  assert.ok(rows.filter(r => r.hex !== 'BTC').every(r => !r.cur), 'only the current choice is marked');
+  const { pinned, groups } = T.pickerGroups(rows, '', 40);
+  assert.equal(pinned.length, 0);
+  assert.equal(groups[0][0], 'Your assets', 'the first group is the wallet\'s own');
+  assert.equal(groups[0][1][0].hex, 'BTC', 'BTC leads "Your assets"');
+  assert.ok(groups.every(([, arr], i) => i === 0 || !arr.some(r => r.hex === 'BTC')), 'BTC is not left in the tail');
+  // A search that matches BTC and a registry asset keeps BTC in the wallet's group, first.
+  S.payAsset = null;
+  const found = T.pickerGroups(searchRows('pay', 'b'), 'b', 40);
+  assert.equal(found.groups[0][1][0].hex, 'BTC', 'BTC first under a search too');
+  console.log('ok: BTC first in the pickers and the current choice never greyed');
+}
+
 console.log('\nALL PASS');

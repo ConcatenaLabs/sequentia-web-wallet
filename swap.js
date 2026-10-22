@@ -4504,10 +4504,13 @@ function pickerCandidates(side){
       hex, ticker: metaOf(hex).ticker, name: pickerName(hex), bal: balLine(hex),
       held, split: held ? heldSplitStr(hex) : '',
       hidden: isAssetHidden(hex),
-      enabled: hex !== cur,
+      // The asset already chosen on this side stays a normal row, marked as the current
+      // choice: greying it out read as "BTC is not available" when BTC was the one chosen.
+      enabled: true, cur: hex === cur,
     };
   });
-  list.sort((a, b) => (b.held ? 1 : 0) - (a.held ? 1 : 0) || a.ticker.localeCompare(b.ticker));
+  // BTC first (every wallet is dual-chain), then what you hold, then the rest by ticker.
+  list.sort((a, b) => (b.hex === 'BTC') - (a.hex === 'BTC') || (b.held ? 1 : 0) - (a.held ? 1 : 0) || a.ticker.localeCompare(b.ticker));
   // The OPPOSITE side's asset used to be silently OMITTED here, so reversing a pair took a
   // three-step dance through a neutral asset. Show it instead — first, visually distinct,
   // with an explicit swap-sides affordance; picking it flips the whole pair (onFlip).
@@ -4523,7 +4526,9 @@ function pickerCandidates(side){
 function openPicker(side){
   const { list, other } = pickerCandidates(side);
   const anchor = side === 'pay' ? C.$('swPayPick') : C.$('swRecvPick');
+  const cur = side === 'pay' ? S.payAsset : S.receiveAsset;
   popover(anchor, list, (hex) => {
+    if (hex === cur) return;   // the current choice: nothing changes, amounts stay
     // The opposite side's asset = the swap-sides affordance: flip the whole pair (assets,
     // amounts, rails) rather than setting both sides to the same asset.
     if (hex === other){ onFlip(); return; }
@@ -4585,6 +4590,23 @@ function pickerMatches(items, q){
   return match;
 }
 
+// How a picker lays out the rows pickerMatches returned: PINNED rows first (the other side's
+// asset · tap-to-swap-sides), then "Your assets", then everything else. BTC belongs to "Your
+// assets" even at 0 and leads it: every wallet is dual-chain, so BTC is never a stranger at
+// the bottom of the list. The tail is capped until you search, so a registry of thousands
+// never renders thousands of rows.
+function pickerGroups(match, q, cap){
+  const mine = (it) => it.held || it.hex === 'BTC';
+  const pinned = match.filter(it => it.pin);
+  const held = match.filter(it => mine(it) && !it.pin).sort((a, b) => (b.hex === 'BTC') - (a.hex === 'BTC'));
+  const all = match.filter(it => !mine(it) && !it.pin);
+  const capped = !!q && all.length > cap;
+  const groups = [];
+  if (held.length) groups.push(['Your assets', held]);
+  if (all.length) groups.push([(q && held.length) ? 'All assets' : 'Assets', capped ? all.slice(0, cap) : all]);
+  return { pinned, groups, capped, more: capped ? all.length - cap : 0 };
+}
+
 // A lightweight searchable popover anchored under `anchorEl`. `items` are
 // { hex, ticker, name, bal:{b,r}, enabled }. onPick(hex) is called on selection.
 let _pop = null;
@@ -4625,7 +4647,8 @@ function popover(anchorEl, items, onPick){
   const ALL_CAP = 40;   // don't render a whole (potentially huge) registry eagerly — search finds the rest
   let kbdIdx = -1, shown = [], optEls = [];
   const rowFor = (it) => {
-    const b = el('button','swopt' + (it.cls ? ' ' + it.cls : '')); b.type = 'button'; b.setAttribute('role','option');
+    const b = el('button','swopt' + (it.cls ? ' ' + it.cls : '') + (it.cur ? ' swopt-cur' : '')); b.type = 'button'; b.setAttribute('role','option');
+    if (it.cur) b.setAttribute('aria-selected','true');
     if (!it.enabled){ b.disabled = true; }
     const t = el('span','swopt-tk', it.ticker);
     // E1: verified ✓ / unregistered ⚠ trust badge next to the ticker (same signal as the Balance list).
@@ -4652,22 +4675,12 @@ function popover(anchorEl, items, onPick){
         : 'No matching assets.'));
       return;
     }
-    // PINNED rows first (the other side's asset · tap-to-swap-sides), then your held assets,
-    // then everything else. The "All assets" tail is capped until you search, so a registry
-    // of thousands never renders thousands of rows.
-    const pinned = match.filter(it => it.pin);
+    const { pinned, groups, capped, more } = pickerGroups(match, q, ALL_CAP);
     for (const it of pinned){
       const b = rowFor(it); const idx = shown.length;
       b.onmouseenter = () => { kbdIdx = idx; markKbd(); };
       listEl.appendChild(b); shown.push(it); optEls.push(b);
     }
-    const held = match.filter(it => it.held && !it.pin), all = match.filter(it => !it.held && !it.pin);
-    const capped = q && all.length > ALL_CAP;
-    const groups = [];
-    if (held.length) groups.push(['Your assets', held]);
-    // Default view: the non-held tail is just BTC (and never the registry), so it is
-    // labeled plain 'Assets'; under a search the tail really is the registry sweep.
-    if (all.length) groups.push([(q && held.length) ? 'All assets' : 'Assets', capped ? all.slice(0, ALL_CAP) : all]);
     for (const [label, arr] of groups){
       listEl.appendChild(el('div','swopt-grp', label));
       for (const it of arr){
@@ -4676,7 +4689,7 @@ function popover(anchorEl, items, onPick){
         listEl.appendChild(b); shown.push(it); optEls.push(b);
       }
     }
-    if (capped) listEl.appendChild(el('div','swopt-more', `+${all.length - ALL_CAP} more · keep typing to find them.`));
+    if (capped) listEl.appendChild(el('div','swopt-more', `+${more} more · keep typing to find them.`));
     // The default view holds only your assets + BTC: say how to reach everything else.
     if (!q) listEl.appendChild(el('div','swopt-more','Type to search every registry asset, or paste an asset id.'));
   };
@@ -10643,7 +10656,7 @@ export const __test__ = { crossableDepthAtoms, ratioRecvPerPay, stripBip32, dexP
   // F1/F2 — asset picker default-vs-search visibility, paste-an-id tradability, and the
   // hidden-asset store, exposed so the REAL candidate construction + filtering are pinned
   // headlessly (no popover DOM needed).
-  pickerCandidates, pickerMatches, metaOf, notePasted, pastedIds: () => PASTED,
+  pickerCandidates, pickerMatches, pickerGroups, metaOf, notePasted, pastedIds: () => PASTED,
   hiddenAssets, setAssetHidden, isAssetHidden, partitionHidden, ensureDefaults,
   acceptedFee, defaultFeeAsset,
   // Take/Post + rail-combo helpers, for headless verification of the composer's gating.
