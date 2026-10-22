@@ -38,6 +38,9 @@ const ceilDiv = (a, b) => (a + b - 1n) / b
 export const BITCOIN_BLOCK_SECONDS = 1200
 export const EXTRA_BLOCKS = 6
 export const REACTION_SECONDS = 3600
+// Buying with BTC, how long the wallet waits for the maker to pay its asset into the wallet's
+// receive. Nothing of the wallet's has moved by then: past it the trade comes back.
+export const MAKER_LOCK_MS = 5 * 60 * 1000
 // A Bitcoin invoice the wallet pays must have at least this long to run.
 export const INVOICE_LEFT_SECONDS = 600
 
@@ -171,7 +174,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     // Nothing of the wallet's is locked until it pays the BTC, which waits for its leaf. From here
     // the trade is under way whatever the maker answers now: a lock it refused is asked for again
     // as the trade is followed, and a receive it never pays lapses and the trade comes back.
-    rec.state = 'waiting'
+    rec.state = 'waiting'; rec.waitingSince = now()
     put(rec)
     try { await post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: r.invoice }) } catch (e) { log('[user trade] the maker did not lock yet:', e.message) }
     return rec
@@ -218,6 +221,13 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     rec.receiveState = rcv.state || null
     if (rec.state === 'waiting') {
       if (rcv.state === 'failed') { rec.state = 'returned'; rec.returnedAt = now(); return put(rec) }
+      // A maker that has not paid the asset in by now is not going to: nothing of the wallet's has
+      // moved, so the trade comes back and the maker lets its offer go. The wallet never pays BTC
+      // for a trade it has called returned.
+      if ((rcv.state === 'waiting' || !rcv.state) && now() - (rec.waitingSince ?? rec.at ?? now()) >= MAKER_LOCK_MS) {
+        release(rec.maker, rec.swap)
+        rec.state = 'returned'; rec.returnedAt = now(); rec.why = 'the maker did not lock its side in time'; return put(rec)
+      }
       // The maker's lock, asked for again in case it missed it.
       if (rcv.state === 'waiting') post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: rec.invoiceX }).catch(() => {})
       let r
