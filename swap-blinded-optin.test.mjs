@@ -48,7 +48,8 @@ test('the reviews can be confirmed with the box unticked', () => {
   const i = src.indexOf('async function takeCovenantWalkReview(');
   const market = src.slice(i, src.indexOf('ok.onclick', i));
   assert.match(market, /if \(askBlind && pv\.interactive\) consent = blindedConsent\(modal\.querySelector\('\.card'\)\);/);
-  assert.ok(!/ok\.disabled/.test(market), 'the market review is not disabled by the box');
+  // Only an empty book disables it (swap-empty-review.test.mjs), never the box.
+  assert.ok(!/ok\.disabled/.test(market.replace(/if \(pv\.paid <= 0n\)\{ ok\.disabled = true;[^\n]*/, '')), 'the market review is not disabled by the box');
   const j = src.indexOf('async function reviewSame(');
   const single = src.slice(j, src.indexOf('ok.onclick', j));
   assert.ok(!/ok\.disabled/.test(single), 'the single-offer review is not disabled by the box');
