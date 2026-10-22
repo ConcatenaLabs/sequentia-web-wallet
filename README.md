@@ -91,9 +91,12 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   is pinned or privileged; the Sequence token (tSEQ) is one row among equals. Each asset's figure
   counts everything of it the wallet holds: on-chain, leaves, Lightning (the wallet's share of
   its own channels, reserve included) and, for tSEQ, what is staked (each bonded stake, each
-  unbonding output not yet claimed back, and the delegation record). In user mode a row shows
-  that one figure, and a tap on it opens its parts; developer mode shows the parts in columns,
-  with the controls that move an asset to and from Lightning.
+  unbonding output not yet claimed back, and the delegation record). A row shows that one
+  figure, with a bolt beside the ticker that is yellow when the asset has a Lightning channel;
+  a tap on it opens its details: its parts (on-chain, Lightning with what it can send and
+  receive, leaves and staked, each when it holds some), the controls that move it to and from
+  Lightning or ask for room to receive, and its asset id and Hide. The view is the same in
+  both modes.
 - **Send**: multi-recipient sends of any owned asset, including BTC (a real Bitcoin testnet4
   transaction) and OpenAMP restricted assets. For Sequentia sends you choose the **fee asset**:
   the fee can be paid in any asset the node publishes an exchange rate for. The fee is
@@ -177,9 +180,9 @@ currency, and amount inputs can be flipped to be typed directly in the reference
 **Settings → Mode** is one setting, kept for each wallet, with the same words in every
 Sequentia wallet:
 
-- **User mode** (the default): One figure per asset, and the wallet chooses how value moves.
-- **Developer mode**: Every rail by name, side by side (on-chain, leaves and Lightning), each
-  with its balance and its manual controls, and the developer tools.
+- **User mode** (the default): The wallet chooses how value moves.
+- **Developer mode**: Leaves as a rail you can choose, and the developer tools (the Leaves and
+  Contracts tabs). The Balance tab is the same in both modes.
 
 The headline total counts every rail of every asset (on-chain, Lightning and leaves) and the
 staked tSEQ in the reference currency, in both modes, and no asset comes first. User mode shows
@@ -406,7 +409,7 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
   both your hosted node and the node your channel is with: the hosted node collects the
   device's signature on each commitment before the device revokes it, so the two together can
   broadcast a revoked commitment and take the channel's funds.
-- Moving BTC or a Sequentia asset to Lightning (developer mode's Move, on the Balance row) is one transaction: your wallet pays the channel's
+- Moving BTC or a Sequentia asset to Lightning (Move to Lightning, in an asset's details on the Balance tab) is one transaction: your wallet pays the channel's
   2-of-2 output directly, so the coins are never on the hosted node and there is one fee and one
   confirmation. The wallet builds and blinds the transaction, the node's peer signs the
   channel's first commitment (the way back) against it while it is still unsigned, and only then

@@ -1,6 +1,6 @@
-// The Balance tab as one table: every asset in the same five cells (asset, on-chain, Lightning with
-// what it can send and receive, total, value in the right-hand column), one card per asset on a
-// phone with Lightning on the left and on-chain on the right.
+// The Balance tab as one table, the same in every mode: one figure per asset and its value, and a
+// tap on a row opens its details (on-chain, Lightning with what it can send and receive, leaves,
+// staked, the actions, the asset's id and Hide).
 //
 //   node --test balance-table.test.mjs
 import assert from 'node:assert';
@@ -13,15 +13,15 @@ const fn = (name) => { const i = html.indexOf('function ' + name + '('); assert.
 test('every row has the same cells, value last', () => {
   assert.match(fn('balRow'), /cell\('bt-a', null, a\); cell\('bt-o', 'On-chain', onchain\); cell\('bt-l', 'Lightning', ln\); cell\('bt-t', 'Total', total\); cell\('bt-u', null, value\);/);
   const rb = fn('renderBalance');
-  assert.match(rb, /list\.appendChild\(balHeader\(userMode\)\);/);
+  assert.match(rb, /list\.appendChild\(balHeader\(\)\);/);
   assert.equal((html.match(/(appendChild\(|const row = )balRow\(\{/g) || []).length, 3, 'assets, hidden assets and restricted assets');
   assert.ok(!/'asset-row arow2'/.test(html), 'no row is left in the old layout');
 });
 
 test('Lightning says what it can send and receive, "not yet" when it cannot receive', () => {
   const rb = fn('renderBalance');
-  assert.match(rb, /line\('can send', amt\(lnSendFor\(kind\)\)\);/);
-  assert.match(rb, /line\('can receive', room>0n \? amt\(room\) : 'not yet', room>0n \? null : 'none'\);/);
+  assert.match(rb, /line\('You can send', amt\(lnSendFor\(kind\)\)\);/);
+  assert.match(rb, /line\('You can receive', room>0n \? amt\(room\) : 'not yet', room>0n \? null : 'none'\);/);
   assert.match(rb, /'Add room to receive'/);
 });
 
@@ -45,21 +45,26 @@ test('a phone shows one card per asset, Lightning left and on-chain right', () =
   assert.match(css, /\.bt-o\{grid-area:o;text-align:right\}/);
 });
 
-test('user mode: one figure per asset, no rail columns, no Move or room to receive, the split one tap away', () => {
+test('one view in every mode: one figure per asset, its parts and actions one tap away', () => {
   const rb = fn('renderBalance');
-  assert.match(rb, /const userMode = !devMode\(\);/);
-  assert.match(rb, /list\.classList\.toggle\('user', userMode\);/);
-  // The Lightning cell (its figures and its Move / room buttons) is built only in developer mode.
-  assert.match(rb, /if\(userMode\) \{[^}]*\}\s*else if\(!lnOn \|\| !leg\)/);
+  assert.ok(!/devMode\(\)|userMode/.test(rb), 'the balance does not change with the mode');
+  assert.match(rb, /list\.classList\.add\('user'\);/);
   assert.match(html, /\.btable\.user \.bt-o,\.btable\.user \.bt-l\{display:none\}/);
-  assert.match(rb, /if\(userMode && several && _splitOpen\.has\(kind\)\) extra = balSplitLine\(parts, amt\);/);
-  assert.match(rb, /\[\['On-chain', on\], \['Off-chain', leafAtoms\], \['Lightning', lnAtoms\], \['Staked', staked\]\]/);
-  // The headline's on-chain / Lightning split is developer mode's.
-  assert.match(rb, /if\(totalLn>0 && !userMode\)/);
+  // A bolt beside the ticker: yellow with a channel, grey without.
+  assert.match(rb, /const bo=el\('span','bt-bolt'\+\(hasLn\?' on':''\)\);/);
+  // The details: each part only when it says something, then the asset's id and Hide.
+  assert.match(rb, /if\(hasLn \|\| leafAtoms>0n \|\| staked>0n\) blk\('On-chain', amt\(on\)\);/);
+  assert.match(rb, /if\(leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
+  assert.match(rb, /if\(staked>0n\) blk\('Staked', amt\(staked\)\);/);
+  // Without a channel the one action is Move to Lightning, inside the details, never on the row.
+  assert.match(rb, /if\(lnOn && leg && !hasLn && toLn\)\{ const d=el\('div','bt-blk'\); button\(d, 'Move to Lightning'/);
+  assert.match(rb, /nameNode:nameEl, foot:sub, movable,/);
+  assert.match(rb, /el\('button','ghost','Hide asset from list'\)/);
+  // A tap on the row only opens or closes the details.
+  assert.match(rb, /if\(ev\.target\.closest\('a,button,\.bt-det'\)\) return;/);
   const hd = new Function('el', 'priceOf', 'REF', 'return ' + fn('balHeader'))(
     (t, c, x) => ({ t, c, x, kids: [], appendChild(k) { this.kids.push(k); } }), () => 1, 'USD');
-  assert.deepEqual(hd(true).kids.map(k => k.x), ['Asset', 'Balance', 'Value (USD)']);
-  assert.deepEqual(hd(false).kids.map(k => k.x), ['Asset', 'On-chain', 'Lightning', 'Total', 'Value (USD)']);
+  assert.deepEqual(hd().kids.map(k => k.x), ['Asset', 'Balance', 'Value']);
 });
 
 test('staked tokens count in the figure and the headline, each stake once', () => {
