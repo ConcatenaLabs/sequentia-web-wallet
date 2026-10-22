@@ -47,6 +47,8 @@ import { execFileSync } from 'node:child_process'
 import { harness, startRelay, placeOrder, restOrder, startMaker, launchMaker, makerReady, freePort, sleep, lwkFrom, relayBook } from './user-mode-stack.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
+// The commit the run's code is at, read when it starts: the checkout may move on before it ends.
+const commit = (() => { try { return execFileSync('git', ['-C', resolve(here, '..'), 'rev-parse', '--short', 'HEAD']).toString().trim() } catch { return '?' } })()
 const argv = process.argv
 const opt = (n, d) => { const i = argv.indexOf(n); return i > 0 ? argv[i + 1] : d }
 const N = Number(opt('--trades', '500'))
@@ -573,7 +575,6 @@ async function main () {
   const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))] }
   const by = (src) => traded.filter((r) => r.source === src)
   const passed = counts.failed === 0 && traded.length >= N && !aborted
-  const commit = (() => { try { return execFileSync('git', ['-C', resolve(here, '..'), 'rev-parse', '--short', 'HEAD']).toString().trim() } catch { return '?' } })()
   const lines = []
   lines.push('# User-mode drill report', '')
   lines.push(`The user-mode composer's trades on one stack, each settled or cleanly returned with no user action, the ticket checked against what moved. This report is written by \`tooling/user-mode-drill.mjs\`; \`pairs.json\` beside it lists what user mode offers on each chain.`, '')
