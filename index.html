@@ -3440,9 +3440,13 @@ function userKnownAssets(){
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
 }
+// The user-mode composer (user-composer.js) trades against the single-step book, which needs the
+// live leaf maker; until that runs, a Trade tab showing it has nothing to trade against. It stays
+// off unless window.SEQ_USER_TRADE = true, and the full composer serves both modes meanwhile.
+function userTradeOn(){ return !!window.SEQ_USER_TRADE; }
 function applyTradeMode(){
   const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
-  const user = !devMode();
+  const user = !devMode() && userTradeOn();
   for(const c of sec.children){ if(c.id === 'userComposerRoot') c.classList.toggle('hide', !user); else c.classList.toggle('uc-dev-hidden', user); }
   if(user && userComposer){ userComposer.render(); userComposer.follow(); }
 }
