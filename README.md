@@ -466,9 +466,11 @@ The route is inferred from the pair:
   (no co-signature, no escrow, no intermediary). Maker-signed relay offers, where one rests,
   are still taken through the co-signed PSET lift. The maker completes that transaction and
   blinds the output that pays you, so it can only pay a blinded address: the review asks before
-  receiving there, with that choice suggested, and a market order skips those offers when you
-  say no. The review shows what the book holds within reach of the best price, not the amount
-  typed times the best price.
+  receiving there, with the box unticked, and a market order skips those offers unless you tick
+  it. The review shows what the book holds within reach of the best price, not the amount
+  typed times the best price, and a dash where nothing is within reach. When an offer cannot be
+  taken and nothing else within reach can fill, the review closes, says that nothing was filled,
+  and leaves the order in the form to review again.
 - **Cross-chain** (BTC ↔ asset): a hash-time-locked-contract (HTLC) atomic swap between
   Bitcoin testnet4 and Sequentia. Before revealing any secret the wallet verifies the
   counterparty leg on-chain AND checks that the Sequentia block anchors at or above the
