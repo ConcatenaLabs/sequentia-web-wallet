@@ -7636,11 +7636,12 @@ async function takeCovenantWalkReview(q){
   // Interactive makers count only when the user ticks the blinded receive (asked below, unticked).
   const askBlind = !blindedReceiveOk();
   let pv = walkPreview(pay, receive, payAtoms, !askBlind);
-  const rows = (p) => [
+  // Nothing within reach is shown as a dash with the reason beneath, never as "up to 0".
+  const rows = (p) => p.paid > 0n ? [
     ['You pay', 'up to ' + amtRow(pay, p.paid) + refSuffix(pay, p.paid)],
     ['You receive', '~' + amtRow(receive, p.got) + refSuffix(receive, p.got)],
-    ['Price', p.paid > 0n ? 'Market · ' + ratePerPayToLine(pay, receive, Number(p.got) / Number(p.paid)).str : '-'],
-  ];
+    ['Price', 'Market · ' + ratePerPayToLine(pay, receive, Number(p.got) / Number(p.paid)).str],
+  ] : [['You pay', '-'], ['You receive', '-'], ['Price', '-']];
   const kv = [
     ...rows(pv),
     ['Network fee', amtRow(feeAsset, covFeeAtoms(feeAsset)) + '  (estimate, per fill)'],
@@ -7698,6 +7699,16 @@ async function takeCovenantWalkReview(q){
       renderSwap();
     } catch (e){
       if (e && e.repriced){
+        const why = e.cause ? 'An offer in this review could not be taken (' + C.prettyErr(e.cause) + ')' : 'The book moved since this review opened';
+        // Nothing was filled, and nothing within reach of the best price can fill now. The review
+        // used to stay open with every figure turned to "up to 0 / ~0 / Price -": close it instead,
+        // keep the order in the form, and say plainly what happened and what to do.
+        if (!(e.repriced.paid > 0n)){
+          modal.remove();
+          C.toast(why + '. Nothing was filled and nothing left this wallet. Your order is still in the form: review it again in a moment to see what the book offers then.', undefined, { sticky: true });
+          requote().catch(() => {});
+          return;
+        }
         // Nothing was filled: show the new figures and let the next Confirm accept them.
         const before = pv.got, paidBefore = pv.paid; pv = e.repriced;
         const card = modal.querySelector('.card');
@@ -7707,14 +7718,11 @@ async function takeCovenantWalkReview(q){
         }
         const less = before > 0n ? Number((before - pv.got) * 10000n / before) / 100 : 0;
         st.className = 'status warn';
-        const why = e.cause ? 'An offer in this review could not be taken (' + C.prettyErr(e.cause) + ')' : 'The book moved since this review opened';
-        st.textContent = pv.paid > 0n
-          ? why + ': you would now pay ' + (pv.paid < paidBefore ? 'only up to ' : 'the same, up to ')
+        st.textContent = why + ': you would now pay ' + (pv.paid < paidBefore ? 'only up to ' : 'the same, up to ')
             + C.fmtAtoms(pv.paid, pm.precision) + ' ' + pm.ticker
             + ', and receive about ' + C.fmtAtoms(pv.got, rm.precision) + ' ' + rm.ticker
-            + ' (' + less.toLocaleString(undefined, { maximumFractionDigits: 2 }) + '% less). Nothing was filled. Confirm again to accept it.'
-          : why + ', and nothing within reach of the best price can fill now. Nothing was filled.';
-        ok.disabled = pv.paid <= 0n;
+            + ' (' + less.toLocaleString(undefined, { maximumFractionDigits: 2 }) + '% less). Nothing was filled. Confirm again to accept it.';
+        ok.disabled = false;
         return;
       }
       st.className = 'status err'; st.textContent = 'Could not fill: ' + C.prettyErr(e); ok.disabled = false;
