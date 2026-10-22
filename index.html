@@ -304,6 +304,9 @@
   /* toast */
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d242d;border:1px solid var(--line);
          border-radius:10px;padding:12px 16px;font-size:13.5px;max-width:92vw;box-shadow:0 8px 30px #0008;z-index:60}
+  .toast-stack{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;width:max-content;max-width:92vw;z-index:61}
+  .toast-stack .toast{position:static;transform:none;max-width:none}
+  .toast-stack .toast button{margin-left:12px;padding:3px 12px;font-size:12px}
 
   /* ===== SeqDEX swap composer (the symmetric Pay -> Receive signature) ===== */
   /* The card holds two weighted-equal panes with a circular flip on the seam. */
@@ -574,10 +577,10 @@
     .more-btn > span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .more-list{top:auto;bottom:calc(100% + 10px);left:auto;right:4px}
     body{padding-bottom:calc(68px + env(safe-area-inset-bottom))}
-    .toast,.lnmove-banner{bottom:calc(76px + env(safe-area-inset-bottom))}
+    .toast,.toast-stack,.lnmove-banner{bottom:calc(76px + env(safe-area-inset-bottom))}
     body.typing .tabs{display:none}
     body.typing{padding-bottom:0}
-    body.typing .toast,body.typing .lnmove-banner{bottom:16px}
+    body.typing .toast,body.typing .toast-stack,body.typing .lnmove-banner{bottom:16px}
     /* The swap's four steps stay on one line; on the narrowest phones a finished step is its check. */
     .swguide{flex-wrap:nowrap;gap:2px;padding:12px 12px 0}
     .swguide .gs{white-space:nowrap;font-size:11.5px;gap:4px;padding:3px 7px 3px 3px}
@@ -8925,10 +8928,23 @@ async function refreshOampHistory(){
 
 // ---------- toast ----------
 let toastT;
-function toast(text, link){ clearTimeout(toastT); let t=$('_toast'); if(!t){ t=el('div','toast'); t.id='_toast'; document.body.appendChild(t); }
+// A short confirmation goes after nine seconds. A message the user has to read (a part of an order
+// that did not fill, a failure, anything longer than a line) stays until they press OK: nobody reads
+// a paragraph in nine seconds, on a phone least of all, and a later toast must not wipe it either,
+// so each one gets its own place in a stack. opts.sticky asks for that on a short message too.
+function toast(text, link, opts){
+  const sticky = !!(opts && opts.sticky) || String(text||'').length > 90;
+  let t;
+  if(sticky){
+    let stack=$('_toasts'); if(!stack){ stack=el('div','toast-stack'); stack.id='_toasts'; document.body.appendChild(stack); }
+    t=el('div','toast'); stack.appendChild(t);
+  } else { clearTimeout(toastT); t=$('_toast'); if(!t){ t=el('div','toast'); t.id='_toast'; document.body.appendChild(t); } }
   t.textContent=text||'';   // TEXT only — error/server strings can't inject markup
   if(link && link.href){ t.appendChild(document.createTextNode(' ')); t.appendChild(txLink(link.href, link.label||link.href)); }
-  t.style.display='block'; toastT=setTimeout(()=>t.style.display='none', 9000); }
+  t.style.display='block';
+  if(sticky){ const ok=el('button','ghost','OK'); ok.onclick=()=>t.remove(); t.appendChild(ok); }
+  else toastT=setTimeout(()=>t.style.display='none', 9000);
+}
 
 // A deep link followed while the wallet is already open (the tab was already sitting on
 // sequentiatestnet.com and something navigated the hash) — same two routes, applied live.
