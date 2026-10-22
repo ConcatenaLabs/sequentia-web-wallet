@@ -71,6 +71,9 @@
 //     "coin_size": "2000000",                    optional: boards in coins of at most this many atoms,
 //                                                one a pass, so several takers are served at once
 //     "exit_delay_units": 36,                    optional; the operator's default otherwise
+//     "rest": { … },                             optional: orders resting in the tree, a ladder a
+//                                                pair, listed on SeqDEX's relay (leaf-maker-rest.mjs
+//                                                says how)
 //     "btc": { … } }                             optional: BTC for an asset and an asset for BTC in
 //                                                one hash-lock, from the maker's own Bitcoin
 //                                                Lightning node (leaf-maker-btc.mjs says how)
@@ -83,6 +86,7 @@ import { fileURLToPath } from 'node:url'
 import { leafLibraryThread } from '../leaf-node.mjs'
 import { spendableFrom } from '../../user-trade.js'
 import { btcDesk } from './leaf-maker-btc.mjs'
+import { restDesk } from './leaf-maker-rest.mjs'
 import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -244,6 +248,9 @@ async function main () {
   let busy = false
   let lastBoardRefusal = null
   const spendable = async () => spendableFrom(await cmd('coins'), await cmd('plans').catch(() => ({ plans: [] })))
+  // Orders resting in the tree, a ladder a pair, listed on the relay (leaf-maker-rest.mjs).
+  const rester = await restDesk({ cfg, cmd, log, liveRates, spendable })
+  if (rester) log('the resting desk is open, its listings signed by', rester.makerPub)
 
   async function swapState (id, first = false) { return (((await cmd('swaps', {}, first)) || []).find((s) => s.swap === id) || {}).state || null }
 
@@ -256,6 +263,7 @@ async function main () {
     {
       try { await cmd('sync') } catch (e) { log('sync:', e.message) }
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
+      if (rester) { try { await rester.tick() } catch (e) { log('rest:', e.message) } }
       // What it holds on the chain of an asset it gives, above what it keeps, comes into the
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
       // another asset the maker holds on the chain that the node takes (the wallet rule; never a
