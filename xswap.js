@@ -1689,11 +1689,22 @@ function onAbandon(){
   loadSwap();
   // NEVER discard a swap that still holds locked BTC: clearSwap() deletes the ONLY reclaim
   // material (redeem script + refund key + outpoint), permanently stranding the BTC. If a leg
-  // is funded and not yet refunded/claimed, keep the record and point at the Refund off-ramp.
+  // is funded and not yet refunded/claimed, the record is kept.
   const lockedUnrefunded = !!(SWAP && SWAP.btc_leg && SWAP.btc_leg.txid)
     && !isForwardComplete() && SWAP.state !== ST.REFUNDED && SWAP.state !== ST.BTC_CLAIMED;
   if (lockedUnrefunded){
-    try { C.toast && C.toast('Your Bitcoin is still locked. Use “Refund BTC leg” (available after the timeout) before clearing — otherwise the reclaim keys are lost.'); } catch {}
+    // Abandoning a trade whose only remaining action is the BTC refund means parking it: the
+    // record moves to the parked list, the sweeper refunds it at T_btc, and the slot frees now.
+    // Refusing instead left the trade active for the rest of the timelock and blocked every
+    // other buy with BTC, with nothing on screen but a toast.
+    if (parkEligible()){ onPark(); return; }
+    // The maker's asset leg is on-chain, or already claimed: the trade finishes rather than
+    // refunds, so it stays.
+    const why = SWAP.state === ST.SEQ_CLAIMED
+      ? 'This trade cannot be abandoned: you have already received the asset, and it clears once the maker takes the BTC.'
+      : 'This trade cannot be abandoned: the maker has locked the asset for you, and claiming it is what finishes the trade. If it cannot be claimed, your BTC refunds at block ' + SWAP.btc_locktime + ' with “Refund BTC leg”.';
+    try { if (C.$ && C.$('xswapErr')) C.$('xswapErr').textContent = why; } catch {}
+    try { C.toast && C.toast(why); } catch {}
     return;
   }
   clearSwap(); renderStepper();
@@ -2081,4 +2092,5 @@ export const __test__ = {
   setQuote: (q) => { LAST_XQUOTE = q; }, getQuote: () => LAST_XQUOTE,
   setMarkets: (m) => { XMARKETS = m.map(normMarket); },
   loadSwap, saveSwap, clearSwap, ST,
+  onAbandon, listParked,
 };
