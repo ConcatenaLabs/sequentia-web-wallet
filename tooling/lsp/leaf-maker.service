@@ -1,0 +1,21 @@
+# The live leaf maker (leaf-maker.mjs; tooling/lsp/README.md, "The live leaf maker").
+# Its configuration names its own wallet; the maker refuses a service or treasury wallet's.
+# It runs as a user of its own, from a clone of its own pinned to one commit, with its phrase,
+# store and node password under /var/lib/leaf-maker (mode 0600, owned by that user).
+[Unit]
+Description=Sequentia live leaf maker (in-tree swaps for the web wallet's user mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=leafmaker
+Group=leafmaker
+WorkingDirectory=/opt/leaf-maker/sequentia-web-wallet
+ExecStart=/usr/bin/node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

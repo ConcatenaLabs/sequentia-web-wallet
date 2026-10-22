@@ -547,7 +547,8 @@ works normally without the restricted rows.
 | `lightning/` | The vendored SeqLN device-signer SDK + its WASM build (tracked, unlike `pkg/`). |
 | `noble-ciphers.js` | Vendored `@noble/ciphers` (MIT): AES-256-GCM for the end-to-end swap encryption. |
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
-| `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md). Three of its modules (`settlement-router.mjs`, `unified-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
+| `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md), and the live leaf maker (`leaf-maker.mjs`) user mode trades with. Four of its modules (`settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
+| `tooling/leaf-node.mjs` | The leaf library (`leaves/pkg`) run in Node, with its storage and synchronous requests given to it: for the leaf maker and the drill. |
 | `*.test.mjs` | Node test suites (no browser needed). |
 
 A deeper tour of the module graph, protocols, config globals, and storage keys is in
@@ -684,6 +685,23 @@ started on a port of its own against the harness's node): no Leaf choice in user
 in-tree swap offered, read, accepted and completed between the two wallets, both balances
 checked; an order placed on the chain from leaves, rested and listed on the relay; and a take of
 it from leaves, its fill round checked at the node.
+
+`node tooling/user-mode-drive.mjs <evidence-dir> [--pairs FILE]` drives the Trade tab in user
+mode in headless Chromium against the same harness, SeqDEX's relay (`SEQOBD`), a live leaf maker
+it starts and a covenant order it places: the user composer and nothing of developer mode's, BTC
+first in both pickers, the word list checked on every screen; a trade settled in the tree against
+the maker; a take of the covenant order once the maker stops; a pair not offered; and developer
+mode as before.
+
+`node tooling/user-mode-drill.mjs --trades 500 --wallets 3 --out DIR` is the reliability bar for
+user mode: that many trades through the composer's own engine (each wallet a process of its own,
+`tooling/user-mode-wallet.mjs`), with the wallet killed mid-trade and started again, the operator
+restarted and the parent chain reorganised under a trade's round, every trade counted settled or
+returned with no user action and its ticket checked against what moved. It writes `REPORT.md`
+and, when every trade passed, the chain's entry for `user-mode/pairs.json`. With `--btc`, on a
+harness started with `ARCA_OPERATOR_LIGHTNING` and `ARCA_OPERATOR_BTC_LIGHTNING`, BTC trades with
+the maker's BTC desk join, each wallet on a Bitcoin Lightning node of its own
+(`tooling/cln-rpc.mjs`).
 
 The real WASM + WebSocket + Noise signer path is exercised separately by
 `tooling/lsp/device-harness.mjs` against a running backend; see
