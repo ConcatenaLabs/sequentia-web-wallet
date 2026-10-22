@@ -831,8 +831,11 @@ pairs. With `--every-pair tooling/user-mode-every-pair.json`, on a harness start
 `ARCA_OPERATOR_MORE_ASSETS=7 ARCA_OPERATOR_SUPERVISED=2`, it trades every directed pair of the
 testnet's assets, each standing in as a harness asset priced the same per atom: a pair with a
 supervised asset through the live maker only, the others through the maker, covenant orders and
-orders resting in the tree. A pair is admitted with the sources that settled at least one of its
-trades, and the run also writes `pairs-testnet.json`, the same pairs under the testnet's ids.
+orders resting in the tree. With `--btc` as well, on a harness that also has
+`ARCA_OPERATOR_LIGHTNING=1 ARCA_OPERATOR_BTC_LIGHTNING=3` (a Lightning leg in every plain asset),
+BTC is traded against every plain asset through the maker's BTC desk; `--btc-only` runs those
+pairs alone. A pair is admitted with the sources that settled at least one of its trades, and the
+run also writes `pairs-testnet.json`, the same pairs under the testnet's ids.
 
 `node tooling/user-mode-btc-drive.mjs <evidence-dir>` drives user mode's BTC trades in headless
 Chromium against the same harness started with `ARCA_OPERATOR_LIGHTNING=1` and
