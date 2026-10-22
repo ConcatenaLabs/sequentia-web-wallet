@@ -1,0 +1,352 @@
+#!/usr/bin/env node
+// A live leaf maker: it holds leaves of one operator's tree, quotes in-tree swaps for the pairs
+// its configuration names, and settles each in one reassignment with the wallet that takes it.
+// It is the in-tree source of the user-mode composer's single-step book
+// (tooling/lsp/single-step-book.mjs 'leaf-maker'; user-trade.js settles against it).
+//
+// It quotes only what it holds: a quote's `max_give` is what its leaf library can pay now
+// (its live coins, less the coin of any open offline-refresh plan; a firm offer's coins are held
+// for it and are not live), less a margin for the swap's own fees. Nothing it cannot fill is
+// quoted.
+//
+// HTTP (JSON; CORS open, since a page may reach it from another origin):
+//   GET  /health              -> { ok, operator, genesis_hash }
+//   GET  /v1/quotes           -> { operator, genesis_hash, quotes: [{ give_asset, want_asset, rate_num, rate_den,
+//                                  min_give, max_give }] }   (the maker gives give_asset and wants
+//                                  ceil(give × rate_num / rate_den) of want_asset)
+//   POST /v1/firm {give_asset, want_asset, give}  -> { swap, offer, give, want, expires_at }: an in-tree swap
+//                                  offer of the leaf library's (`swap_offer`), its coins held until it is
+//                                  completed, released or lapses (`offer_ttl_seconds`)
+//   POST /v1/accept {swap, accept} -> { swap, state: 'done' }: completes the swap (`swap_complete`, the
+//                                  operator co-signing); asked again it answers the same
+//   POST /v1/release {swap}       -> { swap, state }: cancels a firm offer nobody took
+//   GET  /v1/swap/<id>            -> { swap, state }
+//
+// Run:  node tooling/lsp/leaf-maker.mjs --config maker.json
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --init   (draws the maker's phrase, once;
+//            LWK_PKG names the wallet kit's lwk_wasm build when ../../pkg is not there)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --ask-faucet URL ASSET TICKER
+//            (a receive request paid by the testnet faucet as a leaf; prints what came, exits)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --address    (its on-chain address)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --held ASSET (atoms it holds in leaves)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --pay FILE   (pays the receive
+//            requests in FILE from its leaves, in the tree; for a drill's wallets)
+// The one-shot modes open the maker's store: stop its service first.
+//
+// The configuration (JSON) names the maker's own wallet and nothing else's:
+//   { "wallet": "leaf-maker-1",                 a name of the maker's own; a service or treasury
+//                                                wallet's name (treasury, reserve, faucet, bridge,
+//                                                sbtc, pool, fee, service) is refused
+//     "mnemonic_file": "/path/mnemonic",        mode 0600, the maker's own phrase (--init writes it)
+//     "store_dir": "/path/store",               the leaf library's store
+//     "operator": { "server": "https://…/arca", "node_url": "https://…/node", "node_user": "…",
+//                   "node_password_file": "/path/…" },
+//     "listen": "127.0.0.1:9979",
+//     "pairs": [ { "give": "<asset hex>", "want": "<asset hex>", "rate_num": "1", "rate_den": "1",
+//                  "min_give": "10000" } ],      or "price": true in place of the rate, priced from
+//     "prices": { "url": "https://…/prices",    the price server's feed with the spread on the
+//                 "spread_bps": 100,             maker's side, read every minute; a pair whose
+//                 "assets": { "<hex>": { "ticker": "USDX", "precision": 8 } } },   price is missing
+//                                                or older than ten minutes is not quoted
+//     "fee_margin": "2000",                      atoms of each asset kept back for a swap's fees
+//     "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600,
+//     "board_keep": "100000",                    on-chain atoms of each asset it gives that it keeps
+//                                                (for exit fees); what it holds above that is boarded
+//     "coin_size": "2000000",                    optional: boards in coins of at most this many atoms,
+//                                                one a pass, so several takers are served at once
+//     "exit_delay_units": 36,                    optional; the operator's default otherwise
+//     "btc": { … } }                             optional: BTC for an asset and an asset for BTC in
+//                                                one hash-lock, from the maker's own Bitcoin
+//                                                Lightning node (leaf-maker-btc.mjs says how)
+// Every coin the maker receives is refreshed in the operator's next round once it has rested
+// `settle_seconds`, so what it trades settles as the takers' coins do.
+import { createServer } from 'node:http'
+import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { leafLibraryThread } from '../leaf-node.mjs'
+import { spendableFrom } from '../../user-trade.js'
+import { btcDesk } from './leaf-maker-btc.mjs'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
+const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
+const ceilDiv = (a, b) => (a + b - 1n) / b
+const log = (...a) => console.log(new Date().toISOString(), ...a)
+
+export const REFUSED_WALLETS = /(treasury|reserve|faucet|bridge|sbtc|pool|fee|service|founder|drip)/i
+
+// A pair's rate from the price server's feed (`/prices`: { TICKER: price or {price} }, each in
+// the same reference unit per whole unit of the asset), with the maker's spread: the maker wants
+// `rate_num` atoms of what it wants for every `rate_den` atoms it gives. Null when either price is
+// missing, so nothing is quoted on a price the maker does not have.
+export function rateFromPrices (prices, give, want, spreadBps) {
+  const p = (t) => { const v = prices && prices[String(t.ticker).toUpperCase()]; const n = Number(v && typeof v === 'object' ? v.price : v); return n > 0 ? n : null }
+  const pg = p(give), pw = p(want)
+  if (!pg || !pw) return null
+  const DEN = 100000000n
+  // atoms of `want` per atom of `give`, the spread on the maker's side.
+  const ratio = (pg / pw) * 10 ** ((want.precision ?? 8) - (give.precision ?? 8)) * (1 + Number(spreadBps || 0) / 10000)
+  const num = BigInt(Math.ceil(ratio * Number(DEN)))
+  if (num <= 0n) return null
+  return { rate_num: String(num), rate_den: String(DEN) }
+}
+
+export function checkConfig (c) {
+  if (!c || typeof c !== 'object') throw new Error('the configuration is not an object')
+  if (!c.wallet || REFUSED_WALLETS.test(String(c.wallet))) throw new Error(`refused: the maker runs only a wallet of its own, never a service or treasury wallet (${JSON.stringify(c.wallet)})`)
+  for (const k of ['mnemonic_file', 'store_dir', 'listen']) if (!c[k]) throw new Error(`the configuration names no ${k}`)
+  if (REFUSED_WALLETS.test(String(c.mnemonic_file)) || REFUSED_WALLETS.test(String(c.store_dir))) throw new Error('refused: the phrase or store is a service or treasury wallet\'s')
+  if (!c.operator || !c.operator.server || !c.operator.node_url) throw new Error('the configuration names no operator')
+  for (const p of c.pairs || []) {
+    if (!/^[0-9a-f]{64}$/.test(p.give) || !/^[0-9a-f]{64}$/.test(p.want) || p.give === p.want) throw new Error('a pair names two asset ids')
+    if (!p.price && !(big(p.rate_num) > 0n && big(p.rate_den) > 0n)) throw new Error('a pair\'s rate is two positive integers, or "price": true with the configuration\'s price feed')
+    if (p.price && !(c.prices && c.prices.url && c.prices.assets && c.prices.assets[p.give] && c.prices.assets[p.want])) throw new Error('a pair priced from the feed needs prices.url and both assets in prices.assets')
+  }
+  return c
+}
+
+// The quotes, from what the library can pay now and what open offers hold.
+export function quotesFrom (pairs, spendable, held, margin, rates = new Map()) {
+  const out = []
+  for (const p0 of pairs || []) {
+    const r = p0.price ? rates.get(p0.give + ':' + p0.want) : null
+    if (p0.price && !r) continue
+    const p = r ? { ...p0, ...r } : p0
+    const have = (spendable.get(p.give) || 0n) - (held.get(p.give) || 0n) - big(margin)
+    const min = big(p.min_give || 1)
+    if (have < min) continue
+    out.push({ give_asset: p.give, want_asset: p.want, rate_num: String(p.rate_num), rate_den: String(p.rate_den), min_give: String(min), max_give: String(have) })
+  }
+  return out
+}
+
+async function main () {
+  const cfgPath = arg('--config')
+  if (!cfgPath) { console.error('usage: leaf-maker.mjs --config maker.json [--init]'); process.exit(2) }
+  const cfg = checkConfig(JSON.parse(readFileSync(cfgPath, 'utf8')))
+  if (process.argv.includes('--init')) {
+    if (existsSync(cfg.mnemonic_file)) { console.log(`the maker's phrase is already at ${cfg.mnemonic_file}`); return }
+    const pkg = process.env.LWK_PKG || join(here, '..', '..', 'pkg')
+    const lwk = await import(join(pkg, 'lwk_wasm.js'))
+    lwk.initSync({ module: readFileSync(join(pkg, 'lwk_wasm_bg.wasm')) })
+    writeFileSync(cfg.mnemonic_file, lwk.Mnemonic.fromRandom(12).toString() + '\n', { mode: 0o600 })
+    chmodSync(cfg.mnemonic_file, 0o600)
+    console.log(`wrote the maker's phrase to ${cfg.mnemonic_file}`)
+    return
+  }
+  const mnemonic = readFileSync(cfg.mnemonic_file, 'utf8').trim()
+  const op = cfg.operator
+  const nodePassword = op.node_password_file ? readFileSync(op.node_password_file, 'utf8').trim() : (op.node_password || '')
+  // The library on a thread of its own: the maker answers HTTP while a long command runs, and a
+  // taker's acceptance or a firm offer goes ahead of the maker's own upkeep.
+  const lib = await leafLibraryThread(cfg.store_dir)
+  const w = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, nodePassword) : await lib.create(mnemonic, {
+    server: op.server, node_url: op.node_url, node_user: op.node_user, node_password: nodePassword,
+    ...(cfg.exit_delay_units ? { exit_delay_units: cfg.exit_delay_units } : {}),
+    ...(cfg.min_exit_delay_units ? { min_exit_delay_units: cfg.min_exit_delay_units } : {}),
+  })
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms))
+  const cmd = (name, args, first = false) => w.command(name, args || {}, { first })
+  const info = await cmd('info')
+  // --address: the maker's on-chain address (to fund what it boards), then exits.
+  if (process.argv.includes('--address')) { console.log(JSON.stringify({ address: (await cmd('address')).address })); process.exit(0) }
+  // --held ASSET: what the maker holds of an asset in leaves (every state), after a sync; exits.
+  const hi = process.argv.indexOf('--held')
+  if (hi > 0) {
+    try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+    const st = ((await cmd('balance')).arca || {})[process.argv[hi + 1]] || {}
+    console.log(String(Object.values(st).reduce((n, v) => n + big(v), 0n)))
+    process.exit(0)
+  }
+  // --pay FILE: pays each receive request in FILE (one a line) from the maker's leaves, out of
+  // round, in the tree, then exits: how a drill's wallets are funded from the maker.
+  const pi = process.argv.indexOf('--pay')
+  if (pi > 0) {
+    await cmd('sync')
+    const out = []
+    for (const req of readFileSync(process.argv[pi + 1], 'utf8').split('\n').map((x) => x.trim()).filter(Boolean)) {
+      try { const r = await cmd('send', { request: req }); out.push({ ok: true, sent: r.sent || r.value || null }) } catch (e) { out.push({ ok: false, error: e.message }) }
+    }
+    console.log(JSON.stringify(out))
+    process.exit(out.every((x) => x.ok) ? 0 : 3)
+  }
+  // --ask-faucet URL ASSET TICKER: a receive request in that asset, paid by the testnet faucet as
+  // a leaf; prints what the faucet paid, and exits. The faucet pays its own tier, so a caller that
+  // needs more asks again or names the shortfall.
+  const ai = process.argv.indexOf('--ask-faucet')
+  if (ai > 0) {
+    const [url, asset, ticker] = process.argv.slice(ai + 1, ai + 4)
+    const req = await cmd('receive', { asset })
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request: req.request, asset: ticker }) })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) { console.log(JSON.stringify({ ok: false, status: r.status, error: j.error || null })); process.exit(3) }
+    await pause(3000)
+    const mb = (await cmd('sync')).mailbox || {}
+    const got = (mb.accepted || []).filter((x) => x.asset === asset).reduce((n, x) => n + big(x.value), 0n)
+    console.log(JSON.stringify({ ok: true, paid: j.leaf && j.leaf.atoms ? String(j.leaf.atoms) : null, received: String(got) }))
+    process.exit(0)
+  }
+  const address = await cmd('address')
+  log(`leaf maker ${cfg.wallet}: operator ${info.operator}, chain ${info.genesis_hash}, on-chain address ${address.address}`)
+
+  // Rates from the price feed, read every minute; a rate older than ten minutes is not quoted.
+  const rates = new Map()
+  let ratesAt = 0
+  const liveRates = () => (Date.now() - ratesAt < 10 * 60 * 1000 ? rates : new Map())
+  async function readPrices () {
+    if (!cfg.prices || !cfg.prices.url) return
+    try {
+      const r = await fetch(cfg.prices.url, { signal: AbortSignal.timeout(20000) })
+      const j = await r.json()
+      for (const p of [...(cfg.pairs || []), ...((cfg.btc && cfg.btc.pairs) || [])]) {
+        if (!p.price) continue
+        const rate = rateFromPrices(j, cfg.prices.assets[p.give], cfg.prices.assets[p.want], cfg.prices.spread_bps)
+        if (rate) rates.set(p.give + ':' + p.want, rate); else rates.delete(p.give + ':' + p.want)
+      }
+      ratesAt = Date.now()
+    } catch (e) { log('prices:', e.message) }
+  }
+  await readPrices()
+  setInterval(readPrices, 60000)
+  // BTC for an asset and back, from the maker's own Bitcoin Lightning node, when it has one.
+  const desk = await btcDesk({ cfg, cmd, log, liveRates })
+  if (desk) log('the BTC desk is open')
+
+  const firm = new Map()   // swap -> { give_asset, give, expires }
+  const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
+  let busy = false
+  let lastBoardRefusal = null
+  const spendable = async () => spendableFrom(await cmd('coins'), await cmd('plans').catch(() => ({ plans: [] })))
+
+  async function swapState (id, first = false) { return (((await cmd('swaps', {}, first)) || []).find((s) => s.swap === id) || {}).state || null }
+
+  async function tick () {
+    if (busy) return
+    busy = true
+    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally { busy = false }
+  }
+  async function tickOnce () {
+    {
+      try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+      if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
+      // What it holds on the chain of an asset it gives, above what it keeps, comes into the
+      // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
+      // another asset the maker holds on the chain that the node takes (the wallet rule; never a
+      // fallback to one privileged asset).
+      try {
+        const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}
+        for (const a of new Set((cfg.pairs || []).map((x) => x.give))) {
+          let amount = big(onchain[a]) - big(cfg.board_keep ?? 100000)
+          // In coins of `coin_size`, one a pass: a firm offer holds the coins it spends until it
+          // is taken or released, so a maker of one coin serves one taker at a time.
+          if (cfg.coin_size && amount > big(cfg.coin_size)) amount = big(cfg.coin_size)
+          if (amount < big(((cfg.pairs || []).find((x) => x.give === a) || {}).min_give || 1)) continue
+          const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
+          let done = false, why = null
+          for (const fee of feeAssets) {
+            try {
+              const q = await cmd('board_quote', { asset: a, amount: String(amount), fee_asset: fee })
+              await cmd('board', { asset: a, amount: String(amount), fee_asset: fee, shown: q.fee })
+              log('boarded', String(amount), a.slice(0, 8), 'fee', JSON.stringify(q.fee))
+              done = true; break
+            } catch (e) { why = e.message; if (!/not accepted for fees/.test(e.message)) break }
+          }
+          if (!done && why !== lastBoardRefusal) { lastBoardRefusal = why; log('board:', why) }
+        }
+      } catch (e) { log('board:', e.message) }
+      const t = Date.now()
+      for (const [id, f] of firm) {
+        const st = await swapState(id)
+        if (st !== 'open') { firm.delete(id); continue }
+        if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }) } catch (e) { log('cancel', id, e.message) } firm.delete(id) }
+      }
+      // Coins it received, once rested, are refreshed in the operator's next round.
+      const coins = (await cmd('coins')) || []
+      const due = []
+      for (const c of coins) {
+        if (c.state !== 'live' || c.kind !== 'transfer') continue
+        if (!seen.has(c.leaf_id)) seen.set(c.leaf_id, t)
+        if (t - seen.get(c.leaf_id) > (cfg.settle_seconds ?? 600) * 1000) due.push(c.leaf_id)
+      }
+      if (due.length) {
+        try {
+          const q = await cmd('quote', { leaves: due })
+          const r = await cmd('participate', { leaves: due, shown: q.coins })
+          log('settling', due.length, 'received coins:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
+          for (const d of due) seen.delete(d)
+        } catch (e) { log('settle:', e.message) }
+      }
+    }
+  }
+
+  const send = (res, code, v) => {
+    res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'content-type', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' })
+    res.end(JSON.stringify(v))
+  }
+  const body = (req) => new Promise((ok) => { const p = []; req.on('data', (d) => p.push(d)); req.on('end', () => { try { ok(JSON.parse(Buffer.concat(p).toString() || '{}')) } catch { ok(null) } }) })
+
+  const srv = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://x')
+    const p = url.pathname.replace(/\/+$/, '')
+    if (req.method === 'OPTIONS') return send(res, 200, {})
+    try {
+      if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash })
+      if (req.method === 'GET' && p === '/v1/quotes') {
+        const sp = await spendable()
+        return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash,
+          quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates()), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
+      }
+      if (req.method === 'GET' && p.startsWith('/v1/swap/')) { const id = p.slice('/v1/swap/'.length); return send(res, 200, { swap: id, state: await swapState(id, true) }) }
+      if (desk && req.method === 'GET' && p.startsWith('/v1/btc/')) { const r = await desk.route('GET', p, {}); if (r) return send(res, r[0], r[1]) }
+      if (req.method !== 'POST') return send(res, 404, { error: 'no such path' })
+      const b = await body(req)
+      if (!b) return send(res, 400, { error: 'the body is not JSON' })
+      if (desk && p.startsWith('/v1/btc/')) {
+        const r = await desk.route('POST', p, b, spendable, cfg.fee_margin || 0)
+        if (r) { if (p === '/v1/btc/paid') tick(); return send(res, r[0], r[1]) }
+      }
+      if (p === '/v1/firm') {
+        const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
+        if (!pair0) return send(res, 404, { error: 'the maker quotes no such pair' })
+        const give = big(b.give)
+        const q = quotesFrom([pair0], await spendable(), new Map(), cfg.fee_margin || 0, liveRates())[0]
+        const pair = q ? { ...pair0, rate_num: q.rate_num, rate_den: q.rate_den } : pair0
+        if (!q || give < big(q.min_give) || give > big(q.max_give)) return send(res, 409, { error: 'the maker does not hold that much now', quote: q || null })
+        const want = ceilDiv(give * big(pair.rate_num), big(pair.rate_den))
+        const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
+        const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
+        firm.set(o.swap, { give_asset: pair.give, give, expires })
+        log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8))
+        return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
+      }
+      if (p === '/v1/accept') {
+        const st = await swapState(b.swap, true)
+        if (st === 'done') return send(res, 200, { swap: b.swap, state: 'done' })
+        if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st })
+        const r = await cmd('swap_complete', { accept: String(b.accept || '') }, true)
+        firm.delete(b.swap)
+        log('done', String(r.swap).slice(0, 12))
+        return send(res, 200, { swap: b.swap, state: 'done' })
+      }
+      if (p === '/v1/release') {
+        const st = await swapState(b.swap, true)
+        if (st === 'open') { try { await cmd('swap_cancel', { swap: b.swap }) } catch (e) { log('release', e.message) } }
+        firm.delete(b.swap)
+        return send(res, 200, { swap: b.swap, state: await swapState(b.swap) })
+      }
+      return send(res, 404, { error: 'no such path' })
+    } catch (e) {
+      log('refused', p, e.message)
+      return send(res, 409, { error: e.message, kind: e.kind || null })
+    }
+  })
+  const [host, port] = String(cfg.listen).split(':')
+  srv.listen(Number(port), host || '127.0.0.1', () => log(`leaf maker listening on ${host}:${srv.address().port}`))
+  tick()
+  setInterval(tick, (cfg.sync_seconds ?? 20) * 1000)
+  const stop = () => { log('stopping'); srv.close(); lib.stop(); process.exit(0) }
+  process.on('SIGTERM', stop); process.on('SIGINT', stop)
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main().catch((e) => { console.error(e.message || e); process.exit(1) })

@@ -184,3 +184,84 @@ hosted node, opens the separate-peer asset channels, posts an LP offer, then
 not just a shared preimage. `device-harness.mjs` in this directory is the
 device-signer half of that harness: it serves the hosted node's hsmd stream from
 the same vendored wasm signer the page uses.
+
+## The live leaf maker (`leaf-maker.mjs`)
+
+A maker that holds coins in one operator's tree and quotes in-tree swaps for the pairs its
+configuration names: the in-tree source of user mode's Trade tab (`../../user-trade.js`). It runs
+the leaf library (`../../leaves/pkg`) in Node through `../leaf-node.mjs`, with a store of its own.
+It quotes only what that library can pay now, less what its open offers hold and a margin for
+fees, and it boards what it holds on the chain of an asset it gives above `board_keep`.
+
+| Method | Path | What it does |
+| --- | --- | --- |
+| `GET` | `/health` | `{ok, operator, genesis_hash}` |
+| `GET` | `/v1/quotes` | `{quotes: [{give_asset, want_asset, rate_num, rate_den, min_give, max_give}]}`: it gives `give_asset` and wants `ceil(give × rate_num / rate_den)` of `want_asset` |
+| `POST` | `/v1/firm` `{give_asset, want_asset, give}` | an in-tree swap offer of the library's, its coins held until it is completed, released or lapses (`offer_ttl_seconds`, 300 by default): `{swap, offer, give, want, expires_at}` |
+| `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again |
+| `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took |
+| `GET` | `/v1/swap/<id>` | where a swap stands |
+
+Every coin it receives is refreshed in the operator's next round once it has rested
+`settle_seconds`, so what it trades settles as the takers' coins do.
+
+    node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json --init   # once: draws its phrase
+    node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json
+
+The configuration names the maker's own wallet and nothing else's. A `wallet` name, phrase file
+or store that reads as a service or treasury wallet's (treasury, reserve, faucet, bridge, sbtc,
+pool, fee, service, founder, drip) is refused at start.
+
+```json
+{
+  "wallet": "leaf-maker-1",
+  "mnemonic_file": "/var/lib/leaf-maker/mnemonic",
+  "store_dir": "/var/lib/leaf-maker/store",
+  "listen": "127.0.0.1:9979",
+  "operator": { "server": "https://host/arca", "node_url": "http://127.0.0.1:18891/", "node_user": "user", "node_password_file": "/var/lib/leaf-maker/node-password" },
+  "pairs": [ { "give": "<asset id>", "want": "<asset id>", "rate_num": "1", "rate_den": "1", "min_give": "10000" } ],
+  "fee_margin": "2000", "board_keep": "100000",
+  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600
+}
+```
+
+### Its BTC desk (`leaf-maker-btc.mjs`)
+
+With a `btc` section naming the socket of a Bitcoin Lightning node of the maker's own, the maker
+also trades BTC for an asset and an asset for BTC, each in one hash-lock: the asset moves in the
+operator's tree under a payment hash (the operator settles it between its own two wallets, so
+the asset's own Lightning node is never in the path) and the BTC over Bitcoin Lightning under
+the same hash. The hash is always the BTC receiver's and the asset's giver locks first, so
+neither side can take what it gets before paying: the leaf received under the hash opens only
+with the preimage, which comes out only when the BTC is paid. The maker pays BTC only once its
+leaf under the wallet's hash is held for good (`lightning_receive_ready`); a wallet pays BTC to
+the maker only once its own is. The asset must be one the operator serves over Lightning.
+Swaps are kept in the store directory (`btc-swaps.json`), so a restart follows every one it
+began.
+
+| Method | Path | What it does |
+| --- | --- | --- |
+| `POST` | `/v1/btc/firm` `{give_asset, want_asset, give, invoice?}` | `give_asset: "BTC"`: `invoice` is the wallet's Bitcoin invoice for `give` sat, and the answer's `invoice` the operator's, for `want` of the asset under the same hash. `want_asset: "BTC"`: the answer's `invoice` is the maker's Bitcoin invoice for `want` sat |
+| `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it |
+| `POST` | `/v1/btc/paid` `{swap}` | the wallet paid: the maker follows at once |
+| `POST` | `/v1/btc/release` `{swap}` | a firm offer nobody took |
+| `GET` | `/v1/btc/swap/<id>` | where a swap stands |
+
+Its quotes are in `/v1/quotes` beside the in-tree ones, BTC named `"BTC"` and counted in
+satoshis.
+
+```json
+"btc": {
+  "rpc": "/var/lib/leaf-maker/btc/regtest/lightning-rpc",
+  "keep_sats": "100000", "invoice_seconds": 3600,
+  "pairs": [ { "give": "BTC", "want": "<asset id>", "rate_num": "21", "rate_den": "10", "min_give": "5000" },
+             { "give": "<asset id>", "want": "BTC", "rate_num": "11", "rate_den": "20", "min_give": "10000" } ]
+}
+```
+
+A pair may say `"price": true` in place of its rate, priced from the maker's feed, whose
+`assets` then names `"BTC"` too.
+
+`leaf-maker.service` beside it is a systemd unit for it. The page reaches it at
+`/leafmaker` on its own origin (a reverse-proxy route to `listen`), or at the URLs
+`window.SEQ_LEAF_MAKERS` names.
