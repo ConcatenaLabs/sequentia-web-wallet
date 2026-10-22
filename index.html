@@ -211,7 +211,6 @@
   .bt-bolt.on{color:var(--amber);opacity:1}
   .bt-tog{font-size:11.5px;font-style:italic;color:var(--dim);margin-left:4px}
   .bt-row.tappable:hover .bt-tog{text-decoration:underline}
-  .bt-togc{display:none}
   .bt-det{display:flex;flex-wrap:wrap;gap:12px 0;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:6px;cursor:default}
   .bt-blk{flex:1 1 170px;padding:0 12px}
   .bt-blk:first-child{padding-left:0}
@@ -239,9 +238,15 @@
     .bt-lbl{display:block;font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
     .bt-wide{border:0;padding:6px 2px 12px}
     .bt-unit{display:inline;font-size:inherit} .bt-ref{display:inline;font-weight:400;color:var(--dim)}
-    .btable.user .bt-row,.btable.user .bt-row:last-child{grid-template-areas:"a u" "t t" "x x" "g g"}
-    /* On a phone "details" sits in the bottom-right corner of the asset's card, not beside its ticker. */
-    .bt-tk .bt-tog{display:none} .bt-togc{display:block;grid-area:g;justify-self:end;margin:0}
+    /* One view on a phone: the ticker, its bolt and "details" on the first line with the balance on
+       the right, the value under the ticker, the details under both, across the whole card. */
+    .btable.user .bt-row,.btable.user .bt-row:last-child{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"a t" "u u" "x x";gap:4px 12px}
+    .btable.user .bt-name{display:none}
+    .btable.user .bt-tk{flex-wrap:nowrap}
+    .btable.user .bt-t{display:block;border:0;padding:0;text-align:right;white-space:nowrap}
+    .btable.user .bt-t .bt-lbl,.btable.user .bt-t .bt-unit{display:none}
+    .btable.user .bt-u{text-align:left;font-size:12.5px;color:var(--dim)}
+    .btable.user .bt-x{margin-top:6px}
   }
   .bal-total-split{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 16px;margin-top:4px;font-size:12.5px;color:var(--dim)}
   .bal-total-split b{color:var(--txt);font-weight:600}
@@ -5680,7 +5685,6 @@ function renderBalance(){
       value: balValueCell(known ? refKey : null, totalAtoms), extra: (tappable && open) ? det : null });
     if(tappable){
       row.classList.add('tappable'); row.title = open ? 'Hide the details' : 'Show the details';
-      row.appendChild(el('span','bt-tog bt-togc', open ? 'hide details' : 'details'));   // its place on a phone
       row.onclick=(ev)=>{ if(ev.target.closest('a,button,.bt-det')) return; if(open) _splitOpen.delete(kind); else _splitOpen.add(kind); renderBalance(); };
     }
     list.appendChild(row);
