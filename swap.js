@@ -526,6 +526,32 @@ const MIXED_RAILS_REFUSAL = "This combination isn't offered: with one side on-ch
   + ' Settle both sides on-chain, or both over Lightning.';
 const MIXED_RAILS_WHY = ' <a href="#" data-help="faq-swap-times">Why?</a>';
 function isMixedRails(p, r){ return (p === 'chain' || p === 'ln') && (r === 'chain' || r === 'ln') && p !== r; }
+// Pairs and sides with no Lightning offer at all, read from the pure-Lightning book. Lightning is then
+// not offered as a rail for them: the orders rest on-chain, and both sides on-chain is how to take
+// them. Unread or unreachable says nothing, so an outage never takes a rail away.
+const LN_EMPTY = new Map();   // 'pay>receive' -> { empty, at }
+function lnEmptyFor(pay, receive){ const c = LN_EMPTY.get(pay + '>' + receive); return !!(c && c.empty); }
+async function probeLnLiquidity(pay, receive){
+  if (!pay || !receive || pay === receive || !(L && L.lnBook)) return;
+  const k = pay + '>' + receive, c = LN_EMPTY.get(k);
+  if (c && Date.now() - c.at < 30000) return;
+  LN_EMPTY.set(k, { empty: c ? c.empty : false, at: Date.now() });
+  let empty;
+  try {
+    let base, quote;
+    if (pay === 'BTC' || receive === 'BTC'){ base = pay === 'BTC' ? receive : pay; quote = undefined; }
+    else { const cp = canonicalPair(pay, receive); base = cp.base; quote = cp.quote; }
+    const buy = (pay === 'BTC') || (quote && pay === quote);
+    const lb = await L.lnBook(base, quote);
+    empty = !(((buy ? lb.buy_offers : lb.sell_offers) || []).length);
+  } catch { LN_EMPTY.delete(k); return; }
+  LN_EMPTY.set(k, { empty, at: Date.now() });
+  if (S.payAsset === pay && S.receiveAsset === receive) try { updateRails(); } catch {}
+}
+function lnEmptyWhy(pay, receive){
+  const d = pairDir(pay, receive);
+  return `No Lightning offers for ${tk(d.base)}/${tk(d.quote)} yet · the orders in the book rest on-chain · trade them on-chain.`;
+}
 function showMixedRefusal(){
   const note = C.$('swRailNote'); if (!note) return;
   note.classList.remove('hide');
@@ -630,6 +656,7 @@ export function initSwap(ctx){
     // Keep the returned updaters so we can re-value the hints when the asset (not
     // the typed value) changes, WITHOUT dispatching a synthetic 'input' (which
     // would falsely re-arm the requote/edited-side logic above).
+    for (const id of ['swPayAmt', 'swRecvAmt']) $(id).addEventListener('input', fitAmounts);
     _payHint  = C.attachRefHint($('swPayAmt'),  () => S.payAsset || '');
     _recvHint = C.attachRefHint($('swRecvAmt'), () => S.receiveAsset || '');
   }
@@ -1730,7 +1757,7 @@ function paintModeSeg(){
           ? 'Set your price (or an amount) — the order fills what crosses now and rests the remainder at your price. Switch to Market to fill now.'
           : 'Limit rests at your price only on-chain (the Lightning rail can’t rest while your wallet is closed) · set both sides on-chain to rest a durable limit.';
       } else {
-        hint.textContent = 'Type an amount; the other fills at the best price. Switch to Limit to set your own.';
+        hint.textContent = 'Switch to Limit order type to set your own price';
       }
     }
   }
@@ -1809,7 +1836,7 @@ function autoRails(){
     const usable = (leg) => {
       const seg = C.$(leg === 'pay' ? 'swPayRailSeg' : 'swRecvRailSeg'); if (!seg) return [];
       const o = legRailOptions(leg);
-      return ['chain', 'ln'].filter(r => { const b = seg.querySelector('button[data-r="' + r + '"]'); return o[r].ok && b && !b.disabled; });
+      return ['chain', 'ln'].filter(r => { const b = seg.querySelector('button[data-r="' + r + '"]'); return o[r].ok && b && !b.disabled && !b.dataset.why; });
     };
     const p = usable('pay'), q = usable('recv');
     const both = ['chain', 'ln'].filter(r => p.includes(r) && q.includes(r));
@@ -1834,7 +1861,7 @@ function showRailRefusal(why){
   const note = C.$('swRailNote'); if (!note || !why) return;
   if (walletSyncing()) why = SYNC_TEXT;
   note.classList.remove('hide');
-  note.innerHTML = '<span>' + esc(why) + '</span>' + (/Balance/.test(why) ? ' <button type="button" class="swfix" id="swRailMove">Go to Balance</button>' : '');
+  note.innerHTML = '<span class="err">' + esc(why) + '</span>' + (/Balance/.test(why) ? ' <button type="button" class="swfix" id="swRailMove">Go to Balance</button>' : '');
   const b = C.$('swRailMove');
   if (b) b.onclick = () => { if (C.gotoLightning) C.gotoLightning(); };
 }
@@ -1843,6 +1870,7 @@ function updateRails(){
   const pay = S.payAsset, receive = S.receiveAsset;
   if (!(pay && receive && pay !== receive)){ box.classList.add('hide'); renderRailNote(null); paintLeafRail(); return; }
   box.classList.remove('hide');
+  probeLnLiquidity(pay, receive);
   // A mixed pair of rails left over from before (a restored state) settles both sides on-chain.
   if (!mixedRailsAllowed() && isMixedRails(S.payRail, S.recvRail)){ S.payRail = 'chain'; S.recvRail = 'chain'; }
   // Probe the sub-asset book (async, cached) so the LN-readiness note reflects live liquidity.
@@ -2051,6 +2079,10 @@ function paintRailSegs(ra){
       const o = opts[r] || { ok: true, why: '' };
       b.classList.toggle('off', !o.ok);
       if (!o.ok){ b.dataset.why = o.why; b.disabled = false; b.title = o.why; return; }
+      if (r === 'ln' && !mixedRailsAllowed() && lnEmptyFor(S.payAsset, S.receiveAsset)){
+        const why = lnEmptyWhy(S.payAsset, S.receiveAsset);
+        b.classList.add('off'); b.dataset.why = why; b.disabled = false; b.title = why; return;
+      }
       delete b.dataset.why;
       // The Lightning button is now SELECTABLE even without a channel: if the leg has no channel yet,
       // one is opened for you INLINE on Place-order (see reviewLn / renderRailNote). Only the
@@ -2174,10 +2206,7 @@ function paintRouteLine(){
   // The settlement rail is INVISIBLE to the user (it never changes which liquidity exists), so a BTC<->asset
   // pair shows only the plain direction — never a "Mixed rails" / "Cross-chain" / rail label. Same-chain
   // asset<->asset keeps a plain "order book" hint.
-  $('swRoute').textContent =
-      (route.kind === 'mixed' || route.kind === 'cross' || (route.kind === 'ln' && !route.assetAsset))
-        ? (route.payIsBtc ? `Buy ${tk(S.receiveAsset)} with Bitcoin` : `Sell ${tk(S.payAsset)} for Bitcoin`)
-    : 'Order book';
+  $('swRoute').textContent = '';   // the pickers already say what is bought with what
   // The rate line is filled by the quote (showQuote / showXRate); a placeholder until then.
   if (!LAST_QUOTE){ const _d = pairDir(S.payAsset, S.receiveAsset); $('swRate').textContent = '1 ' + tk(_d.base) + ' = … ' + tk(_d.quote); }
 }
@@ -2353,8 +2382,18 @@ function guideStep(){
   if (rails && !rails.classList.contains('hide') && !(S.payRail && S.recvRail)) return 3;
   return 4;
 }
+// Each amount field is as wide as what it holds, so its ticker sits right after the figure. A mono
+// font makes one character one ch; values the quote writes fire no input event, so the guide's
+// repaint, which follows every quote, sizes them too.
+function fitAmounts(){
+  for (const id of ['swPayAmt', 'swRecvAmt']){
+    const i = C.$(id); if (!i) continue;
+    i.style.width = (Math.max(3, String(i.value || i.placeholder || '').length) + 1) + 'ch';
+  }
+}
 function paintGuide(){
   const $ = C.$, g = $('swGuide'); if (!g) return;
+  fitAmounts();
   const step = guideStep();
   const names = ['Assets', 'Amount', 'Settlement', 'Place'];
   g.innerHTML = names.map((n, i) => {
@@ -4394,8 +4433,7 @@ function renderTiming(route){
   const pr = route.payRail, rr = route.recvRail;
   const tk = esc(C.assetMeta(route.seqAsset).ticker);
   if (rr === 'ln' && pr === 'ln'){
-    el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
-    tx.innerHTML = '<b>Instant &amp; final</b> · both sides on Lightning, nothing on-chain to revert.';
+    clearTiming();   // the rails already say it: nothing to add, and a green line read as a go-ahead
   } else if (rr === 'ln' && pr === 'chain' && btcLegAtoms() <= frontCapAtoms()){
     el.className = 'swtiming ok'; if (ic) ic.textContent = '✓';
     // Name what the user actually RECEIVES: the asset on a buy, Bitcoin on a sell. This
@@ -9306,7 +9344,7 @@ async function requoteLn(route, amtStr){
   const side = route.payIsBtc ? 'buy' : 'sell';
   const am = C.assetMeta(route.seqAsset);
   const aprec = am.precision || 0;
-  $('swRoute').textContent = route.payIsBtc ? `Buy ${am.ticker} with ${qtk}` : `Sell ${am.ticker} for ${qtk}`;
+  $('swRoute').textContent = '';
   $('swStatus').textContent = ''; $('swErr').textContent = '';
   renderTiming(route);
   // P2.5: LIMIT on the Lightning rail. A pure-LN offer cannot rest durably while the maker is offline,
