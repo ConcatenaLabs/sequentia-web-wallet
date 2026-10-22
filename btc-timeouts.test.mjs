@@ -49,5 +49,16 @@ test('a failed handshake stays on screen until it is closed', () => {
 
 test('an error page from the testnet4 API is not read as height 0', () => {
   assert.ok(xswap.includes("const t = r.ok ? (await r.text()).trim() : '';"));
-  assert.ok(xswap.includes(String.raw`if (/^\d+$/.test(t)) return Number(t);`));
+  assert.ok(xswap.includes(String.raw`if (/^\d+$/.test(t)) return (_lastBtcTip = Number(t));`));
+});
+
+test('a refund height names its chain, where testnet4 is, and about how long that is', () => {
+  const src = fn(xswap, 'btcRefundText').replace('function btcRefundText', 'return function');
+  const at = (tip) => new Function('_lastBtcTip', src)(tip);
+  // 23/10/2026: T_btc 157545 with testnet4 at 157318, the page synced to Sequentia block 181712.
+  assert.equal(at(157318)(157545), 'Bitcoin (testnet4) block 157545 (testnet4 is at 157318, 227 blocks away: '
+    + 'about 38 h at ten minutes a block, though testnet4 blocks come irregularly)');
+  assert.equal(at(-1)(157545), 'Bitcoin (testnet4) block 157545');
+  assert.equal(at(157600)(157545), 'Bitcoin (testnet4) block 157545, which testnet4 has reached');
+  assert.ok(!/(refunds|refundable)( at| after)? block ' \+ SWAP\.btc_locktime/.test(xswap), 'no bare refund height is left');
 });
