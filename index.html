@@ -513,7 +513,7 @@
   /* Grouped dropdown: "Your assets" (held) first, then "All assets", scalable to a big registry. */
   .swopt-grp{padding:9px 12px 4px;font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;font-weight:700}
   .swopt-grp:first-child{padding-top:3px}
-  .swopt-split{font-size:11px;color:var(--dim);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .swopt-split{font-size:11px;color:var(--dim);margin-top:1px}
   .swopt-split .z{color:var(--amber2)}
   .swopt-more{padding:9px 12px;color:var(--dim);font-size:11.5px;text-align:center;border-top:1px solid var(--line);margin-top:2px}
   /* balance chips: per-asset instant (Lightning) vs on-chain split */
@@ -1692,6 +1692,19 @@ function fmtAtoms(atoms, d){ atoms = BigInt(atoms); const neg = atoms<0n; if(neg
   const base = 10n**BigInt(d); let s = (atoms/base).toString();
   if(d>0){ const f=(atoms%base).toString().padStart(d,'0').replace(/0+$/,''); if(f) s+='.'+f; }
   return (neg?'-':'')+s; }
+// An amount as a person reads it: the integer part grouped the way the browser's locale groups
+// thousands, the locale's decimal mark, and the asset's own decimals (trailing zeros dropped), exact
+// to the atom. For display only: amount fields keep fmtAtoms, which parseAtoms reads back.
+function fmtAmount(atoms, d){
+  const plain = fmtAtoms(atoms, d), neg = plain.startsWith('-'), [i, f] = (neg ? plain.slice(1) : plain).split('.');
+  let grouped = i, dec = '.';
+  try {
+    grouped = BigInt(i).toLocaleString();
+    const part = new Intl.NumberFormat().formatToParts(1.5).find(x => x.type === 'decimal');
+    if (part) dec = part.value;
+  } catch {}
+  return (neg ? '-' : '') + grouped + (f ? dec + f : '');
+}
 function parseAtoms(str, d){ str=(str||'').trim();
   if(!/^\d+(\.\d+)?$/.test(str)) throw new Error('enter a valid amount');
   let [i,f='']=str.split('.'); if(f.length>d) throw new Error(`max ${d} decimals for this asset`);
@@ -1962,8 +1975,8 @@ function oampAssetRow(list, id, atoms, opts){
   if(opts.legacy){ det.appendChild(el('div','sub','Held by this wallet’s legacy m/3/0 identity. Not spendable from here; moving it to the m/5/0 identity needs the platform.')); }
   else { const acts=el('div','bal-acts'); const sb=el('button','ghost','Send'); sb.onclick=()=>oampStartSend(id); acts.appendChild(sb); det.appendChild(acts); }
   // Restricted assets live on the enclave ledger: no Lightning.
-  list.appendChild(balRow({ a: cellA, onchain: balAmt(fmtAtoms(atoms, meta.precision)), ln: el('div','bt-dim','—'),
-    total: balTotalCell(fmtAtoms(atoms, meta.precision), meta.ticker), value: balValueCell('oamp:'+id, atoms), extra: det }));
+  list.appendChild(balRow({ a: cellA, onchain: balAmt(fmtAmount(atoms, meta.precision)), ln: el('div','bt-dim','—'),
+    total: balTotalCell(fmtAmount(atoms, meta.precision), meta.ticker), value: balValueCell('oamp:'+id, atoms), extra: det }));
 }
 // Open the Send tab with this restricted asset preselected on the first recipient row, and
 // optionally a recipient AID + amount (atoms) already filled in. Shared by the row-level Send
@@ -4754,7 +4767,7 @@ function lnPaintRecvRoom(){
   const soon=lnReceiveOpeningFor(hex==='BTC' ? 'BTC' : hex);
   box.innerHTML='';
   if(soon) lnRecheckRoomSoon(); else _lnRoomRechecks=0;
-  if(room>0n){ box.textContent='You can receive up to '+fmtAtoms(room, meta.precision)+' '+meta.ticker+' over Lightning.'+(soon?' More is ready to receive in about a minute.':''); return; }
+  if(room>0n){ box.textContent='You can receive up to '+fmtAmount(room, meta.precision)+' '+meta.ticker+' over Lightning.'+(soon?' More is ready to receive in about a minute.':''); return; }
   if(soon){ box.textContent='Ready to receive '+meta.ticker+' over Lightning in about a minute.'; return; }
   if(hex==='BTC') return;   // BTC room is not sold: the invoice is made, and says itself whether it can be paid
   const a=lnRecvAdvice(hex); lnSayStep(box, a.text, a.step);
@@ -4825,7 +4838,7 @@ function initLnSendReceive(){
       _lnRecvWatchStop = watchInvoicePaid({ history: () => lnApi.nodeHistory(node_key), paymentHash: inv.payment_hash,
         onPaid: (item) => {
           const got = BigInt(Math.floor(Number(item.amount_msat || inv.amount_msat || amt * 1000) / 1000));
-          st.className = 'status ok'; st.textContent = 'Received ✓ ' + fmtAtoms(got, meta.precision) + ' ' + meta.ticker + ' over Lightning.';
+          st.className = 'status ok'; st.textContent = 'Received ✓ ' + fmtAmount(got, meta.precision) + ' ' + meta.ticker + ' over Lightning.';
           out.textContent = ''; oampSetQr('lnRecvQr', ''); $('lnRecvCopy').classList.add('hide');
           try { renderLightningBalance(); } catch {}
         } });
@@ -5414,7 +5427,7 @@ function initSwapTab(){
     // covenant FILL) + a fetch against the wallet's OWN Sequentia esplora /api.
     get mnemonic(){ return localStorage.getItem(KEY) || ''; },
     esploraFetch: (path, opts) => fetch(ESPLORA + path, opts),
-    el, $, assetMeta, balObj, fmtAtoms, parseAtoms,
+    el, $, assetMeta, balObj, fmtAtoms, fmtAmount, parseAtoms,
     assetVerified, assetRegistered, assetDomain, trustBadge,   // E1: asset trust signals in the picker
     refValueStr, refValue, attachRefHint, assetAmountOf, feeRateFor, prettyErr,   // refValue: numeric native->ref (for USD-mode field derivation)
     DEFAULT_FEERATE, EXCHANGE_RATE_SCALE, applyFee,   // open-fee-market fee estimate + real any-asset covenant funding fee
@@ -5779,7 +5792,7 @@ function renderBalance(){
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
     if(!alwaysShow && totalAtoms <= 0n) return;
-    const amt=(x)=> known ? fmtAtoms(x, precision) : (BigInt(x).toString()+' atoms');
+    const amt=(x)=> known ? fmtAmount(x, precision) : (BigInt(x).toString()+' atoms');
     const a=el('div');
     const head=el('div','bt-tk');
     head.appendChild(el('span','tk', ticker));
@@ -5991,7 +6004,7 @@ function renderBalance(){
           ub.style.cssText='padding:2px 9px;font-size:11px;margin-left:8px'; ub.onclick=(ev)=>{ ev.stopPropagation(); setAssetHidden(h,false); renderBalance(); }; sub.appendChild(ub);
         }
         a.appendChild(sub);
-        const amt=(x)=> known ? fmtAtoms(x, meta.precision) : (BigInt(x).toString()+' atoms');
+        const amt=(x)=> known ? fmtAmount(x, meta.precision) : (BigInt(x).toString()+' atoms');
         const on=BigInt(b[h]||0n), ln=lnOn?lnAtomsFor(h):0n, totalAtoms=totalOf(h);
         list.appendChild(balRow({ a, onchain: balAmt(amt(on)), ln: ln>0n ? balAmt(amt(ln)) : el('div','bt-dim','—'),
           total: balTotalCell(amt(totalAtoms), meta.ticker), value: balValueCell(known ? h : null, totalAtoms), cls: 'bt-hidden' }));

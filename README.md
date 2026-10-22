@@ -99,6 +99,8 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   receive, leaves and staked, each when it holds some), the controls that move it to and from
   Lightning or ask for room to receive, and its asset id and Hide. The view is the same in
   both modes.
+  Figures read the way the browser's locale writes numbers (thousands grouped, its decimal
+  mark) with the asset's own decimals, exact to the atom; amount fields take plain digits.
 - **Send**: multi-recipient sends of any owned asset, including BTC (a real Bitcoin testnet4
   transaction) and OpenAMP restricted assets. For Sequentia sends you choose the **fee asset**:
   the fee can be paid in any asset the node publishes an exchange rate for. The fee is

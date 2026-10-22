@@ -1461,13 +1461,16 @@ function balAtoms(hex){
   if (hex === 'BTC') return big(C.btcBalance || 0);   // parent-chain balance, shown like any other
   const b = C.balObj(); return big(b[hex] || 0);
 }
+// A figure as a person reads it (grouped thousands, the asset's own decimals); amount fields keep
+// fmtAtoms, which the parser reads back. The page passes fmtAmount; without it, the plain form.
+const showAmt = (atoms, prec) => (C.fmtAmount || C.fmtAtoms)(atoms, prec);
 function balStr(hex){
   if (!hex) return '';
   const m = metaOf(hex);
   if (walletSyncing()) return 'Balance: reading the chain…';
   const onchain = balAtoms(hex), instant = instantAtomsFor(hex);
-  let s = 'Balance ' + C.fmtAtoms(onchain, m.precision) + ' ' + m.ticker + ' on-chain';
-  if (instant > 0n) s += ' · ' + C.fmtAtoms(instant, m.precision) + ' Lightning';
+  let s = 'Balance ' + showAmt(onchain, m.precision) + ' ' + m.ticker + ' on-chain';
+  if (instant > 0n) s += ' · ' + showAmt(instant, m.precision) + ' Lightning';
   return s;
 }
 
@@ -4486,7 +4489,8 @@ function setFinality(_kind){ renderTiming(findRoute(S.payAsset, S.receiveAsset))
 function balLine(hex){
   if (!hex) return { b:'', r:'' };
   const a = balAtoms(hex), m = metaOf(hex);
-  return { b: C.fmtAtoms(a, m.precision) + ' ' + m.ticker, r: C.refValueStr(hex, a) || '' };
+  // The row names the ticker on its left already; the figure alone keeps a long balance whole.
+  return { b: showAmt(a, m.precision), r: C.refValueStr(hex, a) || '' };
 }
 
 // The candidate rows for one side's picker. Candidate set: assets that trade against the
@@ -4563,8 +4567,8 @@ function pickerName(hex){ if (hex === 'BTC') return 'Bitcoin testnet4'; return C
 // now shown inline under a held asset's name in the dropdown. HTML (the ⚡ part gets the amber .z).
 function heldSplitStr(hex){
   const m = metaOf(hex), instant = instantAtomsFor(hex), onchain = balAtoms(hex), leaf = leafAtomsFor(hex);
-  return `<span class="z">${C.fmtAtoms(instant, m.precision)} Lightning</span> · ${C.fmtAtoms(onchain, m.precision)} on-chain`
-    + (leaf > 0n ? ` · ${C.fmtAtoms(leaf, m.precision)} leaves` : '');
+  return `<span class="z">${showAmt(instant, m.precision)} Lightning</span> · ${showAmt(onchain, m.precision)} on-chain`
+    + (leaf > 0n ? ` · ${showAmt(leaf, m.precision)} leaves` : '');
 }
 // What the wallet holds of an asset as leaves, in developer mode only (leaf-rail.js); 0 otherwise.
 function leafAtomsFor(hex){ try { return (C.leafRail && C.leafRail.atoms) ? C.leafRail.atoms(hex) : 0n; } catch { return 0n; } }
