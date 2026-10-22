@@ -134,3 +134,22 @@ test('a wallet with no Bitcoin Lightning is offered no BTC trade', async () => {
   const e2 = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: null })
   assert.equal((await e2.quote({ payAsset: X, receiveAsset: 'BTC', amount: '50000' })).why, 'not-offered')
 })
+
+test('buying with BTC: a maker that refuses to lock at first leaves the trade under way, not returned', async () => {
+  const s = standIn()
+  s.makerSats = 50000n
+  s.claimed = String(100000n - 616n)
+  let refuse = true, locks = 0
+  const fetchJson = s.fetchJson
+  s.fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/btc/lock')) locks++
+    if (url.endsWith('/v1/btc/lock') && refuse) { refuse = false; throw new Error('refused: the payment\'s spends changed since it was shown') }
+    return fetchJson(url, init)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  const r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'waiting', 'the receive is asked: the trade is under way')
+  await eng.advance(eng.records()[0])
+  assert.equal(locks, 2, 'the lock is asked for again as the trade is followed')
+})

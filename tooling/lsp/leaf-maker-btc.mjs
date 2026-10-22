@@ -149,11 +149,17 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     if (!s || s.give_asset === 'BTC') return [404, { error: 'no such swap' }]
     if (s.state !== 'offered') return [200, { swap: s.swap, state: s.state }]
     if (Date.now() > s.expires) return [409, { error: 'the offer lapsed' }]
-    const q = await cmd('lightning_pay_quote', { invoice: String(body.invoice || ''), asset: s.give_asset }, true)
-    if (q.payment_hash !== s.hash || q.asset !== s.give_asset || q.amount !== s.give) return [409, { error: 'the invoice is not for this swap' }]
+    // The maker's own coins can move between its quote and its payment (a board, a settle, another
+    // swap): the payment is then quoted again, for the same invoice, and made on the new quote.
     s.state = 'locked'; s.invoice_x = body.invoice; save()
-    try { await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true) }
-    catch (e) { s.state = 'offered'; save(); throw e }
+    for (let i = 0; ; i++) {
+      const q = await cmd('lightning_pay_quote', { invoice: String(body.invoice || ''), asset: s.give_asset }, true)
+      if (q.payment_hash !== s.hash || q.asset !== s.give_asset || q.amount !== s.give) { s.state = 'offered'; save(); return [409, { error: 'the invoice is not for this swap' }] }
+      try { await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true); break } catch (e) {
+        if (i < 2 && /changed since it was shown/.test(String(e.message))) continue
+        s.state = 'offered'; save(); throw e
+      }
+    }
     log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8))
     return [200, { swap: s.swap, state: s.state }]
   }

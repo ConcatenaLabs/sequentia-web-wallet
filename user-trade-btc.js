@@ -145,10 +145,12 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     const r = await run('lightning_receive', { asset: rec.receiveAsset, amount: choice.btc.receiveQuote.amount, hash: rec.hash, max_fee_ppm: maxFeePpm })
     if (r.fee !== choice.btc.receiveQuote.fee || r.value !== choice.btc.receiveQuote.value) throw new Error('the receive changed since it was shown')
     rec.invoiceX = r.invoice
-    // Nothing of the wallet's is locked until it pays the BTC, which waits for its leaf.
+    // Nothing of the wallet's is locked until it pays the BTC, which waits for its leaf. From here
+    // the trade is under way whatever the maker answers now: a lock it refused is asked for again
+    // as the trade is followed, and a receive it never pays lapses and the trade comes back.
     rec.state = 'waiting'
     put(rec)
-    await post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: r.invoice })
+    try { await post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: r.invoice }) } catch (e) { log('[user trade] the maker did not lock yet:', e.message) }
     return rec
   }
 
