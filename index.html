@@ -7290,6 +7290,7 @@ $('btnDoImport').onclick=async()=>{ try{ await openWallet($('importPhrase').valu
   catch(e){ $('importErr').textContent='Invalid phrase: '+(e?.message??e); } };
 
 $('btnSync').onclick=sync;
+let _faucetWatch=null;   // the wait for the last faucet payment to reach the wallet
 async function requestFaucet(asset){
   const btns=[...document.querySelectorAll('#faucetBtns button')];
   btns.forEach(b=>b.disabled=true);
@@ -7303,10 +7304,21 @@ async function requestFaucet(asset){
     const j=await r.json();
     if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
     $('faucetStatus').className='status ok';
-    { const fs=$('faucetStatus'); fs.textContent=`Sent ${Number(j.amount).toLocaleString()} ${j.asset}: `;
+    const say=(lead, tail)=>{ const fs=$('faucetStatus'); fs.textContent=lead;
       fs.appendChild(txLink('/explorer/tx/'+j.txid, String(j.txid).slice(0,16)+'…'));
-      fs.appendChild(document.createTextNode(". It'll show up once it confirms.")); }
+      fs.appendChild(document.createTextNode(tail)); };
+    const what=`${Number(j.amount).toLocaleString()} ${j.asset}`;
+    say(`Sent ${what} · `, ' · it shows in your balance as soon as the wallet sees it, usually within a minute.');
     setTimeout(sync, 8000);
+    // The line follows the coins: once the wallet holds the faucet's transaction it says so, rather
+    // than keep promising an arrival that has already happened.
+    clearInterval(_faucetWatch);
+    const until=Date.now()+10*60*1000;
+    _faucetWatch=setInterval(()=>{
+      let seen=false; try{ seen=wollet.transactions().some(t=>t.txid().toString()===j.txid); }catch{}
+      if(seen){ clearInterval(_faucetWatch); say(`Received ${what} ✓ · `, ' · it is in your balance.'); }
+      else if(Date.now()>until) clearInterval(_faucetWatch);
+    }, 3000);
   }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
   finally{ btns.forEach(b=>b.disabled=false); }
 }

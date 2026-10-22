@@ -82,7 +82,8 @@ context, which the live site is). Create a new wallet or restore one from a 12-w
 
 Get testnet funds from the **Issuance** tab: one-click faucet buttons for tSEQ and the demo
 assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com/faucet pays
-straight to your current address).
+straight to your current address). The line under the buttons says when the coins have reached
+the wallet.
 
 The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign and
 Help under **More**; Settings behind the gear in the header. On a phone the same tabs are a bar
