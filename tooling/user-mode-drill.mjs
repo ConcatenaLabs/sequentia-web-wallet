@@ -317,7 +317,10 @@ async function everyPairStack (file) {
   note(`relay seqobd pid ${relay.proc.pid}`)
   // The live maker quotes every directed pair, holding $1,500 of each asset.
   const makerPairs = pairs.filter((p) => !p.sources.includes('btc-gateway')).map((p) => { const [n, d] = rateOf(p.receive, p.pay, 0.02); return { give: p.receive, want: p.pay, rate_num: n, rate_den: d, min_give: String(MIN_SIDE / 2) } })
-  const maker = await startMaker(H, st, join(out, 'maker'), { pairs: makerPairs, fund: A.map((a) => [a.id, atomsOf(a.id, 1500)]), port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, exitDelayUnits: exitUnits, btc: btcDesk })
+  const maker = await startMaker(H, st, join(out, 'maker'), { pairs: makerPairs, fund: A.map((a) => [a.id, atomsOf(a.id, 1500)]), port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, exitDelayUnits: exitUnits, btc: btcDesk,
+    // Coins of about $100 of each asset, as a live maker holds them: one coin of all it holds
+    // would be tied up by each offer or payment in flight, and the next in that asset would wait.
+    coinSize: Object.fromEntries(A.map((a) => [a.id, String(atomsOf(a.id, 100))])) })
   children.push(maker.proc)
   note(`leaf maker pid ${maker.proc.pid}`)
   // Covenant orders and resting orders, each four times the pair's least trade.
@@ -392,7 +395,7 @@ async function everyPairStack (file) {
     describe: [
       `- Chain: \`${st.genesis_hash}\` (regtest, the operator repository's harness \`arca_operator_for_browsers\` with ${st.more.length} more plain assets and ${st.supervised_all.length} supervised ones, anchored proof of stake).`,
       `- The testnet's assets (\`tooling/user-mode-every-pair.json\`), each a harness asset priced the same per atom: ${A.map((a) => `${a.ticker}${a.sup ? ' (supervised)' : ''}`).join(', ')}; ${pairs.length} directed pairs, a trade's direction cycling through them all.`,
-      '- The operator, rounds built every 2 s by the drill\'s clock, leaves with an exit delay of one 512 s unit; SeqDEX\'s relay with `-fill-anchor-depth=2`; one live leaf maker quoting every directed pair 2% above the mid; transparent covenant orders 1% above it and orders resting in the tree 0.5% above it on every pair without a supervised asset, each four times the pair\'s least trade, restocked every 25 trades.',
+      '- The operator, rounds built every 2 s by the drill\'s clock, leaves with an exit delay of one 512 s unit; SeqDEX\'s relay with `-fill-anchor-depth=2`; one live leaf maker quoting every directed pair 2% above the mid from coins of about $100; transparent covenant orders 1% above it and orders resting in the tree 0.5% above it on every pair without a supervised asset, each four times the pair\'s least trade, restocked every 25 trades.',
       `- ${K} wallets, one trade at a time each, each trade worth between its pair's least (neither side under ${MIN_SIDE.toLocaleString('en-US')} atoms) and five times that; each wallet starts with five coins of $100 of every asset.`,
       ...(BTC ? ['- BTC against every plain asset over Lightning: the maker\'s BTC desk on a hub node with a channel of 10,000,000 sat to each wallet\'s own node, half of it the wallet\'s; the operator\'s Lightning leg in each plain asset (SeqLN, the hold-invoice plugin); the wallets\' and the maker\'s exit delay three units.'] : []),
     ],
