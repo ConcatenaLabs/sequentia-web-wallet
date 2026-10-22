@@ -741,6 +741,16 @@ with what that repository's tests need) and its command-line wallet as the count
 operator and its node behind the same origin, for working on the tab by hand (`--seqob URL`
 puts an order-book relay behind `/seqob/` too).
 
+`node tooling/profiles-drive.mjs <evidence-dir>` drives the same harness started with
+`ARCA_OPERATOR_SUPERVISED=1 ARCA_OPERATOR_ISSUER=1` (a supervised asset, an issuer-operated
+asset, and the bond the drive posts): a payment that needs a planned leaf made through the next
+round with no prompt; the supervised asset boarded, received and refreshed at the wallet's
+landing key, frozen by its issuer (the sentence in both modes, a payment refused), taken home by
+its landing (frozen on the chain), lifted and paid again; the issuer-operated asset's batch
+profile and supply; a receive refused while the bond is in notice; and the user-mode screens free
+of the developer words. With `SEQ_DRIVE_MNEMONIC_FILE` naming a file, it opens the phrase there,
+or writes there the phrase it creates, so another wallet can be driven with the same phrase.
+
 `node tooling/leaf-rail-drive.mjs <evidence-dir>` drives the Trade tab's leaf rail in two
 headless Chromium profiles against the same harness and SeqDEX's relay (`SEQOBD=/path/to/seqobd`,
 started on a port of its own against the harness's node): no Leaf choice in user mode; an
