@@ -187,8 +187,9 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
 - **Settings**: the mode, backend endpoints, network, the policy asset id, reveal-phrase,
   and remove-wallet.
 
-A wallet-wide **"Show values in"** selector picks the reference currency (USD by default, BTC
-or any priced asset optional). Every amount field carries a live approximate value in that
+A wallet-wide **"Show values in"** selector picks the reference currency (USD by default, then
+BTC, then any priced asset, each named by the ticker the wallet shows elsewhere: the Sequence
+token is tSEQ on the testnet, though the price feed keys it SEQ). Every amount field carries a live approximate value in that
 currency, and amount inputs can be flipped to be typed directly in the reference currency.
 
 ### The mode
