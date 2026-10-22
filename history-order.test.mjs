@@ -1,5 +1,5 @@
-// History puts Bitcoin's card first when it has transactions, Sequentia's otherwise, and with none
-// on either chain shows one line.
+// History shows Bitcoin's card, then Sequentia's, then Lightning's, always in that order, and with
+// none on either chain shows one line.
 //
 //   node --test history-order.test.mjs
 import assert from 'node:assert';
@@ -11,7 +11,7 @@ const fn = (name) => { const i = html.indexOf('function ' + name + '('); assert.
 
 // A minimal DOM: the panel's cards, their hidden state and their order.
 function dom(){
-  const cards = ['histEmptyCard', 'seqHistCard', 'btcHistCard', 'oampHistCard'].map((id) => ({ id, hidden: id === 'histEmptyCard', classList: null }));
+  const cards = ['histEmptyCard', 'btcHistCard', 'seqHistCard', 'oampHistCard'].map((id) => ({ id, hidden: id === 'histEmptyCard', classList: null }));
   const panel = { kids: cards.slice(), insertBefore(a, b){ this.kids.splice(this.kids.indexOf(a), 1); this.kids.splice(this.kids.indexOf(b), 0, a); } };
   for (const c of cards){
     c.classList = { toggle: (cls, on) => { c.hidden = !!on; }, contains: () => c.hidden };
@@ -22,17 +22,16 @@ function dom(){
 }
 const run = (counts) => { const d = dom(); new Function('$', '_histCounts', fn('arrangeHistory') + 'arrangeHistory();')(d.$, counts); return d.shown(); };
 
-test('Bitcoin first when it has transactions', () => {
+test('Bitcoin, then Sequentia, then Lightning, in the markup and never reordered', () => {
+  const at = (id) => html.indexOf('id="' + id + '"');
+  assert.ok(at('btcHistCard') < at('seqHistCard') && at('seqHistCard') < at('lnHistCard') && at('lnHistCard') < at('oampHistCard'));
+  assert.ok(!/insertBefore/.test(fn('arrangeHistory')));
   assert.deepEqual(run({ seq: 3, btc: 1, oamp: 0 }), ['btcHistCard', 'seqHistCard']);
-  assert.deepEqual(run({ seq: 0, btc: 2, oamp: 0 }), ['btcHistCard', 'seqHistCard']);
-});
-
-test('Sequentia first otherwise, and an unread history is not called empty', () => {
-  assert.deepEqual(run({ seq: 3, btc: 0, oamp: 0 }), ['seqHistCard', 'btcHistCard']);
-  assert.deepEqual(run({ seq: 0, btc: null, oamp: 0 }), ['seqHistCard', 'btcHistCard']);
+  assert.deepEqual(run({ seq: 3, btc: 0, oamp: 0 }), ['btcHistCard', 'seqHistCard']);
+  assert.deepEqual(run({ seq: 0, btc: null, oamp: 0 }), ['btcHistCard', 'seqHistCard'], 'an unread history is not called empty');
 });
 
 test('one line when neither chain has any', () => {
   assert.deepEqual(run({ seq: 0, btc: 0, oamp: 0 }), ['histEmptyCard']);
-  assert.deepEqual(run({ seq: 0, btc: 0, oamp: 1 }), ['seqHistCard', 'btcHistCard', 'oampHistCard']);
+  assert.deepEqual(run({ seq: 0, btc: 0, oamp: 1 }), ['btcHistCard', 'seqHistCard', 'oampHistCard']);
 });
