@@ -10,7 +10,7 @@ const H = 'cd'.repeat(32), P = 'ef'.repeat(32)
 const admitted = (pay, receive) => () => ({ pairs: { chains: { g: { pairs: [{ pay, receive, sources: ['btc-gateway'] }] } } }, genesis: 'g' })
 
 function standIn () {
-  const s = { calls: [], posts: [], coins: [{ leaf_id: 'c1', asset: X, value: '1000000', state: 'live' }], receives: {}, pays: {}, ready: false,
+  const s = { calls: [], posts: [], coins: [{ leaf_id: 'c1', asset: X, value: '1000000', state: 'live', expiry: 1790000000 }], receives: {}, pays: {}, ready: false,
     btcPaid: [], invoices: {}, parts: [] }
   const mem = new Map()
   s.store = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) }
@@ -22,8 +22,13 @@ function standIn () {
         case 'plans': return { plans: [] }
         case 'sync': return {}
         case 'participations': return s.parts
-        case 'lightning_pay_quote': return { payment_hash: H, asset: X, amount: s.want, fee: '200', margins: '480', spends: String(BigInt(s.want) + 680n) }
-        case 'lightning_pay': s.pays[H] = { state: 'paying' }; s.coins[0].state = 'spent'; return { change: '799320' }
+        case 'lightning_pay_quote': return { payment_hash: H, asset: X, amount: s.want, fee: '200', margins: '480', spends: String(BigInt(s.want) + 680n),
+          gives: ['c1'], change: String(1000000n - BigInt(s.want) - 680n) }
+        case 'lightning_pay': {
+          const change = String(1000000n - BigInt(s.want) - 680n)
+          s.pays[H] = { state: 'paying' }; s.coins[0].state = 'spent'; s.coins.push({ leaf_id: 'chg', asset: X, value: change, state: 'live', expiry: 1790000000 })
+          return { change }
+        }
         case 'lightning_payments': return s.pays
         case 'lightning_post_preimage': s.posted = a.preimage; return {}
         case 'lightning_receive_quote': return { asset: X, amount: a.amount, fee: '200', value: String(BigInt(a.amount) - 200n), claim_margins: '416', claimed: String(BigInt(a.amount) - 616n) }
@@ -69,11 +74,11 @@ test('selling for BTC: the wallet\'s hash, its leaf pays first, and the preimage
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
   assert.ok(q.ok, q.why)
   assert.equal(q.ticket.source, 'btc-gateway')
-  // 100,340 sat would take 200,680 and 680 of fees: sized down to fit what is paid.
-  assert.equal(q.ticket.amountIn, '200678', 'what leaves the wallet in all: the amount, the fee and the margins')
-  assert.equal(q.ticket.amountOut, '99999')
+  // 100,340 sat would take 200,680, 680 of fees and 3 to settle the change: sized down to fit.
+  assert.equal(q.ticket.amountIn, '200677', 'what leaves the wallet in all: the amount, the fee, the margins and the change\'s settle')
+  assert.equal(q.ticket.amountOut, '99997')
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the firm offer that did not fit is released')
-  assert.deepEqual(q.ticket.fees, [{ asset: X, atoms: '680' }])
+  assert.deepEqual(q.ticket.fees, [{ asset: X, atoms: '683' }])
   const firm = s.posts.filter(([p]) => p === 'firm').pop()[1]
   assert.equal(firm.invoice, 'lnbcrt-wallet', 'the maker receives under the wallet\'s own hash')
   let r = await eng.confirm(q.choice, q.ticket)
@@ -85,6 +90,9 @@ test('selling for BTC: the wallet\'s hash, its leaf pays first, and the preimage
   assert.equal(s.posted, P, 'the preimage is handed to the operator, so the wallet\'s payment settles')
   assert.equal(r.state, 'sent')
   s.pays[H].state = 'paid'
+  r = await eng.advance(eng.records()[0])
+  assert.ok(r.settle, 'the change the payment left is asked into the next round')
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
   r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'settled')
 })
@@ -152,4 +160,26 @@ test('buying with BTC: a maker that refuses to lock at first leaves the trade un
   assert.equal(r.state, 'waiting', 'the receive is asked: the trade is under way')
   await eng.advance(eng.records()[0])
   assert.equal(locks, 2, 'the lock is asked for again as the trade is followed')
+})
+
+test('buying with BTC: an operator that does not answer the readiness check is asked again; only a refusal returns the trade', async () => {
+  const s = standIn()
+  s.makerSats = 50000n
+  const orig = s.lib.command.bind(s.lib)
+  let mode = 'unreachable'
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'lightning_receive_ready' && mode) {
+      const e = new Error(mode === 'refused' ? 'refused: the leaf must start home in 10 s' : 'cannot reach the operator: info'); e.kind = mode; throw e
+    }
+    return orig(cmd, a)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  await eng.confirm(q.choice, q.ticket)
+  s.receives[H].state = 'issuing'
+  let r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'waiting', 'an operator that did not answer is asked again')
+  mode = 'refused'
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned'); assert.equal(s.btcPaid.length, 0)
 })

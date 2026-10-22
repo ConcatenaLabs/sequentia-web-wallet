@@ -74,7 +74,18 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         // The maker's invoice is under the wallet's own hash, for the asset paid, at the price quoted.
         const fair = ceilDiv(sats * entry.rateNum, entry.rateDen)
         if (q.payment_hash !== inv.payment_hash || q.asset !== payAsset || big(q.amount) !== big(o.want) || big(o.want) > fair) { log('[user trade] the maker\'s btc terms are not the quote\'s'); drop(); return null }
-        const spends = big(q.spends)
+        // The change the payment leaves is settled in the operator's next round as part of the trade,
+        // so a wallet that sells again and again does not pile up reassignments on it; the settle's
+        // fee, at the change's expiry (the earliest of the coins it comes from), is on the ticket.
+        let sc = null
+        if (big(q.change) > 0n && Array.isArray(q.gives)) {
+          try {
+            const given = ((await run('coins')) || []).filter((c) => q.gives.includes(c.leaf_id))
+            const expiry = Math.min(...given.map((c) => Number(c.expiry)).filter((x) => x > 0))
+            sc = await run('settle_quote', { asset: payAsset, value: String(q.change), expiry })
+          } catch (e) { log('[user trade] settle_quote:', e.message); drop(); return null }
+        }
+        const spends = big(q.spends) + (sc ? big(sc.fee) : 0n)
         const limit = pay < have ? pay : have
         if (spends > limit) {
           B().cancelInvoice(inv.payment_hash).catch(() => {})
@@ -84,7 +95,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
           continue
         }
         return { source: entry.source, id: entry.id, entry, receive: sats, give: spends, dir: 'sell',
-          fees: [{ asset: payAsset, atoms: spends - big(q.amount) }], btc: { invoice: inv, offer: o, quote: q } }
+          fees: [{ asset: payAsset, atoms: spends - big(q.amount) }], btc: { invoice: inv, offer: o, quote: q, settle: sc } }
       }
       return null
     }
@@ -139,6 +150,8 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     if (choice.dir === 'sell') {
       rec.hash = choice.btc.invoice.payment_hash; rec.invoiceX = o.invoice; rec.sats = String(choice.receive)
       rec.spends = choice.btc.quote.spends; rec.amount = choice.btc.quote.amount
+      const sc = choice.btc.settle
+      rec.settleTargets = sc ? [{ asset: sc.asset, value: sc.value, fee: sc.fee }] : []
       put(rec)
       const r = await run('lightning_pay', { invoice: o.invoice, asset: choice.btc.quote.asset, max_fee_ppm: maxFeePpm, shown: choice.btc.quote })
       rec.change = r.change || null
@@ -181,7 +194,9 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       if (p.state !== 'paid' && inv.preimage && !rec.posted) {
         try { await run('lightning_post_preimage', { hash: rec.hash, preimage: inv.preimage }); rec.posted = true } catch (e) { log('[user trade] post preimage:', e.message) }
       }
-      if (p.state === 'paid') { rec.state = 'settled'; rec.settledAt = now() }
+      // Settled once the wallet's payment is settled too, and the change it left is settled in a
+      // round that is final.
+      if (p.state === 'paid' && (await settleStep(rec)) === 'settled') { rec.state = 'settled'; rec.settledAt = now() }
       return put(rec)
     }
     if (p.state === 'returned') {
@@ -207,7 +222,12 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       if (rcv.state === 'waiting') post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: rec.invoiceX }).catch(() => {})
       let r
       try { r = await run('lightning_receive_ready', { hash: rec.hash, need_seconds: needSeconds(rec.routeDelay || rec.minFinalCltv) }) }
-      catch (e) { log('[user trade] the leaf will not do:', e.message); rec.state = 'returned'; rec.returnedAt = now(); rec.why = e.message; return put(rec) }
+      catch (e) {
+        // Only the library's refusal says the leaf will never do (nothing of the wallet's has left);
+        // an operator that does not answer now is asked again.
+        if (!(e && (e.kind === 'refused' || /^refused\b/i.test(String(e.message))))) { log('[user trade] not ready yet:', e.message); return put(rec) }
+        log('[user trade] the leaf will not do:', e.message); rec.state = 'returned'; rec.returnedAt = now(); rec.why = e.message; return put(rec)
+      }
       if (!r.ready) return put(rec)
       rec.state = 'sent'; rec.sentAt = now(); rec.paying = true
       put(rec)
