@@ -339,6 +339,18 @@ export function createEngine (deps) {
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
   //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'too-small' }
+  // What can be received for `payAsset` in one step now: each admitted pair's asset that some
+  // source in the book offers, whatever the wallet holds. BTC counts only with the wallet's
+  // Bitcoin Lightning (the gateway pays it there).
+  async function offered (payAsset) {
+    const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
+    const chain = ad.pairs && ad.pairs.chains && ad.pairs.chains[ad.genesis]
+    const pairs = ((chain && chain.pairs) || []).filter((p) => p.pay === payAsset && p.receive !== payAsset && (p.sources || []).length)
+    const found = await Promise.all(pairs.map((p) => entries(payAsset, p.receive, p.sources)
+      .then((es) => es.some((e) => e.source !== 'btc-gateway' || deps.btc) ? p.receive : null).catch(() => null)))
+    return [...new Set(found.filter(Boolean))]
+  }
+
   async function quote ({ payAsset, receiveAsset, amount }) {
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
@@ -605,5 +617,5 @@ export function createEngine (deps) {
     return out
   }
 
-  return { quote, confirm, advance, resume, records, spendable, release, drop }
+  return { quote, offered, confirm, advance, resume, records, spendable, release, drop }
 }

@@ -150,3 +150,23 @@ test('engine: not listed, not offered, no funds', async () => {
   s.coins[0].state = 'spent'
   assert.equal((await createEngine({ ...base, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })).why, 'no-funds')
 })
+
+test('engine: what can be received for an asset is what the book offers on an admitted pair, held or not', async () => {
+  const s = standIn()
+  s.coins[0].state = 'spent'   // nothing held: the picker still lists what is offered
+  const pairs = { chains: { g: { pairs: [
+    { pay: X, receive: Y, sources: ['leaf-maker'] },        // the maker quotes Y for X
+    { pay: X, receive: Z, sources: ['covenant-round'] },    // admitted, but no order now
+    { pay: X, receive: 'BTC', sources: ['btc-gateway'] },   // no Bitcoin Lightning in this wallet
+    { pay: Y, receive: X, sources: ['leaf-maker'] },        // another pay asset
+  ] } } }
+  const fetchJson = async (url) => url.endsWith('/v1/quotes')
+    ? { quotes: [{ give_asset: Y, want_asset: X, rate_num: '4', rate_den: '3', max_give: '1000000', min_give: '10000' },
+      { give_asset: 'BTC', want_asset: X, rate_num: '1', rate_den: '1', max_give: '1000000', min_give: '10000' }] }
+    : s.fetchJson(url)
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) })
+  assert.deepEqual(await eng.offered(X), [Y])
+  const withBtc = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }), btc: { balance: () => 0n } })
+  assert.deepEqual((await withBtc.offered(X)).sort(), ['BTC', Y].sort())
+  assert.deepEqual(await createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => [], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) }).offered(X), [], 'no maker, no order: nothing offered')
+})

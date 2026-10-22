@@ -10,14 +10,19 @@
 // ctx: { root (element), engine (createEngine's), assetMeta(hex) -> {ticker, precision},
 //   fmtAtoms(atoms, precision), parseAtoms(text, precision), knownAssets() -> [hex],
 //   held(hex) -> atoms the person holds (the figure the Balance tab shows), admittedReceives(pay)
-//   -> [hex] (optional: the receive picker lists those first) }
+//   -> [hex] (optional: the receive picker lists those after what is offered now) }
+// The receive picker lists BTC first, then every asset the book offers for what is paid in one
+// step now (engine.offered), then the admitted rest, then every other asset known; it starts on
+// the first one offered.
 
 import { USER_WORDS, pickerOrder, costLine } from './user-trade.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
 export function mountUserComposer (ctx) {
-  const S = { pay: null, get: null, amount: '', ticket: null, choice: null, busy: false, note: '', error: '', timer: null }
+  const S = { pay: null, get: null, amount: '', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
+    offered: { pay: null, list: [], at: 0, loading: false } }
+  const OFFERS_MS = ctx.offersMs || 60000
   const doc = ctx.root.ownerDocument || document
   const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
   const name = (h) => (h === 'BTC' ? 'BTC' : ((ctx.assetMeta(h) || {}).ticker || String(h).slice(0, 8)))
@@ -27,13 +32,38 @@ export function mountUserComposer (ctx) {
   function payList () { return pickerOrder(ctx.knownAssets(), ctx.held, name) }
   // What is paid starts as the first asset held, in the pickers' order (BTC first when held).
   function defaultPay () { const l = payList(); return l.find((a) => big(ctx.held(a)) > 0n) || l[0] }
+  function offeredNow () { return S.offered.pay === S.pay ? S.offered.list.filter((a) => a !== S.pay) : [] }
   function getList () {
-    const first = (ctx.admittedReceives ? ctx.admittedReceives(S.pay) : []).filter((a) => a !== S.pay)
+    const admitted = (ctx.admittedReceives ? ctx.admittedReceives(S.pay) : []).filter((a) => a !== S.pay)
     const all = pickerOrder(ctx.knownAssets(), ctx.held, name).filter((a) => a !== S.pay)
-    // BTC first, then what can be received for this asset now, then the rest.
-    const head = all.includes('BTC') ? ['BTC'] : []
-    return [...new Set([...head, ...first.filter((a) => a !== 'BTC'), ...all])]
+    // BTC first, then what the book offers for this asset now, then what is admitted, then the rest.
+    const head = S.pay !== 'BTC' ? ['BTC'] : []
+    return [...new Set([...head, ...offeredNow(), ...admitted, ...all])].filter((a) => a !== S.pay)
   }
+  // What is received starts as the first asset offered, until the person picks one.
+  function defaultGet (gl) { const o = offeredNow(); return gl.find((a) => o.includes(a)) || gl[0] || null }
+
+  // The book's offers for what is paid, asked when that changes and again after a minute; the
+  // receive picker is redrawn in place, so typing is not disturbed.
+  async function loadOffered () {
+    const pay = S.pay
+    if (!ctx.engine.offered || S.offered.loading || (S.offered.pay === pay && Date.now() - S.offered.at < OFFERS_MS)) return
+    S.offered.loading = true
+    let list = []
+    try { list = await ctx.engine.offered(pay) } catch (e) { console.warn('[user composer] offers:', e && e.message) }
+    S.offered = { pay, list: list || [], at: Date.now(), loading: false }
+    // What is paid may have changed while the book was asked: ask again for that.
+    if (pay === S.pay) paintGet(); else loadOffered()
+  }
+  function paintGet () {
+    const old = ctx.root.querySelector('#ucGet'); if (!old) return
+    const gl = getList()
+    const was = S.get
+    if (!S.getChosen || !gl.includes(S.get)) S.get = S.ticket || S.busy ? S.get : defaultGet(gl)
+    old.replaceWith(select('ucGet', gl, S.get, pickGet))
+    if (S.get !== was && !S.ticket) { S.error = ''; paintTicket() }
+  }
+  function pickGet (v) { S.get = v; S.getChosen = true; reset(); render() }
 
   function select (id, list, value, onchange) {
     const s = el('select', 'uc-pick'); s.id = id
@@ -52,7 +82,7 @@ export function mountUserComposer (ctx) {
     // You pay
     const row1 = el('div', 'uc-row')
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
-    row1.appendChild(select('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; if (S.get === v) S.get = null; reset(); render() }))
+    row1.appendChild(select('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
     const inp = el('input', 'uc-amount'); inp.id = 'ucAmount'; inp.inputMode = 'decimal'; inp.placeholder = USER_WORDS.amount; inp.value = S.amount
     inp.oninput = () => { S.amount = inp.value; if (S.ticket) { reset(); paintTicket() } }
     row1.appendChild(inp)
@@ -63,8 +93,8 @@ export function mountUserComposer (ctx) {
     const row2 = el('div', 'uc-row')
     row2.appendChild(el('label', 'lbl', USER_WORDS.get))
     const gl = getList()
-    if (!S.get || !gl.includes(S.get)) S.get = gl[0] || null
-    row2.appendChild(select('ucGet', gl, S.get, (v) => { S.get = v; reset(); render() }))
+    if (!S.get || !gl.includes(S.get)) S.get = defaultGet(gl)
+    row2.appendChild(select('ucGet', gl, S.get, pickGet))
     box.appendChild(row2)
     // The ticket and the button
     const t = el('div', 'uc-ticket'); t.id = 'ucTicket'; box.appendChild(t)
@@ -75,6 +105,7 @@ export function mountUserComposer (ctx) {
     r.appendChild(box)
     paintTicket()
     paintTrades()
+    loadOffered()
   }
 
   function paintTicket () {

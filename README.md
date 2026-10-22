@@ -421,7 +421,9 @@ turns it on once those exist on its chain. Otherwise the full composer (develope
 serves both modes.
 
 Three inputs and one button: **You pay** (an asset and an amount), **You get** (an asset), and
-**Review**. Both pickers list BTC first, then what the wallet holds. Review shows three lines
+**Review**. Both pickers list BTC first. **You pay** then lists what the wallet holds; **You get**
+lists every asset the book offers for what is paid in one step now, held or not, and starts on the
+first of those, then the rest. Review shows three lines
 before anything is signed: what you pay, what you get, and the fees ("Fees 192 XLEAF, included
 above"), each fee in the asset it is paid in, the price not counted as one. **Trade** confirms
 it; the trade then reads **Sent**, and **Settled** once it is final, or **Returned: nothing
