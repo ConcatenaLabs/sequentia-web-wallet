@@ -185,11 +185,15 @@ export async function launchMaker (H, dir, port, fund) {
   return { proc, url, address, log, dir, port, stop: () => new Promise((ok) => { if (proc.exitCode != null) return ok(); proc.once('exit', ok); proc.kill('SIGTERM') }) }
 }
 
-// The leaf maker's quotes, once it has boarded what it gives.
+// The leaf maker's quotes, once it has boarded what it gives. It boards its coins one at a time,
+// which on a loaded machine takes minutes: the wait ends only when it has said nothing new for
+// `ms`, or after `ms` × 8 whatever it says.
 export async function makerReady (H, maker, give, ms = 120000) {
-  const end = Date.now() + ms
+  const cap = Date.now() + ms * 8
+  let end = Date.now() + ms, said = maker.log.length
   for (;;) {
     try { const q = await (await fetch(maker.url + '/v1/quotes')).json(); if ((q.quotes || []).some((x) => x.give_asset === give)) return q } catch {}
+    if (maker.log.length > said) { said = maker.log.length; end = Math.min(cap, Date.now() + ms) }
     if (Date.now() > end) throw new Error('the maker never quoted: ' + maker.log.slice(-5).join(''))
     await H.produce(); await H.bury(); await sleep(2000)
   }
