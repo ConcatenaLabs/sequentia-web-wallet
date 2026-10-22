@@ -2161,7 +2161,8 @@ function priceTicker(hex){ if(hex==='BTC') return 'BTC'; if(hex===POLICY_HEX) re
 const _BTC_KEYS = ['BTC', 'TBTC', 'WBTC'];
 function _btcUsd(){ for(const k of _BTC_KEYS){ if(PRICES[k]>0) return PRICES[k]; } return null; }
 function priceFor(t){ if(!t) return null; const u=String(t).toUpperCase(); if(PRICES[u]>0) return PRICES[u]; return _BTC_KEYS.includes(u) ? _btcUsd() : null; }
-function refOptions(){ const s=new Set(['USD']); for(const t of Object.keys(PRICES)) s.add(_BTC_KEYS.includes(t)?'BTC':t); return [...s]; }
+// USD, then BTC (the other chain, never last), then every other priced asset in the feed's order.
+function refOptions(){ const s=new Set(['USD']); if(_btcUsd()) s.add('BTC'); for(const t of Object.keys(PRICES)) s.add(_BTC_KEYS.includes(t)?'BTC':t); return [...s]; }
 function priceOf(ref){ return ref==='USD' ? 1 : priceFor(ref); }
 // True when the chosen reference currency has no price and we are showing USD instead.
 function refUnpriced(){ return REF!=='USD' && !(priceOf(REF)>0); }
@@ -2176,7 +2177,10 @@ function refValue(hex, atoms){
   const units = Number(BigInt(atoms)) / Math.pow(10, assetMeta(hex).precision||0);
   return { v: units*pu/pr, ref };
 }
-function fmtRef(v, ref){ const dp = ref==='BTC' ? 8 : (Math.abs(v) >= 1 ? 2 : 6); return v.toLocaleString(undefined,{maximumFractionDigits:dp}) + ' ' + ref; }
+// A reference currency as the wallet names it. The price feed keys the Sequence token as SEQ;
+// the wallet shows the ticker its chain uses (tSEQ on the testnet), as it does everywhere else.
+function refName(ref){ return (ref==='SEQ' && POLICY_HEX) ? (assetMeta(POLICY_HEX).ticker || ref) : ref; }
+function fmtRef(v, ref){ const dp = ref==='BTC' ? 8 : (Math.abs(v) >= 1 ? 2 : 6); return v.toLocaleString(undefined,{maximumFractionDigits:dp}) + ' ' + refName(ref); }
 // "≈ 12.34 USD" for `atoms` of asset `hex`, or '' if unpriced.
 function refValueStr(hex, atoms){ const rv = refValue(hex, atoms); return rv ? '≈ ' + fmtRef(rv.v, rv.ref) : ''; }
 // Changing the reference re-denominates the whole wallet at once: the balance rows
@@ -2187,11 +2191,11 @@ function setRef(r){ REF=r; try{ localStorage.setItem('seqRefCcy', r); }catch{} i
 function initRefSelector(){
   const sel=$('refCcySel'); if(!sel) return;
   const opts=refOptions(); if(!opts.includes(REF)) opts.push(REF);
-  sel.innerHTML=''; for(const o of opts){ const op=el('option'); op.value=o; op.textContent=o; if(o===REF) op.selected=true; sel.appendChild(op); }
+  sel.innerHTML=''; for(const o of opts){ const op=el('option'); op.value=o; op.textContent=refName(o); if(o===REF) op.selected=true; sel.appendChild(op); }
   if(!sel._wired){ sel._wired=true; sel.onchange=()=>setRef(sel.value); }
   // If the chosen reference has no live price, values are shown in USD; tell the user.
   const unpriced = refUnpriced();
-  sel.title = unpriced ? (REF+' has no live price right now; values are shown in USD') : '';
+  sel.title = unpriced ? (refName(REF)+' has no live price right now; values are shown in USD') : '';
   sel.classList.toggle('ref-unpriced', unpriced);
   try{ updateRateStaleBadge(); }catch{}   // P5.4b — keep the staleness badge in sync with the ref bar
 }
@@ -2252,18 +2256,18 @@ function attachRefHint(input, assetFn){
   const node=el('div','sub'); node.style.cssText='margin-top:4px;min-height:1.1em;cursor:pointer;user-select:none';
   node.title='Click to switch which currency you enter amounts in (affects every field)';
   wrap.insertAdjacentElement('afterend', node);
-  const setPh=()=>{ input.setAttribute('placeholder', input._refMode ? ('amount in '+REF) : input._origPh); };
+  const setPh=()=>{ input.setAttribute('placeholder', input._refMode ? ('amount in '+refName(REF)) : input._origPh); };
   const setDenom=()=>{ denom.textContent = input._refMode ? REF : (assetMeta(hexOf()).ticker||''); };
   const upd=()=>{
     setDenom();
     const hex=hexOf(), raw=(input.value||'').trim(), ticker=assetMeta(hex).ticker||'asset';
     if(!input._refMode){
       if(!_bothPriced(hex, REF)){ node.textContent = refHintFor(raw, hex); return; }   // unpriced: plain ≈ if any, else ''
-      const t = raw ? refHintFor(raw, hex) : ('enter in '+REF);                          // ⇄ affordance even when empty
-      node.textContent = '⇄ ' + (t || ('enter in '+REF));
+      const t = raw ? refHintFor(raw, hex) : ('enter in '+refName(REF));                          // ⇄ affordance even when empty
+      node.textContent = '⇄ ' + (t || ('enter in '+refName(REF)));
     } else {
       // ref mode but the asset lost its price: keep a clickable escape (don't blank + trap the user).
-      if(!_bothPriced(hex, REF)){ node.textContent = raw ? ('⇄ no '+REF+' price - switch to '+ticker) : ''; return; }
+      if(!_bothPriced(hex, REF)){ node.textContent = raw ? ('⇄ no '+refName(REF)+' price - switch to '+ticker) : ''; return; }
       if(!raw){ node.textContent = '⇄ enter in '+ticker; return; }
       const a=assetAmountOf(input, hex);                                                 // exact string that will be sent
       node.textContent = a ? ('⇄ ≈ '+a+' '+ticker) : ('⇄ enter in '+ticker);
@@ -5735,8 +5739,8 @@ function balTotalCell(text, ticker){ const d=el('div','bt-amt'); d.appendChild(e
 function balValueCell(refKey, atoms){
   const rv=refKey ? refValue(refKey, atoms) : null, d=el('div','bt-usd');
   if(!rv){ d.textContent='—'; return d; }
-  d.appendChild(document.createTextNode(fmtRef(rv.v, rv.ref).slice(0, -(rv.ref.length+1))));
-  d.appendChild(el('span','bt-ref',' '+rv.ref));
+  d.appendChild(document.createTextNode(fmtRef(rv.v, rv.ref).slice(0, -(refName(rv.ref).length+1))));
+  d.appendChild(el('span','bt-ref',' '+refName(rv.ref)));
   return d;
 }
 // A line across the whole list: the frozen notice, the hidden-assets fold.
@@ -5899,7 +5903,7 @@ function renderBalance(){
       if(line.children.length) card.appendChild(line);
     }
     if(anyPriced && !allPriced) card.appendChild(el('div','bal-total-note','priced assets only'));
-    else if(refUnpriced()) card.appendChild(el('div','bal-total-note', REF+' has no live price; shown in USD'));
+    else if(refUnpriced()) card.appendChild(el('div','bal-total-note', refName(REF)+' has no live price; shown in USD'));
     // P5.4b — never present a stale-rate total as fresh: flag it honestly right under the headline.
     if(anyPriced && pricesStale()){ const n=el('div','bal-total-note stale', 'rates may be stale · '+(_pricesTs==null?'feed not reached':'updated '+_ageStr(Date.now()-_pricesTs)+' ago')); card.appendChild(n); }
   }
