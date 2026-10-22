@@ -241,7 +241,7 @@
     /* One view on a phone: the ticker, its bolt and "details" on the first line with the balance on
        the right, the value under the ticker, the details under both, across the whole card. */
     .btable.user .bt-row,.btable.user .bt-row:last-child{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"a t" "u u" "x x";gap:4px 12px}
-    .btable.user .bt-name{display:none}
+    .btable.user .bt-row:not(.bt-hidden) .bt-name{display:none}   /* a hidden asset's line holds its Unhide */
     .btable.user .bt-tk{flex-wrap:nowrap}
     .btable.user .bt-t{display:block;border:0;padding:0;text-align:right;white-space:nowrap}
     .btable.user .bt-t .bt-lbl,.btable.user .bt-t .bt-unit{display:none}
