@@ -31,7 +31,8 @@
 //     covenant order. The operator's round spends the order, pays its maker on the chain and
 //     gives the taker a leaf: method 'round' (a take from leaves).
 // Every other shape with a leaf has no construction, and is refused rather than planned: a leaf
-// against Lightning needs the operator's gateway, which the composer does not run, and a party
+// against Lightning needs the operator's gateway, which developer mode's composer does not run
+// (user mode's BTC trade does, in one shape: planSingleStep's 'leaf-ln' below), and a party
 // with a leaf on one leg and the chain on the other is no trade either side can sign. BTC is
 // never a leaf: native bitcoin lives on its own chain, so a BTC leg stays on Lightning or an
 // on-chain hash-lock, and a pair with BTC in it has no leaf rail at all.
@@ -300,4 +301,63 @@ export function planExecutionName(side, plan) {
     'sell:ln:chain':  'xsublift',     // fund asset HTLC on-chain, receive BTC over LN
     'sell:chain:ln':  'xsubas-sell',  // pay asset over LN, receive BTC on-chain
   }[`${side}:${plan.btcLeg.rail}:${plan.assetLeg.rail}`] || null;
+}
+
+// --- The single step (user mode) -----------------------------------------------------------
+// User mode offers only what settles in one native step and never falls back mid-trade
+// (single-step-book.mjs). Each source of its book settles one way, which the router names here
+// from the same leaf plans as developer mode's, so the two modes cannot disagree on what a shape
+// is: an in-tree swap ('leaf-swap', both parties on leaves) or a take from leaves in a round
+// ('leaf-take', against an on-chain order), or a trade of BTC for an asset in one hash-lock
+// ('leaf-ln': the asset leg in the operator's tree under the hash, between two wallets of its,
+// and the BTC leg over Bitcoin Lightning under the same hash). Any other source is refused,
+// never planned.
+export const SINGLE_STEP_SOURCES = Object.freeze({
+  'leaf-maker': { path: 'leaf-swap', taker: { leaf: true }, maker: 'leaf' },
+  'covenant-round': { path: 'leaf-take', taker: { leaf: true }, maker: 'chain' },
+  'btc-gateway': { path: 'leaf-ln', taker: { leaf: true, btc: 'ln' }, maker: 'leaf' },
+});
+
+// The one hash-lock of a BTC trade: BTC over Lightning on both ends (native), the asset from a
+// leaf to a leaf under the same hash (the operator settles it between its own two wallets, no
+// Lightning channel in the asset in its path). The hash is the BTC receiver's, and the asset's
+// giver locks first.
+function planLeafLightning ({ payAsset, receiveAsset }) {
+  if ((payAsset === 'BTC') === (receiveAsset === 'BTC')) throw new Error('a BTC trade names BTC and one asset besides it')
+  const asset = payAsset === 'BTC' ? receiveAsset : payAsset
+  return {
+    asset, takerSide: payAsset === 'BTC' ? 'buy' : 'sell',
+    btcLeg: { unit: 'btc', rail: 'ln', method: 'ln-htlc', bridge: false, lnSide: null, jitInbound: false },
+    assetLeg: { unit: 'asset', rail: 'leaf', method: 'tree-htlc', bridge: false, lnSide: null, jitInbound: false },
+    atomic: { sharedPreimage: true, lspCoordinates: false },
+    happyCoincidence: true,
+    leaf: { shape: 'hash-lock', hashBy: 'btc-receiver' },
+    steps: payAsset === 'BTC'
+      ? [{ op: 'receive-under-hash' }, { op: 'maker-locks-asset' }, { op: 'pay-btc-when-held' }, { op: 'claim-with-preimage' }]
+      : [{ op: 'btc-invoice' }, { op: 'pay-asset-under-hash' }, { op: 'maker-pays-btc-when-held' }, { op: 'settle-with-preimage' }],
+  };
+}
+
+// The settlement of a single-step source for a trade of `payAsset` for `receiveAsset`:
+// { path, plan, commands } from the router's own plans, or a refusal for anything that is not
+// one step. `caps` is the entry's unified-book capabilities, when it has them.
+export function planSingleStep(source, { payAsset, receiveAsset, caps } = {}) {
+  const s = SINGLE_STEP_SOURCES[source];
+  if (!s) throw new Error(`${JSON.stringify(source)} is not a single-step source`);
+  if (!payAsset || !receiveAsset || payAsset === receiveAsset) throw new Error('a trade names two assets');
+  if (s.path === 'leaf-ln') {
+    const plan = planLeafLightning({ payAsset, receiveAsset });
+    return { path: s.path, plan, commands: payAsset === 'BTC'
+      ? ['lightning_receive_quote', 'lightning_receive', 'lightning_receive_ready', 'lightning_receive_preimage', 'sync']
+      : ['lightning_pay_quote', 'lightning_pay', 'lightning_post_preimage', 'sync'] };
+  }
+  if (isBtc(payAsset) || isBtc(receiveAsset)) throw new Error(`${source} trades no BTC: BTC is never a leaf`);
+  const leaves = { btcRail: 'leaf', assetRail: 'leaf' };
+  const other = s.maker === 'leaf' ? leaves : { btcRail: 'chain', assetRail: 'chain' };
+  // The wallet buys `receiveAsset` with `payAsset`: the receive asset in the base's place.
+  const match = { asset: receiveAsset, quote: payAsset, buyer: leaves, seller: other, takerSide: 'buy' };
+  const plan = planSettlement(match);
+  const path = chooseSettlementPath(match, caps ? { caps } : (s.path === 'leaf-take' ? { caps: { leaf_take: true } } : {})).path;
+  if (path !== s.path) throw new Error(`${source} does not settle in one step here (${path || 'no path'})`);
+  return { path, plan, commands: leafExecution(plan) };
 }
