@@ -43,8 +43,10 @@ Anything importing `swap.js` from Node needs a `localStorage` shim installed bef
 `lightning/pkg/` is a *different* wasm artifact (the SeqLN on-device signer) and **is** tracked.
 Do not confuse it with `pkg/`. So is `leaves/pkg/`, the leaf wallet of developer mode: the
 operator wallet library (`bark::arca` in `ConcatenaLabs/arca`) built from that repository's
-`wallet-wasm/` with `wasm-pack build --target web --release --out-name leaf_wallet`; copy
-`leaf_wallet.js`, `leaf_wallet_bg.wasm` and `leaf_wallet.d.ts` into `leaves/pkg/`. It runs only
+`wallet-wasm/` by `tooling/build-leaf-wallet.sh <arca checkout>`, which remaps every
+build-machine path (home directory, checkout, cargo cache) out of the wasm, refuses to copy one
+that still names any, and copies `leaf_wallet.js`, `leaf_wallet_bg.wasm` and `leaf_wallet.d.ts`
+into `leaves/pkg/`. A plain `wasm-pack build` leaves the builder's paths in a public file. It runs only
 inside `leaves/worker.js`, a dedicated worker, because the library blocks on synchronous
 requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in JavaScript:
 `leaves.js` shows what the library answers, refusals in the library's own words, and nothing
