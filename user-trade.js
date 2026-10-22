@@ -289,7 +289,17 @@ export function createEngine (deps) {
     let r = size.receive
     for (let i = 0; i < 4; i++) {
       let q
-      try { q = await run('order_fill_resting_quote', { order: entry.id, amount: String(r) }) } catch (e) { log('[user trade] order_fill_resting_quote:', e.message); return null }
+      try { q = await run('order_fill_resting_quote', { order: entry.id, amount: String(r) }) } catch (e) {
+        // A fill spends only the wallet's coins no older than the order's: when those hold less
+        // than the fill takes, the library says how much they hold, and the fill is sized to it.
+        const m = /the outputs take (\d+) of asset \S+, more than the (\d+) the inputs hold/.exec(String(e && e.message))
+        if (m && BigInt(m[1]) > 0n) {
+          const r2 = (r * BigInt(m[2])) / BigInt(m[1]) - 1n
+          const s2 = r2 > 0n ? sizeEntry(entry, (r2 * entry.rateNum) / entry.rateDen) : null
+          if (s2 && s2.receive < r) { r = s2.receive; continue }
+        }
+        log('[user trade] order_fill_resting_quote:', e.message); return null
+      }
       if (!q.gets || q.gets.asset !== receiveAsset || big(q.gets.amount) !== r || !q.fee || q.fee.asset !== payAsset) { log('[user trade] the resting fill is not the one asked'); return null }
       const coins = (await run('coins')) || []
       const given = coins.filter((c) => (q.gives || []).includes(c.leaf_id))
@@ -371,8 +381,13 @@ export function createEngine (deps) {
       // A maker quoting several levels of one pair is asked once, at the level that gives the
       // most for this size: each firm offer holds its coins.
       .filter((x, i, l) => !x.e.maker || l.findIndex((y) => y.e.maker === x.e.maker && y.e.source === x.e.source) === i)
+    // Firm terms of the best three that give them: an entry that cannot be firmed (a resting
+    // order the wallet's coins are too old for, a maker that ran short) makes way for the next.
     const cands = []
-    for (const { e } of ind.slice(0, 3)) {
+    let tried = 0
+    for (const { e } of ind) {
+      if (cands.length >= 3 || tried >= 8) break
+      tried++
       const c = await firm(e, payAsset, receiveAsset, A, have)
       if (c) cands.push(c)
     }
