@@ -46,6 +46,9 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
   const btc = deps.btc
   const post = (url, b) => deps.fetchJson(url, { method: 'POST', body: JSON.stringify(b) })
   const release = (maker, swap) => { if (maker && swap) Promise.resolve(post(maker + '/v1/btc/release', { swap })).catch(() => {}) }
+  // Before a smaller offer is asked for, the larger one is let go of and the maker has answered:
+  // it holds what an offer gives until the offer is released.
+  const releaseNow = async (maker, swap) => { if (maker && swap) { try { await post(maker + '/v1/btc/release', { swap }) } catch {} } }
 
   // Firm terms of one entry (source 'btc-gateway') for `pay` of the pay asset.
   async function firm (entry, payAsset, receiveAsset, pay, have, sized) {
@@ -68,7 +71,8 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         const spends = big(q.spends)
         const limit = pay < have ? pay : have
         if (spends > limit) {
-          drop()
+          btc.cancelInvoice(inv.payment_hash).catch(() => {})
+          await releaseNow(entry.maker, o.swap)
           sats = sats - ((spends - limit) * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
           if (sats < entry.minReceive) return null
           continue
@@ -98,7 +102,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       const spends = big(d.sats) + fee
       const limit = pay < have ? pay : have
       if (spends > limit) {
-        release(entry.maker, o.swap)
+        await releaseNow(entry.maker, o.swap)
         give = give - ((spends - limit) * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
         if (give < entry.minReceive) return null
         continue

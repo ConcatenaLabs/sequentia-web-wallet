@@ -79,11 +79,19 @@ function standIn () {
   }
   const posts = []
   let complete = true
+  let held = false
   const fetchJson = async (url, init) => {
     if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: '4', rate_den: '3', max_give: '1000000', min_give: '10000' }] }
     const b = init && init.body ? JSON.parse(init.body) : {}
     posts.push([url.split('/v1/')[1], b])
-    if (url.endsWith('/v1/firm')) { const want = (BigInt(b.give) * 4n + 2n) / 3n; return { swap: 's1', offer: `swap-offer:${b.give}:${want}`, give: b.give, want: String(want) } }
+    // The maker holds its coin for an offer until the offer is released, a moment after it is
+    // asked to, and refuses a second offer meanwhile, as leaf-maker.mjs does.
+    if (url.endsWith('/v1/firm')) {
+      if (held) throw new Error('the maker does not hold that much now')
+      held = true
+      const want = (BigInt(b.give) * 4n + 2n) / 3n; return { swap: 's1', offer: `swap-offer:${b.give}:${want}`, give: b.give, want: String(want) }
+    }
+    if (url.endsWith('/v1/release')) { await new Promise((r) => setTimeout(r, 20)); held = false; return {} }
     if (url.endsWith('/v1/accept')) {
       if (!complete) throw new Error('the maker is away')
       const s = swaps.find((x) => x.swap === 's1'); s.state = 'done'

@@ -235,7 +235,7 @@ export function createEngine (deps) {
         const spend = big(t.gives.value) + big(t.pays.margins)
         const limit = pay < have ? pay : have
         if (spend > limit) {
-          release(entry.maker, o.swap)
+          await releaseNow(entry.maker, o.swap)
           const over = spend - limit
           give = give - (over * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
           if (give < entry.minReceive) return null
@@ -252,7 +252,7 @@ export function createEngine (deps) {
         const total = spend + (sc ? big(sc.fee) : 0n)
         if (total > limit) {
           // Settling the change costs too: what the trade takes in all must fit what is paid.
-          release(entry.maker, o.swap)
+          await releaseNow(entry.maker, o.swap)
           give = give - ((total - limit) * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
           if (give < entry.minReceive) return null
           continue
@@ -270,6 +270,12 @@ export function createEngine (deps) {
   function release (maker, swap) {
     if (!maker || !swap) return
     Promise.resolve(deps.fetchJson(maker + '/v1/release', { method: 'POST', body: JSON.stringify({ swap }) })).catch(() => {})
+  }
+  // A firm offer let go of before the maker is asked again for a smaller one: the maker holds its
+  // coins for an offer until it is released, and refuses a second offer they would have paid.
+  async function releaseNow (maker, swap) {
+    if (!maker || !swap) return
+    try { await deps.fetchJson(maker + '/v1/release', { method: 'POST', body: JSON.stringify({ swap }) }) } catch {}
   }
 
   // Lets go of a priced choice that is not taken: the maker's held offer, and the wallet's own
