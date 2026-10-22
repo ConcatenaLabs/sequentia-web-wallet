@@ -383,3 +383,14 @@ test('issuer-operated assets are the ones the operator serves with an issuer ent
   assert.deepEqual(issuerAssets(info), [X])
   assert.deepEqual(issuerAssets({}), [])
 })
+
+test('a leaf whose exit landed counts once: the library\'s held, less its on-chain coins', () => {
+  // A 2,000,000 leaf exiting with its claim out (1,999,976 on the chain at the landing), 300,000 live.
+  const b = leafBalances({ held: { [Y]: '2299976' }, arca: { [Y]: { exiting: '2000000', live: '300000' } }, sequentia_onchain: { [Y]: '1999976' } })
+  assert.equal(b.get(Y).leaves, 300000n)
+  assert.equal(b.get(Y).onchain, 1999976n)
+  assert.deepEqual(b.get(Y).states, { exiting: 2000000n, live: 300000n }, 'developer mode still lists every state')
+  const coins = [{ leaf_id: 'e', asset: Y, value: '2000000', state: 'exiting', note: 'claimed by f1fc…', frozen: { frozen: true } },
+    { leaf_id: 'l', asset: Y, value: '300000', state: 'live', frozen: { frozen: true } }]
+  assert.equal(frozenAtoms(coins, { sequentia_onchain_frozen: { [Y]: '1999976' } }).get(Y), 2299976n)
+})
