@@ -1802,6 +1802,23 @@ function legRailOptions(leg){
 // being usable (its balance moved): the guide then goes straight to the next step. With two
 // usable rails the choice stays the user's.
 function autoRails(){
+  // Without mixed rails the choice is of a combination: both on-chain or both over Lightning. When
+  // the two legs can share only one of them, that is the settlement, set here, and the composer
+  // goes straight to Place instead of waiting on a choice that has one answer.
+  if (!mixedRailsAllowed() && S.payRail !== 'leaf' && S.recvRail !== 'leaf'){
+    const usable = (leg) => {
+      const seg = C.$(leg === 'pay' ? 'swPayRailSeg' : 'swRecvRailSeg'); if (!seg) return [];
+      const o = legRailOptions(leg);
+      return ['chain', 'ln'].filter(r => { const b = seg.querySelector('button[data-r="' + r + '"]'); return o[r].ok && b && !b.disabled; });
+    };
+    const p = usable('pay'), q = usable('recv');
+    const both = ['chain', 'ln'].filter(r => p.includes(r) && q.includes(r));
+    if (both.length === 1){
+      if (S.payRail !== both[0]) setRail('pay', both[0]);
+      if (S.recvRail !== both[0]) setRail('recv', both[0]);
+    }
+    return;
+  }
   for (const leg of ['pay', 'recv']){
     const seg = C.$(leg === 'pay' ? 'swPayRailSeg' : 'swRecvRailSeg'); if (!seg) continue;
     const o = legRailOptions(leg);
