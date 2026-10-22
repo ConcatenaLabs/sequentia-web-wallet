@@ -756,7 +756,7 @@ async function runForwardCourier(q){
       SWAP.detail = `the maker locked ${C.fmtAtoms(SWAP.seq_leg.amount, sm.precision)} ${sm.ticker}, not the ${C.fmtAtoms(SWAP.seq_amount, sm.precision)} ${sm.ticker} you funded`;
       saveSwap();
       await session.fail('seq_leg_mismatch', 'amount differs from the taken slice'); renderStepper();
-      if ($('xswapErr')) $('xswapErr').textContent = 'Stopped before revealing your secret: ' + SWAP.detail + '. Your BTC is refundable after block ' + SWAP.btc_locktime + '.';
+      if ($('xswapErr')) $('xswapErr').textContent = 'Stopped before revealing your secret: ' + SWAP.detail + '. Your BTC is refundable after ' + btcRefundText(SWAP.btc_locktime) + '.';
       return;
     }
 
@@ -764,7 +764,7 @@ async function runForwardCourier(q){
     const lg = verifyLeg();
     if (!lg.ok){ SWAP.state = ST.FAILED; SWAP.detail = lg.reason; saveSwap();
       await session.fail('seq_leg_invalid', lg.reason); renderStepper();
-      if ($('xswapErr')) $('xswapErr').textContent = 'Stopped before revealing your secret: ' + lg.reason + ' Your BTC is refundable after block ' + SWAP.btc_locktime + '.';
+      if ($('xswapErr')) $('xswapErr').textContent = 'Stopped before revealing your secret: ' + lg.reason + ' Your BTC is refundable after ' + btcRefundText(SWAP.btc_locktime) + '.';
       return;
     }
     setStepStatus('anchor', 'Checking the asset leg is anchored to a Bitcoin block at or above your lock…', true);
@@ -778,7 +778,7 @@ async function runForwardCourier(q){
     if (!gate.ok){ SWAP.detail = gate.reason; saveSwap(); renderStepper();
       if ($('xswapErr')) $('xswapErr').textContent = (gate.timedout
         ? 'Anchor did not confirm before your refund window: ' + gate.reason
-        : 'Anchor check did not pass: ' + gate.reason + ' Your secret was NOT revealed; refund your BTC after block ' + SWAP.btc_locktime + '.');
+        : 'Anchor check did not pass: ' + gate.reason + ' Your secret was NOT revealed; refund your BTC after ' + btcRefundText(SWAP.btc_locktime) + '.');
       return;
     }
 
@@ -844,7 +844,7 @@ function describeForwardFailure(e){
   const T = SWAP && SWAP.btc_locktime;
   const base = 'The swap didn’t complete: ' + C.prettyErr(e);
   if (SWAP && SWAP.seq_claim_txid) return base + ' - but your asset was already claimed.';
-  return base + (T ? ` Your BTC is refundable after block ${T} (use “Refund BTC leg”).` : '');
+  return base + (T ? ` Your BTC is refundable after ${btcRefundText(T)} (use “Refund BTC leg”).` : '');
 }
 // One confirmation modal with the maker's real per-lift terms; resolves true/false.
 function confirmLockModal(fq, sm){
@@ -1043,11 +1043,11 @@ async function resumeCourierStranded(){
       // The anchor first: a maker waiting on it is reachable, and blaming it sends the user looking
       // in the wrong place.
       const why = await anchorWait().catch(() => null);
-      SWAP.detail = why || ('Connection to the maker was interrupted; retrying. Your BTC stays refundable at block ' + SWAP.btc_locktime + ' either way.');
+      SWAP.detail = why || ('Connection to the maker was interrupted; retrying. Your BTC stays refundable at ' + btcRefundText(SWAP.btc_locktime) + ' either way.');
       saveSwap(); renderStepper();
       if (C.$('xswapErr')) C.$('xswapErr').textContent = why
-        ? why + ' The wallet keeps checking; your BTC is safe and refunds at block ' + SWAP.btc_locktime + ' if the swap cannot complete.'
-        : 'Could not reach the maker just now. The wallet keeps retrying in the background; your BTC is safe and refunds at block ' + SWAP.btc_locktime + ' if the swap cannot complete.';
+        ? why + ' The wallet keeps checking; your BTC is safe and refunds at ' + btcRefundText(SWAP.btc_locktime) + ' if the swap cannot complete.'
+        : 'Could not reach the maker just now. The wallet keeps retrying in the background; your BTC is safe and refunds at ' + btcRefundText(SWAP.btc_locktime) + ' if the swap cannot complete.';
       if (!_strandedRetryTimer){
         _strandedRetryTimer = setTimeout(() => { _strandedRetryTimer = null; resumeCourierStranded(); }, 90000);
       }
@@ -1059,7 +1059,7 @@ async function resumeCourierStranded(){
     SWAP.detail = 'Interrupted after your Bitcoin was locked; the maker did not lock the asset.';
     saveSwap(); renderStepper();
     if (C.$('xswapErr')) C.$('xswapErr').textContent =
-      'This swap was interrupted after your Bitcoin was locked and can no longer complete with the maker. Your BTC is safe and refunds at block ' + SWAP.btc_locktime + '.';
+      'This swap was interrupted after your Bitcoin was locked and can no longer complete with the maker. Your BTC is safe and refunds at ' + btcRefundText(SWAP.btc_locktime) + '.';
   } catch { /* transient (esplora/tip); a later reload retries the recovery */ }
   finally { _resumeStranded = false; }
 }
@@ -1269,7 +1269,7 @@ function verifyLeg(){
     const expected = C.wasm.buildSeqHtlcRedeemScript(SWAP.hash_hex, SWAP.seq_claim_pub, SWAP.maker_seq_refund_pub, SWAP.seq_locktime);
     const got = String(SWAP.seq_leg.redeem_script || '');
     if (!expected || String(expected).toLowerCase() !== got.toLowerCase())
-      return { ok:false, reason:'the maker locked a Sequentia output your key cannot claim (HTLC script mismatch) - do NOT claim; refund your BTC after block ' + SWAP.btc_locktime };
+      return { ok:false, reason:'the maker locked a Sequentia output your key cannot claim (HTLC script mismatch) - do NOT claim; refund your BTC after ' + btcRefundText(SWAP.btc_locktime) };
   } catch { return { ok:false, reason:'could not verify the Sequentia leg script - do not claim; refund your BTC' }; }
   return { ok:true };
 }
@@ -1297,7 +1297,7 @@ function verifyAnchor(legAnchor){
   if (!Number.isFinite(a) || a < 0)
     return { ok: false, anchor_height: a, btc_height: bh, unconfirmed: true, reason: 'the maker’s Sequentia leg is not yet confirmed and anchored to Bitcoin' };
   if (!(a >= bh))
-    return { ok: false, anchor_height: a, btc_height: bh, unsafe: true, reason: `the asset leg is anchored at Bitcoin height ${a}, BEFORE your BTC lock (${bh}); it could outlive your BTC in a reorg, so it is NOT safe to claim · refund your BTC after block ${SWAP.btc_locktime}` };
+    return { ok: false, anchor_height: a, btc_height: bh, unsafe: true, reason: `the asset leg is anchored at Bitcoin height ${a}, BEFORE your BTC lock (${bh}); it could outlive your BTC in a reorg, so it is NOT safe to claim · refund your BTC after ${btcRefundText(SWAP.btc_locktime)}` };
   return { ok: true, anchor_height: a, btc_height: bh };
 }
 
@@ -1366,12 +1366,27 @@ async function verifyAnchorFull(){
 }
 
 // The Bitcoin (testnet4) tip height — used only to decide when the refund window is close.
+// The Bitcoin refund height is a testnet4 block, while the page shows Sequentia's height, which is
+// tens of thousands higher: "refunds at block 157545" under "Synced to block 181712" read as a refund
+// long overdue (23/10/2026). Say which chain, where testnet4 is now and about how long that is.
+let _lastBtcTip = -1;
+function btcRefundText(T){
+  const t = Number(T);
+  if (!(t > 0)) return 'the Bitcoin refund height';
+  if (!(_lastBtcTip > 0)) return 'Bitcoin (testnet4) block ' + t;
+  const left = t - _lastBtcTip;
+  if (left <= 0) return 'Bitcoin (testnet4) block ' + t + ', which testnet4 has reached';
+  const h = Math.round(left * 10 / 60);
+  const span = h < 1 ? 'under an hour' : h < 48 ? 'about ' + h + ' h' : 'about ' + Math.round(h / 24) + ' days';
+  return 'Bitcoin (testnet4) block ' + t + ' (testnet4 is at ' + _lastBtcTip + ', ' + left + ' blocks away: '
+    + span + ' at ten minutes a block, though testnet4 blocks come irregularly)';
+}
 async function btcTipHeight(){
   try {
     const base = (typeof location !== 'undefined' ? location.origin : '') + '/testnet4/api';
     const r = await fetch(base + '/blocks/tip/height', { signal: AbortSignal.timeout(6000) });
     const t = r.ok ? (await r.text()).trim() : '';
-    if (/^\d+$/.test(t)) return Number(t);   // an error page or an empty answer is not height 0
+    if (/^\d+$/.test(t)) return (_lastBtcTip = Number(t));   // an error page or an empty answer is not height 0
   } catch {}
   return -1;
 }
@@ -1436,14 +1451,14 @@ async function awaitAnchor(){
     const btcTip = await btcTipHeight();
     if (btcTip >= 0 && SWAP.btc_locktime && btcTip >= (Number(SWAP.btc_locktime) - MARGIN))
       return { ok: false, timedout: true, anchor_height: gate.anchor_height, btc_height: gate.btc_height,
-        reason: `the maker's asset block did not confirm and anchor at/above your BTC-lock height (${gate.btc_height}) before your refund window; refund the BTC leg after block ${SWAP.btc_locktime}` };
+        reason: `the maker's asset block did not confirm and anchor at/above your BTC-lock height (${gate.btc_height}) before your refund window; refund the BTC leg after ${btcRefundText(SWAP.btc_locktime)}` };
     // Don't keep waiting once the Sequentia tip nears the maker's SEQ refund window: even if the leg
     // later anchors, claiming past this point races the maker's refund. Stop and route to a BTC refund.
     if (SWAP.seq_locktime){
       const seqTip = await seqTipHeight();
       if (seqTip >= 0 && seqTip >= (Number(SWAP.seq_locktime) - SEQ_REFUND_MARGIN))
         return { ok: false, timedout: true, anchor_height: gate.anchor_height, btc_height: gate.btc_height,
-          reason: `the maker's asset leg did not become claimable before its own Sequentia refund window (tip ${seqTip} ≥ T_seq ${SWAP.seq_locktime} − ${SEQ_REFUND_MARGIN}); refund the BTC leg after block ${SWAP.btc_locktime}` };
+          reason: `the maker's asset leg did not become claimable before its own Sequentia refund window (tip ${seqTip} ≥ T_seq ${SWAP.seq_locktime} − ${SEQ_REFUND_MARGIN}); refund the BTC leg after ${btcRefundText(SWAP.btc_locktime)}` };
     }
     setStepStatus('anchor', (Number(gate.btc_height) > 0
       ? `Waiting for the maker's asset block to confirm and anchor to Bitcoin (needs anchor ≥ your BTC height ${gate.btc_height})…`
@@ -1470,7 +1485,7 @@ async function claimSeq(){
   if (SWAP.seq_locktime){
     const seqTip = await seqTipHeight();
     if (seqTip >= 0 && seqTip >= (Number(SWAP.seq_locktime) - SEQ_REFUND_MARGIN))
-      throw new Error(`too close to the maker's Sequentia refund window (tip ${seqTip} ≥ T_seq ${SWAP.seq_locktime} − ${SEQ_REFUND_MARGIN}); do NOT reveal the secret · let your BTC refund after block ${SWAP.btc_locktime}`);
+      throw new Error(`too close to the maker's Sequentia refund window (tip ${seqTip} ≥ T_seq ${SWAP.seq_locktime} − ${SEQ_REFUND_MARGIN}); do NOT reveal the secret · let your BTC refund after ${btcRefundText(SWAP.btc_locktime)}`);
   }
   const { wasm } = C;
   // Destination SPK: a fresh wallet address, unconfidential (explicit output).
@@ -1496,7 +1511,7 @@ async function claimSeq(){
   // secret stays hidden and the leg stays claimable, so resumeAnchorClaim retries once the feed is back.
   if (!feeSized){
     const tk = (C.assetMeta(claimAsset) || {}).ticker || 'this asset';
-    throw new Error(`The Sequentia fee rate for ${tk} is unavailable right now, so the claim fee cannot be sized safely · your secret was NOT revealed. This retries automatically; your BTC stays refundable after block ${SWAP.btc_locktime}.`);
+    throw new Error(`The Sequentia fee rate for ${tk} is unavailable right now, so the claim fee cannot be sized safely · your secret was NOT revealed. This retries automatically; your BTC stays refundable after ${btcRefundText(SWAP.btc_locktime)}.`);
   }
   { const amt = Number(SWAP.seq_leg.amount); if (fee > Math.floor(amt/2)) fee = Math.max(1, Math.floor(amt/2)); }
   const spend = {
@@ -1598,7 +1613,7 @@ async function onRefundBtc(){
   const kv = [
     ['Network', '⚠ Bitcoin: refunding YOUR locked BTC leg (parent chain) via the CLTV branch'],
     ['Refund amount', C.fmtAtoms(SWAP.btc_leg.amount, 8) + ' BTC (minus the refund tx fee)'],
-    ['Valid after', 'block ' + SWAP.btc_locktime],
+    ['Valid after', btcRefundText(SWAP.btc_locktime)],
     ['Note', 'Only do this if the maker stalled / the quote expired and the Sequentia leg was never safely claimable.'],
   ];
   const { m: modal, ok, st } = C.modalRows({ title: 'Refund the BTC leg', kv });
@@ -1702,7 +1717,7 @@ function onAbandon(){
     // refunds, so it stays.
     const why = SWAP.state === ST.SEQ_CLAIMED
       ? 'This trade cannot be abandoned: you have already received the asset, and it clears once the maker takes the BTC.'
-      : 'This trade cannot be abandoned: the maker has locked the asset for you, and claiming it is what finishes the trade. If it cannot be claimed, your BTC refunds at block ' + SWAP.btc_locktime + ' with “Refund BTC leg”.';
+      : 'This trade cannot be abandoned: the maker has locked the asset for you, and claiming it is what finishes the trade. If it cannot be claimed, your BTC refunds at ' + btcRefundText(SWAP.btc_locktime) + ' with “Refund BTC leg”.';
     try { if (C.$ && C.$('xswapErr')) C.$('xswapErr').textContent = why; } catch {}
     try { C.toast && C.toast(why); } catch {}
     return;
@@ -1936,7 +1951,7 @@ function renderStepper(){
   // held hostage for the rest of the timelock (the wedge that blocked all cross buys for a day).
   if (parkEligible()){
     const pk = el('button','ghost', 'Park · refund runs itself');
-    pk.id = 'btnXPark'; pk.title = 'Free the trade slot now; the BTC leg refunds automatically at block ' + SWAP.btc_locktime + '.';
+    pk.id = 'btnXPark'; pk.title = 'Free the trade slot now; the BTC leg refunds automatically at ' + btcRefundText(SWAP.btc_locktime) + '.';
     pk.onclick = onPark; row.appendChild(pk);
   }
   ctl.appendChild(row);
@@ -2005,7 +2020,7 @@ function stepProposeCard(){
     ? [ C.el('div','sub','This swap was interrupted after your Bitcoin lock and can no longer complete with the maker.') ]
     : [ C.el('div','sub','The maker verifies your BTC leg, then locks the Sequentia leg in an anchored Sequentia block.') ];
   if (SWAP.seq_leg && SWAP.seq_leg.txid) body.push(kvRowHtml('Sequentia lock tx', txLink(SWAP.seq_leg.txid, false)));
-  if (SWAP.stranded) body.push(errLine('Your BTC is safe and refunds at block ' + SWAP.btc_locktime + '.'));
+  if (SWAP.stranded) body.push(errLine('Your BTC is safe and refunds at ' + btcRefundText(SWAP.btc_locktime) + '.'));
   if (SWAP.state === ST.FAILED) body.push(errLine(SWAP.detail || 'propose failed'));
   // The maker locks its asset leg by itself and announces it over the session, so
   // this step advances on its own — there is nothing for the user to press.
