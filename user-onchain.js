@@ -18,6 +18,16 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
 const display = (h) => String(h || '').toLowerCase().match(/../g).reverse().join('')
 
+// What a failed broadcast means: the FILL is out when the node already holds it ({ txid }); the
+// node's refusal of it is a refusal, nothing moved ({ error } of kind 'refused'); anything else
+// (the esplora not answering) leaves it unknown ({ error } as it came).
+export function broadcastAnswer (e, txid) {
+  const m = String((e && e.message) || e)
+  if (txid && /already in (the )?mempool|txn-already-known|txn-already-in-mempool|already known/i.test(m)) return { txid }
+  if (/^broadcast failed:/.test(m)) { const x = new Error('refused: the node took no FILL: ' + m.slice('broadcast failed:'.length).trim()); x.kind = 'refused'; return { error: x } }
+  return { error: e }
+}
+
 export function makeUserOnchain (ctx) {
   // One FILL's network fee, in the asset paid for the order: the covenant-fill host pays the fee
   // in that asset, and the order's own asset never. An asset the node takes no fee in cannot pay
@@ -42,10 +52,22 @@ export function makeUserOnchain (ctx) {
     // The FILL's txid is recorded before it is broadcast, so a broadcast that does not answer is
     // looked for on the chain rather than taken for failed.
     const build = hooks.buildCovenantFillTx
+    let txid = null
     hooks.buildCovenantFillTx = async (recipe) => {
       const built = await build(recipe)
-      if (built && built.txid && onTxid) { try { onTxid(String(built.txid)) } catch {} }
+      if (built && built.txid) { txid = String(built.txid); if (onTxid) { try { onTxid(txid) } catch {} } }
       return built
+    }
+    // A FILL the node refuses moved nothing: the trade is a refusal, not a step that did not
+    // answer (an order another taker filled first is the usual one). A FILL the node already
+    // holds was broadcast.
+    const broadcast = hooks.broadcast
+    hooks.broadcast = async (rawHex) => {
+      try { return await broadcast(rawHex) } catch (e) {
+        const v = broadcastAnswer(e, txid)
+        if (v.txid) return v.txid
+        throw v.error
+      }
     }
     const r = await settleFill(matched, hooks)
     return { txid: r.txid }

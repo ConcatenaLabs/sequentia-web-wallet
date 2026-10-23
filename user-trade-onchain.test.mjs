@@ -110,3 +110,22 @@ test('the page\'s on-chain wallet: a FILL\'s fee in the asset paid at the node\'
   assert.equal(await oc.status('a'), 'final'); assert.equal(await oc.status('b'), 'pending'); assert.equal(await oc.status('c'), 'unknown')
   assert.equal(oc.balance(X), 7n)
 })
+
+test('a FILL the node refuses is a refusal (nothing moved), one it already holds is out, anything else unknown', async () => {
+  const { broadcastAnswer } = await import('./user-onchain.js')
+  const refused = broadcastAnswer(new Error('broadcast failed: sendrawtransaction RPC error: {"code":-25,"message":"bad-txns-inputs-missingorspent"}'), 'ab')
+  assert.equal(refused.error.kind, 'refused'); assert.match(refused.error.message, /^refused: the node took no FILL: .*missingorspent/)
+  assert.deepEqual(broadcastAnswer(new Error('broadcast failed: txn-already-in-mempool'), 'ab'), { txid: 'ab' })
+  const away = new Error('fetch failed')
+  assert.equal(broadcastAnswer(away, 'ab').error, away, 'an esplora that does not answer leaves it unknown')
+  // The engine fails a refused FILL at once: nothing to follow.
+  const s = standIn()
+  const eng = createEngine({ leaves: { command (cmd) { if (cmd === 'coins') return []; if (cmd === 'plans') return { plans: [] }; throw new Error('no leaves') } },
+    fetchJson: async () => ({}), makers: () => [], relayBook: async () => [offer], store: s.store,
+    admitted: () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['onchain-fill'] }] } } }, genesis: 'g' }),
+    onchain: { balance: () => 2000000n, fee: () => ({ asset: X, atoms: 50n }), status: () => 'unknown',
+      take: async (m, { onTxid }) => { onTxid('ab'); throw refused.error } } })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400050' })
+  await assert.rejects(eng.confirm(q.choice, q.ticket), /refused/)
+  assert.equal(eng.records()[0].state, 'failed')
+})
