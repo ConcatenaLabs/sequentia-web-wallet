@@ -41,6 +41,7 @@ export function startEsploraShim({ rpc, port, pools = null }) {
   const spkOf = new Map();                // "txid:vout" -> scripthash
   const outOf = new Map();                // "txid:vout" -> { scriptpubkey, value, asset }
   const txJson = new Map();               // txid -> esplora-shaped transaction
+  const atHeight = new Map();             // height -> { hash, txids } of the block indexed there
 
   function add(map, k, v) { if (!map.has(k)) map.set(k, []); map.get(k).push(v); }
   function touch(h, txid) { if (!touches.has(h)) touches.set(h, new Set()); touches.get(h).add(txid); }
@@ -81,14 +82,26 @@ export function startEsploraShim({ rpc, port, pools = null }) {
 
   let mempoolSeen = new Set();
   async function catchUp() {
+    // A reorganisation (an anchor rollback) replaces blocks already indexed: the blocks that left
+    // the chain are forgotten back to the fork, and the chain indexed again from there.
+    while (indexed >= 0) {
+      let hash = null;
+      try { hash = await call('getblockhash', [indexed]); } catch {}
+      const was = atHeight.get(indexed);
+      if (was && hash === was.hash) break;
+      for (const txid of (was && was.txids) || []) blockOf.delete(txid);
+      atHeight.delete(indexed);
+      indexed--;
+    }
     const tip = await call('getblockcount');
     for (let height = indexed + 1; height <= tip; height++) {
       const hash = await call('getblockhash', [height]);
       const b = await call('getblock', [hash, 2]);
       for (const tx of b.tx) {
-        if (!mempoolSeen.has(tx.txid)) indexTx(tx);
+        if (!mempoolSeen.has(tx.txid) && !txJson.has(tx.txid)) indexTx(tx);
         blockOf.set(tx.txid, { height, hash });
       }
+      atHeight.set(height, { hash, txids: b.tx.map((t) => t.txid) });
       indexed = height;
     }
     // Parents before children, so a child's inputs find their outputs.
@@ -176,7 +189,8 @@ export function startEsploraShim({ rpc, port, pools = null }) {
         return res.end(Buffer.from(hex, 'hex'));
       }
       if ((m = p.match(/^\/tx\/([0-9a-f]{64})\/hex$/))) return send(200, await call('getrawtransaction', [m[1], 0]));
-      if ((m = p.match(/^\/tx\/([0-9a-f]{64})\/status$/))) return json(status(m[1]));
+      // A transaction neither in a block nor in the mempool is unknown, as esplora answers it.
+      if ((m = p.match(/^\/tx\/([0-9a-f]{64})\/status$/))) return (await live(m[1])) ? json(status(m[1])) : send(404, 'Transaction not found');
       if ((m = p.match(/^\/tx\/([0-9a-f]{64})$/))) return json({ ...(txJson.get(m[1]) || jsonOf(await call('getrawtransaction', [m[1], true]))), status: status(m[1]) });
       if ((m = p.match(/^\/tx\/([0-9a-f]{64})\/outspend\/(\d+)$/))) {
         const sp = spentBy.get(`${m[1]}:${m[2]}`);
