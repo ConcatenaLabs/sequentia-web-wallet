@@ -129,3 +129,10 @@ test('a FILL the node refuses is a refusal (nothing moved), one it already holds
   await assert.rejects(eng.confirm(q.choice, q.ticket), /refused/)
   assert.equal(eng.records()[0].state, 'failed')
 })
+
+test('an esplora that fails for itself is not the node refusing the FILL', async () => {
+  const { broadcastAnswer } = await import('./user-onchain.js')
+  const e = new Error('broadcast failed: Block height out of range')
+  assert.equal(broadcastAnswer(e, 'ab').error, e, 'left unknown, followed on the chain')
+  assert.equal(broadcastAnswer(new Error('broadcast failed: sendrawtransaction RPC error: {"code":-26,"message":"min relay fee not met"}'), 'ab').error.kind, 'refused')
+})

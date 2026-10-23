@@ -20,11 +20,15 @@ const display = (h) => String(h || '').toLowerCase().match(/../g).reverse().join
 
 // What a failed broadcast means: the FILL is out when the node already holds it ({ txid }); the
 // node's refusal of it is a refusal, nothing moved ({ error } of kind 'refused'); anything else
-// (the esplora not answering) leaves it unknown ({ error } as it came).
+// (the esplora not answering, or failing for itself) leaves it unknown ({ error } as it came).
 export function broadcastAnswer (e, txid) {
   const m = String((e && e.message) || e)
   if (txid && /already in (the )?mempool|txn-already-known|txn-already-in-mempool|already known/i.test(m)) return { txid }
-  if (/^broadcast failed:/.test(m)) { const x = new Error('refused: the node took no FILL: ' + m.slice('broadcast failed:'.length).trim()); x.kind = 'refused'; return { error: x } }
+  // Only the node's own refusal, as esplora passes it on (its sendrawtransaction error, or the
+  // reason it names), is a refusal; an esplora that failed for itself leaves the FILL unknown.
+  if (/^broadcast failed:/.test(m) && /sendrawtransaction|bad-txns|txn-mempool-conflict|non-final|min relay fee|insufficient fee|missing-?inputs|missingorspent|dust/i.test(m)) {
+    const x = new Error('refused: the node took no FILL: ' + m.slice('broadcast failed:'.length).trim()); x.kind = 'refused'; return { error: x }
+  }
   return { error: e }
 }
 
