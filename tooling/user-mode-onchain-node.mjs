@@ -36,7 +36,7 @@ export async function nodeOnchain ({ lwk, mnemonic, esplora, policyAsset, genesi
   // How many of the wallet's transactions are not yet in a block: its balance is read for a
   // trade's check only when none is.
   const pending = () => { try { return wollet.transactions().filter((t) => t.height() == null).length } catch { return 0 } }
-  // A scan that fails now (the esplora not answering yet) is made again at the next one.
-  await sync().catch(() => {})
+  // No scan here: the wallet scans before each quote and each balance it reads, and a scan at
+  // start, slow on a loaded machine, would keep the process from answering in time.
   return { ...oc, sync, address, balances, pending }
 }
