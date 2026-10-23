@@ -128,7 +128,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_ALLOW_MIXED_RAILS` | `false` | offer one side on-chain and the other over Lightning (refused by default: not safe against a Bitcoin reorg) |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
-| `SEQ_USER_TRADE` | unset | unset or `true`: the Trade tab is the user composer (three inputs, one button, for the pairs `user-mode/pairs.json` admits on the page's chain) in default mode and the full composer in developer mode; `false`: the full composer in both modes |
+| `SEQ_USER_TRADE` | `false` | `true` shows user mode's Trade tab as the user composer (three inputs, one button), for the pairs `user-mode/pairs.json` admits on the page's chain; otherwise the full composer serves both modes |
 | `SEQ_LEAF_MAKERS` | `[origin + '/leafmaker', origin + '/leafmaker-btc']` | the live leaf makers user mode's Trade tab asks for in-tree swaps and BTC trades |
 | `SEQ_USER_MODE_PAIRS` | `user-mode/pairs.json` | the list of pairs user mode offers (a URL) |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |
