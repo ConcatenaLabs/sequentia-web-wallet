@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 133 `*.test.mjs` files (108 at the root, 25 under `tooling/lsp/`), and `node --test` runs
+There are 139 `*.test.mjs` files (110 at the root, 29 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -119,9 +119,12 @@ Root is flat: production modules and tests sit side by side.
   it shows is in `USER_WORDS`, and none may be in `USER_MODE_FORBIDDEN_WORDS` (rail, round, leaf,
   operator, covenant, expiry, atom and the rest): its test checks both. A pair reaches user mode
   only through `user-mode/pairs.json`, which only a passing drill run
-  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it: in
-  user mode the tab's other children are hidden (`applyTradeMode` in `index.html`), except on a
-  page with `window.SEQ_USER_TRADE = false`, where the full composer serves both modes.
+  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it. **The Trade tab is the full composer in
+  both modes unless a page sets `window.SEQ_USER_TRADE = true`**; only then are the tab's other
+  children hidden in user mode (`applyTradeMode` in `index.html`). The default stays off by the
+  repository owner's decision: turning it on by default replaced the public page's Trade tab
+  twice. `user-trade-switch.test.mjs` fails on a change that turns it on; change it only when the
+  owner asks for it.
 - `xswap.js`, `xrswap.js`, `xcourier.js`, `xmaker.js` — the cross-chain courier path. **These are
   live.** The RFQ client that used to sit alongside them was retired; the `xchain`/`xswap` naming
   survives on code that is very much in use. Do not delete them on the assumption they are dead
