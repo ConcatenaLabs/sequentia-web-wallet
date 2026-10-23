@@ -20,7 +20,12 @@ exactly what its ticket showed.
   exit delays). The drill run against the testnet itself then marks it `"testnet"`, or takes the
   pair out if it fails there.
 - Each pair names the report of the drill run that admitted it (`report`): `REPORT.md`, and a
-  `REPORT-<what>.md` beside it for each other run (the BTC pairs' own run, `--btc-only`).
+  `REPORT-<what>.md` beside it for each other run (the BTC pairs' own run, `--btc-only`; the run
+  over every pair of the testnet's assets, `--every-pair`). A pair is admitted with the sources
+  that settled at least one of its trades in that run.
+- A pair with a supervised asset (USDC.e, EURC.e) trades through the live maker only, and has no
+  BTC pair: the operator serves no take, no resting order and no Lightning payment in such an
+  asset.
 
 The drill writes both into its output directory; a pull request copies them here, so what user
 mode offers and the run that earned it are reviewed together.
