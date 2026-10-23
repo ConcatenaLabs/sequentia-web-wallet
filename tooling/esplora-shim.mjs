@@ -81,7 +81,14 @@ export function startEsploraShim({ rpc, port, pools = null }) {
   }
 
   let mempoolSeen = new Set();
-  async function catchUp() {
+  // One catch-up at a time: requests arrive together, and two passes moving the same index would
+  // undo each other.
+  let catching = null;
+  function catchUp() {
+    if (!catching) catching = catchUpOnce().finally(() => { catching = null; });
+    return catching;
+  }
+  async function catchUpOnce() {
     // A reorganisation (an anchor rollback) replaces blocks already indexed: the blocks that left
     // the chain are forgotten back to the fork, and the chain indexed again from there.
     while (indexed >= 0) {
@@ -95,8 +102,9 @@ export function startEsploraShim({ rpc, port, pools = null }) {
     }
     const tip = await call('getblockcount');
     for (let height = indexed + 1; height <= tip; height++) {
-      const hash = await call('getblockhash', [height]);
-      const b = await call('getblock', [hash, 2]);
+      // The tip can move back while this runs (a rollback): the rest is indexed next time.
+      let hash, b;
+      try { hash = await call('getblockhash', [height]); b = await call('getblock', [hash, 2]); } catch { break; }
       for (const tx of b.tx) {
         if (!mempoolSeen.has(tx.txid) && !txJson.has(tx.txid)) indexTx(tx);
         blockOf.set(tx.txid, { height, hash });
