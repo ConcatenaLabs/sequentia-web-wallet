@@ -378,6 +378,43 @@ test('the bond is read and watched at care\'s pace, in either mode', async () =>
   api.stop()
 })
 
+test('a payment asked while the wallet keeps itself goes first: the bond\'s watch waits for it', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const runs = []
+  let api, paid, releaseSend
+  const answer = (m) => {
+    const c = m.args.command
+    const result = c === 'bond' ? { state: 'bonded' } : c === 'watch_bond' ? { state: 'bonded', slashed: [] }
+      : c === 'schedule' ? { now: 1 } : c === 'balance' ? {} : c === 'care' ? {} : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  }
+  const w = { posted: [] }
+  w.postMessage = (m) => {
+    w.posted.push(m)
+    if (m.op === 'exists') return queueMicrotask(() => w.onmessage({ data: { id: m.id, ok: true, value: true } }))
+    if (m.op === 'open') return queueMicrotask(() => w.onmessage({ data: { id: m.id, ok: true, value: {} } }))
+    const c = m.args.command
+    runs.push(c)
+    // The composer pays while care runs; the payment's answer takes its time.
+    if (c === 'care') paid = api.pay('send', { request: 'r', amount: '1', asset: X })
+    if (c === 'send') { releaseSend = () => w.onmessage({ data: { id: m.id, ok: true, value: { result: { transfer: 't' }, start: {} } } }); return }
+    queueMicrotask(() => w.onmessage({ data: answer(m) }))
+  }
+  api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1, tickMs: 3_600_000 }, null, null)
+  try {
+    await api.start()
+    assert.ok(runs.indexOf('care') > runs.indexOf('sync'), 'care after the opening sync: ' + runs.join(' '))
+    assert.ok(runs.includes('send'), runs.join(' '))
+    assert.ok(!runs.includes('watch_bond'), 'the watch waits while the payment is out: ' + runs.join(' '))
+    releaseSend()
+    assert.deepEqual(await paid, { transfer: 't' })
+    for (let i = 0; i < 100 && !runs.includes('watch_bond'); i++) await new Promise((r) => setTimeout(r, 5))
+    assert.ok(runs.indexOf('watch_bond') > runs.indexOf('send'), 'then the watch: ' + runs.join(' '))
+    assert.equal(api.state.lastWatch.value.state, 'bonded')
+  } finally { api.stop() }
+})
+
 test('issuer-operated assets are the ones the operator serves with an issuer entry', () => {
   const info = { server_info: { assets: [{ asset: X, issuer: { limiter: 'l' } }, { asset: Y }] } }
   assert.deepEqual(issuerAssets(info), [X])

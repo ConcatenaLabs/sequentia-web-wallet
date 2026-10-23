@@ -17,8 +17,10 @@
 // refreshed or taken home on their dates. In user mode nothing of leaves is shown or
 // reachable; their value counts in each asset's one figure and in the headline.
 //
-// What the wallet does by itself, in either mode, is the library's `care`: after a sync,
-// at most every ten minutes and at the first sync after the page opens, it takes up
+// What the wallet does by itself, in either mode, is the library's `care`, then a read
+// and a watch of the operator's bond: after a sync, at most every ten minutes and at the
+// first sync after the page opens, once the page shows what the wallet holds and never
+// ahead of a command or a payment a person asked for, which it waits for. Care takes up
 // every open claim named for one of the wallet's receive keys (scanning the addresses
 // the kit handed out and 20 more), cancels each refresh plan whose coin has moved, and
 // signs a plan for every leaf of a round at once (`plan_within`: PLAN_EVERY_ROUND_LEAF),
@@ -547,14 +549,45 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
     try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
-    try { await careIfDue() } finally { S.busy = false }
+    // What the wallet holds is on the page now; its own upkeep comes after.
+    S.busy = false; render()
+    await upkeep()
     schedule()
+  }
+
+  // ---- what a person asks for comes first ----
+  // A command of the page API or a payment of the composer, waiting or running, counts
+  // here. The wallet's own upkeep (care, and the bond's watch, whose first run may read
+  // a long stretch of the chain) starts only while none does, and what it put off runs
+  // once the last one is done.
+  async function asking (f) {
+    S.asked = (S.asked || 0) + 1
+    try { return await f() } finally {
+      S.asked--
+      if (!S.asked && S.upkeepLater) upkeepSoon(0)
+    }
+  }
+  function upkeepSoon (ms) {
+    clearTimeout(S.upkeepTimer)
+    S.upkeepTimer = setTimeout(() => { upkeep().catch(() => {}) }, ms)
+  }
+  async function upkeep () {
+    if (!S.open) return
+    await new Promise((r) => setTimeout(r, 0))   // the page paints what it holds first
+    if (S.busy || S.asked) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
+    S.upkeepLater = false
+    S.busy = true; render()
+    try {
+      if (careDue(S.careAt, now(), careEvery)) await careIfDue()
+      else if (S.bondLater) await bondIfIdle()
+    } finally { S.busy = false; render() }
   }
 
   // ---- what the wallet does by itself: claims taken up, plans kept ----
   const claimScan = () => { try { const n = ctx.claimScan ? Number(ctx.claimScan()) : NaN; return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined } catch { return undefined } }
   async function careIfDue () {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
+    if (S.asked) { S.upkeepLater = true; return }
     S.careAt = now()
     try {
       const v = await run('care', careArgs(claimScan()))
@@ -563,6 +596,13 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
       for (const c of (v && v.claims) || []) if (c && c.taken_up && !c.error) emit('leafArrived', { leaf_id: c.leaf_id, value: String(c.value ?? ''), kind: 'claim' })
     } catch (e) { S.lastCare = { at: now(), error: e } }
+    await bondIfIdle()
+  }
+
+  // The bond's watch, unless a person is waiting: then once they are not.
+  async function bondIfIdle () {
+    if (S.asked) { S.bondLater = true; S.upkeepLater = true; return }
+    S.bondLater = false
     await watchBond()
   }
 
@@ -1282,7 +1322,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- for the page API (wallet-api.js): the library's commands, one at a time ----
   async function command (cmd, args) {
     if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet has not joined a leaf operator: join one in the wallet\u2019s Leaves tab' })
-    return await act(cmd, () => paying(cmd, args || {}))
+    return await asking(() => act(cmd, () => paying(cmd, args || {})))
   }
   // One on-chain address of the leaf wallet, the same each time a page asks: taking a
   // new one on every ask would let a page grow the wallet's scan without end.
@@ -1308,7 +1348,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // the next round when it needs a planned coin.
     pay: (cmd, args) => {
       if (!S.open) return Promise.reject(new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' }))
-      return paying(cmd, args || {}).catch((e) => { throw dev() ? e : plainRefusal(e) })
+      return asking(() => paying(cmd, args || {})).catch((e) => { throw dev() ? e : plainRefusal(e) })
     },
     // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
     frozenAtoms: (hex) => frozenAtoms(S.coins, S.balance).get(hex) || 0n,
@@ -1318,7 +1358,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
     leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),
     syncNow,
-    stop: () => clearTimeout(S.timer),
+    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer) },
   }
   render()
   return api
