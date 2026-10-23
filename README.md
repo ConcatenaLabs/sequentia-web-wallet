@@ -414,14 +414,15 @@ it cannot account for) is refused before anything is signed, in the engine's wor
 
 ### The Trade tab in user mode
 
-The user composer below is the Trade tab in user mode. It trades only against a live leaf
+On a page configured with `window.SEQ_USER_TRADE = true`, the user composer below is the Trade
+tab in user mode; without it, as on the public testnet page, the full composer (developer
+mode's, below) is the Trade tab in both modes. The user composer trades only against a live leaf
 maker, orders and the pairs `user-mode/pairs.json` admits; a pair nobody offers right now is shown
 as not offered. It pays from the wallet's leaves when it holds them, and from its on-chain coins
 otherwise: a covenant order is then taken on the chain in one transaction (`user-onchain.js`), so a
 new wallet trades without joining an operator first. The network fee of such a fill is paid in the
-asset paid for the order, and the asset must be one the node takes fees in. A page configured with `window.SEQ_USER_TRADE = false`
-([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) shows the full composer (developer mode's, below)
-in both modes instead.
+asset paid for the order, and the asset must be one the node takes fees in. The switch is
+described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Three inputs and one button: **You pay** (an asset and an amount), **You get** (an asset), and
 **Review**. Both pickers list BTC first. **You pay** then lists what the wallet holds; **You get**
