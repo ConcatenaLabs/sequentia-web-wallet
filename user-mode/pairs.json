@@ -581,6 +581,96 @@
           ],
           "proven": "regtest",
           "report": "REPORT-every-pair.md"
+        },
+        {
+          "pay": "e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13",
+          "receive": "BTC",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "BTC",
+          "receive": "e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40",
+          "receive": "BTC",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "BTC",
+          "receive": "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1",
+          "receive": "BTC",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "BTC",
+          "receive": "3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "57dfa6b0eff594cc3ef1de5555e0526d1eb5590289e014e7663b292edcd63f48",
+          "receive": "BTC",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "BTC",
+          "receive": "57dfa6b0eff594cc3ef1de5555e0526d1eb5590289e014e7663b292edcd63f48",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "4dfe69c334a9cdf4005ddf3889bba1bc397703fa8da669254877f3209caf7c8f",
+          "receive": "BTC",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
+        },
+        {
+          "pay": "BTC",
+          "receive": "4dfe69c334a9cdf4005ddf3889bba1bc397703fa8da669254877f3209caf7c8f",
+          "sources": [
+            "btc-gateway"
+          ],
+          "proven": "regtest",
+          "report": "REPORT-btc-every-asset.md"
         }
       ]
     }

@@ -21,7 +21,8 @@ exactly what its ticket showed.
   pair out if it fails there.
 - Each pair names the report of the drill run that admitted it (`report`): `REPORT.md`, and a
   `REPORT-<what>.md` beside it for each other run (the BTC pairs' own run, `--btc-only`; the run
-  over every pair of the testnet's assets, `--every-pair`). A pair is admitted with the sources
+  over every pair of the testnet's assets, `--every-pair`; BTC against each of them, `--every-pair
+  --btc-only`). A pair is admitted with the sources
   that settled at least one of its trades in that run.
 - A pair with a supervised asset (USDC.e, EURC.e) trades through the live maker only, and has no
   BTC pair: the operator serves no take, no resting order and no Lightning payment in such an
