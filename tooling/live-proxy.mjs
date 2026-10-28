@@ -54,7 +54,8 @@ const server = createServer(async (req, res) => {
     res.writeHead(r.status, out)
     res.end(Buffer.from(await r.arrayBuffer()))
   } catch (e) {
-    res.writeHead(502, { 'content-type': 'text/plain' }); res.end('live-proxy: ' + (e && e.message))
+    // A forward that fails after its answer began is cut off; one that failed before says why.
+    try { if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }); res.end('live-proxy: ' + (e && e.message)) } catch {}
   }
 })
 server.listen(port, '127.0.0.1', () => console.log(`serving http://127.0.0.1:${server.address().port}/wallet/`))

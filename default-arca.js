@@ -22,6 +22,12 @@
 // The words default mode shows for all of this. None is in user-trade.js's
 // USER_MODE_FORBIDDEN_WORDS (default-arca.test.mjs checks it). They are the kit's default-mode
 // contract (docs/DEFAULT_MODE.md), the same in every Concatena wallet: change it there first.
+// When a payment out of the tree arrives, from the operator's interval in minutes.
+function arrivesWords (minutes) {
+  if (!minutes) return 'It arrives shortly.'
+  return minutes <= 5 ? 'It arrives in a few minutes.' : `It arrives in about ${minutes} minutes.`
+}
+
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
   codeLabel: 'Receive code',
@@ -40,9 +46,29 @@ export const DEFAULT_WORDS = Object.freeze({
   stillArriving: (ticker) => `Part of this ${ticker} is still arriving: try again in a moment.`,
   codeBtc: 'A receive code takes Sequentia assets. For BTC, use an address or an invoice.',
   codeMixed: 'A receive code is paid on its own: send it without other recipients.',
-  addressShort: 'This amount is kept for instant payments and can\u2019t be sent to an address yet. Send it to a receive code, or pay an invoice.',
+  addressShort: 'This amount can\u2019t be sent to an address right now. Send it to a receive code, or pay an invoice.',
+  arrivesWithin: (minutes) => arrivesWords(minutes),
+  fee: (amount, ticker) => `Fee ${amount} ${ticker}`,
+  sentLater: (amount, ticker, minutes) => `Sent ${amount} ${ticker}. ${arrivesWords(minutes)}`,
   faucetReceived: (what) => `Received ${what}.`,
 })
+
+// The minutes a payment to an address from the tree takes at most, from the operator's interval
+// between settlements (the library's `round_within_seconds`), or null when it publishes none.
+export function arrivalMinutes (seconds) {
+  const n = Number(seconds)
+  return Number.isFinite(n) && n > 0 ? Math.max(1, Math.ceil(n / 60)) : null
+}
+
+// How a payment of `amount` atoms of an asset to an address is made: on the chain when the
+// wallet's coins there cover it (as it always was), else out of the tree when the tree's
+// spendable coins cover it, else not at all.
+export function addressRoute (amount, onchain, treeSpendable) {
+  const a = big(amount)
+  if (a <= big(onchain)) return 'chain'
+  if (a <= big(treeSpendable)) return 'tree'
+  return null
+}
 
 // The coin states a balance counts as arriving: held, not yet spendable (a board not yet final,
 // a transfer recorded and not yet completed).

@@ -1621,7 +1621,7 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes } from './default-arca.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
@@ -2539,6 +2539,35 @@ async function treeSendReview(r, onDone){
       const ms=Math.round(performance.now()-t0);
       console.log('[tree send] paid in', ms, 'ms');
       st.className='status ok'; st.textContent = DEFAULT_WORDS.sent(amt, m0.ticker, (ms/1000).toFixed(1));
+      ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+      if(onDone) onDone(); renderBalance();
+    }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
+  };
+}
+
+// A payment to an address out of the tree (leaves.js offboard): the library quotes it, the
+// review shows the amount, its fee and when it arrives, and it is made only on that quote.
+async function offboardReview(r, onDone){
+  const m0 = assetMeta(r.asset);
+  const atoms = parseAtoms(r.amtS, m0.precision||0);
+  if(atoms<=0n) throw new Error('amount must be greater than zero');
+  const address = r.addr.trim();
+  let q;
+  try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }
+  catch(e){ console.warn('[offboard] quote:', e?.message??e); throw new Error(DEFAULT_WORDS.addressShort); }
+  const amt = fmtAtoms(atoms, m0.precision||0);
+  const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
+  const minutes = arrivalMinutes(leavesApi.roundInterval());
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
+  { const line=el('p','sub', DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  ok.textContent = DEFAULT_WORDS.send;
+  ok.onclick=async()=>{
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
+    try{
+      const v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q });
+      const mins = arrivalMinutes(v && v.round_within_seconds) || minutes;
+      console.log('[offboard]', v && v.offboard, v && v.state);
+      st.className='status ok'; st.textContent = DEFAULT_WORDS.sentLater(amt, m0.ticker, mins);
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
       if(onDone) onDone(); renderBalance();
     }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
@@ -3474,7 +3503,7 @@ function initLeaves(){
     btcOnchain: ()=> btcBalance || 0n,
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
-    onChange: ()=>{ try{ renderBalance(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
@@ -6004,6 +6033,11 @@ let _onchainSeen = null;   // the on-chain balance the last sync read, to board 
 function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkRoutes() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
   const b=balObj(); return b[hex]||0n; }
+// What the Send tab says can be sent of an asset: on the chain, and, in default mode, what the
+// tree holds spendable now (one figure, as the balance shows it).
+function sendableFor(hex){ let n=availableFor(hex);
+  try{ if(hex!=='BTC' && !isOampAsset(hex) && leavesApi && !devMode()) n += (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n); }catch{}
+  return n; }
 // Re-run every recipient row's "Available:" line after a sync changes balances.
 function refreshAllAvail(){ const box=document.getElementById('recipients'); if(!box) return; for(const r of box.children){ if(typeof r._refreshAvail==='function'){ try{ r._refreshAvail(); }catch{} } } }
 // One balance row: the same five cells for every asset. On a desktop they read as a table under one
@@ -6564,6 +6598,8 @@ function ownedOptions(sel){
   add('BTC');   // parent-chain Bitcoin testnet4 — the first-class default pick (principle 2), routed through the BTC layer, not lwk
   add(POLICY_HEX);   // tSEQ: one asset among equals, no longer the privileged default (principle 3)
   for(const h of Object.keys(b)) if(h!==POLICY_HEX) add(h);
+  // What the wallet holds in the operator's tree is sent from there (to a receive code).
+  try{ if(leavesApi) for(const h of leavesApi.leafAssets()) if(h!==POLICY_HEX && !(h in b)) add(h); }catch{}
   // Restricted (OpenAMP) assets the AID holds — routed through the enclave transfer API, not lwk.
   for(const id of Object.keys(oampBalances)) if((oampBalances[id]?.atoms||0n)>0n) add('oamp:'+id);
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;   // keep the user's choice
@@ -6965,7 +7001,7 @@ function addRecipientRow(){
     if(!hex){ availLine.textContent=''; return; }
     const prec = hex==='BTC' ? 8 : (assetMeta(hex).precision||0);
     const tk = hex==='BTC' ? 'BTC' : assetMeta(hex).ticker;
-    availLine.textContent = 'Available: ' + fmtAtoms(availableFor(hex), prec) + ' ' + tk; };
+    availLine.textContent = 'Available: ' + fmtAtoms(sendableFor(hex), prec) + ' ' + tk; };
   // Restricted (OpenAMP) sends go to a recipient AID, not a tb1/tsqb1 address — relabel the field.
   const raddr=r.querySelector('.raddr');
   const updAddrPh=()=>{ if(isOampAsset(rsel.value)){ r.querySelector('.addr-row').previousElementSibling.textContent='Recipient AID'; raddr.placeholder='recipient OpenAMP account id'; }
@@ -7783,10 +7819,17 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       await treeSendReview(rows[0], reset);
       return;
     }
-    // Coins held in the tree can't pay an address yet: say so, rather than a shortfall.
-    { const want=new Map(); for(const r of rows) if(r.asset!=='BTC'){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
-      for(const [h, a] of want){ const on=availableFor(h), lf=leavesApi ? (leavesApi.leafAtoms(h)||0n) : 0n;
-        if(a > on && a <= on + lf) throw new Error(DEFAULT_WORDS.addressShort); } }
+    // An address the chain's coins can't cover is paid out of the tree, when the tree holds it
+    // (default-arca.js addressRoute): one recipient at a time, paid in the operator's next
+    // settlement; otherwise as it always was.
+    { const want=new Map(); for(const r of rows) if(r.asset!=='BTC' && !isOampAsset(r.asset)){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
+      for(const [h, a] of want){
+        const tree = leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n) : 0n;
+        if(addressRoute(a, availableFor(h), tree) !== 'tree') continue;
+        if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
+        await offboardReview(rows[0], reset);
+        return;
+      } }
     const btcRows=rows.filter(r=>r.asset==='BTC');
     if(btcRows.length && btcRows.length!==rows.length)
       throw new Error("Bitcoin and Sequentia assets can't be sent in the same transaction");

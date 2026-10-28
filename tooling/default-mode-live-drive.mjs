@@ -125,22 +125,29 @@ async function main () {
     // node … send A B GOLD 1: A pays B's receive code; B's page is open throughout.
     const [to, ticker, amount] = rest
     const pb = await openWallet(to)
-    const code = await waitJoined(pb)
+    const old = await waitJoined(pb)
+    // A fresh code for this payment: the one shown may be paid already by an earlier run.
+    if (rest[3] !== 'same') {
+      await click(pb, '#btnNewAddr')
+      await pb.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^[A-Za-z0-9-]+:[0-9a-f]{40,}/.test(t) && t!==${JSON.stringify(old)} })()`, 300000)
+    }
+    const code = await pb.eval("document.querySelector('#addr').textContent")
     await tab(pb, 'balance')
     const before = (await balances(pb))[ticker] || { total: '0' }
     const pa = await openWallet(name)
     await waitJoined(pa)
     await tab(pa, 'send')
+    await pa.waitFor(`[...document.querySelectorAll('#recipients .rec .rasset option')].some(o=>o.textContent.trim()===${JSON.stringify(ticker)})`, 180000)
     await pa.eval(`(()=>{ const r=document.querySelector('#recipients .rec'); r.querySelector('.raddr').value=${JSON.stringify(code)}; r.querySelector('.raddr').dispatchEvent(new Event('input'));
       const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); if(!o) throw new Error('no option ${ticker}: '+[...s.options].map(o=>o.textContent).join(',')); s.value=o.value; s.dispatchEvent(new Event('change'));
       r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
     await click(pa, '#btnReview')
     const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e ? 'ERR '+e : false })()", 120000)
-    check('the review asks to send it, in plain words', /^Send .*\?/.test(title.trim()) && !forbiddenIn(title).length, title.replace(/\n+/g, ' | '))
+    check('the review asks to send it, in plain words', /^Send .*\?/i.test(title.trim()) && !forbiddenIn(title).length, title.replace(/\n+/g, ' | '))
     await shot(pa, `${name}-send-review.png`)
     const tClick = Date.now()
     await pa.eval("document.querySelector('.modal button.primary').click()")
-    const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return /^Sent|Failed|declined|can|arriving/.test(t) && !/Sending/.test(t) ? t : false })()", 300000)
+    const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 300000).catch(async (e) => { note('still: ' + await pa.eval("document.querySelector('.modal .status')?.textContent||''") + ' console: ' + pa.console.slice(-8).join(' | ')); throw e })
     check('the sender says it is sent', /^Sent/.test(done), `${done} (${secs(Date.now() - tClick)} from the click)`)
     await shot(pa, `${name}-send-done.png`)
     const seen = await pb.waitFor(`(async()=>{ const r=[...document.querySelectorAll('.bt-row')].find(r=>r.querySelector('.tk')?.textContent.trim()===${JSON.stringify(ticker)}); const t=r?(r.querySelector('.bt-t')?.innerText||''):''; return t && t!==${JSON.stringify(before.total)} ? t : false })()`, 600000).catch(() => null)
@@ -190,7 +197,7 @@ async function main () {
     await sleep(Number(rest[0] || 20000))
     const bal = await balances(page)
     note(`figures ${secs(Date.now() - tOpen)} after open: ${JSON.stringify(bal)}`)
-    note('console: ' + page.console.filter((l) => /faucet|receive code|tree send|leaves|board|leaf/i.test(l)).slice(-12).join(' | '))
+    note('console: ' + page.console.filter((l) => /faucet|receive code|tree send|leaves|board|leaf|offboard/i.test(l)).slice(-12).join(' | '))
     writeFileSync(join(ev, `${name}.totals.json`), JSON.stringify(bal, null, 1))
     await shot(page, `${name}-balance.png`)
     await page.stop()

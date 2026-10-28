@@ -78,9 +78,14 @@ In practice:
 - Refusals: one sentence each, and nothing is signed.
   - "Part of this <TICKER> is still arriving: try again in a moment."
   - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
-  - "This amount is kept for instant payments and can't be sent to an address yet. Send it to a
-    receive code, or pay an invoice." This applies until the wallet can pay an address from the
-    operator's tree. From then on, the payment goes out of the tree and no sentence is shown.
+  - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
+    invoice." When the wallet's coins on the chain don't cover a payment to an address, it is
+    paid out of what the wallet holds for instant payments: the review is titled
+    **Send <amount> <TICKER>?**, with "It arrives in a few minutes." (or "in about <N>
+    minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
+    line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
+    The sentence above is for when even that cannot be made.
+  - "This receive code was paid already: ask for a new one. Nothing was sent."
   - "This payment was declined; nothing was sent."
 
 ## BTC

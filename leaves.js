@@ -20,7 +20,9 @@
 // What the wallet does by itself, in either mode, is the library's `care`, then a read
 // and a watch of the operator's bond: after a sync, at most every ten minutes and at the
 // first sync after the page opens, once the page shows what the wallet holds and never
-// ahead of a command or a payment a person asked for, which it waits for. Care takes up
+// ahead of a command or a payment a person asked for, which it waits for (in user mode on the
+// page's operator, the bond's watch, which can hold the wallet for most of a minute, runs at most
+// hourly and only after two quiet minutes). Care takes up
 // every open claim named for one of the wallet's receive keys (scanning the addresses
 // the kit handed out and 20 more), cancels each refresh plan whose coin has moved, and
 // signs a plan for every leaf of a round at once (`plan_within`: PLAN_EVERY_ROUND_LEAF),
@@ -94,6 +96,15 @@ export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
+// User mode: how often the open page reads the wallet's mailbox, so that a payment to its receive
+// code shows within seconds rather than at the schedule's next sync.
+export const MAILBOX_POLL_MS = 5_000
+export const MAILBOX_QUIET_MS = 20_000
+// User mode: the watch of the operator's bond (which may read a long stretch of the chain, and
+// holds the wallet while it does) runs at most this often, and only once the page has been
+// left alone for BOND_QUIET_MS; the bond itself is read at care's pace in either mode.
+export const BOND_WATCH_EVERY_MS = 3600_000
+export const BOND_QUIET_MS = 120_000
 export const TICK_MS = 60_000
 // How often `care` runs at most, after a sync or a tick of the schedule.
 export const CARE_EVERY_MS = 10 * 60_000
@@ -165,6 +176,8 @@ export function plainRefusal (e) {
   const m = String((e && e.message) || '')
   if (e && e.code === 'declined') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: DECLINED_WORDS })
   if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
+  // A receive code is paid once: the operator refuses a second payment to its key.
+  if (e && e.code === 'key_reused') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: CODE_PAID_WORDS })
   if ((e && e.code === 'frozen') || /\bfrozen\b|\bpaused\b/i.test(m)) {
     return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: 'This asset is frozen by its issuer for this wallet: nothing was sent.' })
   }
@@ -174,6 +187,8 @@ export function plainRefusal (e) {
 // A payment the operator's signer refuses for what it asks, which it would refuse again
 // however often it were asked (the server's `declined`): the library has put the coins back.
 export const DECLINED_WORDS = 'This payment was declined; nothing was sent.'
+
+export const CODE_PAID_WORDS = 'This receive code was paid already: ask for a new one. Nothing was sent.'
 
 // A refusal of the operator's equivocation bond (missing, in notice, or worth less than
 // what the wallet would hold out of round on it): the library's gate, said plainly.
@@ -570,6 +585,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         S.open = true
       }
       S.joinError = null
+      S.openedAt = now()
     } catch (e) {
       S.open = false
       S.joinError = e
@@ -583,8 +599,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // mailbox, or an exit to move on; the schedule wakes a planned coin only at its plan's
     // date, so without this the page would show the coin the step gave up until then.
     S.busy = true; render()
+    const tSync = now()
     try {
       const v = await run('sync')
+      log(`[leaves] sync at open: ${now() - tSync} ms`)
       arrivals(v && v.mailbox)
       S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
@@ -594,6 +612,32 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (ctx.onOpen) try { ctx.onOpen() } catch {}
     await upkeep()
     schedule()
+    watchMailbox()
+  }
+
+  // ---- user mode: what is paid to the wallet shows within seconds ----
+  // The library's `mailbox` (what sync reads first) every few seconds while the page is open,
+  // never while the wallet is busy or a person waits on it; what it takes shows at once.
+  function watchMailbox () {
+    clearTimeout(S.mailTimer)
+    if (!S.open || dev() || !pinned()) return
+    S.mailTimer = setTimeout(async () => {
+      // Not while a person waits on the wallet, nor between the steps of what they asked (a
+      // trade's quote asks the library several times, with the network in between).
+      if (S.open && !dev() && !S.busy && !S.asked && now() - (S.lastAsked || 0) > MAILBOX_QUIET_MS) {
+        S.busy = true
+        const t0 = now()
+        try {
+          const v = await run('mailbox')
+          if (now() - t0 > 2000) log(`[leaves] mailbox read: ${now() - t0} ms`)
+          if (v && ((v.accepted || []).length || (v.pending || []).length)) {
+            arrivals(v)
+            try { await reload() } catch {}
+          }
+        } catch {} finally { S.busy = false }
+      }
+      watchMailbox()
+    }, ctx.mailboxPollMs || MAILBOX_POLL_MS)
   }
 
   // Joins the page's operator, as the join form does with what a person types: the server must
@@ -621,8 +665,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // once the last one is done.
   async function asking (f) {
     S.asked = (S.asked || 0) + 1
+    S.lastAsked = now()
     try { return await f() } finally {
       S.asked--
+      S.lastAsked = now()
       if (!S.asked && S.upkeepLater) upkeepSoon(0)
     }
   }
@@ -634,6 +680,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open) return
     await new Promise((r) => setTimeout(r, 0))   // the page paints what it holds first
     if (S.busy || S.asked) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
+    // In user mode on the page's operator, upkeep also leaves room between the steps of what a
+    // person asked (a trade's quote asks the library several times, with the network between).
+    if (!dev() && pinned()) { const quiet = now() - (S.lastAsked || 0); if (quiet < MAILBOX_QUIET_MS) { S.upkeepLater = true; upkeepSoon(MAILBOX_QUIET_MS - quiet + 500); return } }
     S.upkeepLater = false
     S.busy = true; render()
     try {
@@ -681,8 +730,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
     if (S.asked) { S.upkeepLater = true; return }
     S.careAt = now()
+    const t0 = now()
     try {
       const v = await run('care', careArgs(claimScan()))
+      log(`[leaves] care: ${now() - t0} ms`)
       S.lastCare = { at: now(), value: v }
       const sum = careSummary(v)
       if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
@@ -703,8 +754,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // in notice), and watched: the wallet's evidence against the chain and the mempool, and
   // a slash sent should the operator key have signed twice under one salt.
   async function watchBond () {
+    const t0 = now()
     try { S.bond = await run('bond') } catch (e) { S.bond = { error: e } }
+    if (!dev() && pinned()) {
+      const quiet = Math.min(now() - (S.lastAsked || 0), now() - (S.openedAt || 0))
+      if (S.watchedAt != null && now() - S.watchedAt < BOND_WATCH_EVERY_MS) return
+      if (quiet < BOND_QUIET_MS) { S.bondLater = true; upkeepSoon(BOND_QUIET_MS - quiet + 1000); return }
+    }
+    S.watchedAt = now()
     try { S.lastWatch = { at: now(), value: await run('watch_bond', {}) } } catch (e) { S.lastWatch = { at: now(), error: e } }
+    log(`[leaves] bond read and watched: ${now() - t0} ms`)
   }
 
   // ---- the schedule: sync by itself while the page is open ----
@@ -1408,6 +1467,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     setWalletMode(ctx.store, tag(), m)
     if (ctx.onModeChange) try { ctx.onModeChange(m) } catch {}
     if (m === 'developer') { try { await start() } catch (e) { S.error = { what: 'open', e } } }
+    else watchMailbox()
     render()
   }
 
@@ -1478,11 +1538,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
     receiveCode,
     // Pays a receive code in the tree, as a person asked (first in line, through the next round
     // when it needs a planned coin), and reads what it moved.
-    payCode: (text, amount, asset) => command('send', { request: text, amount: String(amount), asset }).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
+    payCode: (text, amount, asset) => {
+      const t0 = now()
+      return asking(async () => {
+        while (S.busy) await sleep(50)
+        const t1 = now()
+        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset })).catch((e) => { throw dev() ? e : plainRefusal(e) })
+        log(`[leaves] send: waited ${t1 - t0} ms for the wallet, paid in ${now() - t1} ms`)
+        if (ctx.onChange) try { ctx.onChange() } catch {}
+        return v
+      })
+    },
+    // A payment to an address out of the tree, paid in the operator's next settlement: the
+    // library's quote, then the payment made only on that quote (`shown`).
+    offboardQuote: (args) => command('offboard_quote', args),
+    offboard: (args) => command('offboard', args).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
+    // The operator's interval between settlements, in seconds, or null.
+    roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     joinError: () => S.joinError || null,
-    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer) },
+    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer) },
   }
   render()
   return api
