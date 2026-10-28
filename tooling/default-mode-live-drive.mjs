@@ -182,7 +182,10 @@ async function main () {
     await shot(page, `${name}-trade-${pay}-${get}-ticket.png`)
     if (!/^ERR/.test(tk)) {
       const tC = Date.now()
+      const rows0 = await page.eval("document.querySelectorAll('#ucTrades .uc-trade').length")
       await click(page, '#ucConfirm')
+      // The new trade's row: the list's first once it has one row more than before.
+      await page.waitFor(`document.querySelectorAll('#ucTrades .uc-trade').length > ${rows0}`, 300000).catch(() => null)
       const sent = await page.waitFor("(()=>{ const r=document.querySelector('#ucTrades .uc-trade'); return r ? r.querySelector('.uc-state').textContent : false })()", 300000).catch(() => null)
       note(`first state ${sent} after ${secs(Date.now() - tC)}`)
       const fin = await page.waitFor("(()=>{ const r=document.querySelector('#ucTrades .uc-trade'); const t=r?r.querySelector('.uc-state').textContent:''; return /Settled|Returned/.test(t) ? t : false })()", 1200000).catch(() => null)
@@ -237,7 +240,7 @@ async function main () {
     await sleep(Number(rest[0] || 20000))
     const bal = await balances(page)
     note(`figures ${secs(Date.now() - tOpen)} after open: ${JSON.stringify(bal)}`)
-    note('console: ' + page.console.filter((l) => /faucet|receive code|tree send|leaves|board|leaf|offboard/i.test(l)).slice(-12).join(' | '))
+    note('console: ' + page.console.filter((l) => /faucet|receive code|tree send|leaves|board|leaf|offboard|ark|btc/i.test(l)).slice(-12).join(' | '))
     writeFileSync(join(ev, `${name}.totals.json`), JSON.stringify(bal, null, 1))
     await shot(page, `${name}-balance.png`)
     await page.stop()
