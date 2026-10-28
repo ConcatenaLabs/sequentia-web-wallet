@@ -62,19 +62,21 @@ test('a phone shows one card per asset, Lightning left and on-chain right', () =
   assert.match(css, /\.bt-o\{grid-area:o;text-align:right\}/);
 });
 
-test('one view in every mode: one figure per asset, its parts and actions one tap away', () => {
+test('one figure per asset in every mode; the rails and their actions in developer mode only', () => {
   const rb = fn('renderBalance');
-  assert.ok(!/devMode\(\)|userMode/.test(rb), 'the balance does not change with the mode');
   assert.match(rb, /list\.classList\.add\('user'\);/);
   assert.match(html, /\.btable\.user \.bt-o,\.btable\.user \.bt-l\{display:none\}/);
-  // A bolt beside the ticker: yellow with a channel, grey without.
-  assert.match(rb, /const bo=el\('span','bt-bolt'\+\(hasLn\?' on':''\)\);/);
-  // The details: each part only when it says something, then the asset's id and Hide.
-  assert.match(rb, /if\(hasLn \|\| leafAtoms>0n \|\| staked>0n\) blk\('On-chain', amt\(on\)\);/);
-  assert.match(rb, /if\(leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
+  // Default mode shows no rail (docs/DEFAULT_MODE.md): the bolt, the split and every move between
+  // rails are developer mode's; what is arriving, staked or frozen shows in both.
+  assert.match(rb, /if\(devMode\(\) && lnOn && leg\)\{\s*const bo=el\('span','bt-bolt'\+\(hasLn\?' on':''\)\);/);
+  assert.match(rb, /const dm = devMode\(\);/);
+  assert.match(rb, /if\(dm && \(hasLn \|\| leafAtoms>0n \|\| staked>0n\)\) blk\('On-chain', amt\(on\)\);/);
+  assert.match(rb, /if\(dm && lnOn && leg && hasLn\)\{/);
+  assert.match(rb, /if\(dm && leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
   assert.match(rb, /if\(staked>0n\) blk\('Staked', amt\(staked\)\);/);
-  // Without a channel the one action is Move to Lightning, inside the details, never on the row.
-  assert.match(rb, /if\(lnOn && leg && !hasLn && toLn\)\{ const d=el\('div','bt-blk'\); button\(d, 'Move to Lightning'/);
+  assert.match(rb, /DEFAULT_WORDS\.arriving\(amt\(arriving\), ticker\)/);
+  // Without a channel the one action is Move to Lightning, in developer mode's details, never on the row.
+  assert.match(rb, /if\(dm && lnOn && leg && !hasLn && toLn\)\{ const d=el\('div','bt-blk'\); button\(d, 'Move to Lightning'/);
   assert.match(rb, /nameNode:nameEl, foot:sub, movable,/);
   assert.match(rb, /el\('button','ghost','Hide asset from list'\)/);
   // A tap on the row only opens or closes the details.

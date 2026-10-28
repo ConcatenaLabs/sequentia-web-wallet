@@ -64,9 +64,19 @@
 //   careEveryMs         optional: how often `care` runs at most (default CARE_EVERY_MS)
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
+//   pinned()            optional: the page's operator ({ server, node_url, operator }, the key
+//                       pinned), which a wallet in user mode joins by itself (default-arca.js)
+//   serverInfo(server)  optional: the operator server's own `info` (GET <server>/v1/info), read
+//                       before joining it, so a server showing another key is never joined
+//   onBoarded()         optional: called once coins were boarded (the page reads the chain again,
+//                       so the coins the board spent are not counted twice)
+//   onchainQuiet()      optional: true while the page's own on-chain payment may still be
+//                       spending coins (the leaf wallet then boards nothing)
 
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
+import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, boardCandidates, boardAll, JOIN_RETRY_MS } from './default-arca.js'
+
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
   user: 'User mode',
@@ -81,6 +91,9 @@ export const LEGACY_DEV_MODE_KEY = 'swk.devMode'     // one setting for every wa
 export const JOINED_KEY = 'swk.leaves.joined'        // + '.' + tag: this wallet joined an operator
 export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf address handed to pages
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
+export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
+// A receive code is shown again while it has at least this long before it lapses.
+export const CODE_MARGIN_S = 86_400
 export const TICK_MS = 60_000
 // How often `care` runs at most, after a sync or a tick of the schedule.
 export const CARE_EVERY_MS = 10 * 60_000
@@ -453,6 +466,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const tickMs = ctx.tickMs || TICK_MS
   const careEvery = ctx.careEveryMs || CARE_EVERY_MS
   const sleep = ctx.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
+  const log = (m) => { try { (ctx.log || console.log)(m) } catch {} }
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
     refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
     careAt: null, lastCare: null, plans: null, claims: null, distributions: null }
@@ -529,20 +543,40 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
 
   // Opens the leaf wallet: in developer mode always (the tab shows the join form when
-  // this wallet has joined none), in user mode only when it has joined an operator,
-  // whose coins it then syncs without showing them.
+  // this wallet has joined none), in user mode when it has joined an operator, whose coins it
+  // then syncs without showing them, or else when the page names an operator: a wallet in user
+  // mode joins that one by itself (joinPinned), and one that cannot (the server unreachable, or
+  // showing another key) works as it did without, and tries again later.
+  const pinned = () => { try { return ctx.pinned ? pinnedOperator(ctx.pinned()) : null } catch { return null } }
   async function start () {
-    if (S.open) return
-    if (!dev() && !joinedOperator(ctx.store, tag())) return
-    if (!S.client) S.client = new LeafClient(ctx.makeWorker)
-    const m = ctx.mnemonic()
-    const has = await S.client.exists(m)
-    if (!has) { S.open = false; render(); return }
-    setJoined(ctx.store, tag())
-    let pw = null; try { pw = ctx.store.getItem(NODE_PASSWORD_KEY) } catch {}
-    await S.client.open(m, pw || undefined)
-    S.open = true
-    S.info = await run('info')
+    if (S.open || S.starting) return
+    const auto = dev() ? null : pinned()
+    if (!dev() && !joinedOperator(ctx.store, tag()) && !auto) return
+    S.starting = true
+    clearTimeout(S.joinTimer)
+    try {
+      if (!S.client) S.client = new LeafClient(ctx.makeWorker)
+      const m = ctx.mnemonic()
+      const has = await S.client.exists(m)
+      if (!has && !auto) { S.open = false; render(); return }
+      if (!has) await joinPinned(m, auto)
+      else {
+        let pw = null; try { pw = ctx.store.getItem(NODE_PASSWORD_KEY) } catch {}
+        await S.client.open(m, pw || undefined)
+        S.info = await run('info')
+        // A wallet joined by itself is opened only under the key the page pins.
+        if (auto && !joinedOperator(ctx.store, tag())) checkPinned(S.info && S.info.operator, auto, 'the wallet')
+        setJoined(ctx.store, tag())
+        S.open = true
+      }
+      S.joinError = null
+    } catch (e) {
+      S.open = false
+      S.joinError = e
+      if (auto) S.joinTimer = setTimeout(() => { start().catch(() => {}) }, JOIN_RETRY_MS)
+      render()
+      throw e
+    } finally { S.starting = false }
     await reload()
     // The resume pass: one sync when the leaf wallet opens, whatever the schedule says. A
     // wallet closed for a while may have coins a plan's step replaced, payments in its
@@ -557,8 +591,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
     // What the wallet holds is on the page now; its own upkeep comes after.
     S.busy = false; render()
+    if (ctx.onOpen) try { ctx.onOpen() } catch {}
     await upkeep()
     schedule()
+  }
+
+  // Joins the page's operator, as the join form does with what a person types: the server must
+  // show the pinned key before anything is created, and the wallet's answer must name it after.
+  // A phrase that already holds coins with this operator (another browser, Ambra, the
+  // extension) finds them under its mailbox key: restore once, as the join form does.
+  async function joinPinned (m, cfg) {
+    if (!ctx.serverInfo) throw new LeafError({ kind: 'refused', message: 'the page cannot read the operator\u2019s server' })
+    const si = await ctx.serverInfo(cfg.server)
+    checkPinned(si && si.operator, cfg, 'the server')
+    const info = await S.client.create(m, { server: cfg.server, node_url: cfg.node_url })
+    S.info = info && info.result
+    checkPinned(S.info && S.info.operator, cfg, 'the wallet')
+    setJoined(ctx.store, tag())
+    try { ctx.store.removeItem(NODE_PASSWORD_KEY) } catch {}
+    S.open = true
+    S.autoJoined = { at: now() }
+    try { S.restored = await run('restore') } catch (e) { S.restored = { error: e.message } }
   }
 
   // ---- what a person asks for comes first ----
@@ -586,7 +639,40 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try {
       if (careDue(S.careAt, now(), careEvery)) await careIfDue()
       else if (S.bondLater) await bondIfIdle()
+      await boardArrivals()
     } finally { S.busy = false; render() }
+  }
+
+  // ---- user mode: coins that land on the chain go into the tree by themselves ----
+  // Each asset the operator serves, held at the phrase's keys on the chain at least at its
+  // smallest leaf, is boarded whole less its fee (default-arca.js boardAll: the fee the library
+  // quoted for that very board, in the asset boarded). Never in developer mode, whose Board card
+  // is the person's; never while a person waits on the wallet, or while the page's own on-chain
+  // payment may still be spending coins; coins the library refused to board are asked again
+  // only once they change. The coin shows as arriving until the board is final.
+  async function boardArrivals () {
+    if (!S.open || dev() || !pinned() || S.asked) return
+    try { if (ctx.onchainQuiet && ctx.onchainQuiet()) { upkeepSoon(30_000); return } } catch {}
+    const refused = S.boardRefused || (S.boardRefused = new Map())
+    try { S.balance = await run('balance') } catch (e) { log('[leaves] balance before boarding: ' + (e && e.message)); return }
+    log('[leaves] on the chain: ' + JSON.stringify((S.balance && S.balance.sequentia_onchain) || {}))
+    let boarded = false
+    for (const c of boardCandidates(S.balance, S.info)) {
+      if (S.asked) { S.upkeepLater = true; break }
+      // The same coins the library refused to board are not asked again until they change.
+      if (refused.get(c.asset) === String(c.onchain)) continue
+      try {
+        const v = await boardAll(run, c)
+        if (v) { boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }; emit('leafArrived', { asset: c.asset, value: String(c.onchain), kind: 'board' }) }
+        else refused.set(c.asset, String(c.onchain))
+        log(`[leaves] board of ${c.asset.slice(0, 8)}: ${v ? 'boarded ' + (v.value || '') : 'nothing to board after the fee'}`)
+      } catch (e) { refused.set(c.asset, String(c.onchain)); S.lastBoard = { at: now(), asset: c.asset, error: e }; log(`[leaves] board of ${c.asset.slice(0, 8)} refused: ${e && e.message}`) }
+    }
+    if (boarded) {
+      try { await reload() } catch {}
+      // The page's own reading of the chain still counts the coins the board spent: it reads again.
+      if (ctx.onBoarded) try { ctx.onBoarded() } catch {}
+    }
   }
 
   // ---- what the wallet does by itself: claims taken up, plans kept ----
@@ -1341,6 +1427,24 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return v
   }
 
+  // `quick`: the code shown before is shown at once while it has a day before it lapses, without
+  // waiting for the library (busy with the sync that opens it); a coin that arrives meanwhile
+  // (leafArrived) has the page ask again, and then the library says whether it was paid.
+  async function receiveCode ({ quick = false } = {}) {
+    const key = tagged(CODE_KEY, tag())
+    let kept = null; try { kept = JSON.parse(ctx.store.getItem(key) || 'null') } catch {}
+    if (quick && kept && kept.text && kept.until && kept.until - now() / 1000 > CODE_MARGIN_S) return kept
+    if (kept && kept.text && kept.owner) {
+      let s = null; try { s = await asking(() => run('schedule')); S.schedule = s } catch {}
+      const r = ((s && s.receive_requests) || []).find((x) => x.owner === kept.owner)
+      if (r && r.state === 'waiting' && (r.lapses_at == null || r.lapses_at - ((s && s.now) || 0) > CODE_MARGIN_S)) return kept
+    }
+    const v = await command('receive', {})
+    const out = { text: v.request, owner: (v.details && v.details.owner) || null, until: (v.details && v.details.until) || null }
+    try { ctx.store.setItem(key, JSON.stringify(out)) } catch {}
+    return out
+  }
+
   const api = {
     state: S,
     render,
@@ -1364,7 +1468,21 @@ export function mountLeaves (ctx, root, settingsRoot) {
     leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
     leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),
     syncNow,
-    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer) },
+    // ---- default mode (default-arca.js) ----
+    // What of an asset is arriving (held, not yet spendable), in atoms.
+    arriving: (hex) => arrivingAtoms(S.balance, hex),
+    // The receive code a payment to `text` would go in the tree under, or null.
+    treeRoute: (text) => (S.open ? treeRoute(text, S.info) : null),
+    // The receive code default mode shows: the one shown before while it is unpaid and has a
+    // day before it lapses, or a new one. -> { text, owner }
+    receiveCode,
+    // Pays a receive code in the tree, as a person asked (first in line, through the next round
+    // when it needs a planned coin), and reads what it moved.
+    payCode: (text, amount, asset) => command('send', { request: text, amount: String(amount), asset }).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
+    // Boards the chain's new coins soon (the page calls it when its own scan sees them).
+    boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
+    joinError: () => S.joinError || null,
+    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer) },
   }
   render()
   return api

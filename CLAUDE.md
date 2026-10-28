@@ -54,12 +54,21 @@ in it may decide anything the library decides. The page's copy never names the o
 protocol: developer mode speaks of leaves, rounds and the operator.
 
 The mode is kept for each wallet (`swk.mode.<walletTag>`, `leaves.js`), user mode by default,
-and its words are the same in the extension and Ambra: change them in all three together. A
-wallet that joined an operator keeps its leaf wallet syncing in either mode; user mode shows
-nothing of leaves and the page API refuses every leaf method there, but leaves count in each
-asset's figure and the headline. Each asset's figure counts on-chain, leaves, Lightning and, for
-tSEQ, what is staked (`stakedAtoms` in `index.html`), in both modes; user mode shows that one
-figure with its parts one tap away, and no Move or room to receive. After a sync, at most every ten minutes, `leaves.js` runs the library's `care` (claims taken up,
+and its words are the same in the extension and Ambra: change them in all three together. User
+mode's words and what it never shows are `docs/DEFAULT_MODE.md`, the contract every Concatena
+wallet follows; `default-arca.js` holds the strings and is tested against
+`USER_MODE_FORBIDDEN_WORDS`. In user mode a wallet joins the page's operator by itself
+(`window.SEQ_ARCA`, its key pinned: the server must show it before `create`, the wallet's `info`
+after), restores once, and retries every two minutes when it cannot; Receive gives a receive code,
+a payment to a receive code of the same operator and chain goes in the tree (`treeRoute`), and
+coins new on the chain are boarded in `leaves.js`'s upkeep (`boardArrivals`: never in developer
+mode, never ahead of a person, never within a minute of the page's own on-chain payment, since
+both spend the same keys' coins). A wallet that joined an operator keeps its leaf wallet syncing
+in either mode; user mode shows nothing of leaves and the page API refuses every leaf method
+there, but leaves count in each asset's figure and the headline. Each asset's figure counts
+on-chain, leaves, Lightning and, for tSEQ, what is staked (`stakedAtoms` in `index.html`), in
+both modes; user mode shows that one figure, what is arriving, and no rail, Move or room to
+receive. After a sync, at most every ten minutes, `leaves.js` runs the library's `care` (claims taken up,
 every leaf of a round planned, a plan whose leaf moved cancelled) in either mode, with `claimScan`
 from the page (the kit's next receive index and 20 more) and `plan_within` set to plan every leaf
 of a round; developer mode lists plans with Cancel and Release (`plan_release`). Every leaf
@@ -119,12 +128,12 @@ Root is flat: production modules and tests sit side by side.
   it shows is in `USER_WORDS`, and none may be in `USER_MODE_FORBIDDEN_WORDS` (rail, round, leaf,
   operator, covenant, expiry, atom and the rest): its test checks both. A pair reaches user mode
   only through `user-mode/pairs.json`, which only a passing drill run
-  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it. **The Trade tab is the full composer in
-  both modes unless a page sets `window.SEQ_USER_TRADE = true`**; only then are the tab's other
-  children hidden in user mode (`applyTradeMode` in `index.html`). The default stays off by the
-  repository owner's decision: turning it on by default replaced the public page's Trade tab
-  twice. `user-trade-switch.test.mjs` fails on a change that turns it on; change it only when the
-  owner asks for it.
+  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it. **The Trade tab follows the mode,
+  by the repository owner's decision ("Simple composer in default mode, full composer in dev
+  mode")**: the user composer when developer mode is off, the full composer when it is on,
+  switching with the mode (`applyTradeMode` in `index.html`). A page that sets
+  `window.SEQ_USER_TRADE = false` keeps the full composer in both modes. `user-trade-switch.test.mjs`
+  holds the rule both ways; change it only when the owner asks for it.
 - `xswap.js`, `xrswap.js`, `xcourier.js`, `xmaker.js` — the cross-chain courier path. **These are
   live.** The RFQ client that used to sit alongside them was retired; the `xchain`/`xswap` naming
   survives on code that is very much in use. Do not delete them on the assumption they are dead
