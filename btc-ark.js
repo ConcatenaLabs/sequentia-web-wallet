@@ -40,6 +40,7 @@ export const BTC_WORDS = Object.freeze({
   invoiceReady: (amount) => `Invoice ready. Share it to receive ${amount} BTC.`,
   received: (amount) => `Received ✓ ${amount} BTC.`,
   invoiceWait: 'Making the invoice…',
+  amountHint: 'Amount in BTC (optional)',
   payTitle: 'Pay an invoice',
   paySub: 'Paste an invoice to pay it with your BTC.',
   paying: 'Paying…',
