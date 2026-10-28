@@ -607,6 +607,13 @@ export function seqlnChannelInbound({ node_key, asset, amount, mode, fee_txid, m
   return lspFetch('/channel/inbound', { method: 'POST', timeoutMs: 180_000,
     body: JSON.stringify({ node_key, asset, amount, mode, fee_txid, months }) });
 }
+// Pay the fee for room to receive BTC over Lightning, from the user's own BTC node: without
+// payment_hash the service invoices what this node owes ({ owed, bolt11, payment_hash }, or owed 0);
+// with it, it checks that invoice was paid and clears the debt ({ settled, paid, owed }).
+export function seqlnInboundSettle({ node_key, asset, payment_hash }) {
+  return lspFetch('/channel/inbound/settle', { method: 'POST',
+    body: JSON.stringify({ node_key, asset, ...(payment_hash ? { payment_hash } : {}) }) });
+}
 // The price of room to receive `amount` atoms of `asset` over Lightning, and where a prepaid fee
 // goes. Returns the service's answer as it is, an out-of-range amount included ({ ok:false, reason,
 // min, max }), so the caller can say what range it sells; throws only when the service cannot be
