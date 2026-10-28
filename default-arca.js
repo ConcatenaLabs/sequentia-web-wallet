@@ -184,3 +184,17 @@ export async function boardAll (run, c, tries = 3) {
   }
   return null
 }
+
+// The assets a wallet lists to pay or send from: BTC always (the parent chain, first-class,
+// shown at 0 in a fresh wallet), then each Sequentia asset only while the wallet holds some of it
+// (on the chain, in the tree or on Lightning), in the order given. No asset is listed for being
+// the network's own: a fresh wallet lists BTC alone. `balances`: { assetHex: atoms } (any
+// numeric form); `others`: [[assetHex, atoms]] from the other places it is held.
+export function heldAssetList (balances, others = []) {
+  const out = ['BTC']
+  const add = (h, v) => { if (h && h !== 'BTC' && big(v) > 0n && !out.includes(h)) out.push(h) }
+  for (const [h, v] of Object.entries(balances || {})) add(h, v)
+  for (const [h, v] of others || []) add(h, v)
+  return out
+}
+

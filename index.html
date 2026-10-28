@@ -1622,7 +1622,7 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList } from './default-arca.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
@@ -6628,11 +6628,13 @@ function ownedOptions(sel){
   const prev=sel.value;
   const b=balObj(); sel.innerHTML='';
   const add=(h)=>{ const o=el('option'); o.value=h; o.textContent=assetMeta(h).ticker; sel.appendChild(o); };
-  add('BTC');   // parent-chain Bitcoin testnet4 — the first-class default pick (principle 2), routed through the BTC layer, not lwk
-  add(POLICY_HEX);   // tSEQ: one asset among equals, no longer the privileged default (principle 3)
-  for(const h of Object.keys(b)) if(h!==POLICY_HEX) add(h);
-  // What the wallet holds in the operator's tree is sent from there (to a receive code).
-  try{ if(leavesApi) for(const h of leavesApi.leafAssets()) if(h!==POLICY_HEX && !(h in b)) add(h); }catch{}
+  // BTC always (the parent chain, first-class); a Sequentia asset only while the wallet holds some,
+  // on the chain, in the tree or on Lightning: a fresh wallet lists BTC alone, and no asset, tSEQ
+  // included, is listed for being the network's own (default-arca.js heldAssetList).
+  const others=[];
+  try{ if(leavesApi) for(const h of leavesApi.leafAssets()) others.push([h, leavesApi.leafAtoms(h)]); }catch{}
+  try{ for(const c of ((lnLastStatus && lnLastStatus.channels) || [])) if(c.asset && c.leg!=='btc') others.push([c.asset, lnBalanceFor(c.asset)]); }catch{}
+  for(const h of heldAssetList(b, others)) add(h);
   // Restricted (OpenAMP) assets the AID holds — routed through the enclave transfer API, not lwk.
   for(const id of Object.keys(oampBalances)) if((oampBalances[id]?.atoms||0n)>0n) add('oamp:'+id);
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;   // keep the user's choice

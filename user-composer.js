@@ -23,6 +23,12 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 export const FOLLOW_FAST_MS = 120_000
 export const FOLLOW_SLOW_MS = 30_000
 
+// The "You pay" list: BTC always, and an asset only while the wallet holds some of it (or it is
+// the one chosen now), in the pickers' order. A fresh wallet pays from BTC alone.
+export function payAssets (known, held, current, name) {
+  return pickerOrder((known || []).filter((a) => a === 'BTC' || big(held(a)) > 0n || a === current), held, name)
+}
+
 export function mountUserComposer (ctx) {
   const S = { pay: null, get: null, amount: '', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
     offered: { pay: null, list: [], at: 0, loading: false } }
@@ -33,7 +39,9 @@ export function mountUserComposer (ctx) {
   const prec = (h) => (h === 'BTC' ? 8 : ((ctx.assetMeta(h) || {}).precision ?? 0))
   const amt = (h, atoms) => `${ctx.fmtAtoms(big(atoms), prec(h))} ${name(h)}`
 
-  function payList () { return pickerOrder(ctx.knownAssets(), ctx.held, name) }
+  // What can be paid: BTC always, and an asset only while the wallet holds some (a fresh wallet
+  // pays from BTC alone); what can be got is every asset the book knows.
+  function payList () { return payAssets(ctx.knownAssets(), ctx.held, S.pay, name) }
   // What is paid starts as the first asset held, in the pickers' order (BTC first when held).
   function defaultPay () { const l = payList(); return l.find((a) => big(ctx.held(a)) > 0n) || l[0] }
   function offeredNow () { return S.offered.pay === S.pay ? S.offered.list.filter((a) => a !== S.pay) : [] }
