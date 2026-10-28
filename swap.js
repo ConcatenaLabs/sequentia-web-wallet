@@ -1785,6 +1785,9 @@ function setMode(m){
 // This wallet's own Lightning channels in one asset ('BTC' for bitcoin), summed: what they can send
 // and what they can still receive. Only open channels count (CHANNELD_NORMAL), matched as the
 // Balance tab matches them: by asset id, the policy asset by the 'policy' tag the service gives it.
+// Whether the service sells room to receive BTC (its /status funding.btc_room).
+function btcRoomSold(){ return !!(LNSTATUS && LNSTATUS.funding && LNSTATUS.funding.btc_room); }
+const BTC_ROOM_NOTE = 'To pay you BTC over Lightning, the service makes room for it when you confirm. The review shows what that costs.';
 function lnLegTotals(hex){
   let spend = 0, recv = 0;
   const want = String(hex || '').toLowerCase(), tk = hex === 'BTC' ? 'BTC' : (metaOf(hex).ticker || '');
@@ -1819,7 +1822,9 @@ function legRailOptions(leg){
       ln: { ok: onLn, why: onLn ? '' : !lnOn ? noLn : none || ('You have no ' + tk + ' on Lightning. Move some to Lightning from Balance to pay with it here, or pay on-chain.') },
     };
   }
-  const room = ln.recv > 0;
+  // BTC: where the service sells room to receive BTC, the swap obtains it when the order is
+  // confirmed (reviewLn, btcRoomPlan), so no room yet is no reason to turn Lightning off.
+  const room = ln.recv > 0 || (hex === 'BTC' && lnOn && btcRoomSold());
   const lnWhy = room ? '' : !lnOn ? noLn
     : hex === 'BTC' ? 'You have no room to receive BTC over Lightning. Receive it on-chain.'
     : ln.spend > 0 ? 'You have no room to receive ' + tk + ' over Lightning. Buy room to receive from the ' + tk + ' row in Balance, or receive it on-chain.'
@@ -1909,11 +1914,13 @@ function renderRailNote(ra){
   // -> assume inline) | add(own channel short) | unfrontable(genuinely unavailable). Surface honestly.
   const legs = [];
   if (ra && S.payRail  === 'ln' && ra.payLn)  legs.push(ra.payLn);
-  if (ra && S.recvRail === 'ln' && ra.recvLn) legs.push(ra.recvLn);
+  const btcRoomLeg = !!(ra && S.recvRail === 'ln' && S.receiveAsset === 'BTC' && ra.recvLn && !ra.recvLn.ok && btcRoomSold());
+  if (ra && S.recvRail === 'ln' && ra.recvLn && !btcRoomLeg) legs.push(ra.recvLn);
   const unavail = legs.find(l => l.unfrontable);            // real blocker: no channel + LSP can't front -> LN disabled
   const addliq  = legs.find(l => !l.ok && l.cta === 'add'); // own channel exists but lacks this side
   const provis  = legs.find(l => l.provisionable);          // no own channel but provisionable -> opened/fronted for you
   const pick = unavail || addliq || provis;
+  if (!pick && btcRoomLeg){ note.classList.remove('hide'); note.innerHTML = '<span>' + esc(BTC_ROOM_NOTE) + '</span>'; return; }
   if (!pick){ note.innerHTML = ''; note.classList.add('hide'); return; }
   note.classList.remove('hide');
   const nm = esc(pick.name || 'this asset');
@@ -9508,6 +9515,71 @@ async function requoteLn(route, amtStr){
   setReviewEnabled(true);   // LP fixed terms (proven path) — Review is offerable
 }
 
+// --- room to receive BTC, in the swap ------------------------------------------------------
+const BTC_ROOM_DEV_KEY = 'How the room opens';
+// A refusal with the one tap that gets the trade through: receive (and so, with no mixed rails,
+// settle) on-chain, then review again.
+function refuseToChain(why){
+  const e = C.$('swErr'); if (!e) return;
+  e.innerHTML = esc(why) + ' <button type="button" class="swfix" id="swToChain">Receive it on-chain</button>';
+  const b = C.$('swToChain');
+  if (b) b.onclick = () => { e.textContent = ''; setRail('recv', 'chain'); if (S.payRail !== 'chain') setRail('pay', 'chain'); try { updateRails(); } catch {} };
+}
+// The room the service opens for `want` sat and its fee, quoted for this wallet's BTC node:
+// { ok, amount, fee, months, nodeKey } or { ok:false, why }. The smallest room sold is opened when
+// the trade is smaller; a fee as large as the BTC received is refused rather than taken.
+async function btcRoomPlan(want){
+  const no = 'You have no room to receive this BTC over Lightning, and the service is not making room right now.';
+  if (!btcRoomSold() || !L || !L.inboundQuote || !L.channelInbound || !L.btcNodeKey || !L.readyBtcNode) return { ok: false, why: no };
+  let nodeKey, q;
+  try {
+    nodeKey = await L.btcNodeKey();
+    q = await L.inboundQuote({ asset: 'BTC', amount: Number(want), node_key: nodeKey });
+    if (q && !q.ok && q.min != null && Number(want) < Number(q.min)) q = await L.inboundQuote({ asset: 'BTC', amount: Number(q.min), node_key: nodeKey });
+  } catch { return { ok: false, why: 'The service did not answer about room to receive this BTC.' }; }
+  if (!q || !q.ok){
+    if (q && q.already_have_room && q.pending) return { ok: false, why: 'Room for this BTC is already on its way and is ready after the next Bitcoin block.' };
+    if (q && q.max != null && Number(want) > Number(q.max)) return { ok: false, why: `The service makes room for at most ${C.fmtAtoms(BigInt(q.max), 8)} BTC at a time: take a smaller amount over Lightning.` };
+    return { ok: false, why: no };
+  }
+  const fee = Number(q.due_now ?? q.fee ?? 0);
+  if (!(fee < Number(want))) return { ok: false, why: `Making room to receive this BTC would cost ${C.fmtAtoms(BigInt(fee), 8)} BTC, as much as the trade pays you.` };
+  return { ok: true, amount: Number(q.amount), fee, months: q.months || null, nodeKey };
+}
+// Open the planned room before anything is paid: the wallet's BTC node up (provisioned if it has
+// none), the service's channel opened toward it, and then the wallet's largest BTC channel checked
+// to hold `want`. { ok } or { ok:false, why }; a refusal here has moved nothing.
+async function openBtcRoom(plan, want, say){
+  try {
+    say('Getting your Lightning ready to receive BTC…');
+    await L.readyBtcNode(() => say('Getting your Lightning ready to receive BTC…'));
+    say('Making room to receive BTC…');
+    const r = await L.channelInbound({ node_key: plan.nodeKey, asset: 'BTC', amount: plan.amount, mode: 'deferred', ...(plan.months ? { months: plan.months } : {}) });
+    if (r && r.pending) return { ok: false, why: 'The room to receive this BTC opens after the next Bitcoin block. Nothing was traded.' };
+    LNSTATUS = await L.status().catch(() => LNSTATUS);
+    const l = railAvail(S.payAsset, 'BTC').recvLn.liquidity;
+    if (!(l && l.active && big(l.maxReceivable ?? 0) >= want)) return { ok: false, why: 'The room to receive this BTC did not open in time. Nothing was traded.' };
+    return { ok: true };
+  } catch (e){
+    return { ok: false, why: 'Could not make room to receive this BTC: ' + C.prettyErr(e) + ' Nothing was traded.' };
+  }
+}
+// The room's fee, paid over Lightning from the BTC the trade just paid in. Best effort and quiet in
+// user mode: what is not paid now stays owed to the service and is paid with the next room bought.
+async function payBtcRoomFee(nodeKey){
+  try {
+    if (!L || !L.inboundSettle || !L.nodePay) return;
+    const inv = await L.inboundSettle({ node_key: nodeKey, asset: 'BTC' });
+    if (!inv || !inv.bolt11 || !(inv.owed > 0)) return;
+    await L.nodePay({ node_key: nodeKey, bolt11: inv.bolt11, amountMsat: inv.owed * 1000 });
+    const done = await L.inboundSettle({ node_key: nodeKey, asset: 'BTC', payment_hash: inv.payment_hash });
+    console.log('[swap] room fee paid over Lightning: ' + (done && done.paid) + ' sat, still owed ' + (done && done.owed));
+  } catch (e){
+    console.warn('[swap] room fee not paid yet (it stays owed):', e && e.message);
+    try { if (document.body.classList.contains('devmode')) C.toast('The fee for room to receive is still owed: ' + C.prettyErr(e)); } catch {}
+  }
+}
+
 // Execute the pure-LN swap through the LSP (the device co-signs the hosted node's
 // commitment updates over the wss link during the call). Honest finality: pure-LN
 // is the one state we may call final.
@@ -9594,14 +9666,25 @@ async function reviewLn(q){
       $('swErr').textContent = `This offer pays you ${C.fmtAtoms(_recvWant, rm.precision || 0)} ${rm.ticker} in one Lightning payment, and your largest ${rm.ticker} channel can receive ${C.fmtAtoms(rl.maxReceivable, rm.precision || 0)} · take a smaller offer, or receive ${rm.ticker} on-chain.`;
       return;
     }
-  } else if (_recvWant > 0n && ra.recvLn.ok && ra.recvLn.liquidity && (ra.recvLn.liquidity.maxReceivable ?? ra.recvLn.liquidity.receivable) < _recvWant){
-    // asset<->BTC SELL: we RECEIVE BTC over Lightning. provisionInbound is asset-only by construction
-    // (it funds an asset channel from the LP's asset inventory), so there is nothing to provision on this
-    // leg — REFUSE SPECIFICALLY rather than let the maker fail to route into a too-small channel.
-    $('swErr').textContent = `Your largest BTC Lightning channel can receive ${C.fmtAtoms(ra.recvLn.liquidity.maxReceivable ?? ra.recvLn.liquidity.receivable, 8)} BTC in one payment and this offer pays you ${C.fmtAtoms(_recvWant, 8)} BTC · receive BTC on-chain instead, or take a smaller offer.`;
-    return;
   }
-  if (!ra.pureLnOk){
+  // === ROOM TO RECEIVE BTC, OBTAINED IN THE SWAP ===========================================
+  // asset->BTC SELL over Lightning: the BTC arrives as ONE payment into one channel, so the wallet's
+  // largest BTC channel must have room for all of it. When it has not (no BTC channel, or one that
+  // is all on the wallet's own side), the service opens room toward the wallet's BTC node when the
+  // order is confirmed: btcRoomPlan quotes it here, the review shows its fee, and the room is opened
+  // in ok.onclick before anything is paid. The service's BTC node only, at zero confirmations
+  // (tooling/lsp/zeroconf.mjs), so the swap does not wait for a Bitcoin block. Its fee is paid over
+  // Lightning from the BTC received, once the trade has settled (payBtcRoomFee).
+  let btcRoom = null;
+  if (S.receiveAsset === 'BTC' && _recvWant > 0n){
+    const rl = ra.recvLn && ra.recvLn.liquidity;
+    const have = rl && rl.active ? big(rl.maxReceivable ?? rl.receivable ?? 0) : 0n;
+    if (have < _recvWant){
+      btcRoom = await btcRoomPlan(_recvWant);
+      if (!btcRoom.ok){ refuseToChain(btcRoom.why); return; }
+    }
+  }
+  if (!(ra.payLn.ok && (ra.recvLn.ok || btcRoom))){
     // No usable channel on one/both legs. Instead of BLOCKING and sending the user to the Balance tab,
     // OPEN the missing channel(s) INLINE on the user's OWN nodes, then continue. Per-leg DIRECTION matters:
     // the PAY leg needs spendable OUTBOUND capacity (provisionChannel funds it from the user's balance);
@@ -9639,7 +9722,7 @@ async function reviewLn(q){
     try {
       $('swErr').textContent = '';
       if (!ra.payLn.ok)  await provPayOutbound(S.payAsset,     'swPayAmt',  _payWant);
-      if (!ra.recvLn.ok) await provRecvInbound(S.receiveAsset, 'swRecvAmt', _recvWant);
+      if (!ra.recvLn.ok && !btcRoom) await provRecvInbound(S.receiveAsset, 'swRecvAmt', _recvWant);
       LNSTATUS = await L.status();   // refresh so railAvail sees the freshly-opened channel(s)
       $('swStatus').textContent = '';
     } catch (e){
@@ -9648,7 +9731,7 @@ async function reviewLn(q){
       return;
     }
     ra = railAvail(S.payAsset, S.receiveAsset);
-    if (!ra.pureLnOk){
+    if (!(ra.payLn.ok && (ra.recvLn.ok || btcRoom))){
       // NEVER a generic "try again shortly": name the leg and quote the exact reason ln-rail.js reports,
       // plus the on-chain way to take this same offer.
       const bad = !ra.payLn.ok ? ra.payLn : ra.recvLn;
@@ -9677,6 +9760,8 @@ async function reviewLn(q){
     ['Direction', dir],
   ];
   if (payStr){ kv.push(['You pay', payStr], ['You receive', recvStr]); }
+  if (btcRoom) kv.push(['Room to receive', `Making room to receive this BTC costs ${C.fmtAtoms(BigInt(btcRoom.fee), 8)} BTC, paid from the BTC you receive.`],
+    [BTC_ROOM_DEV_KEY, `The service opens a ${C.fmtAtoms(BigInt(btcRoom.amount), 8)} BTC channel to your BTC node for ${btcRoom.months} months, usable at once: until a Bitcoin block confirms it, you trust the service not to double-spend its funding.`]);
   kv.push(
     ['Pricing', 'Fills against the best resting Lightning offer · any remainder stays on the book · the rate includes the spread (no separate network fee)'],
     ['Finality', L.finalityCopy ? L.finalityCopy() : 'Instant and final · pure Lightning, nothing on-chain to revert.'],
@@ -9691,8 +9776,19 @@ async function reviewLn(q){
       kv.push(['⚠ Note', `This fills ${q.side === 'buy' ? btcStr : assetStr} (the resting offer's size), which differs from the ${C.fmtAtoms(BigInt(Math.round(q.amount * Math.pow(10, q.side === 'buy' ? qprec : aprec))), q.side === 'buy' ? qprec : aprec)} ${q.side === 'buy' ? qtk : am.ticker} you entered.`]);
   }
   const { m: modal, ok, st } = C.modalRows({ title: 'Review Lightning swap', kv });
+  // The channel detail of the room is for developer mode (body.devmode shows .dev-only).
+  try { for (const d of modal.querySelectorAll('.kv')) if (d.firstChild && d.firstChild.textContent === BTC_ROOM_DEV_KEY) d.classList.add('dev-only'); } catch {}
   ok.onclick = async () => {
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Settling over Lightning…';
+    if (btcRoom){
+      const t0 = Date.now();
+      const made = await openBtcRoom(btcRoom, _recvWant, (t) => { st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + esc(t); });
+      if (!made.ok){
+        modal.remove(); refuseToChain(made.why); return;
+      }
+      console.log('[swap] room to receive BTC ready in ' + (Date.now() - t0) + ' ms');
+      st.innerHTML = '<span class="spin"></span>Settling over Lightning…';
+    }
     try {
       // SELF-CUSTODY: name the user's OWN per-asset nodes so the LSP drives the swap on THEM (the device
       // co-signs over the wss link), not on the LSP's shared node. node_key = the base <asset> node;
@@ -9728,6 +9824,7 @@ async function reviewLn(q){
         price: lnBaseU > 0 ? lnQuoteU / lnBaseU : null, size: lnBaseU || null, sizeTicker: bm.ticker,
         card: true });   // task 21b: genuine settlement -> settle card
       C.toast(`Lightning swap settled and final: received ${got}.`);
+      if (btcRoom) payBtcRoomFee(btcRoom.nodeKey);
       resetComposer();
       await C.sync();
       renderSwap();

@@ -30,6 +30,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import { spawn, execFile, execFileSync } from 'node:child_process';
+import { ensureConfigLines } from './zeroconf.mjs';
 
 // Derive a secp256k1 compressed pubkey (33-byte hex) from a 32-byte hex privkey, the
 // same Noise static-key form the device + host use. Uses Node's own EC (no wasm dep):
@@ -422,6 +423,16 @@ export function makeProvisioner(opts) {
         const line = `rescan=-${tip - 50}`;
         c = /^rescan=.*$/m.test(c) ? c.replace(/^rescan=.*$/m, line) : c + line + '\n';
         fs.writeFileSync(cfgPath, c);
+      }
+    } catch { /* keep the existing config */ }
+    // Lines every node of this chain carries from now on (the BTC nodes' zero-conf plugin for the
+    // service's LP, zeroconf.mjs), written in at boot so nodes provisioned before them get them too.
+    try {
+      const chainCfg = CFG.chains[rec.chain] || CFG.chains.seq;
+      if ((chainCfg.bootLines || []).length) {
+        const cfgPath = path.join(rec.dir, 'config');
+        const c = fs.readFileSync(cfgPath, 'utf8'), next = ensureConfigLines(c, chainCfg.bootLines);
+        if (next !== c) fs.writeFileSync(cfgPath, next);
       }
     } catch { /* keep the existing config */ }
     bootedAt.set(rec.key, Date.now());

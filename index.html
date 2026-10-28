@@ -1469,7 +1469,8 @@
           <p>The dialog does this calculation with the service's real percentage before you pay. Why it is priced this way: what the service gives up is its own coins, held in your channel for that time, so the price grows with the amount and with the months. The percentage differs by asset because a coin that would earn something elsewhere, lent out or staked, costs more to hold than one that would not.</p>
           <p>What is guaranteed is the channel, kept open for the months paid for, not a fixed amount of room. Receiving uses room up and spending makes it again. When the time is over the service may close the channel: what is on your side then comes back to you on chain. To keep receiving, buy room again.</p>
           <p>You can ask for room when you move an asset to Lightning: its fee travels in the same transaction, and the service opens its channel as soon as that transaction confirms.</p>
-          <p>Room to receive BTC is bought on its own, with Add room to receive, and needs no BTC channel of yours first. Its fee is paid in BTC on Bitcoin testnet4, and the channel is ready once a Bitcoin block confirms it, often ten minutes or more.</p>
+          <p>Room to receive BTC is bought on its own, with Add room to receive, and needs no BTC channel of yours first. Its fee is paid in BTC on Bitcoin testnet4, and the service opens the channel once a Bitcoin block confirms that payment, often ten minutes or more. A swap that pays you BTC over Lightning makes the room itself, as described under the next question but one.</p>
+          <p>Room to receive BTC is usable as soon as the service opens it, before any Bitcoin block confirms the channel. Until one does, you trust the service not to double-spend the coins that fund it. Your node accepts this from the service's own BTC node only; a channel from anyone else waits for its block.</p>
         </details>
         <details id="faq-room-full"><summary>I need more room to receive, or more to send. What can I do?</summary>
           <p>Add capacity on the side you need, without giving up any you have:</p>
@@ -1508,6 +1509,7 @@
         </details>
         <details id="faq-ln-swap"><summary>Why does a swap ask me for room to receive?</summary>
           <p>A swap that pays you over Lightning needs room on the other side of one of your channels, in the asset you receive, or the payment cannot arrive. With no room in that asset, receiving over Lightning is off in the swap: receive on-chain, or buy room first. With some room but less than the amount, the swap says what the rest costs; the service opens it when the order is placed, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
+          <p>BTC is different: a swap that pays you BTC over Lightning makes the room it needs, whatever your BTC channels look like, and with none at all. The review shows what the room costs. When you confirm, the service opens it before anything is traded, and the swap settles at once, with no Bitcoin block to wait for. The fee is then paid over Lightning from the BTC you received. If the trade does not go through, the room stays yours, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
           <p>The same goes for paying: each side of a swap offers only the rails where you hold the asset, and picks the only one by itself when there is one.</p>
         </details>
       </div>
@@ -1590,6 +1592,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed, creditNotes,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
+import { seqlnInboundSettle } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
 import { creditLines } from './lncredit.js';
@@ -5390,6 +5393,7 @@ function initSwapTab(){
     // P; the maker pays H by hash to the user's node; the device settles once held (see startBuy).
     channelInbound: (p) => seqlnChannelInbound(p),
     inboundQuote: (p) => seqlnInboundQuote(p),
+    inboundSettle: (p) => seqlnInboundSettle(p),   // a BTC room fee, paid over Lightning (swap.js payBtcRoomFee)
     receivable: (hex) => lnReceivableFor(hex),
     nodeInvoice: (p) => seqlnNodeInvoice(p),
     invoiceStatus: (p) => seqlnInvoiceStatus(p),
@@ -5460,6 +5464,18 @@ function initSwapTab(){
       if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
       return await provisionAndConnect({ chain:'btc', label:'BTC', policy: lnPolicy(),
         deriveIdentity: () => { const k = lnNodeIdentity(phrase, 'btc'); return { transportPrivkey: k.deviceTransportPrivkey, signingSeed: k.deviceSigningSeed }; } });
+    },
+    // connectBtcNode, then wait until the node answers: a swap that has the service open room to
+    // receive BTC needs the node up (its device signer signs the channel), and a wallet with no BTC
+    // node yet gets one here.
+    readyBtcNode: async (onProgress) => {
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      if (!phrase) throw new Error('Your wallet is locked; unlock it and try again.');
+      const prov = await provisionAndConnect({ chain:'btc', label:'BTC', policy: lnPolicy(),
+        deriveIdentity: () => { const k = lnNodeIdentity(phrase, 'btc'); return { transportPrivkey: k.deviceTransportPrivkey, signingSeed: k.deviceSigningSeed }; } });
+      if (!(prov && prov.connected)) throw new Error('Could not bring your device signer online for your Lightning node.');
+      await waitNodeReady({ nodeKey: prov.key, onProgress: () => { try { onProgress && onProgress(); } catch {} } });
+      return prov;
     },
     finalityCopy: () => lnFinalityCopy(),
     // Open a Lightning channel for a leg INLINE — the SAME non-custodial provision+fund flow as

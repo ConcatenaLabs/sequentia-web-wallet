@@ -120,6 +120,8 @@ import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from 
 import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
 import { withPaymentHash } from './hold-bolt11.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
+import { fileURLToPath } from 'node:url';
+import { zeroconfConfigLines, zeroconfRunning, roomFeeLabel, roomFeePaid } from './zeroconf.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -224,6 +226,10 @@ const CFG = {
   // The same sale in BTC: the testnet4 LP that opens room to receive BTC toward the user's BTC
   // node and takes its fee on its own wallet (INBOUND_BTC_LP_RPC above).
   inboundBtcLpRpc: process.env.INBOUND_BTC_LP_RPC || '',
+  // The plugin that lets a hosted BTC node take a zero-confirmation channel from that LP, and from
+  // no other peer (zeroconf.mjs): room bought during a trade is then usable at once instead of after
+  // a testnet4 block. Set ZEROCONF_PLUGIN= (empty) to keep every BTC channel waiting for its block.
+  zeroconfPlugin: process.env.ZEROCONF_PLUGIN ?? fileURLToPath(new URL('./zeroconf-from-lp.py', import.meta.url)),
   subasInboundReserve: Number(process.env.SUBAS_INBOUND_RESERVE || 5000), // flat extra asset sat funded above the receive amount
   // PROPORTIONAL headroom on top of that flat reserve. CLN holds back a 1% channel reserve plus the
   // commitment fee, which together cost ~9% of capacity at these sizes -- so a flat 5000 sat covered
@@ -360,7 +366,11 @@ if (CFG.provDir && CFG.lightningd && CFG.hsmdProxy && CFG.wsRelay && CFG.element
     chains.btc = {
       network: CFG.btcNetwork, rpcConnect: '127.0.0.1',
       rpcPort: CFG.btcRpcPort, rpcUser: CFG.btcRpcUser, rpcPass: CFG.btcRpcPass,
-      cli: CFG.btcCli, feerate: CFG.btcFeerate, extra: ['min-emergency-msat=1000sat'],
+      cli: CFG.btcCli, feerate: CFG.btcFeerate,
+      extra: ['min-emergency-msat=1000sat', ...zeroconfConfigLines(CFG.zeroconfPlugin, (CFG.channelPeerBtcProvisioned || '').split('@')[0])],
+      // Written into the config at every boot, so a node provisioned before the plugin existed
+      // takes the LP's zero-conf room after its next restart too.
+      bootLines: zeroconfConfigLines(CFG.zeroconfPlugin, (CFG.channelPeerBtcProvisioned || '').split('@')[0]),
     };
   }
   PROV = makeProvisioner({
@@ -2026,6 +2036,20 @@ async function inboundRoomThere(nodeKey, assetId, amount) {
 // CLI. Idempotent: a no-op (already_had_inbound) if the user already has >= amount
 // receivable from the LP. Fails closed (throws) if unconfigured, the node is not
 // provisioned, or the LP lacks the coins. amount is in the asset's atoms, or sat for BTC.
+// Load zeroconf-from-lp.py on a running hosted BTC node, for the LP `lpId`, when it is not running
+// there. Best effort: a node that cannot load it still gets its room, after a block.
+async function ensureZeroconf(userRpc, lpId) {
+  if (!zeroconfConfigLines(CFG.zeroconfPlugin, lpId).length) return false;
+  try {
+    const pl = await lnrpcKw('plugin', ['subcommand=list'], userRpc, STATUS_RPC_TIMEOUT_MS);
+    if (zeroconfRunning(pl, CFG.zeroconfPlugin)) return true;
+    await lnrpcKw('plugin', ['subcommand=start', `plugin=${CFG.zeroconfPlugin}`, `zeroconf-peer=${lpId}`], userRpc, SIGNER_RPC_TIMEOUT_MS);
+    return true;
+  } catch (e) {
+    console.error('[lsp] zero-conf plugin not loaded; this room waits for a block:', e && e.message);
+    return false;
+  }
+}
 async function provisionInbound({ nodeKey, assetId, amount }) {
   const lp = await inboundLp(assetId);
   const lpId = lp.lpId;
@@ -2065,6 +2089,9 @@ async function provisionInbound({ nodeKey, assetId, amount }) {
   const bind = (uinfo.binding || []).find(b => b.port) || {};
   if (!bind.port) throw new Error('user node has no listen binding for the LP to connect to');
   const host = bind.address || '127.0.0.1';
+  // A BTC node takes the LP's room at once only with the zero-conf plugin loaded; a node booted
+  // before it existed is given it now. Without it the room still opens, usable after a block.
+  if (lp.isBtc) await ensureZeroconf(userRpc, lpId);
   await lnrpc('connect', [`id=${userId}`, `host=${host}`, `port=${bind.port}`], lp.rpc, SIGNER_RPC_TIMEOUT_MS)
     .catch(e => { throw new Error(`LP could not connect to the user node: ${e.message}`); });
   // LP funds a 0-conf asset channel TOWARD the user (all liquidity on the LP side =
@@ -5268,6 +5295,38 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         if (e && e.lp_short) return send(res, 503, { ok: false, error: e.message, lp_short: true, fundable: e.fundable, asset: assetId });
         return send(res, 502, { ok: false, error: String((e && e.message) || e) });
+      }
+    }
+    // PAY A ROOM FEE OVER LIGHTNING. Room opened during a trade is charged as a deferred debt (above);
+    // once the trade has paid the user BTC, the wallet pays that debt from it. Two calls:
+    //   POST /channel/inbound/settle {node_key, asset:'BTC'}               -> { owed, bolt11, payment_hash }
+    //   POST /channel/inbound/settle {node_key, asset:'BTC', payment_hash} -> { settled, paid, owed }
+    // The first has the LP invoice what this node owes, under a label naming the node and the asset;
+    // the second clears the debt by what that invoice says was received, once per payment.
+    if (req.method === 'POST' && url.pathname === '/channel/inbound/settle') {
+      const body = await readBody(req);
+      if (!body || !body.node_key) return send(res, 400, { ok: false, error: 'body { node_key, asset } required' });
+      if (!/^btc$/i.test(String(body.asset || ''))) return send(res, 400, { ok: false, error: 'only a BTC room fee is paid over Lightning' });
+      if (!CFG.inboundBtcLpRpc) return send(res, 400, { ok: false, error: 'room to receive BTC is not sold on this LSP' });
+      const nodeKey = String(body.node_key).toLowerCase(), assetId = 'BTC';
+      try {
+        if (body.payment_hash) {
+          const done = inboundFees.get('ln:' + String(body.payment_hash).toLowerCase());
+          if (done) return send(res, 200, { ok: true, settled: true, already: true, paid: done.paid, owed: debtOwed(nodeKey, assetId) });
+          const li = await lnrpcKw('listinvoices', [`payment_hash=${String(body.payment_hash).toLowerCase()}`], CFG.inboundBtcLpRpc, STATUS_RPC_TIMEOUT_MS);
+          const v = roomFeePaid(li, { nodeKey, assetId, paymentHash: body.payment_hash });
+          if (!v.paid) return send(res, 409, { ok: false, settled: false, error: v.reason, owed: debtOwed(nodeKey, assetId) });
+          recordFeeUse('ln:' + String(body.payment_hash).toLowerCase(), { node_key: nodeKey, asset: assetId, paid: v.sat, mode: 'lightning', label: v.label });
+          const owed = debtClear(nodeKey, assetId, v.sat);
+          return send(res, 200, { ok: true, settled: true, paid: v.sat, owed });
+        }
+        const owed = debtOwed(nodeKey, assetId);
+        if (!(owed > 0)) return send(res, 200, { ok: true, owed: 0 });
+        const inv = await lnrpcKw('invoice', [`amount_msat=${owed * 1000}`, `label=${roomFeeLabel(nodeKey, assetId, Date.now())}`,
+          'description=Room to receive BTC', 'expiry=600'], CFG.inboundBtcLpRpc, STATUS_RPC_TIMEOUT_MS);
+        return send(res, 200, { ok: true, owed, bolt11: inv.bolt11, payment_hash: inv.payment_hash });
+      } catch (e) {
+        return send(res, 502, { ok: false, error: String((e && e.message) || e), owed: debtOwed(nodeKey, assetId) });
       }
     }
     // "Move back to chain": cooperatively close a channel on the user's own hosted node, sending
