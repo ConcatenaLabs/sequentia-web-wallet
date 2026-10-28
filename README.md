@@ -336,6 +336,13 @@ its exit date), where the coin stays frozen on the chain until the issuer lifts 
 then spent like any coin. The operator serves no take, no resting order and no Lightning payment
 in a supervised asset, so the user composer offers such an asset only through an in-tree swap.
 
+A payment the operator declines is refused for good: the operator's signer refuses what it
+asks, and would refuse it again however often it were asked (the server's code `declined`). The
+library puts the coins back at once, keeps the refusal once among its refusals and sends nothing
+again; user mode reads "This payment was declined; nothing was sent." Developer mode shows the
+operator's own words with the code. An operator that cannot be reached is no refusal:
+the payment stands, and the next sync sends it again.
+
 Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
 library itself (the same code as the operator's command-line wallet), compiled to WebAssembly
 and run in a dedicated worker (`leaves/`), so nothing about a leaf is computed by the page.
@@ -414,9 +421,10 @@ it cannot account for) is refused before anything is signed, in the engine's wor
 
 ### The Trade tab in user mode
 
-On a page configured with `window.SEQ_USER_TRADE = true`, the user composer below is the Trade
-tab in user mode; without it, as on the public testnet page, the full composer (developer
-mode's, below) is the Trade tab in both modes. The user composer trades only against a live leaf
+The Trade tab follows the mode: the user composer below in default mode, the full composer
+(developer mode's, below) in developer mode, switching with it. A page that sets
+`window.SEQ_USER_TRADE = false` ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) keeps the full
+composer in both modes. The user composer trades only against a live leaf
 maker, orders and the pairs `user-mode/pairs.json` admits; a pair nobody offers right now is shown
 as not offered. It pays from the wallet's leaves when it holds them, and from its on-chain coins
 otherwise: a covenant order is then taken on the chain in one transaction (`user-onchain.js`), so a

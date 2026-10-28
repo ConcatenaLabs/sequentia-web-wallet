@@ -146,15 +146,21 @@ export function frozenSentence (amount, ticker) {
   return `${amount} ${ticker} is frozen by its issuer: it can't be sent until the issuer lifts the freeze.`
 }
 
-// A refusal for user mode: a frozen coin said plainly; every other refusal as it is.
+// A refusal for user mode: the bond's, a frozen coin's and one the operator declines said
+// plainly; every other refusal as it is.
 export function plainRefusal (e) {
   const m = String((e && e.message) || '')
+  if (e && e.code === 'declined') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: DECLINED_WORDS })
   if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
   if ((e && e.code === 'frozen') || /\bfrozen\b|\bpaused\b/i.test(m)) {
     return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: 'This asset is frozen by its issuer for this wallet: nothing was sent.' })
   }
   return e
 }
+
+// A payment the operator's signer refuses for what it asks, which it would refuse again
+// however often it were asked (the server's `declined`): the library has put the coins back.
+export const DECLINED_WORDS = 'This payment was declined; nothing was sent.'
 
 // A refusal of the operator's equivocation bond (missing, in notice, or worth less than
 // what the wallet would hold out of round on it): the library's gate, said plainly.
