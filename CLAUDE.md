@@ -119,12 +119,12 @@ Root is flat: production modules and tests sit side by side.
   it shows is in `USER_WORDS`, and none may be in `USER_MODE_FORBIDDEN_WORDS` (rail, round, leaf,
   operator, covenant, expiry, atom and the rest): its test checks both. A pair reaches user mode
   only through `user-mode/pairs.json`, which only a passing drill run
-  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it. **The Trade tab follows the mode,
-  by the repository owner's decision ("Simple composer in default mode, full composer in dev
-  mode")**: the user composer when developer mode is off, the full composer when it is on,
-  switching with the mode (`applyTradeMode` in `index.html`). A page that sets
-  `window.SEQ_USER_TRADE = false` keeps the full composer in both modes. `user-trade-switch.test.mjs`
-  holds the rule both ways; change it only when the owner asks for it.
+  (`tooling/user-mode-drill.mjs`) may extend. Developer mode's composer is untouched by it. **The Trade tab is the full composer in
+  both modes unless a page sets `window.SEQ_USER_TRADE = true`**; only then are the tab's other
+  children hidden in user mode (`applyTradeMode` in `index.html`). The default stays off by the
+  repository owner's decision: turning it on by default replaced the public page's Trade tab
+  twice. `user-trade-switch.test.mjs` fails on a change that turns it on; change it only when the
+  owner asks for it.
 - `xswap.js`, `xrswap.js`, `xcourier.js`, `xmaker.js` — the cross-chain courier path. **These are
   live.** The RFQ client that used to sit alongside them was retired; the `xchain`/`xswap` naming
   survives on code that is very much in use. Do not delete them on the assumption they are dead
