@@ -56,6 +56,11 @@ In practice:
   receive request. Neither extra part is required, so any Bitcoin wallet reads the code as a plain
   request for the address. A wallet like this one pays an asset at the `sequentia` part and BTC at
   the `ark` part, and anything else at the address.
+- Above the code, one optional field, empty by default: "Amount in BTC (optional)". With an
+  amount the code also names it (`amount=`) and carries an invoice of the wallet's on the Bitcoin
+  ark for exactly that amount (`lightning=`), which a Lightning wallet pays; the invoice is
+  claimed while the wallet is open, and a new one is made with the code. Without an amount the
+  code carries no invoice.
 - Buttons: **Copy receive code** (confirmation: "Receive code copied") and **New code**. The
   address alone is shown in developer mode.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server

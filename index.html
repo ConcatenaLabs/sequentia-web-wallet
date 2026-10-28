@@ -768,6 +768,7 @@
       <div class="card">
         <label class="lbl" id="recvLbl">Receive</label>
         <p class="sub" id="recvTip" style="margin:0 0 10px">Your address for BTC and every Sequentia asset: the same tb1 address on both chains.</p>
+        <input id="recvAmt" class="mono hide" inputmode="decimal" style="width:100%;margin:0 0 10px">
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
         <div class="row" style="margin-top:12px">
@@ -3505,7 +3506,7 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
       const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -3575,6 +3576,8 @@ function userHeld(a){
   try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0)); } catch {}
   try { if(leavesApi) n += leavesApi.leafAtoms(a) || 0n; } catch {}
   try { n += BigInt(Math.round(lnSpendableFor(a).units || 0)); } catch {}
+  // BTC on the Bitcoin ark, which default mode's trades pay from.
+  try { if(a==='BTC' && btcArkRoutes()) n += btcArk.figures().spendable; } catch {}
   return n;
 }
 function userKnownAssets(){
@@ -6491,13 +6494,37 @@ function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen
 // request in one payment request (pay-code.js). -> the code, or the bare request while the ark
 // has not answered (the code is drawn again once it has).
 let _recvArk = null, _recvArkAsk = null;
+// An amount asked for (optional, in BTC): the code then names it, with an invoice of the Bitcoin
+// ark's for exactly it, which a Lightning wallet pays. `_recvInv` is that invoice, made once per
+// amount and code.
+let _recvInv = null, _recvInvAsk = null, _recvInvWatch = 0;
+function recvAmountSats(){ try{ const v=($('recvAmt').value||'').trim(); if(!v) return 0n; const a=parseAtoms(v, 8); return a>0n ? a : 0n; }catch{ return 0n; } }
 function payCodeText(){
   if(!_recvCode) return null;
   if(!_recvArk && btcArk && btcArk.isOpen() && !_recvArkAsk)
     _recvArkAsk = btcArk.run('address').then(a=>{ _recvArk = a.address; }).catch(e=> console.warn('[receive code] ark:', e?.message??e)).finally(()=>{ _recvArkAsk = null; renderReceive(); });
+  const sats = recvAmountSats();
+  if(sats>0n && btcArkRoutes() && (!_recvInv || _recvInv.sats!==sats) && !_recvInvAsk){
+    _recvInvAsk = btcArk.invoice(sats, 'Receive').then(inv=>{ _recvInv = { ...inv, sats }; watchRecvInvoice(_recvInv); })
+      .catch(e=> console.warn('[receive code] invoice:', e?.message??e)).finally(()=>{ _recvInvAsk = null; renderReceive(); });
+  }
   let address = null; try{ address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential()); }catch{}
   if(!address) return _recvCode.text;
-  return buildPayCode({ address, ark: _recvArk || undefined, sequentia: _recvCode.text });
+  const inv = sats>0n && _recvInv && _recvInv.sats===sats ? _recvInv : null;
+  return buildPayCode({ address, amount: sats>0n ? fmtAtoms(sats, 8).replace(/[^0-9.]/g, '') : undefined,
+    lightning: inv ? inv.invoice : undefined, ark: _recvArk || undefined, sequentia: _recvCode.text });
+}
+// The code's invoice is claimed as soon as it is paid; the code then shows a new one.
+function watchRecvInvoice(inv){
+  const mine = ++_recvInvWatch;
+  (async()=>{
+    while(mine===_recvInvWatch && Date.now()/1000 < Number(inv.expires_at)){
+      let r=null; try{ r = await btcArk.received(inv.payment_hash); }catch{}
+      if(mine!==_recvInvWatch) return;
+      if(r && r.state==='paid'){ _recvInv=null; try{ renderBalance(); renderReceive(); }catch{} return; }
+      await new Promise(ok=> setTimeout(ok, 3000));
+    }
+  })();
 }
 // Where a payment of `asset` to `text` goes when `text` is a receive code: its Sequentia part
 // for an asset the tree pays, its Ark part for BTC the ark pays (btcArk takes the code as it
@@ -6523,6 +6550,7 @@ function renderReceiveCode(){
       .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
     return;
   }
+  const ra=$('recvAmt'); ra.classList.remove('hide'); ra.placeholder = BTC_WORDS.amountHint;
   const code = payCodeText();
   $('addr').textContent = code;
   try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
@@ -6533,6 +6561,7 @@ function renderReceive(){
   $('btnRecvMode').classList.toggle('hide', true);
   $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
   if(receiveCodeMode()){ renderReceiveCode(); renderOampReceive(); return; }
+  $('recvAmt').classList.add('hide');
   $('btnConf').classList.remove('hide');
   $('addr').classList.remove('recv-code');
   $('recvLbl').textContent = 'Receive'; $('btnCopy').textContent = 'Copy';
@@ -7859,9 +7888,11 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
 $('btnNewAddr').onclick=()=>{
-  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; _recvArk=null; renderReceive(); return; }
+  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; renderReceive(); return; }
   addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnRecvMode').onclick=()=>{ showAddrDefault=!showAddrDefault; renderReceive(); };
+// An amount typed on Receive redraws the code (its invoice is made for the amount once typing stops).
+{ let t=null; $('recvAmt').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(()=>{ _recvInv=null; _recvInvWatch++; renderReceive(); }, 600); }); }
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
 $('xpubForm').onchange=()=>renderXpubForm();
