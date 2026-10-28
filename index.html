@@ -3497,12 +3497,12 @@ function userKnownAssets(){
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
 }
-// The Trade tab follows the mode, by the repository owner's decision ("Simple composer in
-// default mode, full composer in dev mode"): the user composer (user-composer.js, three inputs and
-// one button, for the pairs user-mode/pairs.json admits) when developer mode is off, the full
-// composer when it is on, switching with the mode. A page that sets window.SEQ_USER_TRADE = false
-// keeps the full composer in both modes. user-trade-switch.test.mjs holds the rule.
-function userTradeOn(){ return window.SEQ_USER_TRADE !== false; }
+// The Trade tab is the full composer in both modes. The user-mode composer (user-composer.js),
+// which trades against the single-step book for the pairs user-mode/pairs.json admits, replaces it
+// in user mode only on a page that sets window.SEQ_USER_TRADE = true (the drills do). Off by
+// default by the repository owner's decision, and user-trade-switch.test.mjs holds it there: turning
+// it on by default replaced the public page's Trade tab with three inputs and a button, twice.
+function userTradeOn(){ return window.SEQ_USER_TRADE === true; }
 function applyTradeMode(){
   const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
   const user = !devMode() && userTradeOn();
