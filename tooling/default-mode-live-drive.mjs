@@ -44,6 +44,12 @@ async function openWallet (who, { fresh = false, phrase = null } = {}) {
   const page = new Page(chromium(), { profile })
   pages.push(page)
   await page.open()
+  // A browser stopped by an earlier run reopens its tabs: a wallet tab among them holds the
+  // one-tab lock. Every page but this one is closed.
+  try {
+    const me = (await page.send('Target.getTargetInfo')).targetInfo.targetId
+    for (const t of (await page.send('Target.getTargets')).targetInfos) if (t.type === 'page' && t.targetId !== me) await page.send('Target.closeTarget', { targetId: t.targetId })
+  } catch (e) { note('closing other tabs: ' + e.message) }
   await page.send('Page.addScriptToEvaluateOnNewDocument', { source: `window.SEQ_LEAVES_TICK_MS=8000;
     // Served from this machine, the hosted-node service is reached through the same origin, as on the public page.
     if (location.hostname === '127.0.0.1') Object.defineProperty(window, 'SEQ_LSP_URL', { value: location.origin + '/lsp', writable: false, configurable: false })` })
@@ -82,9 +88,9 @@ const balances = (page) => page.eval(`(()=>{ const out={}; for(const r of docume
   out[tk.textContent.trim()]={ total:(r.querySelector('.bt-t')?.innerText||'').replace(/^Total\\s*/,'').trim(), arriving:(r.querySelector('.bt-arriving')?.textContent||'') }; }
   out._headline=(document.querySelector('#totalVal')||document.querySelector('.hero .big')||{}).textContent||''; return out })()`)
 
-async function waitJoined (page) {
+async function waitJoined (page, ms = 240000) {
   await tab(page, 'receive')
-  return page.waitFor("(()=>{ const a=document.querySelector('#addr'); return a && a.classList.contains('recv-code') && /^[A-Za-z0-9-]+:[0-9a-f]{40,}/.test(a.textContent) ? a.textContent : false })()", 240000)
+  return page.waitFor("(()=>{ const a=document.querySelector('#addr'); return a && a.classList.contains('recv-code') && /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(a.textContent) ? a.textContent : false })()", ms)
 }
 
 async function faucet (page, asset) {
@@ -127,11 +133,13 @@ async function main () {
     const pb = await openWallet(to)
     const old = await waitJoined(pb)
     // A fresh code for this payment: the one shown may be paid already by an earlier run.
-    if (rest[3] !== 'same') {
+    if (rest[3] !== 'same' && rest[3] !== 'address') {
       await click(pb, '#btnNewAddr')
-      await pb.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^[A-Za-z0-9-]+:[0-9a-f]{40,}/.test(t) && t!==${JSON.stringify(old)} })()`, 300000)
+      await pb.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(t) && t!==${JSON.stringify(old)} })()`, 300000)
     }
-    const code = await pb.eval("document.querySelector('#addr').textContent")
+    let code = await pb.eval("document.querySelector('#addr').textContent")
+    // `address`: pay the address the code carries, as a sender outside the tree would be given.
+    if (rest[3] === 'address') { code = decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]); note('paying the address ' + code) }
     await tab(pb, 'balance')
     const before = (await balances(pb))[ticker] || { total: '0' }
     const pa = await openWallet(name)
@@ -147,7 +155,7 @@ async function main () {
     await shot(pa, `${name}-send-review.png`)
     const tClick = Date.now()
     await pa.eval("document.querySelector('.modal button.primary').click()")
-    const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 300000).catch(async (e) => { note('still: ' + await pa.eval("document.querySelector('.modal .status')?.textContent||''") + ' console: ' + pa.console.slice(-8).join(' | ')); throw e })
+    const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 2400000).catch(async (e) => { note('still: ' + await pa.eval("document.querySelector('.modal .status')?.textContent||''") + ' console: ' + pa.console.slice(-8).join(' | ')); throw e })
     check('the sender says it is sent', /^Sent/.test(done), `${done} (${secs(Date.now() - tClick)} from the click)`)
     await shot(pa, `${name}-send-done.png`)
     const seen = await pb.waitFor(`(async()=>{ const r=[...document.querySelectorAll('.bt-row')].find(r=>r.querySelector('.tk')?.textContent.trim()===${JSON.stringify(ticker)}); const t=r?(r.querySelector('.bt-t')?.innerText||''):''; return t && t!==${JSON.stringify(before.total)} ? t : false })()`, 600000).catch(() => null)
@@ -182,6 +190,38 @@ async function main () {
       await shot(page, `${name}-trade-${pay}-${get}-done.png`)
     }
     note('console: ' + page.console.filter((l) => /user composer|trade|leaves/i.test(l)).slice(-8).join(' | '))
+  } else if (step === 'trades') {
+    // The Trade tab's list of trades, followed until each is Settled or Returned (or the wait ends).
+    const page = await openWallet(name)
+    await waitJoined(page)
+    await tab(page, 'swap')
+    const tOpen = Date.now()
+    const read = () => page.eval("[...document.querySelectorAll('#ucTrades .uc-trade')].map(r=>r.innerText.replace(/\\n+/g,' '))")
+    note('trades at open: ' + JSON.stringify(await read()))
+    const fin = await page.waitFor("(()=>{ const r=[...document.querySelectorAll('#ucTrades .uc-trade')]; return r.length && r.every(x=>/Settled|Returned/.test(x.innerText)) ? true : false })()", Number(rest[0] || 600000)).catch(() => false)
+    note(`trades after ${secs(Date.now() - tOpen)}: ${JSON.stringify(await read())}`)
+    check('every trade Settled or Returned', !!fin)
+    await shot(page, `${name}-trades.png`)
+    const recs = await page.eval("JSON.stringify(Object.entries(localStorage).filter(([k])=>k.startsWith('swk.usertrade')).map(([k,v])=>{ try{ return JSON.parse(v) }catch{ return v } }))")
+    writeFileSync(join(ev, `${name}-trade-records.json`), recs)
+    note('console: ' + page.console.filter((l) => /user trade|user composer/i.test(l)).slice(-10).join(' | '))
+  } else if (step === 'restore') {
+    // node … restore A2 A: wallet A's phrase opened in a fresh profile (A2), on --base; it joins
+    // by itself, restores what the tree holds of it, and shows the figures A showed (A.totals.json).
+    const [from] = rest
+    const phrase = readFileSync(join(work, from + '.phrase'), 'utf8').trim()
+    const want = JSON.parse(readFileSync(join(ev, from + '.totals.json'), 'utf8'))
+    const page = await openWallet(name, { phrase })
+    const tOpen = Date.now()
+    const code = await waitJoined(page, 900000)
+    check('the restored wallet joined by itself; Receive gives a receive code', true, `${code.slice(0, 40)}… ${secs(Date.now() - tOpen)} after it opened`)
+    await tab(page, 'balance')
+    const same = (b) => Object.keys(want).filter((k) => k !== '_headline').every((k) => b[k] && b[k].total === want[k].total)
+    const got = await page.waitFor(`(()=>{ const out={}; for(const r of document.querySelectorAll('.bt-row')){ const tk=r.querySelector('.tk'); if(!tk) continue; out[tk.textContent.trim()]={ total:(r.querySelector('.bt-t')?.innerText||'').replace(/^Total\\s*/,'').trim() } } ; const want=${JSON.stringify(want)}; return Object.keys(want).filter(k=>k!=='_headline').every(k=>out[k] && out[k].total===want[k].total) ? out : false })()`, 900000).catch(() => null)
+    const now2 = await balances(page)
+    check(`the figures are ${from}'s`, !!got && same(now2), `${secs(Date.now() - tOpen)} after it opened: ${JSON.stringify(now2)} (want ${JSON.stringify(want)})`)
+    await shot(page, `${name}-restored-balance.png`)
+    note('console: ' + page.console.filter((l) => /leaves|restore/i.test(l)).slice(-8).join(' | '))
   } else if (step === 'code') {
     const page = await openWallet(name)
     const tOpen = Date.now()

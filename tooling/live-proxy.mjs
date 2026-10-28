@@ -18,6 +18,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const arg = (name, dflt) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt }
 const port = Number(arg('--port', '8791'))
 const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '')
+// --log: one line per forwarded call (method, path, status, time, and the JSON-RPC method).
+const logCalls = process.argv.includes('--log')
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
 
@@ -47,12 +49,17 @@ const server = createServer(async (req, res) => {
       if (['host', 'connection', 'origin', 'referer', 'accept-encoding', 'content-length'].includes(k)) continue
       headers[k] = v
     }
+    const t0 = Date.now()
     const r = await fetch(origin + url.pathname + url.search, { method: req.method, headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: 'manual' })
     const out = {}
     r.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'alt-svc', 'strict-transport-security'].includes(k)) out[k] = v })
     res.writeHead(r.status, out)
     res.end(Buffer.from(await r.arrayBuffer()))
+    if (logCalls) {
+      let m = ''; try { const j = JSON.parse(Buffer.concat(chunks).toString()); m = Array.isArray(j) ? j.map((x) => x.method).join(',') : (j.method || '') + (j.method === 'getblockhash' ? ' ' + JSON.stringify(j.params) : '') } catch {}
+      console.log(`${new Date().toISOString()} ${req.method} ${url.pathname} ${r.status} ${Date.now() - t0}ms ${m}`.slice(0, 300))
+    }
   } catch (e) {
     // A forward that fails after its answer began is cut off; one that failed before says why.
     try { if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }); res.end('live-proxy: ' + (e && e.message)) } catch {}
