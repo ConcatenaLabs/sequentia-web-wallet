@@ -11,10 +11,12 @@
 //
 // HTTP (JSON; CORS open, since a page may reach it from another origin):
 //   GET  /health              -> { ok, operator, genesis_hash }
-//   GET  /v1/quotes           -> { operator, genesis_hash, quotes: [{ give_asset, want_asset, rate_num, rate_den,
+//   GET  /v1/quotes           -> { operator, genesis_hash, as_of, quotes: [{ give_asset, want_asset, rate_num, rate_den,
 //                                  min_give, max_give }] }   (the maker gives give_asset and wants
 //                                  ceil(give × rate_num / rate_den) of want_asset; with a ladder, one
-//                                  quote a level, each carrying the depth of the levels before it)
+//                                  quote a level, each carrying the depth of the levels before it), from
+//                                  the holdings read at `as_of` (unix seconds): every pass and every offer
+//                                  renews them, and a quote never waits on the library
 //   POST /v1/firm {give_asset, want_asset, give}  -> { swap, offer, give, want, expires_at }: an in-tree swap
 //                                  offer of the leaf library's (`swap_offer`), its coins held until it is
 //                                  completed, released or lapses (`offer_ttl_seconds`), priced by walking
@@ -247,7 +249,17 @@ async function main () {
   const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
   let busy = false
   let lastBoardRefusal = null
-  const spendable = async () => spendableFrom(await cmd('coins'), await cmd('plans').catch(() => ({ plans: [] })))
+  // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
+  // quotes are served from the last reading (`holdings`), which every pass of the upkeep and every
+  // offer and completion renew, so a quote never waits on the library: with a hundred coins and
+  // resting orders a pass can hold the library for minutes, and a quote that waited on it was
+  // no quote at all.
+  const spendable = async (first = false) => {
+    const sp = spendableFrom(await cmd('coins', {}, first), await cmd('plans', {}, first).catch(() => ({ plans: [] })))
+    holdings = { sp, at: Date.now() }
+    return sp
+  }
+  let holdings = null
   // Orders resting in the tree, a ladder a pair, listed on the relay (leaf-maker-rest.mjs).
   const rester = await restDesk({ cfg, cmd, log, liveRates, spendable })
   if (rester) log('the resting desk is open, its listings signed by', rester.makerPub)
@@ -262,6 +274,7 @@ async function main () {
   async function tickOnce () {
     {
       try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+      try { await spendable() } catch (e) { log('holdings:', e.message) }
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
       if (rester) { try { await rester.tick() } catch (e) { log('rest:', e.message) } }
       // What it holds on the chain of an asset it gives, above what it keeps, comes into the
@@ -330,8 +343,8 @@ async function main () {
     try {
       if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash })
       if (req.method === 'GET' && p === '/v1/quotes') {
-        const sp = await spendable()
-        return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash,
+        const sp = holdings ? holdings.sp : await spendable(true)
+        return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
       }
       if (req.method === 'GET' && p.startsWith('/v1/swap/')) { const id = p.slice('/v1/swap/'.length); return send(res, 200, { swap: id, state: await swapState(id, true) }) }
@@ -347,7 +360,7 @@ async function main () {
         const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
         if (!pair0) return send(res, 404, { error: 'the maker quotes no such pair' })
         const give = big(b.give)
-        const sl = slicesFor(pair0, await spendable(), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
+        const sl = slicesFor(pair0, await spendable(true), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
         const w = sl && give >= sl.min ? walkWant(sl.slices, give) : null
         if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
         const pair = sl.pair
@@ -355,6 +368,7 @@ async function main () {
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, expires })
+        spendable(true).catch(() => {})
         log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8))
         return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
       }
@@ -364,6 +378,7 @@ async function main () {
         if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st })
         const r = await cmd('swap_complete', { accept: String(b.accept || '') }, true)
         firm.delete(b.swap)
+        spendable(true).catch(() => {})
         log('done', String(r.swap).slice(0, 12))
         return send(res, 200, { swap: b.swap, state: 'done' })
       }
