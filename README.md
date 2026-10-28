@@ -57,8 +57,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   that reads your stake -- Levo -- signs you in: paste its message, sign, paste the signature back
 - QR scanning for addresses (live camera on https, photo upload elsewhere)
 - A mode setting, kept for each wallet: user mode (one figure per asset, and the wallet
-  chooses how value moves) by default, or developer mode, which adds coins held as leaves of
-  an operator's tree, with the balance per rail, boarding, receive requests and payments,
+  chooses how value moves) by default, in which the wallet holds its Sequentia assets in the
+  page's operator's tree by itself, or developer mode, which shows those coins as leaves of the
+  operator's tree, with the balance per rail, boarding, receive requests and payments,
   settle now, and an exit drill; and contract spends, shown and signed under the five-point
   rule. The wallet's own pages read the mode and the leaf rail through its page API
   ([docs/PAGE_API.md](docs/PAGE_API.md))
@@ -95,11 +96,11 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   counts everything of it the wallet holds: on-chain, leaves, Lightning (the wallet's share of
   its own channels, reserve included) and, for tSEQ, what is staked (each bonded stake, each
   unbonding output not yet claimed back, and the delegation record). A row shows that one
-  figure, with a bolt beside the ticker that is yellow when the asset has a Lightning channel;
-  a tap on it opens its details: its parts (on-chain, Lightning with what it can send and
-  receive, leaves and staked, each when it holds some), the controls that move it to and from
-  Lightning or ask for room to receive, and its asset id and Hide. The view is the same in
-  both modes.
+  figure, with what is still arriving under it ("10 GOLD arriving"). A tap opens its details:
+  what is staked, and its asset id and Hide. In developer mode the details also hold its parts
+  (on-chain, Lightning with what it can send and receive, leaves), with a bolt beside the
+  ticker that is yellow when the asset has a Lightning channel, and the controls that move it
+  to and from Lightning or ask for room to receive.
   Figures read the way the browser's locale writes numbers (thousands grouped, its decimal
   mark) with the asset's own decimals, exact to the atom; amount fields take plain digits.
 - **Send**: multi-recipient sends of any owned asset, including BTC (a real Bitcoin testnet4
@@ -199,20 +200,34 @@ Sequentia wallet:
 
 - **User mode** (the default): The wallet chooses how value moves.
 - **Developer mode**: Leaves as a rail you can choose, and the developer tools (the Leaves and
-  Contracts tabs). The Balance tab is the same in both modes.
+  Contracts tabs).
 
-The headline total counts every rail of every asset (on-chain, Lightning and leaves) and the
-staked tSEQ in the reference currency, in both modes, and no asset comes first. User mode shows
-one figure per asset, its parts one tap away, with Move to Lightning and room to receive among
-them; where an asset cannot be paid or received over Lightning yet, the Lightning cards say what
-to do in one sentence and offer that step. User mode carries no developer vocabulary: the xpub,
+User mode's words, and what it never shows, are in [docs/DEFAULT_MODE.md](docs/DEFAULT_MODE.md),
+the same for every Concatena wallet. The headline total counts every rail of every asset
+(on-chain, Lightning and leaves) and the staked tSEQ in the reference currency, in both modes,
+and no asset comes first. User mode shows one figure per asset and no rail.
+
+In user mode the wallet holds its Sequentia assets in the tree of the operator the page names
+(`window.SEQ_ARCA`, its key pinned) without a step: a new or restored wallet joins it by itself
+once the operator's server shows the pinned key (a restored phrase finds the coins it holds
+there), and one that cannot (the server unreachable, or showing another key) works as it would
+without and tries again every two minutes. **Receive** gives a receive code (a single-use
+receive request of the leaf library), which another wallet of the same operator pays in
+seconds, with **Show address** for BTC and for any sender that asks for an address. The
+testnet faucet pays the receive code, or the address when it does not pay that asset into
+receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
+by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
+pays a receive code of the same operator and chain in the tree, and everything else as it
+always has; an amount held only in the tree cannot be paid to an address yet, and the wallet
+says so. The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
+coins. User mode carries no developer vocabulary: the xpub,
 the Settings backend card, the staker key, the order book's unblinded/blinded switch (shown in
 user mode only while the blinded book is chosen), a payment's preimage and the Lightning
 channel count are developer mode's. In developer mode each asset row also reads "X on-chain · Y in leaves · Z on
 Lightning" (and "· S staked" for tSEQ), the Lightning column carries Move and room to receive,
-and the **Leaves** and **Contracts** tabs appear. In user mode nothing of leaves is shown, but a wallet that joined
-an operator keeps its leaf wallet syncing while the page is open, since its coins have dates
-to keep, and their value counts in each asset's one figure; the Trade tab's user composer pays
+and the **Leaves** and **Contracts** tabs appear. In user mode nothing of leaves is shown, but the leaf wallet
+keeps syncing while the page is open, since its coins have dates to keep, and their value counts
+in each asset's one figure; the Trade tab's user composer pays
 from them and settles in them without naming them (below). The wallet's own pages read the
 mode, and in developer mode the leaf rail, through the page API (`window.sequentiaWallet`,
 [docs/PAGE_API.md](docs/PAGE_API.md)), in the shape the browser extension's provider serves.
@@ -421,9 +436,10 @@ it cannot account for) is refused before anything is signed, in the engine's wor
 
 ### The Trade tab in user mode
 
-On a page configured with `window.SEQ_USER_TRADE = true`, the user composer below is the Trade
-tab in user mode; without it, as on the public testnet page, the full composer (developer
-mode's, below) is the Trade tab in both modes. The user composer trades only against a live leaf
+The Trade tab follows the mode: the user composer below in default mode, the full composer
+(developer mode's, below) in developer mode, switching with it. A page that sets
+`window.SEQ_USER_TRADE = false` ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) keeps the full
+composer in both modes. The user composer trades only against a live leaf
 maker, orders and the pairs `user-mode/pairs.json` admits; a pair nobody offers right now is shown
 as not offered. It pays from the wallet's leaves when it holds them, and from its on-chain coins
 otherwise: a covenant order is then taken on the chain in one transaction (`user-onchain.js`), so a

@@ -89,7 +89,7 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/testnet4/api` | index.html (btc leg), xmaker | Bitcoin testnet4 Esplora REST |
 | `/prices` | index.html | per-asset USD prices for reference-currency display |
 | `/feerates` | index.html | the node's fee-asset acceptance set (`getfeeexchangerates`): `{"bitcoin"\|ticker\|hex: rate}`, tSEQ keyed `"bitcoin"` |
-| `/faucet` | index.html | POST, testnet funds to the current address |
+| `/faucet` | index.html | POST, testnet funds to the wallet's receive code (user mode, with the leaf wallet open) or its current address |
 | `/registry/index.minimal.json` | index.html | asset-metadata index (override: `window.SEQ_REGISTRY_URL`) |
 | `/seqob` + `/seqob/v1/ws` | seqob.js, xcourier.js | order-book relay REST + the swap courier WebSocket |
 | `/anchor/<blockhash>`, `/anchorstatus` | xmaker.js | anchor height / certification for the maker's reveal gate |
@@ -99,6 +99,8 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/sbtc` | sbtc.js | SBTC custody bridge: peg-in / peg-out address allocation for offline-resting BTC limit orders |
 | the operator's server, the node's JSON-RPC | leaves/worker.js | the URLs the user enters when joining an operator in developer mode, then whenever this wallet's leaf wallet syncs, in either mode. Each is fetched with a synchronous XHR from the worker, so a server on another origin must answer CORS |
 | `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
+| `/arca` | leaves.js (its worker) | the operator's server, which user mode joins by itself (`window.SEQ_ARCA`) |
+| `/node-rpc` | leaves.js (its worker) | a node's JSON-RPC, read calls and broadcasts only, through which the leaf wallet follows the chain |
 | `/leafmaker` | user-trade.js, user-trade-btc.js | a live leaf maker (`tooling/lsp/leaf-maker.mjs`): its quotes, firm in-tree swap offers and, from its BTC desk, BTC trades in one hash-lock, for user mode's Trade tab (override: `window.SEQ_LEAF_MAKERS`, a list of base URLs) |
 | `/leafmaker-btc` | user-trade.js, user-trade-btc.js | the live BTC maker: the same program with its BTC desk on a Bitcoin Lightning node of its own |
 | `user-mode/pairs.json` | index.html | the pairs, and their sources, user mode offers per chain (override: `window.SEQ_USER_MODE_PAIRS`) |
@@ -129,7 +131,8 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_ALLOW_MIXED_RAILS` | `false` | offer one side on-chain and the other over Lightning (refused by default: not safe against a Bitcoin reorg) |
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
-| `SEQ_USER_TRADE` | `false` | `true` shows user mode's Trade tab as the user composer (three inputs, one button), for the pairs `user-mode/pairs.json` admits on the page's chain; otherwise the full composer serves both modes |
+| `SEQ_USER_TRADE` | unset | unset or `true`: the Trade tab is the user composer (three inputs, one button, for the pairs `user-mode/pairs.json` admits on the page's chain) in default mode and the full composer in developer mode; `false`: the full composer in both modes |
+| `SEQ_ARCA` | `{ server: origin + '/arca', node_url: origin + '/node-rpc', operator: <the testnet operator's key> }` | the operator user mode keeps its coins with, its key pinned (`default-arca.js`); `null` joins none by itself |
 | `SEQ_LEAF_MAKERS` | `[origin + '/leafmaker', origin + '/leafmaker-btc']` | the live leaf makers user mode's Trade tab asks for in-tree swaps and BTC trades |
 | `SEQ_USER_MODE_PAIRS` | `user-mode/pairs.json` | the list of pairs user mode offers (a URL) |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |

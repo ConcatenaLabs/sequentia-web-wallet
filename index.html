@@ -109,6 +109,8 @@
   .mono-inline{font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere;text-align:right}
   .leaf-result{max-height:260px;overflow:auto;white-space:pre-wrap;font-size:12px}
   .leaf-refusal{color:#f0a39b}
+  /* default mode: a receive code is long; it is shown in a few lines and copied whole */
+  #addr.recv-code{font-size:10.5px;word-break:break-all;max-height:5.6em;overflow:hidden}
   .leaf-split{font-size:12.5px;color:var(--dim);margin-top:2px}
   /* tabs */
   .tabs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:18px;padding:0 0 12px;border-bottom:1px solid var(--line)}
@@ -764,7 +766,7 @@
     <!-- receive -->
     <section data-panel="receive" class="hide">
       <div class="card">
-        <label class="lbl">Receive</label>
+        <label class="lbl" id="recvLbl">Receive</label>
         <p class="sub" id="recvTip" style="margin:0 0 10px">Your address for BTC and every Sequentia asset: the same tb1 address on both chains.</p>
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
@@ -772,6 +774,7 @@
           <button id="btnCopy">Copy</button>
           <button id="btnNewAddr">New address</button>
           <button class="ghost" id="btnConf">Show blinded address</button>
+          <button class="ghost hide" id="btnRecvMode">Show address</button>
           <button class="ghost dev-only" id="btnXpub">Show xpub</button>
         </div>
         <div class="rec hide dev-only" id="xpubReveal">
@@ -1555,6 +1558,15 @@
   window.SEQ_LSP_HOST_PUBKEY_ASSET = '0295374d947dc7e27382a83b2034a10b3d51b6f2fdf7e7da490893e3995141523b';
   window.SEQ_LSP_WS_BTC            = 'wss://sequentiatestnet.com/lsp-ws-btc';
   window.SEQ_LSP_HOST_PUBKEY_BTC   = '020a749af93e2a5a4d67ad28585cec31b55a146969eb77ca3d076eb59ff111ed51';
+  // The operator whose tree holds default mode's coins (default-arca.js): its server, the node the
+  // leaf wallet follows the chain through (same origin; it forwards only a wallet's read calls and
+  // broadcasts), and the operator's key, pinned: a wallet in default mode joins it by itself, and
+  // only while its server shows this key. A page that sets SEQ_ARCA = null first joins none.
+  if(window.SEQ_ARCA === undefined) window.SEQ_ARCA = {
+    server:   location.origin + '/arca',
+    node_url: location.origin + '/node-rpc',
+    operator: 'b6f4c5924ad81947658cf85bb93d9267efc54c7fcb2e4577e8c954c68fa087bb',
+  };
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1601,6 +1613,7 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS } from './default-arca.js';
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
 import { createEngine as createUserTrade } from './user-trade.js';
@@ -2495,6 +2508,33 @@ async function btcBuildTx(outputs, feeRate, { unsigned = false } = {}){
 }
 
 // review + broadcast a Bitcoin testnet4 payment (mirrors the Sequentia reviewBroadcast UX)
+// A payment to a receive code in the tree (leaves.js payCode): what is sent, to whom, and its
+// fee, reviewed before anything is signed; the leaf library refuses what it would not pay, in its
+// own words (plain words in default mode).
+async function treeSendReview(r, onDone){
+  const m0 = r.asset==='BTC' ? { precision:8, ticker:'BTC' } : assetMeta(r.asset);
+  const atoms = parseAtoms(r.amtS, m0.precision||0);
+  if(atoms<=0n) throw new Error('amount must be greater than zero');
+  const held = leavesApi.leafAtoms(r.asset) || 0n, arriving = leavesApi.arriving(r.asset) || 0n;
+  if(atoms > held - arriving) throw new Error(atoms <= held ? DEFAULT_WORDS.stillArriving(m0.ticker) : `You can send up to ${fmtAtoms(held - arriving, m0.precision||0)} ${m0.ticker} this way now.`);
+  const amt = fmtAtoms(atoms, m0.precision||0);
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: []});
+  { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  ok.textContent = DEFAULT_WORDS.send;
+  ok.onclick=async()=>{
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
+    const t0=performance.now();
+    try{
+      await leavesApi.payCode(r.addr.trim(), atoms, r.asset);
+      const ms=Math.round(performance.now()-t0);
+      console.log('[tree send] paid in', ms, 'ms');
+      st.className='status ok'; st.textContent = DEFAULT_WORDS.sent(amt, m0.ticker, (ms/1000).toFixed(1));
+      ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+      if(onDone) onDone(); renderBalance();
+    }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
+  };
+}
+
 async function btcReviewBroadcast(outputs, onDone, satPerVb){
   const built = await btcBuildTx(outputs, satPerVb > 0 ? satPerVb : btcFeeRate());
   const kv=[['Network', '⚠ Bitcoin testnet4 (parent chain): sending BTC, not a Sequentia asset']];
@@ -3424,7 +3464,7 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
       const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -3436,6 +3476,13 @@ function initLeaves(){
     // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
+    // Default mode joins the page's operator by itself (default-arca.js), once its server shows the pinned key.
+    pinned: ()=> (typeof window!=='undefined') ? window.SEQ_ARCA : null,
+    serverInfo: async (server)=>{ const r=await fetch(server + '/v1/info', { cache:'no-store' }); if(!r.ok) throw new Error('the server answered HTTP ' + r.status); return await r.json(); },
+    // The page and the leaf wallet spend the same coins: no board while the page's own payment is fresh.
+    onchainQuiet: ()=> _ownTxRing.some(t=> Date.now() - t.at < BOARD_QUIET_MS),
+    onOpen: ()=>{ try{ renderBalance(); }catch{} try{ renderReceive(); }catch{} },
+    onBoarded: ()=>{ setTimeout(()=>{ try{ sync(); }catch{} }, 1500); },
   }, $('leavesRoot'), $('devModeRoot'));
   show('tabLeaves', devMode());
   applyModeClass();
@@ -3497,12 +3544,12 @@ function userKnownAssets(){
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
 }
-// The Trade tab is the full composer in both modes. The user-mode composer (user-composer.js),
-// which trades against the single-step book for the pairs user-mode/pairs.json admits, replaces it
-// in user mode only on a page that sets window.SEQ_USER_TRADE = true (the drills do). Off by
-// default by the repository owner's decision, and user-trade-switch.test.mjs holds it there: turning
-// it on by default replaced the public page's Trade tab with three inputs and a button, twice.
-function userTradeOn(){ return window.SEQ_USER_TRADE === true; }
+// The Trade tab follows the mode, by the repository owner's decision ("Simple composer in
+// default mode, full composer in dev mode"): the user composer (user-composer.js, three inputs and
+// one button, for the pairs user-mode/pairs.json admits) when developer mode is off, the full
+// composer when it is on, switching with the mode. A page that sets window.SEQ_USER_TRADE = false
+// keeps the full composer in both modes. user-trade-switch.test.mjs holds the rule.
+function userTradeOn(){ return window.SEQ_USER_TRADE !== false; }
 function applyTradeMode(){
   const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
   const user = !devMode() && userTradeOn();
@@ -5779,6 +5826,8 @@ async function _syncImpl(){
     // that's been used on either chain (never backward, so a manual "New address" sticks).
     addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
     renderBalance(); renderHistory(); renderReceive(); refreshStakes(); refreshDelegationHeld(); populateFeeAssets(); refreshRecipientAssets();
+    // Default mode: coins new on the chain go into the tree by themselves (leaves.js boardArrivals).
+    try{ const k=JSON.stringify(balObj(), (_, v)=> typeof v==='bigint' ? String(v) : v); if(k!==_onchainSeen){ _onchainSeen=k; if(leavesApi) leavesApi.boardSoon(); } }catch{}
     { const sw=document.querySelector('[data-panel="swap"]'); if(sw && !sw.classList.contains('hide')) try{ renderActiveSwap(); }catch{} }   // its balances are real now
     const t = wollet.tip();
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
@@ -5789,6 +5838,7 @@ async function _syncImpl(){
   finally{ for(const x of btns) x.disabled=false; endSync(); }
 }
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
+let _onchainSeen = null;   // the on-chain balance the last sync read, to board what is new
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
 function availableFor(hex){ if(hex==='BTC') return (typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n;
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
@@ -5907,6 +5957,9 @@ function renderBalance(){
     // A holding its issuer has frozen for this wallet: one plain sentence, in both modes, never hidden.
     let frozenAt = 0n; try { if(kind!=='BTC' && leavesApi) frozenAt = leavesApi.frozenAtoms(kind) || 0n; } catch {}
     if(frozenAt > 0n){ const fz=el('div','bt-frozen', frozenSentence(amt(frozenAt), ticker)); fz.style.cssText='color:var(--amber2,#e0a800);font-size:12px;margin-top:2px'; a.appendChild(fz); }
+    // Default mode: what is held in the tree and not yet spendable (a board not yet final) says so.
+    let arriving = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arriving = leavesApi.arriving(kind) || 0n; } catch {}
+    if(arriving > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
     // ONE VIEW FOR EVERY MODE. A bolt beside the ticker says whether the asset has a Lightning
     // channel (yellow) or not yet (grey); the row's details, one tap away, hold its parts (on-chain |
@@ -5917,7 +5970,7 @@ function renderBalance(){
     const opening = (lnOn && leg) ? lnOpeningFor(kind) : false;
     const hasLn = own.length > 0 || lnAtoms > 0n || !!opening;
     const toLn = movable && on > 0n, toChain = own.length > 0 && lnAtoms > 0n && !opening;
-    if(lnOn && leg){
+    if(devMode() && lnOn && leg){
       const bo=el('span','bt-bolt'+(hasLn?' on':''));
       bo.innerHTML='<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>';
       bo.title = hasLn ? ticker+' has a Lightning channel' : 'No Lightning channel for '+ticker+' yet';
@@ -5926,8 +5979,11 @@ function renderBalance(){
     const det=el('div','bt-det');
     const blk=(label, value)=>{ const d=el('div','bt-blk'), h=el('div','bt-bh'); h.appendChild(el('span',null,label)); if(value!=null) h.appendChild(el('b',null,value)); d.appendChild(h); det.appendChild(d); return d; };
     const button=(box, label, title, go, cls)=>{ const bt=el('button', cls||'ghost mv', label); bt.title=title; bt.onclick=go; box.appendChild(bt); return bt; };
-    if(hasLn || leafAtoms>0n || staked>0n) blk('On-chain', amt(on));
-    if(lnOn && leg && hasLn){
+    // Default mode shows no rail (docs/DEFAULT_MODE.md): the split between on-chain, the
+    // tree and Lightning, and every move between them, are developer mode's.
+    const dm = devMode();
+    if(dm && (hasLn || leafAtoms>0n || staked>0n)) blk('On-chain', amt(on));
+    if(dm && lnOn && leg && hasLn){
       const l=blk('Lightning', amt(lnAtoms));
       if(opening) l.appendChild(el('div','bt-dim','channel opening'));
       const cap=el('div','bt-cap');
@@ -5949,10 +6005,10 @@ function renderBalance(){
         button(acts, room>0n ? 'More room to receive' : 'Add room to receive', 'Have the service open a channel to you, so '+ticker+' can arrive over Lightning', ()=>lnReceiveRoomDialog(leg));
       if(acts.children.length) l.appendChild(acts);
     }
-    if(leafAtoms>0n) blk('Leaves', amt(leafAtoms));
+    if(dm && leafAtoms>0n) blk('Leaves', amt(leafAtoms));
     if(staked>0n) blk('Staked', amt(staked));
     // No channel yet: the one thing to do is move the asset to Lightning, which asks for room itself.
-    if(lnOn && leg && !hasLn && toLn){ const d=el('div','bt-blk'); button(d, 'Move to Lightning', 'Open a channel to send and receive '+ticker+' instantly.', ()=>moveToLightningDialog(leg), 'mv'); det.appendChild(d); }
+    if(dm && lnOn && leg && !hasLn && toLn){ const d=el('div','bt-blk'); button(d, 'Move to Lightning', 'Open a channel to send and receive '+ticker+' instantly.', ()=>moveToLightningDialog(leg), 'mv'); det.appendChild(d); }
     if(foot){ const f=el('div','bt-foot'); f.appendChild(foot); det.appendChild(f); }
     const open=_splitOpen.has(kind), tappable=det.children.length>0;
     if(tappable) head.appendChild(el('span','bt-tog', open ? 'hide details' : 'details'));
@@ -6223,7 +6279,38 @@ function renderXpubForm(){
   }
   $('xpubText').textContent = accountDescriptors(ko, form).join('\n');
 }
+// Default mode, once the wallet holds its coins in the page's operator's tree: Receive gives a
+// receive code (the leaf library's single-use receive request), which a wallet of the same
+// operator and the faucet pay in seconds; "Show address" gives the address, for BTC and for any
+// sender that asks for one. Developer mode, and a wallet not in the tree, show the address.
+let showAddrDefault = false, _recvCode = null, _recvCodeAsk = null, _recvCodeAsked = false;
+function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen() && !showAddrDefault && !showConf; }
+function renderReceiveCode(){
+  $('recvLbl').textContent = DEFAULT_WORDS.codeLabel;
+  $('recvTip').textContent = DEFAULT_WORDS.receiveTip;
+  $('btnNewAddr').textContent = DEFAULT_WORDS.newCode;
+  $('btnCopy').textContent = DEFAULT_WORDS.copyCode;
+  $('btnConf').classList.add('hide');
+  $('addr').classList.add('recv-code');
+  if(!_recvCode){
+    $('addr').textContent = DEFAULT_WORDS.receiveWait; $('qr').removeAttribute('src');
+    if(!_recvCodeAsk) _recvCodeAsk = leavesApi.receiveCode({ quick: !_recvCodeAsked })
+      .then(c=>{ _recvCode = c; _recvCodeAsked = true; }).catch(e=>{ console.warn('[receive code]', e?.message??e); showAddrDefault = true; })
+      .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
+    return;
+  }
+  $('addr').textContent = _recvCode.text;
+  try{ $('qr').src = stringToQr(_recvCode.text); }catch{ $('qr').removeAttribute('src'); }
+}
 function renderReceive(){
+  const codeOn = !devMode() && !!leavesApi && leavesApi.isOpen();
+  $('btnRecvMode').classList.toggle('hide', !codeOn || showConf);
+  $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
+  if(receiveCodeMode()){ renderReceiveCode(); renderOampReceive(); return; }
+  $('btnConf').classList.remove('hide');
+  $('addr').classList.remove('recv-code');
+  $('recvLbl').textContent = 'Receive'; $('btnCopy').textContent = 'Copy';
+  $('btnNewAddr').textContent = 'New address';
   const a = currentAddress();
   $('addr').textContent = a.toString();   // the shown/copied text is ALWAYS the bare tb1/tsqb1 address (correct on both chains)
   // TODO(browser-verify / qr.rs): QRCodeUri() returns a QR image whose PAYLOAD is a Liquid
@@ -6240,7 +6327,7 @@ function renderReceive(){
   if(showXpub) renderXpubForm();
   $('recvTip').textContent = showConf
     ? 'Blinded address (tsqb1…): what it receives on Sequentia has its amount and asset hidden on the chain. BTC always arrives at your usual tb1 address.'
-    : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.';
+    : (codeOn ? DEFAULT_WORDS.addressTip : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.');
   renderOampReceive();
 }
 // Restricted-asset (OpenAMP) receive panel: show the wallet's AID plus the enclave deposit address
@@ -6605,6 +6692,7 @@ function mountSendFee(){
 // Why a recipient cannot be paid as typed, said before Review: Bitcoin has no confidential
 // addresses, so a confidential Sequentia address (tsqb1…) cannot receive BTC.
 function recipientProblem(addr, asset){
+  if(addr && leavesApi && leavesApi.treeRoute(addr)) return asset==='BTC' ? DEFAULT_WORDS.codeBtc : null;
   if(!addr || asset!=='BTC') return null;
   let a=null; try{ a=new Address(addr); }catch{ return null; }
   if(a.isBlinded()) return 'Bitcoin can only be sent to a non-confidential address (tb1…). This is a confidential Sequentia address: ask the recipient for their non-confidential address, or send a Sequentia asset instead.';
@@ -7410,6 +7498,25 @@ async function requestFaucet(asset){
   const btns=[...document.querySelectorAll('#faucetBtns button')];
   btns.forEach(b=>b.disabled=true);
   $('faucetStatus').className='status'; $('faucetStatus').innerHTML='<span class="spin"></span>Requesting from the faucet…';
+  // Default mode, coins in the tree: the faucet pays the wallet's receive code, which arrives in
+  // seconds; should it refuse that, the address, as before.
+  if(!devMode() && leavesApi && leavesApi.isOpen()){
+    try{
+      const code=await leavesApi.receiveCode();
+      const body=asset?{request:code.text,asset}:{request:code.text};
+      const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+      _recvCode=null;
+      const what=`${Number(j.amount).toLocaleString()} ${j.asset}`;
+      $('faucetStatus').className='status ok'; $('faucetStatus').textContent=`Sent ${what} · arriving…`;
+      await leavesApi.syncNow();
+      $('faucetStatus').textContent=DEFAULT_WORDS.faucetReceived(what);
+      renderBalance(); renderReceive();
+      btns.forEach(b=>b.disabled=false);
+      return;
+    }catch(e){ console.warn('[faucet] to the receive code:', e?.message??e, '; to the address instead'); }
+  }
   try{
     // Fund the NON-confidential (tb1) form so the wallet receives EXPLICIT funds (later
     // spends + change stay non-confidential). The confidential (tsqb1) form is opt-in.
@@ -7472,6 +7579,18 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       return;
     }
     for(const r of rows){ const p=recipientProblem(r.addr, r.asset); if(p) throw new Error(p); }
+    // A receive code of the operator this wallet holds its coins with is paid in the tree, in
+    // seconds (default-arca.js treeRoute); everything else goes on as it always has.
+    const codeRows=rows.filter(r=>leavesApi && leavesApi.treeRoute(r.addr));
+    if(codeRows.length){
+      if(codeRows.length!==rows.length || rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed);
+      await treeSendReview(rows[0], reset);
+      return;
+    }
+    // Coins held in the tree can't pay an address yet: say so, rather than a shortfall.
+    { const want=new Map(); for(const r of rows) if(r.asset!=='BTC'){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
+      for(const [h, a] of want){ const on=availableFor(h), lf=leavesApi ? (leavesApi.leafAtoms(h)||0n) : 0n;
+        if(a > on && a <= on + lf) throw new Error(DEFAULT_WORDS.addressShort); } }
     const btcRows=rows.filter(r=>r.asset==='BTC');
     if(btcRows.length && btcRows.length!==rows.length)
       throw new Error("Bitcoin and Sequentia assets can't be sent in the same transaction");
@@ -7495,7 +7614,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
   finally{ btn.disabled=false; btn.textContent=label; } };
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
-$('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
+$('btnNewAddr').onclick=()=>{
+  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; renderReceive(); return; }
+  addrIndex=(addrIndex??0)+1; renderReceive(); };
+$('btnRecvMode').onclick=()=>{ showAddrDefault=!showAddrDefault; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
 $('xpubForm').onchange=()=>renderXpubForm();
