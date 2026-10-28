@@ -1582,13 +1582,14 @@ import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
+import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
 import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
   onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
-  seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodeHistory, seqlnNodePay, seqlnNodePayHash, seqlnNodePayStatus, seqlnNodePayQuote, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
+  seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodeHistory, seqlnSwapNote, seqlnNodePay, seqlnNodePayHash, seqlnNodePayStatus, seqlnNodePayQuote, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed, creditNotes,
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
@@ -1692,6 +1693,7 @@ let companionClient;   // the sync's second client: scans the covenant companion
 let broadcastClient;   // broadcasts a reviewed send without waiting for a scan to free the shared client (see reviewBroadcast)
 let keySignStarted = false;   // the Sign tab opens on the address the Receive tab is showing, once
 let lnApi = null;             // the hosted-Lightning API, wired once the wallet is open (see initSwap)
+const _lnNoNode = new Map();   // node key -> until when the History's Lightning card does not ask the service for it again
 
 // ---------- amount helpers (lwk takes u64 -> JS BigInt) ----------
 function fmtAtoms(atoms, d){ atoms = BigInt(atoms); const neg = atoms<0n; if(neg) atoms=-atoms;
@@ -5400,6 +5402,7 @@ function initSwapTab(){
     nodeSettle: (p) => seqlnNodeSettle(p),
     nodeReceive: (p) => seqlnNodeReceive(p),
     nodeHistory: (k) => seqlnNodeHistory(k),
+    swapNote: (p) => seqlnSwapNote(p),
     nodePay: (p) => seqlnNodePay(p),
     // BARE-HASH pay — the taker's OWN hosted BTC-LN node commits an HTLC to node_id on H (no bolt11), the
     // LSP PAYER leg-bridge hold primitive (see subswap.runLspPayerBridge / swap.js driveLspPayerBridge).
@@ -7676,44 +7679,61 @@ function arrangeHistory(){
   if(oamp) oamp.classList.toggle('hide', !_histCounts.oamp);
   // Always Bitcoin, then Sequentia, then Lightning: the order the markup gives them.
 }
-// Lightning in the History: each own node's paid invoices and completed payments (GET /node/history),
-// and the trades of the log that settled over Lightning. A node that does not answer (its device
-// signer is not attached) is left out rather than failing the card.
+// Lightning in the History: what each of the wallet's own hosted nodes settled (GET /node/history:
+// invoices paid to it, holds it settled, payments it made), one row per payment hash, so a swap's two
+// legs read as one swap with both amounts (ln-history.js). The trade log only names a row the nodes
+// give, or shows a trade no node has settled yet. A node that does not answer is left out rather than
+// failing the card.
 async function renderLnHistory(){
   const card=$('lnHistCard'), list=$('lnHistList'); if(!card || !list) return;
-  const nodes=new Map();
+  const keys=new Map();   // node key -> its asset ('btc' or a 64-hex id)
   for(const c of ((lnLastStatus && lnLastStatus.channels) || [])){
-    if(!c.node_key || nodes.has(c.node_key)) continue;
-    const btc = c.asset_label==='BTC' || c.leg==='btc';
-    nodes.set(c.node_key, btc ? { ticker:'BTC', precision:8 } : assetMeta(c.asset));
+    if(!c.node_key || keys.has(c.node_key)) continue;
+    keys.set(c.node_key, (c.asset_label==='BTC' || c.leg==='btc') ? 'btc' : String(c.asset||'').toLowerCase());
   }
-  const rows=[];
-  await Promise.all([...nodes].map(async ([key, m])=>{
+  // The wallet's other node keys too, so a node with no open channel now still shows what it settled;
+  // a key the service has no node for is not asked again for ten minutes.
+  const now=Date.now();
+  let cands=[]; try{ cands=_ownLnCandidates || []; }catch{ /* declared below the boot's first sync: none yet */ }
+  for(const c of cands) if(c && c.key && !keys.has(c.key) && !((_lnNoNode.get(c.key)||0) > now)) keys.set(c.key, c.leg==='btc' ? 'btc' : c.leg);
+  const nodes=[];
+  await Promise.all([...keys].map(async ([key, asset])=>{
     try{
       const r = lnApi && lnApi.nodeHistory ? await lnApi.nodeHistory(key) : null;
-      for(const it of ((r && r.items) || [])) rows.push({ at:(it.at||0)*1000, kind:it.dir, m, atoms:BigInt(Math.floor((it.amount_msat||0)/1000)), text:it.description||'' });
-    }catch{ /* not answering now: left out */ }
+      if(r && Array.isArray(r.items)) nodes.push({ asset, items:r.items });
+    }catch(e){ if(/unknown node key/.test(String(e && e.message || e))) _lnNoNode.set(key, now + 600000); /* else not answering now: left out */ }
   }));
   let trades=[]; try{ trades=lnTradeHistory(); }catch{}
-  for(const t of trades) rows.push({ at:t.at||0, kind:'swap', text:t.title||'Swap', status:t.status||'' });
-  rows.sort((a,b)=>b.at-a.at);
-  card.classList.toggle('hide', !nodes.size && !trades.length);
+  const rows=lnHistoryRows({ nodes, trades });
+  card.classList.toggle('hide', !nodes.length && !trades.length);
   list.innerHTML='';
   if(!rows.length){ list.appendChild(el('div','muted','No Lightning payments yet.')); return; }
+  const metaFor=(a)=> a==='btc' ? { ticker:'BTC', precision:8 } : assetMeta(a);
+  const fmtLeg=(l)=>{ const m=metaFor(l.asset); return fmtAtoms(l.atoms, m.precision)+' '+m.ticker; };
   for(const r of rows.slice(0,100)){
     const item=el('div','item');
-    item.appendChild(el('span','badge dir '+(r.kind==='in'?'b-in':r.kind==='out'?'b-out':'b-swap'), r.kind==='in'?'IN':r.kind==='out'?'OUT':'SWAP'));
+    const swap=r.kind==='swap';
+    item.appendChild(el('span','badge dir '+(r.kind==='in'?'b-in':r.kind==='out'?'b-out':'b-swap'), swap?'SWAP':r.kind==='in'?'IN':'OUT'));
     const mid=el('div','grow');
-    mid.appendChild(el('div',null, r.text || (r.kind==='in' ? 'Received over Lightning' : 'Paid over Lightning')));
-    mid.appendChild(el('div','sub', (r.at ? whenText(r.at) : '')+(r.status ? ' · '+r.status : '')));
+    // Default mode names the swap and its amounts only; developer mode adds where each leg settled.
+    const dev=devMode();
+    const head = swap ? lnSwapLine(r, fmtLeg, dev) : lnPlainLine(r, dev);
+    mid.appendChild(el('div',null, head));
+    const rails = (swap && dev) ? lnRailLine(r, (a)=>metaFor(a).ticker) : '';
+    const sub=[r.at ? whenText(r.at) : '', (swap && r.title && r.title!==head) ? r.title : '', rails, r.status].filter(Boolean).join(' · ');
+    if(sub) mid.appendChild(el('div','sub', sub));
     item.appendChild(mid);
-    if(r.m) item.appendChild(el('span','amt '+(r.kind==='in'?'pos':'neg'), (r.kind==='in'?'+':'-')+fmtAtoms(r.atoms, r.m.precision)+' '+r.m.ticker));
+    const amts=el('div','amts');
+    for(const l of r.legs){ const out=l.dir==='out';
+      amts.appendChild(el('span','amt '+(out?'neg':'pos'), (out?'-':'+')+fmtLeg(l))); }
+    if(r.fee){ amts.appendChild(el('span','fee','fee '+fmtLeg(r.fee))); }
+    item.appendChild(amts);
     list.appendChild(item);
   }
 }
 function renderHistory(){
   renderBtcHistory().catch(()=>{});
-  renderLnHistory().catch(()=>{});   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
+  renderLnHistory().catch((e)=>console.warn('[history] Lightning card:', e?.message??e));   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
   renderOampHistory(); refreshOampHistory().catch(()=>{});   // WW-6: restricted-transfer history + confirmation/anchor chips
   const list=$('histList'); if(!wollet){ return; }
   // Before this session's first sync the wollet may hold nothing yet, and "No transactions yet"

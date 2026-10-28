@@ -1,0 +1,419 @@
+{
+ "hashes": {
+  "pureln": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+  "subbuy": "58995bb290dc2c25547f2a9a31490a47c538fc22c86d4ba5dc0878e5adf4f3fe",
+  "subsell": "6e949ad6ea614a04f5de88c130c33a365fd44a806bf125a170281e01e37b9169",
+  "plainout": "af5a5595105672876ec23ef3007fc77c3ecf15a512ec7e86665e85c756882ae6",
+  "plainin": "5fad01dae3fd994aadf5193f51e42329a96c5d479e6f4baa039b21bc11c0458f",
+  "neg_failed_out": "4d77dd5d1254a4dfde0fd5fb2d210b4791893edee4af1878e087cf63fb9a0321",
+  "neg_hold_unpaid": "11640eb4ed788f14b06e98e4dbd321e475a100c0694a0f4bf3ec6e36a758a1bd",
+  "neg_hold_unsettled": "d0247de37f97efc38f9725473e6ba40f33dcff7404dc0e658fe099332b96f526"
+ },
+ "gold": "d024f89a8119d84ecf31fcabc87bc94e2b7d7966bc47dfb76b6237e75f2defdb",
+ "silv": "a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7",
+ "nodes": {
+  "l1_gold_user": {
+   "listinvoices": {
+    "invoices": []
+   },
+   "listpays": {
+    "pays": [
+     {
+      "destination": "033845802d25b4e074ccfd7cd8b339a41dc75bf9978a034800444b51d42b07799a",
+      "payment_hash": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+      "status": "complete",
+      "created_at": 1792743209,
+      "completed_at": 1792743210,
+      "preimage": "<removed>",
+      "amount_msat": 5000000000,
+      "amount_sent_msat": 5000000000,
+      "created_index": 1,
+      "updated_index": 1
+     },
+     {
+      "destination": "033845802d25b4e074ccfd7cd8b339a41dc75bf9978a034800444b51d42b07799a",
+      "payment_hash": "6e949ad6ea614a04f5de88c130c33a365fd44a806bf125a170281e01e37b9169",
+      "status": "complete",
+      "created_at": 1792743210,
+      "completed_at": 1792743210,
+      "preimage": "<removed>",
+      "amount_msat": 2000000000,
+      "amount_sent_msat": 2000000000,
+      "created_index": 2,
+      "updated_index": 2
+     },
+     {
+      "bolt11": "<removed>",
+      "destination": "033845802d25b4e074ccfd7cd8b339a41dc75bf9978a034800444b51d42b07799a",
+      "payment_hash": "af5a5595105672876ec23ef3007fc77c3ecf15a512ec7e86665e85c756882ae6",
+      "status": "complete",
+      "created_at": 1792743210,
+      "completed_at": 1792743210,
+      "preimage": "<removed>",
+      "amount_msat": 1000000000,
+      "amount_sent_msat": 1000000000,
+      "created_index": 3,
+      "updated_index": 3
+     },
+     {
+      "destination": "033845802d25b4e074ccfd7cd8b339a41dc75bf9978a034800444b51d42b07799a",
+      "payment_hash": "4d77dd5d1254a4dfde0fd5fb2d210b4791893edee4af1878e087cf63fb9a0321",
+      "status": "failed",
+      "created_at": 1792743210,
+      "amount_sent_msat": 0,
+      "created_index": 4,
+      "updated_index": 4
+     }
+    ]
+   },
+   "listhtlcs": {
+    "htlcs": [
+     {
+      "created_index": 1,
+      "updated_index": 9,
+      "short_channel_id": "105x1x0",
+      "id": 0,
+      "expiry": 307,
+      "direction": "out",
+      "amount_msat": 5000000000,
+      "payment_hash": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+      "state": "RCVD_REMOVE_ACK_REVOCATION"
+     },
+     {
+      "created_index": 2,
+      "updated_index": 18,
+      "short_channel_id": "105x1x0",
+      "id": 1,
+      "expiry": 307,
+      "direction": "out",
+      "amount_msat": 2000000000,
+      "payment_hash": "6e949ad6ea614a04f5de88c130c33a365fd44a806bf125a170281e01e37b9169",
+      "state": "RCVD_REMOVE_ACK_REVOCATION"
+     },
+     {
+      "created_index": 3,
+      "updated_index": 27,
+      "short_channel_id": "105x1x0",
+      "id": 2,
+      "expiry": 287,
+      "direction": "out",
+      "amount_msat": 1000000000,
+      "payment_hash": "af5a5595105672876ec23ef3007fc77c3ecf15a512ec7e86665e85c756882ae6",
+      "state": "RCVD_REMOVE_ACK_REVOCATION"
+     },
+     {
+      "created_index": 4,
+      "updated_index": 35,
+      "short_channel_id": "105x1x0",
+      "id": 3,
+      "expiry": 307,
+      "direction": "out",
+      "amount_msat": 1000000000,
+      "payment_hash": "4d77dd5d1254a4dfde0fd5fb2d210b4791893edee4af1878e087cf63fb9a0321",
+      "state": "RCVD_REMOVE_ACK_REVOCATION"
+     }
+    ]
+   },
+   "listdatastore": {
+    "datastore": []
+   },
+   "bkpr-listaccountevents": {
+    "events": [
+     {
+      "account": "wallet",
+      "type": "chain",
+      "tag": "deposit",
+      "credit_msat": 1000000000000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "outpoint": "76f694aaae3aa563076341fe86fccfb81d73526f21d142522878d2112e5440be:1",
+      "timestamp": 1792743207,
+      "blockheight": 104
+     },
+     {
+      "account": "wallet",
+      "type": "chain",
+      "tag": "withdrawal",
+      "credit_msat": 0,
+      "debit_msat": 1000000000000,
+      "currency": "sqrt",
+      "outpoint": "76f694aaae3aa563076341fe86fccfb81d73526f21d142522878d2112e5440be:1",
+      "txid": "e9839f03aba22a55bff20b613bcc6bce01cf196a72af05d652c471d8c6fd3e7a",
+      "timestamp": 1792743208,
+      "blockheight": 105
+     },
+     {
+      "account": "wallet",
+      "type": "chain",
+      "tag": "deposit",
+      "credit_msat": 899991907000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "outpoint": "e9839f03aba22a55bff20b613bcc6bce01cf196a72af05d652c471d8c6fd3e7a:1",
+      "timestamp": 1792743208,
+      "blockheight": 105
+     },
+     {
+      "account": "7a3efdc6d871c452d605af726a19cf01ce6bcc3b610bf2bf552aa2ab039f83e9",
+      "type": "chain",
+      "tag": "channel_open",
+      "credit_msat": 100000000000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "outpoint": "e9839f03aba22a55bff20b613bcc6bce01cf196a72af05d652c471d8c6fd3e7a:0",
+      "timestamp": 1792743208,
+      "blockheight": 105
+     },
+     {
+      "account": "7a3efdc6d871c452d605af726a19cf01ce6bcc3b610bf2bf552aa2ab039f83e9",
+      "type": "onchain_fee",
+      "tag": "onchain_fee",
+      "credit_msat": 8093000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "timestamp": 1792743208,
+      "txid": "e9839f03aba22a55bff20b613bcc6bce01cf196a72af05d652c471d8c6fd3e7a"
+     },
+     {
+      "account": "wallet",
+      "type": "onchain_fee",
+      "tag": "onchain_fee",
+      "credit_msat": 100008093000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "timestamp": 1792743208,
+      "txid": "e9839f03aba22a55bff20b613bcc6bce01cf196a72af05d652c471d8c6fd3e7a"
+     },
+     {
+      "account": "wallet",
+      "type": "onchain_fee",
+      "tag": "onchain_fee",
+      "credit_msat": 0,
+      "debit_msat": 100008093000,
+      "currency": "sqrt",
+      "timestamp": 1792743208,
+      "txid": "e9839f03aba22a55bff20b613bcc6bce01cf196a72af05d652c471d8c6fd3e7a"
+     },
+     {
+      "account": "7a3efdc6d871c452d605af726a19cf01ce6bcc3b610bf2bf552aa2ab039f83e9",
+      "type": "channel",
+      "tag": "invoice",
+      "credit_msat": 0,
+      "debit_msat": 5000000000,
+      "currency": "sqrt",
+      "payment_id": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+      "part_id": 0,
+      "timestamp": 1792743210,
+      "is_rebalance": false
+     },
+     {
+      "account": "7a3efdc6d871c452d605af726a19cf01ce6bcc3b610bf2bf552aa2ab039f83e9",
+      "type": "channel",
+      "tag": "invoice",
+      "credit_msat": 0,
+      "debit_msat": 2000000000,
+      "currency": "sqrt",
+      "payment_id": "6e949ad6ea614a04f5de88c130c33a365fd44a806bf125a170281e01e37b9169",
+      "part_id": 0,
+      "timestamp": 1792743210,
+      "is_rebalance": false
+     },
+     {
+      "account": "7a3efdc6d871c452d605af726a19cf01ce6bcc3b610bf2bf552aa2ab039f83e9",
+      "type": "channel",
+      "tag": "invoice",
+      "credit_msat": 0,
+      "debit_msat": 1000000000,
+      "currency": "sqrt",
+      "payment_id": "af5a5595105672876ec23ef3007fc77c3ecf15a512ec7e86665e85c756882ae6",
+      "part_id": 0,
+      "description": "coffee",
+      "timestamp": 1792743210,
+      "is_rebalance": false
+     }
+    ]
+   }
+  },
+  "l3_silv_user": {
+   "listinvoices": {
+    "invoices": [
+     {
+      "label": "xpln-recv",
+      "bolt11": "<removed>",
+      "payment_hash": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+      "amount_msat": 7000000000,
+      "status": "paid",
+      "pay_index": 1,
+      "amount_received_msat": 7000000000,
+      "paid_at": 1792743210,
+      "payment_preimage": "<removed>",
+      "description": "pureln swap",
+      "expires_at": 1793348009,
+      "asset": "a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7",
+      "created_index": 1,
+      "updated_index": 1
+     },
+     {
+      "label": "plain-in",
+      "bolt11": "<removed>",
+      "payment_hash": "5fad01dae3fd994aadf5193f51e42329a96c5d479e6f4baa039b21bc11c0458f",
+      "amount_msat": 1500000000,
+      "status": "paid",
+      "pay_index": 2,
+      "amount_received_msat": 1500000000,
+      "paid_at": 1792743210,
+      "payment_preimage": "<removed>",
+      "description": "Lightning receive",
+      "expires_at": 1793348010,
+      "asset": "a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7",
+      "created_index": 2,
+      "updated_index": 2
+     },
+     {
+      "label": "never-paid",
+      "bolt11": "<removed>",
+      "payment_hash": "669fbe2d2e069118e0f57db87e430255a1e245a1fdb9863874e68db36042b2c4",
+      "amount_msat": 1000000000,
+      "status": "unpaid",
+      "description": "never",
+      "expires_at": 1793348011,
+      "asset": "a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7",
+      "created_index": 3
+     }
+    ]
+   },
+   "listpays": {
+    "pays": []
+   },
+   "listhtlcs": {
+    "htlcs": [
+     {
+      "created_index": 1,
+      "updated_index": 8,
+      "short_channel_id": "106x1x0",
+      "id": 0,
+      "expiry": 287,
+      "direction": "in",
+      "amount_msat": 7000000000,
+      "payment_hash": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+      "state": "SENT_REMOVE_ACK_REVOCATION"
+     },
+     {
+      "created_index": 2,
+      "updated_index": 16,
+      "short_channel_id": "106x1x0",
+      "id": 1,
+      "expiry": 307,
+      "direction": "in",
+      "amount_msat": 3000000000,
+      "payment_hash": "58995bb290dc2c25547f2a9a31490a47c538fc22c86d4ba5dc0878e5adf4f3fe",
+      "state": "SENT_REMOVE_ACK_REVOCATION"
+     },
+     {
+      "created_index": 3,
+      "updated_index": 24,
+      "short_channel_id": "106x1x0",
+      "id": 2,
+      "expiry": 287,
+      "direction": "in",
+      "amount_msat": 1500000000,
+      "payment_hash": "5fad01dae3fd994aadf5193f51e42329a96c5d479e6f4baa039b21bc11c0458f",
+      "state": "SENT_REMOVE_ACK_REVOCATION"
+     },
+     {
+      "created_index": 4,
+      "updated_index": 27,
+      "short_channel_id": "106x1x0",
+      "id": 3,
+      "expiry": 307,
+      "direction": "in",
+      "amount_msat": 1000000000,
+      "payment_hash": "d0247de37f97efc38f9725473e6ba40f33dcff7404dc0e658fe099332b96f526",
+      "state": "RCVD_ADD_ACK_REVOCATION"
+     }
+    ]
+   },
+   "listdatastore": {
+    "datastore": [
+     {
+      "key": [
+       "holdinvoice-seq",
+       "11640eb4ed788f14b06e98e4dbd321e475a100c0694a0f4bf3ec6e36a758a1bd"
+      ],
+      "generation": 0,
+      "string": "{\"state\": \"waiting\", \"preimage\": null, \"amount_msat\": 1000000000, \"asset\": \"a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7\", \"label\": \"\", \"description\": \"hold 11640eb4\", \"cltv\": 0, \"mpp_timeout\": 60}"
+     },
+     {
+      "key": [
+       "holdinvoice-seq",
+       "58995bb290dc2c25547f2a9a31490a47c538fc22c86d4ba5dc0878e5adf4f3fe"
+      ],
+      "generation": 1,
+      "string": "{\"state\": \"settled\", \"preimage\": \"<removed>\", \"amount_msat\": 3000000000, \"asset\": \"a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7\", \"label\": \"\", \"description\": \"hold 58995bb2\", \"cltv\": 0, \"mpp_timeout\": 60}"
+     },
+     {
+      "key": [
+       "holdinvoice-seq",
+       "d0247de37f97efc38f9725473e6ba40f33dcff7404dc0e658fe099332b96f526"
+      ],
+      "generation": 0,
+      "string": "{\"state\": \"waiting\", \"preimage\": null, \"amount_msat\": 1000000000, \"asset\": \"a1e906baeb35e566e9f717f4b8fc241c9337f387603e3f3bb2818d153c4c69d7\", \"label\": \"\", \"description\": \"hold d0247de3\", \"cltv\": 0, \"mpp_timeout\": 60}"
+     }
+    ]
+   },
+   "bkpr-listaccountevents": {
+    "events": [
+     {
+      "account": "c18938415984766949df77fd3e50a0f1507837473789ede9810cd788f4e373c1",
+      "type": "chain",
+      "tag": "channel_open",
+      "credit_msat": 0,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "outpoint": "c173e3f488d70c81e9ed893747377850f1a0503efd77df4969768459413889c1:0",
+      "timestamp": 1792743208,
+      "blockheight": 106
+     },
+     {
+      "account": "c18938415984766949df77fd3e50a0f1507837473789ede9810cd788f4e373c1",
+      "type": "channel",
+      "tag": "invoice",
+      "credit_msat": 7000000000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "payment_id": "e46e443385bb3d3b9ae4e024302b6651f18e510c04b10b1e847756a4b7572156",
+      "part_id": 0,
+      "description": "pureln swap",
+      "timestamp": 1792743210,
+      "is_rebalance": false
+     },
+     {
+      "account": "c18938415984766949df77fd3e50a0f1507837473789ede9810cd788f4e373c1",
+      "type": "channel",
+      "tag": "invoice",
+      "credit_msat": 3000000000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "payment_id": "58995bb290dc2c25547f2a9a31490a47c538fc22c86d4ba5dc0878e5adf4f3fe",
+      "part_id": 0,
+      "timestamp": 1792743210,
+      "is_rebalance": false
+     },
+     {
+      "account": "c18938415984766949df77fd3e50a0f1507837473789ede9810cd788f4e373c1",
+      "type": "channel",
+      "tag": "invoice",
+      "credit_msat": 1500000000,
+      "debit_msat": 0,
+      "currency": "sqrt",
+      "payment_id": "5fad01dae3fd994aadf5193f51e42329a96c5d479e6f4baa039b21bc11c0458f",
+      "part_id": 0,
+      "description": "Lightning receive",
+      "timestamp": 1792743210,
+      "is_rebalance": false
+     }
+    ]
+   }
+  }
+ }
+}

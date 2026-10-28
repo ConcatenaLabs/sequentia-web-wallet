@@ -46,6 +46,7 @@ import { jobIsDead } from './seqln.js';
 // The mixed-rail (submarine) swap state machine + localStorage resume (fund-safety:
 // an in-flight on-chain HTLC leg must survive a reload so it can be refunded).
 import * as sub from './submarine.js';
+import { tradeHash } from './ln-history.js';
 // The SBTC bridge client (the silent peg for resting on-chain-BTC LIMIT orders). Allocates
 // peg-in/peg-out addresses only; the wallet's own signed sends move the funds. See sbtc.js.
 import * as sbtc from './sbtc.js';
@@ -199,24 +200,60 @@ export function logTrade(e){
     // composer minutes after every settle, swallowing clicks).
     const identicalRelog = !!(prev && prev.status === (e.status || '') && prev.title === (e.title || ''));
     const at = (prev && prev.at) || e.at || Date.now();
+    // An upgrade replaces the row's title and status; what the new write does not say (the rail, the
+    // pair, the amounts, the hash) is kept from the earlier row, so a refunded buy still names its rail.
+    const keep = (k) => (e[k] != null && e[k] !== '') ? e[k] : ((prev && prev[k] != null) ? prev[k] : null);
     h.unshift({
       id: e.id, title: e.title || '', status: e.status || '',
       txid: e.txid || (Array.isArray(e.txids) && e.txids[0]) || (prev && prev.txid) || null, at, ts: e.ts || (prev && prev.ts) || at,
       // Enriched, durable receipt fields (all optional; a path that can't supply one leaves it blank —
       // honest, not fabricated). pair/side/price/size/fee/rail feed the "Your trades" view + the export.
-      pair: e.pair || null, side: e.side || null,
-      price: (e.price != null && isFinite(e.price)) ? e.price : null,
-      size: (e.size != null) ? e.size : null, sizeTicker: e.sizeTicker || null,
-      fee: (e.fee != null) ? e.fee : null, feeTicker: e.feeTicker || null,
-      rail: e.rail || null, preimage: e.preimage || null,
-      txids: Array.isArray(e.txids) ? e.txids.filter(Boolean).slice(0, 64) : (e.txid ? [e.txid] : []),
+      pair: keep('pair'), side: keep('side'),
+      price: (e.price != null && isFinite(e.price)) ? e.price : ((prev && prev.price != null) ? prev.price : null),
+      size: keep('size'), sizeTicker: keep('sizeTicker'),
+      fee: keep('fee'), feeTicker: keep('feeTicker'),
+      rail: keep('rail'), preimage: keep('preimage'),
+      // The payment hash the trade settles under, and what it paid and received ({ asset: 'btc' | hex,
+      // atoms, rail: 'ln' | 'chain' }): the History's Lightning card joins the nodes' legs by the hash.
+      payment_hash: keep('payment_hash'), pay: keep('pay'), recv: keep('recv'),
+      txids: Array.isArray(e.txids) ? e.txids.filter(Boolean).slice(0, 64) : (e.txid ? [e.txid] : ((prev && prev.txids) || [])),
     });
+    if (!h[0].payment_hash) h[0].payment_hash = tradeHash(h[0]);
     saveHist(h);
+    if (e.card && !identicalRelog) noteSwap(h[0]);
     try { renderInFlightCard(); } catch {}   // surface the new receipt in the trades view immediately
     // Settle card (task 21b): a caller that marks a genuine settlement gets the one-shot
     // completion card. Opt-in by flag — the fund-time and refund rows must never pop one.
     if (e.card && !identicalRelog){ try { showSettleCard(h[0], e); } catch {} }
   } catch {}
+}
+// Leave the account of a settled Lightning swap on the wallet's own hosted node(s) of its Lightning
+// legs (POST /node/swap-note), so the History names both legs, the on-chain one included, on any
+// device. Best effort: the node's own record of the leg is what makes the row; the note only names it.
+function noteSwap(t){
+  try {
+    if (!L || !L.swapNote || !t || !t.payment_hash || !t.pay || !t.recv || !LN_TRADE_RAILS.has(t.rail)) return;
+    const note = { pay: t.pay, recv: t.recv, title: t.title || '' };
+    for (const leg of [t.pay, t.recv]) {
+      if (!leg || leg.rail !== 'ln') continue;
+      (async () => {
+        const node_key = leg.asset === 'btc' ? (L.btcNodeKey && await L.btcNodeKey()) : (L.assetNodeKey && await L.assetNodeKey(leg.asset));
+        if (!node_key) return;
+        for (let i = 0; i < 3; i++){
+          try { await L.swapNote({ node_key, payment_hash: t.payment_hash, note }); return; }
+          catch { await new Promise((ok) => setTimeout(ok, 5000 * (i + 1))); }
+        }
+      })().catch(() => {});
+    }
+  } catch {}
+}
+// A leg of a trade for its receipt: { asset: 'btc' | hex id, atoms (string), rail: 'ln' | 'chain' }.
+function tradeLeg(asset, atoms, rail){
+  try {
+    const a = (!asset || asset === 'BTC' || asset === 'btc') ? 'btc' : String(asset).toLowerCase();
+    const n = big(atoms || 0);
+    return n > 0n ? { asset: a, atoms: n.toString(), rail } : null;
+  } catch { return null; }
 }
 // The trades that settled in more than one transaction (a market order walks several offers, one
 // fill each), so History can show them as one order: [{ id, title, txids }].
@@ -5303,6 +5340,9 @@ function applyBridgeStatus(r){
         logTrade({ id: 'bridge:' + (BRIDGE.hash_h || BRIDGE.job_id || BRIDGE.swap_nonce || ''),
           title: (sell ? 'Sold ' : 'Bought ') + (bm.ticker || 'asset') + (sell ? ' for BTC' : ' with BTC'),
           status: 'settled', rail: 'bridged', pair: (bm.ticker || 'asset') + '/BTC',
+          payment_hash: BRIDGE.hash_h || null,
+          pay: sell ? tradeLeg(BRIDGE.asset, BRIDGE.asset_atoms, 'chain') : tradeLeg('btc', BRIDGE.btc_sats, 'ln'),
+          recv: sell ? tradeLeg('btc', BRIDGE.btc_sats, 'ln') : tradeLeg(BRIDGE.asset, BRIDGE.asset_atoms, 'chain'),
           side: sell ? 'sell' : 'buy', size: assetU || null, sizeTicker: bm.ticker || null,
           price: (assetU > 0) ? btcU / assetU : null,
           card: true,   // task 21b: genuine settlement -> settle card
@@ -8080,6 +8120,7 @@ async function startSell(params){
     // returns the settled {preimage, btc_htlc} idempotently (it never re-pays for a stored nonce).
     const swap_nonce = newSwapNonce();
     rec = addSell({ state: 'paying', swap_nonce, asset, ticker: am.ticker, amount: params.amount ?? null,
+      asset_atoms: params.expectedAssetAtoms != null ? String(params.expectedAssetAtoms) : null,
       quote_asset: qh || undefined,   // mixed same-chain: the claim leg's REAL asset (absent = BTC)
       started_ms: Date.now(),         // total-elapsed anchor for the progress narrative + settle card
       node_key, btc_claim_pub, offer, ts: Date.now() });
@@ -8183,6 +8224,9 @@ async function claimSell(SELL){
   const sellBtcU = (() => { try { return Number(big(H.amount || 0)) / 1e8; } catch { return null; } })();
   logTrade({ id: 'sell:' + (SELL.hash_h || SELL.claim_txid || ''), title: 'Sold ' + SELL.ticker + ' for ' + sellQtk,
     status: sellQtk + ' claimed', txid: SELL.claim_txid, rail: 'sub-asset', preimage: SELL.preimage || null,
+    payment_hash: SELL.hash_h || null,
+    pay: tradeLeg(SELL.asset, SELL.asset_atoms || (() => { try { return String(Math.round(Number(SELL.amount) * Math.pow(10, (metaOf(SELL.asset) || {}).precision || 0))); } catch { return null; } })(), 'ln'),
+    recv: tradeLeg(SELL.quote_asset || 'btc', H.amount, 'chain'),
     pair: (SELL.ticker || 'asset') + '/' + sellQtk, side: 'sell', sizeTicker: SELL.ticker || null,
     size: (SELL.amount != null ? Number(SELL.amount) : null),
     price: (sellBtcU != null && Number(SELL.amount) > 0) ? sellBtcU / Number(SELL.amount) : null,
@@ -8531,7 +8575,8 @@ async function startBuy(params){
     }
     b.btc_htlc.txid = String(funded.txid); b.btc_htlc.vout = funded.vout; b.state = 'funded'; saveBuys();
     const btc_htlc = b.btc_htlc;   // { txid, vout, amount, redeem_script, cltv, ... } for the /swap call
-    logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with ' + qtk, status: qtk + ' locked' });
+    logTrade({ id: 'buy:' + H, title: 'Buying ' + am.ticker + ' with ' + qtk, status: qtk + ' locked', rail: 'sub-asset',
+      payment_hash: H, pay: tradeLeg(qh || 'btc', btcSats, 'chain'), recv: tradeLeg(asset, assetAtoms, 'ln') });
     // 4. Command the LSP to drive the maker's pay-by-hash (ASYNC job -> 202 { job_id, poll, held:false }).
     say('Waiting for your trade to settle …');
     const job = await L.swap({ side: 'buy', hodl: true, asset, node_key, payment_hash: H, asset_amount: assetAtoms,
@@ -8570,7 +8615,9 @@ async function driveBuy(b, say){
     const buyAssetU = (() => { try { return Number(big(b.asset_amount || 0)) / Math.pow(10, (metaOf(b.asset) || {}).precision || 0); } catch { return null; } })();
     const buyBtcU = (() => { try { return Number(big((b.btc_htlc && (b.btc_htlc.amount || b.btc_htlc.btc_sats)) || 0)) / 1e8; } catch { return null; } })();
     logTrade({ id: 'buy:' + H, title: 'Bought ' + b.ticker + ' with ' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), status: 'asset received',
-      rail: 'sub-asset', preimage: b.preimage || null, pair: (b.ticker || 'asset') + '/' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), side: 'buy',
+      rail: 'sub-asset', preimage: b.preimage || null, payment_hash: H,
+      pay: tradeLeg(b.quote_asset || 'btc', b.btc_htlc && (b.btc_htlc.amount || b.btc_htlc.btc_sats), 'chain'),
+      recv: tradeLeg(b.asset, b.asset_amount, 'ln'), pair: (b.ticker || 'asset') + '/' + (b.quote_asset ? ((C.assetMeta(b.quote_asset) || {}).ticker || 'quote') : 'BTC'), side: 'buy',
       size: buyAssetU, sizeTicker: b.ticker || null,
       price: (buyBtcU != null && buyAssetU > 0) ? buyBtcU / buyAssetU : null,
       // Task 19b: UPGRADE the fund-time '<QUOTE> locked' row in place (same id) — for the BTC
@@ -9819,7 +9866,9 @@ async function reviewLn(q){
       const lnQuoteU = Number(big(r.quote_amount || 0)) / Math.pow(10, qprec || 0);
       logTrade({ id: 'ln:' + (r.hash_h || r.preimage || Date.now()),
         title: (r.direction === 'sold' ? 'Sold ' + bm.ticker + ' for ' + qtkR : 'Bought ' + bm.ticker + ' with ' + qtkR) + ' over Lightning',
-        status: 'settled', rail: 'ln', preimage: r.preimage || null,
+        status: 'settled', rail: 'ln', preimage: r.preimage || null, payment_hash: r.hash_h || null,
+        pay: r.direction === 'sold' ? tradeLeg(r.asset || q.seqAsset, r.base_amount, 'ln') : tradeLeg(q.assetAsset ? q.quoteAsset : 'btc', r.quote_amount, 'ln'),
+        recv: r.direction === 'sold' ? tradeLeg(q.assetAsset ? q.quoteAsset : 'btc', r.quote_amount, 'ln') : tradeLeg(r.asset || q.seqAsset, r.base_amount, 'ln'),
         pair: bm.ticker + '/' + qtkR, side: (r.direction === 'sold') ? 'sell' : 'buy',
         price: lnBaseU > 0 ? lnQuoteU / lnBaseU : null, size: lnBaseU || null, sizeTicker: bm.ticker,
         card: true });   // task 21b: genuine settlement -> settle card

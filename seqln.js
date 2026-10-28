@@ -653,9 +653,15 @@ export function seqlnNodeReceive({ node_key, amount, description }) {
   return lspFetch('/node/receive', { method: 'POST', body: JSON.stringify({ node_key, amount, description }) });
 }
 // What the user's own hosted node received and paid over Lightning: { items: [{ dir: 'in'|'out',
-// amount_msat, at (unix seconds), payment_hash, description }] }, newest first.
+// kind: 'invoice'|'hold'|'pay', asset, amount_msat, fee_msat, at (unix seconds), payment_hash,
+// description, note }] }, newest first: paid invoices, settled holds and completed payments.
 export function seqlnNodeHistory(node_key) {
   return lspFetch('/node/history?node_key=' + encodeURIComponent(node_key), { method: 'GET' });
+}
+// Keep the account of a settled swap on the user's own hosted node, read back by /node/history as
+// the item's `note`: { pay: { asset, atoms, rail }, recv: { asset, atoms, rail }, title }.
+export function seqlnSwapNote({ node_key, payment_hash, note }) {
+  return lspFetch('/node/swap-note', { method: 'POST', body: JSON.stringify({ node_key, payment_hash, note }) });
 }
 // Generic Lightning SEND: the user's own hosted node PAYS `bolt11` (device co-signs every HTLC).
 // Returns { paid, preimage, amount_msat, destination }.
