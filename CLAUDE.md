@@ -74,11 +74,17 @@ a payment to a receive code of the same operator and chain goes in the tree (`tr
 coins new on the chain are boarded in `leaves.js`'s upkeep (`boardArrivals`: never in developer
 mode, never ahead of a person, never within a minute of the page's own on-chain payment, since
 both spend the same keys' coins). An address the chain's coins can't cover is paid out of the tree
-(`offboard_quote`, then `offboard` with the quote as `shown`). In user mode the open page reads the
-mailbox every five seconds (`watchMailbox`), and its own upkeep, the mailbox read included,
-leaves twenty seconds after anything a person asked, since a trade's quote asks the library
-several times and the worker answers one command at a time; the bond's watch, which holds the
-worker for most of a minute, runs at most hourly after two quiet minutes. A wallet that joined an operator keeps its leaf wallet syncing
+(`offboard_quote`, then `offboard` with the quote as `shown`). A payment the operator refuses as too
+many reassignments from a round (`depth_limit`) refreshes that asset's coins in the next round and
+is asked again once it is final (`paying`), as a release is. A wallet joined by itself restores
+once to the end (`RESTORED_KEY`; a page closed mid-restore restores at its next open) and counts
+as open only after it, so the page works on the chain alone meanwhile. The worker answers one
+command at a time, so in user mode on the page's operator the wallet's own work never stands in
+a person's way: the pass that syncs at open, care, boards and the mailbox read (every ten seconds,
+`watchMailbox`) wait for twenty quiet seconds after the page opens or a person asks anything (a
+trade's quote asks the library several times); the bond's watch, which holds the worker for most
+of a minute, runs at most hourly after two quiet minutes; and the Trade tab follows a trade older
+than two minutes every half minute, and never while a price is asked. A wallet that joined an operator keeps its leaf wallet syncing
 in either mode; user mode shows nothing of leaves and the page API refuses every leaf method
 there, but leaves count in each asset's figure and the headline. Each asset's figure counts
 on-chain, leaves, Lightning and, for tSEQ, what is staked (`stakedAtoms` in `index.html`), in

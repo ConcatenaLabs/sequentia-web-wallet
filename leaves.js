@@ -94,11 +94,12 @@ export const JOINED_KEY = 'swk.leaves.joined'        // + '.' + tag: this wallet
 export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf address handed to pages
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
+export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
 // User mode: how often the open page reads the wallet's mailbox, so that a payment to its receive
 // code shows within seconds rather than at the schedule's next sync.
-export const MAILBOX_POLL_MS = 5_000
+export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
 // User mode: the watch of the operator's bond (which may read a long stretch of the chain, and
 // holds the wallet while it does) runs at most this often, and only once the page has been
@@ -582,6 +583,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
         // A wallet joined by itself is opened only under the key the page pins.
         if (auto && !joinedOperator(ctx.store, tag())) checkPinned(S.info && S.info.operator, auto, 'the wallet')
         setJoined(ctx.store, tag())
+        // A wallet this page joined by itself whose restore was cut short restores now.
+        if (auto) await restoreOnce()
         S.open = true
       }
       S.joinError = null
@@ -589,6 +592,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     } catch (e) {
       S.open = false
       S.joinError = e
+      log('[leaves] could not open' + (auto ? ' (tried again in two minutes)' : '') + ': ' + ((e && e.message) || e))
       if (auto) S.joinTimer = setTimeout(() => { start().catch(() => {}) }, JOIN_RETRY_MS)
       render()
       throw e
@@ -598,17 +602,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // wallet closed for a while may have coins a plan's step replaced, payments in its
     // mailbox, or an exit to move on; the schedule wakes a planned coin only at its plan's
     // date, so without this the page would show the coin the step gave up until then.
-    S.busy = true; render()
-    const tSync = now()
-    try {
-      const v = await run('sync')
-      log(`[leaves] sync at open: ${now() - tSync} ms`)
-      arrivals(v && v.mailbox)
-      S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
-    } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
-    try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
-    // What the wallet holds is on the page now; its own upkeep comes after.
-    S.busy = false; render()
+    // In user mode on the page's operator the pass waits, as the rest of the upkeep does, for a
+    // moment nobody is asking the wallet for anything: what it holds is on the page already,
+    // and a person who acts at once is not kept behind it.
+    if (!dev() && pinned()) S.openSyncDue = true
+    else await openSync()
     if (ctx.onOpen) try { ctx.onOpen() } catch {}
     await upkeep()
     schedule()
@@ -640,11 +638,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
     }, ctx.mailboxPollMs || MAILBOX_POLL_MS)
   }
 
+  async function openSync () {
+    S.openSyncDue = false
+    S.busy = true; render()
+    const tSync = now()
+    try {
+      const v = await run('sync')
+      log(`[leaves] sync at open: ${now() - tSync} ms`)
+      arrivals(v && v.mailbox)
+      S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
+    } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
+    try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
+    // What the wallet holds is on the page now; its own upkeep comes after.
+    S.busy = false; render()
+  }
+
   // Joins the page's operator, as the join form does with what a person types: the server must
   // show the pinned key before anything is created, and the wallet's answer must name it after.
   // A phrase that already holds coins with this operator (another browser, Ambra, the
   // extension) finds them under its mailbox key: restore once, as the join form does.
   async function joinPinned (m, cfg) {
+    log('[leaves] joining ' + cfg.server)
     if (!ctx.serverInfo) throw new LeafError({ kind: 'refused', message: 'the page cannot read the operator\u2019s server' })
     const si = await ctx.serverInfo(cfg.server)
     checkPinned(si && si.operator, cfg, 'the server')
@@ -653,9 +667,24 @@ export function mountLeaves (ctx, root, settingsRoot) {
     checkPinned(S.info && S.info.operator, cfg, 'the wallet')
     setJoined(ctx.store, tag())
     try { ctx.store.removeItem(NODE_PASSWORD_KEY) } catch {}
-    S.open = true
     S.autoJoined = { at: now() }
-    try { S.restored = await run('restore') } catch (e) { S.restored = { error: e.message } }
+    // Open once restored: until then the page works as it does without the tree (the address,
+    // what is on the chain), rather than waiting on what the restore holds up.
+    await restoreOnce()
+    S.open = true
+  }
+
+  // The join's restore, run to its end once: a page closed while it ran restores again when it
+  // next opens, so a phrase's coins are never left behind by a tab closed too soon.
+  async function restoreOnce () {
+    const key = tagged(RESTORED_KEY, tag())
+    try { if (ctx.store.getItem(key)) return } catch {}
+    const t0 = now()
+    try {
+      S.restored = await run('restore')
+      try { ctx.store.setItem(key, String(now())) } catch {}
+      log(`[leaves] restore: ${now() - t0} ms`)
+    } catch (e) { S.restored = { error: e.message }; log('[leaves] restore: ' + e.message) }
   }
 
   // ---- what a person asks for comes first ----
@@ -682,8 +711,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (S.busy || S.asked) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
     // In user mode on the page's operator, upkeep also leaves room between the steps of what a
     // person asked (a trade's quote asks the library several times, with the network between).
-    if (!dev() && pinned()) { const quiet = now() - (S.lastAsked || 0); if (quiet < MAILBOX_QUIET_MS) { S.upkeepLater = true; upkeepSoon(MAILBOX_QUIET_MS - quiet + 500); return } }
+    if (!dev() && pinned()) { const quiet = Math.min(now() - (S.lastAsked || 0), now() - (S.openedAt || 0)); if (quiet < MAILBOX_QUIET_MS) { S.upkeepLater = true; upkeepSoon(MAILBOX_QUIET_MS - quiet + 500); return } }
     S.upkeepLater = false
+    if (S.openSyncDue) await openSync()
+    if (S.asked) { S.upkeepLater = true; return }
     S.busy = true; render()
     try {
       if (careDue(S.careAt, now(), careEvery)) await careIfDue()
@@ -826,6 +857,23 @@ export function mountLeaves (ctx, root, settingsRoot) {
   async function paying (command, args) {
     for (let i = 0; ; i++) {
       try { return await run(command, args) } catch (e) {
+        // Coins too many payments from a round (the operator's `depth_limit`) are refreshed in the
+        // next round, by themselves, and the payment asked again once that round is final: the
+        // same wait as a release, which a person in user mode never has to ask for.
+        if (e instanceof LeafError && e.code === 'depth_limit' && i < RELEASE_TRIES && args && args.asset) {
+          const leaves = (S.coins && S.coins.length ? S.coins : (await run('coins')) || [])
+            .filter((c) => c.asset === args.asset && c.state === 'live').map((c) => c.leaf_id)
+          if (!leaves.length) throw e
+          S.releasing = { coins: leaves, asset: args.asset, since: now(), command, why: 'depth' }
+          render()
+          try {
+            const q = await run('quote', { leaves })
+            await run('participate', { leaves, shown: q.coins })
+            log(`[leaves] ${leaves.length} coin(s) refreshed in the next round before paying`)
+            await waitReleased(leaves)
+          } finally { S.releasing = null; render() }
+          continue
+        }
         if (!(e instanceof LeafError) || e.kind !== 'planned' || !e.release || !e.release.length || i >= RELEASE_TRIES) throw e
         S.releasing = { coins: e.release, asset: e.asset, since: now(), command }
         render()

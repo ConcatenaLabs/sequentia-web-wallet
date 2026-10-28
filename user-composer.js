@@ -19,6 +19,10 @@ import { USER_WORDS, pickerOrder, costLine } from './user-trade.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
+// How long a trade is followed every few seconds, and how often after that.
+export const FOLLOW_FAST_MS = 120_000
+export const FOLLOW_SLOW_MS = 30_000
+
 export function mountUserComposer (ctx) {
   const S = { pay: null, get: null, amount: '', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
     offered: { pay: null, list: [], at: 0, loading: false } }
@@ -191,13 +195,18 @@ export function mountUserComposer (ctx) {
   }
 
   // Open trades are moved on every few seconds while any is open, and once when the page opens.
+  // The wallet answers one command at a time, and moving a trade on asks it to sync: never while
+  // a person is pricing or confirming one, and every half minute for a trade older than two
+  // minutes, so an open trade does not hold up the next.
   async function follow () {
     clearTimeout(S.timer)
-    const open = ctx.engine.records().some((r) => !['settled', 'returned', 'failed'].includes(r.state))
-    if (!open) return
+    const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed'].includes(r.state))
+    if (!openRecs.length) return
+    if (S.busy) { S.timer = setTimeout(follow, ctx.followMs || 4000); return }
     try { await ctx.engine.resume() } catch (e) { console.warn('[user composer] resume:', e && e.message) }
     paintTrades()
-    S.timer = setTimeout(follow, ctx.followMs || 4000)
+    const young = openRecs.some((r) => Date.now() - (r.sentAt || r.at || 0) < FOLLOW_FAST_MS)
+    S.timer = setTimeout(follow, young ? (ctx.followMs || 4000) : (ctx.followSlowMs || FOLLOW_SLOW_MS))
   }
 
   return { render, follow, state: S }
