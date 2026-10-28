@@ -11,6 +11,10 @@ pkg/
 # worker; developer mode's Leaves tab) IS tracked, for the same reason.
 !leaves/pkg/
 !leaves/pkg/**
+# EXCEPTION: the vendored Bitcoin ark wallet (Bark's wallet built for a browser worker,
+# from the operator repository's bark-wasm/; default mode's BTC) IS tracked, likewise.
+!btc-ark/pkg/
+!btc-ark/pkg/**
 
 # Agent worktrees and local agent state (never belongs in the repo).
 .claude/

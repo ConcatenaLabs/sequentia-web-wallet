@@ -44,6 +44,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   come back through Reclaim once its lock has passed: a median time a day after it is placed (a
   block height a day ahead when the explorer gives no median time)
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
+- BTC on a Bitcoin ark in default mode: native bitcoin held in Bark's wallet of the same phrase
+  on the ark the page names (Second's server on testnet4), paid in seconds between wallets,
+  over Lightning to any invoice and out to any Bitcoin address, and the BTC side of trades
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry
@@ -112,11 +115,16 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   Bitcoin testnet4's fee estimates; a testnet4 estimate above 50 sat/vB is someone flooding
   testnet4 and is not followed. **Max** fills
   an amount with everything that can be sent after the fee. Every send shows a review dialog
-  before broadcast. A Lightning card pays an invoice from the hosted node. When the wallet has
+  before broadcast. In default mode one BTC recipient is paid from the Bitcoin ark when it holds
+  enough: an invoice over Lightning, a receive code at its Ark part inside the ark in seconds, an address out
+  of the ark to the chain; with too little there, an address is paid from the chain as before.
+  A Lightning card pays an invoice from the hosted node (a BTC invoice from the ark in default mode). When the wallet has
   none (or too little) of the invoice's asset on Lightning, it says so before asking the node,
   and offers **Move to Lightning** when the asset is on-chain.
 - **Receive**: one address for both chains. The default is the non-confidential `tb1...` form,
   which is Bitcoin-compatible: the same address receives parent-chain BTC and Sequentia assets.
+  In default mode BTC that arrives there and is confirmed moves by itself into the Bitcoin ark
+  (below), and a BTC invoice made on the Lightning card is paid into the ark.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
   Sequentia is transparent by default and confidentiality is opt-in (**Show blinded address**).
   **Show xpub** (developer mode) reveals the
@@ -211,9 +219,11 @@ In user mode the wallet holds its Sequentia assets in the tree of the operator t
 (`window.SEQ_ARCA`, its key pinned) without a step: a new or restored wallet joins it by itself
 once the operator's server shows the pinned key (a restored phrase finds the coins it holds
 there), and one that cannot (the server unreachable, or showing another key) works as it would
-without and tries again every two minutes. **Receive** gives a receive code (a single-use
-receive request of the leaf library), which another wallet of the same operator pays in
-seconds, with **Show address** for BTC and for any sender that asks for an address. The
+without and tries again every two minutes. **Receive** gives one receive code, a BIP321 payment request
+(`bitcoin:<address>?ark=<Ark address>&sequentia=<receive request>`, `pay-code.js`): another
+wallet like this one pays an asset at its single-use Sequentia receive request and BTC at its
+Bitcoin ark address, both in seconds, and any other wallet pays the address. The address alone
+is shown in developer mode. The
 testnet faucet pays the receive code, or the address when it does not pay that asset into
 receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
@@ -663,6 +673,9 @@ works normally without the restricted rows.
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
+| `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, and the composer's `deps.btc` on the ark. No DOM. |
+| `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
+| `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
@@ -675,6 +688,7 @@ works normally without the restricted rows.
 | `noble-ciphers.js` | Vendored `@noble/ciphers` (MIT): AES-256-GCM for the end-to-end swap encryption. |
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
 | `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md), and the live leaf maker (`leaf-maker.mjs`) user mode trades with. Four of its modules (`settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
+| `tooling/build-btc-ark.sh` | Builds `btc-ark/pkg` from an arca checkout's `bark-wasm/`, every build-machine path remapped. |
 | `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from an arca checkout's `wallet-wasm/`, every build-machine path remapped. |
 | `tooling/leaf-node.mjs` | The leaf library (`leaves/pkg`) run in Node, with its storage and synchronous requests given to it: for the leaf maker and the drill. |
 | `*.test.mjs` | Node test suites (no browser needed). |
