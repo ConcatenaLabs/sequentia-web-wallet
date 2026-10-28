@@ -3544,6 +3544,7 @@ function initLeaves(){
 // followed to "Settled". A pair is offered only once the drill has admitted it on this chain
 // (user-mode/pairs.json). Developer mode keeps the composer below unchanged.
 let userComposer = null, userTrade = null, _userPairs = null;
+const USER_READ_TIMEOUT_MS = 20000;
 async function userModePairs(){
   if(_userPairs) return _userPairs;
   const url = (typeof window!=='undefined' && window.SEQ_USER_MODE_PAIRS) || 'user-mode/pairs.json';
@@ -3561,7 +3562,7 @@ async function chainGenesis(){
 // relay's own JSON (what the leaf library reads an order from).
 async function relayPairBook(base, quote){
   const get = async (b, q)=>{
-    const r = await fetch(`${seqob.seqobBase()}/v1/market/${b}/${q}/orderbook`, { cache:'no-store' });
+    const r = await fetch(`${seqob.seqobBase()}/v1/market/${b}/${q}/orderbook`, { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) });
     if(!r.ok) return [];
     // statuses[i] is the order status of offers[i]: what the order can be filled for now.
     const j = await r.json();
@@ -3720,8 +3721,11 @@ function initUserComposer(){
       if(!leavesApi || !leavesApi.isOpen() || !leavesApi.state || !leavesApi.state.client) throw new Error('this wallet holds no leaves');
       return await leavesApi.pay(cmd, args || {});
     } },
+    // A read (a maker's quotes, the relay's book) that has not answered in 20 s is given up, so a
+    // silent maker costs the price one source rather than holding it for good. A POST is left to
+    // run: a firm offer or an acceptance can take minutes, and is only asked of a maker that quoted.
     fetchJson: async (url, init)=>{
-      const r = await fetch(url, init ? { ...init, headers: { 'content-type':'application/json' } } : { cache:'no-store' });
+      const r = await fetch(url, init ? { ...init, headers: { 'content-type':'application/json' } } : { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) });
       const j = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
       return j;
