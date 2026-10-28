@@ -336,6 +336,13 @@ its exit date), where the coin stays frozen on the chain until the issuer lifts 
 then spent like any coin. The operator serves no take, no resting order and no Lightning payment
 in a supervised asset, so the user composer offers such an asset only through an in-tree swap.
 
+A payment the operator declines is refused for good: the operator's signer refuses what it
+asks, and would refuse it again however often it were asked (the server's code `declined`). The
+library puts the coins back at once, keeps the refusal once among its refusals and sends nothing
+again; user mode reads "This payment was declined; nothing was sent." Developer mode shows the
+operator's own words with the code. An operator that cannot be reached is no refusal:
+the payment stands, and the next sync sends it again.
+
 Every refusal is shown in the library's own words. The leaf wallet is the operator wallet
 library itself (the same code as the operator's command-line wallet), compiled to WebAssembly
 and run in a dedicated worker (`leaves/`), so nothing about a leaf is computed by the page.
