@@ -73,7 +73,12 @@ after), restores once, and retries every two minutes when it cannot; Receive giv
 a payment to a receive code of the same operator and chain goes in the tree (`treeRoute`), and
 coins new on the chain are boarded in `leaves.js`'s upkeep (`boardArrivals`: never in developer
 mode, never ahead of a person, never within a minute of the page's own on-chain payment, since
-both spend the same keys' coins). A wallet that joined an operator keeps its leaf wallet syncing
+both spend the same keys' coins). An address the chain's coins can't cover is paid out of the tree
+(`offboard_quote`, then `offboard` with the quote as `shown`). In user mode the open page reads the
+mailbox every five seconds (`watchMailbox`), and its own upkeep, the mailbox read included,
+leaves twenty seconds after anything a person asked, since a trade's quote asks the library
+several times and the worker answers one command at a time; the bond's watch, which holds the
+worker for most of a minute, runs at most hourly after two quiet minutes. A wallet that joined an operator keeps its leaf wallet syncing
 in either mode; user mode shows nothing of leaves and the page API refuses every leaf method
 there, but leaves count in each asset's figure and the headline. Each asset's figure counts
 on-chain, leaves, Lightning and, for tSEQ, what is staked (`stakedAtoms` in `index.html`), in

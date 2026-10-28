@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, boardCandidates,
+import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, boardCandidates,
   boardValue, boardAll } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -106,4 +106,23 @@ test('nothing is boarded when the fee leaves less than the smallest leaf, or is 
 test('a library that refuses the board is not asked to sign', async () => {
   const run = async (cmd) => { if (cmd === 'board_quote') throw new Error('the node does not accept the asset for fees'); throw new Error('signed') }
   await assert.rejects(boardAll(run, { asset: B, onchain: 50000n, min: 10000n }), /does not accept/)
+})
+
+test('an address is paid on the chain while the chain covers it, else out of the tree', () => {
+  assert.equal(addressRoute(5n, 10n, 0n), 'chain')
+  assert.equal(addressRoute(5n, 4n, 5n), 'tree')
+  assert.equal(addressRoute(5n, 4n, 4n), null)
+  assert.equal(addressRoute(5n, 0n, 0n), null)
+})
+
+test('the arrival time is the operator\'s interval in whole minutes, or none', () => {
+  assert.equal(arrivalMinutes(600), 10)
+  assert.equal(arrivalMinutes(61), 2)
+  assert.equal(arrivalMinutes(5), 1)
+  assert.equal(arrivalMinutes(null), null)
+  assert.equal(arrivalMinutes(0), null)
+  assert.equal(DEFAULT_WORDS.arrivesWithin(10), 'It arrives in about 10 minutes.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(1), 'It arrives in a few minutes.')
+  assert.equal(DEFAULT_WORDS.sentLater('1', 'GOLD', 1), 'Sent 1 GOLD. It arrives in a few minutes.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
 })

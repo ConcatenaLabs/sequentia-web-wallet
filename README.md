@@ -228,8 +228,10 @@ testnet faucet pays the receive code, or the address when it does not pay that a
 receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
 pays a receive code of the same operator and chain in the tree, and everything else as it
-always has; an amount held only in the tree cannot be paid to an address yet, and the wallet
-says so. The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
+always has; an address the chain's coins cannot cover is paid out of the tree in the operator's
+next settlement (the library's `offboard`), its fee and arrival shown first. The open page reads
+the wallet's mailbox every few seconds, so a payment to its receive code shows as soon as the
+library has taken it. The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
 coins. User mode carries no developer vocabulary: the xpub,
 the Settings backend card, the staker key, the order book's unblinded/blinded switch (shown in
 user mode only while the blinded book is chosen), a payment's preimage and the Lightning
