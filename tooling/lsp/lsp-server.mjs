@@ -122,6 +122,7 @@ import { withPaymentHash } from './hold-bolt11.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
 import { fileURLToPath } from 'node:url';
 import { zeroconfConfigLines, zeroconfRunning, roomFeeLabel, roomFeePaid } from './zeroconf.mjs';
+import { readNodeHistory, cleanNote, NOTE_STORE } from './node-history.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -4822,34 +4823,49 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // POST /node/receive { node_key, amount (asset sats), description? } -> { bolt11, payment_hash }.
-    // A PLAIN (non-HODL) invoice to RECEIVE over Lightning into the user's own hosted node. The node
-    // signs the bolt11 with its node key (device-co-signed), so its signer must be online. Distinct
-    // from /node/invoice (which is the HODL buy path); this is the generic Receive-tab invoice.
-    // GET /node/history?node_key= -> { items: [{ dir, amount_msat, at, payment_hash, description }] }:
-    // the hosted node's paid invoices (in) and completed payments (out), newest first, for the
-    // wallet's History. Read-only; the node answers RPC while its device signer is attached.
+    // GET /node/history?node_key= -> { items: [{ dir, kind, asset, amount_msat, fee_msat?, at, payment_hash,
+    // description, note }], unread }: everything the hosted node settled over Lightning, newest first, from
+    // its own records: invoices paid to it, holds it settled (a sub-asset buy's asset, a BTC sale), and
+    // payments it made by invoice or by bare hash (node-history.mjs says where each is kept). `note` is the
+    // wallet's swap note for that hash (POST /node/swap-note), `unread` the records the node could not
+    // give. Read-only; the node answers RPC while its device signer is attached.
     if (req.method === 'GET' && url.pathname === '/node/history') {
       if (!PROV) return send(res, 200, { ok: true, items: [] });
       const nodeKey = String(url.searchParams.get('node_key') || '').toLowerCase();
       const rec = nodeKey ? PROV.getByKey(nodeKey) : null;
       if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
-      const msat = (x) => parseInt(String(x ?? 0), 10) || 0;   // older nodes answer "1000msat"
       try {
-        const [inv, pays] = await Promise.all([
-          lnrpcKw('listinvoices', [], rec.rpc, SIGNER_RPC_TIMEOUT_MS).catch(() => ({ invoices: [] })),
-          lnrpcKw('listpays', [], rec.rpc, SIGNER_RPC_TIMEOUT_MS).catch(() => ({ pays: [] })),
-        ]);
-        const items = [];
-        for (const i of (inv.invoices || [])) if (i.status === 'paid')
-          items.push({ dir: 'in', amount_msat: msat(i.amount_received_msat ?? i.amount_msat), at: Number(i.paid_at || 0), payment_hash: i.payment_hash, description: i.description || '' });
-        for (const p of (pays.pays || [])) if (p.status === 'complete')
-          items.push({ dir: 'out', amount_msat: msat(p.amount_msat ?? p.amount_sent_msat), at: Number(p.completed_at || p.created_at || 0), payment_hash: p.payment_hash, description: p.description || '' });
-        items.sort((a, b) => b.at - a.at);
-        return send(res, 200, { ok: true, items: items.slice(0, 100) });
+        const r = await readNodeHistory((m, kv) => lnrpcKw(m, kv, rec.rpc, SIGNER_RPC_TIMEOUT_MS),
+          { asset: rec.chain === 'btc' ? 'btc' : (rec.asset_id || null) });
+        return send(res, 200, { ok: true, items: r.items, unread: r.unread });
       } catch (e) { return send(res, 502, { ok: false, error: e.message }); }
     }
 
+    // POST /node/swap-note { node_key, payment_hash, note: { pay: { asset, atoms, rail }, recv: {...}, title } }
+    // keeps the wallet's account of a settled swap on the user's own hosted node (its datastore, under
+    // [seqwallet-swap, hash]), so /node/history names both legs of the swap on any device, the one that
+    // settled on-chain included. Only for a hash the node itself settled; a note never creates a row.
+    if (req.method === 'POST' && url.pathname === '/node/swap-note') {
+      if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
+      const body = await readBody(req);
+      const nodeKey = String((body && body.node_key) || '').toLowerCase();
+      const H = String((body && body.payment_hash) || '').toLowerCase();
+      const note = cleanNote(body && body.note);
+      if (!nodeKey || !/^[0-9a-f]{64}$/.test(H) || !note) return send(res, 400, { ok: false, error: 'body { node_key, payment_hash, note: { pay: { asset, atoms }, recv: { asset, atoms }, title? } } required' });
+      const rec = PROV.getByKey(nodeKey);
+      if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
+      try {
+        const r = await readNodeHistory((m, kv) => lnrpcKw(m, kv, rec.rpc, SIGNER_RPC_TIMEOUT_MS), { limit: Infinity });
+        if (!r.items.some((i) => i.payment_hash === H)) return send(res, 409, { ok: false, error: 'this node has settled nothing under that hash' });
+        await lnrpcKw('datastore', [`key=${JSON.stringify([NOTE_STORE, H])}`, `hex=${Buffer.from(JSON.stringify({ ...note, at: note.at || Math.floor(Date.now() / 1000) })).toString('hex')}`, 'mode=create-or-replace'], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
+        return send(res, 200, { ok: true });
+      } catch (e) { return send(res, 502, { ok: false, error: e.message }); }
+    }
+
+    // POST /node/receive { node_key, amount (asset sats), description? } -> { bolt11, payment_hash }.
+    // A PLAIN (non-HODL) invoice to RECEIVE over Lightning into the user's own hosted node. The node
+    // signs the bolt11 with its node key (device-co-signed), so its signer must be online. Distinct
+    // from /node/invoice (which is the HODL buy path); this is the generic Receive-tab invoice.
     if (req.method === 'POST' && url.pathname === '/node/receive') {
       if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
       const body = await readBody(req);

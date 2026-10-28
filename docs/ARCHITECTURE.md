@@ -46,6 +46,7 @@ index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools,
  ├─ seqln.js               Lightning: LSP HTTP client + device-signer orchestration
  │   ├─ bolt11.js          invoice reader: network, amount, hash, final CLTV, the asset (`a`)
  │   ├─ seqln-keys.js      m/1017'/... derivation of the two device identities
+ │   ├─ ln-history.js      History's Lightning card: the nodes' legs joined by payment hash, one row per swap
  │   └─ lightning/seqln-signer-sdk.js + lightning/pkg/   vendored SeqLN device signer (WASM, tracked)
  └─ tooling/lsp/           the hosted-SeqLN LSP backend + provisioning/harness scripts (Node)
 ```
@@ -219,6 +220,14 @@ rails are submarine swaps gated by the anchor rules like any on-chain leg. The b
 service, a browser-model device harness, a WS-to-TCP relay, and the key-provisioning tool
 live in [`tooling/lsp/`](../tooling/lsp/README.md).
 
+The History's Lightning card reads what each of the wallet's hosted nodes settled
+(`GET /node/history`: invoices paid to it, holds it settled, payments it made, each with its
+asset, amount, time and payment hash) and joins the legs of one payment hash into one row, so a
+swap reads "Swapped 10 USDX for 9.2 EURX over Lightning" (`ln-history.js`). When a swap settles,
+the wallet stores on its own node what both legs moved, the on-chain one included
+(`POST /node/swap-note`), so the row is the same on any device that opens the wallet; the
+browser's trade log only names a row the nodes give, or shows a trade no node has settled yet.
+
 ### CoinJoin (coinjoin.js + the seqcj coordinator)
 
 The Mix tab runs a seqcj round: `coinjoin-protocol.js` and `blindsig.js` are vendored from the
@@ -284,7 +293,7 @@ were spent off-chain, forfeits signed, the operator's record heads). Clearing th
 
 ## Testing
 
-`node --test` (Node 22+) runs all 107 `*.test.mjs` files: 82 hold `node:test` suites, and the
+`node --test` (Node 22+) runs all 144 `*.test.mjs` files: 119 hold `node:test` suites, and the
 other 25, including `seqln.test.mjs`, `xcourier.test.mjs` and `xmaker.test.mjs`, are
 standalone scripts with their own `check()` harness, which it runs as one test each and which
 also run on their own with `node <file>`. The swap modules additionally export `__test__`
