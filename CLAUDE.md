@@ -33,7 +33,7 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 144 `*.test.mjs` files (113 at the root, 31 under `tooling/lsp/`), and `node --test` runs
+There are 147 `*.test.mjs` files (116 at the root, 31 under `tooling/lsp/`), and `node --test` runs
 every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
@@ -52,6 +52,16 @@ requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in
 `leaves.js` shows what the library answers, refusals in the library's own words, and nothing
 in it may decide anything the library decides. The page's copy never names the operator
 protocol: developer mode speaks of leaves, rounds and the operator.
+
+`btc-ark/pkg/` is tracked too: Bark's wallet for Bitcoin arks, built from arca's `bark-wasm/` by
+`tooling/build-btc-ark.sh <arca checkout>` (paths remapped the same way), run inside
+`btc-ark/worker.js`. It holds default mode's BTC on the Bitcoin ark named by `SEQ_BTC_ARK`: native
+bitcoin, never pegged, from the page's own phrase under Bark's key path. `btc-ark.js` names the
+route (an invoice, an Ark address, a Bitcoin address) and shows the wallet's answers; every fee,
+coin and refusal is the wallet's. A board is cosigned by the ark's server before the page signs
+its funding: keep that order. In default mode the composer's `deps.btc` is the ark
+(`btcArk.lightning()`), so a BTC trade pays and is paid there; the payment's lock is bounded by
+the server's longest (`max_route_delay`), which the trade checks against the coin it receives.
 
 The mode is kept for each wallet (`swk.mode.<walletTag>`, `leaves.js`), user mode by default,
 and its words are the same in the extension and Ambra: change them in all three together. User

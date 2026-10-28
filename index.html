@@ -1567,6 +1567,14 @@
     node_url: location.origin + '/node-rpc',
     operator: 'b6f4c5924ad81947658cf85bb93d9267efc54c7fcb2e4577e8c954c68fa087bb',
   };
+  // The Bitcoin ark that holds default mode's BTC (btc-ark.js): its server (gRPC-web, same origin)
+  // and the Esplora server the wallet reads testnet4 from. A page that sets SEQ_BTC_ARK = null
+  // first keeps BTC on the chain and Lightning only.
+  if(window.SEQ_BTC_ARK === undefined) window.SEQ_BTC_ARK = {
+    server:  location.origin,
+    esplora: location.origin + '/testnet4/api',
+    network: 'testnet4',
+  };
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1614,8 +1622,10 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { DEFAULT_WORDS, BOARD_QUIET_MS } from './default-arca.js';
+import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
+import { mountBtcArk, arkConfig, BTC_WORDS } from './btc-ark.js';
 import { createEngine as createUserTrade } from './user-trade.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
@@ -2459,7 +2469,7 @@ async function btcGatherUtxos(){
   const lists = await Promise.all(jobs.map(async([internal,i])=>{
     const node=btcNode(internal,i); const p=btc.p2wpkh(node.publicKey, btc.TEST_NETWORK);
     const us=await fetch(`${T4_API}/address/${p.address}/utxo`).then(r=>r.json()).catch(()=>[]);
-    return us.map(u=>({txid:u.txid, vout:u.vout, value:BigInt(u.value), script:p.script, priv:node.privateKey}));
+    return us.map(u=>({txid:u.txid, vout:u.vout, value:BigInt(u.value), script:p.script, priv:node.privateKey, confirmed:!!(u.status && u.status.confirmed)}));
   }));
   return lists.flat();
 }
@@ -2550,6 +2560,7 @@ async function btcReviewBroadcast(outputs, onDone, satPerVb){
       if(!r.ok) throw new Error(txt||('HTTP '+r.status));
       if(!/^[0-9a-fA-F]{64}$/.test(txt)) throw new Error('unexpected broadcast response: '+txt.slice(0,80));
       if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);  // advance only on a confirmed broadcast
+      _btcSentAt = Date.now();   // no board races this payment's coins (btcArkBoardSoon)
       // What left the wallet: the outputs to addresses not its own, and the fee.
       { let gone=built.fee; for(const o of outputs) if(!isOwnBtcAddress(o.address)) gone+=o.amount;
         noteBtcSent(txt, -gone); renderBtcHistory().catch(()=>{}); }
@@ -3359,6 +3370,7 @@ async function openWallet(phrase){
   // on at any time; the leaf wallet starts only while the mode is on.
   try{ initLeaves(); }catch(e){ console.warn('[leaves] init failed:', e?.message??e); }
   try{ initContracts(); }catch(e){ console.warn('[contracts] init failed:', e?.message??e); }
+  try{ initBtcArk(); }catch(e){ console.warn('[btc ark] init failed:', e?.message??e); }
   // Register the OpenAMP identity + load restricted-asset metadata before the first sync, so
   // restricted rows/balances can render in the same pass. Non-fatal if the enclave is unreachable.
   const endOamp = timer('open wallet › OpenAMP init');
@@ -3464,7 +3476,7 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
       const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -3582,6 +3594,90 @@ function userBtcLightning(){
   });
   return _userBtc;
 }
+// ---------- default mode: BTC on the Bitcoin ark (btc-ark.js) ----------
+// The wallet of the page's phrase on the Bitcoin ark runs in its own worker in both modes, so its
+// BTC is always in BTC's one figure; default mode also sends from it, boards what arrives at the
+// address, and trades from it. Developer mode keeps BTC's own paths.
+let btcArk = null, _btcSentAt = 0, _btcArkBoardAt = 0;
+function initBtcArk(){
+  if(btcArk) return;
+  const config = arkConfig(window.SEQ_BTC_ARK);
+  if(!config) return;
+  btcArk = mountBtcArk({
+    makeWorker: ()=> new Worker(new URL('./btc-ark/worker.js', import.meta.url), { type:'module' }),
+    mnemonic: ()=> (localStorage.getItem(KEY) || '').trim(), config,
+    decode: (s)=> decodeBolt11(s),
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} },
+    log: (...a)=> console.log(...a),
+  });
+  btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
+}
+function btcArkAtoms(){ return (btcArk && btcArk.isOpen()) ? btcArk.figures().total : 0n; }
+function btcArkRoutes(){ return !!btcArk && btcArk.isOpen() && !devMode(); }
+// The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
+// server cosigns the board first, then finish() signs it with the page's key.
+async function btcDrainUnsigned(address, sats){
+  const sel = (await btcGatherUtxos()).filter(u=> u.confirmed);
+  if(!sel.length) throw new Error('no confirmed BTC to move');
+  const inSum = sel.reduce((n,u)=> n+u.value, 0n);
+  const feeFor = (nout)=> BigInt(Math.ceil((btcVbytes(sel.length, nout) + 12) * BTC_DEFAULT_FEERATE));
+  const tx = new btc.Transaction();
+  for(const u of sel) tx.addInput({ txid:u.txid, index:u.vout, witnessUtxo:{ script:u.script, amount:u.value } });
+  tx.addOutputAddress(address, BigInt(sats), btc.TEST_NETWORK);
+  let change = inSum - BigInt(sats) - feeFor(2), changeIndex = null;
+  if(change > BTC_DUST){ tx.addOutputAddress(btcAddr(true, btcChangeNext), change, btc.TEST_NETWORK); changeIndex = btcChangeNext; }
+  else if(inSum <= BigInt(sats)) throw new Error('insufficient BTC for the move and its fee');
+  const psbt = tx.toPSBT(0);
+  const keys=[], seen=new Set(); for(const u of sel){ const k=[...u.priv].join(','); if(!seen.has(k)){ seen.add(k); keys.push(u.priv); } }
+  return { psbtHex: Array.from(psbt, b=> b.toString(16).padStart(2,'0')).join(''), txid: tx.id,
+    finish: ()=>{ for(const k of keys) tx.sign(k); tx.finalize(); if(changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, changeIndex+1); return { hex: tx.hex }; } };
+}
+async function btcBroadcastHex(hex){
+  const r = await fetch(`${T4_API}/tx`, { method:'POST', body:hex });
+  const t = (await r.text()).trim();
+  if(!r.ok || !/^[0-9a-fA-F]{64}$/.test(t)) throw new Error(t || ('HTTP ' + r.status));
+  return t;
+}
+function btcArkBoardSoon(){
+  if(!btcArkRoutes() || !(btcBalance > 0n)) return;
+  if(Date.now() - _btcSentAt < 120000 || Date.now() - _btcArkBoardAt < 30000) return;   // the page's own BTC payment is fresh
+  _btcArkBoardAt = Date.now();
+  btcArk.board({ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, broadcast: btcBroadcastHex })
+    .then((r)=>{ if(r) sync().catch(()=>{}); })
+    .catch((e)=> console.warn('[btc ark] board:', e?.message??e));
+}
+// A BTC payment from the ark: what is sent, to whom, its fee, reviewed before anything moves.
+// -> false when the ark cannot pay it and the page's own path can (too little in the ark).
+async function btcArkSendReview(r, onDone){
+  const route = btcArk.route(r.addr);
+  const sats = route === 'invoice' ? null : parseAtoms(r.amtS, 8);
+  if(route !== 'invoice' && !(sats > 0n)) throw new Error('amount must be greater than zero');
+  const q = await btcArk.quote(r.addr, sats);
+  if(!q) return false;
+  if(q.short){
+    if(route === 'chain' && q.sats != null && btcBalance >= q.sats) return false;   // the address is paid from the chain, as before
+    throw new Error(q.short === 'not enough here' ? BTC_WORDS.upTo(fmtAtoms(btcArk.figures().spendable, 8)) : q.short);
+  }
+  const to = route === 'invoice' ? BTC_WORDS.toInvoice : /^bitcoin:/i.test(r.addr) ? BTC_WORDS.toCode : (r.addr.slice(0, 14) + '…');
+  const what = fmtAtoms(q.sats, 8);
+  const kv = [[BTC_WORDS.to, to], [BTC_WORDS.fee, q.fee > 0n ? fmtAtoms(q.fee, 8) + ' BTC' : BTC_WORDS.noFee], ['', route === 'chain' ? BTC_WORDS.arrivesBlock : BTC_WORDS.arrivesNow]];
+  const {m, ok, st} = modalRows({ title: BTC_WORDS.review(what), kv });
+  ok.textContent = BTC_WORDS.send;
+  ok.onclick = async()=>{
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.sending;
+    const t0 = performance.now();
+    try{
+      const res = await btcArk.send(r.addr, q.sats);
+      console.log('[btc ark] sent by', res.route, 'in', Math.round(performance.now() - t0), 'ms');
+      st.className = 'status ok';
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      st.textContent = route === 'chain' ? BTC_WORDS.sentBlock(what) : BTC_WORDS.sent(what, secs);
+      ok.classList.add('hide'); { const no = m.querySelector('button.ghost'); if(no) no.textContent = 'Close'; }
+      if(onDone) onDone(); renderBalance();
+    }catch(e){ st.className = 'status err'; st.textContent = 'Failed: ' + prettyErr(e); ok.disabled = false; }
+  };
+  return true;
+}
 function initUserComposer(){
   if(userComposer) return;
   userTrade = createUserTrade({
@@ -3615,7 +3711,9 @@ function initUserComposer(){
     admitted: async ()=> ({ pairs: servedPairs(await userModePairs(), leavesApi ? leavesApi.supervisedAssets() : []), genesis: await chainGenesis() }),
     // The wallet's Bitcoin Lightning (btc-lightning.js), once the service runs it; until then no
     // trade is made for or with BTC.
-    get btc(){ return userBtcLightning(); },
+    // In default mode the trades pay and are paid in the Bitcoin ark: a sale for BTC is a Lightning
+    // receive into it (no room to buy first), a purchase is paid from it.
+    get btc(){ return btcArkRoutes() ? btcArk.lightning() : userBtcLightning(); },
     // The wallet's own on-chain coins, which take a covenant order on the chain in one FILL: a
     // wallet that holds nothing in the tree trades from them (user-onchain.js).
     onchain: makeUserOnchain({
@@ -4825,11 +4923,48 @@ function fillLnAssetSelect(sel, receive = false){
 }
 // Show the LN send/receive cards only when LN is deployed AND the wallet holds a fee-rated asset.
 function refreshLnSendReceive(){
-  const on = !!(typeof seqlnState === 'function' && seqlnState().deployed) && !!lnApi;
+  const lnOn = !!(typeof seqlnState === 'function' && seqlnState().deployed) && !!lnApi;
+  // Default mode with BTC on the Bitcoin ark: BTC is paid and received over Lightning from there.
+  const arkOn = btcArkRoutes(), on = lnOn || arkOn;
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
   if (sc) sc.classList.toggle('hide', !on);
   if (rc) rc.classList.toggle('hide', !on);
-  if (on){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
+  if (lnOn){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
+  else if (arkOn){ for (const id of ['lnRecvAsset', 'lnSendAsset']){ const sel = $(id); if (sel) sel.innerHTML = '<option value="BTC">BTC</option>'; } }
+  // Default mode names no rail: with BTC on the ark the two cards are about BTC and invoices.
+  if (rc && sc){
+    if (!rc._words) rc._words = [rc.querySelector('.lbl').textContent, rc.querySelector('.sub').textContent];
+    if (!sc._words) sc._words = [sc.querySelector('.lbl').textContent, sc.querySelector('.sub').textContent];
+    const plain = arkOn && !lnOn;
+    rc.querySelector('.lbl').textContent = plain ? BTC_WORDS.recvTitle : rc._words[0];
+    rc.querySelector('.sub').textContent = plain ? BTC_WORDS.recvSub : rc._words[1];
+    sc.querySelector('.lbl').textContent = plain ? BTC_WORDS.payTitle : sc._words[0];
+    sc.querySelector('.sub').textContent = plain ? BTC_WORDS.paySub : sc._words[1];
+  }
+}
+// A BTC invoice paid into the Bitcoin ark (default mode): shown on the receive card, and Received
+// once the wallet has claimed the payment, which it does as soon as the ark's server holds it.
+async function btcArkReceive(sats, st, out){
+  st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.invoiceWait;
+  const inv = await btcArk.invoice(sats, 'Receive BTC');
+  out.textContent = inv.invoice; $('lnRecvCopy').classList.remove('hide');
+  oampSetQr('lnRecvQr', String(inv.invoice).toUpperCase());
+  st.className = 'status'; st.textContent = BTC_WORDS.invoiceReady(fmtAtoms(BigInt(sats), 8));
+  let stop = false;
+  _lnRecvWatchStop = () => { stop = true; };
+  (async () => {
+    while (!stop && Date.now() / 1000 < Number(inv.expires_at)) {
+      let r = null; try { r = await btcArk.received(inv.payment_hash); } catch {}
+      if (stop) return;
+      if (r && r.state === 'paid'){
+        st.className = 'status ok'; st.textContent = BTC_WORDS.received(fmtAtoms(BigInt(r.amount || sats), 8));
+        out.textContent = ''; oampSetQr('lnRecvQr', ''); $('lnRecvCopy').classList.add('hide');
+        try { renderBalance(); } catch {}
+        return;
+      }
+      await new Promise((ok) => setTimeout(ok, 2000));
+    }
+  })();
 }
 // The one step that lets an asset be paid or received over Lightning, when the wallet can take it
 // now: Move to Lightning (coins on-chain and no channel yet; the move asks for room to receive in
@@ -4938,6 +5073,13 @@ function initLnSendReceive(){
     _lnRecvWatchStop();   // a new invoice replaces the one on the card
     out.textContent = ''; $('lnRecvCopy').classList.add('hide');
     if (!(amt > 0)){ st.className = 'status err'; st.textContent = 'Enter an amount.'; return; }
+    if (asset === 'BTC' && btcArkRoutes()){
+      recvBtn.disabled = true;
+      try { await btcArkReceive(amt, st, out); }
+      catch(e){ st.className = 'status err'; st.textContent = 'Could not create the invoice: ' + prettyErr(e); }
+      finally { recvBtn.disabled = false; }
+      return;
+    }
     // An invoice for more than can arrive would only fail in the payer's wallet. Room to receive
     // is bought openly, with its price, in its own dialog; it is never bought here on the side.
     const room = lnReceivableFor(asset === 'BTC' ? 'BTC' : asset);
@@ -5006,6 +5148,23 @@ function initLnSendReceive(){
     const inv = lnInvoiceAsset(bolt11);
     if (inv.error){ st.className = 'status err'; st.textContent = inv.error; return; }
     if (inv.want !== asset){ st.className = 'status err'; st.textContent = 'This invoice is paid in ' + inv.name + '; choose ' + inv.name + ' to pay it.'; return; }
+    // Default mode: a BTC invoice is paid from the Bitcoin ark when it holds enough.
+    if (inv.want === 'BTC' && btcArkRoutes()){
+      let q = null; try { q = await btcArk.quote(bolt11); } catch {}
+      if (q && !q.short){
+        sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.paying;
+        const t0 = performance.now();
+        try {
+          await btcArk.send(bolt11);
+          console.log('[btc ark] invoice paid in', Math.round(performance.now() - t0), 'ms');
+          st.className = 'status ok'; st.textContent = BTC_WORDS.paid(fmtAtoms(q.sats, 8), fmtAtoms(q.fee, 8));
+          $('lnSendBolt11').value = ''; try { renderBalance(); } catch {}
+        } catch(e){ st.className = 'status err'; st.textContent = 'Payment failed: ' + prettyErr(e); }
+        finally { sendBtn.disabled = false; }
+        return;
+      }
+      if (!(typeof seqlnState === 'function' && seqlnState().deployed)){ st.className = 'status err'; st.textContent = q && q.short ? BTC_WORDS.payUpTo(fmtAtoms(btcArk.figures().spendable, 8)) : 'This invoice cannot be paid now.'; return; }
+    }
     // Nothing (or too little) of the asset on Lightning: say so at once, with the step that fixes it,
     // rather than bring the node online and come back ten seconds later with "no route".
     if (!lnLastStatus){   // just opened: read the balance first, so the check below is not skipped
@@ -5828,6 +5987,8 @@ async function _syncImpl(){
     renderBalance(); renderHistory(); renderReceive(); refreshStakes(); refreshDelegationHeld(); populateFeeAssets(); refreshRecipientAssets();
     // Default mode: coins new on the chain go into the tree by themselves (leaves.js boardArrivals).
     try{ const k=JSON.stringify(balObj(), (_, v)=> typeof v==='bigint' ? String(v) : v); if(k!==_onchainSeen){ _onchainSeen=k; if(leavesApi) leavesApi.boardSoon(); } }catch{}
+    // Default mode: BTC confirmed at the wallet's address goes into the Bitcoin ark by itself.
+    btcArkBoardSoon();
     { const sw=document.querySelector('[data-panel="swap"]'); if(sw && !sw.classList.contains('hide')) try{ renderActiveSwap(); }catch{} }   // its balances are real now
     const t = wollet.tip();
     $('tipline').textContent = `Synced to block ${t.height()} · Sequentia + Bitcoin testnet4`;
@@ -5840,7 +6001,7 @@ async function _syncImpl(){
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 let _onchainSeen = null;   // the on-chain balance the last sync read, to board what is new
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
-function availableFor(hex){ if(hex==='BTC') return (typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n;
+function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkRoutes() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
   const b=balObj(); return b[hex]||0n; }
 // Re-run every recipient row's "Available:" line after a sync changes balances.
@@ -5942,7 +6103,9 @@ function renderBalance(){
     const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
     const on = onchainAtoms||0n;
     const staked = stakedFor(kind);
-    const totalAtoms = on + lnAtoms + leafAtoms + staked;
+    // BTC held in the Bitcoin ark counts in BTC's one figure, in both modes.
+    const arkAtoms = kind==='BTC' ? btcArkAtoms() : 0n;
+    const totalAtoms = on + lnAtoms + leafAtoms + staked + arkAtoms;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
@@ -5982,7 +6145,7 @@ function renderBalance(){
     // Default mode shows no rail (docs/DEFAULT_MODE.md): the split between on-chain, the
     // tree and Lightning, and every move between them, are developer mode's.
     const dm = devMode();
-    if(dm && (hasLn || leafAtoms>0n || staked>0n)) blk('On-chain', amt(on));
+    if(dm && (hasLn || leafAtoms>0n || staked>0n || arkAtoms>0n)) blk('On-chain', amt(on));
     if(dm && lnOn && leg && hasLn){
       const l=blk('Lightning', amt(lnAtoms));
       if(opening) l.appendChild(el('div','bt-dim','channel opening'));
@@ -6006,6 +6169,11 @@ function renderBalance(){
       if(acts.children.length) l.appendChild(acts);
     }
     if(dm && leafAtoms>0n) blk('Leaves', amt(leafAtoms));
+    // The ark's part is a rail: split out in developer mode only. What it has not taken in yet is
+    // "arriving" under the figure, in both modes.
+    if(dm && arkAtoms>0n) blk('Bitcoin ark', amt(arkAtoms));
+    { const arr = kind==='BTC' && btcArk && btcArk.isOpen() ? btcArk.figures().arriving : 0n;
+      if(arr>0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arr), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); } }
     if(staked>0n) blk('Staked', amt(staked));
     // No channel yet: the one thing to do is move the asset to Lightning, which asks for room itself.
     if(dm && lnOn && leg && !hasLn && toLn){ const d=el('div','bt-blk'); button(d, 'Move to Lightning', 'Open a channel to send and receive '+ticker+' instantly.', ()=>moveToLightningDialog(leg), 'mv'); det.appendChild(d); }
@@ -6042,7 +6210,7 @@ function renderBalance(){
   let total=0, totalLn=0, totalRef=null, anyPriced=false, allPriced=true;
   const addToTotal=(refKey, atoms, lnPart)=>{ const rv=refValue(refKey, atoms); if(rv){ total+=rv.v; totalRef=rv.ref; anyPriced=true;
       const lv=lnPart>0n ? refValue(refKey, lnPart) : null; if(lv) totalLn+=lv.v; } else if((atoms||0n)>0n) allPriced=false; };
-  { const ln=lnOn?lnAtomsFor('BTC'):0n; addToTotal('BTC', btcBal + ln, ln); }
+  { const ln=lnOn?lnAtomsFor('BTC'):0n; addToTotal('BTC', btcBal + ln + btcArkAtoms(), ln); }
   const leafFor = (h)=> leavesApi ? leavesApi.leafAtoms(h) : 0n;
   for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h) + stakedFor(h), ln); }
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
@@ -6285,6 +6453,28 @@ function renderXpubForm(){
 // sender that asks for one. Developer mode, and a wallet not in the tree, show the address.
 let showAddrDefault = false, _recvCode = null, _recvCodeAsk = null, _recvCodeAsked = false;
 function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen() && !showAddrDefault && !showConf; }
+// The one receive code: the wallet's address, its Bitcoin ark address and its Sequentia receive
+// request in one payment request (pay-code.js). -> the code, or the bare request while the ark
+// has not answered (the code is drawn again once it has).
+let _recvArk = null, _recvArkAsk = null;
+function payCodeText(){
+  if(!_recvCode) return null;
+  if(!_recvArk && btcArk && btcArk.isOpen() && !_recvArkAsk)
+    _recvArkAsk = btcArk.run('address').then(a=>{ _recvArk = a.address; }).catch(e=> console.warn('[receive code] ark:', e?.message??e)).finally(()=>{ _recvArkAsk = null; renderReceive(); });
+  let address = null; try{ address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential()); }catch{}
+  if(!address) return _recvCode.text;
+  return buildPayCode({ address, ark: _recvArk || undefined, sequentia: _recvCode.text });
+}
+// Where a payment of `asset` to `text` goes when `text` is a receive code: its Sequentia part
+// for an asset the tree pays, its Ark part for BTC the ark pays (btcArk takes the code as it
+// is), else its address. Anything that is not a code is returned as it is.
+function payCodeDestination(text, asset){
+  let c = null; try{ c = readPayCode(text); }catch{ return text; }
+  if(!c) return text;
+  if(asset === 'BTC') return (c.ark && btcArkRoutes()) ? text : (c.address || text);
+  if(c.sequentia && leavesApi && leavesApi.treeRoute(c.sequentia)) return c.sequentia;
+  return c.address || text;
+}
 function renderReceiveCode(){
   $('recvLbl').textContent = DEFAULT_WORDS.codeLabel;
   $('recvTip').textContent = DEFAULT_WORDS.receiveTip;
@@ -6299,12 +6489,14 @@ function renderReceiveCode(){
       .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
     return;
   }
-  $('addr').textContent = _recvCode.text;
-  try{ $('qr').src = stringToQr(_recvCode.text); }catch{ $('qr').removeAttribute('src'); }
+  const code = payCodeText();
+  $('addr').textContent = code;
+  try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
 }
 function renderReceive(){
   const codeOn = !devMode() && !!leavesApi && leavesApi.isOpen();
-  $('btnRecvMode').classList.toggle('hide', !codeOn || showConf);
+  // Default mode shows the one receive code only; the address is developer mode's.
+  $('btnRecvMode').classList.toggle('hide', true);
   $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
   if(receiveCodeMode()){ renderReceiveCode(); renderOampReceive(); return; }
   $('btnConf').classList.remove('hide');
@@ -7556,6 +7748,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     btn.textContent='Preparing…';
     await new Promise(r=>setTimeout(r,16));   // one frame, so 'Preparing…' is painted before the build runs
     const rows=collectRows();
+    // A receive code (pay-code.js) is paid the way that fits what is sent: an asset at its
+    // Sequentia part when the tree takes it, BTC at its Ark part when the Bitcoin ark pays it,
+    // and anything else at its address.
+    for(const r of rows) r.addr = payCodeDestination(r.addr, r.asset);
     if(!rows.length) throw new Error('add at least one recipient');
     const reset=()=>{ $('recipients').innerHTML=''; addRecipientRow(); };
     // Restricted (OpenAMP) assets settle on the enclave ledger, not on-chain — one transfer, one
@@ -7595,6 +7791,11 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     if(btcRows.length && btcRows.length!==rows.length)
       throw new Error("Bitcoin and Sequentia assets can't be sent in the same transaction");
     if(btcRows.length){
+      // Default mode: BTC leaves from the Bitcoin ark when it can pay this (btc-ark.js); an
+      // invoice or an Ark address only the ark pays.
+      if(btcRows.length===1 && btcArkRoutes() && btcArk.route(btcRows[0].addr)){
+        if(await btcArkSendReview(btcRows[0], reset)) return;
+      }
       const outputs=rows.map(r=>{ const amount=parseAtoms(r.amtS, 8);
         if(amount<=0n) throw new Error('amount must be greater than zero');
         return {address:r.addr, amount}; });
@@ -7615,7 +7816,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
 $('btnNewAddr').onclick=()=>{
-  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; renderReceive(); return; }
+  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; _recvArk=null; renderReceive(); return; }
   addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnRecvMode').onclick=()=>{ showAddrDefault=!showAddrDefault; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };

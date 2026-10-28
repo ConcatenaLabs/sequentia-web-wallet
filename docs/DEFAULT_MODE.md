@@ -49,10 +49,15 @@ In practice:
 
 - The card's label is **Receive code**. Under it: "Any asset, any amount. A payment from another
   Sequentia wallet arrives in seconds. Each code is paid once; a new one shows when it is."
-- Buttons: **Copy receive code** (confirmation: "Receive code copied"), **New code**, and **Show
-  address**.
-- Show address gives the wallet's address, the same tb1 address on both chains, with the line:
-  "For BTC, and for senders that ask for an address." Its button back is **Show receive code**.
+- The code is one payment request for everything the wallet takes, BTC included:
+  `bitcoin:<address>?ark=<Ark address>&sequentia=<receive request>` (`pay-code.js`). The address
+  is the wallet's own, the same tb1 address on both chains; `ark` is an address of the wallet's
+  on the Bitcoin ark, where BTC arrives in seconds; `sequentia` is the single-use Sequentia
+  receive request. Neither extra part is required, so any Bitcoin wallet reads the code as a plain
+  request for the address. A wallet like this one pays an asset at the `sequentia` part and BTC at
+  the `ark` part, and anything else at the address.
+- Buttons: **Copy receive code** (confirmation: "Receive code copied") and **New code**. The
+  address alone is shown in developer mode.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server
   shows another key than the one pinned), the address is shown instead and nothing is said about
   why. The wallet tries again on its own.
@@ -72,12 +77,32 @@ In practice:
   can be seen.
 - Refusals: one sentence each, and nothing is signed.
   - "Part of this <TICKER> is still arriving: try again in a moment."
-  - "A receive code takes Sequentia assets. For BTC, use an address or an invoice." This applies
-    until BTC is held with an operator too. From then on, a receive code takes BTC as well.
+  - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
   - "This amount is kept for instant payments and can't be sent to an address yet. Send it to a
     receive code, or pay an invoice." This applies until the wallet can pay an address from the
     operator's tree. From then on, the payment goes out of the tree and no sentence is shown.
   - "This payment was declined; nothing was sent."
+
+## BTC
+
+BTC is held on a Bitcoin ark: native bitcoin, never pegged, in a wallet of the same phrase, and
+part of BTC's one figure. Its address there is part of the receive code. The words are in
+`BTC_WORDS` (`btc-ark.js`).
+
+- BTC that arrives at the address and is confirmed moves there by itself; until it can be spent
+  it is "<amount> BTC arriving" under the figure.
+- **Receive BTC with an invoice**: "Make an invoice for BTC. Once it is paid, the BTC is yours in
+  seconds." Then "Invoice ready. Share it to receive <amount> BTC." and, when paid, "Received ✓
+  <amount> BTC."
+- Send, one BTC recipient: a receive code, an invoice or an address. The review is titled
+  **Send <amount> BTC?** with To, Fee ("No fees" when none) and "It arrives in seconds." (for an
+  address, "It arrives after a Bitcoin block."), and the button **Send**. When it is done: "Sent
+  <amount> BTC (<seconds> s)." or "Sent <amount> BTC. It arrives after a Bitcoin block." With too
+  little held this way, an address is paid as before; a code or an invoice is refused with "You
+  can send up to <amount> BTC this way now."
+- **Pay an invoice**: "Paste an invoice to pay it with your BTC." Then "Paid ✓ <amount> BTC · fee
+  <fee> BTC."
+- A trade's BTC is paid and received the same way.
 
 ## Trade
 

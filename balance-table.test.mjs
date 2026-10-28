@@ -70,7 +70,9 @@ test('one figure per asset in every mode; the rails and their actions in develop
   // rails are developer mode's; what is arriving, staked or frozen shows in both.
   assert.match(rb, /if\(devMode\(\) && lnOn && leg\)\{\s*const bo=el\('span','bt-bolt'\+\(hasLn\?' on':''\)\);/);
   assert.match(rb, /const dm = devMode\(\);/);
-  assert.match(rb, /if\(dm && \(hasLn \|\| leafAtoms>0n \|\| staked>0n\)\) blk\('On-chain', amt\(on\)\);/);
+  assert.match(rb, /if\(dm && \(hasLn \|\| leafAtoms>0n \|\| staked>0n \|\| arkAtoms>0n\)\) blk\('On-chain', amt\(on\)\);/);
+  // BTC held on the Bitcoin ark: in BTC's one figure in both modes, its own part in developer mode.
+  assert.match(rb, /if\(dm && arkAtoms>0n\) blk\('Bitcoin ark', amt\(arkAtoms\)\);/);
   assert.match(rb, /if\(dm && lnOn && leg && hasLn\)\{/);
   assert.match(rb, /if\(dm && leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
   assert.match(rb, /if\(staked>0n\) blk\('Staked', amt\(staked\)\);/);
@@ -88,7 +90,9 @@ test('one figure per asset in every mode; the rails and their actions in develop
 
 test('staked tokens count in the figure and the headline, each stake once', () => {
   const rb = fn('renderBalance');
-  assert.match(rb, /const totalAtoms = on \+ lnAtoms \+ leafAtoms \+ staked;/);
+  assert.match(rb, /const totalAtoms = on \+ lnAtoms \+ leafAtoms \+ staked \+ arkAtoms;/);
+  assert.match(rb, /const arkAtoms = kind==='BTC' \? btcArkAtoms\(\) : 0n;/);
+  assert.match(rb, /addToTotal\('BTC', btcBal \+ ln \+ btcArkAtoms\(\), ln\)/);
   assert.match(rb, /addToTotal\(h, BigInt\(b\[h\]\|\|0n\) \+ ln \+ leafFor\(h\) \+ stakedFor\(h\), ln\)/);
   assert.match(rb, /const totalOf=\(h\)=> BigInt\(b\[h\]\|\|0n\) \+ \(lnOn\?lnAtomsFor\(h\):0n\) \+ leafFor\(h\) \+ stakedFor\(h\);/);
   const stakes = [
