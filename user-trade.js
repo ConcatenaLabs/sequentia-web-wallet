@@ -94,6 +94,7 @@ export const USER_WORDS = Object.freeze({
   notListed: (get, pay) => `${get} for ${pay} is not offered.`,
   enter: 'Enter how much you pay.',
   tooSmall: 'That amount is too small to trade.',
+  noFirmOffer: 'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',
   noFunds: (pay) => `You have no ${pay} to trade.`,
   // Held, and shown in the balance, but not where a trade can pay it from yet (just arrived, or
   // still being moved in by the wallet): never "you have none".
@@ -178,6 +179,8 @@ export function spendableFrom (coins, plans) {
 }
 
 const TRADES_KEY = 'swk.usertrade'
+// How long a quote waits before it asks once more for firm terms that none gave.
+const FIRM_RETRY_MS = 3000
 
 export function createEngine (deps) {
   // The node scans one wallet at a time; a command that meets another's scan is asked again
@@ -275,7 +278,10 @@ export function createEngine (deps) {
   // Firm terms of one entry for `pay` atoms, priced by the library. -> a candidate or null.
   async function firm (entry, payAsset, receiveAsset, pay, have) {
     planSingleStep(entry.source, { payAsset, receiveAsset, caps: entry.source === 'covenant-round' ? { leaf_take: true } : undefined })
-    const size = sizeEntry(entry, pay)
+    // Sized on what the wallet can pay, never on more: a site asks the price of all the wallet can
+    // pay with a large probe amount, and a maker asked for its whole level refuses what it does
+    // not hold.
+    const size = sizeEntry(entry, pay < have ? pay : have)
     if (!size) return null
     if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size)
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size)
@@ -326,7 +332,16 @@ export function createEngine (deps) {
       for (let i = 0; i < 4; i++) {
         let o
         try { o = await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }) }) }
-        catch (e) { log('[user trade] maker firm:', e.message); return null }
+        catch (e) {
+          log('[user trade] maker firm:', e.message)
+          // The maker holds less than its quote now (its last trade spent some): ask for half.
+          if (/does not hold that much/.test(String(e.message))) {
+            give = give / 2n
+            if (give < entry.minReceive) return null
+            continue
+          }
+          return null
+        }
         let t
         try { t = await run('swap_read', { offer: o.offer }) } catch (e) { log('[user trade] swap_read:', e.message); release(entry.maker, o.swap); return null }
         if (t.gets.asset !== receiveAsset || t.gives.asset !== payAsset || big(t.gets.value) !== give) { release(entry.maker, o.swap); return null }
@@ -464,7 +479,7 @@ export function createEngine (deps) {
 
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
-  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'too-small' }
+  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'too-small'|'no-firm-offer' }
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
   // source in the book offers, whatever the wallet holds. BTC counts only with the wallet's
   // Bitcoin Lightning (the gateway pays it there).
@@ -551,17 +566,23 @@ export function createEngine (deps) {
       .filter((x, i, l) => !x.e.maker || l.findIndex((y) => y.e.maker === x.e.maker && y.e.source === x.e.source) === i)
     // Firm terms of the best three that give them: an entry that cannot be firmed (a resting
     // order the wallet's coins are too old for, a maker that ran short) makes way for the next.
+    // When none gives firm terms (a maker busy or short just now), they are asked once more a
+    // moment later before the person is told.
     const cands = []
-    let tried = 0
-    for (const { e } of ind) {
-      if (cands.length >= 3 || tried >= 8) break
-      tried++
-      const c = await firm(e, payAsset, receiveAsset, A, haveOf(e))
-      if (c) cands.push(c)
+    for (let round = 0; round < 2 && !cands.length; round++) {
+      if (round) await sleep(FIRM_RETRY_MS)
+      let tried = 0
+      for (const { e } of ind) {
+        if (cands.length >= 3 || tried >= 8) break
+        tried++
+        const c = await firm(e, payAsset, receiveAsset, A, haveOf(e))
+        if (c) cands.push(c)
+      }
     }
     const best = chooseCandidate(cands)
     for (const c of cands) if (c !== best) drop(c)
-    if (!best) return { ok: false, why: es.length ? 'too-small' : 'not-offered' }
+    // Offered, but nobody gave firm terms: that is not the amount's fault.
+    if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }
     const have = haveOf(best.entry)
