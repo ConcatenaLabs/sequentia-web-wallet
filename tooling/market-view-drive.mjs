@@ -11,10 +11,13 @@
 //      rail, and the book's depth is shown by rail.
 //
 //   node tooling/market-view-drive.mjs <work-dir> --pay BTC --get <asset hex> [--await-new 300]
-//     [--base http://127.0.0.1:8791/wallet/]
+//     [--base http://127.0.0.1:8791/wallet/] [--phrase-file <file>]
 //
+// --phrase-file opens that wallet's phrase instead of a new wallet (in a profile of the drive's
+// own), so You pay can be an asset it holds: how a trade another drive makes with that wallet is
+// watched arriving in the market.
 // Screenshots and the log go to <work-dir>/evidence. Needs a Chromium (CHROMIUM=…).
-import { mkdirSync, appendFileSync } from 'node:fs'
+import { mkdirSync, appendFileSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Page, chromium } from './cdp-page.mjs'
 import { forbiddenIn } from '../user-trade.js'
@@ -24,6 +27,7 @@ const flag = (n, d) => { const i = argv.indexOf(n); if (i < 0) return d; const v
 const base = flag('--base', 'http://127.0.0.1:8791/wallet/')
 const pay = flag('--pay', 'BTC'), get = flag('--get', null)
 const awaitNew = Number(flag('--await-new', '0'))
+const phraseFile = flag('--phrase-file', null)
 const work = resolve(argv[0] || 'market-view-drive')
 if (!get) { console.error('usage: market-view-drive.mjs <work-dir> --pay BTC --get <asset hex> [--await-new <seconds>]'); process.exit(2) }
 const ev = join(work, 'evidence'); mkdirSync(ev, { recursive: true })
@@ -40,15 +44,23 @@ try {
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1180, height: 1500, deviceScaleFactor: 1, mobile: false })
   await page.go(base)
   await page.waitFor("document.querySelector('#btnCreate') && document.querySelector('#btnCreate').offsetParent !== null", 300000)
-  await click(page, '#btnCreate')
-  await page.waitFor("document.querySelector('#btnConfirm') && document.querySelector('#btnConfirm').offsetParent !== null")
-  await click(page, '#btnConfirm')
+  if (phraseFile) {
+    const phrase = readFileSync(phraseFile, 'utf8').trim()
+    await page.eval(`localStorage.setItem('swk.sequentia.mnemonic', ${JSON.stringify(phrase)})`)
+    await page.go('about:blank'); await sleep(1500)
+    await page.go(base)
+  } else {
+    await click(page, '#btnCreate')
+    await page.waitFor("document.querySelector('#btnConfirm') && document.querySelector('#btnConfirm').offsetParent !== null")
+    await click(page, '#btnConfirm')
+  }
   await page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000)
   note('the wallet is open')
 
   // 1. default mode
   await click(page, '#tabs button[data-tab="swap"]')
-  await page.waitFor("document.querySelector('#ucPay')", 120000)
+  // What is held shows in You pay once the wallet has synced; the tab is drawn again until it does.
+  await page.waitFor(`(()=>{ if([...document.querySelectorAll('#ucPay option')].some(o=>o.value===${JSON.stringify(pay)})) return true; if(!window._mvT || Date.now()-window._mvT>5000){ window._mvT=Date.now(); document.querySelector('#tabs button[data-tab="swap"]').click() } return false })()`, 300000)
   const p1 = await pick(page, '#ucPay', pay)
   check(`You pay ${pay}`, p1 === true, p1)
   await page.waitFor(`[...document.querySelectorAll('#ucGet option')].some(o=>o.value===${JSON.stringify(get)})`, 60000)
