@@ -46,7 +46,10 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
 - BTC on a Bitcoin ark in default mode: native bitcoin held in Bark's wallet of the same phrase
   on the ark the page names (Second's server on testnet4), paid in seconds between wallets,
-  over Lightning to any invoice and out to any Bitcoin address, and the BTC side of trades
+  over Lightning to any invoice and out to any Bitcoin address, and the BTC side of trades. A
+  browser holding the phrase learns from the ark's server, at each open and every five minutes,
+  what the phrase's other wallets did (`catch_up`): the coins they boarded or received, and those
+  of its own they spent
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry

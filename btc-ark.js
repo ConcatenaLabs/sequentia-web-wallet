@@ -58,6 +58,11 @@ export const PAY_TIMEOUT_MS = 180_000
 // how often the wallet is asked to sync with its server and the chain besides its daemon.
 export const REFRESH_MS = 3_000
 export const SYNC_MS = 30_000
+// How often the wallet asks its server what the phrase's other wallets did (`catch_up`: the coins
+// they made or received, a board once its wallet has registered it, and the coins of this store
+// they spent), besides once at each open. A browser that opened the phrase before another one
+// boarded or was paid learns of it this way.
+export const CATCH_UP_MS = 5 * 60_000
 // The least a board leaves the on-chain fee and the ark's board fee, over the ark's own least.
 export const BOARD_MARGIN_SATS = 1_000n
 // testnet4's fee floor for the board's funding (sat/vB).
@@ -160,6 +165,18 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   }
   const run = (command, args = {}, timeout) => call('run', { command, args }, timeout)
 
+  // The other wallets of the phrase, caught up from the server; the figure follows.
+  function catchUp () {
+    const t0 = now()
+    return run('catch_up', {}, PAY_TIMEOUT_MS)
+      .then((r) => {
+        const got = (r && r.recovered) || [], gone = (r && r.spent_elsewhere) || []
+        log('[btc ark] caught up in', now() - t0, 'ms:', got.length, 'coin(s) taken in (', (r && r.recovered_sat) || '0', 'sat),', gone.length, 'spent elsewhere')
+        return refresh()
+      })
+      .catch((e) => log('[btc ark] catch up:', e && e.message))
+  }
+
   async function refresh () {
     if (!isOpen) return figures
     const b = await run('balance')
@@ -180,10 +197,12 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
         info = await run('info')
         await refresh()
         log('[btc ark] open in', now() - t0, 'ms')
+        catchUp()
         if (!timer) {
-          let lastSync = now()
+          let lastSync = now(), lastCatchUp = now()
           timer = setInterval(() => {
-            if (now() - lastSync >= SYNC_MS) { lastSync = now(); run('sync').then(() => refresh()).catch(() => {}) } else refresh().catch(() => {})
+            if (now() - lastCatchUp >= CATCH_UP_MS) { lastCatchUp = now(); catchUp() }
+            else if (now() - lastSync >= SYNC_MS) { lastSync = now(); run('sync').then(() => refresh()).catch(() => {}) } else refresh().catch(() => {})
           }, REFRESH_MS)
         }
         return true
