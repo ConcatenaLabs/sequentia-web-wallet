@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { makeSiteOrders, readParams, readOptions, restTerms, meetsLimit, SITE_WORDS, ORDER_FEATURES } from './site-orders.js'
-import { forbiddenIn } from './user-trade.js'
+import { forbiddenIn, USER_WORDS } from './user-trade.js'
 
 const B = 'bb'.repeat(32), Q = 'cc'.repeat(32)
 const meta = (h) => (h === B ? { ticker: 'GOLD', precision: 8 } : { ticker: 'USDX', precision: 8 })
@@ -80,6 +80,25 @@ test('a market buy is sized from a first price, shown, and settled as one trade'
   assert.deepEqual(o.trades[0].fills, [{ txid: r.trade, base: String(10n ** 8n), quote: String(4000n * 10n ** 8n), state: 'sent' }])
   assert.deepEqual((await S.orders('https://other/')).trades, [])
   await assert.rejects(S.confirm(q.id), /no longer current/)
+})
+
+test('a trade is "received" as soon as the maker completed it, with the wallet\'s own words', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't' })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  const r = await S.confirm(q.id)
+  // The swap the maker completed: what it brings is the wallet's, only its settling is left.
+  Object.assign(E.recs[0], { source: 'leaf-maker', swapState: 'done', sentAt: Date.now() })
+  let o = await S.orders('https://s/dex/')
+  assert.equal(o.trades[0].state, 'received')
+  assert.equal(o.trades[0].note, USER_WORDS.receivedSettling)
+  // Still settling a quarter of an hour on: said to be slow, never "Sent".
+  Object.assign(E.recs[0], { sentAt: Date.now() - 15 * 60000, settleState: ['released', 'pending'] })
+  o = await S.orders('https://s/dex/')
+  assert.equal(o.trades[0].state, 'received')
+  assert.match(o.trades[0].note, /taking longer than usual/)
+  assert.deepEqual(forbiddenIn(o.trades[0].note), [])
+  assert.ok(r.trade)
 })
 
 test('a limit order away from the book rests from leaves, listed once it rests, taken back only after its date', async () => {

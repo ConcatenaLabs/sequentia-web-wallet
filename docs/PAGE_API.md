@@ -143,3 +143,10 @@ A limit order takes four options, each listed in `getCapabilities().features`:
   shorter time becomes the earliest it allows; the dialog shows the time it is.
 
 A market order refuses all four.
+
+`getOrders` lists each trade the site made with a `state` and a `note`. The state is `sent` once
+the wallet has paid or signed its side, and `received` as soon as what the trade brings is the
+wallet's (a swap with a maker is received seconds after it is sent). It is `settled` once the
+trade's coins are settled with the network, and `failed` when it did not happen and what was
+paid came back. The note says the same in the wallet's own words, with the minutes a trade has
+waited, for a site to show beside its state.
