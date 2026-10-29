@@ -213,7 +213,10 @@ Every coin it receives is refreshed in the operator's next round once it has res
 
 The library answers one command at a time, so a taker's firm offer waits behind whatever the
 maker's own upkeep is running. Quotes are served from the last reading and never wait. A firm
-offer or an acceptance goes ahead of every queued command. A read of `/v1/quotes` holds the
+offer, in-tree or at the BTC desk, is sized on that reading too, while it is under five minutes old.
+It then asks the library for one command, the offer, which goes ahead of every queued command
+(the library refuses an offer it cannot pay). An acceptance goes ahead the same way, and the
+reading taken after either waits its turn in the upkeep. A read of `/v1/quotes` holds the
 upkeep's next commands for 90 s (at most once every three minutes), so the firm offer that
 follows finds the library free. The upkeep leaves the library idle at least as long as its last
 pass held it. The resting desk reads its orders eight to a command. Every command slower than

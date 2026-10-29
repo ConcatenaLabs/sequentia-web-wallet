@@ -281,6 +281,10 @@ async function main () {
   // The upkeep leaves the library free at least as long as its last pass held it, so a taker's
   // firm offer or acceptance is as likely to find it idle as busy.
   let passEnd = 0, passTook = 0, lastHold = 0
+  const HOLDINGS_FOR_FIRM_MS = 5 * 60 * 1000
+  // What a firm offer is sized on: the upkeep's last reading while it is fresh, else a reading
+  // asked ahead of the queue.
+  const firmHoldings = async () => (holdings && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings.sp : spendable(true))
   const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
   async function tick () {
     if (busy || Date.now() - passEnd < passTook) return
@@ -375,14 +379,17 @@ async function main () {
       const b = await body(req)
       if (!b) return send(res, 400, { error: 'the body is not JSON' })
       if (desk && p.startsWith('/v1/btc/')) {
-        const r = await desk.route('POST', p, b, spendable, cfg.fee_margin || 0)
+        const r = await desk.route('POST', p, b, firmHoldings, cfg.fee_margin || 0)
         if (r) { if (p === '/v1/btc/paid') tick(); return send(res, r[0], r[1]) }
       }
       if (p === '/v1/firm') {
         const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
         if (!pair0) return send(res, 404, { error: 'the maker quotes no such pair' })
         const give = big(b.give)
-        const sl = slicesFor(pair0, await spendable(true), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
+        // Sized on the holdings the upkeep read last (each library command can take tens of seconds
+        // on a wallet of a hundred coins): the library refuses an offer it cannot pay, and the
+        // reading is renewed after the offer.
+        const sl = slicesFor(pair0, await firmHoldings(), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
         const w = sl && give >= sl.min ? walkWant(sl.slices, give) : null
         if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
         const pair = sl.pair
@@ -390,7 +397,7 @@ async function main () {
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
-        spendable(true).catch(() => {})
+        spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
         log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8))
         return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
       }
@@ -402,7 +409,7 @@ async function main () {
         const f = firm.get(b.swap)
         if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)
-        spendable(true).catch(() => {})
+        spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
         log('done', String(r.swap).slice(0, 12))
         return send(res, 200, { swap: b.swap, state: 'done' })
       }
