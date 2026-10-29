@@ -733,6 +733,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   async function boardArrivals () {
     if (!S.open || dev() || !pinned() || S.asked) return
     try { if (ctx.onchainQuiet && ctx.onchainQuiet()) { upkeepSoon(30_000); return } } catch {}
+    await coverReceiveKeys()
     const refused = S.boardRefused || (S.boardRefused = new Map())
     try { S.balance = await run('balance') } catch (e) { log('[leaves] balance before boarding: ' + (e && e.message)); return }
     log('[leaves] on the chain: ' + JSON.stringify((S.balance && S.balance.sequentia_onchain) || {}))
@@ -753,6 +754,34 @@ export function mountLeaves (ctx, root, settingsRoot) {
       // The page's own reading of the chain still counts the coins the board spent: it reads again.
       if (ctx.onBoarded) try { ctx.onBoarded() } catch {}
     }
+  }
+
+  // The leaf wallet finds its on-chain coins by a gap of 20 unused keys past the last key it
+  // handed out or saw holding an UNSPENT coin (its node's scantxoutset), where this page finds them
+  // by a gap past the last key with any history. Keys used and spent before the leaf wallet looked
+  // (before it joined, or by the page's own payments), or skipped by the address the page shares
+  // with Bitcoin, leave a coin the page shows at a key the leaf wallet never reads: default mode
+  // then never boards it, and a trade finds nothing to pay from. So the leaf wallet is handed keys
+  // (`address`, each the next key) until its window covers every key this page has handed out,
+  // once per key, remembered per wallet. -> how many keys it was handed now.
+  const WINDOW_KEY = 'swk.leaves.window'
+  async function coverReceiveKeys () {
+    const target = claimScan()
+    if (!target) return 0
+    let had = 0
+    try { had = Number(ctx.store.getItem(tagged(WINDOW_KEY, tag())) || 0) } catch {}
+    // The window reaches 20 keys past the last one handed out: hand out up to `target - 20`.
+    const want = target - 20
+    if (!(want > had)) return 0
+    let n = 0
+    for (let i = had; i < want; i++) {
+      if (S.asked) break
+      try { await run('address') } catch (e) { log('[leaves] handing the leaf wallet its keys: ' + (e && e.message)); break }
+      n++
+      try { ctx.store.setItem(tagged(WINDOW_KEY, tag()), String(i + 1)) } catch {}
+    }
+    if (n) log(`[leaves] the leaf wallet reads its on-chain coins up to key ${had + n + 20} now (${n} key(s) handed to it)`)
+    return n
   }
 
   // ---- what the wallet does by itself: claims taken up, plans kept ----

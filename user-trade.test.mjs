@@ -149,6 +149,13 @@ test('engine: not listed, not offered, no funds', async () => {
   assert.equal((await createEngine({ ...base, makers: () => [], admitted: admitted(['leaf-maker']) }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })).why, 'not-offered')
   s.coins[0].state = 'spent'
   assert.equal((await createEngine({ ...base, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })).why, 'no-funds')
+  // Held where no source can pay from it now (on the chain, waiting to be boarded): not ready, and
+  // the wallet is asked to make it ready; never "you have none".
+  const asked = []
+  const q = await createEngine({ ...base, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), held: () => 50000000000000n, prepare: (a) => asked.push(a) })
+    .quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([q.why, q.held, asked], ['not-ready', '50000000000000', [X]])
+  assert.deepEqual(forbiddenIn(USER_WORDS.notReady('USDX')), [])
 })
 
 test('engine: what can be received for an asset is what the book offers on an admitted pair, held or not', async () => {

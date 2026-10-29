@@ -274,6 +274,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.usertrade.<tag>` | user mode's trades, each written before anything is signed: its ticket, the step it took (an in-tree swap's offer and acceptance, a take's id, a BTC trade's hash and invoices), the coins it brought and the round that settles them; resumed on every open until Settled or Returned |
 | `swk.leaves.joined.<tag>` | `1` once this wallet has joined a leaf operator: its leaf wallet then opens and syncs in either mode |
 | `swk.siteorders.<tag>` | the trades and orders a site of this origin made through this wallet: each trade's site, market and amounts (its record is the engine's), each order placed from leaves with its terms and whether it is listed |
+| `swk.leaves.window.<tag>` | how many on-chain keys default mode has handed the leaf wallet (`address`) so its window of on-chain coins covers every key the page handed out; it boards only what it reads there |
 | `swk.leaves.address.<tag>` | the leaf wallet's on-chain address handed to the page API, the same each time it is asked |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |

@@ -33,6 +33,11 @@
 //                                 broadcasts the FILL at the fee shown; onTxid(txid) before the
 //                                 broadcast),
 //                                 status(txid) -> 'final' | 'confirmed' | 'pending' | 'unknown' }
+//   held(asset)                -> what the wallet shows it holds of an asset, wherever it is; optional:
+//                                 with it, a pay asset held but not payable now is 'not-ready', not
+//                                 'no-funds'
+//   prepare(asset)             -> asks the wallet to make an asset held but not payable ready (default
+//                                 mode boards it); optional
 //   store                      -> getItem/setItem (the trade records, persisted before signing)
 //   now()                      -> milliseconds
 //   sleep(ms), log(...)        -> optional
@@ -86,6 +91,9 @@ export const USER_WORDS = Object.freeze({
   enter: 'Enter how much you pay.',
   tooSmall: 'That amount is too small to trade.',
   noFunds: (pay) => `You have no ${pay} to trade.`,
+  // Held, and shown in the balance, but not where a trade can pay it from yet (just arrived, or
+  // still being moved in by the wallet): never "you have none".
+  notReady: (pay) => `Your ${pay} is not ready to trade yet. It will be in a few minutes; nothing has moved.`,
   pricing: 'Finding the best price…',
   priceMoved: 'The price moved. Here is the new one.',
   sent: 'Sent',
@@ -478,7 +486,13 @@ export function createEngine (deps) {
       : (await spendable()).get(payAsset) || 0n
     const haveChain = payAsset !== 'BTC' && deps.onchain && sources.includes('onchain-fill')
       ? big(await Promise.resolve(deps.onchain.balance(payAsset)).catch(() => 0n)) : 0n
-    if (haveLeaf <= 0n && haveChain <= 0n) return { ok: false, why: 'no-funds' }
+    if (haveLeaf <= 0n && haveChain <= 0n) {
+      // What the wallet shows it holds, though no source can pay from it now: the wallet is asked to
+      // make it ready (default mode boards coins on the chain into the tree by itself).
+      const held = payAsset !== 'BTC' && deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : 0n
+      if (held > 0n) { try { deps.prepare && deps.prepare(payAsset) } catch {} return { ok: false, why: 'not-ready', held: String(held) } }
+      return { ok: false, why: 'no-funds' }
+    }
     const haveOf = (e) => (e.source === 'onchain-fill' ? haveChain : haveLeaf)
     const es = (await entries(payAsset, receiveAsset, sources)).filter((e) => haveOf(e) > 0n)
     // Indicative first, so only the best few are asked for firm terms (a maker holds its coins

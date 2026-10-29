@@ -110,7 +110,7 @@ answers and refusals:
 | `getWalletMode()` | silent | `{ mode }` |
 | `connect()` | this page's dialog: "Connect SeqDEX?" | `{ network, address }` (the shared `tb1` address) |
 | `getAccounts()` | silent | `{ accounts: [account] }`, or `[]` until connected |
-| `getBalances()` | silent | `{ assets, btc, leaves, total, arriving }` (and `by_place` in developer mode): on-chain Sequentia assets, BTC on the chain, what is held as leaves and spendable now, one figure per asset wherever it is held, and what of it is arriving, each in atoms |
+| `getBalances()` | silent | `{ assets, btc, leaves, total, arriving, spendable }` (and `by_place` in developer mode): on-chain Sequentia assets, BTC on the chain, what is held as leaves and spendable now, one figure per asset wherever it is held, what of it is arriving, and what a trade can pay from now (the composer's own figure), each in atoms |
 | `placeOrder({ type, base, quote, side, amount, price? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |
 | `getOrders()` | silent | `{ orders, trades }` |
 | `cancelOrder({ order })` | this page's dialog | `{ order, txid }` |
