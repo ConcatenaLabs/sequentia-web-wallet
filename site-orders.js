@@ -176,7 +176,10 @@ export function makeSiteOrders (d) {
     if (q.why === 'not-offered') return W.notOffered(tick(get), tick(pay))
     if (q.why === 'no-funds') return W.noFunds(tick(pay))
     if (q.why === 'not-ready') return W.notReady(tick(pay))
-    return W.tooSmall
+    if (q.why === 'too-small') return W.tooSmall
+    if (q.why === 'no-firm-offer') return W.noFirmOffer
+    // A reason this list does not know is never told as the amount's fault.
+    return W.failed
   }
 
   // One trade of the engine for the order: a sale pays its amount; a purchase pays what the book

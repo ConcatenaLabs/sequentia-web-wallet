@@ -193,6 +193,52 @@ test('engine: a maker quoting levels of one pair is asked for one firm offer, at
   assert.deepEqual(s.posts.filter(([p]) => p === 'firm').map(([, b]) => b.give), ['240000'], 'one firm offer, at the deeper level')
 })
 
+test('engine: a site\'s probe of all the wallet can pay asks the maker for no more than that', async () => {
+  // The maker quotes up to 1,000,000 YT but holds 500,000 now; the wallet holds 600,000 XT, which
+  // buys 450,000 YT. A site prices a purchase with a large probe amount.
+  const s = standIn()
+  s.coins[0].value = '600000'
+  const fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/firm') && BigInt(JSON.parse(init.body).give) > 500000n) throw new Error('the maker does not hold that much now')
+    return s.fetchJson(url, init)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), sleep: async () => {} })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: String(10n ** 18n) })
+  assert.ok(q.ok, q.why)
+  const asked = s.posts.filter(([p]) => p === 'firm').map(([, b]) => BigInt(b.give))
+  assert.ok(asked[0] <= 450000n, `first firm offer sized on what the wallet holds, not the level: ${asked}`)
+  assert.ok(BigInt(q.ticket.amountIn) <= 600000n, q.ticket.amountIn)
+})
+
+test('engine: a maker that holds less than it quotes is asked for half', async () => {
+  const s = standIn()
+  const fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/firm') && BigInt(JSON.parse(init.body).give) > 200000n) throw new Error('the maker does not hold that much now')
+    return s.fetchJson(url, init)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), sleep: async () => {} })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  assert.ok(BigInt(q.ticket.amountOut) <= 200000n, q.ticket.amountOut)
+})
+
+test('engine: offered, but no firm offer comes: said so, after one more try, never "too small"', async () => {
+  const s = standIn()
+  let firms = 0
+  const fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/firm')) { firms++; throw new Error('the maker is busy') }
+    return s.fetchJson(url, init)
+  }
+  let slept = 0
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), sleep: async () => { slept++ } })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.ok, false)
+  assert.equal(q.why, 'no-firm-offer')
+  assert.equal(firms, 2, 'asked once more after a pause')
+  assert.equal(slept, 1)
+  assert.deepEqual(forbiddenIn(USER_WORDS.noFirmOffer), [])
+})
+
 test('engine: the two amounts, estimated either way round, with no firm offer asked', async () => {
   const s = standIn()
   const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => 0 })
