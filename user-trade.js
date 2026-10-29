@@ -360,14 +360,20 @@ export function createEngine (deps) {
           if (give < entry.minReceive) return null
           continue
         }
-        // What settling the coins it gets (what it receives, and its change) in the next round
-        // costs, from the library: the swap is settled only after the next round.
-        let s, sc = null
+        // The coins the swap makes (what the wallet gets, and its change) are settled in a round
+        // only when they would sit one reassignment short of the operator's limit: otherwise they
+        // are the wallet's to use the moment the maker completes, and nothing waits for a round.
+        // What settling costs, when it is needed, comes from the library.
+        const most = await depthLimit()
+        const settles = t.hops == null || most == null || Number(t.hops) >= most - 1
+        let s = { asset: receiveAsset, value: String(give), fee: '0', after: String(give) }, sc = null
         const change = big(t.change && t.change.value)
-        try {
-          s = await run('settle_quote', { asset: receiveAsset, value: String(give), expiry: t.dates && t.dates.expiry })
-          if (change > 0n) sc = await run('settle_quote', { asset: payAsset, value: String(change), expiry: t.dates && t.dates.expiry })
-        } catch (e) { log('[user trade] settle_quote:', e.message); release(entry.maker, o.swap); return null }
+        if (settles) {
+          try {
+            s = await run('settle_quote', { asset: receiveAsset, value: String(give), expiry: t.dates && t.dates.expiry })
+            if (change > 0n) sc = await run('settle_quote', { asset: payAsset, value: String(change), expiry: t.dates && t.dates.expiry })
+          } catch (e) { log('[user trade] settle_quote:', e.message); release(entry.maker, o.swap); return null }
+        }
         const total = spend + (sc ? big(sc.fee) : 0n)
         if (total > limit) {
           // Settling the change costs too: what the trade takes in all must fit what is paid.
@@ -376,10 +382,11 @@ export function createEngine (deps) {
           if (give < entry.minReceive) return null
           continue
         }
-        const fees = [{ asset: payAsset, atoms: big(t.pays.margins) }, { asset: receiveAsset, atoms: big(s.fee) }]
+        const fees = [{ asset: payAsset, atoms: big(t.pays.margins) }]
+        if (settles) fees.push({ asset: receiveAsset, atoms: big(s.fee) })
         if (sc) fees.push({ asset: payAsset, atoms: big(sc.fee) })
         return { source: entry.source, id: entry.id, entry, receive: big(s.after), give: total, offer: o, terms: t,
-          settle: { received: s, change: sc }, fees }
+          settle: settles ? { received: s, change: sc } : null, fees }
       }
       return null
     }
@@ -630,7 +637,7 @@ export function createEngine (deps) {
         }
         rec.maker = choice.entry.maker; rec.swap = choice.offer.swap; rec.give = choice.terms.gets.value
         rec.receiveAsset = choice.terms.gets.asset
-        rec.settleTargets = [{ asset: choice.settle.received.asset, value: choice.settle.received.value, fee: choice.settle.received.fee },
+        rec.settleTargets = !choice.settle ? [] : [{ asset: choice.settle.received.asset, value: choice.settle.received.value, fee: choice.settle.received.fee },
           ...(choice.settle.change ? [{ asset: choice.settle.change.asset, value: choice.settle.change.value, fee: choice.settle.change.fee }] : [])]
         // The coins the wallet holds now, so the coin the swap brings is the one it did not hold.
         rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
@@ -764,6 +771,13 @@ export function createEngine (deps) {
     return put(rec)
   }
 
+  // The operator's limit on reassignments since a round (`info.depth_limit`); null when unknown.
+  async function depthLimit () {
+    if (!infoSeen || now() - infoSeen.at > 5000) infoSeen = { at: now(), info: await run('info').catch(() => null) }
+    const v = infoSeen.info && infoSeen.info.server_info && infoSeen.info.server_info.depth_limit
+    return v != null ? Number(v) : null
+  }
+
   async function participation (pid) {
     return ((await run('participations')) || []).find((p) => p.participation === pid) || null
   }
@@ -782,6 +796,14 @@ export function createEngine (deps) {
         if (!c) return 'waiting'
         coins.push(c)
       }
+      // Only a coin one reassignment short of the operator's limit needs a round now: the rest stay
+      // spendable at once (a round can take minutes, and holds the coin meanwhile), and the wallet's
+      // own upkeep refreshes them before their dates. A library that does not count hops settles
+      // every coin, as before.
+      const limit = await depthLimit()
+      const deep = coins.filter((c) => c.hops == null || limit == null || Number(c.hops) >= limit - 1)
+      if (!deep.length) return 'settled'
+      coins.splice(0, coins.length, ...deep)
       let q
       try { q = await run('quote', { leaves: coins.map((c) => c.leaf_id), max_fee_ppm: MAX_FEE_PPM }) } catch (e) { log('[user trade] settle quote:', e.message); return 'waiting' }
       for (const qc of q.coins || []) {

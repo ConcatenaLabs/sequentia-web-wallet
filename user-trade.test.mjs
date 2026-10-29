@@ -127,6 +127,26 @@ test('engine: an in-tree trade from ticket to Settled, the ticket the library\'s
   assert.equal(r.state, 'settled')
 })
 
+test('engine: a swap whose coins are far from the operator\'s limit is done the moment the maker completes it, no round asked', async () => {
+  const s = standIn()
+  // The library counts the swap's hops (1 here) and the operator allows 5.
+  const lib = { command (cmd, a) {
+    if (cmd === 'info') return { server_info: { depth_limit: 5 } }
+    const v = s.lib.command(cmd, a)
+    return cmd === 'swap_read' ? { ...v, hops: 1 } : v
+  } }
+  let t = 0
+  const eng = createEngine({ leaves: lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => (t += 1000) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  assert.equal(q.ticket.amountOut, q.choice.terms.gets.value, 'what the swap gives, no settle fee taken off')
+  assert.ok(!s.calls.includes('settle_quote'), 'no settling priced')
+  await eng.confirm(q.choice, q.ticket)
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled', 'settled once the maker completed the swap')
+  assert.ok(!s.calls.includes('participate'), 'no round asked')
+})
+
 test('engine: a maker that never completes: the swap is cancelled and the coin comes back, no action asked', async () => {
   const s = standIn()
   s.away()
