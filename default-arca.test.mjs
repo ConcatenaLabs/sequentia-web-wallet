@@ -72,6 +72,13 @@ test('arriving is what the balance holds pending', () => {
   assert.equal(arrivingAtoms(null, A), 0n)
 })
 
+test('a coin the operator owes back after its expiry is arriving, and part of the figure', () => {
+  const bal = { arca: { [A]: { returning: '989626', live: '2000000' } }, held: { [A]: '2989626' } }
+  assert.equal(arrivingAtoms(bal, A), 989626n)
+  const b = { arca: { [A]: { pending: '5', returning: '10' } } }
+  assert.equal(arrivingAtoms(b, A), 15n)
+})
+
 test('what is boarded: served assets on the chain at the smallest leaf or more, frozen coins left', () => {
   const bal = { sequentia_onchain: { [A]: '999999', [B]: '50000', ['ff'.repeat(32)]: '9999999' } }
   assert.deepEqual(boardCandidates(bal, info), [{ asset: B, onchain: 50000n, min: 10000n }])
