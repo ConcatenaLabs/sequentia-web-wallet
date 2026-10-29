@@ -169,6 +169,46 @@ Default mode is a trading screen, not only a form: once a pair is chosen, its ma
   never says how a trade settled; developer mode adds a **Rail** column to the recent trades and
   the book's depth by rail.
 - The view reads the relay again every five seconds while it is on screen.
+- The chart is drawn the same way on every surface (SeqDEX's `shared/chart.js`, with TradingView
+  Lightweight Charts): buys green, sales amber, a step line or candles, and the ranges above.
+
+## SeqDEX
+
+SeqDEX's site is the most complete place to trade, and its default view uses this page's words.
+What it shows beyond the Market and Trade sections above:
+
+- **Markets**: every pair with **Last price** (in the quote, its value in the reference currency
+  beside it), **24h change**, **24h high / low**, **24h volume** (in the reference currency) and
+  a **7 days** line. A pair with no trade says "No trades yet". Filters: **All**, BTC, each fiat
+  stablecoin, **Favourites**, **You hold**.
+- **The chart**: **Price** or **Depth**; ranges 1D, 1W, 1M, then **3M**, **1Y** and **All**;
+  **Candles** or **Line**; **Indicators**: "Volume", "Moving average 7", "Moving average 25",
+  "EMA 20", "Bollinger bands 20, 2", "VWAP", "RSI 14".
+- **Order book** and **Recent trades**. Between the two sides: the last price, then "Spread
+  <amount> · <percent> · Mid <price>". A book whose best bid is above its best ask is shown as
+  it is.
+- **The order ticket**: **Buy** or **Sell**; **Market**, **Limit** or **Auction** ("Trades at the
+  next auction's one price, at your limit or better."); **Price**, **Amount**, **Total**, and
+  25%, 50%, 75%, **Max** of the balance. Under **Options**:
+  - **Post only**: "Rest on the book without taking any order."
+  - **Nothing left resting**: "Take what is on offer at your price now; the rest is not placed."
+  - **Smallest fill** <amount> <TICKER>.
+  - **Can take back after** 1 hour, 1 day or 1 week: "Until then it stays on the book for anyone
+    to fill at your price."
+  An option or a type shows only when the connected wallet offers it.
+- The ticket's estimate: **Fills now** <amount> at <price>, **Rests on the book** <amount> at
+  <price>, **You pay** <amount>; under the button, "Your wallet shows the exact amounts and fees
+  before anything is signed." The button reads "Buy <amount> <TICKER>" or "Sell <amount>
+  <TICKER>".
+- Refusals, besides the Trade section's: "You declined in the wallet. Nothing was traded." and,
+  for post only, "This order would trade at once. Nothing was placed."
+- **Your orders**: **Open orders** (with **Filled** <percent>, and "Can take back from <time>"
+  or a **Take back** button), **Trades** (each row as in History, with **Sent** or **Settled**),
+  **Order history**, and "This market only".
+- **Portfolio**: **Total** in the reference currency with its 24h change, then each asset's one
+  figure, its price, its 24h change, its value and its share; **Export CSV**.
+- Developer view adds a **Route** column, each route's own book, the route the wallet proposes on
+  the ticket, and **Two-sided** orders (a bid and an ask from two coins).
 
 ## History
 
