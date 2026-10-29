@@ -111,7 +111,7 @@ answers and refusals:
 | `connect()` | this page's dialog: "Connect SeqDEX?" | `{ network, address }` (the shared `tb1` address) |
 | `getAccounts()` | silent | `{ accounts: [account] }`, or `[]` until connected |
 | `getBalances()` | silent | `{ assets, btc, leaves, total, arriving, spendable }` (and `by_place` in developer mode): on-chain Sequentia assets, BTC on the chain, what is held as leaves and spendable now, one figure per asset wherever it is held, what of it is arriving, and what a trade can pay from now (the composer's own figure), each in atoms |
-| `placeOrder({ type, base, quote, side, amount, price? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |
+| `placeOrder({ type, base, quote, side, amount, price?, post_only?, rest?, min_fill?, take_back_after? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |
 | `getOrders()` | silent | `{ orders, trades }` |
 | `cancelOrder({ order })` | this page's dialog | `{ order, txid }` |
 
@@ -127,3 +127,19 @@ order is that trade when its price meets the limit, and otherwise rests whole on
 order placed from the wallet's leaves, which the page lists on the relay once it rests (while it
 is open) and takes back by its refund once its time has run out. The dialog's words are default
 mode's (`docs/DEFAULT_MODE.md`): what is paid, what is got, the fees, and the site that asked.
+
+A limit order takes four options, each listed in `getCapabilities().features`:
+
+- `post_only: true` (`order-post-only`): the order only rests. One that would trade at once is
+  refused before any dialog with "This order would trade at once. Nothing was placed."
+- `rest: false` (`order-no-rest`): the order only trades. When the book does not meet the price
+  it is refused with "Nothing on the book meets that price right now." It cannot be asked with
+  `post_only`.
+- `min_fill` (`order-min-fill`): base atoms, the smallest part of the resting order one fill may
+  take (at the price, in what a purchase pays). Without it, a tenth of the order.
+- `take_back_after` (`order-take-back-after`): whole seconds from now, from 3600 (an hour) to
+  604800 (a week), after which what is left can be taken back. Without it, a day. The operator
+  takes a resting order only some hours ahead of its refund (its `order_margin_seconds`), so a
+  shorter time becomes the earliest it allows; the dialog shows the time it is.
+
+A market order refuses all four.

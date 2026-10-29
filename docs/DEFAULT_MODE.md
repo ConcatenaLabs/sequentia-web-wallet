@@ -240,7 +240,10 @@ What it shows beyond the Market and Trade sections above:
   before anything is signed." The button reads "Buy <amount> <TICKER>" or "Sell <amount>
   <TICKER>".
 - Refusals, besides the Trade section's: "You declined in the wallet. Nothing was traded." and,
-  for post only, "This order would trade at once. Nothing was placed."
+  for post only, "This order would trade at once. Nothing was placed." (against BTC, "An order
+  against BTC trades at once and never rests on the book. Nothing was placed."), and for a
+  smallest fill larger than the order, "The smallest fill is more than the order. Nothing was
+  placed."
 - **Your orders**: **Open orders** (with **Filled** <percent>, and "Can take back from <time>"
   or a **Take back** button), **Trades** (each row as in History, with **Sent** or **Settled**),
   **Order history**, and "This market only".
