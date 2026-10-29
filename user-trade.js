@@ -90,12 +90,43 @@ export const USER_WORDS = Object.freeze({
   priceMoved: 'The price moved. Here is the new one.',
   sent: 'Sent',
   settled: 'Settled',
+  // A trade that waits on Bitcoin blocks says what is already true while it waits.
+  waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
+  receivedSettling: 'Received. Settled after the next Bitcoin blocks.',
+  minutes: (word, n) => `${word} (${n} min)`,
   returned: 'Returned: nothing traded.',
   returnedFees: (fees) => `Returned: nothing traded. Fees of ${fees} were paid.`,
   working: 'Working…',
   failed: 'This trade could not be made. Nothing moved.',
   recent: 'Your trades',
 })
+
+// Whether what an open trade brings is held already, and only its settling is left: a purchase
+// with BTC once the BTC is paid and the asset claimed, a sale for BTC once the BTC came, a swap once
+// the maker completed it, a take once its round released the coin.
+export function heldAlready (r) {
+  if (!r) return false
+  if (r.source === 'btc-gateway') return r.dir === 'sell' ? !!r.btcPaid : !!(r.preimage && r.receiveState === 'received')
+  if (r.source === 'leaf-maker') return r.swapState === 'done'
+  if (r.source === 'covenant-round') return r.takeState === 'released'
+  return false
+}
+
+// What the list of trades says of one: Sent, then Settled; a trade waiting on the other side or on
+// its settling says so, with the minutes it has waited once it has waited one.
+export function tradeStateWord (r, now = Date.now()) {
+  const W = USER_WORDS
+  if (r.state === 'settled') return W.settled
+  if (r.state === 'returned' && (r.feesPaid || []).length) return null
+  if (r.state === 'returned' || r.state === 'failed') return W.returned
+  if (r.state === 'confirming') return W.working
+  const since = (t) => Math.floor((now - (t || r.at || now)) / 60000)
+  // Buying with BTC: nothing has left the wallet until its asset is held for it.
+  if (r.state === 'waiting') { const m = since(r.waitingSince); return m >= 1 ? W.minutes(W.waitingOther, m) : W.waitingOther }
+  const m = since(r.sentAt)
+  const word = heldAlready(r) ? W.receivedSettling : W.sent
+  return m >= 1 ? W.minutes(word, m) : word
+}
 
 // The fees a ticket counts, as one line: each fee in the asset it is paid in, summed per asset.
 // `fmt(asset, atoms)` names an amount. Fees in the asset paid come first.

@@ -15,7 +15,7 @@
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
-import { USER_WORDS, pickerOrder, costLine } from './user-trade.js'
+import { USER_WORDS, pickerOrder, costLine, tradeStateWord } from './user-trade.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -178,13 +178,8 @@ export function mountUserComposer (ctx) {
   }
 
   function stateWord (r) {
-    if (r.state === 'settled') return USER_WORDS.settled
     if (r.state === 'returned' && (r.feesPaid || []).length) return USER_WORDS.returnedFees(r.feesPaid.map((f) => amt(f.asset, f.atoms)).join(' and '))
-    if (r.state === 'returned' || r.state === 'failed') return USER_WORDS.returned
-    if (r.state === 'confirming') return USER_WORDS.working
-    // Buying with BTC: nothing has left the wallet until its asset is held for it.
-    if (r.state === 'waiting') return USER_WORDS.working
-    return USER_WORDS.sent
+    return tradeStateWord(r)
   }
 
   function paintTrades () {

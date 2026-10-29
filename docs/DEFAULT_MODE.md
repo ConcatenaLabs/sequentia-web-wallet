@@ -129,6 +129,11 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   take a payment) is counted as one of these fees and has no row of its own.
 - Statuses: **Sent**, then **Settled**. If a trade is undone: "Returned: nothing traded." or
   "Returned: nothing traded. Fees of <fees> were paid."
+- Settling waits for Bitcoin blocks, so a trade can take an hour or more. While it waits the row
+  says what is already true, with the minutes it has waited once that is one or more: "Waiting
+  for the other side. Nothing has left your wallet yet." (buying with BTC, until the asset is held
+  for the wallet); "Sent (<N> min)"; and once what the trade brings is held, "Received. Settled
+  after the next Bitcoin blocks. (<N> min)"
 - Refusals: "This trade could not be made. Nothing moved."; "The other side declined. Nothing was
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
   is not offered."; "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
