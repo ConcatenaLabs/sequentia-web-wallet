@@ -185,7 +185,8 @@ async function main () {
   const errs = [...wallet.errors, ...site.errors].filter((e) => !/favicon|ERR_/.test(e))
   check('no error in either page\'s console', !errs.length, errs.slice(0, 6))
   note('wallet console (site orders): ' + wallet.console.filter((l) => /site orders|user trade|order_/i.test(l)).slice(-12).join(' | '))
-  await site.stop(); await wallet.stop()
+  // The pages' storage is written to disk before the browser stops.
+  await site.stop(); await wallet.go('about:blank'); await sleep(3000); await wallet.stop()
   note(`done, ${failures} failed`)
   process.exit(failures ? 1 : 0)
 }
