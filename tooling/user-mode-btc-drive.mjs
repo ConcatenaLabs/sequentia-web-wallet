@@ -27,6 +27,7 @@
 // channel to the hub both ways. SEQLN_DIR is a SeqLN build with the keyless hsmd proxy, the
 // hold-invoice plugin and the signer's websocket relay. Needs pkg/ and a Chromium (CHROMIUM=…).
 import { spawn } from 'node:child_process'
+import { pickExpr, rowsExpr } from './picker-drive.mjs'
 import { mkdirSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -136,7 +137,7 @@ async function wordsCheck (w, label) {
   appendFileSync(join(out, 'user-mode-text.txt'), `--- ${label}\n${text}\n`)
 }
 
-async function pick (w, id, hex) { await w.set(id, hex); await sleep(200) }
+async function pick (w, id, hex) { if (!(await w.eval(pickExpr(id, hex)))) throw new Error('no ' + hex + ' in #' + id); await sleep(200) }
 async function review (w, pay, get, amount) {
   await w.click('[data-tab=swap]')
   await w.page.waitFor("document.querySelector('#ucPay') && document.querySelector('#ucPay').offsetParent !== null", 30000)
@@ -230,7 +231,7 @@ async function main () {
   await A.mode('user')
   await A.click('[data-tab=swap]')
   await A.page.waitFor("document.querySelector('#ucPay') && document.querySelector('#ucPay').offsetParent !== null", 30000)
-  const firsts = await A.eval("[document.querySelector('#ucPay').options[0].value, document.querySelector('#ucGet').options[0].value]")
+  const firsts = [(await A.eval(rowsExpr('ucPay')))[0], (await A.eval(rowsExpr('ucGet')))[0]]
   check('both pickers list BTC first', firsts[0] === 'BTC' && firsts[1] === 'BTC', firsts)
   await wordsCheck(A, 'user mode, empty')
   const t0 = await review(A, X, 'BTC', '100000')

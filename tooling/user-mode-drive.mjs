@@ -25,6 +25,7 @@
 // --pairs names the admitted pairs (the drill's list for this chain). Without it the drive admits
 // its own two pairs and says so. Needs pkg/ (the lwk_wasm build) and a Chromium (CHROMIUM=…).
 import { spawn } from 'node:child_process'
+import { pickExpr, rowsExpr } from './picker-drive.mjs'
 import { mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -135,7 +136,7 @@ async function wordsCheck (w, label) {
   appendFileSync(join(out, 'user-mode-text.txt'), `--- ${label}\n${text}\n`)
 }
 
-async function pick (w, id, hex) { await w.set(id, hex); await sleep(200) }
+async function pick (w, id, hex) { if (!(await w.eval(pickExpr(id, hex)))) throw new Error('no ' + hex + ' in #' + id); await sleep(200) }
 
 // Review, then the ticket's three lines.
 async function review (w, pay, get, amount) {
@@ -222,7 +223,7 @@ async function main () {
   await A.click('[data-tab=swap]')
   await A.page.waitFor("document.querySelector('#ucPay') && document.querySelector('#ucPay').offsetParent !== null", 30000)
   check('user mode: the Trade tab is the user composer', await A.visible('#userComposer') && !(await A.visible('#swComposer')))
-  const firsts = await A.eval("[document.querySelector('#ucPay').options[0].value, document.querySelector('#ucGet').options[0].value]")
+  const firsts = [(await A.eval(rowsExpr('ucPay')))[0], (await A.eval(rowsExpr('ucGet')))[0]]
   check('both pickers list BTC first', firsts[0] === 'BTC' && firsts[1] === 'BTC', firsts)
   await wordsCheck(A, 'user mode, empty')
   await A.shot('user-mode-composer')

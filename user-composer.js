@@ -12,15 +12,22 @@
 //   held(hex) -> atoms the person holds (the figure the Balance tab shows), admittedReceives(pay)
 //   -> [hex] (optional: the receive picker lists those after what is offered now),
 //   market: { relay() -> the relay's base URL, pairOf(a, b) -> {base, quote} } (optional: the
-//   chosen pair's market above the inputs, market-view.js) }
+//   chosen pair's market above the inputs, market-view.js), isHidden(hex) -> the person hid it
+//   (optional), refValue(hex, atoms) -> its value in words, "≈ $…" (optional) }
+// Both pickers are the shared asset chooser (asset-picker.js): a search box, your assets first
+// with their balances, BTC always, what the book offers now next, the rest found by searching.
 // The receive picker lists BTC first, then every asset the book offers for what is paid in one
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
 import { USER_WORDS, pickerOrder, costLine, tradeStateWord } from './user-trade.js'
 import { mountMarketView } from './market-view.js'
+import { openPicker, PICKER_WORDS } from './asset-picker.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
+// The chooser button's marks (no words): what nothing chosen shows, and the arrow.
+const NONE = '…'
+const CARET = '▾'
 
 // How long a trade is followed every few seconds, and how often after that.
 export const FOLLOW_FAST_MS = 120_000
@@ -75,17 +82,28 @@ export function mountUserComposer (ctx) {
     const gl = getList()
     const was = S.get
     if (!S.getChosen || !gl.includes(S.get)) S.get = S.ticket || S.busy ? S.get : defaultGet(gl)
-    old.replaceWith(select('ucGet', gl, S.get, pickGet))
+    old.replaceWith(chooser('ucGet', gl, S.get, pickGet))
     if (S.get !== was && !S.ticket) { S.error = ''; paintTicket() }
     if (S.get !== was && S.market) S.market.refresh().catch(() => {})
   }
   function pickGet (v) { S.get = v; S.getChosen = true; reset(); render() }
 
-  function select (id, list, value, onchange) {
-    const s = el('select', 'uc-pick'); s.id = id
-    for (const a of list) { const o = el('option', null, name(a)); o.value = a; if (a === value) o.selected = true; s.appendChild(o) }
-    s.onchange = () => onchange(s.value)
-    return s
+  // A picker: a button naming the asset chosen, which opens the shared chooser over `list`.
+  function chooser (id, list, value, onchange) {
+    const b = el('button', 'uc-pick'); b.type = 'button'; b.id = id; b.dataset.value = value || ''
+    b.setAttribute('aria-haspopup', 'listbox'); b.setAttribute('aria-expanded', 'false')
+    b.appendChild(el('span', 'uc-pick-tk', value ? name(value) : NONE))
+    b.appendChild(el('span', 'uc-pick-caret', CARET))
+    const offered = new Set(offeredNow())
+    const tradable = new Set(ctx.admittedReceives && id === 'ucGet' ? ctx.admittedReceives(S.pay) : [])
+    b.onclick = () => openPicker(b, list.map((h) => {
+      const atoms = big(ctx.held(h) || 0n)
+      const m = ctx.assetMeta(h) || {}
+      return { hex: h, ticker: name(h), name: h === 'BTC' ? 'Bitcoin' : (m.name || ''), held: atoms > 0n,
+        hidden: !!(ctx.isHidden && ctx.isHidden(h)), offered: offered.has(h), tradable: tradable.has(h), cur: h === value,
+        bal: atoms > 0n ? { b: ctx.fmtAtoms(atoms, prec(h)), r: ctx.refValue ? ctx.refValue(h, atoms) : '' } : null }
+    }), (hex) => onchange(hex), { hint: PICKER_WORDS.hintSearch })
+    return b
   }
 
   function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = '' }
@@ -101,7 +119,7 @@ export function mountUserComposer (ctx) {
     // You pay
     const row1 = el('div', 'uc-row')
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
-    row1.appendChild(select('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
+    row1.appendChild(chooser('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
     const inp = el('input', 'uc-amount'); inp.id = 'ucAmount'; inp.inputMode = 'decimal'; inp.placeholder = USER_WORDS.amount; inp.value = S.amount
     inp.oninput = () => { S.amount = inp.value; if (S.ticket) { reset(); paintTicket() } }
     row1.appendChild(inp)
@@ -113,7 +131,7 @@ export function mountUserComposer (ctx) {
     row2.appendChild(el('label', 'lbl', USER_WORDS.get))
     const gl = getList()
     if (!S.get || !gl.includes(S.get)) S.get = defaultGet(gl)
-    row2.appendChild(select('ucGet', gl, S.get, pickGet))
+    row2.appendChild(chooser('ucGet', gl, S.get, pickGet))
     box.appendChild(row2)
     // The ticket and the button
     const t = el('div', 'uc-ticket'); t.id = 'ucTicket'; box.appendChild(t)

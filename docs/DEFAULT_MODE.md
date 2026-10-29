@@ -150,6 +150,27 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
 
+## Choosing an asset
+
+Wherever an asset is chosen from a list, on every surface (the Trade tab's You pay and You
+receive, Send, the fee asset, Receive's amount, SeqDEX's ticket and its "Priced in" menu), it
+is chosen the same way, with the shared chooser (`asset-picker.js`):
+
+- A button names the asset chosen; it opens a list with a search box on top, "Search assets".
+- Before anything is typed, the list shows **Your assets** first: what the wallet holds, each
+  with its balance and its value, BTC always among them and first, even at 0. When the list is
+  one of a trade's sides: then what the book offers now for the other side, then the other
+  assets that trade against it.
+- A hidden asset (hidden from the Balance tab) is left out of that first list.
+- Typing searches every asset by ticker or name, hidden ones included. With nothing found:
+  "No matching assets." Many matches show the first forty, then "+<n> more · keep typing to
+  find them."
+- Only what can be chosen is listed: a trade's You receive lists what trades against You pay;
+  You pay lists what the wallet holds.
+- A menu that sets what everything is priced in pins **Any** on top, then lists the assets that
+  price some market.
+- Under the list before a search: "Type to search every asset."
+
 ## Market
 
 Default mode is a trading screen, not only a form: once a pair is chosen, its market shows above

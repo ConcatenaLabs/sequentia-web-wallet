@@ -19,6 +19,7 @@
 // Profiles are kept under <work-dir>/profiles/<name>, so a wallet carries from step to step; the
 // phrases are kept out of the evidence directory.
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs'
+import { pickExpr, rowsExpr } from './picker-drive.mjs'
 import { join, resolve } from 'node:path'
 import { Page, chromium } from './cdp-page.mjs'
 import { forbiddenIn } from '../user-trade.js'
@@ -172,7 +173,7 @@ async function main () {
     await page.waitFor("document.querySelector('#ucPay') && document.querySelector('#userComposer').offsetParent !== null", 120000)
     const words = forbiddenIn(await page.eval("document.querySelector('section[data-panel=\"swap\"]').innerText"))
     check('the Trade tab is three inputs and a button, none of the words', !words.length, words)
-    const pick = (id, tk) => page.eval(`(()=>{ const s=document.querySelector('#${id}'); const o=[...s.options].find(o=>o.textContent.trim()===${JSON.stringify(tk)}); if(!o) throw new Error('no ${tk} in '+[...s.options].map(o=>o.textContent).join(',')); s.value=o.value; s.dispatchEvent(new Event('change')); return true })()`)
+    const pick = async (id, tk) => { if (!(await page.eval(pickExpr(id, tk)))) throw new Error('no ' + tk + ' in #' + id) }
     await pick('ucPay', pay); await sleep(500); await pick('ucGet', get)
     await page.eval(`(()=>{ const i=document.querySelector('#ucAmount'); i.value=${JSON.stringify(amount)}; i.dispatchEvent(new Event('input')); return true })()`)
     const tQ = Date.now()
