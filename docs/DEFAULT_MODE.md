@@ -39,6 +39,10 @@ In practice:
   top is **one total** in the reference currency, across every asset.
 - What has been received and cannot be spent yet appears under the figure as
   **"<amount> <TICKER> arriving"**. Once it can be spent, it is simply part of the figure.
+- A coin the wallet left past its expiry, which the operator took and repays as a new coin less
+  its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
+  The wallet claims it by itself the next time it opens, or once restored from its phrase.
+  Developer mode names it `returning`.
 - The row's details show only what a person may act on: **Staked**, **Arriving**, and a freeze,
   as "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts the
   freeze."
