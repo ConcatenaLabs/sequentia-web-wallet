@@ -3918,6 +3918,8 @@ function lnStatusPill(){
   // fraction that mimics the "N ch" form. The signer detail lives in the tooltip.
   // Default mode says only whether Lightning works; developer mode adds the channel count.
   const dev = (()=>{ try { return devMode(); } catch { return false; } })();
+  // Default mode names no rail: the pill is developer mode's.
+  el.classList.toggle('hide', !dev);
   if(activeChannels){
     el.textContent = dev ? '⚡ LN '+activeChannels+' ch' : '⚡ Lightning';
   } else if (serviceUp){
@@ -4961,17 +4963,21 @@ function fillLnAssetSelect(sel, receive = false){
 function refreshLnSendReceive(){
   const lnOn = !!(typeof seqlnState === 'function' && seqlnState().deployed) && !!lnApi;
   // Default mode with BTC on the Bitcoin ark: BTC is paid and received over Lightning from there.
-  const arkOn = btcArkRoutes(), on = lnOn || arkOn;
+  // Default mode shows them only as the BTC cards of the ark, in plain words; developer mode shows
+  // every asset's Lightning cards.
+  const dev = devMode(), arkOn = btcArkRoutes(), on = dev ? (lnOn || arkOn) : arkOn;
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
   if (sc) sc.classList.toggle('hide', !on);
   if (rc) rc.classList.toggle('hide', !on);
-  if (lnOn){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
+  if (lnOn && dev){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
   else if (arkOn){ for (const id of ['lnRecvAsset', 'lnSendAsset']){ const sel = $(id); if (sel) sel.innerHTML = '<option value="BTC">BTC</option>'; } }
   // Default mode names no rail: with BTC on the ark the two cards are about BTC and invoices.
   if (rc && sc){
     if (!rc._words) rc._words = [rc.querySelector('.lbl').textContent, rc.querySelector('.sub').textContent];
     if (!sc._words) sc._words = [sc.querySelector('.lbl').textContent, sc.querySelector('.sub').textContent];
-    const plain = arkOn && !lnOn;
+    const plain = arkOn && (!lnOn || !dev);
+    for (const id of ['lnRecvAsset', 'lnSendAsset', 'lnRecvRoom']){ const e = $(id); if (e) e.classList.toggle('hide', plain); }
+    { const t = $('lnSendBolt11'); if (t){ if (t._ph == null) t._ph = t.placeholder; t.placeholder = plain ? BTC_WORDS.payHint : t._ph; } }
     rc.querySelector('.lbl').textContent = plain ? BTC_WORDS.recvTitle : rc._words[0];
     rc.querySelector('.sub').textContent = plain ? BTC_WORDS.recvSub : rc._words[1];
     sc.querySelector('.lbl').textContent = plain ? BTC_WORDS.payTitle : sc._words[0];
@@ -5109,7 +5115,7 @@ function initLnSendReceive(){
     _lnRecvWatchStop();   // a new invoice replaces the one on the card
     out.textContent = ''; $('lnRecvCopy').classList.add('hide');
     if (!(amt > 0)){ st.className = 'status err'; st.textContent = 'Enter an amount.'; return; }
-    if (asset === 'BTC' && btcArkRoutes()){
+    if (btcArkRoutes()){
       recvBtn.disabled = true;
       try { await btcArkReceive(amt, st, out); }
       catch(e){ st.className = 'status err'; st.textContent = 'Could not create the invoice: ' + prettyErr(e); }
@@ -5159,6 +5165,13 @@ function initLnSendReceive(){
   // An invoice names what it is paid in: bitcoin, or on Sequentia the asset in its `a` field. The
   // node that pays it must hold that asset, so pasting one selects it, and paying from another is
   // refused before any node is asked.
+  // What an invoice asks for, as default mode says it: 'BTC', an asset's ticker, or null when it is
+  // no invoice.
+  const lnInvoiceKind = (bolt11) => {
+    const d = decodeBolt11(bolt11);
+    if (!d.ok) return null;
+    return d.chain === 'btc' ? 'BTC' : (assetMeta(d.asset).ticker || 'another asset');
+  };
   const lnInvoiceAsset = (bolt11) => {
     const d = decodeBolt11(bolt11);
     if (!d.ok) return { error: 'This is not an invoice the wallet can pay: ' + d.error + '.' };
@@ -5171,6 +5184,12 @@ function initLnSendReceive(){
   if (bolt11El) bolt11El.addEventListener('input', () => {
     const bolt11 = (bolt11El.value || '').trim(), st = $('lnSendStatus');
     if (!bolt11) return;
+    if (btcArkRoutes()){
+      const k = lnInvoiceKind(bolt11);
+      if (k && k !== 'BTC'){ st.className = 'status err'; st.textContent = BTC_WORDS.notBtc(k); }
+      else { st.className = 'status'; st.textContent = ''; }
+      return;
+    }
     const r = lnInvoiceAsset(bolt11);
     if (r.error){ st.className = 'status err'; st.textContent = r.error; return; }
     $('lnSendAsset').value = r.want;
@@ -5181,26 +5200,26 @@ function initLnSendReceive(){
     const bolt11 = ($('lnSendBolt11').value || '').trim();
     const st = $('lnSendStatus');
     if (!bolt11){ st.className = 'status err'; st.textContent = 'Paste an invoice.'; return; }
+    // Default mode pays a BTC invoice from the ark, and only that: no other route is taken.
+    if (btcArkRoutes()){
+      const k = lnInvoiceKind(bolt11);
+      if (k !== 'BTC'){ st.className = 'status err'; st.textContent = k ? BTC_WORDS.notBtc(k) : 'This invoice cannot be paid now.'; return; }
+      let q = null; try { q = await btcArk.quote(bolt11); } catch {}
+      if (!q || q.short){ st.className = 'status err'; st.textContent = q && q.short ? BTC_WORDS.payUpTo(fmtAtoms(btcArk.figures().spendable, 8)) : 'This invoice cannot be paid now.'; return; }
+      sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.paying;
+      const t0 = performance.now();
+      try {
+        await btcArk.send(bolt11);
+        console.log('[btc ark] invoice paid in', Math.round(performance.now() - t0), 'ms');
+        st.className = 'status ok'; st.textContent = BTC_WORDS.paid(fmtAtoms(q.sats, 8), fmtAtoms(q.fee, 8));
+        $('lnSendBolt11').value = ''; try { renderBalance(); } catch {}
+      } catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.failed(prettyErr(e)); }
+      finally { sendBtn.disabled = false; }
+      return;
+    }
     const inv = lnInvoiceAsset(bolt11);
     if (inv.error){ st.className = 'status err'; st.textContent = inv.error; return; }
     if (inv.want !== asset){ st.className = 'status err'; st.textContent = 'This invoice is paid in ' + inv.name + '; choose ' + inv.name + ' to pay it.'; return; }
-    // Default mode: a BTC invoice is paid from the Bitcoin ark when it holds enough.
-    if (inv.want === 'BTC' && btcArkRoutes()){
-      let q = null; try { q = await btcArk.quote(bolt11); } catch {}
-      if (q && !q.short){
-        sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.paying;
-        const t0 = performance.now();
-        try {
-          await btcArk.send(bolt11);
-          console.log('[btc ark] invoice paid in', Math.round(performance.now() - t0), 'ms');
-          st.className = 'status ok'; st.textContent = BTC_WORDS.paid(fmtAtoms(q.sats, 8), fmtAtoms(q.fee, 8));
-          $('lnSendBolt11').value = ''; try { renderBalance(); } catch {}
-        } catch(e){ st.className = 'status err'; st.textContent = 'Payment failed: ' + prettyErr(e); }
-        finally { sendBtn.disabled = false; }
-        return;
-      }
-      if (!(typeof seqlnState === 'function' && seqlnState().deployed)){ st.className = 'status err'; st.textContent = q && q.short ? BTC_WORDS.payUpTo(fmtAtoms(btcArk.figures().spendable, 8)) : 'This invoice cannot be paid now.'; return; }
-    }
     // Nothing (or too little) of the asset on Lightning: say so at once, with the step that fixes it,
     // rather than bring the node online and come back ten seconds later with "no route".
     if (!lnLastStatus){   // just opened: read the balance first, so the check below is not skipped

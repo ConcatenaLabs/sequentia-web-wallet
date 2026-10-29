@@ -111,7 +111,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   little held this way, an address is paid as before; a code or an invoice is refused with "You
   can send up to <amount> BTC this way now."
 - **Pay an invoice**: "Paste an invoice to pay it with your BTC." Then "Paid ✓ <amount> BTC · fee
-  <fee> BTC."
+  <fee> BTC." An invoice for anything else is refused with "This invoice asks for <TICKER>. Only
+  invoices for BTC are paid here."; one larger than what is held this way with "You can pay up to
+  <amount> BTC this way now."
+- These two cards are the only invoice cards default mode shows, and only while the wallet holds
+  BTC this way. Invoices for other assets, the asset pickers, room to receive and the status pill
+  of the wallet's Lightning nodes are in developer mode.
 - A trade's BTC is paid and received the same way.
 
 ## Trade

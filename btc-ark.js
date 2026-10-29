@@ -46,6 +46,8 @@ export const BTC_WORDS = Object.freeze({
   paying: 'Paying…',
   paid: (amount, fee) => `Paid ✓ ${amount} BTC · fee ${fee} BTC`,
   payUpTo: (amount) => `You can pay up to ${amount} BTC this way now.`,
+  payHint: 'Paste an invoice',
+  notBtc: (ticker) => `This invoice asks for ${ticker}. Only invoices for BTC are paid here.`,
 })
 
 // How long a worker request may take before the page stops waiting on it (a payment waits for

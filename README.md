@@ -622,11 +622,12 @@ The Lightning rails use a hosted-SeqLN LSP model in which the keys stay on your 
 - A trade with both rails set to Lightning settles both legs atomically on one preimage, fully
   off-chain. A mixed rail (one leg on-chain, one Lightning) is a submarine swap.
 
-The status pill next to the wallet title says whether Lightning works: "⚡ Lightning" once the
-service answers, "⚡ Lightning…" while it connects and "⚡ Lightning offline" when it cannot be
-reached; developer mode says "LN 2 ch" (the wallet's own open channels), "LN ready",
-"LN connecting…" or "LN offline" instead. When Lightning is not configured the pill is hidden
-and the composer quietly uses the on-chain rails only.
+In developer mode a status pill next to the wallet title says how the wallet's Lightning nodes
+stand: "LN 2 ch" (the wallet's own open channels), "LN ready", "LN connecting…" or "LN offline".
+Default mode names no rail and shows no pill. Its only invoice cards are BTC's on the Bitcoin
+ark ("Pay an invoice", "Receive BTC with an invoice"): an invoice for another asset, the asset
+pickers and room to receive are developer mode's. When Lightning is not configured the pill is
+hidden and the composer quietly uses the on-chain rails only.
 
 Honest caveats: this is a demo deployment. The live page ships a shared testnet-demo bearer
 token for the LSP API rather than per-wallet authentication, the backend is a single
