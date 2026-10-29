@@ -4,7 +4,9 @@
 //
 // On the wallet's page: `window.sequentiaWallet`, with `request({ method, params })`,
 // `on(event, fn)` and `removeListener(event, fn)`. Another page of the wallet's origin
-// reads the mode, and hears it change, over the BroadcastChannel `sequentia-wallet`.
+// reads the mode, and hears it change, over the BroadcastChannel `sequentia-wallet`; a site of
+// the origin (SeqDEX) that its owner connects here trades through this page over the same channel,
+// each order shown in this page's dialog first (the extension's doc/PAIRING.md).
 //
 // The mode and the leaf rail follow the provider's rules: the mode reads silently; the
 // leaf methods answer in developer mode only; a receive request, a payment, a board and
@@ -22,6 +24,10 @@ export const NOT_JOINED = 'this wallet has not joined a leaf operator: join one 
 export const METHODS = ['getCapabilities', 'getWalletMode', 'getLeafBalances', 'getLeafAddress', 'requestLeafReceive',
   'sendLeaves', 'boardLeaves', 'exitLeaf']
 export const EVENTS = ['modeChanged', 'leafArrived', 'leafSyncDue']
+export const PROVIDER = 'sequentia-web-wallet'
+// What a site of this origin may ask over the channel (docs/PAGE_API.md).
+export const SITE_METHODS = ['getCapabilities', 'getWalletMode', 'connect', 'getAccounts', 'getBalances', 'placeOrder', 'getOrders', 'cancelOrder']
+const siteName = (page) => (/\/dex\//.test(page) ? 'SeqDEX' : 'This site')
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -34,6 +40,9 @@ const HEX64 = /^[0-9a-f]{64}$/
 //   doc         the document the dialog is shown in; optional (win.document)
 //   confirm(display) -> Promise<boolean>; optional (the wallet's dialog)
 //   channel     a BroadcastChannel-like; optional (made from win)
+//   site        what a site of this origin may reach once its owner connects it; optional:
+//               { unlocked() -> bool, account() -> { network, address }, balances() -> getBalances'
+//               answer, orders (site-orders.js makeSiteOrders), attention() (bring this page forward) }
 export function mountPageApi (ctx) {
   const { leaves } = ctx
   const listeners = new Map()
@@ -78,7 +87,7 @@ export function mountPageApi (ctx) {
   async function handle (method, params = {}) {
     switch (method) {
       case 'getCapabilities':
-        return { provider: 'sequentia-web-wallet', methods: METHODS, events: EVENTS, features: ['leaves'] }
+        return { provider: PROVIDER, methods: METHODS, events: EVENTS, features: ['leaves'] }
 
       case 'getWalletMode':
         return { mode: leaves.mode() }
@@ -188,16 +197,83 @@ export function mountPageApi (ctx) {
   }
   if (ctx.win) ctx.win.sequentiaWallet = api
 
-  // Other pages of the wallet's origin: the mode, read and followed.
+  // Other pages of the wallet's origin (docs/PAGE_API.md, "Sites of this origin"): every page
+  // reads the mode; a site that says hello and is approved by its owner here trades through this
+  // wallet page (its account, balances and orders), each action behind this page's dialog.
   let channel = ctx.channel || null
   if (!channel && ctx.win && typeof ctx.win.BroadcastChannel === 'function') channel = new ctx.win.BroadcastChannel(CHANNEL)
+  const walletId = Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2)
+  const connected = new Set()   // the pages approved by this wallet page, while it is open
   if (channel) {
     channel.onmessage = (ev) => {
       const m = (ev && ev.data) || {}
+      if (m.type === 'hello' && m.from) {
+        channel.postMessage({ type: 'here', to: m.from, wallet: walletId, provider: PROVIDER, mode: leaves.mode() })
+        return
+      }
       if (m.type !== 'request') return
-      const answer = (ok, v) => channel.postMessage({ type: 'answer', id: m.id, ok, ...(ok ? { result: v } : { error: v }) })
-      if (m.method === 'getWalletMode') answer(true, { mode: leaves.mode() })
-      else answer(false, 'only getWalletMode is served to the wallet’s other pages; the leaf methods are on the wallet’s page (window.sequentiaWallet)')
+      const reply = (ok, v) => channel.postMessage({ type: 'answer', id: m.id, to: m.from, wallet: walletId, ok, ...(ok ? { result: v } : { error: v }) })
+      if (!m.wallet) {
+        if (m.method === 'getWalletMode') reply(true, { mode: leaves.mode() })
+        else reply(false, 'only getWalletMode is served to the wallet’s other pages; the leaf methods are on the wallet’s page (window.sequentiaWallet)')
+        return
+      }
+      if (m.wallet !== walletId) return
+      siteRequest(String(m.page || ''), String(m.method || ''), m.params || {})
+        .then((v) => reply(true, v), (e) => reply(false, (e && e.message) || String(e)))
+    }
+  }
+
+  // A site's request over the channel: the provider protocol's market methods (the extension's
+  // doc/PROVIDER.md), served while this page is open and the wallet unlocked.
+  let queue = Promise.resolve()
+  const oneAtATime = (fn) => { const p = queue.then(fn, fn); queue = p.catch(() => {}); return p }
+  async function siteRequest (page, method, params) {
+    const site = ctx.site
+    if (!site) throw new Error('this wallet page serves no site')
+    const pageKey = page.replace(/[?#].*$/, '')
+    const isConnected = () => connected.has(pageKey)
+    switch (method) {
+      case 'getCapabilities':
+        return { provider: PROVIDER, methods: SITE_METHODS, events: ['accountsChanged', 'modeChanged'], features: ['orders', 'balances-total'] }
+      case 'getWalletMode':
+        return { mode: leaves.mode() }
+      case 'getAccounts':
+        return { accounts: isConnected() && site.unlocked() ? [site.account()] : [] }
+      case 'connect':
+        if (!site.unlocked()) throw new Error('the wallet is locked; unlock it in its own page first')
+        if (isConnected()) return site.account()
+        return oneAtATime(async () => {
+          site.attention && site.attention()
+          await approved({ title: 'Connect ' + siteName(pageKey) + '?', text: siteName(pageKey) + ' wants to see your address and balances, and to ask you to trade. Each trade is shown here for you to approve.', rows: [['Site', pageKey]] })
+          connected.add(pageKey)
+          return site.account()
+        })
+    }
+    if (!isConnected()) throw new Error('this site is not connected; call connect first')
+    if (!site.unlocked()) throw new Error('the wallet is locked; unlock it in its own page first')
+    switch (method) {
+      case 'getBalances':
+        return await site.balances()
+      case 'getOrders':
+        site.orders.follow().catch(() => {})
+        return await site.orders.orders(pageKey)
+      case 'placeOrder':
+        return oneAtATime(async () => {
+          const q = await site.orders.quote(params, pageKey)
+          site.attention && site.attention()
+          if (!(await confirm(q.display))) { site.orders.drop(q.id); throw new Error('the user rejected the request') }
+          return await site.orders.confirm(q.id)
+        })
+      case 'cancelOrder':
+        return oneAtATime(async () => {
+          const q = await site.orders.quoteCancel(params, pageKey)
+          site.attention && site.attention()
+          if (!(await confirm(q.display))) throw new Error('the user rejected the request')
+          return await site.orders.confirmCancel(q.id)
+        })
+      default:
+        throw new Error('unknown method: ' + method)
     }
   }
 
@@ -206,7 +282,12 @@ export function mountPageApi (ctx) {
     request: api.request,
     modeChanged (mode) {
       emit('modeChanged', { mode })
-      if (channel) try { channel.postMessage({ type: 'event', event: 'modeChanged', data: { mode } }) } catch {}
+      if (channel) try { channel.postMessage({ type: 'event', event: 'modeChanged', data: { mode }, wallet: walletId }) } catch {}
+    },
+    // The wallet was locked or another one opened: every site connected here hears it.
+    accountsChanged () {
+      connected.clear()
+      if (channel) try { channel.postMessage({ type: 'event', event: 'accountsChanged', data: { accounts: [] }, wallet: walletId }) } catch {}
     },
     // The leaf events reach the page in developer mode only.
     leafEvent (name, data) { if (EVENTS.includes(name) && name !== 'modeChanged' && leaves.mode() === 'developer') emit(name, data) },

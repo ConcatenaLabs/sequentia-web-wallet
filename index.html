@@ -1650,7 +1650,8 @@ import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList } from './default-arca.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
-import { mountLeafRail } from './leaf-rail.js';
+import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
+import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { mountBtcArk, arkConfig, BTC_WORDS } from './btc-ark.js';
 import { createEngine as createUserTrade } from './user-trade.js';
@@ -3564,7 +3565,67 @@ function initLeaves(){
   try{ initUserComposer(); }catch(e){ console.warn('[user composer] init failed:', e?.message??e); }
   // The page API: the wallet's mode and leaf rail for code running in this page, and the
   // mode for the wallet's other pages on this origin (wallet-api.js, docs/PAGE_API.md).
-  try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
+  try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window, site: siteDeps() }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
+}
+
+// ---------- sites of this origin (SeqDEX) ----------
+// What a site its owner connects on this page may reach over the page API's channel
+// (wallet-api.js, docs/PAGE_API.md): the account, the balances, and orders settled the way the
+// Trade tab settles a trade (site-orders.js), each shown in this page's dialog first.
+let siteOrders = null;
+function siteDeps(){
+  return {
+    unlocked: ()=> !!wollet,
+    account: ()=>{ const a = wollet.address(addrIndex == null ? undefined : addrIndex).address(); return { network: 'sequentia-testnet', address: (a.toUnconfidential ? a.toUnconfidential() : a).toString() }; },
+    balances: async ()=>{
+      const leaves = {};
+      try{ if(leavesApi && leavesApi.isOpen()) for(const h of leavesApi.leafAssets()){ const n = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n); if(n > 0n) leaves[h] = n.toString(); } }catch{}
+      let assets = {};
+      try{ assets = balObj(); }catch{}
+      // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
+      const total = {}, arriving = {}, by_place = {};
+      for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves)])){
+        const t = userHeld(h); if(t > 0n || h === 'BTC') total[h] = t.toString();
+        try{ const a = h !== 'BTC' && leavesApi ? (leavesApi.arriving(h) || 0n) : 0n; if(a > 0n) arriving[h] = a.toString(); }catch{}
+        if(devMode()){
+          const chain = h === 'BTC' ? (btcBalance || 0n) : BigInt(assets[h] || 0);
+          let lv = 0n; try{ if(h !== 'BTC' && leavesApi) lv = leavesApi.leafAtoms(h) || 0n; }catch{}
+          let ak = 0n; try{ if(h === 'BTC' && btcArkRoutes()) ak = btcArk.figures().spendable; }catch{}
+          by_place[h] = { chain: chain.toString(), leaves: lv.toString(), lightning: (t - chain - lv - ak > 0n ? t - chain - lv - ak : 0n).toString(), ark: ak.toString() };
+        }
+      }
+      return { assets, btc: String(btcBalance || 0n), leaves, total, arriving, ...(devMode() ? { by_place } : {}) };
+    },
+    get orders(){
+      if(!siteOrders){
+        initUserComposer();
+        siteOrders = makeSiteOrders({
+          engine: userTrade, assetMeta, fmtAtoms, store: localStorage, tag: walletTag, followTrades: false,
+          busy: (on)=>{ try{ if(userComposer && userComposer.state) userComposer.state.busy = !!on; }catch{} },
+          leaves: { command: async (cmd, args)=>{
+            if(!leavesApi || !leavesApi.isOpen()) throw new Error('this wallet holds nothing it can place an order from');
+            return await leavesApi.pay(cmd, args || {});
+          } },
+          list: async (o, rec)=>{
+            const P = leafRelayPost();
+            const p = leafPostParams(o, rec.offer_id, P.orderFromCovenantTerms, P.normTerms);
+            if(!p) throw new Error('the order does not rest yet');
+            const now = Math.floor(Date.now() / 1000);
+            const { priv, pub } = await P.offerKey(o.order);
+            const res = await P.postExisting({ ...p, nowUnix: now, ttlSecs: leafOfferTtl(now, p.expiryLocktime), makerPubkey: pub },
+              { fetchOutput: P.fetchOutput, postCovenantOffer: (offer)=> P.postCovenantOffer(offer, priv) });
+            return { relay_expires: Number(res.offer.expires_at_unix) };
+          },
+          log: (...a)=> console.log(...a),
+        });
+        // Orders placed for a site are listed by themselves once they rest, while this page is open.
+        setInterval(()=>{ siteOrders.follow().catch(()=>{}); }, 60000);
+      }
+      return siteOrders;
+    },
+    // A request waits on this page: bring it forward where the browser lets a page do that.
+    attention: ()=>{ try{ window.focus(); }catch{} try{ const t = document.title; if(!/^\(1\) /.test(t)){ document.title = '(1) ' + t; setTimeout(()=>{ document.title = t; }, 15000); } }catch{} },
+  };
 }
 
 // ---------- user mode: the composer ----------
@@ -3828,25 +3889,32 @@ function initLeafRail(){
       const seen = new Set();
       return [...a, ...b].filter(o=>{ const k=(o.maker_pubkey||'')+':'+(o.offer_id||''); if(seen.has(k)) return false; seen.add(k); return true; });
     },
-    relayPost: {
-      postExisting, orderFromCovenantTerms,
-      // The relay's base64 byte fields of an order's terms, as the wallet's covenant code reads them (hex).
-      normTerms: (ct)=>{ const o = { covenant: ct }; seqob.normRelayOffer(o); return o.covenant; },
-      postCovenantOffer: (offer, priv)=> seqob.postCovenantOffer(offer, priv),
-      fetchOutput: async (txid, vout)=>{
-        const r = await fetch(`${ESPLORA}/tx/${txid}`); if(!r.ok) return null;
-        const o = ((await r.json()).vout || [])[vout]; if(!o) return null;
-        return { scriptPubKey: o.scriptpubkey, asset: o.asset ?? null, value: o.value ?? null };
-      },
-      // One key per order, from the wallet's phrase, so the relay cannot link two orders of one
-      // wallet by their key (the extension derives the same one).
-      offerKey: async (orderId)=>{
-        const phrase = (localStorage.getItem(KEY) || '').trim();
-        const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('sequentia/leaf-order-offer-key/' + phrase + '/' + orderId)));
-        return { priv: d, pub: [...secp256k1.getPublicKey(d, true)].map(x=>x.toString(16).padStart(2,'0')).join('') };
-      },
-    },
+    relayPost: leafRelayPost(),
   });
+}
+
+// How an order placed from leaves is listed on the relay once it rests (leaf-rail.js and
+// site-orders.js): the relay's form of its terms, its output read from the chain, and a key of
+// its own.
+function leafRelayPost(){
+  return {
+    postExisting, orderFromCovenantTerms,
+    // The relay's base64 byte fields of an order's terms, as the wallet's covenant code reads them (hex).
+    normTerms: (ct)=>{ const o = { covenant: ct }; seqob.normRelayOffer(o); return o.covenant; },
+    postCovenantOffer: (offer, priv)=> seqob.postCovenantOffer(offer, priv),
+    fetchOutput: async (txid, vout)=>{
+      const r = await fetch(`${ESPLORA}/tx/${txid}`); if(!r.ok) return null;
+      const o = ((await r.json()).vout || [])[vout]; if(!o) return null;
+      return { scriptPubKey: o.scriptpubkey, asset: o.asset ?? null, value: o.value ?? null };
+    },
+    // One key per order, from the wallet's phrase, so the relay cannot link two orders of one
+    // wallet by their key (the extension derives the same one).
+    offerKey: async (orderId)=>{
+      const phrase = (localStorage.getItem(KEY) || '').trim();
+      const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('sequentia/leaf-order-offer-key/' + phrase + '/' + orderId)));
+      return { priv: d, pub: [...secp256k1.getPublicKey(d, true)].map(x=>x.toString(16).padStart(2,'0')).join('') };
+    },
+  };
 }
 
 // ---------- developer mode: contract spends ----------

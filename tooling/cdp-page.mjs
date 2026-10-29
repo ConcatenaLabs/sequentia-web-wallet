@@ -33,13 +33,28 @@ export class Page {
       setTimeout(() => no(new Error('chromium did not start')), 20000)
     })
     const port = new URL(wsUrl).port
+    this.port = port
     let page
     for (let i = 0; i < 40 && !page; i++) {
       try { page = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find((t) => t.type === 'page') } catch {}
       if (!page) await new Promise((r) => setTimeout(r, 250))
     }
     if (!page) throw new Error('no page target')
-    this.ws = new WebSocket(page.webSocketDebuggerUrl)
+    await this.attach(page.webSocketDebuggerUrl)
+  }
+
+  // Another tab of the same browser (the same profile, so the same origin's storage and
+  // channels), driven like this one. -> a Page; its stop() closes only the tab.
+  async tab (url) {
+    const t = await (await fetch(`http://127.0.0.1:${this.port}/json/new?${encodeURI(url)}`, { method: 'PUT' })).json()
+    const p = new Page(this.bin, { profile: this.profile })
+    p.port = this.port; p.tabOf = this; p.targetId = t.id
+    await p.attach(t.webSocketDebuggerUrl)
+    return p
+  }
+
+  async attach (wsUrl) {
+    this.ws = new WebSocket(wsUrl)
     await new Promise((ok, no) => { this.ws.onopen = ok; this.ws.onerror = no })
     this.ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data)
@@ -87,6 +102,7 @@ export class Page {
 
   // Ends Chromium and waits for it to exit, so its profile can be removed after.
   async stop () {
+    if (this.tabOf) { try { await fetch(`http://127.0.0.1:${this.port}/json/close/${this.targetId}`) } catch {} try { this.ws?.close() } catch {} return }
     try { this.ws?.close() } catch {}
     const p = this.proc
     if (!p || p.exitCode !== null || p.signalCode !== null) return

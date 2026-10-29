@@ -107,10 +107,62 @@ test('mode and leaf events: the mode always, the leaf events in developer mode o
   p.modeChanged('user')
   p.leafEvent('leafArrived', { value: '2' })
   assert.deepEqual(heard, [['leafArrived', { value: '1' }], ['modeChanged', { mode: 'user' }]])
-  assert.deepEqual(posted, [{ type: 'event', event: 'modeChanged', data: { mode: 'user' } }])
-  ch.onmessage({ data: { type: 'request', id: 7, method: 'getWalletMode' } })
-  ch.onmessage({ data: { type: 'request', id: 8, method: 'getLeafBalances' } })
-  assert.deepEqual(posted[1], { type: 'answer', id: 7, ok: true, result: { mode: 'user' } })
+  assert.equal(posted.length, 1)
+  assert.deepEqual({ ...posted[0], wallet: undefined }, { type: 'event', event: 'modeChanged', data: { mode: 'user' }, wallet: undefined })
+  ch.onmessage({ data: { type: 'request', id: 7, from: 'p1', method: 'getWalletMode' } })
+  ch.onmessage({ data: { type: 'request', id: 8, from: 'p1', method: 'getLeafBalances' } })
+  assert.deepEqual({ ...posted[1], wallet: undefined }, { type: 'answer', id: 7, to: 'p1', ok: true, result: { mode: 'user' }, wallet: undefined })
   assert.equal(posted[2].ok, false)
   assert.match(posted[2].error, /only getWalletMode/)
+})
+
+// A site of this origin: hello, connect behind the dialog, every action behind it, refusals.
+test('a site over the channel: connects and trades only with the owner’s approval, one wallet page answering', async () => {
+  const L = fakeLeaves({ mode: 'user' })
+  const posted = []
+  const ch = { postMessage: (m) => posted.push(m), onmessage: null }
+  const shown = []
+  let approve = true
+  const orders = {
+    quoted: [], dropped: [], confirmed: [],
+    async quote (p, page) { this.quoted.push([p, page]); return { id: 'q1', display: { title: 'Trade?', rows: [['You pay', '1 X']] } } },
+    drop (id) { this.dropped.push(id) },
+    async confirm (id) { this.confirmed.push(id); return { trade: 't1', filled: 1, failed: [], order: null, order_error: null, gave: '1', got: '2' } },
+    async follow () {}, async orders () { return { orders: [], trades: [] } },
+  }
+  const site = { unlocked: () => true, account: () => ({ network: 'sequentia-testnet', address: 'tb1qx' }), balances: async () => ({ assets: {}, btc: '0', leaves: { [X]: '700' } }), orders }
+  mountPageApi({ leaves: L, assetMeta: () => ({}), fmtAtoms: String, confirm: async (d) => { shown.push(d); return approve }, channel: ch, site })
+  const ask = async (msg) => { const n = posted.length; ch.onmessage({ data: msg }); for (let i = 0; i < 50 && posted.length === n; i++) await new Promise((r) => setTimeout(r, 1)); return posted[posted.length - 1] }
+  ch.onmessage({ data: { type: 'hello', from: 's1' } })
+  const here = posted.pop()
+  assert.equal(here.type, 'here'); assert.equal(here.to, 's1'); assert.equal(here.provider, 'sequentia-web-wallet')
+  const W = here.wallet
+  const page = 'https://sequentiatestnet.com/dex/market.html?pair=a'
+  // Another wallet page's id: this page stays silent.
+  ch.onmessage({ data: { type: 'request', id: 1, from: 's1', wallet: 'other', page, method: 'getBalances' } })
+  await new Promise((r) => setTimeout(r, 5))
+  assert.equal(posted.length, 0)
+  let a = await ask({ type: 'request', id: 2, from: 's1', wallet: W, page, method: 'getBalances' })
+  assert.equal(a.ok, false); assert.match(a.error, /not connected/)
+  a = await ask({ type: 'request', id: 3, from: 's1', wallet: W, page, method: 'getAccounts' })
+  assert.deepEqual(a.result, { accounts: [] })
+  approve = false
+  a = await ask({ type: 'request', id: 4, from: 's1', wallet: W, page, method: 'connect' })
+  assert.equal(a.ok, false); assert.equal(a.error, 'the user rejected the request')
+  assert.match(shown[0].title, /^Connect SeqDEX/)
+  approve = true
+  a = await ask({ type: 'request', id: 5, from: 's1', wallet: W, page, method: 'connect' })
+  assert.deepEqual(a.result, { network: 'sequentia-testnet', address: 'tb1qx' })
+  a = await ask({ type: 'request', id: 6, from: 's1', wallet: W, page, method: 'getBalances' })
+  assert.deepEqual(a.result.leaves, { [X]: '700' })
+  // A trade declined: the review is let go and nothing is confirmed.
+  approve = false
+  a = await ask({ type: 'request', id: 7, from: 's1', wallet: W, page, method: 'placeOrder', params: { type: 'market' } })
+  assert.equal(a.error, 'the user rejected the request')
+  assert.deepEqual(orders.dropped, ['q1']); assert.deepEqual(orders.confirmed, [])
+  assert.equal(orders.quoted[0][1], 'https://sequentiatestnet.com/dex/market.html')
+  approve = true
+  a = await ask({ type: 'request', id: 8, from: 's1', wallet: W, page, method: 'placeOrder', params: { type: 'market' } })
+  assert.equal(a.result.trade, 't1'); assert.deepEqual(orders.confirmed, ['q1'])
+  assert.equal(shown.length, 4)
 })
