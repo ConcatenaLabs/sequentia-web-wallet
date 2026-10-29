@@ -54,7 +54,7 @@ export function checkBtcConfig (b) {
   return b
 }
 
-export async function btcDesk ({ cfg, cmd, log, liveRates }) {
+export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
   const b = checkBtcConfig(cfg.btc)
   if (!b) return null
   const lockingMs = Number(b.locking_seconds ?? LOCKING_SECONDS) * 1000
@@ -233,7 +233,10 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     const receives = (await cmd('lightning_receives')) || {}
     const pays = (await cmd('lightning_payments')) || {}
     for (const s of open) {
+      const was = s.state
       try { await step(s, receives[s.hash] || {}, pays[s.hash] || {}) } catch (e) { log('btc swap', s.swap, e.message) }
+      // A swap settled: the trade it made goes to the market's trade log.
+      if (was !== 'done' && s.state === 'done' && onTrade) onTrade(s)
     }
     save()
   }
