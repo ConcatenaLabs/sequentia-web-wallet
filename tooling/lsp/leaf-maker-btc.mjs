@@ -229,7 +229,8 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
   // receives is final, which can take longer than an invoice runs.
   async function reinvoice (body) {
     const s = swaps.get(String(body.swap || ''))
-    if (!s || s.give_asset === 'BTC' || !s.own_preimage) return [404, { error: 'no such swap' }]
+    if (!s || s.give_asset === 'BTC') return [404, { error: 'no such swap' }]
+    if (!s.own_preimage) return [409, { error: 'this swap\'s invoice cannot be renewed: it was made before the desk kept its preimages', state: s.state }]
     if (s.state !== 'locked') return [409, { error: `the swap is ${s.state}`, state: s.state }]
     const d = await node.decode(s.invoice_btc)
     if (d.expires_at - Date.now() / 1000 > 1800) return [200, { swap: s.swap, invoice: s.invoice_btc, expires_at: d.expires_at }]
