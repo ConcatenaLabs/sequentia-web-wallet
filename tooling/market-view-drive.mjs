@@ -56,11 +56,17 @@ try {
   }
   await page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000)
   note('the wallet is open')
+  // A wallet opened from its phrase holds its assets once it has joined and restored.
+  if (phraseFile) {
+    await click(page, '#tabs button[data-tab="receive"]')
+    await page.waitFor("(()=>{ const a=document.querySelector('#addr'); return a && a.classList.contains('recv-code') })()", 300000)
+    note('it joined and restored')
+  }
 
   // 1. default mode
   await click(page, '#tabs button[data-tab="swap"]')
   // What is held shows in You pay once the wallet has synced; the tab is drawn again until it does.
-  await page.waitFor(`(()=>{ if([...document.querySelectorAll('#ucPay option')].some(o=>o.value===${JSON.stringify(pay)})) return true; if(!window._mvT || Date.now()-window._mvT>5000){ window._mvT=Date.now(); document.querySelector('#tabs button[data-tab="swap"]').click() } return false })()`, 300000)
+  await page.waitFor(`(()=>{ if([...document.querySelectorAll('#ucPay option')].some(o=>o.value===${JSON.stringify(pay)})) return true; if(!window._mvT || Date.now()-window._mvT>10000){ window._mvT=Date.now(); document.querySelector('#tabs button[data-tab="balance"]').click(); document.querySelector('#tabs button[data-tab="swap"]').click() } return false })()`, 300000)
   const p1 = await pick(page, '#ucPay', pay)
   check(`You pay ${pay}`, p1 === true, p1)
   await page.waitFor(`[...document.querySelectorAll('#ucGet option')].some(o=>o.value===${JSON.stringify(get)})`, 60000)

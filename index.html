@@ -3169,6 +3169,9 @@ function tab(name){
   if(name==='history') renderHistory();
   if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
   if(name==='swap') renderActiveSwap();
+  // Default mode's composer is drawn again on opening the tab, so what arrived since it was last
+  // drawn (a restore, a payment) is in You pay; never while a trade is being priced or reviewed.
+  if(name==='swap'){ try{ if(userComposer && !devMode() && userTradeOn() && !userComposer.state.ticket && !userComposer.state.busy) userComposer.render(); }catch(e){ console.warn('[user composer] render:', e?.message??e); } }
   if(name==='send'){ feeAssetManual=false; refreshRecipientAssets(); populateFeeAssets(); defaultFeeAssetToSent(); updateFeeForSendType(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='assets'){ try{ populateIssueFeeAssets(); }catch{} issueHints(); fillReissuePick(); }   // no wallet yet: no balance to read
   if(name==='help') renderRoomStepper($('roomStepper'));
