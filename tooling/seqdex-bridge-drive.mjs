@@ -133,6 +133,8 @@ async function main () {
   check('the site is connected to the web wallet', /Connected/.test(conn), conn.replace(/\s+/g, ' '))
   await sleep(3000)
   await click(site, '#side-sell'); await sleep(2000)
+  // A wallet just opened is still reading its coins: its balance shows once it has.
+  await site.waitFor("/[1-9]/.test(document.querySelector('#fBal').innerText)", 180000).catch(() => null)
   const bal = await site.eval("document.querySelector('#fBal').innerText.replace(/\\s+/g,' ')")
   check('the site shows the wallet\'s balances, its leaves counted', /[1-9]/.test(bal), bal)
   await shot(site, 'site-connected')
