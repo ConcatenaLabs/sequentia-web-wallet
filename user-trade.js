@@ -96,6 +96,7 @@ export const USER_WORDS = Object.freeze({
   minutes: (word, n) => `${word} (${n} min)`,
   returned: 'Returned: nothing traded.',
   returnedFees: (fees) => `Returned: nothing traded. Fees of ${fees} were paid.`,
+  returnedLapsed: 'Returned: nothing traded. The other side\'s offer ran out while the trade waited.',
   working: 'Working…',
   failed: 'This trade could not be made. Nothing moved.',
   recent: 'Your trades',
@@ -120,6 +121,7 @@ export function tradeStateWord (r, now = Date.now()) {
   const W = USER_WORDS
   if (r.state === 'settled') return W.settled
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
+  if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' || r.state === 'failed') return W.returned
   if (r.state === 'confirming') return W.working
   const since = (t) => Math.floor((now - (t || r.at || now)) / 60000)
