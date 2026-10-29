@@ -163,7 +163,7 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
   is not offered."; "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
   is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere); "Your
-  <pay> is not ready to trade yet. It will be in a few minutes; nothing has moved." (held, and shown in
+  <pay> is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved." (held, and shown in
   the balance, but not yet where a trade pays from: just arrived, or still being moved in by the
   wallet)
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
