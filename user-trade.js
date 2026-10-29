@@ -106,6 +106,7 @@ export const USER_WORDS = Object.freeze({
   // A trade that waits on Bitcoin blocks says what is already true while it waits.
   waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
   receivedSettling: 'Received. Settled after the next Bitcoin blocks.',
+  receivedSlow: 'Received, and yours to use. Settling with the network is taking longer than usual.',
   minutes: (word, n) => `${word} (${n} min)`,
   returned: 'Returned: nothing traded.',
   returnedFees: (fees) => `Returned: nothing traded. Fees of ${fees} were paid.`,
@@ -141,7 +142,10 @@ export function tradeStateWord (r, now = Date.now()) {
   // Buying with BTC: nothing has left the wallet until its asset is held for it.
   if (r.state === 'waiting') { const m = since(r.waitingSince); return m >= 1 ? W.minutes(W.waitingOther, m) : W.waitingOther }
   const m = since(r.sentAt)
-  const word = heldAlready(r) ? W.receivedSettling : W.sent
+  // Received, its settling still waiting with the network after ten minutes (the network had no
+  // room for it yet): said so, the coins being the wallet's all along.
+  const held = heldAlready(r)
+  const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.receivedSettling) : W.sent
   return m >= 1 ? W.minutes(word, m) : word
 }
 
@@ -181,6 +185,8 @@ export function spendableFrom (coins, plans) {
 const TRADES_KEY = 'swk.usertrade'
 // How long a quote waits before it asks once more for firm terms that none gave.
 const FIRM_RETRY_MS = 3000
+// Minutes after which a received trade still settling is said to be slow.
+const SLOW_SETTLE_MIN = 10
 
 export function createEngine (deps) {
   // The node scans one wallet at a time; a command that meets another's scan is asked again

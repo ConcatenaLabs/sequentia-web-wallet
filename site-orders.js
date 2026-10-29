@@ -37,7 +37,7 @@
 //   now()             -> milliseconds; optional
 //   log(...)          optional
 
-import { USER_WORDS, costLine } from './user-trade.js'
+import { USER_WORDS, costLine, heldAlready, tradeStateWord } from './user-trade.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
@@ -317,11 +317,14 @@ export function makeSiteOrders (d) {
     }
   }
 
+  // A trade is `received` as soon as what it brings is the wallet's (a swap the maker completed,
+  // seconds after it is sent): only its settling with the network is left, which no longer holds
+  // the person's trade at "Sent".
   function tradeState (r) {
     if (!r) return 'sent'
     if (r.state === 'settled') return 'settled'
     if (r.state === 'failed' || r.state === 'returned') return 'failed'
-    return 'sent'
+    return heldAlready(r) ? 'received' : 'sent'
   }
   function orderState (o, rec) {
     const s = String(o && o.state || 'waiting')
@@ -339,7 +342,9 @@ export function makeSiteOrders (d) {
     const trades = Object.entries(v.trades).filter(([, t]) => t.origin === origin).map(([id, t]) => {
       const r = byId.get(id)
       const state = tradeState(r)
-      return { trade: id, at: t.at, market: t.market, side: t.side, type: t.type, kind: 'take', order: null, state,
+      // The trade's own words, as the wallet's list says them (with the minutes it has waited).
+      const note = r ? tradeStateWord(r, now()) : null
+      return { trade: id, at: t.at, market: t.market, side: t.side, type: t.type, kind: 'take', order: null, state, note,
         fills: t.base != null ? [{ txid: id, base: t.base, quote: t.quote, state }] : [] }
     })
     const placing = Object.entries(v.placing || {}).filter(([, o]) => o.origin === origin)
