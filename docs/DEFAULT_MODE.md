@@ -180,6 +180,23 @@ Default mode is a trading screen, not only a form: once a pair is chosen, its ma
 - Which rails a trade used ("BTC on-chain · GOLD over Lightning", "over Lightning") is shown in
   developer mode only.
 
+## Connect
+
+A site that trades through a wallet (SeqDEX) offers every wallet it can reach, in the same words:
+
+- The button reads **Connect wallet**, or **Get a wallet** when none is there. Once connected:
+  "Connected" and the address, shortened.
+- It opens a list headed "Connect with": **Sequentia wallet extension** and **Sequentia Core on
+  this computer**, each marked "Ready", "Connected", "Not installed" (the extension) or "Not
+  running" (Sequentia Core). A wallet that is not there opens where to get it.
+- With no wallet at all, under the bar: "SeqDEX needs a wallet. Every order and every settlement
+  is signed inside your wallet; this site never holds keys or funds.", then where to get each.
+  Where a form needs one: "Trading needs a wallet: the Sequentia wallet extension, or Sequentia
+  Core on this computer through sequentia-connect."
+- The wallet asks its owner before anything is signed, in its own window or, for Sequentia Core
+  on this computer, in the terminal sequentia-connect runs in; the site waits with "Waiting for
+  your approval in the wallet…".
+
 ## Never in default mode
 
 None of these words appear on any screen in default mode, in the wallet's own text: rail,
