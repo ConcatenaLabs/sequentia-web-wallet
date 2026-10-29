@@ -153,8 +153,9 @@ Default mode is a trading screen, not only a form: once a pair is chosen, its ma
   quote).
 - Under it, the last price in the quote's units and its change over the last 24 hours, with
   "24h". Then "High <price> · Low <price> · Volume <amount> <base>" for the last 24 hours.
-- A price chart, with three ranges: **1D**, **1W**, **1M**, labelled "24 hours ago" (or "7 days
-  ago", "30 days ago") and "now". A price holds until the next trade, so the line is a step.
+- A price chart, with three ranges: **1D**, **1W**, **1M**, its times along the bottom and its
+  prices on the right. A price holds until the next trade, so the line is a step. Under it, the
+  chart library's notice: "Charts by TradingView Lightweight Charts™", a link to TradingView.
 - **Best bid** and **Best ask**, then a bar of the book's depth on each side, "Buyers <n>%" and
   "Sellers <n>%". With no order on either side: "Nobody is buying or selling right now".
 - **Recent trades**: price, amount and time ("<n> minutes", as ago), newest first; a buy in green,

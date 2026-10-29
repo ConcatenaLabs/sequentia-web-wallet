@@ -76,7 +76,7 @@ try {
   const read = () => page.eval(`(()=>{ const m=document.querySelector('#ucMarket .mv'); if(!m) return null; const rows=[...m.querySelectorAll('.mv-trade')];
     return { pair: (m.querySelector('.mv-pair')||{}).textContent, last: (m.querySelector('#mvLast')||{}).textContent || null,
       change: (m.querySelector('#mvChange')||{}).textContent || null, note: (m.querySelector('#mvNote')||{}).textContent || null,
-      chart: !!m.querySelector('svg.mv-chart'), bid: (m.querySelector('#mvBid')||{}).textContent || null, ask: (m.querySelector('#mvAsk')||{}).textContent || null,
+      chart: !!m.querySelector('.mv-chart canvas'), bid: (m.querySelector('#mvBid')||{}).textContent || null, ask: (m.querySelector('#mvAsk')||{}).textContent || null,
       trades: rows.length, newest: rows[0] ? { id: rows[0].dataset.id, text: rows[0].innerText.replace(/\\s+/g,' ') } : null,
       rails: rows.map(r=>r.dataset.rail||null).filter(Boolean), text: m.innerText } })()`)
   const m1 = await read()
