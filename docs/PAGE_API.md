@@ -13,13 +13,15 @@ Two ways in:
   `removeListener(event, handler)` subscribe and unsubscribe. `isSequentiaWallet` is `true`.
 - **On another page of the wallet's origin**, the `BroadcastChannel` named
   `sequentia-wallet`, while a wallet page is open: post
-  `{ type: 'request', id, method: 'getWalletMode' }` and the wallet answers
-  `{ type: 'answer', id, ok: true, result: { mode } }`; it posts
-  `{ type: 'event', event: 'modeChanged', data: { mode } }` whenever the mode changes. Only the
-  mode is served over the channel: an action needs the wallet's approval dialog, which is on
-  the wallet's page.
+  `{ type: 'request', id, from, method: 'getWalletMode' }` and the wallet answers
+  `{ type: 'answer', id, to: from, ok: true, result: { mode } }`; it posts
+  `{ type: 'event', event: 'modeChanged', data: { mode } }` whenever the mode changes. The leaf
+  methods are not served over the channel: they are on the wallet's page.
+- **A site of the wallet's origin** (SeqDEX at `/dex/`) trades through an open wallet page over
+  the same channel, once the wallet's owner connects it there. See "Sites of this origin" below.
 
-There is no connection step: the page API is the wallet's own, on its own origin.
+There is no connection step for the wallet's own page: the page API is the wallet's own, on its own
+origin. A site of the origin connects first, as below.
 
 ## The mode
 
@@ -89,3 +91,39 @@ if (mode === 'developer') {
   const board = await w.request({ method: 'boardLeaves', params: { asset, amount: '1000000' } })
 }
 ```
+
+## Sites of this origin
+
+A site served on the wallet's origin trades through an open wallet page over the
+`sequentia-wallet` channel, with the messages of the browser extension's `doc/PAIRING.md` ("Same
+origin"): the site posts `{ type: 'hello', from }`, every open wallet page answers
+`{ type: 'here', to, wallet, provider: 'sequentia-web-wallet', mode }`, and the site sends
+`{ type: 'request', id, from, wallet, page, method, params }` to one of them, which answers
+`{ type: 'answer', id, to, wallet, ok, result | error }`.
+
+The methods are the provider protocol's (the extension's `doc/PROVIDER.md`), with its params,
+answers and refusals:
+
+| Method | Approval | Answers |
+| --- | --- | --- |
+| `getCapabilities()` | silent | `{ provider: 'sequentia-web-wallet', methods, events, features }` |
+| `getWalletMode()` | silent | `{ mode }` |
+| `connect()` | this page's dialog: "Connect SeqDEX?" | `{ network, address }` (the shared `tb1` address) |
+| `getAccounts()` | silent | `{ accounts: [account] }`, or `[]` until connected |
+| `getBalances()` | silent | `{ assets, btc, leaves, total, arriving }` (and `by_place` in developer mode): on-chain Sequentia assets, BTC on the chain, what is held as leaves and spendable now, one figure per asset wherever it is held, and what of it is arriving, each in atoms |
+| `placeOrder({ type, base, quote, side, amount, price? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |
+| `getOrders()` | silent | `{ orders, trades }` |
+| `cancelOrder({ order })` | this page's dialog | `{ order, txid }` |
+
+A connection lasts while the wallet page is open, for the site's page (its address without the
+query). Until then every method but the first three refuses with
+`this site is not connected; call connect first`; a declined dialog refuses with
+`the user rejected the request`. One dialog shows at a time, and the page asks the browser to bring
+it forward.
+
+`placeOrder` settles as the Trade tab does (`site-orders.js`): a market order is one trade of the
+user composer's engine, priced and settled from the wallet's leaves or on-chain coins; a limit
+order is that trade when its price meets the limit, and otherwise rests whole on the book as an
+order placed from the wallet's leaves, which the page lists on the relay once it rests (while it
+is open) and takes back by its refund once its time has run out. The dialog's words are default
+mode's (`docs/DEFAULT_MODE.md`): what is paid, what is got, the fees, and the site that asked.

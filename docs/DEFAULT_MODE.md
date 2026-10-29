@@ -227,16 +227,28 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
 
 - The button reads **Connect wallet**, or **Get a wallet** when none is there. Once connected:
   "Connected" and the address, shortened.
-- It opens a list headed "Connect with": **Sequentia wallet extension** and **Sequentia Core on
-  this computer**, each marked "Ready", "Connected", "Not installed" (the extension) or "Not
-  running" (Sequentia Core). A wallet that is not there opens where to get it.
+- It opens a list headed "Connect with": **Sequentia web wallet**, **Ambra mobile**,
+  **Ambra browser** and **Sequentia Core on this computer**, each marked "Ready",
+  "Connected", "Not open" (the web wallet), "Pair" or "Paired" (a phone), "Not installed" (the
+  extension) or "Not running" (Sequentia Core). The web wallet not open opens it in a new tab,
+  with "Open your web wallet in the new tab, then choose it here again."; a phone not paired
+  shows "Pair Ambra mobile", a code to scan and "Open in Ambra mobile on this phone",
+  then "Waiting for your wallet…"; a paired phone has **Forget**; any other wallet that is not
+  there opens where to get it.
 - With no wallet at all, under the bar: "SeqDEX needs a wallet. Every order and every settlement
   is signed inside your wallet; this site never holds keys or funds.", then where to get each.
-  Where a form needs one: "Trading needs a wallet: the Sequentia wallet extension, or Sequentia
-  Core on this computer through sequentia-connect."
-- The wallet asks its owner before anything is signed, in its own window or, for Sequentia Core
-  on this computer, in the terminal sequentia-connect runs in; the site waits with "Waiting for
-  your approval in the wallet…".
+  Where a form needs one: "Trading needs a wallet: the Sequentia web wallet, Ambra mobile, Ambra
+  browser, or Sequentia Core on this computer through sequentia-connect."
+- The wallet asks its owner before anything is signed, in its own window or screen (the web
+  wallet's page, the phone's screen, the extension's window), or, for Sequentia Core on this
+  computer, in the terminal sequentia-connect runs in; the site waits with "Waiting for your
+  approval in the wallet…".
+- The wallet's side, in every wallet: a site asks once to connect ("Connect SeqDEX?", with the
+  site's address; on a phone, the address is what the site says it is, shown as that), then
+  each order shows **Trade?** (You pay, You get, Fees, Asked by) or **Place an order?** (You
+  sell, For, Price, Smallest part filled, Fees, What is left can be taken back from, Asked by),
+  and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
+  request".
 
 ## Never in default mode
 

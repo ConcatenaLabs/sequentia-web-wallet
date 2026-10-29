@@ -254,6 +254,10 @@ in each asset's one figure; the Trade tab's user composer pays
 from them and settles in them without naming them (below). The wallet's own pages read the
 mode, and in developer mode the leaf rail, through the page API (`window.sequentiaWallet`,
 [docs/PAGE_API.md](docs/PAGE_API.md)), in the shape the browser extension's provider serves.
+SeqDEX, served on the same origin, trades through an open wallet page over the page API's
+channel: the wallet's dialog shows the site's connection and each of its orders before
+anything is signed, and each order settles as the Trade tab settles a trade (`site-orders.js`).
+`tooling/seqdex-bridge-drive.mjs` drives that against the live testnet.
 
 ### Developer mode: leaves
 
@@ -690,7 +694,8 @@ works normally without the restricted rows.
 | `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
 | `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
-| `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog ([docs/PAGE_API.md](docs/PAGE_API.md)). |
+| `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog; and, over the channel, a site of this origin's account, balances and orders once its owner connects it ([docs/PAGE_API.md](docs/PAGE_API.md)). |
+| `site-orders.js` | A site's market and limit orders settled as the Trade tab settles a trade: the user composer's engine, or an order placed from leaves that rests. No DOM; the browser extension copies it into its `vendor/`. |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
 | `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, and the composer's `deps.btc` on the ark. No DOM. |

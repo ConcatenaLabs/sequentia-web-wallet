@@ -15,6 +15,7 @@ index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools,
  ├─ leaves.js              the mode setting (per wallet), and developer mode's Leaves tab (rails,
  │   │                     board, receive, send, sync on the schedule, settle now, exit drill, refusals)
  ├─ wallet-api.js          the page API: window.sequentiaWallet and the sequentia-wallet channel
+ │   └─ site-orders.js     a site's orders over that channel, as the Trade tab settles a trade
  │   └─ leaf-request.js    reads a receive request for the approval dialog (copied to the extension)
  │   └─ leaves/worker.js   dedicated worker running leaves/pkg/ (the operator wallet library, WASM,
  │                         tracked): blocking HTTP as synchronous XHR, its SQLite store on OPFS
@@ -272,6 +273,7 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.mode.<tag>` | per wallet (the tag is a 32-bit FNV-1a of its descriptor), `developer` or `user`; absent is user mode. A `swk.devMode` of `1` left from before is taken as the first wallet's that reads it |
 | `swk.usertrade.<tag>` | user mode's trades, each written before anything is signed: its ticket, the step it took (an in-tree swap's offer and acceptance, a take's id, a BTC trade's hash and invoices), the coins it brought and the round that settles them; resumed on every open until Settled or Returned |
 | `swk.leaves.joined.<tag>` | `1` once this wallet has joined a leaf operator: its leaf wallet then opens and syncs in either mode |
+| `swk.siteorders.<tag>` | the trades and orders a site of this origin made through this wallet: each trade's site, market and amounts (its record is the engine's), each order placed from leaves with its terms and whether it is listed |
 | `swk.leaves.address.<tag>` | the leaf wallet's on-chain address handed to the page API, the same each time it is asked |
 | `swk.contracts.trusted` | contract templates added to this wallet's list by hand in developer mode: each descriptor and its sources, by template hash |
 | `swk.leaves.nodePassword` | the node RPC password the leaf wallet was joined with, handed to it on each open (the library stores none) |
