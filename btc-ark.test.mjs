@@ -204,3 +204,28 @@ test('a wallet whose package has no catch_up opens as before', async () => {
   assert.equal(ark.figures().spendable, 7n)
   ark.close()
 })
+
+// A coin of the Bitcoin ark left past its expiry is swept by the server and repaid by nobody: the
+// wallet renews the coins that are due by itself, at open and after each sync.
+test('the coins near their expiry are renewed by the wallet itself: at open, and once at a time', async () => {
+  let due = 2
+  const { w, asked } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '1000', total: '1000' }),
+    catch_up: () => ({ recovered: [], recovered_sat: '0', spent_elsewhere: [], failed: [], complete: true }),
+    refresh: () => { const n = due; due = 0; return { refreshed: n } },
+  })
+  const logs = []
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11, log: (...a) => logs.push(a.join(' ')) })
+  await ark.open()
+  for (let i = 0; i < 40 && !asked.some((x) => x.command === 'refresh'); i++) await new Promise((r) => setTimeout(r, 5))
+  const order = asked.filter((x) => x.command).map((x) => x.command)
+  assert.ok(order.indexOf('refresh') > order.indexOf('catch_up'), 'renewed after the catch-up at open: ' + order.join(','))
+  await new Promise((r) => setTimeout(r, 20))
+  assert.ok(logs.some((l) => /renewed 2 coin\(s\) near their expiry/.test(l)), logs.join(' | '))
+  // Two asks at once: one refresh.
+  const before = asked.filter((x) => x.command === 'refresh').length
+  await Promise.all([ark.renewDue(), ark.renewDue()])
+  assert.equal(asked.filter((x) => x.command === 'refresh').length, before + 1)
+  ark.close()
+})

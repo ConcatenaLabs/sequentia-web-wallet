@@ -177,6 +177,21 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
       .catch((e) => log('[btc ark] catch up:', e && e.message))
   }
 
+  // Bark's own refresh of the coins that are due (`refresh`: the wallet's coins near their
+  // expiry, renewed in the server's next round). A coin left past its expiry is swept by the
+  // server's watchman and nothing repays it, so the wallet renews its coins by itself: when it
+  // opens, and after each sync. One at a time; nothing is renewed when nothing is due.
+  let renewing = null
+  function renewDue () {
+    if (!isOpen || renewing) return renewing || Promise.resolve(null)
+    const t0 = now()
+    renewing = run('refresh', {}, PAY_TIMEOUT_MS)
+      .then((r) => { if (r && r.refreshed) { log('[btc ark] renewed', r.refreshed, 'coin(s) near their expiry in', now() - t0, 'ms'); return refresh().then(() => r) } return r })
+      .catch((e) => { log('[btc ark] renewing coins near their expiry:', e && e.message); return null })
+      .finally(() => { renewing = null })
+    return renewing
+  }
+
   async function refresh () {
     if (!isOpen) return figures
     const b = await run('balance')
@@ -197,12 +212,12 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
         info = await run('info')
         await refresh()
         log('[btc ark] open in', now() - t0, 'ms')
-        catchUp()
+        catchUp().then(() => renewDue())
         if (!timer) {
           let lastSync = now(), lastCatchUp = now()
           timer = setInterval(() => {
             if (now() - lastCatchUp >= CATCH_UP_MS) { lastCatchUp = now(); catchUp() }
-            else if (now() - lastSync >= SYNC_MS) { lastSync = now(); run('sync').then(() => refresh()).catch(() => {}) } else refresh().catch(() => {})
+            else if (now() - lastSync >= SYNC_MS) { lastSync = now(); run('sync').then(() => refresh()).then(() => renewDue()).catch(() => {}) } else refresh().catch(() => {})
           }, REFRESH_MS)
         }
         return true
@@ -339,7 +354,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   }
 
   return {
-    open, isOpen: () => isOpen, refresh, figures: () => figures, info: () => info,
+    open, isOpen: () => isOpen, refresh, renewDue, figures: () => figures, info: () => info,
     route: (to) => routeOf(to, decode), quote, send, board, invoice, received, lightning, run,
     close () { if (timer) clearInterval(timer); timer = null; if (worker) worker.terminate(); worker = null; isOpen = false; opened = null },
   }
