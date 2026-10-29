@@ -48,6 +48,23 @@ In practice:
   freeze."
 - The split by rail (on-chain, instant, Lightning) and every move between rails are in developer
   mode only.
+- Any asset but BTC can be hidden from the list: it leaves the list for a folded **Hidden assets
+  (<n>)** at its foot, from which it can be shown again. A hidden asset still counts in the total,
+  still trades, and is still found by a picker's search; it only leaves the list and the pickers'
+  first rows. Hiding is kept for each wallet.
+
+## Asset pickers
+
+Every place a person chooses an asset (Trade's You pay and You get, Send's asset) uses the same
+picker, in both modes:
+
+- It opens with a search box, "Search assets". Before anything is typed it lists **Your assets**:
+  BTC first, even at 0, then every asset the wallet holds, hidden ones left out.
+- Typing searches every asset in the registry by ticker, name or asset id, hidden ones included,
+  under **All assets**. A pasted asset id that no registry names is still found and can be chosen.
+  Under the first rows: "Type to search every registry asset, or paste an asset id."
+- A picker lists only what can be chosen there: You pay what the wallet holds, You get what can be
+  had for it.
 
 ## Receive
 
@@ -69,7 +86,8 @@ In practice:
   address alone is shown in developer mode.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server
   shows another key than the one pinned), the address is shown instead and nothing is said about
-  why. The wallet tries again on its own.
+  why. The wallet tries again on its own, and once it can, the code takes the address's place on
+  the screen without the person leaving it.
 - **Faucet** (testnet): the faucet pays the receive code. When it has paid: "Received <amount>
   <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address instead, in the
   same click.
@@ -125,8 +143,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 ## Trade
 
-- Three inputs and one button: **You pay**, **You get**, **Amount**, then **Review** and
-  **Trade**. While pricing: "Finding the best price…". If the price moves: "The price moved. Here
+- **You pay** and **You get**, each an asset and an amount, then **Review** and **Trade**. An
+  amount typed on either side shows the other at the price on offer now, so a person can say what
+  they spend or what they want. While pricing: "Finding the best price…". If the price moves: "The price moved. Here
   is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
@@ -295,3 +314,10 @@ these words too, never in the service's own.
 
 The web wallet holds its list in `USER_MODE_FORBIDDEN_WORDS` (`user-trade.js`), and each wallet
 tests its default-mode strings against the list.
+
+## Checked after every deploy
+
+Each rule on this page is a line of the regression suite in
+[sequentia-testnet-ops](https://github.com/ConcatenaLabs/sequentia-testnet-ops/tree/main/regression),
+which reads the live testnet in a headless browser, at desktop and phone widths, and says pass or
+fail for each. A rule added here gets its line there in the same sitting.
