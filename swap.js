@@ -509,10 +509,11 @@ let LAST_LADDER = null;
 function _quoteRank(hex){
   if (hex === 'BTC') return 1000;
   const t = String((C.assetMeta(hex) || {}).ticker || '').toUpperCase();
-  // ONLY genuine units of account are numeraires (quotes): BTC + the fiat stablecoins. The Sequence
+  // ONLY genuine units of account are numeraires (quotes): BTC + the fiat stablecoins, bridged ones
+  // (USDC.e, EURC.e) included; the SeqDEX site ranks them the same (seqdex-web QUOTE_RANK). The Sequence
   // token (SEQ/tSEQ) is NOT a numeraire — it's just another issued asset with EQUAL standing (Principle 3),
   // so it sits in the same generic "base" tier as the commodities and any unknown asset, tiebroken by id.
-  const r = { USDX:900, EURX:890, FEEUSD:880, USDT:870, USDC:865, USD:860 };
+  const r = { USDX:900, EURX:890, 'EURC.E':885, FEEUSD:880, USDT:870, USDC:865, 'USDC.E':864, USD:860 };
   return (t in r) ? r[t] : 400;
 }
 // {base, quote} for an UNORDERED pair — the higher-rank asset is the QUOTE (numeraire). Deterministic
