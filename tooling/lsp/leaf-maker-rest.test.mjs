@@ -34,3 +34,20 @@ test('the relay offer of a resting order: its signed amount, the coin it rests a
   assert.ok(Number(o.expires_at_unix) <= now + 7 * 86400 - 21600)
   assert.equal(restOffer(rec, { ...served, terms: { ...served.terms, expiry: now + 21600 + 300 } }, { server: 's', operator: 'o' }, now, 21600), null, 'too near its delist time')
 })
+
+test('an order the feed\'s mid moved through is stale, one still over it is not', async () => {
+  const { throughMid } = await import('./leaf-maker-rest.mjs')
+  // the feed's rate with a 100 bps spread: mid 1.0 want per give
+  const now = { rate_num: '101', rate_den: '100' }
+  assert.equal(throughMid({ rate_num: '1003', rate_den: '1000' }, now, 100, 10), false) // 30 bps over the mid
+  assert.equal(throughMid({ rate_num: '1001', rate_den: '1000' }, now, 100, 10), true)  // within 10 bps
+  assert.equal(throughMid({ rate_num: '990', rate_den: '1000' }, now, 100, 10), true)   // under the mid
+})
+
+test('a level is not rested through the book\'s best bid', async () => {
+  const { crossesBook } = await import('./leaf-maker-rest.mjs')
+  assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 0, 10), false)      // no bid
+  assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 0.99, 10), false)   // over the bid by 101 bps
+  assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 0.9995, 10), true)  // within 10 bps
+  assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 1.2, 10), true)     // under the bid
+})
