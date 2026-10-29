@@ -100,6 +100,8 @@ export const USER_WORDS = Object.freeze({
   working: 'Working…',
   failed: 'This trade could not be made. Nothing moved.',
   recent: 'Your trades',
+  openTrades: 'Open',
+  pastTrades: 'Past',
 })
 
 // Whether what an open trade brings is held already, and only its settling is left: a purchase

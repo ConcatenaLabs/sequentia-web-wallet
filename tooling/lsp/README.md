@@ -240,6 +240,20 @@ pool, fee, service, founder, drip) is refused at start.
 }
 ```
 
+### Its trades in the market's trade log (`trade-report.mjs`)
+
+SeqDEX's relay cannot watch an in-tree swap or a BTC desk trade, so the maker reports each one
+it settles (`POST /v1/trades/report` on the relay; seqdex `daemon/README.md`, "Market data"),
+signed with its relay key: an in-tree swap once `/v1/accept` completes it (`leaf-maker`), a desk
+swap once it is done (`btc-gateway`). The relay named by `"report": { "relay": "http://…" }`, else
+the resting desk's `rest.relay`, gets them; with neither, nothing is reported. A report waits in
+the store directory (`trade-reports.json`) until the relay answers. The relay records reports
+only from the keys it lists in `-trade-reporters`; the maker prints its key with
+
+    node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json --reporter-key
+
+Each instance (the in-tree maker, the maker of BTC) has its own store and so its own key.
+
 ### Its BTC desk (`leaf-maker-btc.mjs`)
 
 With a `btc` section naming the socket of a Bitcoin Lightning node of the maker's own, the maker

@@ -76,6 +76,8 @@
 //     "rest": { … },                             optional: orders resting in the tree, a ladder a
 //                                                pair, listed on SeqDEX's relay (leaf-maker-rest.mjs
 //                                                says how)
+//     "report": { "relay": "http://…" },        optional: where its trades are reported (else the
+//                                                resting desk's relay); trade-report.mjs says how
 //     "btc": { … } }                             optional: BTC for an asset and an asset for BTC in
 //                                                one hash-lock, from the maker's own Bitcoin
 //                                                Lightning node (leaf-maker-btc.mjs says how)
@@ -89,6 +91,7 @@ import { leafLibraryThread } from '../leaf-node.mjs'
 import { spendableFrom } from '../../user-trade.js'
 import { btcDesk } from './leaf-maker-btc.mjs'
 import { restDesk } from './leaf-maker-rest.mjs'
+import { tradeReporter, makerRelayKey } from './trade-report.mjs'
 import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -167,6 +170,9 @@ async function main () {
     console.log(`wrote the maker's phrase to ${cfg.mnemonic_file}`)
     return
   }
+  // --reporter-key: the key the maker signs its trade reports and listings with, for the relay's
+  // -trade-reporters; exits.
+  if (process.argv.includes('--reporter-key')) { console.log(makerRelayKey(cfg.store_dir).pub); return }
   const mnemonic = readFileSync(cfg.mnemonic_file, 'utf8').trim()
   const op = cfg.operator
   const nodePassword = op.node_password_file ? readFileSync(op.node_password_file, 'utf8').trim() : (op.node_password || '')
@@ -243,8 +249,12 @@ async function main () {
   }
   await readPrices()
   setInterval(readPrices, 60000)
+  // Every trade it settles is reported to the relay's trade log, when it names a relay.
+  const reporter = tradeReporter({ cfg, log })
+  if (reporter) log('trades are reported to', reporter.relay, 'signed by', reporter.pub)
+  const reportTrade = (t) => { if (reporter) { try { reporter.report(t) } catch (e) { log('report:', e.message) } } }
   // BTC for an asset and back, from the maker's own Bitcoin Lightning node, when it has one.
-  const desk = await btcDesk({ cfg, cmd, log, liveRates })
+  const desk = await btcDesk({ cfg, cmd, log, liveRates, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
   if (desk) log('the BTC desk is open')
 
   const firm = new Map()   // swap -> { give_asset, give, expires }
@@ -284,6 +294,7 @@ async function main () {
       try { await spendable() } catch (e) { log('holdings:', e.message) }
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
       if (rester) { try { await rester.tick() } catch (e) { log('rest:', e.message) } }
+      if (reporter && reporter.pending().length) { try { await reporter.flush() } catch (e) { log('report:', e.message) } }
       // What it holds on the chain of an asset it gives, above what it keeps, comes into the
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
       // another asset the maker holds on the chain that the node takes (the wallet rule; never a
@@ -378,7 +389,7 @@ async function main () {
         const want = w.want
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
-        firm.set(o.swap, { give_asset: pair.give, give, expires })
+        firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
         spendable(true).catch(() => {})
         log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8))
         return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
@@ -388,6 +399,8 @@ async function main () {
         if (st === 'done') return send(res, 200, { swap: b.swap, state: 'done' })
         if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st })
         const r = await cmd('swap_complete', { accept: String(b.accept || '') }, true)
+        const f = firm.get(b.swap)
+        if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)
         spendable(true).catch(() => {})
         log('done', String(r.swap).slice(0, 12))

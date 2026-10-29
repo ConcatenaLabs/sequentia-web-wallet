@@ -143,6 +143,33 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
 
+## Market
+
+Default mode is a trading screen, not only a form: once a pair is chosen, its market shows above
+**You pay**. The words are in `MARKET_WORDS` (`market-view.js`).
+
+- The pair is named "<base> / <quote>", one way for both sides of a trade: the same direction the
+  rest of the wallet prices it in ("1 <base> = N <quote>"; BTC and the fiat stablecoins are the
+  quote).
+- Under it, the last price in the quote's units and its change over the last 24 hours, with
+  "24h". Then "High <price> · Low <price> · Volume <amount> <base>" for the last 24 hours.
+- A price chart, with three ranges: **1D**, **1W**, **1M**, labelled "24 hours ago" (or "7 days
+  ago", "30 days ago") and "now". A price holds until the next trade, so the line is a step.
+- **Best bid** and **Best ask**, then a bar of the book's depth on each side, "Buyers <n>%" and
+  "Sellers <n>%". With no order on either side: "Nobody is buying or selling right now".
+- **Recent trades**: price, amount and time ("<n> minutes", as ago), newest first; a buy in green,
+  a sale in amber.
+- When a pair has little history, it says so and shows what there is: "No trades yet", or "No
+  trades in the last 24 hours · Last trade <price> <quote>, <time> ago" (the last price stands,
+  with no 24-hour change), or, on a chart range with no trade in it, "No trades in this range".
+- Below the button, **Your trades**, in two groups: **Open** (trades still settling, with their
+  status) and **Past**.
+- Every figure comes from SeqDEX's relay, whose one trade log per market holds every trade
+  however it settled, so the market reads the same in every wallet and on SeqDEX. Default mode
+  never says how a trade settled; developer mode adds a **Rail** column to the recent trades and
+  the book's depth by rail.
+- The view reads the relay again every five seconds while it is on screen.
+
 ## History
 
 - **One row per payment or trade.** A trade is one row, however many legs it has.

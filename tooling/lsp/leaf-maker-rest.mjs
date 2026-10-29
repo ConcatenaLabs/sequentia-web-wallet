@@ -26,8 +26,8 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import * as seqob from '../../seqob.js'
-import { secp256k1 } from '../../btc.js'
 import { ladderOf } from './leaf-maker-ladder.mjs'
+import { makerRelayKey } from './trade-report.mjs'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
@@ -82,10 +82,7 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
   let recs = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : []
   const save = () => { writeFileSync(file + '.tmp', JSON.stringify(recs, null, 1)); renameSync(file + '.tmp', file) }
   // One key for the maker's listings, kept beside its store: the relay sees one maker.
-  const keyFile = join(cfg.store_dir, 'rest-offer.key')
-  if (!existsSync(keyFile)) writeFileSync(keyFile, hex(randomBytes(32)) + '\n', { mode: 0o600 })
-  const priv = Uint8Array.from(Buffer.from(readFileSync(keyFile, 'utf8').trim(), 'hex'))
-  const makerPub = hex(secp256k1.getPublicKey(priv, true))
+  const { priv, pub: makerPub } = makerRelayKey(cfg.store_dir)
   const relay = r.relay || 'http://127.0.0.1:9955'
   let lastPass = 0
 

@@ -10,12 +10,15 @@
 // ctx: { root (element), engine (createEngine's), assetMeta(hex) -> {ticker, precision},
 //   fmtAtoms(atoms, precision), parseAtoms(text, precision), knownAssets() -> [hex],
 //   held(hex) -> atoms the person holds (the figure the Balance tab shows), admittedReceives(pay)
-//   -> [hex] (optional: the receive picker lists those after what is offered now) }
+//   -> [hex] (optional: the receive picker lists those after what is offered now),
+//   market: { relay() -> the relay's base URL, pairOf(a, b) -> {base, quote} } (optional: the
+//   chosen pair's market above the inputs, market-view.js) }
 // The receive picker lists BTC first, then every asset the book offers for what is paid in one
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
 import { USER_WORDS, pickerOrder, costLine, tradeStateWord } from './user-trade.js'
+import { mountMarketView } from './market-view.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -74,6 +77,7 @@ export function mountUserComposer (ctx) {
     if (!S.getChosen || !gl.includes(S.get)) S.get = S.ticket || S.busy ? S.get : defaultGet(gl)
     old.replaceWith(select('ucGet', gl, S.get, pickGet))
     if (S.get !== was && !S.ticket) { S.error = ''; paintTicket() }
+    if (S.get !== was && S.market) S.market.refresh().catch(() => {})
   }
   function pickGet (v) { S.get = v; S.getChosen = true; reset(); render() }
 
@@ -91,6 +95,9 @@ export function mountUserComposer (ctx) {
     if (!S.pay || !S.payChosen) S.pay = defaultPay()
     r.innerHTML = ''
     const box = el('div', 'ucomp'); box.id = 'userComposer'
+    // The chosen pair's market: its chart, price, book and recent trades.
+    const mk = el('div', 'uc-market'); mk.id = 'ucMarket'
+    if (ctx.market) box.appendChild(mk)
     // You pay
     const row1 = el('div', 'uc-row')
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
@@ -118,6 +125,11 @@ export function mountUserComposer (ctx) {
     paintTicket()
     paintTrades()
     loadOffered()
+    if (ctx.market) {
+      if (S.market) S.market.stop()
+      S.market = mountMarketView(mk, { meta: ctx.assetMeta, fmtAtoms: ctx.fmtAtoms, dev: false, relay: ctx.market.relay,
+        pair: () => (S.pay && S.get ? ctx.market.pairOf(S.pay, S.get) : null), visible: ctx.market.visible })
+    }
   }
 
   function paintTicket () {
@@ -186,14 +198,20 @@ export function mountUserComposer (ctx) {
     const list = ctx.root.querySelector('#ucTrades'); if (!list) return
     list.innerHTML = ''
     // A trade whose step did not answer is shown while it is looked for.
-    const recs = ctx.engine.records().filter((r) => (r.state !== 'confirming' || r.uncertain) && r.ticket).slice(-8).reverse()
+    const recs = ctx.engine.records().filter((r) => (r.state !== 'confirming' || r.uncertain) && r.ticket).slice(-12).reverse()
     if (!recs.length) return
     list.appendChild(el('label', 'lbl', USER_WORDS.recent))
-    for (const r of recs) {
-      const d = el('div', 'kv uc-trade'); d.dataset.trade = r.id; d.dataset.state = r.state
-      d.appendChild(el('span', 'k', `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`))
-      d.appendChild(el('span', 'v uc-state', stateWord(r)))
-      list.appendChild(d)
+    // The person's open trades, then the past ones.
+    const done = (r) => ['settled', 'returned', 'failed'].includes(r.state)
+    for (const [word, group] of [[USER_WORDS.openTrades, recs.filter((r) => !done(r))], [USER_WORDS.pastTrades, recs.filter(done).slice(0, 8)]]) {
+      if (!group.length) continue
+      list.appendChild(el('div', 'sub uc-group', word))
+      for (const r of group) {
+        const d = el('div', 'kv uc-trade'); d.dataset.trade = r.id; d.dataset.state = r.state
+        d.appendChild(el('span', 'k', `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`))
+        d.appendChild(el('span', 'v uc-state', stateWord(r)))
+        list.appendChild(d)
+      }
     }
   }
 
