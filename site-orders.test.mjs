@@ -33,9 +33,14 @@ function fakeLeaves () {
     if (c === 'order_quote') return { fee: { asset: a.sell, amount: '25' }, full_price: '999', min_lot: a.min_lot, expiry_locktime: 87400 }
     if (c === 'order_place') return { order: 'o1', state: 'waiting' }
     if (c === 'orders') return [{ order: 'o1', state: 'resting', holds: '60000000', refund_from: 87400, rests_at: 't:0' }]
-    if (c === 'order_refund') return { txid: 'rf' }
+    if (c === 'order_refund') return { refund: 'rf' }
     throw new Error('no ' + c) } }
 }
+
+test('every word a site\'s order shows is a default-mode word', () => {
+  const all = Object.values(SITE_WORDS).map((w) => (typeof w === 'function' ? w('GOLD') : w)).join(' | ')
+  assert.deepEqual(forbiddenIn(all), [])
+})
 
 test('params: a market of two assets, a side, an amount; a limit needs its price', () => {
   assert.throws(() => readParams({ type: 'x' }), /type/)

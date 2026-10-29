@@ -51,7 +51,7 @@ export const SITE_WORDS = Object.freeze({
   takeBack: 'What is left can be taken back from',
   restText: 'Nothing on the book meets your price now, so the order rests on the book at your price: anyone can fill it, all or in parts, while your wallet is closed. What it is paid arrives in your wallet.',
   tradeText: 'One trade, at the best price the book offers now.',
-  takeBackText: 'The order leaves the book and what is left of it returns to your wallet.',
+  takeBackText: 'The order comes off the book and what is left of it returns to your wallet.',
   notYet: (when) => `this order can be taken back from ${when}; until then it stays on the book for anyone to fill at your price`,
   priceNotMet: 'Nothing on the book meets that price right now.',
   cannotRest: 'This order could not be placed. Nothing moved.',
@@ -189,7 +189,8 @@ export function makeSiteOrders (d) {
     const fee = q.fee || {}
     const rows = [[SITE_WORDS.youSell, fmt(args.sell, args.amount)], [SITE_WORDS.forAtLeast, fmt(args.want, q.full_price)],
       [SITE_WORDS.price, priceText(o)], [SITE_WORDS.smallest, fmt(args.sell, q.min_lot ?? args.min_lot)],
-      feeRow([{ asset: fee.asset || args.sell, atoms: fee.amount }], args.sell),
+      // The placement's fee is paid on top of what is sold.
+      [USER_WORDS.fees, fee.amount && big(fee.amount) > 0n ? fmt(fee.asset || args.sell, fee.amount) + ', on top' : USER_WORDS.noFees],
       [SITE_WORDS.takeBack, when(q.expiry_locktime ?? args.expiry)], asked]
     return { id, kind: 'rest', display: { title: SITE_WORDS.restTitle, text: SITE_WORDS.restText, rows } }
   }
@@ -329,7 +330,8 @@ export function makeSiteOrders (d) {
     const p = pending.get(qid); pending.delete(qid)
     if (!p || p.kind !== 'cancel') throw new Error(SITE_WORDS.lapsed)
     const r = await d.leaves.command('order_refund', { order: p.order })
-    return { order: p.order, txid: (r && (r.txid || r.refund_txid)) || null }
+    // The library answers the refund's txid as `refund`.
+    return { order: p.order, txid: (r && (r.refund || r.txid || r.refund_txid)) || null }
   }
 
   return { quote: busy(quote), confirm: busy(confirm), drop, follow, orders, quoteCancel, confirmCancel: busy(confirmCancel) }
