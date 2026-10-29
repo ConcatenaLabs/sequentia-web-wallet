@@ -2,7 +2,7 @@
 // placement, against fakes; the engine and the library are driven live by the browser drives.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { makeSiteOrders, readParams, restTerms, meetsLimit, SITE_WORDS } from './site-orders.js'
+import { makeSiteOrders, readParams, readOptions, restTerms, meetsLimit, SITE_WORDS, ORDER_FEATURES } from './site-orders.js'
 import { forbiddenIn } from './user-trade.js'
 
 const B = 'bb'.repeat(32), Q = 'cc'.repeat(32)
@@ -123,4 +123,75 @@ test('an order whose coins are still arriving is refused in plain words', async 
   const S = makeSiteOrders({ engine: fakeEngine(), leaves: L, assetMeta: meta, fmtAtoms, store: mem() })
   await assert.rejects(S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: '5', price: String(9000n * 10n ** 8n) }, 'o'), /Not enough GOLD is ready to place this order yet/)
   assert.deepEqual(forbiddenIn(SITE_WORDS.notReady('GOLD')), [])
+})
+
+test('options: a limit order\'s four, refused on a market order and post only beside rest: false', () => {
+  const L = { type: 'limit', base: B, quote: Q, side: 'sell', amount: '5', price: '9' }
+  assert.deepEqual(readOptions(L, 'limit'), { postOnly: false, rest: true, minFill: null, takeBackAfter: null })
+  assert.deepEqual(readParams({ ...L, post_only: true, min_fill: '2', take_back_after: 3600 }).opts, { postOnly: true, rest: true, minFill: 2n, takeBackAfter: 3600 })
+  assert.equal(readParams({ ...L, rest: false }).opts.rest, false)
+  assert.throws(() => readParams({ ...L, type: 'market', price: undefined, post_only: true }), /post_only: options of a limit order/)
+  assert.throws(() => readParams({ ...L, post_only: true, rest: false }), /cannot be asked together/)
+  assert.throws(() => readParams({ ...L, post_only: 'yes' }), /post_only must be true or false/)
+  assert.throws(() => readParams({ ...L, min_fill: '0' }), /min_fill must be a positive/)
+  assert.throws(() => readParams({ ...L, take_back_after: 60 }), /from 3600 \(an hour\) to 604800 \(a week\)/)
+  assert.throws(() => readParams({ ...L, take_back_after: 604801 }), /a week/)
+  assert.deepEqual([...ORDER_FEATURES], ['order-post-only', 'order-no-rest', 'order-min-fill', 'order-take-back-after'])
+  for (const w of [SITE_WORDS.wouldTrade, SITE_WORDS.neverRests, SITE_WORDS.minFillTooBig]) assert.deepEqual(forbiddenIn(w), [])
+})
+
+test('post only: refused before any approval when it would trade, rests when it would not', async () => {
+  const U = 10n ** 8n
+  const E = fakeEngine(), L = fakeLeaves()
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem() })
+  // The book buys at 3900: a sale at 3800 would trade.
+  await assert.rejects(S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(3800n * U), post_only: true }, 'o'), new RegExp(SITE_WORDS.wouldTrade))
+  assert.equal(E.dropped.length, 1)
+  assert.equal(L.calls.some((c) => c[0] === 'order_quote'), false)
+  const q = await S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(4200n * U), post_only: true }, 'o')
+  assert.equal(q.kind, 'rest')
+  await assert.rejects(S.quote({ type: 'limit', base: B, quote: 'BTC', side: 'sell', amount: '5', price: '9', post_only: true }, 'o'), new RegExp(SITE_WORDS.neverRests))
+})
+
+test('rest: false trades when the book meets the price and places nothing when it does not', async () => {
+  const U = 10n ** 8n
+  const E = fakeEngine(), L = fakeLeaves()
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem() })
+  const q = await S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(3800n * U), rest: false }, 'o')
+  assert.equal(q.kind, 'take')
+  await assert.rejects(S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(4200n * U), rest: false }, 'o'), new RegExp(SITE_WORDS.priceNotMet))
+  assert.equal(L.calls.some((c) => c[0] === 'order_quote'), false)
+})
+
+test('min_fill sets the resting order\'s smallest fill, at the price for a purchase; take_back_after its refund', async () => {
+  const U = 10n ** 8n
+  const L = fakeLeaves()
+  const S = makeSiteOrders({ engine: fakeEngine(), leaves: L, assetMeta: meta, fmtAtoms, store: mem() })
+  await S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(2n * U), price: String(4200n * U), min_fill: String(U / 4n), take_back_after: 604800 }, 'o')
+  let a = L.calls.filter((c) => c[0] === 'order_quote').pop()[1]
+  assert.deepEqual([a.min_lot, a.expiry], [String(U / 4n), String(1000 + 604800)])
+  // A purchase of 1 GOLD at 3800 sells 3800 USDX; a smallest fill of 0.25 GOLD is 950 USDX.
+  await S.quote({ type: 'limit', base: B, quote: Q, side: 'buy', amount: String(U), price: String(3800n * U), min_fill: String(U / 4n) }, 'o')
+  a = L.calls.filter((c) => c[0] === 'order_quote').pop()[1]
+  assert.deepEqual([a.sell, a.amount, a.min_lot, a.expiry], [Q, String(3800n * U), String(950n * U), String(1000 + 86400)])
+  await assert.rejects(S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(4200n * U), min_fill: String(2n * U) }, 'o'), new RegExp(SITE_WORDS.minFillTooBig))
+})
+
+test('take_back_after shorter than the operator allows becomes the earliest it names, and the approval shows it', async () => {
+  const U = 10n ** 8n
+  const L = fakeLeaves(); const inner = L.command
+  L.command = async (c, a) => {
+    if (c === 'order_quote' && Number(a.expiry) < 1000 + 21600) { L.calls.push([c, { ...a }]); throw new Error('refused: the order would be refundable from median time ' + a.expiry + ', and the operator takes no take of an order refundable within 21600 s: name an expiry of at least 23800 (the chain\'s median time is 1000)') }
+    if (c === 'order_quote') { L.calls.push([c, { ...a }]); return { fee: { asset: a.sell, amount: '25' }, full_price: '999', min_lot: a.min_lot, expiry_locktime: Number(a.expiry) } }
+    return inner(c, a)
+  }
+  const S = makeSiteOrders({ engine: fakeEngine(), leaves: L, assetMeta: meta, fmtAtoms, store: mem() })
+  const q = await S.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(4200n * U), take_back_after: 3600 }, 'o')
+  const asks = L.calls.filter((c) => c[0] === 'order_quote').map((c) => c[1].expiry)
+  assert.deepEqual(asks, ['4600', '23800'])
+  assert.match(JSON.stringify(q.display), /1970-01-01 06:36 UTC/)
+  // Without the option asked, the same refusal is not worked around.
+  const L2 = fakeLeaves(); L2.command = async (c, a) => { if (c === 'order_quote') throw new Error('refused: name an expiry of at least 99999999'); return c === 'schedule' ? { now: 1000 } : null }
+  const S2 = makeSiteOrders({ engine: fakeEngine(), leaves: L2, assetMeta: meta, fmtAtoms, store: mem() })
+  await assert.rejects(S2.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(4200n * U) }, 'o'), new RegExp(SITE_WORDS.cannotRest))
 })

@@ -17,6 +17,7 @@
 // worker).
 
 import { readRequest, planSend, leafBalancesAnswer } from './leaf-request.js'
+import { ORDER_FEATURES } from './site-orders.js'
 
 export const CHANNEL = 'sequentia-wallet'
 export const NOT_DEVELOPER = 'leaves are a developer-mode rail: turn developer mode on in the wallet’s Settings'
@@ -235,7 +236,7 @@ export function mountPageApi (ctx) {
     const isConnected = () => connected.has(pageKey)
     switch (method) {
       case 'getCapabilities':
-        return { provider: PROVIDER, methods: SITE_METHODS, events: ['accountsChanged', 'modeChanged'], features: ['orders', 'balances-total'] }
+        return { provider: PROVIDER, methods: SITE_METHODS, events: ['accountsChanged', 'modeChanged'], features: ['orders', 'balances-total', ...ORDER_FEATURES] }
       case 'getWalletMode':
         return { mode: leaves.mode() }
       case 'getAccounts':
