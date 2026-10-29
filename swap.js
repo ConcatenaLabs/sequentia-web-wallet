@@ -30,6 +30,7 @@
 
 import * as seqob from './seqob.js';
 import { secp256k1 } from './btc.js';
+import { readMarket, marketHtml } from './market-view.js';
 import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc-wait.js';
 // The byte-exact passive-CLOB covenant stack: place a funded resting order that
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
@@ -516,7 +517,7 @@ function _quoteRank(hex){
 }
 // {base, quote} for an UNORDERED pair — the higher-rank asset is the QUOTE (numeraire). Deterministic
 // (a rank tie falls back to the asset id) so a pair's direction never flips with the buy/sell side.
-function canonicalPair(a, b){
+export function canonicalPair(a, b){
   if (!a || !b) return { base: a || b, quote: b || a };
   const ra = _quoteRank(a), rb = _quoteRank(b);
   if (ra !== rb) return ra > rb ? { base: b, quote: a } : { base: a, quote: b };
@@ -1006,7 +1007,7 @@ function startLiveData(){
       const sw = C.$('swBook'); if (!sw || sw.offsetParent === null) return;   // Swap tab not visible
       if (S.payAsset && S.receiveAsset){ renderRecentTrades().catch(()=>{}); renderPairStats().catch(()=>{}); }
     } catch {}
-  }, 15000);
+  }, 5000);
 }
 
 // First-open composer default (native-BTC-at-top): open with BTC in the pay slot and
@@ -10074,95 +10075,22 @@ export function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c =
 // (the conventional quote, matching the mid). ASKS are the offers we can take (give
 // pay, get receive) · clickable to lift; BIDS are the opposite side (display-only
 // depth, since the taker can't lift them).
-// D5: recent-trades feed for the active pair, backed by seqobd's /trades (T1). Resting offers use ONE
-// canonical base/quote per market, so exactly one direction has data — query the composer's direction
-// first, fall back to the inverse, and display whichever has trades (never merge — the two are
-// inverse-priced). Compact: price (quote/base) · size (base) · time-ago. Empty ⇒ no section (honest).
-let _tradesPair = null, _tradesReq = 0;
-async function renderRecentTrades(){
-  const host = C.$('swTrades'); if (!host) return;
-  const pay = S.payAsset, recv = S.receiveAsset;
-  if (!pay || !recv){ host.innerHTML = ''; return; }
-  const req = ++_tradesReq;
-  const fetchDir = async (base, quote) => {
-    try {
-      const r = await fetch(seqob.seqobBase() + '/v1/market/' + encodeURIComponent(base) + '/' + encodeURIComponent(quote) + '/trades?limit=30', { cache: 'no-store' });
-      if (!r.ok) return []; const j = await r.json(); return Array.isArray(j.trades) ? j.trades : [];
-    } catch { return []; }
-  };
-  // ONE canonical base/quote per pair ("1 base = N quote") — query that direction, else the inverse and
-  // invert its prices, so the feed reads the SAME way as the book + rate line.
-  const canon = pairDir(pay, recv);
-  let sizeAsset = canon.base, inv = false, trades = await fetchDir(canon.base, canon.quote);
-  if (!trades.length){ const alt = await fetchDir(canon.quote, canon.base); if (alt.length){ trades = alt; inv = true; sizeAsset = canon.quote; } }
-  if (req !== _tradesReq) return;                 // superseded by a newer pair
-  if (!trades.length){ host.innerHTML = ''; return; }
-  trades.sort((a, b) => (b.ts || 0) - (a.ts || 0));
-  const bm = C.assetMeta(canon.base), qm = C.assetMeta(canon.quote), sm = C.assetMeta(sizeAsset);
-  const px = (t) => { const p = Number(t.price); return (p > 0 && inv) ? 1 / p : p; };   // quote per canonical base
-  const nowS = Math.floor(Date.now() / 1000);
-  const ago = (ts) => { const s = Math.max(0, nowS - (ts || 0)); return s < 60 ? s + 's' : s < 3600 ? Math.floor(s/60) + 'm' : s < 86400 ? Math.floor(s/3600) + 'h' : Math.floor(s/86400) + 'd'; };
-  const row = (t) => '<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 10px;font-size:12px">'
-    + '<span class="mono">' + trim(px(t)) + '</span>'
-    + '<span class="mono sub">' + esc(C.fmtAtoms(big(String(t.size || 0)), sm.precision || 0)) + ' ' + esc(sm.ticker) + '</span>'
-    + '<span class="sub" style="min-width:30px;text-align:right">' + ago(t.ts) + '</span></div>';
-  host.innerHTML = '<div class="swladder" style="margin-top:8px"><div class="swladder-head">'
-    + '<span class="sub" style="color:var(--txt);font-weight:650">Recent trades</span>'
-    + '<span class="sub">price ' + esc(bm.ticker) + '/' + esc(qm.ticker) + '</span></div>'
-    + trades.slice(0, 30).map(row).join('') + '</div>';
-}
-
-// D3: 24h stats + a mini sparkline for the active pair, from seqobd /candles (T1). Same
-// one-canonical-direction handling as the trades feed. Sparse on testnet (renders whatever exists);
-// richer as trades accumulate. Cleared when no pair / no candle data.
-let _statsPair = null, _statsReq = 0;
+// The pair's market, as default mode shows it plus each trade's rail and the book's depth by rail
+// (market-view.js): chart, last price and 24-hour change, best bid and ask, recent trades. One
+// relay trade log holds every rail's trades and serves the market in the pair's display direction.
+// The view goes in swPairStats; the recent trades are part of it, so swTrades stays empty.
+let _tradesPair = null, _statsReq = 0, _mvRange = '1D';
+async function renderRecentTrades(){ const host = C.$('swTrades'); if (host) host.innerHTML = ''; }
 async function renderPairStats(){
   const host = C.$('swPairStats'); if (!host) return;
   const pay = S.payAsset, recv = S.receiveAsset;
   if (!pay || !recv){ host.innerHTML = ''; return; }
   const req = ++_statsReq;
-  const fetchDir = async (base, quote) => {
-    try {
-      const r = await fetch(seqob.seqobBase() + '/v1/market/' + encodeURIComponent(base) + '/' + encodeURIComponent(quote) + '/candles?interval=3600&limit=48', { cache: 'no-store' });
-      if (!r.ok) return []; const j = await r.json(); return Array.isArray(j.candles) ? j.candles : [];
-    } catch { return []; }
-  };
   const canon = pairDir(pay, recv);
-  let sizeAsset = canon.base, inv = false, candles = await fetchDir(canon.base, canon.quote);
-  if (!candles.length){ const alt = await fetchDir(canon.quote, canon.base); if (alt.length){ candles = alt; inv = true; sizeAsset = canon.quote; } }
-  if (req !== _statsReq) return;
-  if (!candles.length){ host.innerHTML = ''; return; }
-  // Normalise every candle to the canonical quote-per-base frame; inverting an inverse-direction feed
-  // swaps each candle's high and low. vol stays in the candle's own (size) asset.
-  const iv = (x) => { const n = Number(x); return (n > 0) ? 1 / n : 0; };
-  const cN = candles.map(c => inv
-    ? { t: c.t, o: iv(c.o), c: iv(c.c), h: iv(c.l), l: iv(c.h), v: c.v }
-    : { t: c.t, o: Number(c.o), c: Number(c.c), h: Number(c.h), l: Number(c.l), v: c.v });
-  const nowSec = Math.floor(Date.now() / 1000);
-  const d = dayStats(cN, nowSec);
-  const bm = C.assetMeta(sizeAsset);
-  // Nothing traded in the last day: say when the last trade was, at what price, instead of
-  // presenting that old candle as the day's change, range and volume.
-  if (!d.inDay){
-    host.innerHTML = '<div style="padding:4px 2px;font-size:12px" class="sub">No trades in the last 24 hours · last trade '
-      + '<span class="mono">' + esc(trim(d.last)) + '</span>, ' + esc(agoText(d.lastT, nowSec)) + ' ago</div>';
-    return;
-  }
-  const { hi, lo, vol, changePct, pts } = d;
-  const up = changePct >= 0, col = up ? '#3ddc84' : 'var(--amber2)';
-  let spark = '';
-  if (pts.length >= 2){
-    const min = Math.min(...pts), max = Math.max(...pts), rng = (max - min) || 1, W = 84, H = 20;
-    const d = pts.map((p, i) => (i / (pts.length - 1) * W).toFixed(1) + ',' + (H - (p - min) / rng * H).toFixed(1)).join(' ');
-    spark = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" style="vertical-align:middle"><polyline points="' + d + '" fill="none" stroke="' + col + '" stroke-width="1.5"/></svg>';
-  }
-  const chg = (up ? '+' : '') + changePct.toFixed(2) + '%';
-  host.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:4px 2px;font-size:12px" class="sub">'
-    + spark
-    + '<span>24h <b style="color:' + col + '">' + chg + '</b></span>'
-    + (hi != null ? '<span>H <span class="mono">' + trim(hi) + '</span></span><span>L <span class="mono">' + trim(lo) + '</span></span>' : '')
-    + '<span>vol <span class="mono">' + esc(C.fmtAtoms(vol, bm.precision || 0)) + '</span> ' + esc(bm.ticker) + '</span>'
-    + '</div>';
+  const m = await readMarket(seqob.seqobBase(), canon.base, canon.quote, _mvRange);
+  if (req !== _statsReq) return;                 // superseded by a newer pair
+  host.innerHTML = marketHtml(m, { meta: C.assetMeta, fmtAtoms: C.fmtAtoms, dev: true, base: canon.base, quote: canon.quote });
+  for (const b of host.querySelectorAll('.mv-range')) b.onclick = () => { _mvRange = b.dataset.range; renderPairStats().catch(()=>{}); };
 }
 
 function renderBook(pay, receive){

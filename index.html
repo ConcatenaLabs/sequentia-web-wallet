@@ -76,6 +76,31 @@
   .ucomp .uc-ticket .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
   .ucomp .uc-note.err{color:var(--bad,#c33)}
   .ucomp .uc-trade{display:flex;justify-content:space-between;gap:12px}
+  .ucomp .uc-group{margin-top:6px}
+  /* a pair's market (market-view.js), in both modes' Trade tab */
+  .mv{display:flex;flex-direction:column;gap:8px;border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel2)}
+  .mv-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+  .mv-num{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .mv-pair{font-weight:700;font-size:15px}
+  .mv-last{font-size:20px;font-weight:700;margin-top:2px}
+  .mv-last .sub{font-size:13px;font-weight:500}
+  .mv-up{color:#3ddc84} .mv-down{color:#f0a35e}
+  .mv-last .mv-up,.mv-last .mv-down{font-size:14px}
+  .mv-ranges{display:flex;gap:4px}
+  .mv-range{padding:3px 9px;font-size:12px;background:transparent;color:var(--dim)}
+  .mv-range.on{color:var(--txt);border-color:var(--amber)}
+  .mv-chartbox{width:100%}
+  .mv-chart{display:block;height:130px}
+  .mv-ax{font-size:9px;fill:var(--dim)}
+  .mv-book{display:flex;justify-content:space-between;gap:10px;font-size:13px}
+  .mv-depth{display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--line)}
+  .mv-depth-b{background:#3ddc84aa} .mv-depth-s{background:#f0a35eaa}
+  .mv-depth-l{display:flex;justify-content:space-between;font-size:11px}
+  .mv-sec{display:flex;flex-direction:column;gap:2px;margin-top:4px}
+  .mv-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;font-size:12px;padding:2px 0}
+  .mv-row:has(> :nth-child(4)){grid-template-columns:1fr 1fr 1fr auto}
+  .mv-row > :last-child{text-align:right}
+  .mv-note{font-size:12px}
   /* The fee section (fee-panel.js), laid out as Sequentia Qt's. */
   .fee-summary{display:flex;align-items:center;gap:10px;justify-content:space-between}
   .fee-adv-btn{padding:6px 12px;font-size:13px}
@@ -1632,7 +1657,7 @@ import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
 import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
-import { composerState, setComposerRail } from './swap.js';
+import { composerState, setComposerRail, canonicalPair } from './swap.js';
 import { mountPageApi } from './wallet-api.js';
 import { mountContracts } from './contracts.js';
 import { watchTips } from './tip-watch.js';
@@ -3768,6 +3793,8 @@ function initUserComposer(){
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, parseAtoms,
     knownAssets: userKnownAssets, held: userHeld,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
+    // The chosen pair's market, from the relay's one trade log (market-view.js).
+    market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> canonicalPair(a, b) },
   });
   // The pairs and the chain are read once; the composer draws when they are in.
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());

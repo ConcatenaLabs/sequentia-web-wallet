@@ -5,6 +5,11 @@
 // makers and node exactly as the deployed page does, before it is deployed.
 //
 //   node tooling/live-proxy.mjs [--port 8791] [--origin https://sequentiatestnet.com]
+//                               [--seqob-market http://127.0.0.1:19955]
+//
+// --seqob-market sends the relay's market data (/seqob/v1/trades…, and each market's trades,
+// candles and ticker) to a relay of your own instead, the book and everything else still to the
+// testnet: how a relay change to the market view is seen on the page before it is deployed.
 //
 // It prints one line, `serving <url>`, once it listens. Nothing here is used by the deployed
 // wallet. The browser sees one origin (http://127.0.0.1:<port>), a secure context, so the
@@ -20,6 +25,8 @@ const port = Number(arg('--port', '8791'))
 const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '')
 // --log: one line per forwarded call (method, path, status, time, and the JSON-RPC method).
 const logCalls = process.argv.includes('--log')
+const seqobMarket = (arg('--seqob-market', '') || '').replace(/\/+$/, '')
+const MARKET_DATA = /^\/seqob\/v1\/(trades(\/.*)?|market\/[^/]+\/[^/]+\/(trades|candles|ticker))$/
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
 
@@ -50,7 +57,8 @@ const server = createServer(async (req, res) => {
       headers[k] = v
     }
     const t0 = Date.now()
-    const r = await fetch(origin + url.pathname + url.search, { method: req.method, headers,
+    const to = seqobMarket && MARKET_DATA.test(url.pathname) ? seqobMarket + url.pathname.slice('/seqob'.length) : origin + url.pathname
+    const r = await fetch(to + url.search, { method: req.method, headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: 'manual' })
     const out = {}
     r.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'alt-svc', 'strict-transport-security'].includes(k)) out[k] = v })

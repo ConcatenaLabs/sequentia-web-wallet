@@ -38,7 +38,13 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Portfolio and per-amount display in a user-chosen reference currency (USD, BTC, or any priced asset)
 - Any-asset fees on Sequentia transactions (open fee market), with fee-asset selection on every send
 - Trade tab in user mode: what you pay, what you get, one amount and one button; a market
-  trade that settles in one step, offered only for the pairs the reliability drill has passed
+  trade that settles in one step, offered only for the pairs the reliability drill has passed.
+  Above it, the chosen pair's market: a price chart (1D, 1W, 1M), the last price and its change
+  over 24 hours, the best bid and ask with a depth bar, and the market's recent trades; below it,
+  your open and past trades
+- Both modes read the market from SeqDEX's relay, whose one trade log per market holds the
+  trades of every way a trade settles, so every surface shows the same numbers; developer mode
+  adds each trade's rail and the book's depth by rail (`market-view.js`)
 - Trade tab in developer mode: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
   self-enforcing SeqOB covenants and fill without the wallet being open. An order's locked coins
   come back through Reclaim once its lock has passed: a median time a day after it is placed (a
@@ -658,6 +664,7 @@ works normally without the restricted rows.
 | `pkg/` | **Not tracked.** The `lwk_wasm` WebAssembly bindings built from SWK (see below). |
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
 | `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
+| `market-view.js` | A pair's market, in both modes' Trade tab: chart, last price and 24-hour change, best bid and ask, recent trades, from the relay's `trades`, `candles` and `ticker`; developer mode adds rails. |
 | `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `covenant-sim.js` | SeqDEX's Simplicity order (the template `seqdex/order`): its address from the terms and the pinned commitment root, and a fill's witness from the template's pinned programs, with no compiler; `seqob.js` signs and verifies its offers (`simplicity_covenant`). Pinned to the template's vectors as seqdex vendors them. |
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
