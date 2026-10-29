@@ -254,6 +254,32 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
   request".
 
+## Report a problem
+
+Every wallet has **Report a problem** where a person looks for help: in the web wallet, in More
+and at the top of Help. The words are in `REPORT_WORDS` (`problem-report.js`).
+
+- The intro: "Tell us what went wrong. Reports help fix the testnet before more people use it."
+- **What happened?**, with the hint "What you did, what you expected, and what happened
+  instead.", then **Emissio account code (optional)**: "Paste it to be credited if the report is
+  accepted."
+- Under them: "The report includes this wallet's version, its mode and its recent errors. It
+  never includes your recovery phrase or your keys." The recent errors are the last twenty the
+  wallet threw or showed, with anything shaped like an address, a key, an invoice or a long hex
+  string replaced before they are kept.
+- A box, unticked: **Also send my address**. Ticked, it shows "This address will be sent:" and the
+  address. No key and no phrase is ever sent.
+- **What will be sent**, folded: the exact report, as it changes.
+- **Send report**. When it is done: "Report sent. Its number is #<n>. Thank you.", then "If it is
+  accepted, it is credited to your Emissio account." or "That account code was not found, so the
+  report was sent without it."
+- Refusals: "Describe what happened."; "This looks like your recovery phrase. Never share it with
+  anyone: remove it, then send again." (three words of the wallet's phrase in a row); "This report
+  was already sent."; "Too many reports from here. Try again later."; "This report is too long.
+  Shorten it, then send again."; "The report could not be sent. Check your connection and try
+  again."
+- Reports go to Emissio's intake (`/emissio/api/problem-reports`); its README holds the contract.
+
 ## Never in default mode
 
 None of these words appear on any screen in default mode, in the wallet's own text: rail,

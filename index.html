@@ -708,6 +708,7 @@
           <button data-tab="stake">Stake</button>
           <button data-tab="sign">Sign</button>
           <button data-tab="help">Help</button>
+          <button id="btnReportMenu">Report a problem</button>
           <button data-tab="leaves" id="tabLeaves" class="dev hide">Leaves</button>
           <button data-tab="contracts" id="tabContracts" class="dev hide">Contracts</button>
         </div>
@@ -1415,6 +1416,35 @@
 
     <!-- settings -->
     <section data-panel="help" class="hide">
+      <!-- Report a problem (problem-report.js): the words come from REPORT_WORDS and are
+           filled in by mountReport(); what is sent is shown under "What will be sent". -->
+      <div class="card" id="reportCard">
+        <label class="lbl" id="reportTitle"></label>
+        <p class="sub" style="margin:0 0 10px" id="reportIntro"></p>
+        <div class="field">
+          <label class="lbl" for="reportText" id="reportTextLabel"></label>
+          <textarea id="reportText" rows="5" maxlength="4000" style="width:100%;resize:vertical"></textarea>
+        </div>
+        <div class="field">
+          <label class="lbl" for="reportCode" id="reportCodeLabel"></label>
+          <input id="reportCode" autocomplete="off" spellcheck="false" maxlength="64">
+          <div class="sub" id="reportCodeHint"></div>
+        </div>
+        <p class="sub" style="margin:10px 0" id="reportIncludes"></p>
+        <label style="display:flex;gap:9px;align-items:center;margin:0 0 8px;cursor:pointer">
+          <input type="checkbox" id="reportAddr" style="width:16px;height:16px;flex:0 0 auto;margin:0">
+          <span id="reportAddrLabel"></span>
+        </label>
+        <div class="hide" id="reportAddrList" style="margin:0 0 10px">
+          <div class="sub" id="reportAddrWill"></div>
+          <div class="mono" id="reportAddrValue" style="word-break:break-all"></div>
+        </div>
+        <details id="reportPreview" style="margin:0 0 12px"><summary id="reportPreviewLabel"></summary>
+          <pre class="mono" id="reportPayload" style="white-space:pre-wrap;word-break:break-all;font-size:12px;margin:8px 0 0"></pre>
+        </details>
+        <button id="btnReport"></button>
+        <div class="status" id="reportStatus"></div>
+      </div>
       <div class="card faq">
         <label class="lbl">Fees and transactions</label>
         <details id="faq-fee-asset"><summary>In which asset can I pay a network fee?</summary>
@@ -1565,7 +1595,7 @@
   </div>
 
   <div class="foot">
-    Sequentia testnet · <a href="/explorer/">Block explorer</a> · <a href="/download/">Desktop wallet</a><br>
+    Sequentia testnet · <a href="/explorer/">Block explorer</a> · <a href="/download/core/">Sequentia Core</a><br>
     <a href="https://github.com/ConcatenaLabs/sequentia-web-wallet" target="_blank" rel="noopener">Open source on GitHub</a>
   </div>
 </div>
@@ -1597,6 +1627,8 @@
   // The Bitcoin ark that holds default mode's BTC (btc-ark.js): its server (gRPC-web, same origin)
   // and the Esplora server the wallet reads testnet4 from. A page that sets SEQ_BTC_ARK = null
   // first keeps BTC on the chain and Lightning only.
+  // Where Report a problem sends (problem-report.js): Emissio's intake on this site.
+  if(window.SEQ_REPORT_URL === undefined) window.SEQ_REPORT_URL = location.origin + '/emissio/api/problem-reports';
   if(window.SEQ_BTC_ARK === undefined) window.SEQ_BTC_ARK = {
     server:  location.origin,
     esplora: location.origin + '/testnet4/api',
@@ -1648,6 +1680,7 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
+import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
 import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList } from './default-arca.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
@@ -1667,6 +1700,16 @@ import { reapplyUnseen } from './own-txs.js';
 import { watchInvoicePaid } from './ln-invoice-watch.js';
 
 const ESPLORA = location.origin + '/api';
+// The page's recent errors for Report a problem: what it threw, and every error it showed.
+const pageErrors = createErrorLog();
+pageErrors.install(window, console);
+new MutationObserver((ms) => {
+  for (const m of ms) {
+    const t = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+    const e = t && t.closest && t.closest('.status.err');
+    if (e && e.id !== 'reportStatus' && e.textContent.trim()) pageErrors.note(e.textContent.trim());
+  }
+}).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class'] });
 let _tipWatch = null;   // the new-block watch (tip-watch.js), started once the wallet is open
 const OPENAMP = location.origin + '/openamp';   // OpenAMP restricted-asset enclave (same-origin proxy)
 const KEY = 'swk.sequentia.mnemonic';
@@ -7845,6 +7888,52 @@ async function cjRunBtc(){
 
 document.querySelectorAll('#tabs button[data-tab]').forEach(b=> b.onclick=()=>tab(b.dataset.tab));
 function closeMore(){ const l=$('moreList'); if(l && !l.classList.contains('hide')){ l.classList.add('hide'); $('btnMore').setAttribute('aria-expanded','false'); } }
+// Report a problem (problem-report.js), at the top of Help and in More. The report carries
+// this page's version (when it was published), the mode and the recent errors: those the
+// page threw and those it showed (every .status.err). The address goes only when ticked,
+// and the exact payload is shown under "What will be sent" as it changes.
+function mountReport(){
+  const W = REPORT_WORDS;
+  const set = (id, t) => { const e = $(id); if (e) e.textContent = t; };
+  set('reportTitle', W.title); set('reportIntro', W.intro); set('reportTextLabel', W.descriptionLabel);
+  set('reportCodeLabel', W.codeLabel); set('reportCodeHint', W.codeHint); set('reportIncludes', W.includes);
+  set('reportAddrLabel', W.addressesBox); set('reportAddrWill', W.addressesWill); set('reportPreviewLabel', W.preview);
+  set('btnReport', W.send); set('btnReportMenu', W.title);
+  $('reportText').placeholder = W.descriptionHint;
+  // When the page was published, from its Last-Modified header; without one the browser
+  // reports the time of loading, which says nothing, so it is "unknown".
+  const published = () => { const d = new Date(document.lastModified); return isNaN(d) || Math.abs(d - performance.timeOrigin) < 60000 ? 'unknown' : 'page ' + d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC'; };
+  const myAddress = () => { try { return currentAddress().toString(); } catch { return ''; } };
+  const report = () => buildReport({
+    wallet: 'web-wallet', version: published(), mode: devMode() ? 'developer' : 'default',
+    description: $('reportText').value, accountCode: $('reportCode').value, errors: pageErrors.list(),
+    context: { platform: navigator.platform, user_agent: navigator.userAgent, network: 'testnet' },
+    addresses: $('reportAddr').checked ? [myAddress()] : [],
+  });
+  const paint = () => {
+    const ticked = $('reportAddr').checked;
+    $('reportAddrList').classList.toggle('hide', !ticked);
+    $('reportAddrValue').textContent = ticked ? myAddress() : '';
+    $('reportPayload').textContent = JSON.stringify(report(), null, 2);
+  };
+  for (const id of ['reportText', 'reportCode']) $(id).addEventListener('input', () => { if ($('reportStatus').classList.contains('err')) { $('reportStatus').className = 'status'; $('reportStatus').textContent = ''; } paint(); });
+  $('reportAddr').addEventListener('change', paint);
+  $('reportPreview').addEventListener('toggle', paint);
+  $('btnReportMenu').onclick = () => { closeMore(); tab('help'); paint(); $('reportCard').scrollIntoView({ block: 'start' }); $('reportText').focus(); };
+  $('btnReport').onclick = async () => {
+    const st = $('reportStatus'), r = report();
+    const no = refusal(r, localStorage.getItem(KEY));
+    if (no) { st.className = 'status err'; st.textContent = no; return; }
+    $('btnReport').disabled = true; st.className = 'status'; st.textContent = W.sending;
+    const res = await sendReport(r, { url: window.SEQ_REPORT_URL });
+    $('btnReport').disabled = false;
+    if (!res.ok) { st.className = 'status err'; st.textContent = res.message; return; }
+    st.className = 'status ok'; st.textContent = sentWords(res);
+    $('reportText').value = ''; $('reportAddr').checked = false; paint();
+  };
+  paint();
+}
+mountReport();
 // The phone tab bar steps aside while the keyboard is up: a field has the focus, or the visual
 // viewport has shrunk well below the window (the keyboard took it). It comes back when both end.
 {

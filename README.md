@@ -98,8 +98,8 @@ assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com
 straight to your current address). The line under the buttons says when the coins have reached
 the wallet.
 
-The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign and
-Help under **More**; Settings behind the gear in the header. On a phone the same tabs are a bar
+The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign,
+Help and Report a problem under **More**; Settings behind the gear in the header. On a phone the same tabs are a bar
 fixed to the bottom of the screen, icon over label, which steps aside while the keyboard is up.
 
 - **Balance**: a headline portfolio total across parent-chain BTC and every Sequentia asset,
@@ -190,6 +190,10 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   chosen asset's own units, and says what the rescue comes to; it checks again before signing
   that the transaction is still unconfirmed. Each row's details say why an unconfirmed
   transaction is waiting, and a transaction the network dropped is marked so.
+- **Report a problem**, at the top of Help: what happened, an optional Emissio account code to be
+  credited, and the address only when ticked. The report carries the page's version, the mode and
+  the recent errors (scrubbed of addresses, keys and invoices), shows exactly what will be sent,
+  and goes to Emissio's intake. Its words are in `docs/DEFAULT_MODE.md`.
 - **Help**: questions and answers on fees (which assets pay them, what the marks next to the fee
   asset mean, setting a rate, why a transaction is refused or waits, the three rescues) and on
   Lightning (who holds the keys, moving in and out, sending and receiving, what room to receive
@@ -699,6 +703,7 @@ works normally without the restricted rows.
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
 | `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, and the composer's `deps.btc` on the ark. No DOM. |
+| `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
