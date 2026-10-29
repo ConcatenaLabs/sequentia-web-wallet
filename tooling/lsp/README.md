@@ -219,7 +219,10 @@ It then asks the library for one command, the offer, which goes ahead of every q
 reading taken after either waits its turn in the upkeep. A read of `/v1/quotes` holds the
 upkeep's next commands for 90 s (at most once every three minutes), so the firm offer that
 follows finds the library free. The upkeep leaves the library idle at least as long as its last
-pass held it. The resting desk reads its orders eight to a command. Every command slower than
+pass held it. The resting desk reads its orders eight to a command. It never rests an order at
+or within `rest.guard_bps` (10 by default) of the pair's best bid on the relay, every rail of the
+on-chain book taken together, and it cancels, to rest again at the feed's rate, an order the
+feed's mid has moved to within `rest.guard_bps` of. Every command slower than
 five seconds is logged (`slow <command> <ms> ms`), which names what a slow firm offer waited
 behind.
 

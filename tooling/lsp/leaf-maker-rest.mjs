@@ -5,17 +5,21 @@
 // Each pass (`interval_seconds`) it keeps one order resting per pair and level:
 //   - a level with no order, or whose order was filled whole, cancelled, not rested, or reached its
 //     time, is rested again at the feed's rate of now (`order_rest_quote`, then `order_rest`);
-//   - a resting order whose rate is more than `reprice_bps` off the feed's, or that fills have
-//     brought below `refill_pct` (25) percent of its size, is cancelled
+//   - a resting order whose rate is more than `reprice_bps` off the feed's, that the feed's mid has
+//     moved through (it sells at or below mid * (1 + guard_bps), the rule every maker of the books
+//     follows), or that fills have brought below `refill_pct` (25) percent of its size, is cancelled
 //     (`order_cancel_resting_quote`, `order_cancel_resting`, and its relay listing cancelled), and
 //     rested again on a later pass;
 //   - an order that rests at the operator and has no live listing (never posted, or the relay
 //     restarted and lost it, or its listing is near its end) is posted to the relay.
+// A level is never rested at a rate that crosses the pair's combined best bid on the relay, or comes
+// within `guard_bps` of it (the relay's ticker: every rail of the on-chain book, both orientations);
+// such a level waits for a later pass.
 // A part fill moves the order to a coin holding the rest; the relay follows it there. What a fill
 // brings in is a received coin, refreshed in a round by the maker's own loop.
 //
 // Configuration, under the maker's own:
-//   "rest": { "relay": "http://127.0.0.1:9955", "days": 7, "reprice_bps": 300, "refill_pct": 25, "interval_seconds": 60,
+//   "rest": { "relay": "http://127.0.0.1:9955", "days": 7, "reprice_bps": 300, "guard_bps": 10, "refill_pct": 25, "interval_seconds": 60,
 //             "max_new_per_pass": 6,
 //             "pairs": [ { "give": "<hex>", "want": "<hex>", "price": true,
 //                          "ladder": { "levels": 8, "step_bps": 25, "growth": 1.4, "first": "5000000" } } ] }
@@ -55,6 +59,31 @@ export function restTerms (size, rate, stepBps, k) {
 export function offPrice (r, now, bps) {
   const a = Number(r.rate_num) / Number(r.rate_den), b = Number(now.rate_num) / Number(now.rate_den)
   return b > 0 && Math.abs(a / b - 1) * 10000 > Number(bps)
+}
+
+// Whether the feed's mid has moved through an order rested at rate `r` (want per give): it sells
+// at or below mid * (1 + guardBps). `now` is the feed's rate with the maker's spread on it
+// (rateFromPrices), so the mid is `now` without the spread.
+export function throughMid (r, now, spreadBps, guardBps) {
+  const a = Number(r.rate_num) / Number(r.rate_den)
+  const mid = Number(now.rate_num) / Number(now.rate_den) / (1 + Number(spreadBps || 0) / 10000)
+  return mid > 0 && a <= mid * (1 + Number(guardBps ?? 10) / 10000)
+}
+
+// Whether an order at rate `r` (want atoms per give atom) would cross, or come within guardBps of,
+// the book's best bid for give in want (`bid`, in the same terms; 0 when there is none).
+export function crossesBook (r, bid, guardBps) {
+  const a = Number(r.rate_num) / Number(r.rate_den)
+  return bid > 0 && a <= bid * (1 + Number(guardBps ?? 10) / 10000)
+}
+
+// The pair's combined best bid on the relay (its ticker), in atoms of `want` per atom of `give`.
+async function bestBid (relay, give, want) {
+  try {
+    const r = await fetch(`${relay}/v1/market/${give}/${want}/ticker`, { signal: AbortSignal.timeout(10000) })
+    const j = await r.json()
+    return Number(j.best_bid) || 0
+  } catch { return 0 }
 }
 
 // The offer that lists a resting order on the relay, from the operator's view of it.
@@ -119,13 +148,14 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
       // A level filled down to a small remainder is rested again at its whole size, as a level
       // filled whole is: what is left of it is too little for the trades it is there for.
       const low = big(served.value || 0) * 100n < big(rec.amount) * BigInt(r.refill_pct ?? 25)
-      if ((rate && offPrice(rec, rate, r.reprice_bps ?? 300)) || low) {
+      const through = p && p.price && rate && throughMid(rec, rate, (cfg.prices || {}).spread_bps, r.guard_bps)
+      if ((rate && offPrice(rec, rate, r.reprice_bps ?? 300)) || through || low) {
         try {
           const q = await cmd('order_cancel_resting_quote', { order: rec.order })
           await cmd('order_cancel_resting', { order: rec.order, shown: q })
           try { await seqob.signAndCancel(rec.offer_id, priv, now) } catch {}
           rec.done = low ? 'refilled' : 'repriced'
-          log('rest', rec.slot, rec.order.slice(0, 12), low ? `holds ${served.value} of ${rec.amount}: cancelled to be rested at its whole size` : 'cancelled to be rested at the feed\'s rate')
+          log('rest', rec.slot, rec.order.slice(0, 12), low ? `holds ${served.value} of ${rec.amount}: cancelled to be rested at its whole size` : through ? 'the feed\'s mid moved through it: cancelled to be rested at the feed\'s rate' : 'cancelled to be rested at the feed\'s rate')
         } catch (e) { log('rest cancel', rec.slot, e.message) }
         continue
       }
@@ -152,10 +182,13 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
       if (!rate) continue
       const lad = ladderOf(p, cfg)
       const sizes = restSizes(p, cfg)
+      let bid = null
       for (let k = 0; k < sizes.length && made < (r.max_new_per_pass ?? 6); k++) {
         const slot = `${p.give}:${p.want}#${k}`
         if (recs.some((x) => x.slot === slot && !x.done)) continue
         const t = restTerms(sizes[k], rate, lad.stepBps, k)
+        if (bid === null) bid = await bestBid(relay, p.give, p.want)
+        if (crossesBook(t, bid, r.guard_bps)) { log('rest', slot, `not rested: its rate would cross the book's best bid ${bid}`); continue }
         if ((sp.get(p.give) || 0n) < t.amount + big(cfg.fee_margin_rest || 0)) break
         const args = { sell: p.give, amount: t.amount.toString(), want: p.want, rate_num: t.rate_num.toString(), rate_den: t.rate_den.toString(),
           min_lot: String(t.amount / 100n > 0n ? t.amount / 100n : 1n), expiry: med + Math.floor((r.days ?? 7) * 86400) }
