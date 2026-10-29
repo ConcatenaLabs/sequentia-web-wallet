@@ -31,6 +31,7 @@
 import * as seqob from './seqob.js';
 import { secp256k1 } from './btc.js';
 import { readMarket, paintMarket } from './market-view.js';
+import { pickerMatches as sharedPickerMatches, pickerGroups as sharedPickerGroups, openPicker as openAssetChooser, closePicker } from './asset-picker.js';
 import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc-wait.js';
 // The byte-exact passive-CLOB covenant stack: place a funded resting order that
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
@@ -4617,163 +4618,20 @@ function heldSplitStr(hex){
 // What the wallet holds of an asset as leaves, in developer mode only (leaf-rail.js); 0 otherwise.
 function leafAtomsFor(hex){ try { return (C.leafRail && C.leafRail.atoms) ? C.leafRail.atoms(hex) : 0n; } catch { return 0n; } }
 
-// Which rows a picker query shows (F1) — pure over the candidate rows, so the headless
-// harness pins it.
-// EMPTY query: only assets you HOLD (on-chain or Lightning) plus native BTC — the
-// parent-chain asset stays first-class in the picker even at 0 — minus hidden assets
-// (F2, Balance-tab hide). Pinned rows (the other side's tap-to-swap affordance) always
-// show. The registry tail is reachable by typing, never rendered eagerly.
-// TYPED query: search EVERY candidate (full registry, hidden assets included) by
-// ticker, name, or id. A 64-hex query that matches nothing known is still an asset id:
-// synthesize a selectable row for it (metaOf resolves registry metadata when known,
-// otherwise the id-prefix ticker at precision 8), marked pasted so the pick is
-// registered for the session (notePasted) and survives composer validation.
-function pickerMatches(items, q){
-  q = (q || '').trim();
-  if (!q) return items.filter(it => it.pin || it.hex === 'BTC' || (it.held && !it.hidden));
-  const ql = q.toLowerCase();
-  const match = items.filter(it => (it.ticker + ' ' + (it.name || '') + ' ' + it.hex).toLowerCase().includes(ql));
-  if (!match.length && /^[0-9a-fA-F]{64}$/.test(q)){
-    const hex = ql;   // asset ids are canonically lowercase hex
-    const m = metaOf(hex) || {};
-    match.push({ hex, ticker: m.ticker || hex.slice(0, 8) + '…', name: m.name || 'Asset',
-      bal: balLine(hex), held: false, split: '', hidden: false, enabled: true, pasted: true });
-  }
-  return match;
-}
-
-// How a picker lays out the rows pickerMatches returned: PINNED rows first (the other side's
-// asset · tap-to-swap-sides), then "Your assets", then everything else. BTC belongs to "Your
-// assets" even at 0 and leads it: every wallet is dual-chain, so BTC is never a stranger at
-// the bottom of the list. The tail is capped until you search, so a registry of thousands
-// never renders thousands of rows.
-function pickerGroups(match, q, cap){
-  const mine = (it) => it.held || it.hex === 'BTC';
-  const pinned = match.filter(it => it.pin);
-  const held = match.filter(it => mine(it) && !it.pin).sort((a, b) => (b.hex === 'BTC') - (a.hex === 'BTC'));
-  const all = match.filter(it => !mine(it) && !it.pin);
-  const capped = !!q && all.length > cap;
-  const groups = [];
-  if (held.length) groups.push(['Your assets', held]);
-  if (all.length) groups.push([(q && held.length) ? 'All assets' : 'Assets', capped ? all.slice(0, cap) : all]);
-  return { pinned, groups, capped, more: capped ? all.length - cap : 0 };
-}
-
-// A lightweight searchable popover anchored under `anchorEl`. `items` are
-// { hex, ticker, name, bal:{b,r}, enabled }. onPick(hex) is called on selection.
-let _pop = null;
+// Which rows a picker query shows, how they are grouped, and the chooser itself: the shared
+// asset chooser (asset-picker.js, docs/DEFAULT_MODE.md "Choosing an asset"). No search: your
+// assets and BTC (hidden ones left out) and the pinned other side; a search: every candidate,
+// hidden ones included; a pasted 64-hex id that matches nothing is an asset too (metaOf resolves
+// registry metadata when known, else the id-prefix ticker at precision 8), registered for the
+// session when picked (notePasted) so it survives composer validation.
+const pasteRow = (hex) => { const m = metaOf(hex) || {}; return { ticker: m.ticker || hex.slice(0, 8) + '…', name: m.name || 'Asset', bal: balLine(hex) }; };
+function pickerMatches(items, q){ return sharedPickerMatches(items, q, { paste: pasteRow }); }
+function pickerGroups(match, q, cap){ return sharedPickerGroups(match, q, cap); }
 function popover(anchorEl, items, onPick){
-  closePopover();
-  const { el } = C;
-  anchorEl.setAttribute('aria-expanded', 'true');
-  const pop = el('div','swpop'); pop.setAttribute('role','listbox');
-  const sb = el('div','swpop-search'); const inp = el('input'); inp.placeholder = 'Search assets'; inp.setAttribute('aria-label','Search assets');
-  sb.appendChild(inp); pop.appendChild(sb);
-  const listEl = el('div','swpop-list'); pop.appendChild(listEl);
-  document.body.appendChild(pop);
-  // Position against the anchor, inside the viewport. It used to open under the
-  // anchor at its LEFT edge with a 60vh cap: under the Receive picker, on the
-  // right of the card, that hung past the card and ran below the window, so the
-  // rows after the first few could not be reached. Now it lines up with the
-  // anchor's right edge when the anchor sits on the right, opens upward when
-  // there is more room above, and never takes more height than there is.
-  // Re-placed on scroll and resize, because it is position:fixed and the
-  // anchor is not.
-  const place = () => {
-    const r = anchorEl.getBoundingClientRect();
-    const vw = window.innerWidth, vh = window.innerHeight, gap = 6, edge = 8;
-    const below = vh - r.bottom - gap - edge, above = r.top - gap - edge;
-    // The height the list wants (capped at 60vh); open upward when it does not fit
-    // below and there is more room above.
-    pop.style.maxHeight = (vh * 0.6) + 'px';
-    const want = pop.offsetHeight;
-    const up = below < want && above > below;
-    pop.style.maxHeight = Math.max(160, Math.min(vh * 0.6, up ? above : below)) + 'px';
-    const h = pop.offsetHeight, w = pop.offsetWidth;
-    pop.style.top = (up ? Math.max(edge, r.top - gap - h) : Math.min(r.bottom + gap, vh - edge - h)) + 'px';
-    const rightSide = r.left + r.width / 2 > vw / 2;
-    const left = rightSide ? r.right - w : r.left;
-    pop.style.left = Math.max(edge, Math.min(left, vw - w - edge)) + 'px';
-  };
-
-  const ALL_CAP = 40;   // don't render a whole (potentially huge) registry eagerly — search finds the rest
-  let kbdIdx = -1, shown = [], optEls = [];
-  const rowFor = (it) => {
-    const b = el('button','swopt' + (it.cls ? ' ' + it.cls : '') + (it.cur ? ' swopt-cur' : '')); b.type = 'button'; b.setAttribute('role','option');
-    if (it.cur) b.setAttribute('aria-selected','true');
-    if (!it.enabled){ b.disabled = true; }
-    const t = el('span','swopt-tk', it.ticker);
-    // E1: verified ✓ / unregistered ⚠ trust badge next to the ticker (same signal as the Balance list).
-    try { const tb = C.trustBadge && C.trustBadge(it.hex); if (tb) t.appendChild(tb); } catch {}
-    const mid = el('div','swopt-mid'); mid.appendChild(el('div','swopt-name', it.name || ''));
-    if (it.split){ const sp = el('div','swopt-split'); sp.innerHTML = it.split; mid.appendChild(sp); }
-    const bal = el('div','swopt-bal');
-    if (it.bal && it.bal.b) bal.appendChild(el('div','b', it.bal.b));
-    if (it.bal && it.bal.r) bal.appendChild(el('div','r', it.bal.r));
-    b.appendChild(t); b.appendChild(mid); b.appendChild(bal);
-    b.onclick = () => { if (it.enabled){ pickItem(it); } };
-    return b;
-  };
-  // One selection path for click + Enter: a pasted-id row is registered for the session
-  // (notePasted) so startableAssets keeps offering it and ensureDefaults never drops it.
-  const pickItem = (it) => { if (it.pasted) notePasted(it.hex); onPick(it.hex); closePopover(); };
-  const draw = (q) => {
-    listEl.innerHTML = ''; kbdIdx = -1; shown = []; optEls = [];
-    const match = pickerMatches(items, q);
-    if (!match.length){
-      const syncing = !q && C.walletSynced && !C.walletSynced();
-      listEl.appendChild(el('div','swopt-empty', syncing
-        ? 'Your wallet is still syncing; your assets appear here in a moment.'
-        : 'No matching assets.'));
-      return;
-    }
-    const { pinned, groups, capped, more } = pickerGroups(match, q, ALL_CAP);
-    for (const it of pinned){
-      const b = rowFor(it); const idx = shown.length;
-      b.onmouseenter = () => { kbdIdx = idx; markKbd(); };
-      listEl.appendChild(b); shown.push(it); optEls.push(b);
-    }
-    for (const [label, arr] of groups){
-      listEl.appendChild(el('div','swopt-grp', label));
-      for (const it of arr){
-        const b = rowFor(it); const idx = shown.length;
-        b.onmouseenter = () => { kbdIdx = idx; markKbd(); };
-        listEl.appendChild(b); shown.push(it); optEls.push(b);
-      }
-    }
-    if (capped) listEl.appendChild(el('div','swopt-more', `+${more} more · keep typing to find them.`));
-    // The default view holds only your assets + BTC: say how to reach everything else.
-    if (!q) listEl.appendChild(el('div','swopt-more','Type to search every registry asset, or paste an asset id.'));
-  };
-  const markKbd = () => {
-    optEls.forEach((c,i)=>c.classList.toggle('kbd', i===kbdIdx));
-    const cur = optEls[kbdIdx]; if (cur && cur.scrollIntoView) cur.scrollIntoView({ block:'nearest' });
-  };
-  inp.addEventListener('input', () => { draw(inp.value.trim()); place(); });   // fewer rows: an upward popover must stay against its anchor
-  inp.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown'){ e.preventDefault(); kbdIdx = Math.min(shown.length-1, kbdIdx+1); markKbd(); }
-    else if (e.key === 'ArrowUp'){ e.preventDefault(); kbdIdx = Math.max(0, kbdIdx-1); markKbd(); }
-    else if (e.key === 'Enter'){ e.preventDefault(); const it = shown[kbdIdx] || shown[0]; if (it && it.enabled){ pickItem(it); } }
-    else if (e.key === 'Escape'){ closePopover(); anchorEl.focus(); }
-  });
-  draw('');
-  place();
-  setTimeout(() => inp.focus(), 0);
-  // A scroll inside the list itself must not move the popover.
-  const onMove = (ev) => { if (!ev || !pop.contains(ev.target)) place(); };
-  _pop = { pop, anchorEl, onMove, onDoc:(ev)=>{ if (!pop.contains(ev.target) && ev.target !== anchorEl) closePopover(); } };
-  setTimeout(() => document.addEventListener('mousedown', _pop.onDoc), 0);
-  window.addEventListener('scroll', onMove, true);
-  window.addEventListener('resize', onMove);
+  openAssetChooser(anchorEl, items, onPick, { paste: pasteRow, onPasted: notePasted,
+    badge: (hex) => (C.trustBadge ? C.trustBadge(hex) : null), synced: () => !(C.walletSynced && !C.walletSynced()) });
 }
-function closePopover(){
-  if (!_pop) return;
-  document.removeEventListener('mousedown', _pop.onDoc);
-  window.removeEventListener('scroll', _pop.onMove, true);
-  window.removeEventListener('resize', _pop.onMove);
-  _pop.anchorEl.setAttribute('aria-expanded', 'false');
-  _pop.pop.remove(); _pop = null;
-}
+function closePopover(){ closePicker(); }
 
 // ---------------------------------------------------------------------------
 // Review -> route to same-chain swap OR cross-chain wizard

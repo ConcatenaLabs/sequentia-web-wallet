@@ -18,6 +18,7 @@
 // watched arriving in the market.
 // Screenshots and the log go to <work-dir>/evidence. Needs a Chromium (CHROMIUM=…).
 import { mkdirSync, appendFileSync, readFileSync } from 'node:fs'
+import { pickExpr, rowsExpr } from './picker-drive.mjs'
 import { join, resolve } from 'node:path'
 import { Page, chromium } from './cdp-page.mjs'
 import { forbiddenIn } from '../user-trade.js'
@@ -36,7 +37,7 @@ let failures = 0
 const check = (what, ok, detail) => { note(`${ok ? 'ok  ' : 'FAIL'} ${what}${detail !== undefined ? ': ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : ''}`); if (!ok) failures++ }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const click = (page, sel) => page.eval(`(()=>{ const b=document.querySelector(${JSON.stringify(sel)}); if(!b) throw new Error('no ${sel}'); b.click(); return true })()`)
-const pick = (page, sel, v) => page.eval(`(()=>{ const s=document.querySelector(${JSON.stringify(sel)}); if(!s) throw new Error('no ${sel}'); if(![...s.options].some(o=>o.value===${JSON.stringify(v)})) return [...s.options].map(o=>o.value); s.value=${JSON.stringify(v)}; s.dispatchEvent(new Event('change')); return true })()`)
+const pick = (page, sel, v) => page.eval(pickExpr(sel.replace(/^#/, ''), v))
 
 const page = new Page(chromium(), { profile: join(work, 'profile') })
 try {
@@ -66,11 +67,11 @@ try {
   // 1. default mode
   await click(page, '#tabs button[data-tab="swap"]')
   // What is held shows in You pay once the wallet has synced; the tab is drawn again until it does.
-  await page.waitFor(`(()=>{ if([...document.querySelectorAll('#ucPay option')].some(o=>o.value===${JSON.stringify(pay)})) return true; if(!window._mvT || Date.now()-window._mvT>10000){ window._mvT=Date.now(); document.querySelector('#tabs button[data-tab="balance"]').click(); document.querySelector('#tabs button[data-tab="swap"]').click() } return false })()`, 300000)
+  await page.waitFor(`(async ()=>{ if((await ${rowsExpr('ucPay')}).includes(${JSON.stringify(pay)})) return true; if(!window._mvT || Date.now()-window._mvT>10000){ window._mvT=Date.now(); document.querySelector('#tabs button[data-tab="balance"]').click(); document.querySelector('#tabs button[data-tab="swap"]').click() } return false })()`, 300000)
   const p1 = await pick(page, '#ucPay', pay)
   check(`You pay ${pay}`, p1 === true, p1)
-  await page.waitFor(`[...document.querySelectorAll('#ucGet option')].some(o=>o.value===${JSON.stringify(get)})`, 60000)
-  check(`You get ${get.slice(0, 8)}`, (await pick(page, '#ucGet', get)) === true)
+  await page.waitFor(pickExpr('ucGet', get), 60000)
+  check(`You get ${get.slice(0, 8)}`, true)
   const t0 = Date.now()
   await page.waitFor("document.querySelector('#ucMarket .mv')", 60000)
   const read = () => page.eval(`(()=>{ const m=document.querySelector('#ucMarket .mv'); if(!m) return null; const rows=[...m.querySelectorAll('.mv-trade')];

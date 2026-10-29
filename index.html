@@ -71,7 +71,9 @@
   .ucomp{display:flex;flex-direction:column;gap:12px;max-width:520px}
   .ucomp .uc-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
   .ucomp .uc-row .lbl{flex-basis:100%}
-  .ucomp .uc-pick{min-width:120px}
+  .ucomp .uc-pick{min-width:120px;display:inline-flex;align-items:center;justify-content:space-between;gap:10px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;color:var(--txt);font-weight:700;font-size:15px;cursor:pointer}
+  .ucomp .uc-pick:hover{border-color:var(--amber)}
+  .ucomp .uc-pick-caret{color:var(--dim);font-size:12px}
   .ucomp .uc-amount{flex:1;min-width:140px}
   .ucomp .uc-ticket .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
   .ucomp .uc-note.err{color:var(--bad,#c33)}
@@ -3909,6 +3911,7 @@ function initUserComposer(){
   userComposer = mountUserComposer({
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, parseAtoms,
     knownAssets: userKnownAssets, held: userHeld,
+    isHidden: isAssetHidden, refValue: refValueStr,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
     // The chosen pair's market, from the relay's one trade log (market-view.js).
     market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> canonicalPair(a, b) },
