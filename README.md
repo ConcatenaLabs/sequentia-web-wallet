@@ -485,7 +485,10 @@ in the middle of a trade:
   means that round is final.
 - **A transparent covenant order taken from the wallet's coins in the tree**: the operator's round
   spends the order, pays its maker on the chain, and gives the wallet its coin. Settled means the
-  round is final, as the relay also records it.
+  round is final, as the relay also records it. The round pays the maker from the operator's own
+  coins, so the composer takes no more than the operator's server says its round can pay of that
+  asset now (`fundable` in its `/v1/info`), and skips the order when that covers no lot; a take
+  cannot be called back, and one larger than that would wait for the operator.
 - **An order resting in the operator's tree**: a maker rested it as a leaf and may be away; the
   wallet fills it from its own coins in one transfer the operator co-signs, on the terms its
   library quoted, and fills it at its new place only on the same terms if another taker filled it

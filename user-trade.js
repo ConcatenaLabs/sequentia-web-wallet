@@ -205,6 +205,17 @@ export function createEngine (deps) {
     return out
   }
 
+  // What the operator's rounds can pay of `asset` now (its server's `fundable`), read at most every
+  // five seconds; null when the server does not say. A take of a covenant order is paid to its maker
+  // in the asset the person pays, from the operator's own coins in its round: a take larger than
+  // that would wait for the operator, and a take cannot be called back.
+  let infoSeen = null
+  async function operatorRoom (asset) {
+    if (!infoSeen || now() - infoSeen.at > 5000) infoSeen = { at: now(), info: await run('info').catch(() => null) }
+    const a = ((infoSeen.info && infoSeen.info.server_info && infoSeen.info.server_info.assets) || []).find((x) => x && x.asset === asset)
+    return a && a.fundable != null ? big(a.fundable) : null
+  }
+
   // Firm terms of one entry for `pay` atoms, priced by the library. -> a candidate or null.
   async function firm (entry, payAsset, receiveAsset, pay, have) {
     planSingleStep(entry.source, { payAsset, receiveAsset, caps: entry.source === 'covenant-round' ? { leaf_take: true } : undefined })
@@ -214,9 +225,16 @@ export function createEngine (deps) {
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size)
     if (entry.source === 'onchain-fill') return firmOnchain(entry, payAsset, receiveAsset, pay, have)
     if (entry.source === 'covenant-round') {
+      // No more than the operator can pay its maker in this round now.
+      const room = await operatorRoom(payAsset)
+      let sized = size
+      if (room != null && room < size.pay) {
+        sized = room > 0n ? sizeEntry(entry, room) : null
+        if (!sized) { log('[user trade] the operator cannot pay this take in a round now:', entry.id, String(room)); return null }
+      }
       // The take's price and the operator's fee come from the library: size down until what it
       // gives fits what the person pays and what the wallet can pay now.
-      let r = size.receive
+      let r = sized.receive
       const limit = pay < have ? pay : have
       for (let i = 0; i < 4; i++) {
         let q
