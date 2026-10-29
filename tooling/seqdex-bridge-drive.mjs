@@ -72,11 +72,19 @@ async function siteStatus (site, ms = 900000) {
 async function placeOrder (site, { type, side, amount, price }) {
   await click(site, '#type-' + type); await sleep(300)
   await click(site, '#side-' + side); await sleep(300)
-  await setVal(site, 'fAmount', amount)
   if (price != null) await setVal(site, 'fPrice', price)
+  // The ticket's amounts are You pay and You receive: a sale pays the base, a buy receives it.
+  await setVal(site, side === 'sell' ? 'fPay' : 'fReceive', amount)
   await click(site, '#fGo')
 }
-const ordersShown = (site) => site.eval(`({open:[...document.querySelectorAll('#openOrders .order')].map((d)=>d.innerText.replace(/\\s+/g,' ')), history:[...document.querySelectorAll('#history > *')].map((d)=>d.innerText.replace(/\\s+/g,' ')).slice(0,8)})`)
+// Your orders, as the pair's page shows them: its Open orders tab, then its Trades tab.
+async function ordersShown (site) {
+  const rows = async (tab) => { await click(site, `#ordTabs button[data-o="${tab}"]`); await sleep(2500); return site.eval("[...document.querySelectorAll('#ordersBox tbody tr')].map((d)=>d.innerText.replace(/\\s+/g,' ')).slice(0,8)") }
+  const open = await rows('trades').then(() => rows('open'))
+  const history = await rows('trades')
+  await click(site, '#ordTabs button[data-o="open"]')
+  return { open, history }
+}
 
 async function main () {
   const profile = join(work, 'profiles', name)
@@ -106,7 +114,7 @@ async function main () {
   const site = await wallet.tab(base + `/dex/index.html?pair=${pair}&view=default`)
   sitePage = site
   await site.send('Runtime.enable'); await site.send('Page.enable')
-  await site.waitFor("document.querySelector('#btnConnect') && document.querySelector('#orderForm h2')", 120000)
+  await site.waitFor("document.querySelector('#btnConnect') && document.querySelector('#fGo')", 120000)
   await click(site, '#btnConnect')
   const row = await site.waitFor("(()=>{ const r=document.querySelector('#connectMenu [data-connector=\"webwallet\"]'); return r ? r.innerText.replace(/\\s+/g,' ') : false })()", 30000)
   check('the site\'s chooser lists the web wallet, ready', /Sequentia web wallet.*Ready/.test(row), row)
@@ -124,7 +132,8 @@ async function main () {
   const conn = await site.waitFor("(()=>{ const b=document.querySelector('#btnConnect'); return b && b.classList.contains('ok') ? b.innerText : false })()", 60000)
   check('the site is connected to the web wallet', /Connected/.test(conn), conn.replace(/\s+/g, ' '))
   await sleep(3000)
-  const bal = await site.eval("document.querySelector('#balances').innerText.replace(/\\s+/g,' ')")
+  await click(site, '#side-sell'); await sleep(2000)
+  const bal = await site.eval("document.querySelector('#fBal').innerText.replace(/\\s+/g,' ')")
   check('the site shows the wallet\'s balances, its leaves counted', /[1-9]/.test(bal), bal)
   await shot(site, 'site-connected')
 
@@ -156,7 +165,7 @@ async function main () {
 
   }
   // A limit sale far above the book: it rests.
-  const ask = await site.eval("(()=>{ const b=document.querySelector('#bookBody'); return b ? b.innerText.replace(/\\s+/g,' ').slice(0,300) : '' })()")
+  const ask = await site.eval("(()=>{ const t=(id)=>(document.getElementById(id)||{innerText:''}).innerText.replace(/\\s+/g,' '); return ('asks ' + t('asks')).slice(-200) + ' | bids ' + t('bids').slice(0,200) })()")
   note('book: ' + ask)
   const m = String(ticket).match(/You get[^\d]*([\d.,]+)/)
   const got = m ? Number(m[1].replace(/,/g, '')) : 1
@@ -177,9 +186,9 @@ async function main () {
     while (Date.now() < until) {
       await sleep(30000)
       last = await ordersShown(site).catch(() => null)
-      if (last && last.open.some((x) => /Filled 0 of/.test(x))) break
+      if (last && last.open.some((x) => /\b0%/.test(x))) break
     }
-    check('the order rests on the book (listed)', !!(last && last.open.some((x) => /Filled 0 of/.test(x))), last)
+    check('the order rests on the book (listed)', !!(last && last.open.some((x) => /\b0%/.test(x))), last)
     await shot(site, 'site-order-resting')
   }
   const errs = [...wallet.errors, ...site.errors].filter((e) => !/favicon|ERR_/.test(e))
