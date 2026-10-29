@@ -192,3 +192,21 @@ test('engine: a maker quoting levels of one pair is asked for one firm offer, at
   // 400,000 at 5/3 gives 240,000, more than the first level's 100,000 cap or 200,000 at 6/3.
   assert.deepEqual(s.posts.filter(([p]) => p === 'firm').map(([, b]) => b.give), ['240000'], 'one firm offer, at the deeper level')
 })
+
+test('engine: the two amounts, estimated either way round, with no firm offer asked', async () => {
+  const s = standIn()
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => 0 })
+  // The maker gives Y for X at 4 X per 3 Y, up to 1,000,000 Y.
+  const a = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '400000' })
+  assert.deepEqual([a.ok, a.pay, a.receive, a.short], [true, '400000', '300000', null])
+  const b = await eng.estimate({ payAsset: X, receiveAsset: Y, receive: '300000' })
+  assert.deepEqual([b.ok, b.pay, b.receive, b.short], [true, '400000', '300000', null])
+  const c = await eng.estimate({ payAsset: X, receiveAsset: Y, receive: '2000000' })
+  assert.deepEqual([c.ok, c.receive, c.pay], [true, '1000000', '1333334'], 'more than the book fills: what it can')
+  assert.deepEqual(c.short, { pay: '1333334', receive: '1000000' })
+  const d = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '4000000' })
+  assert.equal(d.receive, '1000000'); assert.ok(d.short, 'paying more than the book takes says how much it can')
+  assert.equal((await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '0' })).why, 'too-small')
+  assert.ok(!s.posts.some(([p]) => p === 'firm'), 'no maker was asked for a firm offer')
+  assert.equal((await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: () => ({ pairs: { chains: {} }, genesis: 'g' }), store: s.store }).estimate({ payAsset: X, receiveAsset: Y, pay: '1' })).why, 'not-listed')
+})

@@ -123,7 +123,7 @@ export function orderRate(amount, want) {
 export function takeRows(q, fmt, op) {
   const rows = [
     ['Order', `${q.order} (on the chain; the wallet found it on its own node, unspent and final)`],
-    ['You get', `${fmt(q.asset_a, q.filled)} as a leaf, in the round’s batch, once the round is final`],
+    ['You receive', `${fmt(q.asset_a, q.filled)} as a leaf, in the round’s batch, once the round is final`],
     ['You give', `${fmt(q.asset_b, q.gives)}: the price and the operator’s fee, from your leaves`],
     ['Price', `${fmt(q.asset_b, q.price)}, paid on the chain to the order’s maker`],
     ['Operator’s fee', `${fmt(q.asset_b, q.fee)} (its schedule for this asset)`],
@@ -138,7 +138,7 @@ export function takeRows(q, fmt, op) {
 export function swapReadRows(r, fmt, when) {
   const d = r.dates || {};
   const rows = [
-    ['You get', `${fmt(r.gets.asset, r.gets.value)} as a leaf, in one reassignment both wallets sign and the operator co-signs`],
+    ['You receive', `${fmt(r.gets.asset, r.gets.value)} as a leaf, in one reassignment both wallets sign and the operator co-signs`],
     ['You give', `${fmt(r.gives.asset, r.gives.value)} from your leaves`],
     ['You pay', `${fmt(r.pays.asset, r.pays.margins)}: the margins your coins leave for the transfer’s fees`],
     ['The other wallet pays', `${fmt(r.maker_pays.asset, r.maker_pays.margin)} as the reassignment’s margin`],
@@ -152,7 +152,7 @@ export function swapReadRows(r, fmt, when) {
 export function swapOfferRows(o, fmt) {
   return [
     ['You give', `${fmt(o.gives.asset, o.gives.value)} from your leaves`],
-    ['You get', `${fmt(o.gets.asset, o.gets.value)} as a leaf`],
+    ['You receive', `${fmt(o.gets.asset, o.gets.value)} as a leaf`],
     ['You pay', `${fmt(o.pays.asset, o.pays.margin)} as the reassignment’s margin, and ${fmt(o.pays.asset, o.pays.margins)} the margins your coins leave`],
     ['Your coins', 'held for this offer, signed for nothing, until it completes or you cancel it'],
   ];
@@ -402,7 +402,7 @@ export function mountLeafRail(ctx) {
       const { open, kept } = S.completing;
       for (const s of open) {
         const k = kept[s.swap];
-        b.appendChild(rowsBox([['Offer', s.swap.slice(0, 16) + '…'], ['You give', fmt(s.gives.asset, s.gives.value)], ['You get', fmt(s.gets.asset, s.gets.value) + ' as a leaf'],
+        b.appendChild(rowsBox([['Offer', s.swap.slice(0, 16) + '…'], ['You give', fmt(s.gives.asset, s.gives.value)], ['You receive', fmt(s.gets.asset, s.gets.value) + ' as a leaf'],
           ['You pay', k && k.pays ? `${fmt(k.pays.asset, k.pays.margin)} margin and ${fmt(k.pays.asset, k.pays.margins)} of your coins’ margins` : 'the margins shown when the offer was made']], 'swLeafCompleteRows'));
       }
       b.appendChild(el('div', 'sub', 'Completing signs your side of the reassignment the acceptance carries; the wallet checks that it keeps your coins and outputs exactly as offered, and the operator co-signs it.'));

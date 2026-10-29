@@ -478,11 +478,15 @@ new wallet trades without joining an operator first. The network fee of such a f
 asset paid for the order, and the asset must be one the node takes fees in. The switch is
 described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Three inputs and one button: **You pay** (an asset and an amount), **You get** (an asset), and
-**Review**. Both pickers list BTC first. **You pay** then lists what the wallet holds; **You get**
-lists every asset the book offers for what is paid in one step now, held or not, and starts on the
-first of those, then the rest. Review shows three lines
-before anything is signed: what you pay, what you get, and the fees ("Fees 192 XLEAF, included
+**You pay** and **You receive**, each an asset and an amount, and one button, **Review**. The two
+amounts are tethered: type either, and the other follows the best price the book offers now
+(the engine's `estimate`, which asks no maker for firm terms), with **Max** under You pay and
+"The book can fill up to …" when it cannot fill what is typed. Both pickers are the shared asset
+chooser (`asset-picker.js`): a search box, BTC and what the wallet holds first. **You pay** lists
+what the wallet holds; **You receive** lists what the book offers for what is paid in one step
+now, held or not, and starts on the first of those, then what trades against it, then the rest
+by search. Review shows three lines
+before anything is signed: what you pay, what you receive, and the fees ("Fees 192 XLEAF, included
 above"), each fee in the asset it is paid in, the price not counted as one. **Trade** confirms
 it; the trade then reads **Sent**, and **Settled** once it is final, or **Returned: nothing
 traded.** when it could not go through, with nothing to do either way. A take that first paid the

@@ -40,7 +40,8 @@ export function payAssets (known, held, current, name) {
 }
 
 export function mountUserComposer (ctx) {
-  const S = { pay: null, get: null, amount: '', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
+  const S = { pay: null, get: null, amount: '', recv: '', fixed: 'pay', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
+    estTimer: null, estSeq: 0,
     offered: { pay: null, list: [], at: 0, loading: false } }
   const OFFERS_MS = ctx.offersMs || 60000
   const doc = ctx.root.ownerDocument || document
@@ -86,7 +87,41 @@ export function mountUserComposer (ctx) {
     if (S.get !== was && !S.ticket) { S.error = ''; paintTicket() }
     if (S.get !== was && S.market) S.market.refresh().catch(() => {})
   }
-  function pickGet (v) { S.get = v; S.getChosen = true; reset(); render() }
+  function pickGet (v) { S.get = v; S.getChosen = true; reset(); render(); schedule(0) }
+
+  // ---- You pay and You receive, tethered ----
+  // The amount typed stays as typed; the other follows the book's best single-step price now
+  // (engine.estimate), again a moment after each keystroke and every few seconds while shown.
+  function schedule (ms = 350) {
+    clearTimeout(S.estTimer)
+    S.estTimer = setTimeout(() => { estimateNow().catch((e) => console.warn('[user composer] estimate:', e && e.message)) }, ms)
+  }
+  async function estimateNow () {
+    if (!ctx.engine.estimate || !S.pay || !S.get || S.ticket || S.busy) return
+    const typed = S.fixed === 'pay' ? S.amount : S.recv
+    const asset = S.fixed === 'pay' ? S.pay : S.get
+    let atoms
+    try { atoms = ctx.parseAtoms(String(typed || '').trim(), prec(asset)) } catch { atoms = 0n }
+    const other = ctx.root.querySelector(S.fixed === 'pay' ? '#ucReceive' : '#ucAmount')
+    if (!(big(atoms) > 0n)) { if (other && doc.activeElement !== other) { other.value = ''; if (S.fixed === 'pay') S.recv = ''; else S.amount = '' } S.note = ''; paintNote(); return }
+    const seq = ++S.estSeq
+    const e = await ctx.engine.estimate({ payAsset: S.pay, receiveAsset: S.get, ...(S.fixed === 'pay' ? { pay: String(atoms) } : { receive: String(atoms) }) })
+    if (seq !== S.estSeq || S.ticket) return
+    if (!e.ok) {
+      S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall : USER_WORDS.notOffered(name(S.get), name(S.pay))
+      if (other && doc.activeElement !== other) other.value = ''
+      paintNote(); return
+    }
+    const fill = S.fixed === 'pay' ? ctx.fmtAtoms(big(e.receive), prec(S.get)) : ctx.fmtAtoms(big(e.pay), prec(S.pay))
+    if (other && doc.activeElement !== other) other.value = fill
+    if (S.fixed === 'pay') S.recv = fill; else S.amount = fill
+    S.note = e.short ? USER_WORDS.bookUpTo(amt(S.get, e.short.receive)) : ''
+    paintNote()
+  }
+  function paintNote () {
+    const n = ctx.root.querySelector('#ucNote'); if (!n || S.ticket) return
+    n.textContent = S.error || S.note || ''; n.classList.toggle('err', !!S.error)
+  }
 
   // A picker: a button naming the asset chosen, which opens the shared chooser over `list`.
   function chooser (id, list, value, onchange) {
@@ -121,17 +156,24 @@ export function mountUserComposer (ctx) {
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
     row1.appendChild(chooser('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
     const inp = el('input', 'uc-amount'); inp.id = 'ucAmount'; inp.inputMode = 'decimal'; inp.placeholder = USER_WORDS.amount; inp.value = S.amount
-    inp.oninput = () => { S.amount = inp.value; if (S.ticket) { reset(); paintTicket() } }
+    inp.oninput = () => { S.amount = inp.value; S.fixed = 'pay'; S.error = ''; if (S.ticket) { reset(); paintTicket() } schedule() }
     row1.appendChild(inp)
-    const have = el('div', 'sub uc-have'); have.id = 'ucHave'; have.textContent = amt(S.pay, ctx.held(S.pay) || 0n)
+    const have = el('div', 'sub uc-have'); have.id = 'ucHave'
+    have.appendChild(el('span', null, USER_WORDS.balance(amt(S.pay, ctx.held(S.pay) || 0n))))
+    const max = el('button', 'ghost uc-max', USER_WORDS.max); max.type = 'button'; max.id = 'ucMax'
+    max.onclick = () => { const a = big(ctx.held(S.pay) || 0n); if (a <= 0n) return; S.amount = ctx.fmtAtoms(a, prec(S.pay)); inp.value = S.amount; S.fixed = 'pay'; if (S.ticket) { reset(); paintTicket() } schedule(0) }
+    have.appendChild(max)
     row1.appendChild(have)
     box.appendChild(row1)
-    // You get
+    // You receive
     const row2 = el('div', 'uc-row')
     row2.appendChild(el('label', 'lbl', USER_WORDS.get))
     const gl = getList()
     if (!S.get || !gl.includes(S.get)) S.get = defaultGet(gl)
     row2.appendChild(chooser('ucGet', gl, S.get, pickGet))
+    const rin = el('input', 'uc-amount'); rin.id = 'ucReceive'; rin.inputMode = 'decimal'; rin.placeholder = USER_WORDS.amount; rin.value = S.recv
+    rin.oninput = () => { S.recv = rin.value; S.fixed = 'receive'; S.error = ''; if (S.ticket) { reset(); paintTicket() } schedule() }
+    row2.appendChild(rin)
     box.appendChild(row2)
     // The ticket and the button
     const t = el('div', 'uc-ticket'); t.id = 'ucTicket'; box.appendChild(t)
@@ -143,6 +185,9 @@ export function mountUserComposer (ctx) {
     paintTicket()
     paintTrades()
     loadOffered()
+    // The amount not typed follows the price every few seconds while the tab is shown.
+    if (!S.refresh) S.refresh = setInterval(() => { if (ctx.root.isConnected && doc.visibilityState !== 'hidden' && (!ctx.market || !ctx.market.visible || ctx.market.visible())) schedule(0) }, 10000)
+    schedule(0)
     if (ctx.market) {
       if (S.market) S.market.stop()
       S.market = mountMarketView(mk, { meta: ctx.assetMeta, fmtAtoms: ctx.fmtAtoms, dev: false, relay: ctx.market.relay,
@@ -197,8 +242,8 @@ export function mountUserComposer (ctx) {
     S.busy = true; paintTicket()
     try {
       await ctx.engine.confirm(S.choice, S.ticket)
-      reset(); S.amount = ''
-      const i = ctx.root.querySelector('#ucAmount'); if (i) i.value = ''
+      reset(); S.amount = ''; S.recv = ''
+      for (const id of ['#ucAmount', '#ucReceive']) { const i = ctx.root.querySelector(id); if (i) i.value = '' }
     } catch (e) {
       console.warn('[user composer] confirm:', e && e.message)
       // A price no longer held is priced again, and shown before anything is signed.

@@ -79,7 +79,7 @@ const fmt = (a, v) => `${v} ${a === X ? 'X' : 'Y'}`;
 test('the approvals show the library’s numbers, as it gave them', () => {
   const q = { order: 'ab:0', asset_a: X, asset_b: Y, filled: '300000', gives: '601000', price: '600000', fee: '1000', remainder: '300000', pays_itself_first: true };
   const rows = Object.fromEntries(takeRows(q, fmt, { forfeit_window_seconds: 600 }));
-  assert.match(rows['You get'], /^300000 X as a leaf/);
+  assert.match(rows['You receive'], /^300000 X as a leaf/);
   assert.match(rows['You give'], /^601000 Y/);
   assert.match(rows['Operator’s fee'], /^1000 Y/);
   assert.match(rows['Order after the fill'], /^300000 X rests again/);
@@ -88,7 +88,7 @@ test('the approvals show the library’s numbers, as it gave them', () => {
   const read = { gets: { asset: X, value: '300000' }, gives: { asset: Y, value: '400000' }, pays: { asset: Y, margins: '12' },
     maker_pays: { asset: X, margin: '30' }, change: { asset: Y, value: '2599988' }, coins_spent: 1, dates: { exit_deadline: 1800000000 } };
   const rr = Object.fromEntries(swapReadRows(read, fmt, (t) => 'T' + t));
-  assert.match(rr['You get'], /^300000 X as a leaf/);
+  assert.match(rr['You receive'], /^300000 X as a leaf/);
   assert.match(rr['You give'], /^400000 Y/);
   assert.match(rr['You pay'], /^12 Y/);
   assert.match(rr['The other wallet pays'], /^30 X/);
