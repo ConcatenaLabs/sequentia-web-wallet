@@ -12,12 +12,12 @@
 // display direction (`ctx.pairOf`, the composer's canonical "1 base = N quote"). A relay that answers
 // no `ticker` keeps each direction's trades apart: both directions are read and put together.
 
+import { createPriceChart, CHART_NOTICE } from './chart.js'
+
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
 export const MARKET_WORDS = Object.freeze({
   ranges: { '1D': '1D', '1W': '1W', '1M': '1M' },
-  ago: { '1D': '24 hours ago', '1W': '7 days ago', '1M': '30 days ago' },
-  now: 'now',
   change24: '24h',
   noDay: 'No trades in the last 24 hours',
   lastTrade: (price, ago) => `Last trade ${price}, ${ago} ago`,
@@ -122,35 +122,6 @@ export function seriesOf (candles, range, nowSec) {
   return { pts, inRange: inside.length, start }
 }
 
-// The chart, as SVG text: a line of the price over the range with its area below, its high and low
-// marked on the right, the range's start and end below.
-export function chartSvg (series, opts = {}) {
-  const W = opts.width || 320, H = opts.height || 120, padR = 64, padB = 16
-  const { pts, start } = series
-  const end = pts.length ? pts[pts.length - 1].t : start + 1
-  if (!pts.length) return ''
-  let min = Math.min(...pts.map((x) => x.p)), max = Math.max(...pts.map((x) => x.p))
-  if (min === max) { min = min * 0.99; max = max * 1.01 || 1 }
-  const x = (t) => ((t - start) / Math.max(1, end - start)) * (W - padR)
-  const y = (p) => 4 + (1 - (p - min) / (max - min)) * (H - padB - 8)
-  // A step line: a price holds until the next trade.
-  let d = ''
-  pts.forEach((q, i) => { d += i === 0 ? `M${x(q.t).toFixed(1)},${y(q.p).toFixed(1)}` : `H${x(q.t).toFixed(1)}V${y(q.p).toFixed(1)}` })
-  const up = pts[pts.length - 1].p >= pts[0].p
-  const col = up ? 'var(--mv-up, #3ddc84)' : 'var(--mv-down, #f0a35e)'
-  const area = `${d}V${(H - padB).toFixed(1)}H${x(pts[0].t).toFixed(1)}Z`
-  const fmt = opts.fmt || ((v) => String(v))
-  const lbl = (t) => opts.timeLabel ? opts.timeLabel(t) : ''
-  return `<svg class="mv-chart" viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="none" role="img" aria-label="${esc(opts.label || '')}">`
-    + `<path d="${area}" fill="${col}" fill-opacity="0.12" stroke="none"/>`
-    + `<path d="${d}" fill="none" stroke="${col}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`
-    + `<text x="${W - padR + 4}" y="${y(max) + 4}" class="mv-ax">${esc(fmt(max))}</text>`
-    + `<text x="${W - padR + 4}" y="${y(min) + 4}" class="mv-ax">${esc(fmt(min))}</text>`
-    + `<text x="0" y="${H - 3}" class="mv-ax">${esc(lbl(start))}</text>`
-    + `<text x="${W - padR}" y="${H - 3}" class="mv-ax" text-anchor="end">${esc(lbl(end))}</text>`
-    + '</svg>'
-}
-
 export function esc (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])) }
 
 export function agoText (tSec, nowSec) {
@@ -216,6 +187,12 @@ export function bookOf (offers, base, quote, bp, qp, nowSec) {
   return { bid, ask, bidDepth, askDepth, byRail }
 }
 
+// The relay's candles in whole units: quote per whole base.
+export function unitCandles (m, bp, qp) {
+  const up = (p) => unitPrice(p, bp, qp)
+  return (m.candles || []).map((c) => ({ t: c.t, o: up(c.o), h: up(c.h), l: up(c.l), c: up(c.c), v: c.v }))
+}
+
 // The view's text (HTML) for a market read with readMarket. ctx: { meta(hex) -> {ticker,
 // precision}, fmtAtoms(atoms, precision), dev (bool), now (unix seconds), base, quote }
 export function marketHtml (m, ctx) {
@@ -228,11 +205,10 @@ export function marketHtml (m, ctx) {
   const trades = (m.trades || []).map((t) => ({ ...t, p: up(t.price) })).filter((t) => t.p > 0)
   const day = dayOf(trades, now)
   const range = m.range || RANGES[0]
-  const candles = (m.candles || []).map((c) => ({ t: c.t, o: up(c.o), h: up(c.h), l: up(c.l), c: up(c.c), v: c.v }))
+  const candles = unitCandles(m, bp, qp)
   const series = seriesOf(candles, range, now)
   const book = bookOf(m.offers, ctx.base, ctx.quote, bp, qp, now)
   const amt = (atoms, prec) => ctx.fmtAtoms(big(String(Math.round(Number(atoms) || 0))), prec)
-  const timeLabel = (t) => (t >= now - 60 ? W.now : W.ago[range.key])
   let h = '<div class="mv" data-pair="' + esc(ctx.base + '/' + ctx.quote) + '">'
   // The head: the pair, its last price and change.
   h += '<div class="mv-head"><div><div class="mv-pair">' + esc(bt) + ' / ' + esc(qt) + '</div>'
@@ -250,7 +226,12 @@ export function marketHtml (m, ctx) {
   else if (!day.inDay) h += '<div class="sub mv-note" id="mvNote">' + esc(W.noDay) + ' · ' + esc(W.lastTrade(fmtPrice(day.last) + ' ' + qt, agoText(day.lastT, now))) + '</div>'
   else h += '<div class="sub mv-day">' + esc(W.high) + ' <span class="mv-num">' + esc(fmtPrice(day.hi)) + '</span> · ' + esc(W.low) + ' <span class="mv-num">' + esc(fmtPrice(day.lo)) + '</span> · ' + esc(W.volume) + ' <span class="mv-num">' + esc(amt(day.vol, bp)) + '</span> ' + esc(bt) + '</div>'
   // The chart.
-  if (series.pts.length) h += '<div class="mv-chartbox">' + chartSvg(series, { fmt: fmtPrice, timeLabel, label: bt + ' / ' + qt }) + (series.inRange ? '' : '<div class="sub mv-note">' + esc(W.noRange) + '</div>') + '</div>'
+  // The chart: a slot paintMarket fills with the family's chart (chart.js), and the library's notice.
+  if (series.pts.length) {
+    h += '<div class="mv-chartbox"><div class="mv-chart" data-mv-chart role="img" aria-label="' + esc(bt + ' / ' + qt) + '"></div>'
+      + (series.inRange ? '' : '<div class="sub mv-note">' + esc(W.noRange) + '</div>')
+      + '<a class="sub mv-credit" href="' + esc(CHART_NOTICE.href) + '" target="_blank" rel="noopener">' + esc(CHART_NOTICE.text) + '</a></div>'
+  }
   // The book: best bid and ask, and a depth bar.
   if (book.bid != null || book.ask != null) {
     const tot = book.bidDepth + book.askDepth
@@ -276,6 +257,32 @@ export function marketHtml (m, ctx) {
   return h + '</div>'
 }
 
+// The chart library, loaded once, when a chart is first drawn (ctx.LW to pass one in).
+let lwLoad = null
+const loadLW = (ctx) => (ctx && ctx.LW ? Promise.resolve(ctx.LW) : (lwLoad = lwLoad || import('./vendor/lightweight-charts/lightweight-charts.standalone.production.mjs')))
+// Each host's chart, kept across repaints so the canvas is not built again every few seconds.
+const charts = new WeakMap()
+
+// Paints a market read with readMarket into host: marketHtml's text, then the chart in its slot, a
+// step line of the price over the range. A host whose market has no chart lets its chart go.
+export async function paintMarket (host, m, ctx) {
+  const LW = await loadLW(ctx)
+  host.innerHTML = marketHtml(m, ctx)
+  const slot = host.querySelector('[data-mv-chart]')
+  let held = charts.get(host)
+  if (!slot) { if (held) { held.chart.remove(); charts.delete(host) } return }
+  if (!held) {
+    const el = slot.cloneNode(false)
+    held = { el, chart: null, key: null }
+    charts.set(host, held)
+  }
+  slot.replaceWith(held.el)
+  if (!held.chart) held.chart = createPriceChart(LW, held.el, { type: 'line', indicators: [] })
+  const bm = ctx.meta(ctx.base) || {}, qm = ctx.meta(ctx.quote) || {}
+  const bp = ctx.base === 'BTC' ? 8 : (bm.precision ?? 0), qp = ctx.quote === 'BTC' ? 8 : (qm.precision ?? 0)
+  held.chart.setCandles(unitCandles(m, bp, qp), ctx.now || Math.floor(Date.now() / 1000), m.range || RANGES[0])
+}
+
 // Mounts the view in host and keeps it current while host is on the page. ctx: marketHtml's, plus
 // relay() -> the relay's base URL, pair() -> {base, quote} or null, everyMs (default 5000).
 export function mountMarketView (host, ctx) {
@@ -286,7 +293,8 @@ export function mountMarketView (host, ctx) {
     const mine = ++req
     const m = await readMarket(ctx.relay(), p.base, p.quote, rangeKey)
     if (mine !== req || stopped) return
-    host.innerHTML = marketHtml(m, { ...ctx, base: p.base, quote: p.quote, rangeKey, now: Math.floor(Date.now() / 1000) })
+    await paintMarket(host, m, { ...ctx, base: p.base, quote: p.quote, rangeKey, now: Math.floor(Date.now() / 1000) })
+    if (mine !== req || stopped) return
     for (const b of host.querySelectorAll('.mv-range')) b.onclick = () => { rangeKey = b.dataset.range; paint() }
   }
   function loop () {

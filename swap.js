@@ -30,7 +30,7 @@
 
 import * as seqob from './seqob.js';
 import { secp256k1 } from './btc.js';
-import { readMarket, marketHtml } from './market-view.js';
+import { readMarket, paintMarket } from './market-view.js';
 import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc-wait.js';
 // The byte-exact passive-CLOB covenant stack: place a funded resting order that
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
@@ -10090,7 +10090,8 @@ async function renderPairStats(){
   const canon = pairDir(pay, recv);
   const m = await readMarket(seqob.seqobBase(), canon.base, canon.quote, _mvRange);
   if (req !== _statsReq) return;                 // superseded by a newer pair
-  host.innerHTML = marketHtml(m, { meta: C.assetMeta, fmtAtoms: C.fmtAtoms, dev: true, base: canon.base, quote: canon.quote });
+  await paintMarket(host, m, { meta: C.assetMeta, fmtAtoms: C.fmtAtoms, dev: true, base: canon.base, quote: canon.quote });
+  if (req !== _statsReq) return;
   for (const b of host.querySelectorAll('.mv-range')) b.onclick = () => { _mvRange = b.dataset.range; renderPairStats().catch(()=>{}); };
 }
 
