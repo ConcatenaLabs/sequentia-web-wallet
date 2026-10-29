@@ -55,16 +55,23 @@ In practice:
 
 ## Asset pickers
 
-Every place a person chooses an asset (Trade's You pay and You get, Send's asset) uses the same
-picker, in both modes:
+Every place a person chooses an asset, on every surface (Trade's You pay and You receive, Send's
+asset, the fee asset, Receive's amount, SeqDEX's "Priced in" menu), uses the same picker, in both
+modes (`asset-picker.js`):
 
-- It opens with a search box, "Search assets". Before anything is typed it lists **Your assets**:
-  BTC first, even at 0, then every asset the wallet holds, hidden ones left out.
-- Typing searches every asset in the registry by ticker, name or asset id, hidden ones included,
-  under **All assets**. A pasted asset id that no registry names is still found and can be chosen.
-  Under the first rows: "Type to search every registry asset, or paste an asset id."
-- A picker lists only what can be chosen there: You pay what the wallet holds, You get what can be
-  had for it.
+- A button names the asset chosen; it opens a list with a search box, "Search assets".
+- Before anything is typed it lists **Your assets**: BTC first, even at 0, then every asset the
+  wallet holds, each with its balance and its value, hidden ones left out. On a trade's side,
+  then what the book offers now for the other side, then the other assets that trade against it.
+- Typing searches every asset by ticker, name or asset id, hidden ones included, under **All
+  assets**. Where an unknown asset can be used (Send, developer mode's swap), a pasted asset id
+  that no registry names is still found and can be chosen, and the line under the first rows
+  reads "Type to search every asset, or paste an asset id."; elsewhere "Type to search every
+  asset." With nothing found: "No matching assets." Many matches show the first forty, then
+  "+<n> more · keep typing to find them."
+- A picker lists only what can be chosen there: You pay what the wallet holds, You receive what
+  can be had for it.
+- A menu that sets what everything is priced in pins **Any** on top.
 
 ## Receive
 
@@ -143,10 +150,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 ## Trade
 
-- **You pay** and **You get**, each an asset and an amount, then **Review** and **Trade**. An
-  amount typed on either side shows the other at the price on offer now, so a person can say what
-  they spend or what they want. While pricing: "Finding the best price…". If the price moves: "The price moved. Here
-  is the new one."
+- **You pay** and **You receive**, each an asset and an amount, then **Review** and **Trade**. The
+  two amounts are tethered: the one typed stays as typed, and the other follows the best price
+  the book offers now, again every few seconds while the tab is shown. Under You pay:
+  "balance <amount> <TICKER>" and **Max**. When the book cannot fill what is typed: "The book can
+  fill up to <amount> <TICKER> now." Review then shows the exact amounts and fees; while
+  pricing: "Finding the best price…". If the price moves: "The price moved. Here is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
@@ -168,27 +177,6 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   wallet)
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
-
-## Choosing an asset
-
-Wherever an asset is chosen from a list, on every surface (the Trade tab's You pay and You
-receive, Send, the fee asset, Receive's amount, SeqDEX's ticket and its "Priced in" menu), it
-is chosen the same way, with the shared chooser (`asset-picker.js`):
-
-- A button names the asset chosen; it opens a list with a search box on top, "Search assets".
-- Before anything is typed, the list shows **Your assets** first: what the wallet holds, each
-  with its balance and its value, BTC always among them and first, even at 0. When the list is
-  one of a trade's sides: then what the book offers now for the other side, then the other
-  assets that trade against it.
-- A hidden asset (hidden from the Balance tab) is left out of that first list.
-- Typing searches every asset by ticker or name, hidden ones included. With nothing found:
-  "No matching assets." Many matches show the first forty, then "+<n> more · keep typing to
-  find them."
-- Only what can be chosen is listed: a trade's You receive lists what trades against You pay;
-  You pay lists what the wallet holds.
-- A menu that sets what everything is priced in pins **Any** on top, then lists the assets that
-  price some market.
-- Under the list before a search: "Type to search every asset."
 
 ## Market
 
@@ -236,16 +224,19 @@ What it shows beyond the Market and Trade sections above:
   <amount> · <percent> · Mid <price>". A book whose best bid is above its best ask is shown as
   it is.
 - **The order ticket**: **Buy** or **Sell**; **Market**, **Limit** or **Auction** ("Trades at the
-  next auction's one price, at your limit or better."); **Price**, **Amount**, **Total**, and
-  25%, 50%, 75%, **Max** of the balance. Under **Options**:
+  next auction's one price, at your limit or better."); **Price** (for a limit or an auction),
+  then **You pay** and **You receive**, tethered as in the Trade tab: the amount typed stays and
+  the other follows (at the limit price for a limit order, by walking the book for a market
+  order), with "The book can fill up to <amount> <TICKER> now." when it cannot; and 25%, 50%,
+  75%, **Max** of what can be paid. Under **Options**:
   - **Post only**: "Rest on the book without taking any order."
   - **Nothing left resting**: "Take what is on offer at your price now; the rest is not placed."
   - **Smallest fill** <amount> <TICKER>.
   - **Can take back after** 1 hour, 1 day or 1 week: "Until then it stays on the book for anyone
     to fill at your price."
   An option or a type shows only when the connected wallet offers it.
-- The ticket's estimate: **Fills now** <amount> at <price>, **Rests on the book** <amount> at
-  <price>, **You pay** <amount>; under the button, "Your wallet shows the exact amounts and fees
+- The ticket's estimate for a limit: **Fills now** <amount> at <price>, **Rests on the book**
+  <amount> at <price>; under the button, "Your wallet shows the exact amounts and fees
   before anything is signed." The button reads "Buy <amount> <TICKER>" or "Sell <amount>
   <TICKER>".
 - Refusals, besides the Trade section's: "You declined in the wallet. Nothing was traded." and,
@@ -292,7 +283,7 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   approval in the wallet…".
 - The wallet's side, in every wallet: a site asks once to connect ("Connect SeqDEX?", with the
   site's address; on a phone, the address is what the site says it is, shown as that), then
-  each order shows **Trade?** (You pay, You get, Fees, Asked by) or **Place an order?** (You
+  each order shows **Trade?** (You pay, You receive, Fees, Asked by) or **Place an order?** (You
   sell, For, Price, Smallest part filled, Fees, What is left can be taken back from, Asked by),
   and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
   request".
