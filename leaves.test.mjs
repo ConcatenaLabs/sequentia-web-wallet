@@ -444,3 +444,48 @@ test('a leaf whose exit landed counts once: the library\'s held, less its on-cha
     { leaf_id: 'l', asset: Y, value: '300000', state: 'live', frozen: { frozen: true } }]
   assert.equal(frozenAtoms(coins, { sequentia_onchain_frozen: { [Y]: '1999976' } }).get(Y), 2299976n)
 })
+
+// The owner's 500,000 USDX that default mode never boarded: the leaf wallet reads its on-chain
+// coins by a gap past the last key it handed out or saw holding an unspent coin, so a coin at a
+// key past that (keys used and spent before it looked) is invisible to it. Default mode hands it
+// keys until its window covers every key the page handed out, then boards what it now sees.
+test('default mode: the leaf wallet is handed keys up to the page\'s receive index, then boards the coin there', async () => {
+  const store = memStore()
+  const G = 'ab'.repeat(32)
+  let taken = 0
+  const runs = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    runs.push(c)
+    // The library's window: keys 0 .. taken+19. The coin sits at key 30.
+    const sees = taken + 20 > 30
+    const result = c === 'address' ? (taken++, { address: 'k' + (taken - 1) })
+      : c === 'info' ? { operator: 'ee'.repeat(32), server_info: { assets: [{ asset: G, min_leaf: '1000' }] } }
+      : c === 'schedule' ? { now: 1, due: false, next_sync_at: null }
+      : c === 'balance' ? { arca: {}, sequentia_onchain: sees ? { [G]: '5000000' } : {} }
+      : c === 'board_quote' ? { fee: { asset: G, amount: '84' } }
+      : c === 'board' ? { value: m.args.args.amount }
+      : c === 'care' ? { claims: [], planned: [], cancelled: [], not_yet_planned: 0 } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  let clock = 1000
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    pinned: () => ({ server: 'https://op', node_url: 'https://node', operator: 'ee'.repeat(32) }), claimScan: () => 30 + 20, tickMs: 3_600_000 }, null, null)
+  store.setItem('swk.leaves.joined.t', '1')
+  try {
+  await api.start()
+  clock += 120_000
+  api.boardSoon()
+  await new Promise((r) => setTimeout(r, 3500))
+  assert.equal(taken, 30, 'handed the keys up to the receive index')
+  assert.ok(runs.lastIndexOf('address') < runs.indexOf('board'), 'keys first, then the board')
+  assert.ok(runs.includes('board'), 'the coin now seen is boarded')
+  // Once handed, not again.
+  clock += 120_000
+  api.boardSoon()
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(taken, 30)
+  } finally { api.stop && api.stop() }
+})

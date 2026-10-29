@@ -3621,6 +3621,7 @@ function siteDeps(){
     unlocked: ()=> !!wollet,
     account: ()=>{ const a = wollet.address(addrIndex == null ? undefined : addrIndex).address(); return { network: 'sequentia-testnet', address: (a.toUnconfidential ? a.toUnconfidential() : a).toString() }; },
     balances: async ()=>{
+      initUserComposer();
       const leaves = {};
       try{ if(leavesApi && leavesApi.isOpen()) for(const h of leavesApi.leafAssets()){ const n = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n); if(n > 0n) leaves[h] = n.toString(); } }catch{}
       let assets = {};
@@ -3637,7 +3638,11 @@ function siteDeps(){
           by_place[h] = { chain: chain.toString(), leaves: lv.toString(), lightning: (t - chain - lv - ak > 0n ? t - chain - lv - ak : 0n).toString(), ark: ak.toString() };
         }
       }
-      return { assets, btc: String(btcBalance || 0n), leaves, total, arriving, ...(devMode() ? { by_place } : {}) };
+      // What a trade can pay from now, per asset (the composer's own figure): the ticket offers this.
+      const spendable = {};
+      try{ for(const [h, v] of await userTrade.spendable()) if(v > 0n) spendable[h] = v.toString(); }catch{}
+      try{ const b = userTrade && btcArkRoutes() ? btcArk.figures().spendable : 0n; if(b > 0n) spendable.BTC = b.toString(); }catch{}
+      return { assets, btc: String(btcBalance || 0n), leaves, total, arriving, spendable, ...(devMode() ? { by_place } : {}) };
     },
     get orders(){
       if(!siteOrders){
@@ -3894,6 +3899,10 @@ function initUserComposer(){
       balance: (a)=> { try { return BigInt(balObj()[a] || 0); } catch { return 0n; } },
       feeRateFor, feerate: DEFAULT_FEERATE, rateScale: EXCHANGE_RATE_SCALE,
     }),
+    // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
+    // as none; and default mode's board of coins on the chain, asked for at once.
+    held: (a)=> userHeld(a),
+    prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
     store: localStorage, tag: walletTag,
     log: (...a)=> console.log(...a),
   });
