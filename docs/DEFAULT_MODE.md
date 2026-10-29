@@ -64,7 +64,7 @@ modes (`asset-picker.js`):
   wallet holds, each with its balance and its value, hidden ones left out. On a trade's side,
   then what the book offers now for the other side, then the other assets that trade against it.
 - Typing searches every asset by ticker, name or asset id, hidden ones included, under **All
-  assets**. Where an unknown asset can be used (Send, developer mode's swap), a pasted asset id
+  assets**. Where an unknown asset can be used (developer mode's swap), a pasted asset id
   that no registry names is still found and can be chosen, and the line under the first rows
   reads "Type to search every asset, or paste an asset id."; elsewhere "Type to search every
   asset." With nothing found: "No matching assets." Many matches show the first forty, then

@@ -159,3 +159,28 @@ export function closePicker () {
   o.pop.remove()
 }
 export function pickerOpen () { return !!open }
+
+// Puts the chooser in front of a <select> of assets. The select stays, hidden, as the value the
+// rest of a page reads and listens to; the button names its choice and opens the chooser over
+// its options, and a choice sets the select's value and fires its change event. rowOf(value,
+// text) -> the row's other fields ({ ticker, name, held, hidden, bal, offered, tradable });
+// opts as openPicker's. -> { button, refresh() } (refresh after setting the value from code).
+export function attachChooser (sel, rowOf, opts = {}) {
+  const doc = sel.ownerDocument
+  const btn = doc.createElement('button'); btn.type = 'button'
+  btn.className = 'asset-chooser' + (opts.cls ? ' ' + opts.cls : '')
+  btn.setAttribute('aria-haspopup', 'listbox'); btn.setAttribute('aria-expanded', 'false')
+  const name = doc.createElement('span'); name.className = 'asset-chooser-tk'
+  const caret = doc.createElement('span'); caret.className = 'asset-chooser-caret'; caret.textContent = '▾'
+  btn.appendChild(name); btn.appendChild(caret)
+  sel.style.display = 'none'; sel.setAttribute('aria-hidden', 'true'); sel.tabIndex = -1
+  sel.parentNode.insertBefore(btn, sel)
+  const refresh = () => { const o = sel.options[sel.selectedIndex]; name.textContent = o ? o.textContent : '…'; btn.dataset.value = sel.value }
+  refresh()
+  sel.addEventListener('change', refresh)
+  try { new doc.defaultView.MutationObserver(refresh).observe(sel, { childList: true, subtree: true }) } catch {}
+  btn.onclick = () => openPicker(btn, [...sel.options].filter((o) => !o.disabled).map((o) => ({
+    ticker: o.textContent, ...rowOf(o.value, o.textContent), hex: o.value, cur: o.value === sel.value,
+  })), (v) => { if (sel.value !== v) { sel.value = v; sel.dispatchEvent(new Event('change', { bubbles: true })) } refresh() }, opts)
+  return { button: btn, refresh }
+}
