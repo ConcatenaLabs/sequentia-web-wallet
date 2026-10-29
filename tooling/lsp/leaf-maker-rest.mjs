@@ -105,7 +105,9 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
       if (m && m.state === 'not_rested') { rec.done = 'not_rested' }
     }
     const ids = recs.filter((x) => x.order && !x.done).map((x) => x.order)
-    const others = ids.length ? ((await cmd('order_resting', { orders: ids })).others || []) : []
+    // Eight orders a command: each command holds the library, and a firm offer waits behind it.
+    const others = []
+    for (let i = 0; i < ids.length; i += 8) others.push(...((await cmd('order_resting', { orders: ids.slice(i, i + 8) })).others || []))
     const listed = new Set()
     try { for (const o of (await seqob.fetchMyOrders(makerPub))) listed.add(o.offer_id || o.offerId) } catch {}
     const rates = liveRates()

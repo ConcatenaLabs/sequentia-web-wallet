@@ -491,7 +491,9 @@ in the middle of a trade:
   round is final, as the relay also records it. The round pays the maker from the operator's own
   coins, so the composer takes no more than the operator's server says its round can pay of that
   asset now (`fundable` in its `/v1/info`), and skips the order when that covers no lot; a take
-  cannot be called back, and one larger than that would wait for the operator.
+  cannot be called back, and one larger than that would wait for the operator. An order the
+  operator refuses to take as not final yet (`order_not_final`) is not offered again for 15
+  minutes.
 - **An order resting in the operator's tree**: a maker rested it as a leaf and may be away; the
   wallet fills it from its own coins in one transfer the operator co-signs, on the terms its
   library quoted, and fills it at its new place only on the same terms if another taker filled it

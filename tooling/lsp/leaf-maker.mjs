@@ -172,7 +172,9 @@ async function main () {
   const nodePassword = op.node_password_file ? readFileSync(op.node_password_file, 'utf8').trim() : (op.node_password || '')
   // The library on a thread of its own: the maker answers HTTP while a long command runs, and a
   // taker's acceptance or a firm offer goes ahead of the maker's own upkeep.
-  const lib = await leafLibraryThread(cfg.store_dir)
+  // A command slower than five seconds is logged by name: the upkeep's long ones are what a
+  // firm offer waits behind.
+  const lib = await leafLibraryThread(cfg.store_dir, { onSlow: (name, ms) => log('slow', name, ms, 'ms') })
   const w = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, nodePassword) : await lib.create(mnemonic, {
     server: op.server, node_url: op.node_url, node_user: op.node_user, node_password: nodePassword,
     ...(cfg.exit_delay_units ? { exit_delay_units: cfg.exit_delay_units } : {}),
@@ -266,10 +268,15 @@ async function main () {
 
   async function swapState (id, first = false) { return (((await cmd('swaps', {}, first)) || []).find((s) => s.swap === id) || {}).state || null }
 
+  // The upkeep leaves the library free at least as long as its last pass held it, so a taker's
+  // firm offer or acceptance is as likely to find it idle as busy.
+  let passEnd = 0, passTook = 0, lastHold = 0
+  const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
   async function tick () {
-    if (busy) return
+    if (busy || Date.now() - passEnd < passTook) return
     busy = true
-    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally { busy = false }
+    const t0 = Date.now()
+    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally { busy = false; passEnd = Date.now(); passTook = passEnd - t0 }
   }
   async function tickOnce () {
     {
@@ -343,6 +350,10 @@ async function main () {
     try {
       if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash })
       if (req.method === 'GET' && p === '/v1/quotes') {
+        // A taker reading quotes asks for a firm offer next: the upkeep's next commands wait 90 s
+        // so the offer finds the library free, at most once every three minutes so a reader that
+        // polls cannot stop the upkeep.
+        if (Date.now() - lastHold > HOLD_EVERY_MS) { lastHold = Date.now(); lib.hold(HOLD_MS) }
         const sp = holdings ? holdings.sp : await spendable(true)
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })

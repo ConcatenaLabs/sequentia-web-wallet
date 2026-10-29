@@ -59,3 +59,24 @@ test('an operator that cannot pay a lot (DA1: it could spend 1463 GOLD): the ord
   assert.ok(!q.ok, 'no ticket')
   assert.deepEqual(s.takes, [], 'the library is never asked for the take')
 })
+
+test('an order the operator refuses as not final yet is not offered again for a while', async () => {
+  const s = standIn(null)
+  const lib = s.lib.command
+  let refuse = true
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'coins' && s.took) return [{ leaf_id: 'c1', asset: GOLD, value: '5000000', state: 'live', expiry: 1800000000 }]
+    if (cmd === 'participations') return []
+    if (cmd === 'settle_quote') return { asset: a.asset, value: a.value, fee: '0', after: a.value }
+    if (cmd === 'take' && refuse) { const e = new Error('the server refused take_order (422 order_not_final): order x is not_in_chain'); throw e }
+    return lib(cmd, a)
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: GOLD, receiveAsset: USDX, amount: '3344976' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket).catch(() => {})
+  s.takes.length = 0
+  const q2 = await eng.quote({ payAsset: GOLD, receiveAsset: USDX, amount: '3344976' })
+  assert.ok(!q2.ok, 'the order is not offered again')
+  assert.deepEqual(s.takes, [], 'the library is not asked to price it')
+})

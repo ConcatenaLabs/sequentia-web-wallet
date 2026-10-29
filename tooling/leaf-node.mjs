@@ -214,29 +214,45 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
   return api
 }
 
+// Which queued job the thread runs next, at `now`: the first that is `first`, else the oldest,
+// unless the queue is held (`holdUntil`), when only a `first` job runs. -> an index, or -1 to wait.
+export function nextJob (queue, now, holdUntil = 0) {
+  const i = queue.findIndex((q) => q.first)
+  if (i >= 0) return i
+  if (!queue.length || now < holdUntil) return -1
+  return 0
+}
+
 // The same library on a thread of its own, so a program that serves requests (the leaf maker)
 // keeps answering while a long command (a sync behind the node's scan lock) runs. Commands run
 // one at a time, in order of priority, then of arrival: `command(name, args, { first: true })`
-// goes ahead of every queued command that is not first.
+// goes ahead of every queued command that is not first. `hold(ms)` keeps every command that is
+// not first queued for that long, so one a person is about to ask for (a firm offer after a
+// quote) finds the library free rather than behind the program's own upkeep; a command already
+// running still ends first. `onSlow(name, ms)` is told of each command that took over five
+// seconds.
 //   const lib = await leafLibraryThread(storeRoot)
 //   const w = await lib.open(mnemonic, nodePassword)   // or create(mnemonic, config)
 //   await w.command('sync')
-export async function leafLibraryThread (storeRoot) {
+export async function leafLibraryThread (storeRoot, { onSlow = null } = {}) {
   const { Worker: W } = await import('node:worker_threads')
   const worker = new W(new URL(import.meta.url), { workerData: { leafThread: storeRoot } })
   const queue = []
   const waiting = new Map()
-  let next = 1, busy = false
+  let next = 1, busy = false, holdUntil = 0, timer = null
   worker.on('message', (m) => {
     const p = waiting.get(m.id); waiting.delete(m.id); busy = false
+    if (p && onSlow && Date.now() - p.started > 5000) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started) } catch {} }
     if (p) { if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) } }
     pump()
   })
   worker.on('error', (e) => { for (const p of waiting.values()) p.no(e); waiting.clear() })
   function pump () {
     if (busy || !queue.length) return
-    const i = queue.findIndex((q) => q.first)
-    const job = queue.splice(i >= 0 ? i : 0, 1)[0]
+    const i = nextJob(queue, Date.now(), holdUntil)
+    if (i < 0) { if (!timer) timer = setTimeout(() => { timer = null; pump() }, Math.max(1, holdUntil - Date.now())); return }
+    const job = queue.splice(i, 1)[0]
+    job.started = Date.now()
     busy = true
     waiting.set(job.id, job)
     worker.postMessage({ id: job.id, op: job.op, args: job.args })
@@ -244,6 +260,7 @@ export async function leafLibraryThread (storeRoot) {
   const call = (op, args, first = false) => new Promise((ok, no) => { queue.push({ id: next++, op, args, first, ok, no }); pump() })
   const wallet = { command: (name, args = {}, opts = {}) => call('command', { name, args }, !!opts.first) }
   return {
+    hold: (ms) => { holdUntil = Math.max(holdUntil, Date.now() + ms) },
     exists: (mnemonic) => call('exists', { mnemonic }),
     open: async (mnemonic, nodePassword) => { await call('open', { mnemonic, nodePassword }); return wallet },
     create: async (mnemonic, config) => { await call('create', { mnemonic, config }); return wallet },

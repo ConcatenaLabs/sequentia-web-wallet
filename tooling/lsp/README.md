@@ -211,6 +211,15 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 Every coin it receives is refreshed in the operator's next round once it has rested
 `settle_seconds`, so what it trades settles as the takers' coins do.
 
+The library answers one command at a time, so a taker's firm offer waits behind whatever the
+maker's own upkeep is running. Quotes are served from the last reading and never wait. A firm
+offer or an acceptance goes ahead of every queued command. A read of `/v1/quotes` holds the
+upkeep's next commands for 90 s (at most once every three minutes), so the firm offer that
+follows finds the library free. The upkeep leaves the library idle at least as long as its last
+pass held it. The resting desk reads its orders eight to a command. Every command slower than
+five seconds is logged (`slow <command> <ms> ms`), which names what a slow firm offer waited
+behind.
+
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json --init   # once: draws its phrase
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json
 

@@ -180,6 +180,13 @@ export function createEngine (deps) {
   const log = deps.log || (() => {})
   const key = () => TRADES_KEY + '.' + (deps.tag ? deps.tag() : 'default')
 
+  // Orders the operator refused to take as not final yet (its chain does not yet hold their
+  // transaction as final, whatever the wallet's node says): not offered again for a while.
+  const NOT_FINAL_MS = 15 * 60 * 1000
+  const nfKey = () => key() + '.notfinal'
+  function notFinal () { try { const m = JSON.parse(deps.store.getItem(nfKey()) || '{}'); for (const k of Object.keys(m)) if (m[k] <= now()) delete m[k]; return m } catch { return {} } }
+  function markNotFinal (id) { const m = notFinal(); m[id] = now() + NOT_FINAL_MS; try { deps.store.setItem(nfKey(), JSON.stringify(m)) } catch {} }
+
   function records () { try { return JSON.parse(deps.store.getItem(key()) || '[]') } catch { return [] } }
   function save (list) { deps.store.setItem(key(), JSON.stringify(list)) }
   function put (rec) { const l = records(); const i = l.findIndex((r) => r.id === rec.id); if (i >= 0) l[i] = rec; else l.push(rec); save(l); return rec }
@@ -216,7 +223,9 @@ export function createEngine (deps) {
     if (onchain && book.length) out.push(...onchainFillEntries(book, { payAsset, receiveAsset }))
     if (sources.includes('covenant-round') && deps.relayBook) {
       try {
+        const nf = notFinal()
         for (const e of covenantRoundEntries(book, { payAsset, receiveAsset })) {
+          if (nf[e.id]) { log('[user trade] not offered: the operator holds order', e.id, 'not final yet'); continue }
           // What the order can be filled for now: the relay's status of it (statuses[i] of
           // offers[i]; the signed offer_amount overstates it after a part fill), else the chain.
           const active = e.raw && e.raw._status && e.raw._status.active_amount
@@ -513,7 +522,11 @@ export function createEngine (deps) {
         rec.settleTargets = choice.settle && choice.settle.change ? [{ asset: choice.settle.change.asset, value: choice.settle.change.value, fee: choice.settle.change.fee }] : []
         rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
         put(rec)
-        const r = await run('take', { order: rec.orderJson, amount: choice.quote.filled, max_fee_ppm: MAX_FEE_PPM, shown: choice.quote })
+        let r
+        try { r = await run('take', { order: rec.orderJson, amount: choice.quote.filled, max_fee_ppm: MAX_FEE_PPM, shown: choice.quote }) } catch (e) {
+          if (/order_not_final/.test(String(e && e.message))) markNotFinal(rec.order)
+          throw e
+        }
         rec.take = r.take; rec.state = 'sent'; rec.sentAt = now()
         return put(rec)
       }
