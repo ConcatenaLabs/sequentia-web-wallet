@@ -175,3 +175,32 @@ test("the composer's deps.btc on the ark: pay within the ticket's fee and lock, 
   assert.deepEqual(await btc.invoiceStatus('00'), { status: 'paid', preimage: 'bb'.repeat(32) })
   ark.close()
 })
+
+test("a store made before another device boarded takes in the phrase's coins from the server at open", async () => {
+  let held = '0'
+  const { w, asked } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: held, total: held }),
+    // The server's recovery mailbox holds a coin another wallet of the phrase boarded.
+    catch_up: () => { held = '299426'; return { recovered: ['ab'.repeat(32) + ':0'], recovered_sat: '299426', spent_elsewhere: [], failed: [], complete: true } },
+  })
+  const changes = []
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }),
+    decode: decodeBolt11, onChange: (f) => changes.push(f.spendable) })
+  await ark.open()
+  assert.equal(ark.figures().spendable, 0n, 'the store alone knows nothing of it')
+  for (let i = 0; i < 20 && ark.figures().spendable === 0n; i++) await new Promise((r) => setTimeout(r, 5))
+  assert.equal(ark.figures().spendable, 299426n, 'the figure shows the coin once the server is asked')
+  assert.deepEqual(asked.filter((x) => x.command).map((x) => x.command).slice(0, 4), ['info', 'balance', 'catch_up', 'balance'])
+  assert.deepEqual(changes, [299426n])
+  ark.close()
+})
+
+test('a wallet whose package has no catch_up opens as before', async () => {
+  const { w } = standIn({ info: () => INFO, balance: () => ({ spendable: '7', total: '7' }) })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
+  await ark.open()
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(ark.figures().spendable, 7n)
+  ark.close()
+})
