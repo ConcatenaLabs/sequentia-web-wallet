@@ -180,7 +180,7 @@ async function main () {
   // taker's acceptance or a firm offer goes ahead of the maker's own upkeep.
   // A command slower than five seconds is logged by name: the upkeep's long ones are what a
   // firm offer waits behind.
-  const lib = await leafLibraryThread(cfg.store_dir, { onSlow: (name, ms) => log('slow', name, ms, 'ms') })
+  const lib = await leafLibraryThread(cfg.store_dir, { onSlow: (name, ms, detail) => log('slow', name, ms, 'ms', detail ? JSON.stringify(detail) : '') })
   const w = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, nodePassword) : await lib.create(mnemonic, {
     server: op.server, node_url: op.node_url, node_user: op.node_user, node_password: nodePassword,
     ...(cfg.exit_delay_units ? { exit_delay_units: cfg.exit_delay_units } : {}),

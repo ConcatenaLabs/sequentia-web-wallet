@@ -229,7 +229,7 @@ export function nextJob (queue, now, holdUntil = 0) {
 // goes ahead of every queued command that is not first. `hold(ms)` keeps every command that is
 // not first queued for that long, so one a person is about to ask for (a firm offer after a
 // quote) finds the library free rather than behind the program's own upkeep; a command already
-// running still ends first. `onSlow(name, ms)` is told of each command that took over five
+// running still ends first. `onSlow(name, ms, detail)` is told of each command that took over five
 // seconds.
 //   const lib = await leafLibraryThread(storeRoot)
 //   const w = await lib.open(mnemonic, nodePassword)   // or create(mnemonic, config)
@@ -242,7 +242,7 @@ export async function leafLibraryThread (storeRoot, { onSlow = null } = {}) {
   let next = 1, busy = false, holdUntil = 0, timer = null
   worker.on('message', (m) => {
     const p = waiting.get(m.id); waiting.delete(m.id); busy = false
-    if (p && onSlow && Date.now() - p.started > 5000) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started) } catch {} }
+    if (p && onSlow && Date.now() - p.started > 5000) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
     if (p) { if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) } }
     pump()
   })
@@ -280,8 +280,16 @@ export async function leafLibraryThread (storeRoot, { onSlow = null } = {}) {
         if (op === 'exists') value = lib.exists(args.mnemonic)
         else if (op === 'open') { w = lib.open(args.mnemonic, args.nodePassword); value = true }
         else if (op === 'create') { w = lib.create(args.mnemonic, args.config); value = true }
-        else if (op === 'command') value = w.command(args.name, args.args)
-        wt.parentPort.postMessage({ id, ok: true, value })
+        let detail = null
+        if (op === 'command') {
+          // What the command cost, and where the re-check before it spent its time: told to
+          // onSlow with a slow command.
+          const full = w.run(args.name, args.args)
+          value = full.result
+          const re = (full.start && full.start.recheck) || {}
+          detail = { cost: full.cost || null, recheck: { ms: re.ms || null, read_again: re.read_again ?? null, lineages_only: !!re.lineages_only } }
+        }
+        wt.parentPort.postMessage({ id, ok: true, value, detail })
       } catch (e) { wt.parentPort.postMessage({ id, ok: false, error: { message: e.message, kind: e.kind || null, code: e.code || null, status: e.status || null } }) }
     })
   }

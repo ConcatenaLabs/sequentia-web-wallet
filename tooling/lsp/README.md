@@ -223,8 +223,10 @@ pass held it. The resting desk reads its orders eight to a command. It never res
 or within `rest.guard_bps` (10 by default) of the pair's best bid on the relay, every rail of the
 on-chain book taken together, and it cancels, to rest again at the feed's rate, an order the
 feed's mid has moved to within `rest.guard_bps` of. Every command slower than
-five seconds is logged (`slow <command> <ms> ms`), which names what a slow firm offer waited
-behind.
+five seconds is logged (`slow <command> <ms> ms {detail}`), which names what a slow firm offer
+waited behind; the detail is the library's cost of the command (milliseconds and requests to
+the node and to the operator, for the re-check before it and for the command itself) and the
+milliseconds each part of that re-check took.
 
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json --init   # once: draws its phrase
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json
