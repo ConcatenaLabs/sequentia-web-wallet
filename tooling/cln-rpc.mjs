@@ -47,10 +47,18 @@ export function clnBitcoinWallet (rpc) {
       const r = await rpc('listpeerchannels')
       return (r.channels || []).filter((c) => c.state === 'CHANNELD_NORMAL').reduce((n, c) => n + msatOf(c.receivable_msat), 0n) / 1000n
     },
-    async invoice ({ sats, description = 'trade', expiry = 3600 }) {
+    // `preimage` (hex): an invoice under a preimage the caller keeps, so it can make a new one under
+    // the same hash once this one runs out.
+    async invoice ({ sats, description = 'trade', expiry = 3600, preimage }) {
       const label = `trade-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
-      const r = await rpc('invoice', { amount_msat: Number(sats) * 1000, label, description, expiry })
+      const r = await rpc('invoice', { amount_msat: Number(sats) * 1000, label, description, expiry, ...(preimage ? { preimage } : {}) })
       return { invoice: r.bolt11, payment_hash: r.payment_hash, expires_at: r.expires_at, label }
+    },
+    // Drops an invoice of its own that was never paid (run out or not), so another can be made
+    // under its hash.
+    async dropUnpaidInvoice (hash) {
+      const r = await rpc('listinvoices', { payment_hash: hash })
+      for (const i of r.invoices || []) if (i.status === 'expired' || i.status === 'unpaid') await rpc('delinvoice', { label: i.label, status: i.status })
     },
     async decode (invoice) {
       const d = await rpc('decode', { string: invoice })

@@ -260,6 +260,7 @@ began.
 | `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it |
 | `POST` | `/v1/btc/paid` `{swap}` | the wallet paid: the maker follows at once |
 | `POST` | `/v1/btc/release` `{swap}` | a firm offer nobody took |
+| `POST` | `/v1/btc/invoice` `{swap}` | the maker gives the asset and has locked: a new Bitcoin invoice under the same hash and for the same amount when the one given runs out within half an hour, `{swap, invoice, expires_at}` |
 | `GET` | `/v1/btc/swap/<id>` | where a swap stands |
 
 Its quotes are in `/v1/quotes` beside the in-tree ones, BTC named `"BTC"` and counted in
@@ -268,11 +269,18 @@ satoshis.
 ```json
 "btc": {
   "rpc": "/var/lib/leaf-maker/btc/regtest/lightning-rpc",
-  "keep_sats": "100000", "invoice_seconds": 3600,
+  "keep_sats": "100000", "invoice_seconds": 14400,
   "pairs": [ { "give": "BTC", "want": "<asset id>", "rate_num": "21", "rate_den": "10", "min_give": "5000" },
              { "give": "<asset id>", "want": "BTC", "rate_num": "11", "rate_den": "20", "min_give": "10000" } ]
 }
 ```
+
+The maker's Bitcoin invoices run `invoice_seconds` (four hours by default) and are made under a
+preimage the desk draws and keeps with the swap. A wallet pays only once the asset it receives
+is final, after Bitcoin blocks, which can take longer than that. The wallet then asks for
+`/v1/btc/invoice` and pays the new invoice only if it carries the same hash, the same amount, and
+no longer a lock or higher fee than the trade allowed. Otherwise the trade comes back, nothing
+paid.
 
 A pair may say `"price": true` in place of its rate, priced from the maker's feed, whose
 `assets` then names `"BTC"` too.

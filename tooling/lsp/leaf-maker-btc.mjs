@@ -21,6 +21,9 @@
 //        wallet's receive under the maker's hash: the maker's leaf pays it.
 //   POST /v1/btc/paid {swap}           a nudge: the wallet paid; the maker follows at once.
 //   POST /v1/btc/release {swap}        a firm offer nobody took.
+//   POST /v1/btc/invoice {swap}        (the maker gives an asset, the swap locked) a new Bitcoin
+//        invoice under the same hash and for the same amount when the one given runs out within
+//        half an hour: -> { swap, invoice, expires_at }
 //   GET  /v1/btc/swap/<id>             -> { swap, state }
 //
 // Its configuration, under the maker's own: "btc": { "rpc": "/…/lightning-rpc" (its node's socket),
@@ -31,6 +34,7 @@
 // feed, its "assets" naming "BTC" too. Swaps are kept in the store directory (btc-swaps.json), so a
 // restart follows every one it began.
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { clnRpc, clnBitcoinWallet } from '../cln-rpc.mjs'
 import { needSeconds, EXTRA_BLOCKS, INVOICE_LEFT_SECONDS } from '../../user-trade-btc.js'
@@ -43,6 +47,9 @@ const OPEN = new Set(['offered', 'locking', 'locked', 'paying', 'claiming'])
 // How long a payment the maker began may go unrecorded by its library before the swap is offered
 // again, so the wallet's next lock pays it.
 const LOCKING_SECONDS = 120
+// How long an invoice of the desk's runs (`invoice_seconds` overrides it): long enough for the
+// usual wait for the asset to be final, and renewed under the same hash past that (`reinvoice`).
+const INVOICE_SECONDS = 4 * 3600
 
 export function checkBtcConfig (b) {
   if (!b) return null
@@ -172,8 +179,11 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
       log('btc firm', id, 'gives', String(give), 'sat for', String(want), p.want.slice(0, 8))
       return [200, { swap: id, invoice: r.invoice, give: String(give), want: String(want), expires_at: Math.floor(s.expires / 1000) }]
     }
-    const inv = await node.invoice({ sats: want, description: 'trade', expiry: b.invoice_seconds ?? 3600 })
-    const s = { swap: id, give_asset: p.give, want_asset: 'BTC', give: String(give), want: String(want), hash: inv.payment_hash, invoice_btc: inv.invoice,
+    // Under a preimage the desk keeps, so a wallet whose trade waited longer than the invoice runs
+    // (its asset final only after Bitcoin blocks) is given a new invoice under the same hash.
+    const ownPreimage = randomBytes(32).toString('hex')
+    const inv = await node.invoice({ sats: want, description: 'trade', expiry: b.invoice_seconds ?? INVOICE_SECONDS, preimage: ownPreimage })
+    const s = { swap: id, give_asset: p.give, want_asset: 'BTC', give: String(give), want: String(want), hash: inv.payment_hash, invoice_btc: inv.invoice, own_preimage: ownPreimage,
       state: 'offered', at: Date.now(), expires: Date.now() + ttl * 1000 }
     swaps.set(id, s); save()
     log('btc firm', id, 'gives', String(give), p.give.slice(0, 8), 'for', String(want), 'sat')
@@ -212,6 +222,25 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     if (mine() || s.state === 'offered') { s.state = 'locked'; save() }
     log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8))
     return [200, { swap: s.swap, state: s.state }]
+  }
+
+  // A new invoice for a swap the desk has locked, under the same hash and for the same amount, when
+  // the one the wallet holds runs out within half an hour: the wallet pays only once the asset it
+  // receives is final, which can take longer than an invoice runs.
+  async function reinvoice (body) {
+    const s = swaps.get(String(body.swap || ''))
+    if (!s || s.give_asset === 'BTC' || !s.own_preimage) return [404, { error: 'no such swap' }]
+    if (s.state !== 'locked') return [409, { error: `the swap is ${s.state}`, state: s.state }]
+    const d = await node.decode(s.invoice_btc)
+    if (d.expires_at - Date.now() / 1000 > 1800) return [200, { swap: s.swap, invoice: s.invoice_btc, expires_at: d.expires_at }]
+    const st = await node.invoiceStatus(s.hash)
+    if (st.status === 'paid') return [409, { error: 'the invoice is paid', state: s.state }]
+    await node.dropUnpaidInvoice(s.hash)
+    const inv = await node.invoice({ sats: big(s.want), description: 'trade', expiry: b.invoice_seconds ?? INVOICE_SECONDS, preimage: s.own_preimage })
+    if (inv.payment_hash !== s.hash) return [500, { error: 'the new invoice is under another hash' }]
+    s.invoice_btc = inv.invoice; save()
+    log('btc reinvoice', s.swap, 'runs to', inv.expires_at)
+    return [200, { swap: s.swap, invoice: inv.invoice, expires_at: inv.expires_at }]
   }
 
   async function release (body) {
@@ -292,6 +321,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates }) {
     if (p === '/v1/btc/firm') return firm(body, await spendable(), margin)
     if (p === '/v1/btc/lock') return lock(body)
     if (p === '/v1/btc/release') return release(body)
+    if (p === '/v1/btc/invoice') return reinvoice(body)
     if (p === '/v1/btc/paid') return [200, { swap: body.swap, state: (swaps.get(String(body.swap)) || {}).state || null }]
     return null
   }

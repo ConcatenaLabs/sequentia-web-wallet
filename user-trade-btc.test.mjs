@@ -2,7 +2,7 @@
 // Bitcoin Lightning wallet: the order of the one hash-lock, and what a ticket counts.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createEngine } from './user-trade.js'
+import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn } from './user-trade.js'
 import { MAKER_LOCK_MS, needSeconds } from './user-trade-btc.js'
 
 const X = 'aa'.repeat(32)
@@ -201,4 +201,49 @@ test('buying with BTC: a maker that never pays its side in is given up on after 
   r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'returned'); assert.equal(s.btcPaid.length, 0, 'no BTC paid')
   assert.ok(posts.includes('btc/release'), 'the maker is told to let its offer go')
+})
+
+// A purchase whose asset became final only after the maker's invoice ran out (a parent-chain split
+// held finality for hours): the maker renews the invoice under the same hash, or the trade comes back.
+async function boughtPastTheInvoice (renew) {
+  const s = standIn()
+  s.makerSats = 50000n
+  s.claimed = String(100000n - 616n)
+  const ran = Math.floor(Date.now() / 1000) - 60
+  s.btc.decode = async (inv) => inv === 'lnbcrt-maker-2' ? { sats: s.makerSats, payment_hash: renew === 'other-hash' ? 'ab'.repeat(32) : H, expires_at: 4e9, min_final_cltv: 18 }
+    : { sats: s.makerSats, payment_hash: H, expires_at: s.expired ? ran : 4e9, min_final_cltv: 18 }
+  const fetch0 = s.fetchJson
+  s.fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/btc/invoice')) { s.posts.push(['invoice', JSON.parse(init.body)]); if (!renew) throw new Error('404 no such path'); return { swap: 's2', invoice: 'lnbcrt-maker-2' } }
+    return fetch0(url, init)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  s.receives[H].state = 'issuing'
+  s.expired = true
+  s.ready = true
+  const r = await eng.advance(eng.records()[0])
+  return { s, r }
+}
+
+test('buying with BTC: an invoice that ran out while the asset became final is renewed under the same hash and paid', async () => {
+  const { s, r } = await boughtPastTheInvoice('same')
+  assert.deepEqual(s.posts.find(([p]) => p === 'invoice')[1], { swap: 's2' })
+  assert.deepEqual(s.btcPaid, ['lnbcrt-maker-2'], 'the renewed invoice is paid, never the one that ran out')
+  assert.equal(r.preimage, P)
+})
+
+test('buying with BTC: a maker that renews no invoice leaves the trade returned, nothing paid, and the row says why', async () => {
+  const { s, r } = await boughtPastTheInvoice(null)
+  assert.equal(r.state, 'returned'); assert.equal(r.whyKind, 'lapsed')
+  assert.deepEqual(s.btcPaid, [])
+  assert.equal(tradeStateWord(r), USER_WORDS.returnedLapsed)
+  assert.deepEqual(forbiddenIn(USER_WORDS.returnedLapsed), [])
+})
+
+test('buying with BTC: a renewed invoice under another hash is not paid', async () => {
+  const { s, r } = await boughtPastTheInvoice('other-hash')
+  assert.equal(r.state, 'returned'); assert.deepEqual(s.btcPaid, [])
 })
