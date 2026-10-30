@@ -55,7 +55,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   over Lightning to any invoice and out to any Bitcoin address, and the BTC side of trades. A
   browser holding the phrase learns from the ark's server, at each open and every five minutes,
   what the phrase's other wallets did (`catch_up`): the coins they boarded or received, and those
-  of its own they spent
+  of its own they spent. Each coin's renewal is scheduled with the ark's server whenever the page
+  is open (`schedule_refreshes`): the server runs it by itself shortly before the coin's expiry,
+  with the page closed, and the renewed coin is taken in at the next open
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry

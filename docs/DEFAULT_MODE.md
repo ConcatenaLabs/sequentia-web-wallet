@@ -130,6 +130,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 - BTC that arrives at the address and is confirmed moves there by itself; until it can be spent
   it is "<amount> BTC arriving" under the figure.
+- The wallet keeps what it holds there current by itself, and arranges each time it is open for
+  that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
+  was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it
+  opens.
 - **Receive BTC with an invoice**: "Make an invoice for BTC. Once it is paid, the BTC is yours in
   seconds." Then "Invoice ready. Share it to receive <amount> BTC." and, when paid, "Received ✓
   <amount> BTC."
