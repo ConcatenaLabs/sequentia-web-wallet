@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy, SHARED_VIEW_READS } from './user-trade.js'
+import { USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy, SHARED_VIEW_READS, worthFirming } from './user-trade.js'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32), Z = 'cc'.repeat(32)
 const fmt = (a, n) => `${n} ${a === X ? 'XT' : a === Y ? 'YT' : 'BTC'}`
@@ -386,4 +386,12 @@ test('engine: its reads share the view a moment old; what takes a coin or signs 
   for (const [cmd, shared] of asked) assert.equal(shared, SHARED_VIEW_READS.has(cmd), cmd)
   assert.ok(asked.some(([c, sh]) => c === 'coins' && sh), 'a read shares the view')
   assert.ok(asked.some(([c, sh]) => c === 'swap_accept' && !sh), 'the acceptance, which signs, looks first')
+})
+
+test('worthFirming: a slow source is asked for firm terms only when it could be chosen', () => {
+  const ind = (l) => l.map(([source, receive]) => ({ e: { source }, receive }))
+  const pick = (l) => worthFirming(ind(l)).map((x) => x.e.source + ':' + x.receive)
+  assert.deepEqual(pick([['covenant-round', 10040n], ['leaf-maker', 10000n], ['leaf-resting', 9990n]]), ['leaf-maker:10000', 'leaf-resting:9990'])
+  assert.deepEqual(pick([['covenant-round', 10060n], ['leaf-maker', 10000n]]), ['covenant-round:10060', 'leaf-maker:10000'])
+  assert.deepEqual(pick([['covenant-round', 300n], ['onchain-fill', 200n]]), ['covenant-round:300', 'onchain-fill:200'])
 })
