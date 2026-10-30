@@ -55,6 +55,7 @@ function standIn () {
   const coins = [{ leaf_id: 'c1', asset: X, value: '3000000', state: 'live', kind: 'board' }]
   const swaps = []
   const parts = []
+  const plans = []
   const calls = []
   let last = null
   const lib = {
@@ -62,7 +63,7 @@ function standIn () {
       calls.push(cmd)
       switch (cmd) {
         case 'coins': return coins.map((c) => ({ ...c }))
-        case 'plans': return { plans: [] }
+        case 'plans': return { plans: plans.map((p) => ({ ...p })) }
         case 'swap_read': return { swap: 's1', gets: { asset: Y, value: a.offer.split(':')[1] }, gives: { asset: X, value: a.offer.split(':')[2] }, pays: { asset: X, margins: '192' },
           change: { asset: X, value: String(3000000 - Number(a.offer.split(':')[2]) - 192) }, dates: { expiry: 1800000000 } }
         case 'settle_quote': return { asset: a.asset, value: a.value, fee: '3', after: String(Number(a.value) - 3) }
@@ -102,7 +103,7 @@ function standIn () {
     return {}
   }
   const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
-  return { lib, fetchJson, store, calls, posts, parts, swaps, coins, away: () => { complete = false } }
+  return { lib, fetchJson, store, calls, posts, parts, swaps, coins, plans, away: () => { complete = false } }
 }
 
 const admitted = (sources) => () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources }] } } }, genesis: 'g' })
@@ -183,6 +184,19 @@ test('engine: not listed, not offered, no funds', async () => {
     .quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   assert.equal(b.why, 'busy')
   assert.deepEqual(forbiddenIn(USER_WORDS.busy('GOLD')), [])
+  // Live, but kept by an open offline-refresh plan, which only a round ends: the wallet is asked to
+  // free it in its next round, and the person is told so, never "held by an order".
+  s.coins[0].state = 'live'
+  s.plans.push({ plan_id: 'p1', coin: 'c1', state: 'open' })
+  const freed = []
+  const f = await createEngine({ ...base, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), held: () => 3000000n, release: (a, l) => freed.push([a, l]) })
+    .quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([f.why, freed], ['freeing', [[X, ['c1']]]])
+  assert.deepEqual(forbiddenIn(USER_WORDS.freeing('GOLD')), [])
+  // A page without a release keeps the older answer.
+  const g = await createEngine({ ...base, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), held: () => 3000000n })
+    .quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(g.why, 'busy')
 })
 
 test('engine: what can be received for an asset is what the book offers on an admitted pair, held or not', async () => {
