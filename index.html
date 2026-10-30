@@ -1457,18 +1457,18 @@
         <details id="faq-fee-asset"><summary>In which asset can I pay a network fee?</summary>
           <p>In any asset a block producer accepts. None is privileged: tSEQ is one choice among the others.</p>
           <p>Each producer keeps a list of the assets it takes for fees, each with an exchange rate that turns a fee into a common reference value, so producers can compare fees paid in different assets. A price server usually builds that list from the Asset Registry and from market prices.</p>
-          <p>Send offers the assets you hold that the nodes this wallet sends to accept, and shows the fee in that asset and in your reference currency before you sign.</p>
+          <p>Send offers the assets you hold that the network accepts for fees, and shows the fee in that asset and in your reference currency before you sign.</p>
         </details>
         <details id="faq-fee-light"><summary>What do the green, amber and red marks next to the fee asset mean?</summary>
           <ul class="ln-help">
-            <li><b>Green</b>: the nodes this wallet sends to accept it, it is published on the Asset Registry and it has a market price. Any producer's price server can value it.</li>
-            <li><b>Amber</b>: the nodes accept it, but it is not published on the Asset Registry or has no market price, so the price servers other producers run may not value it. The payment can then confirm only in a block of a producer that accepts it. Every send can be replaced, so if it waits you can replace it and pay the fee in another asset.</li>
-            <li><b>Red</b>: the nodes this wallet sends to do not accept it, or list it at a rate of zero, which refuses it. The transaction would be rejected before it reached a producer. An asset only some of them accept is listed but cannot be chosen.</li>
+            <li><b>Green</b>: the network accepts it, it is published on the Asset Registry and it has a market price. Any producer's price server can value it.</li>
+            <li><b>Amber</b>: the network accepts it, but it is not published on the Asset Registry or has no market price, so the price servers other producers run may not value it. The payment can then confirm only in a block of a producer that accepts it. Every send can be replaced, so if it waits you can replace it and pay the fee in another asset.</li>
+            <li><b>Red</b>: the network does not accept it, or lists it at a rate of zero, which refuses it. The transaction would be rejected before it reached a producer. An asset only part of the network accepts is listed but cannot be chosen.</li>
           </ul>
         </details>
         <details id="faq-fee-rate"><summary>How do I set my own fee rate?</summary>
           <p>Send pays the recommended fee unless you change it. Open <i>Advanced</i> under the recipients to choose the asset that pays it and how soon it should confirm, or pick <i>Custom</i> and type the fee yourself: as the total for this transaction or as the rate per 100 bytes, either in the fee asset or in your reference currency. The other three follow. A transaction's size is measured in bytes, so a 300-byte payment at 0.000001 OILX per 100 bytes pays 0.000003 OILX.</p>
-          <p>Below the relay minimum no node takes the transaction at all. When blocks are full, the next block takes only what pays more than the cheapest transaction it still fits; the panel says how busy the next block is and which of these your fee clears. Replace, bump and speed up use the same panel and also show what the original transaction pays.</p>
+          <p>Below the network's minimum fee the transaction is not accepted at all. When blocks are full, the next block takes only what pays more than the cheapest transaction it still fits; the panel says how busy the next block is and which of these your fee clears. Replace, bump and speed up use the same panel and also show what the original transaction pays.</p>
           <p>A fee worth more than 30 USD is flagged before you sign: it is almost always a rate typed in the wrong unit.</p>
         </details>
         <details id="faq-refused"><summary>Why was my transaction refused?</summary>
@@ -1477,13 +1477,13 @@
             <li>a coin it spends was already spent, usually by another payment from this wallet: refresh and try again;</li>
             <li>it conflicts with a payment still waiting for a block: wait for that one, or speed it up;</li>
             <li>the fee is under the minimum, or the fee asset is not accepted: raise the rate or pick another asset;</li>
-            <li>an amount is too small to relay (dust);</li>
+            <li>an amount is too small to send (dust);</li>
             <li>too many of your payments are waiting in a row: wait for the next block;</li>
             <li>the asset is frozen by its supervisor, or its supervision rules refuse the transfer.</li>
           </ul>
         </details>
         <details id="faq-waiting"><summary>Why is my transaction not confirmed yet?</summary>
-          <p>A block comes about once a minute. Open the transaction in History: under <i>Why it is waiting</i> the wallet reads the explorer and says what holds it back. The fee asset may be accepted by only some nodes, or refused by the producer. The rate may be under the mempool's minimum, or under what a full next block takes. Or nothing may be wrong.</p>
+          <p>A block comes about once a minute. Open the transaction in History: under <i>Why it is waiting</i> the wallet reads the explorer and says what holds it back. The fee asset may be accepted by only part of the network, or refused by the producer. The rate may be under the mempool's minimum, or under what a full next block takes. Or nothing may be wrong.</p>
           <p>If it misses a block, the row offers Bump fee, Replace and Speed up.</p>
         </details>
         <details id="faq-rescue"><summary>What do Bump fee, Replace and Speed up do?</summary>
@@ -1501,13 +1501,14 @@
           <p>Every address of this wallet has two forms. The usual one, starting tb1, receives in the clear: anyone can see on the explorer how much of which asset arrived. The blinded one, starting tsqb1, hides the amount and the asset from everyone but you. Both belong to this wallet and to the same recovery phrase.</p>
           <p>Coins received at a blinded address count in your balance, spend like any other and come back with your recovery phrase. An explorer shows that a payment happened, not how much or of what. Transactions that carry hidden amounts are a little larger, because each hidden amount comes with a proof, so they cost a slightly higher network fee.</p>
           <p>To bring them back to your usual address, send them to yourself: in Send, paste your tb1 address from Receive and the amount. That one transaction makes them visible again; sending the whole balance of that asset also gathers its coins into one.</p>
-          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap at a blinded address</i>, or tick <i>Receive at a blinded address of this wallet</i> in the review of a swap with a maker who completes it: that maker then blinds the output that pays you. Unticked, it pays your usual address in the clear, like any transfer.</p>
+          <p>Swaps receive at your usual address unless you turn on <i>Receive this swap at a blinded address</i>, or tick <i>Receive at a blinded address of this wallet</i> in the review of a swap with a counterparty who completes it: they then blind the output that pays you. Unticked, it pays your usual address in the clear, like any transfer.</p>
         </details>
         <details id="faq-final"><summary>When is a payment final?</summary>
           <p>It shows at once and is confirmed in about a minute. A confirmed payment stands as long as Bitcoin does not reorganise the block it anchors to.</p>
         </details>
       </div>
-      <div class="card faq">
+      <!-- Lightning names a rail: its answers are developer mode's (docs/DEFAULT_MODE.md). -->
+      <div class="card faq dev-only">
         <label class="lbl">Lightning</label>
         <details id="faq-ln-keys"><summary>Where is my Lightning balance, and who holds the keys?</summary>
           <p>Each asset you move to Lightning is in a channel of a Lightning node the service hosts for you. That node holds no keys. Your browser derives them from your recovery phrase and signs every channel update after checking it.</p>
@@ -1603,7 +1604,7 @@
 
   <div class="foot">
     Sequentia testnet · <a href="/explorer/">Block explorer</a> · <a href="/download/core/">Sequentia Core</a><br>
-    <a href="https://github.com/ConcatenaLabs/sequentia-web-wallet" target="_blank" rel="noopener">Open source on GitHub</a>
+    <a href="https://github.com/ConcatenaLabs/sequentia-web-wallet" target="_blank" rel="noopener">Open source on GitHub</a><span id="pageVersion"></span>
   </div>
 </div>
 
@@ -7957,6 +7958,14 @@ function closeMore(){ const l=$('moreList'); if(l && !l.classList.contains('hide
 // this page's version (when it was published), the mode and the recent errors: those the
 // page threw and those it showed (every .status.err). The address goes only when ticked,
 // and the exact payload is shown under "What will be sent" as it changes.
+// The page's version: when this copy of it was published, from its Last-Modified header, as
+// "2026-10-29 20:44 UTC". Without that header the browser reports the time of loading, which
+// says nothing, so there is none. Shown in the footer and carried by every problem report.
+function pageVersion(){
+  const d = new Date(document.lastModified);
+  return isNaN(d) || Math.abs(d - performance.timeOrigin) < 60000 ? '' : d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+{ const v = pageVersion(), e = $('pageVersion'); if (e && v) e.textContent = ' · Version ' + v; }
 function mountReport(){
   const W = REPORT_WORDS;
   const set = (id, t) => { const e = $(id); if (e) e.textContent = t; };
@@ -7965,12 +7974,9 @@ function mountReport(){
   set('reportAddrLabel', W.addressesBox); set('reportAddrWill', W.addressesWill); set('reportPreviewLabel', W.preview);
   set('btnReport', W.send); set('btnReportMenu', W.title);
   $('reportText').placeholder = W.descriptionHint;
-  // When the page was published, from its Last-Modified header; without one the browser
-  // reports the time of loading, which says nothing, so it is "unknown".
-  const published = () => { const d = new Date(document.lastModified); return isNaN(d) || Math.abs(d - performance.timeOrigin) < 60000 ? 'unknown' : 'page ' + d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC'; };
   const myAddress = () => { try { return currentAddress().toString(); } catch { return ''; } };
   const report = () => buildReport({
-    wallet: 'web-wallet', version: published(), mode: devMode() ? 'developer' : 'default',
+    wallet: 'web-wallet', version: pageVersion() || 'unknown', mode: devMode() ? 'developer' : 'default',
     description: $('reportText').value, accountCode: $('reportCode').value, errors: pageErrors.list(),
     context: { platform: navigator.platform, user_agent: navigator.userAgent, network: 'testnet' },
     addresses: $('reportAddr').checked ? [myAddress()] : [],
