@@ -553,6 +553,17 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (ctx.onChange) try { ctx.onChange() } catch {}
   }
 
+  // The balance read again soon, once nothing else is running: a trade that brought coins in.
+  function refreshSoon () {
+    if (!S.open) return
+    clearTimeout(S.refreshTimer)
+    S.refreshTimer = setTimeout(async () => {
+      if (S.busy) { refreshSoon(); return }
+      S.busy = true
+      try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } finally { S.busy = false; render() }
+    }, 500)
+  }
+
   const tag = () => { try { return ctx.walletTag ? ctx.walletTag() : 'default' } catch { return 'default' } }
   const dev = () => devModeOn(ctx.store, tag())
   const emit = (name, data) => { if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {} }
@@ -1653,8 +1664,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
+    refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
-    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer) },
+    stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer) },
   }
   render()
   return api

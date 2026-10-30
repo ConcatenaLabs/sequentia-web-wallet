@@ -3924,6 +3924,8 @@ function initUserComposer(){
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
     // Coins an open refresh plan keeps are freed for a trade in the wallet's next round.
     release: (a, leaves)=> leavesApi ? leavesApi.releaseFor(a, leaves) : null,
+    // A trade that brought coins in: the balance, and so the Trade tab's Pay list, read again.
+    changed: ()=> { try{ if(leavesApi) leavesApi.refreshSoon(); }catch{} },
     store: localStorage, tag: walletTag,
     log: (...a)=> console.log(...a),
   });
