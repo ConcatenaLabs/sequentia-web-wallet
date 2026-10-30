@@ -179,6 +179,17 @@ export function pickerOrder (assets, held, name) {
 
 // What the library can pay now, per asset, out of round: its live coins, less the coin of every
 // open offline-refresh plan, which the library never spends outside a round.
+// What a payment the library refused for want of funds is short by, in atoms of the asset paid: what
+// it takes with its margins less what the wallet holds, or the operator's smallest leaf when the
+// change would fall below it (paying that much less leaves change of at least that). 0n otherwise.
+export function shortBy (message) {
+  const m = String(message || '')
+  const s = m.match(/holds (\d+) of asset \S+ in live coins, and paying \d+ takes (\d+)/)
+  if (s) return BigInt(s[2]) > BigInt(s[1]) ? BigInt(s[2]) - BigInt(s[1]) : 0n
+  const d = m.match(/change would be below the operator's smallest leaf in asset \S+ \((\d+) atoms\)/)
+  return d ? BigInt(d[1]) : 0n
+}
+
 export function plannedCoins (plans) {
   return new Set(((plans && plans.plans) || []).filter((p) => !/^(done|cancelled|stopped|finished)$/.test(String(p.state || ''))).map((p) => p.coin))
 }
@@ -260,7 +271,7 @@ export function createEngine (deps) {
     const book = wantBook ? await Promise.resolve(deps.relayBook(payAsset, receiveAsset)).catch((e) => { log('[user trade] the book did not answer:', e && e.message); return [] }) : []
     if (sources.includes('leaf-resting') && book.length) {
       // Only orders resting in the tree of the operator the wallet joined.
-      const operator = await run('info').then((i) => i && i.operator).catch(() => null)
+      const operator = await operatorInfo().then((i) => i && i.operator)
       out.push(...restingEntries(book, { payAsset, receiveAsset, operator }))
     }
     if (onchain && book.length) out.push(...onchainFillEntries(book, { payAsset, receiveAsset }))
@@ -306,10 +317,16 @@ export function createEngine (deps) {
   // five seconds; null when the server does not say. A take of a covenant order is paid to its maker
   // in the asset the person pays, from the operator's own coins in its round: a take larger than
   // that would wait for the operator, and a take cannot be called back.
-  let infoSeen = null
+  // One `info` serves every caller for five seconds, those asking at the same time included: the
+  // library runs one command at a time, and a quote asks from several candidates at once.
+  let infoAsk = null
+  function operatorInfo () {
+    if (!infoAsk || now() - infoAsk.at > 5000) infoAsk = { at: now(), p: run('info').catch(() => null) }
+    return infoAsk.p
+  }
   async function operatorRoom (asset) {
-    if (!infoSeen || now() - infoSeen.at > 5000) infoSeen = { at: now(), info: await run('info').catch(() => null) }
-    const a = ((infoSeen.info && infoSeen.info.server_info && infoSeen.info.server_info.assets) || []).find((x) => x && x.asset === asset)
+    const info = await operatorInfo()
+    const a = ((info && info.server_info && info.server_info.assets) || []).find((x) => x && x.asset === asset)
     return a && a.fundable != null ? big(a.fundable) : null
   }
 
@@ -383,7 +400,20 @@ export function createEngine (deps) {
           return null
         }
         let t
-        try { t = await run('swap_read', { offer: o.offer }) } catch (e) { log('[user trade] swap_read:', e.message); release(entry.maker, o.swap); return null }
+        try { t = await run('swap_read', { offer: o.offer }) } catch (e) {
+          log('[user trade] swap_read:', e.message)
+          // Paying that much would take all the wallet holds, with the margins its transactions leave
+          // for their fees, or leave change below the operator's smallest leaf: ask again for less, by
+          // what is missing (a site's probe sizes on all the wallet can pay).
+          const over = shortBy(e.message)
+          if (over > 0n && i < 3) {
+            await releaseNow(entry.maker, o.swap)
+            give = give - (over * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
+            if (give < entry.minReceive) return null
+            continue
+          }
+          release(entry.maker, o.swap); return null
+        }
         if (t.gets.asset !== receiveAsset || t.gives.asset !== payAsset || big(t.gets.value) !== give) { release(entry.maker, o.swap); return null }
         const spend = big(t.gives.value) + big(t.pays.margins)
         const limit = pay < have ? pay : have
@@ -822,8 +852,8 @@ export function createEngine (deps) {
 
   // The operator's limit on reassignments since a round (`info.depth_limit`); null when unknown.
   async function depthLimit () {
-    if (!infoSeen || now() - infoSeen.at > 5000) infoSeen = { at: now(), info: await run('info').catch(() => null) }
-    const v = infoSeen.info && infoSeen.info.server_info && infoSeen.info.server_info.depth_limit
+    const info = await operatorInfo()
+    const v = info && info.server_info && info.server_info.depth_limit
     return v != null ? Number(v) : null
   }
 
