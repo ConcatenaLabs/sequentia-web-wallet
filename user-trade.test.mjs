@@ -402,3 +402,28 @@ test('a purchase of BTC whose payment is made reads "Paid. Your BTC is on its wa
   assert.deepEqual(forbiddenIn(USER_WORDS.btcOnItsWay), [])
   assert.equal(tradeStateWord({ ...r, btcPaid: true }, 1000), USER_WORDS.receivedSettling)
 })
+
+test('engine: no trade is moved on while a person waits on a quote', async () => {
+  const s = standIn()
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  await eng.confirm(q.choice, q.ticket)
+  const rec = eng.records()[0]
+  const command = s.lib.command.bind(s.lib)
+  let release
+  const gate = new Promise((r) => { release = r })
+  let synced = 0
+  s.lib.command = (cmd, a) => { if (cmd === 'sync') synced++; return command(cmd, a) }
+  // A quote held open (its maker slow to answer): an advance meanwhile does nothing.
+  const fetchJson = s.fetchJson
+  s.fetchJson = async (url, init) => { if (String(url).endsWith('/v1/quotes')) await gate; return fetchJson(url, init) }
+  const eng2 = createEngine({ leaves: s.lib, fetchJson: (u, i) => s.fetchJson(u, i), makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store })
+  const pending = eng2.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  await new Promise((r) => setTimeout(r, 20))
+  const r1 = await eng2.advance(rec)
+  assert.equal(synced, 0, 'no sync while the quote waits')
+  assert.equal(r1, rec)
+  release(); await pending
+  await eng2.advance(eng2.records()[0])
+  assert.ok(synced >= 1, 'the trade moves on at the next pass')
+})
