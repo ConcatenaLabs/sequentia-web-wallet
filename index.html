@@ -7082,6 +7082,14 @@ async function openScanner(addrInput, amtInput){
   const onDecoded=(text)=>{
     if(done) return;                                                 // a result already won (camera vs in-flight file decode)
     let s=(text||'').trim(); if(!s) return;
+    // A receive code is kept whole: its instant ways to pay are in its query (pay-code.js).
+    let code=null; try{ code=readPayCode(s); }catch{}
+    if(code && (code.ark || code.sequentia || code.lightning)){
+      cleanup();
+      addrInput.value=s; addrInput.dispatchEvent(new Event('input'));
+      if(code.amount && amtInput && !amtInput._refMode){ amtInput.value=code.amount; amtInput.dispatchEvent(new Event('input')); }
+      return;
+    }
     if(s.includes(':')) s=s.slice(s.indexOf(':')+1);                 // drop any URI scheme (mirror the mobile wallet)
     if(/^LN[A-Z0-9]+$/.test(s)) s=s.toLowerCase();                   // a Lightning invoice QR is upper case; the invoice is the same
     let amt=null; const q=s.indexOf('?');
@@ -7105,12 +7113,13 @@ async function openScanner(addrInput, amtInput){
 
   if(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
     try{
-      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}});
+      // A dense code on another screen needs the pixels: ask for 1080p, read frames at up to 1280.
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}}});
       if(done){ stream.getTracks().forEach(t=>t.stop()); return; }   // cancelled during the permission prompt
       video.style.display='block'; video.srcObject=stream; try{ await video.play(); }catch{}
       const tick=()=>{ if(done) return;
         if(video.readyState>=2 && video.videoWidth){
-          const w=video.videoWidth, h=video.videoHeight, scale=Math.min(1,640/Math.max(w,h));
+          const w=video.videoWidth, h=video.videoHeight, scale=Math.min(1,1280/Math.max(w,h));
           canvas.width=Math.round(w*scale); canvas.height=Math.round(h*scale); ctx.drawImage(video,0,0,canvas.width,canvas.height);
           const code=decode(ctx.getImageData(0,0,canvas.width,canvas.height));
           if(code && code.data){ onDecoded(code.data); return; }
