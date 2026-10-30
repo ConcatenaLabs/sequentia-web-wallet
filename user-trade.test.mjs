@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy } from './user-trade.js'
+import { USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy, SHARED_VIEW_READS } from './user-trade.js'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32), Z = 'cc'.repeat(32)
 const fmt = (a, n) => `${n} ${a === X ? 'XT' : a === Y ? 'YT' : 'BTC'}`
@@ -372,4 +372,18 @@ test('engine: trades moving on together share one sync, and none runs again with
   t += 10_001
   await eng.advance(eng.records()[0])
   assert.equal(syncs() - before, 2, 'and another once ten seconds have passed')
+})
+
+test('engine: its reads share the view a moment old; what takes a coin or signs never asks to', async () => {
+  const s = standIn()
+  const command = s.lib.command.bind(s.lib)
+  const asked = []
+  s.lib.command = (cmd, a) => { asked.push([cmd, !!(a && a.shared_view)]); return command(cmd, a) }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  for (const [cmd, shared] of asked) assert.equal(shared, SHARED_VIEW_READS.has(cmd), cmd)
+  assert.ok(asked.some(([c, sh]) => c === 'coins' && sh), 'a read shares the view')
+  assert.ok(asked.some(([c, sh]) => c === 'swap_accept' && !sh), 'the acceptance, which signs, looks first')
 })

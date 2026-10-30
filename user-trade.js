@@ -219,13 +219,21 @@ const SYNC_EVERY_MS = 10000
 // Minutes after which a received trade still settling is said to be slow.
 const SLOW_SETTLE_MIN = 10
 
+// The library's commands the engine runs that only read, which it runs one after another for a
+// quote or a pass over its trades: each asks the library to answer from a look at the chain made
+// a moment ago (shared_view) rather than its own, which a wallet on a slow link pays a round trip
+// for. Every command that takes a coin, signs or broadcasts looks first, whatever it is asked.
+export const SHARED_VIEW_READS = new Set(['info', 'coins', 'plans', 'participations', 'swaps', 'balance', 'swap_read', 'take_quote',
+  'settle_quote', 'quote', 'order_fill_resting_quote', 'order_cancel_resting_quote'])
+
 export function createEngine (deps) {
   // The node scans one wallet at a time; a command that meets another's scan is asked again
   // (the library's own words; nothing else is retried).
   const run = async (cmd, args) => {
+    const a = SHARED_VIEW_READS.has(cmd) ? { ...(args || {}), shared_view: true } : (args || {})
     for (let i = 0; ; i++) {
       const t0 = now()
-      try { const v = await deps.leaves.command(cmd, args || {}); if (now() - t0 > 2000) log(`[user trade] ${cmd} took ${now() - t0} ms`); return v } catch (e) {
+      try { const v = await deps.leaves.command(cmd, a); if (now() - t0 > 2000) log(`[user trade] ${cmd} took ${now() - t0} ms`); return v } catch (e) {
         if (i < 8 && /Scan already in progress/.test(String(e && e.message))) { await sleep(500 + 500 * i); continue }
         throw e
       }
