@@ -2513,7 +2513,8 @@ const GAP = 20;                          // address gap limit scanned on each ch
 let btcRoot = null, btcBalance = 0n, btcUsed = new Set(), btcChangeNext = 0, btcScanLimit = GAP+1;
 const BTC_DUST = 294n;            // P2WPKH dust threshold (sats)
 const BTC_DEFAULT_FEERATE = 2;    // sat/vB default for testnet4
-const BTC_SANE_FEERATE = 50;      // sat/vB: above it a testnet4 estimate is someone's flood, not a price
+const BTC_MIN_FEERATE = 1;        // sat/vB: the relay minimum of Bitcoin Core up to 28; a tx under it is refused
+const BTC_SANE_FEERATE = 50;     // sat/vB: above it a testnet4 estimate is someone's flood, not a price
 function btcInit(phrase){ btcRoot = HDKey.fromMasterSeed(mnemonicToSeedSync(phrase.trim().replace(/\s+/g,' '))); }
 function btcNode(internal, i){ return btcRoot.derive(`m/84'/1'/0'/${internal?1:0}/${i}`); }
 function btcAddr(internal, i){ return btc.p2wpkh(btcNode(internal,i).publicKey, btc.TEST_NETWORK).address; }
@@ -2554,8 +2555,19 @@ async function btcGatherUtxos(){
   return lists.flat();
 }
 
-// deterministic vbytes for a P2WPKH-only tx, and the fee field as sat/vB
-function btcVbytes(nin, nout){ return Math.ceil(10.75 + 68*nin + 31*nout); }
+// vbytes of one output to `address`: value (8), script length (1) and the script itself. A P2WPKH
+// output is 31, a P2TR or P2WSH one 43; an address that does not decode counts as the largest.
+function btcOutVbytes(address){
+  try{ return 9 + btc.OutScript.encode(btc.Address(btc.TEST_NETWORK).decode(address)).length; }catch{ return 43; }
+}
+// deterministic vbytes of a tx spending `nin` P2WPKH inputs (the wallet's own) to `outs`: a count
+// of P2WPKH outputs, or the destination addresses, null standing for the wallet's P2WPKH change.
+// Counting every output as P2WPKH undersized a payment to a tb1p address by 12 vB, so at
+// 1 sat/vB it paid 0.92 and the node refused it.
+function btcVbytes(nin, outs){
+  const ov = typeof outs === 'number' ? 31*outs : outs.reduce((s,a)=> s + (a == null ? 31 : btcOutVbytes(a)), 0);
+  return Math.ceil(10.75 + 68*nin + ov);
+}
 function btcFeeRate(){ return BTC_DEFAULT_FEERATE; }
 
 // build + sign a P2WPKH transaction spending wallet utxos to `outputs` ([{address, amount}])
@@ -2564,14 +2576,17 @@ async function btcBuildTx(outputs, feeRate, { unsigned = false } = {}){
   if(!utxos.length) throw new Error('no spendable BTC; testnet4 balance is empty');
   utxos.sort((a,b)=> a.value<b.value?1:a.value>b.value?-1:0);   // largest first
   const target = outputs.reduce((s,o)=>s+o.amount, 0n);
-  const feeFor=(nin,nout)=> BigInt(Math.ceil(btcVbytes(nin,nout)*feeRate));
+  // Never under the relay minimum, whatever an estimate or a custom rate says.
+  feeRate = Math.max(Number(feeRate) || BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
+  const dests = outputs.map(o=>o.address);
+  const feeFor=(nin,change)=> BigInt(Math.ceil(btcVbytes(nin, change ? [...dests, null] : dests)*feeRate));
   const sel=[]; let inSum=0n;
-  for(const u of utxos){ sel.push(u); inSum+=u.value; if(inSum >= target + feeFor(sel.length, outputs.length+1)) break; }
-  let fee=feeFor(sel.length, outputs.length+1), change=inSum-target-fee, withChange=true;
+  for(const u of utxos){ sel.push(u); inSum+=u.value; if(inSum >= target + feeFor(sel.length, true)) break; }
+  let fee=feeFor(sel.length, true), change=inSum-target-fee, withChange=true;
   if(change < 0n) throw new Error('insufficient BTC for amount + fee');
   if(change <= BTC_DUST){            // dust change isn't worth an output — fold it into the fee
     withChange=false;
-    if(inSum - target < feeFor(sel.length, outputs.length)) throw new Error('insufficient BTC for amount + fee');
+    if(inSum - target < feeFor(sel.length, false)) throw new Error('insufficient BTC for amount + fee');
     fee = inSum - target; change = 0n;
   }
   const tx=new btc.Transaction();
@@ -2587,6 +2602,9 @@ async function btcBuildTx(outputs, feeRate, { unsigned = false } = {}){
     finish: () => { for(const k of keys) tx.sign(k); tx.finalize(); return { hex: tx.hex, txid: tx.id }; } };
   for(const k of keys) tx.sign(k);
   tx.finalize();
+  // The size above is an upper bound; should the signed tx ever come out larger, say so here
+  // rather than let the node refuse it as "fee too low".
+  if(fee < BigInt(Math.ceil(tx.vsize*feeRate))) throw new Error(`the fee (${fee} sat) is under ${feeRate} sat/vB for this ${tx.vsize} vB transaction`);
   // btcChangeNext is advanced only after a SUCCESSFUL broadcast (see btcReviewBroadcast),
   // so a cancelled or failed build never burns a change index or marches past the scan window.
   // outputIndexes[i] is where requested output i landed. The requested outputs are added first and
@@ -7179,7 +7197,7 @@ async function recommendFee(hex, blocks){
     // Testnet4's estimates are set by whoever floods it, at times hundreds of sat/vB for coins worth
     // nothing (897 for 25 blocks on 20/10/2026): past a sane rate the wallet keeps its default.
     if(sat>BTC_SANE_FEERATE) return { perKvb: BTC_DEFAULT_FEERATE*1000, why:'testnet4 estimates '+Math.round(sat)+' sat/vB because people flood it; the wallet keeps its default, so this may wait hours. Choose Custom to pay more' };
-    if(sat>0) return { perKvb: Math.max(1, sat)*1000 };
+    if(sat>0) return { perKvb: Math.max(BTC_MIN_FEERATE, sat)*1000 };
     return { perKvb: BTC_DEFAULT_FEERATE*1000, why:'no fee estimate from the network — this is the wallet’s default' };
   }
   const c=await congestionFor(hex), floor=Number(c && c.mempoolminfee_asset_atoms_per_kvb) || 0;
@@ -7216,7 +7234,8 @@ async function sendVsize(hex){
     if(rows.some(r=>r.asset==='BTC')){
       const outputs=rows.map(r=>({ address:r.addr, amount: parseAtoms(r.amtS, 8) }));
       const built=await btcBuildTx(outputs, BTC_DEFAULT_FEERATE, { unsigned:true });
-      return btcVbytes(built.inputs, outputs.length + (built.changeIndex!=null ? 1 : 0));
+      const dests=outputs.map(o=>o.address);
+      return btcVbytes(built.inputs, built.changeIndex!=null ? [...dests, null] : dests);
     }
     if(rows.some(r=>isOampAsset(r.asset))) return null;
     const p=buildSendPset(rows, { hex, unitsPerVb: 0 });
@@ -7277,9 +7296,10 @@ async function fillMax(r){
       // build folds the few bytes left over into the fee rather than coming up short.
       const utxos=await btcGatherUtxos();
       const total=utxos.reduce((s,u)=>s+u.value, 0n);
-      const n=$('recipients').children.length;
-      const sat=sendFee && sendFee.perKvb>0 ? sendFee.perKvb/1000 : BTC_DEFAULT_FEERATE;
-      max = total - others - BigInt(Math.ceil(btcVbytes(utxos.length, n+1)*sat));
+      // Each recipient's own output size; one not typed yet counts as the largest.
+      const dests=[...$('recipients').children].map(o=>o.querySelector('.raddr').value.trim());
+      const sat=Math.max(sendFee && sendFee.perKvb>0 ? sendFee.perKvb/1000 : BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
+      max = total - others - BigInt(Math.ceil(btcVbytes(utxos.length, [...dests, null])*sat));
     } else {
       max = BigInt(availableFor(hex)) - others;
       if(sendFee && sendFee.hex===hex && !isOampAsset(hex)){
