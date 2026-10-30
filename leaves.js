@@ -915,6 +915,24 @@ export function mountLeaves (ctx, root, settingsRoot) {
     }
   }
 
+  // A trade from coins an open plan keeps (the trade engine's `release`): they are given up in the
+  // next round for leaves no plan names, and the trade is asked again once that round is final.
+  // One release at a time; a second ask while one runs answers the one running.
+  function releaseFor (asset, leaves) {
+    if (S.releasing) return { releasing: S.releasing.coins.length, asset: S.releasing.asset }
+    if (!S.open || !Array.isArray(leaves) || !leaves.length) return null
+    S.releasing = { coins: leaves.slice(), asset, since: now(), command: 'trade' }
+    render()
+    ;(async () => {
+      try {
+        S.releasing.answer = await run('plan_release', { leaves })
+        log(`[leaves] ${leaves.length} planned coin(s) of ${String(asset).slice(0, 8)} given up in the next round to be traded`)
+        await waitReleased(leaves)
+      } catch (e) { log(`[leaves] release for a trade: ${e && e.message}`) } finally { S.releasing = null; render() }
+    })()
+    return { releasing: leaves.length, asset }
+  }
+
   async function waitReleased (coins) {
     const until = now() + RELEASE_WAIT_MS
     for (;;) {
@@ -1634,6 +1652,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
+    releaseFor: (asset, leaves) => releaseFor(asset, leaves),
     joinError: () => S.joinError || null,
     stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer) },
   }

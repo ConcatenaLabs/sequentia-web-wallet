@@ -3922,6 +3922,8 @@ function initUserComposer(){
     // as none; and default mode's board of coins on the chain, asked for at once.
     held: (a)=> userHeld(a),
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
+    // Coins an open refresh plan keeps are freed for a trade in the wallet's next round.
+    release: (a, leaves)=> leavesApi ? leavesApi.releaseFor(a, leaves) : null,
     store: localStorage, tag: walletTag,
     log: (...a)=> console.log(...a),
   });

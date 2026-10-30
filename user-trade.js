@@ -38,6 +38,9 @@
 //                                 'no-funds'
 //   prepare(asset)             -> asks the wallet to make an asset held but not payable ready (default
 //                                 mode boards it); optional
+//   release(asset, leaves)     -> asks the wallet to free `leaves`, live coins of `asset` kept by an open
+//                                 offline-refresh plan, in its next round (plan_release); optional:
+//                                 with it, a pay asset held only in such coins is 'freeing'
 //   store                      -> getItem/setItem (the trade records, persisted before signing)
 //   now()                      -> milliseconds
 //   sleep(ms), log(...)        -> optional
@@ -100,6 +103,9 @@ export const USER_WORDS = Object.freeze({
   // still being moved in by the wallet): never "you have none".
   notReady: (pay) => `Your ${pay} is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved.`,
   busy: (pay) => `Your ${pay} is held by an order you placed or a move your wallet is making, and can be traded once that completes. Nothing has moved.`,
+  // Kept by the wallet's plan to refresh it while the wallet is closed, which only a round can end:
+  // the wallet gives it up in its next round for a coin it can trade.
+  freeing: (pay) => `Your ${pay} is being made ready to trade: it is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
   pricing: 'Finding the best price…',
   priceMoved: 'The price moved. Here is the new one.',
   sent: 'Sent',
@@ -173,8 +179,11 @@ export function pickerOrder (assets, held, name) {
 
 // What the library can pay now, per asset, out of round: its live coins, less the coin of every
 // open offline-refresh plan, which the library never spends outside a round.
+export function plannedCoins (plans) {
+  return new Set(((plans && plans.plans) || []).filter((p) => !/^(done|cancelled|stopped|finished)$/.test(String(p.state || ''))).map((p) => p.coin))
+}
 export function spendableFrom (coins, plans) {
-  const planned = new Set(((plans && plans.plans) || []).filter((p) => !/^(done|cancelled|stopped|finished)$/.test(String(p.state || ''))).map((p) => p.coin))
+  const planned = plannedCoins(plans)
   const out = new Map()
   for (const c of coins || []) {
     if (!c || c.state !== 'live' || planned.has(c.leaf_id)) continue
@@ -517,7 +526,7 @@ export function createEngine (deps) {
 
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
-  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'busy'|'too-small'|'no-firm-offer' }
+  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'busy'|'freeing'|'too-small'|'no-firm-offer' }
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
   // source in the book offers, whatever the wallet holds. BTC counts only with the wallet's
   // Bitcoin Lightning (the gateway pays it there).
@@ -595,6 +604,14 @@ export function createEngine (deps) {
         // Not yet the wallet's to spend (a board waiting for its blocks), or held by something under
         // way: an order placed from it, a move the wallet is making, a refresh planned for it.
         const mine = ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === payAsset)
+        // Live coins kept by an open offline-refresh plan are freed through the wallet's next round
+        // (deps.release, the page's plan_release), as a payment from them is.
+        const planned = plannedCoins(await run('plans').catch(() => ({ plans: [] })))
+        const kept = mine.filter((c) => c.state === 'live' && planned.has(c.leaf_id)).map((c) => c.leaf_id)
+        if (kept.length && deps.release) {
+          try { await Promise.resolve(deps.release(payAsset, kept)) } catch (e) { log('[user trade] release:', e && e.message) }
+          return { ok: false, why: 'freeing', held: String(held) }
+        }
         const busy = !mine.some((c) => c.state === 'pending') && mine.some((c) => BUSY_STATES.includes(c.state))
         return { ok: false, why: busy ? 'busy' : 'not-ready', held: String(held) }
       }
