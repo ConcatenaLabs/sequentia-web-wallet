@@ -29,10 +29,19 @@
 // Its configuration, under the maker's own: "btc": { "rpc": "/…/lightning-rpc" (its node's socket),
 //   "keep_sats": "100000" (what its channels keep), "invoice_seconds": 3600, "max_route_fee_sats":
 //   "1000" (the most it pays to route a payment to a wallet's node),
+//   "unfinal_max_sats": "0", "unfinal_total_sats": "0", "unfinal_window_seconds": 7200 (see below),
 //   "pairs": [ { "give": "BTC", "want": "<hex>", "rate_num", "rate_den", "min_give" },
 //              { "give": "<hex>", "want": "BTC", … } ] } — or "price": true with the maker's price
 // feed, its "assets" naming "BTC" too. Swaps are kept in the store directory (btc-swaps.json), so a
 // restart follows every one it began.
+//
+// Paying before the asset is final is the desk owner's own risk choice, off unless configured: a
+// BTC purchase of at most `unfinal_max_sats` is paid as soon as the asset leaf the desk received
+// rests on a round the node holds (in a block or its mempool), while the BTC so paid against leaves
+// not yet final stays within `unfinal_total_sats` (a payment counts for `unfinal_window_seconds`
+// after it). Should that round never become final (a reorg voids it), the desk has paid BTC for
+// nothing, and bears it; anchoring is untouched. Above either cap, or at 0 (the default), the desk
+// pays once the asset is final, as before.
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
@@ -50,6 +59,18 @@ const LOCKING_SECONDS = 120
 // How long an invoice of the desk's runs (`invoice_seconds` overrides it): long enough for the
 // usual wait for the asset to be final, and renewed under the same hash past that (`reinvoice`).
 const INVOICE_SECONDS = 4 * 3600
+
+// Whether a swap's BTC (`s.give` sat) may be paid before the asset received for it is final, under
+// the desk's caps `b` (unfinal_max_sats per swap, unfinal_total_sats in all, a payment counting for
+// unfinal_window_seconds), given the desk's swaps: both caps at 0 (the default) never.
+export function mayPayUnfinal (b, swaps, s, now) {
+  const per = big(b.unfinal_max_sats ?? 0), total = big(b.unfinal_total_sats ?? 0)
+  if (per <= 0n || big(s.give) > per) return false
+  const windowMs = Number(b.unfinal_window_seconds ?? 7200) * 1000
+  let exposed = 0n
+  for (const x of swaps) if (x !== s && x.unfinal && x.state !== 'void' && now - (x.unfinal_at || 0) < windowMs) exposed += big(x.give)
+  return exposed + big(s.give) <= total
+}
 
 export function checkBtcConfig (b) {
   if (!b) return null
@@ -271,6 +292,8 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
     save()
   }
 
+  const unfinalAllowed = (s) => mayPayUnfinal(b, swaps.values(), s, Date.now())
+
   async function step (s, rcv, pay) {
     if (s.give_asset === 'BTC') {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
@@ -278,13 +301,19 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
         if (rcv.state !== 'issuing') { if (Date.now() > s.expires + 3600 * 1000 && rcv.state === 'waiting') s.state = 'lapsed'; return }
         // Only the library's refusal says the leaf will never do; an operator that does not answer
         // now (a restart) is asked again at the next pass, the wallet's payment held meanwhile.
-        const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.route_delay || s.min_final_cltv) })
+        const early = unfinalAllowed(s)
+        const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.route_delay || s.min_final_cltv), final: !early })
           .catch((e) => (e && (e.kind === 'refused' || /^refused\b/i.test(String(e.message))) ? { ready: false, never: e.message } : { ready: false, why: e.message }))
         if (r.never) { s.state = 'void'; log('btc swap', s.swap, 'not paid:', r.never); return }
         // The wallet's asset is received; the BTC is paid once it is held for good (its round made
         // and final, past Bitcoin blocks). Said once each time the reason changes, so a swap that
         // waits is seen waiting, not taken for one the desk forgot.
-        if (!r.ready) { if (s.wait_why !== r.why) { s.wait_why = r.why; save(); log('btc swap', s.swap, 'pays once the asset is held for good:', r.why || 'not yet') } return }
+        if (!r.ready) {
+          const why = (r.why || 'not yet') + (early ? '' : ' (paid once final: above the desk\'s limits for paying early)')
+          if (s.wait_why !== why) { s.wait_why = why; save(); log('btc swap', s.swap, 'pays once the asset is held:', why) }
+          return
+        }
+        if (r.final === false) { s.unfinal = true; s.unfinal_at = Date.now(); log('btc swap', s.swap, 'pays', s.give, 'sat before the asset is final (the desk\'s own risk)') }
         const d = await node.decode(s.invoice_btc)
         if (d.expires_at - Date.now() / 1000 < INVOICE_LEFT_SECONDS) { s.state = 'void'; log('btc swap', s.swap, 'the wallet\'s invoice runs out'); return }
         s.state = 'paying'; save()
