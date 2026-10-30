@@ -6312,7 +6312,24 @@ function balValueCell(refKey, atoms){
 }
 // A line across the whole list: the frozen notice, the hidden-assets fold.
 function balWide(node, cls){ const r=el('div','bt-wide'+(cls?' '+cls:'')); r.appendChild(node); return r; }
+// Default mode's composer, open on the Trade tab, is drawn again when what the wallet holds changes
+// (the wallet opened on the tab before its balance was in, a payment arrived), so You pay lists it;
+// never while a trade is priced or reviewed, and only when the set of assets held changed.
+let _ucHeldSig = '';
+function refreshComposerHeld(){
+  try{
+    if(!userComposer || devMode() || !userTradeOn()) return;
+    const panel = document.querySelector('[data-panel=swap]');
+    if(!panel || panel.classList.contains('hide')) return;
+    if(userComposer.state.ticket || userComposer.state.busy) return;
+    const sig = userKnownAssets().filter(a=> userHeld(a) > 0n).sort().join(',');
+    if(sig === _ucHeldSig) return;
+    _ucHeldSig = sig;
+    userComposer.render();
+  }catch(e){ console.warn('[user composer] render:', e?.message??e); }
+}
 function renderBalance(){
+  queueMicrotask(refreshComposerHeld);
   try{ populateFeeAssets(); populateIssueFeeAssets(); fillReissuePick(); }catch{}   // keep the fee and reissue pickers in sync as balances load
   let live = {}; try{ live = balObj(); }catch{}   // wollet.balance() can throw before the first scan
   let b = live, btcBal = btcBalance;
