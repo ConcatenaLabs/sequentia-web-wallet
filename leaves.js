@@ -102,6 +102,11 @@ export const CODE_MARGIN_S = 86_400
 // code shows within seconds rather than at the schedule's next sync.
 export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
+// The library's commands that only read (bark/src/arca/command.rs reads_only): a quote's.
+export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 'refusals', 'participations', 'schedule', 'orders',
+  'swaps', 'plans', 'info', 'supply', 'board_quote', 'quote', 'settle_quote', 'take_quote', 'order_fill_quote', 'order_quote',
+  'order_rest_quote', 'order_fill_resting_quote', 'order_cancel_resting_quote', 'offboard_quote', 'lightning_pay_quote',
+  'lightning_receive_quote', 'plan_quote', 'swap_read', 'btc_swap_read'])
 // User mode: the watch of the operator's bond (which may read a long stretch of the chain, and
 // holds the wallet while it does) runs at most this often, and only once the page has been
 // left alone for BOND_QUIET_MS; the bond itself is read at care's pace in either mode.
@@ -850,13 +855,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   async function autoSync () {
     if (!S.open) return
-    if (S.busy) { S.timer = setTimeout(autoSync, 5000); return }
+    // A person waiting on the wallet (a trade's quote, a payment) comes first: a sync started
+    // between the steps of what they asked held the next step for its whole length.
+    if (S.busy || S.asked) { S.timer = setTimeout(autoSync, S.asked ? 2000 : 5000); return }
     try {
       const s = await run('schedule')
       S.schedule = s
       if (s.due) emit('leafSyncDue', { now: s.now, next_sync_at: s.next_sync_at, why: s.why ?? null })
       const d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
       S.heldFor = d.held
+      if (S.asked) { S.timer = setTimeout(autoSync, 2000); return }
       if (d.sync && !S.busy) {
         S.busy = true; render()
         try {
@@ -939,15 +947,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
       try {
         S.releasing.answer = await run('plan_release', { leaves })
         log(`[leaves] ${leaves.length} planned coin(s) of ${String(asset).slice(0, 8)} given up in the next round to be traded`)
-        await waitReleased(leaves)
+        await waitReleased(leaves, { yieldToPerson: true })
       } catch (e) { log(`[leaves] release for a trade: ${e && e.message}`) } finally { S.releasing = null; render() }
     })()
     return { releasing: leaves.length, asset }
   }
 
-  async function waitReleased (coins) {
+  // `yieldToPerson`: the release runs in the background (one a trade's quote asked for), so a
+  // person waiting on the wallet comes first and the round is followed between their steps. A
+  // release inside the person's own payment never waits for itself.
+  async function waitReleased (coins, { yieldToPerson = false } = {}) {
     const until = now() + RELEASE_WAIT_MS
     for (;;) {
+      while (yieldToPerson && S.asked && now() < until) await sleep(500)
       try { const v = await run('sync'); arrivals(v && v.mailbox); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
       let cs = null
       try { cs = await run('coins'); S.coins = cs || [] } catch {}
@@ -1626,9 +1638,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     hold: (f) => asking(f),
     // A command for the user composer, asked directly (no reload after it), paid through
     // the next round when it needs a planned coin.
+    // A read (a price, the coins) is asked as it is: freeing planned coins and following the next
+    // round is for a payment, never for a quote, whose person waits on its answer.
     pay: (cmd, args) => {
       if (!S.open) return Promise.reject(new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' }))
-      return asking(() => paying(cmd, args || {})).catch((e) => { throw dev() ? e : plainRefusal(e) })
+      const read = COMPOSER_READS.has(String(cmd))
+      return asking(() => (read ? run(cmd, args || {}) : paying(cmd, args || {}))).catch((e) => { throw dev() ? e : plainRefusal(e) })
     },
     // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
     frozenAtoms: (hex) => frozenAtoms(S.coins, S.balance).get(hex) || 0n,
