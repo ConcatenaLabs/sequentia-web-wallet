@@ -33,9 +33,16 @@ test('sizing: the price rounded against the taker, the lot rules of an order', (
   assert.deepEqual(sizeEntry(e, 10_000_000n).receive, 600000n)
 })
 
-test('the choice: the most received, then the fewest parties, then the lower id', () => {
+test('the choice: the most received, then the fewest parties, then the lower id; a coin handed over in seconds before one that waits on Bitcoin blocks unless that gives 0.5% more', () => {
+  // Among sources alike in speed: the most received, then the fewest parties.
+  assert.equal(chooseCandidate([{ source: 'covenant-round', id: 'z', receive: 300n }, { source: 'onchain-fill', id: 'y', receive: 300n }]).source, 'onchain-fill')
+  // A take waits for its round: an instant source within 0.5% is taken instead.
   const c = chooseCandidate([{ source: 'leaf-maker', id: 'b', receive: 300n }, { source: 'covenant-round', id: 'z', receive: 300n }, { source: 'leaf-maker', id: 'a', receive: 299n }])
-  assert.equal(c.source, 'covenant-round')
+  assert.equal(c.id, 'b')
+  assert.equal(chooseCandidate([{ source: 'leaf-maker', id: 'b', receive: 10000n }, { source: 'covenant-round', id: 'z', receive: 10050n }]).id, 'b')
+  assert.equal(chooseCandidate([{ source: 'leaf-maker', id: 'b', receive: 10000n }, { source: 'covenant-round', id: 'z', receive: 10051n }]).id, 'z')
+  assert.equal(chooseCandidate([{ source: 'leaf-resting', id: 'r', receive: 9990n }, { source: 'onchain-fill', id: 'o', receive: 10000n }]).id, 'r')
+  assert.equal(chooseCandidate([{ source: 'covenant-round', id: 'z', receive: 300n }]).id, 'z')
   assert.equal(chooseCandidate([{ source: 'leaf-maker', id: 'b', receive: 301n }, { source: 'covenant-round', id: 'a', receive: 300n }]).id, 'b')
   assert.equal(chooseCandidate([{ source: 'leaf-maker', id: 'b', receive: 5n }, { source: 'leaf-maker', id: 'a', receive: 5n }]).id, 'a')
   assert.equal(chooseCandidate([]), null)

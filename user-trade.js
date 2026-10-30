@@ -214,6 +214,8 @@ const FIRM_WAIT_MS = 30000
 const BUSY_STATES = ['given', 'offered', 'sending', 'forfeited', 'receiving', 'paying', 'live']
 // How far, as a factor either way, an entry's price may be from the price feed's and stand.
 const FEED_REACH = 2
+// The least time between two syncs the engine asks for.
+const SYNC_EVERY_MS = 10000
 // Minutes after which a received trade still settling is said to be slow.
 const SLOW_SETTLE_MIN = 10
 
@@ -319,6 +321,19 @@ export function createEngine (deps) {
   // five seconds; null when the server does not say. A take of a covenant order is paid to its maker
   // in the asset the person pays, from the operator's own coins in its round: a take larger than
   // that would wait for the operator, and a take cannot be called back.
+  // One sync serves every trade moving on at the same time, and none runs again within
+  // SYNC_EVERY_MS of the last: the library runs one command at a time, and a trade that waits
+  // (a take waiting for its round) synced at every pass, so a slow node kept every quote waiting
+  // behind syncs.
+  let syncAsk = null
+  function syncShared () {
+    if (syncAsk && (syncAsk.pending || now() - syncAsk.at < SYNC_EVERY_MS)) return syncAsk.p
+    const a = { at: now(), pending: true }
+    a.p = run('sync').then(() => {}, (e) => log('[user trade] sync:', e && e.message)).finally(() => { a.pending = false; a.at = now() })
+    syncAsk = a
+    return a.p
+  }
+
   // One `info` serves every caller for five seconds, those asking at the same time included: the
   // library runs one command at a time, and a quote asks from several candidates at once.
   let infoAsk = null
@@ -808,7 +823,7 @@ export function createEngine (deps) {
       } else if (rec.source === 'leaf-resting') {
         // A fill the page closed on is sent again by the library's next sync; the coin it brings
         // is then the wallet's.
-        await run('sync').catch(() => {})
+        await syncShared()
         const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
         if (got) { rec.state = 'sent'; rec.sentAt = now() } else notFound('not filled')
       } else if (rec.source === 'onchain-fill') {
@@ -848,7 +863,7 @@ export function createEngine (deps) {
   // A fill of a resting order: Settled once the relay records the fill final and the coins it
   // brought are settled in a round that is final.
   async function advanceResting (rec) {
-    await run('sync').catch((e) => log('[user trade] sync:', e.message))
+    await syncShared()
     if (deps.relayFills && rec.transfer && !rec.fillFinal) {
       const fills = await Promise.resolve(deps.relayFills(rec.ticket.payAsset, rec.ticket.receiveAsset)).catch(() => [])
       const f = (fills || []).find((x) => x && x.txid === rec.transfer)
@@ -916,7 +931,7 @@ export function createEngine (deps) {
   }
 
   async function advanceTake (rec) {
-    await run('sync').catch((e) => log('[user trade] sync:', e.message))
+    await syncShared()
     const p = await participation(rec.take)
     if (!p) return rec
     rec.takeState = p.state
@@ -931,7 +946,7 @@ export function createEngine (deps) {
   }
 
   async function advanceSwap (rec) {
-    await run('sync').catch((e) => log('[user trade] sync:', e.message))
+    await syncShared()
     const s = ((await run('swaps')) || []).find((x) => x.swap === rec.swap)
     rec.swapState = s && s.state
     if (s && s.state === 'cancelled') { rec.state = 'returned'; rec.returnedAt = now(); return put(rec) }

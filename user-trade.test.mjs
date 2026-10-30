@@ -356,3 +356,20 @@ test('engine: the page is told when a trade moves on, so it reads the balance ag
   assert.equal(told[told.length - 1], 'settled')
   assert.ok(told.length > n)
 })
+
+test('engine: trades moving on together share one sync, and none runs again within ten seconds', async () => {
+  const s = standIn()
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  const syncs = () => s.calls.filter((c) => c === 'sync').length
+  const before = syncs()
+  await Promise.all([eng.advance(eng.records()[0]), eng.advance(eng.records()[0])])
+  await eng.advance(eng.records()[0])
+  assert.equal(syncs() - before, 1, 'one sync for passes within ten seconds')
+  t += 10_001
+  await eng.advance(eng.records()[0])
+  assert.equal(syncs() - before, 2, 'and another once ten seconds have passed')
+})
