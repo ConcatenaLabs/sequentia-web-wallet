@@ -99,6 +99,7 @@ export const USER_WORDS = Object.freeze({
   // Held, and shown in the balance, but not where a trade can pay it from yet (just arrived, or
   // still being moved in by the wallet): never "you have none".
   notReady: (pay) => `Your ${pay} is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved.`,
+  busy: (pay) => `Your ${pay} is held by an order you placed or a move your wallet is making, and can be traded once that completes. Nothing has moved.`,
   pricing: 'Finding the best price…',
   priceMoved: 'The price moved. Here is the new one.',
   sent: 'Sent',
@@ -185,6 +186,12 @@ export function spendableFrom (coins, plans) {
 const TRADES_KEY = 'swk.usertrade'
 // How long a quote waits before it asks once more for firm terms that none gave.
 const FIRM_RETRY_MS = 3000
+// How long a maker has to answer a firm offer before the next source is asked.
+const FIRM_WAIT_MS = 30000
+// The states of a coin held by something under way (a live one here is planned for a refresh).
+const BUSY_STATES = ['given', 'offered', 'sending', 'forfeited', 'receiving', 'paying', 'live']
+// How far, as a factor either way, an entry's price may be from the price feed's and stand.
+const FEED_REACH = 2
 // Minutes after which a received trade still settling is said to be slow.
 const SLOW_SETTLE_MIN = 10
 
@@ -230,12 +237,14 @@ export function createEngine (deps) {
     const out = []
     // A maker quotes in-tree swaps, and, with a Bitcoin Lightning node, BTC in one hash-lock.
     if (sources.includes('leaf-maker') || (sources.includes('btc-gateway') && deps.btc)) {
-      for (const m of (deps.makers ? deps.makers() : [])) {
+      // Every maker at once: one that does not answer costs its own wait, not the others'.
+      const got = await Promise.all((deps.makers ? deps.makers() : []).map(async (m) => {
         try {
           const q = await deps.fetchJson(m + '/v1/quotes')
-          out.push(...makerEntries(m, q.quotes, { payAsset, receiveAsset }).filter((e) => sources.includes(e.source)))
-        } catch (e) { log('[user trade] maker', m, 'did not answer:', e && e.message) }
-      }
+          return makerEntries(m, q.quotes, { payAsset, receiveAsset }).filter((e) => sources.includes(e.source))
+        } catch (e) { log('[user trade] maker', m, 'did not answer:', e && e.message); return [] }
+      }))
+      for (const g of got) out.push(...g)
     }
     const onchain = sources.includes('onchain-fill') && deps.onchain
     const wantBook = (sources.includes('covenant-round') || sources.includes('leaf-resting') || onchain) && deps.relayBook
@@ -267,7 +276,21 @@ export function createEngine (deps) {
         }
       } catch (e) { log('[user trade] the book did not answer:', e && e.message) }
     }
-    return out
+    return out.filter((e) => nearFeed(e, payAsset, receiveAsset))
+  }
+
+  // Whether an entry's price is within reach of the price feed's: an entry giving more than twice,
+  // or less than half, of what the feed says the pay asset is worth in the receive asset is
+  // mispriced at its source (a maker that read a bad price, an order posted inverted), and is
+  // never shown or taken. Without a feed price for either asset, every entry stands.
+  function nearFeed (e, payAsset, receiveAsset) {
+    const fair = deps.fairRate ? deps.fairRate(payAsset, receiveAsset) : null
+    if (!(fair > 0)) return true
+    // Atoms received per atom paid, at the entry's price.
+    const at = Number(e.rateDen) / Number(e.rateNum)
+    const ok = at <= fair * FEED_REACH && at >= fair / FEED_REACH
+    if (!ok) log('[user trade] an entry far off the price feed is left out:', e.source, e.id, 'gives', at, 'per atom against the feed\'s', fair)
+    return ok
   }
 
   // What the operator's rounds can pay of `asset` now (its server's `fundable`), read at most every
@@ -337,7 +360,9 @@ export function createEngine (deps) {
       let give = size.receive
       for (let i = 0; i < 4; i++) {
         let o
-        try { o = await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }) }) }
+        // A maker that does not answer a firm offer within FIRM_WAIT_MS makes way for the next
+        // source; acceptances and releases, which must complete, are never cut short.
+        try { o = await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }), signal: AbortSignal.timeout(FIRM_WAIT_MS) }) }
         catch (e) {
           log('[user trade] maker firm:', e.message)
           // The maker holds less than its quote now (its last trade spent some): ask for half.
@@ -492,7 +517,7 @@ export function createEngine (deps) {
 
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
-  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'too-small'|'no-firm-offer' }
+  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'busy'|'too-small'|'no-firm-offer' }
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
   // source in the book offers, whatever the wallet holds. BTC counts only with the wallet's
   // Bitcoin Lightning (the gateway pays it there).
@@ -565,7 +590,14 @@ export function createEngine (deps) {
       // What the wallet shows it holds, though no source can pay from it now: the wallet is asked to
       // make it ready (default mode boards coins on the chain into the tree by itself).
       const held = payAsset !== 'BTC' && deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : 0n
-      if (held > 0n) { try { deps.prepare && deps.prepare(payAsset) } catch {} return { ok: false, why: 'not-ready', held: String(held) } }
+      if (held > 0n) {
+        try { deps.prepare && deps.prepare(payAsset) } catch {}
+        // Not yet the wallet's to spend (a board waiting for its blocks), or held by something under
+        // way: an order placed from it, a move the wallet is making, a refresh planned for it.
+        const mine = ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === payAsset)
+        const busy = !mine.some((c) => c.state === 'pending') && mine.some((c) => BUSY_STATES.includes(c.state))
+        return { ok: false, why: busy ? 'busy' : 'not-ready', held: String(held) }
+      }
       return { ok: false, why: 'no-funds' }
     }
     const haveOf = (e) => (e.source === 'onchain-fill' ? haveChain : haveLeaf)

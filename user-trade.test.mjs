@@ -176,6 +176,13 @@ test('engine: not listed, not offered, no funds', async () => {
     .quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   assert.deepEqual([q.why, q.held, asked], ['not-ready', '50000000000000', [X]])
   assert.deepEqual(forbiddenIn(USER_WORDS.notReady('USDX')), [])
+  // Held by an order placed from it (the coin given to the round that makes the order): busy, not
+  // "the next Bitcoin blocks".
+  s.coins[0].state = 'given'
+  const b = await createEngine({ ...base, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), held: () => 3000000n })
+    .quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(b.why, 'busy')
+  assert.deepEqual(forbiddenIn(USER_WORDS.busy('GOLD')), [])
 })
 
 test('engine: what can be received for an asset is what the book offers on an admitted pair, held or not', async () => {
@@ -257,6 +264,25 @@ test('engine: offered, but no firm offer comes: said so, after one more try, nev
   assert.equal(firms, 2, 'asked once more after a pause')
   assert.equal(slept, 1)
   assert.deepEqual(forbiddenIn(USER_WORDS.noFirmOffer), [])
+})
+
+test('engine: an entry far off the price feed is never shown or taken', async () => {
+  const s = standIn()
+  // One level at the feed's price (4/3 XT per YT), one ~4,900 times off.
+  const levels = [
+    { give_asset: Y, want_asset: X, rate_num: '4', rate_den: '3', max_give: '100000', min_give: '10000' },
+    { give_asset: Y, want_asset: X, rate_num: '4', rate_den: '14700', max_give: '100000000', min_give: '10000' },
+  ]
+  const fetchJson = async (url, init) => url.endsWith('/v1/quotes') ? { quotes: levels } : s.fetchJson(url, init)
+  // The feed: an atom of XT is worth 3/4 of an atom of YT.
+  const fairRate = (pay, receive) => (pay === X && receive === Y ? 0.75 : null)
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), fairRate, sleep: async () => {} })
+  const e = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '40000' })
+  assert.ok(e.ok, e.why)
+  assert.equal(e.receive, '30000', 'priced at the feed\'s level, not the one 4,900 times off')
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '40000' })
+  assert.ok(q.ok, q.why)
+  assert.ok(BigInt(q.ticket.amountOut) <= 30000n, q.ticket.amountOut)
 })
 
 test('engine: the two amounts, estimated either way round, with no firm offer asked', async () => {
