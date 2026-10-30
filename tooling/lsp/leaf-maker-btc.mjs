@@ -281,7 +281,10 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
         const r = await cmd('lightning_receive_ready', { hash: s.hash, need_seconds: needSeconds(s.route_delay || s.min_final_cltv) })
           .catch((e) => (e && (e.kind === 'refused' || /^refused\b/i.test(String(e.message))) ? { ready: false, never: e.message } : { ready: false, why: e.message }))
         if (r.never) { s.state = 'void'; log('btc swap', s.swap, 'not paid:', r.never); return }
-        if (!r.ready) return
+        // The wallet's asset is received; the BTC is paid once it is held for good (its round made
+        // and final, past Bitcoin blocks). Said once each time the reason changes, so a swap that
+        // waits is seen waiting, not taken for one the desk forgot.
+        if (!r.ready) { if (s.wait_why !== r.why) { s.wait_why = r.why; save(); log('btc swap', s.swap, 'pays once the asset is held for good:', r.why || 'not yet') } return }
         const d = await node.decode(s.invoice_btc)
         if (d.expires_at - Date.now() / 1000 < INVOICE_LEFT_SECONDS) { s.state = 'void'; log('btc swap', s.swap, 'the wallet\'s invoice runs out'); return }
         s.state = 'paying'; save()
