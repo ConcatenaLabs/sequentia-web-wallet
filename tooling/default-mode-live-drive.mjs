@@ -10,6 +10,8 @@
 //          the receiver's balance showing it
 //   trade  wallet <name> trades in the Trade tab (default mode's composer): pay, receive, amount
 //   show   wallet <name>'s balance figures and headline, written to <work>/<name>.totals.json
+//   invoice  wallet <name> makes a BTC invoice on Receive for <sats>, writes it to
+//          <work>/<name>.invoice, and keeps the page open until it says Received (up to an hour)
 //   pay    wallet <name> pays a BTC invoice handed over by a link (`#pay?invoice=…`), as a page
 //          selling something for BTC does: Send opens with it filled in, and the drive presses Pay
 //          (`--paste` pastes it into Pay an invoice instead, for a page without the link)
@@ -239,6 +241,24 @@ async function main () {
     note(`code after ${secs(Date.now() - tOpen)}`)
     writeFileSync(join(work, name + '.code'), code)
     await shot(page, `${name}-receive-code.png`)
+    await page.stop()
+  } else if (step === 'invoice') {
+    // node … invoice A 60000
+    const sats = Number(rest[0])
+    if (!(sats > 0)) throw new Error('invoice needs an amount in sats')
+    const page = await openWallet(name)
+    await tab(page, 'receive')
+    await page.waitFor("!document.querySelector('#lnRecvCard').classList.contains('hide')", 120000)
+    await page.eval(`(()=>{ const i=document.querySelector('#lnRecvAmt'); i.value=${JSON.stringify((sats / 1e8).toFixed(8))}; i.dispatchEvent(new Event('input')); return true })()`)
+    await click(page, '#lnRecvBtn')
+    const inv = await page.waitFor("(()=>{ const t=(document.querySelector('#lnRecvBolt11')?.textContent||'').trim(); return /^ln/i.test(t) ? t : false })()", 120000)
+    writeFileSync(join(work, name + '.invoice'), inv + '\n')
+    check('Receive makes a BTC invoice', true, `${sats} sats, ${inv.slice(0, 24)}…`)
+    await shot(page, `${name}-invoice-1.png`)
+    const tR = Date.now()
+    const said = await page.waitFor("(()=>{ const t=(document.querySelector('#lnRecvStatus')?.textContent||'').trim(); return /^Received/.test(t) ? t : false })()", 3600000)
+    check('the invoice is paid and the BTC received', true, `${said} (${secs(Date.now() - tR)} after the invoice showed)`)
+    await shot(page, `${name}-invoice-2-received.png`)
     await page.stop()
   } else if (step === 'pay') {
     // node … pay A <invoice>
