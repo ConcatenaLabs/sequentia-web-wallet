@@ -236,9 +236,10 @@ In user mode the wallet holds its Sequentia assets in the tree of the operator t
 once the operator's server shows the pinned key (a restored phrase finds the coins it holds
 there), and one that cannot (the server unreachable, or showing another key) works as it would
 without and tries again every two minutes. **Receive** gives one receive code, a BIP321 payment request
-(`bitcoin:<address>?ark=<Ark address>&sequentia=<receive request>`, `pay-code.js`): another
-wallet like this one pays an asset at its single-use Sequentia receive request and BTC at its
-Bitcoin ark address, both in seconds, and any other wallet pays the address. An optional
+(`BITCOIN:<ADDRESS>?ark=<ARK ADDRESS>&sequentia=<SQR1…>`, `pay-code.js`, upper case and with
+the receive request in a short form so it scans at a glance): another wallet like this one pays
+an asset at its single-use Sequentia receive request and BTC at its Bitcoin ark address, both in
+seconds, and any other wallet pays the address. An optional
 amount (in BTC) adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
 Lightning wallet pays. The address alone
 is shown in developer mode. The
