@@ -3868,7 +3868,9 @@ function initUserComposer(){
     leaves: { command: async (cmd, args)=>{
       if(!leavesApi || !leavesApi.isOpen() || !leavesApi.state || !leavesApi.state.client) throw new Error('this wallet holds no leaves');
       return await leavesApi.pay(cmd, args || {});
-    } },
+    },
+    // The wallet's upkeep waits while a person waits on a quote or a confirmation.
+    hold: (f)=> (leavesApi && leavesApi.isOpen() && leavesApi.hold) ? leavesApi.hold(f) : f() },
     // A read (a maker's quotes, the relay's book) that has not answered in 20 s is given up, so a
     // silent maker costs the price one source rather than holding it for good. A POST is left to
     // run: a firm offer or an acceptance can take minutes, and is only asked of a maker that quoted.

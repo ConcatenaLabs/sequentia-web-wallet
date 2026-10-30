@@ -179,7 +179,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere); "Your
   <pay> is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved." (held, and shown in
   the balance, but not yet where a trade pays from: just arrived, or still being moved in by the
-  wallet)
+  wallet); "Only <amount> of your <pay> can be traded now, too little for any offer: the rest is
+  ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
+  most of what is held is not ready yet); "Nobody could confirm a price for this just now.
+  Nothing has moved: try again in a moment."
+- A price comes within seconds: every offer worth asking is asked at once, and one that has not
+  answered within a few seconds is left out of the price rather than waited for.
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
 

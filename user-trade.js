@@ -107,6 +107,8 @@ export const USER_WORDS = Object.freeze({
   // Held, and shown in the balance, but not where a trade can pay it from yet (just arrived, or
   // still being moved in by the wallet): never "you have none".
   notReady: (pay) => `Your ${pay} is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved.`,
+  // Part of what is paid can be traded now, too little for any offer; the rest settles first.
+  partReady: (ready, pay) => `Only ${ready} of your ${pay} can be traded now, too little for any offer: the rest is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
   busy: (pay) => `Your ${pay} is held by an order you placed or a move your wallet is making, and can be traded once that completes. Nothing has moved.`,
   // Kept by the wallet's plan to refresh it while the wallet is closed, which only a round can end:
   // the wallet gives it up in its next round for a coin it can trade.
@@ -224,8 +226,14 @@ export function spendableFrom (coins, plans) {
 const TRADES_KEY = 'swk.usertrade'
 // How long a quote waits before it asks once more for firm terms that none gave.
 const FIRM_RETRY_MS = 3000
-// How long a maker has to answer a firm offer before the next source is asked.
-const FIRM_WAIT_MS = 30000
+// How long a quote may take, from Review: every source worth asking for firm terms is asked at
+// once, and one that has not answered by then is left out of the ticket (a late answer is let go
+// of), so a slow maker, or a source waiting on its chain, never holds the person's price up. The
+// firm terms always get at least QUOTE_FIRM_MIN_MS of it.
+export const QUOTE_FIRM_MS = 8000
+const QUOTE_FIRM_MIN_MS = 3000
+// The book's entries read while the amount was typed stand for the quote this long.
+const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
 const BUSY_STATES = ['given', 'offered', 'sending', 'forfeited', 'receiving', 'paying', 'live']
 // How far, as a factor either way, an entry's price may be from the price feed's and stand.
@@ -256,6 +264,7 @@ export function createEngine (deps) {
     }
   }
   const now = () => (deps.now ? deps.now() : Date.now())
+  const firmMs = deps.quoteFirmMs || QUOTE_FIRM_MS
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const log = deps.log || (() => {})
   const key = () => TRADES_KEY + '.' + (deps.tag ? deps.tag() : 'default')
@@ -372,7 +381,7 @@ export function createEngine (deps) {
   }
 
   // Firm terms of one entry for `pay` atoms, priced by the library. -> a candidate or null.
-  async function firm (entry, payAsset, receiveAsset, pay, have) {
+  async function firm (entry, payAsset, receiveAsset, pay, have, until = Date.now() + firmMs) {
     planSingleStep(entry.source, { payAsset, receiveAsset, caps: entry.source === 'covenant-round' ? { leaf_take: true } : undefined })
     // Sized on what the wallet can pay, never on more: a site asks the price of all the wallet can
     // pay with a large probe amount, and a maker asked for its whole level refuses what it does
@@ -436,9 +445,9 @@ export function createEngine (deps) {
       let give = size.receive
       for (let i = 0; i < 4; i++) {
         let o
-        // A maker that does not answer a firm offer within FIRM_WAIT_MS makes way for the next
-        // source; acceptances and releases, which must complete, are never cut short.
-        try { o = await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }), signal: AbortSignal.timeout(FIRM_WAIT_MS) }) }
+        // A maker that does not answer a firm offer by the quote's deadline is left out of it;
+        // acceptances and releases, which must complete, are never cut short.
+        try { o = await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }), signal: AbortSignal.timeout(Math.max(1000, until - Date.now())) }) }
         catch (e) {
           log('[user trade] maker firm:', e.message)
           // The maker holds less than its quote now (its last trade spent some): ask for half.
@@ -593,6 +602,15 @@ export function createEngine (deps) {
     try { await deps.fetchJson(maker + '/v1/release', { method: 'POST', body: JSON.stringify({ swap }) }) } catch {}
   }
 
+  // A firm answer within `ms`, or null: a source that answers later is let go of (drop), so the
+  // offer it holds frees the maker's coins.
+  function inTime (p, ms) {
+    let late = false, timer = null
+    const settled = Promise.resolve(p).then((c) => { if (late) { if (c) { log('[user trade] a source answered after the quote, let go:', c.source); drop(c) } return null } return c }, (e) => { log('[user trade] firm:', e && e.message); return null })
+    const out = Promise.race([settled, new Promise((resolve) => { timer = setTimeout(() => { late = true; resolve(null) }, Math.max(0, ms)) })])
+    return out.finally(() => clearTimeout(timer))
+  }
+
   // Lets go of a priced choice that is not taken: the maker's held offer, and the wallet's own
   // Bitcoin invoice for it.
   function drop (c) {
@@ -607,6 +625,7 @@ export function createEngine (deps) {
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
   //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'busy'|'freeing'|'too-small'|'no-firm-offer' }
+  //  | { ok: false, why: 'part-ready', ready } (atoms payable now, too few for any offer)
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
   // source in the book offers, whatever the wallet holds. BTC counts only with the wallet's
   // Bitcoin Lightning (the gateway pays it there).
@@ -666,9 +685,16 @@ export function createEngine (deps) {
   // on (advance), so the library's one-at-a-time queue holds no follow-up of another trade (a sync of
   // many seconds on a slow link) ahead of it. The trades move on at the next pass after it.
   let asked = 0
-  const personWaits = (f) => async (...a) => { asked++; try { return await f(...a) } finally { asked-- } }
+  // The wallet's own upkeep waits too, for the whole of it, not only while a command runs: a sync
+  // started between the steps of a quote (while a maker answers) held the next step for its whole
+  // length (deps.leaves.hold, leaves.js asking).
+  const personWaits = (f) => async (...a) => {
+    asked++
+    try { return await (deps.leaves && deps.leaves.hold ? deps.leaves.hold(() => f(...a)) : f(...a)) } finally { asked-- }
+  }
 
   async function quote ({ payAsset, receiveAsset, amount }) {
+    const started = Date.now()
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
@@ -704,7 +730,10 @@ export function createEngine (deps) {
       return { ok: false, why: 'no-funds' }
     }
     const haveOf = (e) => (e.source === 'onchain-fill' ? haveChain : haveLeaf)
-    const es = (await entries(payAsset, receiveAsset, sources)).filter((e) => haveOf(e) > 0n)
+    // The entries read for the estimate a moment ago stand: the firm terms are what the ticket shows.
+    const fresh = estimates.get(payAsset + '>' + receiveAsset)
+    const all = fresh && now() - fresh.at <= ENTRIES_FRESH_MS ? fresh.es : await entries(payAsset, receiveAsset, sources)
+    const es = all.filter((e) => haveOf(e) > 0n)
     // Indicative first, so only the best few are asked for firm terms (a maker holds its coins
     // for a firm offer).
     const ind = es.map((e) => { const h = haveOf(e); const s = sizeEntry(e, A < h ? A : h); return s ? { e, receive: s.receive } : null }).filter(Boolean)
@@ -712,21 +741,25 @@ export function createEngine (deps) {
       // A maker quoting several levels of one pair is asked once, at the level that gives the
       // most for this size: each firm offer holds its coins.
       .filter((x, i, l) => !x.e.maker || l.findIndex((y) => y.e.maker === x.e.maker && y.e.source === x.e.source) === i)
-    // Firm terms of the best three that give them: an entry that cannot be firmed (a resting
-    // order the wallet's coins are too old for, a maker that ran short) makes way for the next.
-    // When none gives firm terms (a maker busy or short just now), they are asked once more a
-    // moment later before the person is told.
+    // The amount would trade, but what the wallet can pay now is less than any offer takes: the
+    // rest of what it holds is not ready yet (coins waiting on their blocks). Said so, never
+    // "too small".
+    if (!ind.length && es.some((e) => haveOf(e) < A && sizeEntry(e, A))) {
+      const ready = es.reduce((m, e) => (haveOf(e) > m ? haveOf(e) : m), 0n)
+      return { ok: false, why: 'part-ready', ready: String(ready) }
+    }
+    // Firm terms of the best eight, all asked at once, within QUOTE_FIRM_MS: an entry that cannot
+    // be firmed (a resting order the wallet's coins are too old for, a maker that ran short) or
+    // that has not answered by then is left out, and a late answer is let go of. When none gives
+    // firm terms and there is time left, they are asked once more a moment later.
     const cands = []
-    const worth = worthFirming(ind)
+    const worth = worthFirming(ind).slice(0, 8)
+    // Wall-clock time: the person's wait (deps.now may be a test's stand-in clock).
+    const until = Math.max(started + firmMs, Date.now() + Math.min(QUOTE_FIRM_MIN_MS, firmMs))
     for (let round = 0; round < 2 && !cands.length; round++) {
-      if (round) await sleep(FIRM_RETRY_MS)
-      let tried = 0
-      for (const { e } of worth) {
-        if (cands.length >= 3 || tried >= 8) break
-        tried++
-        const c = await firm(e, payAsset, receiveAsset, A, haveOf(e))
-        if (c) cands.push(c)
-      }
+      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, firmMs / 2)) break; await sleep(FIRM_RETRY_MS) }
+      const got = await Promise.all(worth.map(({ e }) => inTime(firm(e, payAsset, receiveAsset, A, haveOf(e), until), until - Date.now())))
+      for (const c of got) if (c) cands.push(c)
     }
     const best = chooseCandidate(cands)
     for (const c of cands) if (c !== best) drop(c)
