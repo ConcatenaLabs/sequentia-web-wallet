@@ -114,6 +114,8 @@ export const USER_WORDS = Object.freeze({
   settled: 'Settled',
   // A trade that waits on Bitcoin blocks says what is already true while it waits.
   waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
+  // A purchase of BTC whose payment is made: the BTC comes once the other side pays it out.
+  btcOnItsWay: 'Paid. Your BTC is on its way.',
   receivedSettling: 'Received. Settled after the next Bitcoin blocks.',
   receivedSlow: 'Received, and yours to use. Settling with the network is taking longer than usual.',
   minutes: (word, n) => `${word} (${n} min)`,
@@ -154,7 +156,8 @@ export function tradeStateWord (r, now = Date.now()) {
   // Received, its settling still waiting with the network after ten minutes (the network had no
   // room for it yet): said so, the coins being the wallet's all along.
   const held = heldAlready(r)
-  const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.receivedSettling) : W.sent
+  const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.receivedSettling)
+    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : W.sent
   return m >= 1 ? W.minutes(word, m) : word
 }
 
