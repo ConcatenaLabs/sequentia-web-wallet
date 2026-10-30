@@ -114,6 +114,7 @@ import { runReverseBridgeTerms, openReverseBridgeSession, newBridgeClaimKeypair,
 import { hashPreimageOk, subasSellStateFileForNonce, subasSellGuardVerdict, assembleSubasSellSettled } from './subas-sell-recovery.mjs';
 import { takeAssetMsatArgs, partialFields } from './pureln-partial.mjs';
 import { fundFromNode } from './consolidate.mjs';
+import { adoptableChannel } from './channel-adopt.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted, roomAlreadyThere } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
@@ -1096,25 +1097,18 @@ async function runChannelOpen(job) {
   job.status = 'syncing';
   await waitSynced(rpc, deadline);
 
-  // A10 IDEMPOTENCY GUARD (prevents a double-fund). Before waiting for the deposit
-  // or funding, check whether a channel to this peer ALREADY exists. The wallet's
-  // auto-reconnect / stranded-deposit recovery (section 4) — and any plain retry —
-  // can re-issue /channel/open after a prior fundchannel already broadcast; funding
-  // again would open a SECOND channel and fragment the user's deposit. Worse, the
-  // deposit-wait below would then spin to timeout ("Could not afford ...", the
-  // deposit already spent into the first channel). If an opening/locked channel is
-  // present, adopt it and skip straight to the lock-in watch. (listpeerchannels is
-  // registry/db-backed, so this needs no peer connection and never signs.)
+  // A10 IDEMPOTENCY GUARD (prevents a double-fund). A retry of a move whose funding already went
+  // out (the wallet's resume, a plain retry, this service restarting mid-open) finds no deposit on
+  // the node and adopts the channel that funding is opening, rather than funding a second one. A
+  // channel already open is never adopted, nor any while the node holds a deposit of the amount
+  // asked: that is a new deposit, and it funds a new channel (channel-adopt.mjs). listpeerchannels
+  // and listfunds are db-backed, so this needs no peer connection and never signs.
   let existingCh = null;
   {
     const pc = await lnrpc('listpeerchannels', [`id=${peerId}`], rpc)
       .catch(() => ({ channels: [] }));
-    const OPEN_STATES = ['OPENINGD', 'DUALOPEND_OPEN_INIT', 'DUALOPEND_AWAITING_LOCKIN',
-                         'CHANNELD_AWAITING_LOCKIN', 'CHANNELD_NORMAL'];
-    // Only a channel this node opened can be the one its deposit funded. A channel the LP opened
-    // toward it (room to receive, bought on /channel/inbound) holds nothing of the user's: adopting
-    // it reported the move "active with 0 spendable" and left the deposit on the node's address.
-    existingCh = (pc.channels || []).find((c) => OPEN_STATES.includes(c.state) && c.opener !== 'remote') || null;
+    const held = await confirmedOnchain(rpc, job.chain, job.asset_id).catch(() => null);
+    existingCh = adoptableChannel(pc.channels, { depositWaiting: !!held && held.units >= need });
   }
   if (existingCh) {
     job.funding_txid = existingCh.funding_txid
