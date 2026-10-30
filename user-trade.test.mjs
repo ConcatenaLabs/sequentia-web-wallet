@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine } from './user-trade.js'
+import { USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy } from './user-trade.js'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32), Z = 'cc'.repeat(32)
 const fmt = (a, n) => `${n} ${a === X ? 'XT' : a === Y ? 'YT' : 'BTC'}`
@@ -315,4 +315,27 @@ test('engine: the two amounts, estimated either way round, with no firm offer as
   assert.equal((await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '0' })).why, 'too-small')
   assert.ok(!s.posts.some(([p]) => p === 'firm'), 'no maker was asked for a firm offer')
   assert.equal((await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: () => ({ pairs: { chains: {} }, genesis: 'g' }), store: s.store }).estimate({ payAsset: X, receiveAsset: Y, pay: '1' })).why, 'not-listed')
+})
+
+test('shortBy: what a payment the library refused for want of funds is short by', () => {
+  assert.equal(shortBy('the wallet holds 19826249492 of asset 2a51 in live coins, and paying 19826249492 takes 19826251492 with the margins its transactions leave for their fees'), 2000n)
+  assert.equal(shortBy("the change would be below the operator's smallest leaf in asset 2a51 (1000000 atoms): pay a little less, or that much more"), 1000000n)
+  assert.equal(shortBy('the maker is away'), 0n)
+})
+
+test('engine: a firm offer the wallet cannot pay with its margins is asked again for less', async () => {
+  const s = standIn()
+  const command = s.lib.command.bind(s.lib)
+  let refused = 0
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'swap_read' && !refused++) throw new Error('the wallet holds 3000000 of asset x in live coins, and paying 2999000 takes 3000192 with the margins its transactions leave for their fees')
+    return command(cmd, a)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store })
+  // A site's probe: far more than the wallet holds, so the first firm offer is sized on all of it.
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '1000000000000000000' })
+  assert.ok(q.ok, q.why)
+  const firms = s.posts.filter(([p]) => p === 'firm').map(([, b]) => BigInt(b.give))
+  assert.ok(firms.length >= 2 && firms[1] < firms[0], `asked again for less: ${firms}`)
+  assert.ok(s.posts.some(([p]) => p === 'release'), 'the refused offer is released')
 })
