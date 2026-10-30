@@ -2654,9 +2654,9 @@ async function offboardReview(r, onDone){
   };
 }
 
-async function btcReviewBroadcast(outputs, onDone, satPerVb){
+async function btcReviewBroadcast(outputs, onDone, satPerVb, note = []){
   const built = await btcBuildTx(outputs, satPerVb > 0 ? satPerVb : btcFeeRate());
-  const kv=[['Network', '⚠ Bitcoin testnet4 (parent chain): sending BTC, not a Sequentia asset']];
+  const kv=[...note, ['Network', '⚠ Bitcoin testnet4 (parent chain): sending BTC, not a Sequentia asset']];
   for(const o of outputs) kv.push(['→ '+o.address, fmtAtoms(o.amount,8)+' BTC']);
   kv.push(['Network fee', `${fmtAtoms(built.fee,8)} BTC · ${built.inputs} input${built.inputs>1?'s':''}, ${built.vsize} vB`]);
   kv.push(['Total', fmtAtoms(outputs.reduce((s,o)=>s+o.amount,0n)+built.fee,8)+' BTC']);
@@ -6762,16 +6762,24 @@ function watchRecvInvoice(inv){
     }
   })();
 }
-// Where a payment of `asset` to `text` goes when `text` is a receive code: its Sequentia part
-// for an asset the tree pays, its Ark part for BTC the ark pays (btcArk takes the code as it
-// is), else its address. Anything that is not a code is returned as it is.
-function payCodeDestination(text, asset){
-  let c = null; try{ c = readPayCode(text); }catch{ return text; }
-  if(!c) return text;
-  if(asset === 'BTC') return (c.ark && btcArkRoutes()) ? text : (c.address || text);
-  if(c.sequentia && leavesApi && leavesApi.treeRoute(c.sequentia)) return c.sequentia;
-  return c.address || text;
+// Where a payment of `asset` to `text` goes when `text` is a receive code, instant first: its
+// Sequentia part (the library's request, rebuilt from the code's short form) for an asset the
+// tree pays, its Ark part for BTC the ark pays (btcArk takes the code as it is), else its
+// address, and then `byAddress` is set so the review says so in plain words. Anything that is
+// not a code is returned as it is. -> { dest, byAddress }
+function payCodeRoute(text, asset){
+  let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
+  if(!c) return { dest: text, byAddress: false };
+  if(asset === 'BTC'){
+    if(c.ark && btcArkRoutes()) return { dest: text, byAddress: false };
+    if(c.lightning && btcArkRoutes()) return { dest: c.lightning, byAddress: false };
+    return { dest: c.address || text, byAddress: !!c.address };
+  }
+  const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
+  if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
+  return { dest: c.address || text, byAddress: !!c.address };
 }
+function payCodeDestination(text, asset){ return payCodeRoute(text, asset).dest; }
 function renderReceiveCode(){
   $('recvLbl').textContent = DEFAULT_WORDS.codeLabel;
   $('recvTip').textContent = DEFAULT_WORDS.receiveTip;
@@ -8137,7 +8145,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     // A receive code (pay-code.js) is paid the way that fits what is sent: an asset at its
     // Sequentia part when the tree takes it, BTC at its Ark part when the Bitcoin ark pays it,
     // and anything else at its address.
-    for(const r of rows) r.addr = payCodeDestination(r.addr, r.asset);
+    for(const r of rows){ const d = payCodeRoute(r.addr, r.asset); r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); }
+    const byAddressNote = (btc) => rows.some(r=>r.byAddress)
+      ? [['', DEFAULT_WORDS.byAddress(btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock)]] : [];
     if(!rows.length) throw new Error('add at least one recipient');
     const reset=()=>{ $('recipients').innerHTML=''; addRecipientRow(); };
     // Restricted (OpenAMP) assets settle on the enclave ledger, not on-chain — one transfer, one
@@ -8192,7 +8202,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       const outputs=rows.map(r=>{ const amount=parseAtoms(r.amtS, 8);
         if(amount<=0n) throw new Error('amount must be greater than zero');
         return {address:r.addr, amount}; });
-      await btcReviewBroadcast(outputs, reset, sendFee ? sendFee.perKvb/1000 : 0);
+      await btcReviewBroadcast(outputs, reset, sendFee ? sendFee.perKvb/1000 : 0, byAddressNote(true));
     } else {
       const faHex = sendFee ? sendFee.hex : POLICY_HEX;
       // A rate the network would refuse outright is not built (the note under the rate says why).
@@ -8202,7 +8212,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       endBuild();
       // Structured review rows (recipient, resolved atoms, asset, ⇄ ref details) — never blind-sign.
       const reviewRows = rows.map(r=>({ addr:r.addr, atoms:parseAtoms(r.amtS, sendPrecision(r.asset)), hex:r.asset, ref:r.ref }));
-      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex});
+      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:byAddressNote(false)});
     }
   }catch(e){ $('sendErr').textContent=plainErr(e); }
   finally{ btn.disabled=false; btn.textContent=label; } };

@@ -78,12 +78,16 @@ modes (`asset-picker.js`):
 - The card's label is **Receive code**. Under it: "Any asset, any amount. A payment from another
   Sequentia wallet arrives in seconds. Each code is paid once; a new one shows when it is."
 - The code is one payment request for everything the wallet takes, BTC included:
-  `bitcoin:<address>?ark=<Ark address>&sequentia=<receive request>` (`pay-code.js`). The address
-  is the wallet's own, the same tb1 address on both chains; `ark` is an address of the wallet's
-  on the Bitcoin ark, where BTC arrives in seconds; `sequentia` is the single-use Sequentia
-  receive request. Neither extra part is required, so any Bitcoin wallet reads the code as a plain
-  request for the address. A wallet like this one pays an asset at the `sequentia` part and BTC at
-  the `ark` part, and anything else at the address.
+  `BITCOIN:<ADDRESS>?ark=<ARK ADDRESS>&sequentia=<RECEIVE REQUEST>` (`pay-code.js`, whose header
+  describes the format). The address is the wallet's own, the same tb1 address on both chains;
+  `ark` is an address of the wallet's on the Bitcoin ark, where BTC arrives in seconds;
+  `sequentia` is the single-use Sequentia receive request, in its short form (`SQR1…`). Neither
+  extra part is required, so any Bitcoin wallet reads the code as a plain request for the address.
+- The code is made to be scanned at a glance from another screen: upper case, so the QR code
+  holds it in its alphanumeric mode, with error correction at level M. Every wallet reads codes in
+  either case, and codes made before the short form.
+- The code shows at once from what the wallet last drew, syncing or not, and stays until it is
+  paid or its request lapses; a way to pay it that opens later is added to it in place.
 - Above the code, one optional field, empty by default: "Amount in BTC (optional)". With an
   amount the code also names it (`amount=`) and carries an invoice of the wallet's on the Bitcoin
   ark for exactly that amount (`lightning=`), which a Lightning wallet pays; the invoice is
@@ -103,8 +107,13 @@ modes (`asset-picker.js`):
 
 - The field is **Recipient**, with the hint "a receive code, an address or an invoice". Next to
   the asset is its one figure, "balance <amount>".
-- A receive code for the wallet's own operator and chain is paid instantly. Anything else goes the
-  way it always has. The wallet chooses; nothing asks the person.
+- A receive code is paid the fastest way the wallet holds: an asset at its `sequentia` part from
+  what the wallet holds for instant payments, BTC at its `ark` part from the Bitcoin ark, or at
+  its invoice from the ark or from Lightning. Only when none of these fits is it paid at its
+  address, and the review then says so first: "This can't arrive in seconds from what you hold
+  now, so it goes to the address. It arrives after a Bitcoin block." (for BTC; for an asset, "It
+  arrives after the next block, in about a minute."). Anything that is not a code goes the way it
+  always has. The wallet chooses; nothing asks the person.
 - The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds." and the
   buttons **Cancel** and **Send**.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
@@ -273,6 +282,9 @@ What it shows beyond the Market and Trade sections above:
   with the time and, while the trade is not settled, its status. On the right are
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
 - A payment's row has its description (or "Received" / "Sent"), its time and its amount as +/-.
+- A payment is in History the moment it leaves, and a payment arriving as soon as the network has
+  it. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
+  "Pending", and that goes once it is confirmed.
 - Which rails a trade used ("BTC on-chain · GOLD over Lightning", "over Lightning") is shown in
   developer mode only.
 
