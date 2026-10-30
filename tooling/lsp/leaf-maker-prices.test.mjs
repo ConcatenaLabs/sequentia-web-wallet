@@ -2,7 +2,7 @@
 // BTC pair is priced from the testnet feed's `tBTC`, and in capitals otherwise.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { rateFromPrices, steadyRate, JUMP_READS } from './leaf-maker.mjs'
+import { rateFromPrices, steadyRate, JUMP_READS, priceOf, PRICE_MAX_AGE_S } from './leaf-maker.mjs'
 
 const feed = { USDX: { price: 1 }, tBTC: { price: 80000 }, EURX: 1.12 }
 const USDX = { ticker: 'USDX', precision: 8 }, BTC = { ticker: 'tBTC', precision: 8 }
@@ -32,4 +32,17 @@ test('a reading far from the rate quoted now is held back until it repeats', () 
   steadyRate('r', now, wild, jumps)
   assert.equal(steadyRate('r', now, near, jumps), near)
   assert.equal(steadyRate('r', near, wild, jumps), near)
+})
+
+test('a price whose reading is more than ten minutes old is not quoted; a seeded one has no age', () => {
+  const now = 1_800_000_000_000, s = now / 1000
+  const USD = { ticker: 'USDX', precision: 8 }, GOLD = { ticker: 'GOLD', precision: 8 }
+  const feed = (gold) => ({ USDX: { price: 1, as_of: s }, GOLD: gold })
+  assert.ok(rateFromPrices(feed({ price: 4000, as_of: s - PRICE_MAX_AGE_S }), GOLD, USD, 30, now))
+  assert.equal(rateFromPrices(feed({ price: 4000, as_of: s - PRICE_MAX_AGE_S - 1 }), GOLD, USD, 30, now), null)
+  assert.equal(rateFromPrices(feed({ price: 4000, as_of: s - PRICE_MAX_AGE_S - 1 }), USD, GOLD, 30, now), null)
+  assert.ok(rateFromPrices(feed({ price: 4000, as_of: s - 86400, static: true }), GOLD, USD, 30, now))
+  // A feed that dates nothing is read as before.
+  assert.ok(rateFromPrices(feed({ price: 4000 }), GOLD, USD, 30, now))
+  assert.equal(priceOf(feed({ price: 4000, as_of: s - 3600 }), GOLD, now), null)
 })
