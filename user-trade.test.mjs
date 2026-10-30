@@ -436,3 +436,50 @@ test('engine: no trade is moved on while a person waits on a quote', async () =>
   await eng2.advance(eng2.records()[0])
   assert.ok(synced >= 1, 'the trade moves on at the next pass')
 })
+
+test('engine: a maker slower than the quote\'s deadline is left out, and its late offer let go of (#363)', async () => {
+  const s = standIn()
+  const released = []
+  const fetchJson = async (url, init) => {
+    if (url.startsWith('http://slow')) {
+      // Quotes a better price, then takes longer to firm it than the quote waits.
+      if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: '1', rate_den: '1', max_give: '1000000', min_give: '10000' }] }
+      if (url.endsWith('/v1/firm')) { await new Promise((r) => setTimeout(r, 300)); const b = JSON.parse(init.body); return { swap: 'slow1', offer: `swap-offer:${b.give}:${b.give}`, give: b.give, want: b.give } }
+      if (url.endsWith('/v1/release')) { released.push(JSON.parse(init.body).swap); return {} }
+    }
+    return s.fetchJson(url, init)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://slow', 'http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 100 })
+  const t0 = Date.now()
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const took = Date.now() - t0
+  assert.ok(q.ok, q.why)
+  assert.equal(q.choice.entry.maker, 'http://m', 'the ticket is the source that answered in time')
+  assert.ok(took < 250, `the quote waited ${took} ms, not the slow maker's 300`)
+  await new Promise((r) => setTimeout(r, 400))
+  assert.deepEqual(released, ['slow1'], 'the late offer is released')
+})
+
+test('engine: a quote holds the wallet\'s upkeep for its whole length (#363)', async () => {
+  const s = standIn()
+  let held = 0, maxHeld = 0
+  const leaves = { ...s.lib, command: (c, a) => s.lib.command(c, a), hold: async (f) => { held++; maxHeld = Math.max(maxHeld, held); try { return await f() } finally { held-- } } }
+  const fetchJson = async (url, init) => { if (url.endsWith('/v1/firm')) assert.equal(held, 1, 'held while the maker answers'); return s.fetchJson(url, init) }
+  const eng = createEngine({ leaves, fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  assert.equal(maxHeld, 1)
+  assert.equal(held, 0, 'let go once the quote is answered')
+})
+
+test('engine: an amount that would trade, paid from coins mostly not ready yet, is said so, never "too small" (#363)', async () => {
+  const s = standIn()
+  s.coins[0].value = '5000'          // ready now: too little for the maker's least
+  s.coins.push({ leaf_id: 'c2', asset: X, value: '2000000', state: 'pending', kind: 'board' })
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.ok, false)
+  assert.equal(q.why, 'part-ready')
+  assert.equal(q.ready, '5000')
+  assert.deepEqual(forbiddenIn(USER_WORDS.partReady('0.00005 XT', 'XT')), [])
+})

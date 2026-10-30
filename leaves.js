@@ -1620,6 +1620,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     setMode: (m) => changeMode(m),
     isOpen: () => S.open,
     command,
+    // A person's span of work (a trade's quote, its confirmation): the wallet's own upkeep waits
+    // until it is over, not only while one of its commands runs.
+    hold: (f) => asking(f),
     // A command for the user composer, asked directly (no reload after it), paid through
     // the next round when it needs a planned coin.
     pay: (cmd, args) => {
