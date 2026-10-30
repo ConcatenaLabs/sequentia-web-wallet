@@ -533,7 +533,10 @@ in the middle of a trade:
   receive, or a purchase with more than it can pay, is not offered.
 
 Of the trades that can fill the amount you pay, it takes the one that gives you the most, then
-the one with the fewest parties left to act. It offers no more than the wallet can pay now. A
+the one with the fewest parties left to act. A trade whose coin is yours only after Bitcoin
+blocks (a take paid in the operator's round, or a fill on the chain) is taken over one that hands
+the coin over in seconds only when it gives at least 0.5% more. It offers no more than the wallet
+can pay now. A
 pair nobody fills in one step reads "Not offered right now: nobody offers YLEAF for XLEAF in one
 step.", and a pair the drill has not passed is not offered at all. Which pairs those are, per
 chain, is [`user-mode/pairs.json`](user-mode/pairs.json), with the drill's report beside it.
