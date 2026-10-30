@@ -191,12 +191,13 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   that the transaction is still unconfirmed. Each row's details say why an unconfirmed
   transaction is waiting, and a transaction the network dropped is marked so.
 - **Report a problem**, at the top of Help: what happened, an optional Emissio account code to be
-  credited, and the address only when ticked. The report carries the page's version, the mode and
+  credited, and the address only when ticked. The report carries the page's version (when this
+  copy was published, from its Last-Modified header, also shown in the footer), the mode and
   the recent errors (scrubbed of addresses, keys and invoices), shows exactly what will be sent,
   and goes to Emissio's intake. Its words are in `docs/DEFAULT_MODE.md`.
 - **Help**: questions and answers on fees (which assets pay them, what the marks next to the fee
-  asset mean, setting a rate, why a transaction is refused or waits, the three rescues) and on
-  Lightning (who holds the keys, moving in and out, sending and receiving, what room to receive
+  asset mean, setting a rate, why a transaction is refused or waits, the three rescues) and, in
+  developer mode, on Lightning (who holds the keys, moving in and out, sending and receiving, what room to receive
   costs and guarantees, with a step-by-step picture of one channel). Links across the wallet open
   the relevant answer, over a dialog when one is open.
 - **Sign**: two kinds of signature, neither able to authorize a spend. An OpenAMP request (a

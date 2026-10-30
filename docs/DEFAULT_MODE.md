@@ -301,7 +301,9 @@ and at the top of Help. The words are in `REPORT_WORDS` (`problem-report.js`).
   instead.", then **Emissio account code (optional)**: "Paste it to be credited if the report is
   accepted."
 - Under them: "The report includes this wallet's version, its mode and its recent errors. It
-  never includes your recovery phrase or your keys." The recent errors are the last twenty the
+  never includes your recovery phrase or your keys." The web wallet's version is when the page
+  was published ("Version <date> <time> UTC" in the footer); the apps report their own. The
+  recent errors are the last twenty the
   wallet threw or showed, with anything shaped like an address, a key, an invoice or a long hex
   string replaced before they are kept.
 - A box, unticked: **Also send my address**. Ticked, it shows "This address will be sent:" and the
