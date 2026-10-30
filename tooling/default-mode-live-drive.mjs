@@ -10,6 +10,8 @@
 //          the receiver's balance showing it
 //   trade  wallet <name> trades in the Trade tab (default mode's composer): pay, receive, amount
 //   show   wallet <name>'s balance figures and headline, written to <work>/<name>.totals.json
+//   pay    wallet <name> pays a BTC invoice handed over by a link (`#pay?invoice=…`), as a page
+//          selling something for BTC does: Send opens with it filled in, and the drive presses Pay
 //   restore  the phrase of <name> opened in a fresh profile; its figures compared with <name>'s
 //
 //   node tooling/default-mode-live-drive.mjs <work-dir> <step> <name> [args…]
@@ -233,6 +235,29 @@ async function main () {
     note(`code after ${secs(Date.now() - tOpen)}`)
     writeFileSync(join(work, name + '.code'), code)
     await shot(page, `${name}-receive-code.png`)
+    await page.stop()
+  } else if (step === 'pay') {
+    // node … pay A <invoice>
+    const inv = rest[0]
+    if (!inv) throw new Error('pay needs an invoice')
+    const page = await openWallet(name)
+    await page.go(base + '#pay?invoice=' + encodeURIComponent(inv))
+    await page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000)
+    const filled = await page.waitFor(`(()=>{ const t=document.querySelector('#lnSendBolt11'); return t && t.value.trim() === ${JSON.stringify(inv)} && !document.querySelector('#lnSendCard').classList.contains('hide') ? true : false })()`, 120000)
+    check('the link opens Send with the invoice filled in', !!filled)
+    const words = forbiddenIn(await visibleText(page)).filter((w) => !['on-chain', 'lightning', 'channel', 'channels'].includes(w))
+    check('the card says none of the words default mode never says', !words.length, words)
+    await shot(page, `${name}-pay-1-filled.png`)
+    const tP = Date.now()
+    await click(page, '#lnSendBtn')
+    let said
+    try {
+      said = await page.waitFor("(()=>{ const t=(document.querySelector('#lnSendStatus')?.textContent||'').trim(); return /Paid|Nothing was sent|could not|refused/i.test(t) ? t : false })()", 240000)
+    } catch (e) {
+      said = 'no answer in 240 s; the card says: ' + (await page.eval("(document.querySelector('#lnSendStatus')?.textContent||'').trim()").catch(() => '?'))
+    }
+    check('the invoice is paid from the BTC balance', /^Paid/.test(said), `${said} (${secs(Date.now() - tP)} from the click)`)
+    await shot(page, `${name}-pay-2-paid.png`)
     await page.stop()
   } else if (step === 'show') {
     const page = await openWallet(name)

@@ -3270,7 +3270,14 @@ function oampPrefillSignCard(payload){
     lbl.textContent=parts.join('. ');
   } else lbl.textContent='';
 }
-// Parse and act on the current location.hash. Two routes (spec 1.9 WW-2/WW-3); anything else is
+// Fill the invoice card on Send with an invoice handed over by a link, as if pasted.
+function prefillInvoice(inv){
+  tab('send');
+  const t=$('lnSendBolt11'); if(!t) return;
+  t.value=inv; t.dispatchEvent(new Event('input'));
+  try{ $('lnSendCard').scrollIntoView({block:'center'}); $('lnSendBtn').focus(); }catch{}
+}
+// Parse and act on the current location.hash. Three routes (spec 1.9 WW-2/WW-3, and `pay`); anything else is
 // left alone. Called once after a wallet is unlocked (openWallet) and again on every hashchange
 // while the wallet stays open — never before a wallet exists, since neither route can do anything
 // useful without a signer.
@@ -3284,6 +3291,11 @@ function handleDeepLinkRoute(){
     if(p){ try{ payload=JSON.parse(b64urlDecode(p)); }catch(e){ console.warn('[oamp-sign] malformed deep-link payload:', e?.message??e); } }
     tab('sign');
     oampPrefillSignCard(payload);
+  } else if(route==='pay'){
+    // A page selling something for BTC hands its invoice here (`#pay?invoice=<invoice>`): Send
+    // opens with it filled in and checked, and nothing is paid until the person presses Pay.
+    const inv=(params.get('invoice')||'').trim().replace(/^lightning:/i,'');
+    if(/^ln[a-z0-9]+$/i.test(inv) && inv.length<=2000) prefillInvoice(inv);
   } else if(route==='oamp-send'){
     const asset=(params.get('asset')||'').trim().toLowerCase();
     const to=(params.get('to')||'').trim();
