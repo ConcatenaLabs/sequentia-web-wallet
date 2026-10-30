@@ -47,7 +47,7 @@
 //   now()                      -> milliseconds
 //   sleep(ms), log(...)        -> optional
 
-import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries, sizeEntry, chooseCandidate, admittedSources } from './tooling/lsp/single-step-book.mjs'
+import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries, sizeEntry, chooseCandidate, admittedSources, SLOW_SOURCES, SLOW_PREMIUM_BPS } from './tooling/lsp/single-step-book.mjs'
 import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
@@ -190,6 +190,16 @@ export function shortBy (message) {
   if (s) return BigInt(s[2]) > BigInt(s[1]) ? BigInt(s[2]) - BigInt(s[1]) : 0n
   const d = m.match(/change would be below the operator's smallest leaf in asset \S+ \((\d+) atoms\)/)
   return d ? BigInt(d[1]) : 0n
+}
+
+// The indicative entries worth asking for firm terms, best first: a source whose coin waits on
+// Bitcoin blocks is chosen over one handed over in seconds only when it gives SLOW_PREMIUM_BPS
+// more (chooseCandidate), so one that does not give that much more than the best such indicative
+// entry is never asked; its firm terms (a take quoted by the operator) cost the person time.
+export function worthFirming (ind) {
+  const fast = ind.filter((x) => !SLOW_SOURCES.has(x.e.source))
+  const bestFast = fast.length ? fast[0].receive : 0n
+  return ind.filter((x) => !SLOW_SOURCES.has(x.e.source) || x.receive * 10000n > bestFast * (10000n + SLOW_PREMIUM_BPS))
 }
 
 export function plannedCoins (plans) {
@@ -380,7 +390,16 @@ export function createEngine (deps) {
       const limit = pay < have ? pay : have
       for (let i = 0; i < 4; i++) {
         let q
-        try { q = await run('take_quote', { order: entry.raw._relayJson || entry.raw, amount: String(r), max_fee_ppm: MAX_FEE_PPM }) } catch (e) { log('[user trade] take_quote:', e.message); return null }
+        try { q = await run('take_quote', { order: entry.raw._relayJson || entry.raw, amount: String(r), max_fee_ppm: MAX_FEE_PPM }) } catch (e) {
+          log('[user trade] take_quote:', e.message)
+          // Short by the margins, or change below the smallest leaf: ask for less, by what is missing.
+          const over = shortBy(e.message)
+          if (over <= 0n || i >= 3) return null
+          const s3 = sizeEntry(entry, (r * entry.rateNum) / entry.rateDen - over - 1n)
+          if (!s3 || s3.receive >= r) return null
+          r = s3.receive
+          continue
+        }
         // What leaves the wallet in all: the price, the operator's fee, and the margins of a
         // payment to itself when it holds no coin of exactly that much.
         let gives = big(q.spends ?? q.gives)
@@ -686,10 +705,11 @@ export function createEngine (deps) {
     // When none gives firm terms (a maker busy or short just now), they are asked once more a
     // moment later before the person is told.
     const cands = []
+    const worth = worthFirming(ind)
     for (let round = 0; round < 2 && !cands.length; round++) {
       if (round) await sleep(FIRM_RETRY_MS)
       let tried = 0
-      for (const { e } of ind) {
+      for (const { e } of worth) {
         if (cands.length >= 3 || tried >= 8) break
         tried++
         const c = await firm(e, payAsset, receiveAsset, A, haveOf(e))
