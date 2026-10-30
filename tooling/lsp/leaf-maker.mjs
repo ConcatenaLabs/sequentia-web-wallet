@@ -24,7 +24,8 @@
 //                                  whose max_give carries `give`)
 //   POST /v1/accept {swap, accept} -> { swap, state: 'done' }: completes the swap (`swap_complete`, the
 //                                  operator co-signing); asked again it answers the same
-//   POST /v1/release {swap}       -> { swap, state }: cancels a firm offer nobody took
+//   POST /v1/release {swap}       -> { swap, state: 'releasing' }: cancels a firm offer nobody took; answered
+//                                  at once, the cancel ahead of the upkeep and of any later firm
 //   GET  /v1/swap/<id>            -> { swap, state }
 //
 // Run:  node tooling/lsp/leaf-maker.mjs --config maker.json
@@ -445,10 +446,13 @@ async function main () {
         return send(res, 200, { swap: b.swap, state: 'done' })
       }
       if (p === '/v1/release') {
-        const st = await swapState(b.swap, true)
-        if (st === 'open') { try { await cmd('swap_cancel', { swap: b.swap }) } catch (e) { log('release', e.message) } }
+        // Answered at once: the cancel goes into the library's queue ahead of the upkeep, and a
+        // taker's next firm, also ahead of the upkeep, queues behind it, so the coins this offer
+        // held are free by the time that firm runs. Waiting for the cancel here made a taker
+        // wait out whatever upkeep command was running (a sync can take tens of seconds).
         firm.delete(b.swap)
-        return send(res, 200, { swap: b.swap, state: await swapState(b.swap) })
+        cmd('swap_cancel', { swap: String(b.swap || '') }, true).catch((e) => { if (!/not open|no such|unknown/i.test(e.message)) log('release', e.message) })
+        return send(res, 200, { swap: b.swap, state: 'releasing' })
       }
       return send(res, 404, { error: 'no such path' })
     } catch (e) {

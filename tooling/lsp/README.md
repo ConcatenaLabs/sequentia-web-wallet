@@ -212,7 +212,7 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 | `GET` | `/v1/quotes` | `{quotes: [{give_asset, want_asset, rate_num, rate_den, min_give, max_give}]}`: it gives `give_asset` and wants `ceil(give × rate_num / rate_den)` of `want_asset` |
 | `POST` | `/v1/firm` `{give_asset, want_asset, give}` | an in-tree swap offer of the library's, its coins held until it is completed, released or lapses (`offer_ttl_seconds`, 300 by default): `{swap, offer, give, want, expires_at}` |
 | `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again |
-| `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took |
+| `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took; answers `{swap, state: "releasing"}` at once and cancels ahead of the maker's upkeep and of any later firm offer |
 | `GET` | `/v1/swap/<id>` | where a swap stands |
 
 Every coin it receives is refreshed in the operator's next round once it has rested
