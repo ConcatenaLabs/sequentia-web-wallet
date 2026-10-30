@@ -139,6 +139,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 - BTC that arrives at the address and is confirmed moves there by itself; until it can be spent
   it is "<amount> BTC arriving" under the figure.
+- BTC a wallet holds where it cannot be sent in seconds (its own Lightning channel, in a wallet
+  made before BTC was held this way) moves there by itself too, and stays spendable where it is
+  until it has. While it moves, the line under the figure reads "Moving <amount> BTC so it can
+  be sent in seconds." A board that never reached the network holds nothing back.
 - The wallet keeps what it holds there current by itself, and arranges each time it is open for
   that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
   was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it
