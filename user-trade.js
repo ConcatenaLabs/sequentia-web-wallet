@@ -41,6 +41,8 @@
 //   release(asset, leaves)     -> asks the wallet to free `leaves`, live coins of `asset` kept by an open
 //                                 offline-refresh plan, in its next round (plan_release); optional:
 //                                 with it, a pay asset held only in such coins is 'freeing'
+//   changed(record)            -> told when a trade moves on in a way that changes what the wallet
+//                                 holds; optional (the page reads its balance again)
 //   store                      -> getItem/setItem (the trade records, persisted before signing)
 //   now()                      -> milliseconds
 //   sleep(ms), log(...)        -> optional
@@ -777,8 +779,17 @@ export function createEngine (deps) {
     }
   }
 
-  // Moves one trade on as far as it goes now. -> its record.
+  // Moves one trade on as far as it goes now. -> its record. When that changes what the wallet holds
+  // (the trade's state, or what it brings held already), deps.changed is told, so the page reads its
+  // balance again: an asset just received is one the person can pay with at once.
   async function advance (rec) {
+    const was = rec ? rec.state + '|' + heldAlready(rec) : null
+    const r = await advanceOnce(rec)
+    if (r && deps.changed && r.state + '|' + heldAlready(r) !== was) { try { deps.changed(r) } catch {} }
+    return r
+  }
+
+  async function advanceOnce (rec) {
     if (!rec || ['settled', 'returned', 'failed'].includes(rec.state)) return rec
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an

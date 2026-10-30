@@ -339,3 +339,20 @@ test('engine: a firm offer the wallet cannot pay with its margins is asked again
   assert.ok(firms.length >= 2 && firms[1] < firms[0], `asked again for less: ${firms}`)
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the refused offer is released')
 })
+
+test('engine: the page is told when a trade moves on, so it reads the balance again', async () => {
+  const s = standIn()
+  const told = []
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, changed: (r) => told.push(r.state) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  await eng.advance(eng.records()[0])
+  assert.ok(told.length >= 1, 'told once the swap is done')
+  const n = told.length
+  await eng.advance(eng.records()[0])   // nothing new: not told again
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
+  await eng.advance(eng.records()[0])
+  assert.equal(told[told.length - 1], 'settled')
+  assert.ok(told.length > n)
+})
