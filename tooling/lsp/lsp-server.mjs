@@ -118,7 +118,7 @@ import { adoptableChannel } from './channel-adopt.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted, roomAlreadyThere } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
-import { payAssetVerdict, hostedInvoiceArgs } from './invoice-asset.mjs';
+import { payAssetVerdict, hostedInvoiceArgs, payFailureReason } from './invoice-asset.mjs';
 import { withPaymentHash } from './hold-bolt11.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
 import { fileURLToPath } from 'node:url';
@@ -4967,7 +4967,11 @@ const server = http.createServer(async (req, res) => {
             amount_msat: amt, destination: dest, via: 'direct-hop' });
         } catch (e2) {
           if (e2 instanceof PaymentDeclined) return send(res, 403, { ok: false, declined: true, error: e2.message });
-          return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))} (direct-hop fallback: ${scrubDetail(String((e2 && e2.message) || e2))})` });
+          // `reason` says what failed for the page to word (invoice-asset.mjs payFailureReason);
+          // `error` stays the node's own words, for developer detail.
+          const payMsg = String((payErr && payErr.message) || payErr);
+          return send(res, 502, { ok: false, reason: payFailureReason({ decoded, error: payMsg }),
+            error: `pay: ${scrubDetail(payMsg)} (direct-hop fallback: ${scrubDetail(String((e2 && e2.message) || e2))})` });
         }
       }
     }

@@ -51,10 +51,28 @@ export function payAssetVerdict({ rec, decoded, bolt11, label = (x) => x }) {
   return { ok: true };
 }
 
-// The keyword arguments a hosted Sequentia node's `invoice` takes beyond amount, label and
-// description: its asset, and allow_unfunded=true (the LSP opens the inbound channel). A Bitcoin
-// node names no asset.
+// The keyword arguments a hosted node's `invoice` takes beyond amount, label and description.
+// A Sequentia node names its asset, with allow_unfunded=true (the LSP opens the inbound channel);
+// a Bitcoin node names no asset. Both pass exposeprivatechannels=true: the room to receive the LSP
+// sells is an unannounced channel, and a node with a channel flagged for announcement leaves every
+// unannounced one out of its route hints. Its own channels are not announced yet (or wait on the
+// anchor's burial), so the invoice carried no hint at all and no other wallet's node could reach
+// it. The node's only peer is the LSP, so the hint tells a payer nothing the LSP does not route.
 export function hostedInvoiceArgs(rec) {
   const a = hostedNodeAsset(rec);
-  return a ? [`asset=${a}`, 'allow_unfunded=true'] : [];
+  const btc = !!rec && rec.chain === 'btc';
+  if (!a && !btc) return [];
+  return [...(a ? [`asset=${a}`, 'allow_unfunded=true'] : []), 'exposeprivatechannels=true'];
+}
+
+// Why a hosted node's payment found no way to the payee, for the page to say in words: the
+// payee's invoice offers no way in (no route hint, and the payee is in no gossip the payer has)
+// is 'payee_cannot_receive': the payee has no room to receive this amount over Lightning yet.
+// Any other failure to find a route is 'no_route'. Anything else is null (the error says it).
+export function payFailureReason({ decoded, error }) {
+  const m = String(error || '');
+  const hints = decoded && Array.isArray(decoded.routes) ? decoded.routes.length : 0;
+  if (/not reachable directly and all routehints were unusable/i.test(m) && hints === 0) return 'payee_cannot_receive';
+  if (/no route|route not found|failed to find a route|routehints were unusable|not reachable|WIRE_UNKNOWN_NEXT_PEER/i.test(m)) return 'no_route';
+  return null;
 }
