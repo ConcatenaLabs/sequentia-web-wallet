@@ -105,10 +105,19 @@ export const REFUSED_WALLETS = /(treasury|reserve|faucet|bridge|sbtc|pool|fee|se
 // A pair's rate from the price server's feed (`/prices`: { TICKER: price or {price} }, each in
 // the same reference unit per whole unit of the asset), with the maker's spread: the maker wants
 // `rate_num` atoms of what it wants for every `rate_den` atoms it gives. Null when either price is
-// missing, so nothing is quoted on a price the maker does not have.
-export function rateFromPrices (prices, give, want, spreadBps) {
+// missing, so nothing is quoted on a price the maker does not have. A price whose `as_of` (unix
+// seconds of the feed's reading) is more than PRICE_MAX_AGE_S old counts as missing: its source has
+// stopped answering, and the feed only kept its last reading. A seeded price (`static`) has no age.
+export const PRICE_MAX_AGE_S = 600
+export function priceOf (prices, t, now = Date.now()) {
   // The feed's own key first (it names bitcoin `tBTC` on the testnet), then the ticker in capitals.
-  const p = (t) => { const v = prices && (prices[String(t.ticker)] ?? prices[String(t.ticker).toUpperCase()]); const n = Number(v && typeof v === 'object' ? v.price : v); return n > 0 ? n : null }
+  const v = prices && (prices[String(t.ticker)] ?? prices[String(t.ticker).toUpperCase()])
+  if (v && typeof v === 'object' && !v.static && Number(v.as_of) > 0 && now / 1000 - Number(v.as_of) > PRICE_MAX_AGE_S) return null
+  const n = Number(v && typeof v === 'object' ? v.price : v)
+  return n > 0 ? n : null
+}
+export function rateFromPrices (prices, give, want, spreadBps, now = Date.now()) {
+  const p = (t) => priceOf(prices, t, now)
   const pg = p(give), pw = p(want)
   if (!pg || !pw) return null
   const DEN = 100000000n
@@ -256,6 +265,8 @@ async function main () {
     try {
       const r = await fetch(cfg.prices.url, { signal: AbortSignal.timeout(20000) })
       const j = await r.json()
+      const old = Object.values(cfg.prices.assets || {}).filter((t) => t && t.ticker && priceOf(j, t) === null && priceOf(j, t, 0) !== null).map((t) => t.ticker)
+      if (old.length) log('prices: older than', PRICE_MAX_AGE_S, 's, not quoted:', [...new Set(old)].join(', '))
       for (const p of [...(cfg.pairs || []), ...((cfg.btc && cfg.btc.pairs) || [])]) {
         if (!p.price) continue
         const key = p.give + ':' + p.want
