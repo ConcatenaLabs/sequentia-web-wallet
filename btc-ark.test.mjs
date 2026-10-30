@@ -261,3 +261,30 @@ test('a renewal the server runs by itself is scheduled for each coin, before the
   assert.equal(count('refresh'), r0 + 1)
   assert.ok(!logs.slice(n).some((l) => /renewal scheduled/.test(l)))
 })
+
+// #376: a payment the payee holds read "Paid" at once, and stayed so when it came back.
+test('an invoice the payee holds is pending until they take it, and comes back when they do not', async () => {
+  const states = { pay: 'pending', status: ['pending', 'pending', 'none'] }
+  const { w, asked } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '50000', total: '50000' }),
+    pay_fee: () => ({ fee: '77', max_route_delay: 218 }),
+    pay: () => ({ state: states.pay, fee: '77', amount: '500' }),
+    pay_status: (a) => ({ state: states.status.shift() || 'none', hash: a.hash }),
+  })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
+  await ark.open()
+  const r = await ark.send(LNTB)
+  assert.equal(r.state, 'pending', 'held by the payee: not paid')
+  assert.match(r.hash, /^[0-9a-f]{64}$/)
+  const out = await ark.payOutcome(r.hash, { everyMs: 1 })
+  assert.equal(out.state, 'came-back')
+  assert.equal(asked.filter((x) => x.command === 'pay_status').length, 3)
+  assert.ok(asked.filter((x) => x.command === 'pay_status').every((x) => x.args.drive === true && x.args.hash === r.hash))
+  states.status = ['pending', 'complete']
+  const done = await ark.payOutcome(r.hash, { everyMs: 1 })
+  assert.equal(done.state, 'complete')
+  assert.deepEqual(forbiddenIn(BTC_WORDS.payWaiting), [])
+  assert.deepEqual(forbiddenIn(BTC_WORDS.payCameBack), [])
+  ark.close()
+})

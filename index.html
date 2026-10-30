@@ -3862,14 +3862,28 @@ async function btcArkSendReview(r, onDone){
     try{
       const res = await btcArk.send(r.addr, q.sats);
       console.log('[btc ark] sent by', res.route, 'in', Math.round(performance.now() - t0), 'ms');
+      ok.classList.add('hide'); { const no = m.querySelector('button.ghost'); if(no) no.textContent = 'Close'; }
+      if(onDone) onDone(); renderBalance();
+      // An invoice whose payee holds the payment is not paid until they take it (arkPayFollow).
+      if(res.route === 'invoice' && res.state !== 'complete' && res.hash){ arkPayFollow(st, res.hash, ()=>BTC_WORDS.sent(what, ((performance.now() - t0) / 1000).toFixed(1))); return; }
       st.className = 'status ok';
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       st.textContent = route === 'chain' ? BTC_WORDS.sentBlock(what) : BTC_WORDS.sent(what, secs);
-      ok.classList.add('hide'); { const no = m.querySelector('button.ghost'); if(no) no.textContent = 'Close'; }
-      if(onDone) onDone(); renderBalance();
     }catch(e){ st.className = 'status err'; st.textContent = 'Failed: ' + prettyErr(e); ok.disabled = false; }
   };
   return true;
+}
+// A Lightning payment from the Bitcoin ark that the payee holds (a hold invoice): it reads "On its
+// way" until they take it ("Paid"), or "Not paid: it came back" when it fails back, the balance
+// read again either way.
+async function arkPayFollow(st, hash, paidText){
+  st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + esc(BTC_WORDS.payWaiting);
+  let out = null;
+  try{ out = await btcArk.payOutcome(hash); }catch(e){ console.warn('[btc ark] payment outcome:', e?.message??e); }
+  try{ renderBalance(); }catch{}
+  if(out && out.state === 'complete'){ st.className = 'status ok'; st.textContent = paidText(); }
+  else if(out && out.state === 'came-back'){ st.className = 'status err'; st.textContent = BTC_WORDS.payCameBack; }
+  else { st.className = 'status'; st.textContent = BTC_WORDS.payWaiting; }
 }
 function initUserComposer(){
   if(userComposer) return;
@@ -5399,10 +5413,12 @@ function initLnSendReceive(){
       sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.paying;
       const t0 = performance.now();
       try {
-        await btcArk.send(bolt11);
-        console.log('[btc ark] invoice paid in', Math.round(performance.now() - t0), 'ms');
-        st.className = 'status ok'; st.textContent = BTC_WORDS.paid(fmtAtoms(q.sats, 8), fmtAtoms(q.fee, 8));
+        const res = await btcArk.send(bolt11);
+        console.log('[btc ark] invoice', res.state, 'in', Math.round(performance.now() - t0), 'ms');
         $('lnSendBolt11').value = ''; try { renderBalance(); } catch {}
+        const paidText = ()=> BTC_WORDS.paid(fmtAtoms(q.sats, 8), fmtAtoms(q.fee, 8));
+        if (res.state !== 'complete' && res.hash) arkPayFollow(st, res.hash, paidText);
+        else { st.className = 'status ok'; st.textContent = paidText(); }
       } catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.failed(prettyErr(e)); }
       finally { sendBtn.disabled = false; }
       return;

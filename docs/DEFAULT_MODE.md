@@ -157,7 +157,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   little held this way, an address is paid as before; a code or an invoice is refused with "You
   can send up to <amount> BTC this way now."
 - **Pay an invoice**: "Paste an invoice to pay it with your BTC." Then "Paid ✓ <amount> BTC · fee
-  <fee> BTC." An invoice for anything else is refused with "This invoice asks for <TICKER>. Only
+  <fee> BTC." once the other side has taken it. While they hold it without taking it yet, "On its
+  way: waiting for the other side to accept it."; if they never do, "Not paid: the payment came
+  back, and the BTC is in your balance again." An invoice for anything else is refused with "This invoice asks for <TICKER>. Only
   invoices for BTC are paid here."; one larger than what is held this way with "You can pay up to
   <amount> BTC this way now."
 - **A pay link**: a page that sells something for BTC hands its invoice over with
