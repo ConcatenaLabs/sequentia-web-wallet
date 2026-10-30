@@ -659,6 +659,12 @@ export function createEngine (deps) {
     return R > most.receive ? out(most.pay, most.receive, true) : { ok: false, why: 'too-small' }
   }
 
+  // What a person is waiting on comes first: while a quote or a confirmation runs, no trade is moved
+  // on (advance), so the library's one-at-a-time queue holds no follow-up of another trade (a sync of
+  // many seconds on a slow link) ahead of it. The trades move on at the next pass after it.
+  let asked = 0
+  const personWaits = (f) => async (...a) => { asked++; try { return await f(...a) } finally { asked-- } }
+
   async function quote ({ payAsset, receiveAsset, amount }) {
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
@@ -829,6 +835,7 @@ export function createEngine (deps) {
   // (the trade's state, or what it brings held already), deps.changed is told, so the page reads its
   // balance again: an asset just received is one the person can pay with at once.
   async function advance (rec) {
+    if (asked > 0) return rec
     const was = rec ? rec.state + '|' + heldAlready(rec) : null
     const r = await advanceOnce(rec)
     if (r && deps.changed && r.state + '|' + heldAlready(r) !== was) { try { deps.changed(r) } catch {} }
@@ -1020,5 +1027,5 @@ export function createEngine (deps) {
     return out
   }
 
-  return { quote, estimate, offered, confirm, advance, resume, records, spendable, release, drop }
+  return { quote: personWaits(quote), estimate, offered, confirm: personWaits(confirm), advance, resume, records, spendable, release, drop }
 }
