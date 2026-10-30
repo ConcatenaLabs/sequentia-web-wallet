@@ -3880,6 +3880,16 @@ function initUserComposer(){
     // The live makers: the one of in-tree swaps, and the one of BTC (its own Bitcoin node).
     makers: ()=> (typeof window!=='undefined' && Array.isArray(window.SEQ_LEAF_MAKERS)) ? window.SEQ_LEAF_MAKERS : [location.origin + '/leafmaker', location.origin + '/leafmaker-btc'],
     relayBook: (pay, receive)=> relayPairBook(receive, pay),
+    // Atoms of `receive` an atom of `pay` is worth on the price feed, or null when either is
+    // unpriced: the engine leaves out any entry far off it.
+    fairRate: (pay, receive)=>{
+      try {
+        const pp = priceFor(priceTicker(pay)), pr = priceFor(priceTicker(receive));
+        const dp = assetMeta(pay).precision, dr = assetMeta(receive).precision;
+        if(!(pp>0) || !(pr>0) || dp==null || dr==null) return null;
+        return (pp / pr) * Math.pow(10, dr - dp);
+      } catch { return null; }
+    },
     // The relay's fill records of the pair, both orientations: a fill of an order resting in the
     // tree is Settled once its record (keyed by the operator's transfer id) is final.
     relayFills: async (pay, receive)=>{

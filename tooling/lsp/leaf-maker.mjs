@@ -119,6 +119,22 @@ export function rateFromPrices (prices, give, want, spreadBps) {
   return { rate_num: String(num), rate_den: String(DEN) }
 }
 
+// Whether a pair's freshly read rate replaces the one quoted now: a rate more than twice, or less
+// than half, of the current one is a reading the maker does not trust at once (a feed that
+// glitched would have it give its coins away), and is taken only once `JUMP_READS` readings in a
+// row say so; meanwhile the current rate stays. `jumps` counts those readings per pair.
+// -> the rate to quote.
+export const JUMP_READS = 3
+export function steadyRate (key, prev, next, jumps) {
+  if (!prev || !next) { jumps.delete(key); return next }
+  const ratio = (Number(next.rate_num) / Number(next.rate_den)) / (Number(prev.rate_num) / Number(prev.rate_den))
+  if (ratio <= 2 && ratio >= 0.5) { jumps.delete(key); return next }
+  const n = (jumps.get(key) || 0) + 1
+  if (n < JUMP_READS) { jumps.set(key, n); return prev }
+  jumps.delete(key)
+  return next
+}
+
 export function checkConfig (c) {
   if (!c || typeof c !== 'object') throw new Error('the configuration is not an object')
   if (!c.wallet || REFUSED_WALLETS.test(String(c.wallet))) throw new Error(`refused: the maker runs only a wallet of its own, never a service or treasury wallet (${JSON.stringify(c.wallet)})`)
@@ -232,6 +248,7 @@ async function main () {
 
   // Rates from the price feed, read every minute; a rate older than ten minutes is not quoted.
   const rates = new Map()
+  const jumps = new Map()
   let ratesAt = 0
   const liveRates = () => (Date.now() - ratesAt < 10 * 60 * 1000 ? rates : new Map())
   async function readPrices () {
@@ -241,8 +258,11 @@ async function main () {
       const j = await r.json()
       for (const p of [...(cfg.pairs || []), ...((cfg.btc && cfg.btc.pairs) || [])]) {
         if (!p.price) continue
-        const rate = rateFromPrices(j, cfg.prices.assets[p.give], cfg.prices.assets[p.want], cfg.prices.spread_bps)
-        if (rate) rates.set(p.give + ':' + p.want, rate); else rates.delete(p.give + ':' + p.want)
+        const key = p.give + ':' + p.want
+        const read = rateFromPrices(j, cfg.prices.assets[p.give], cfg.prices.assets[p.want], cfg.prices.spread_bps)
+        const rate = steadyRate(key, rates.get(key), read, jumps)
+        if (read && rate !== read) log('prices: a reading of', key, 'far from the rate quoted now is held back', JSON.stringify(read))
+        if (rate) rates.set(key, rate); else rates.delete(key)
       }
       ratesAt = Date.now()
     } catch (e) { log('prices:', e.message) }
