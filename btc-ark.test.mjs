@@ -205,8 +205,10 @@ test('a wallet whose package has no catch_up opens as before', async () => {
   ark.close()
 })
 
-// A coin of the Bitcoin ark left past its expiry is swept by the server and repaid by nobody: the
-// wallet renews the coins that are due by itself, at open and after each sync.
+// A coin of the Bitcoin ark left past its expiry is swept by the server, which takes it in a round
+// later only by its own choice: the wallet renews the coins that are due by itself, at open and
+// after each sync. (This stand-in has
+// no schedule_refreshes, as a package built before it: the refresh runs all the same.)
 test('the coins near their expiry are renewed by the wallet itself: at open, and once at a time', async () => {
   let due = 2
   const { w, asked } = standIn({
@@ -228,4 +230,34 @@ test('the coins near their expiry are renewed by the wallet itself: at open, and
   await Promise.all([ark.renewDue(), ark.renewDue()])
   assert.equal(asked.filter((x) => x.command === 'refresh').length, before + 1)
   ark.close()
+})
+
+// The renewal of each coin is scheduled with the server, so it runs with the page closed: at open
+// (and after each sync), before the wallet's own refresh of what is due and not scheduled.
+test('a renewal the server runs by itself is scheduled for each coin, before the refresh', async (t) => {
+  let fresh = 3
+  const { w, asked } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '1000', total: '1000' }),
+    catch_up: () => ({ recovered: [], recovered_sat: '0', spent_elsewhere: [], failed: [], complete: true }),
+    schedule_refreshes: () => { const n = fresh; fresh = 0; return { scheduled: n ? [{ height: 1944, vtxos: ['a', 'b'], amount: '700' }, { height: 2001, vtxos: ['c'], amount: '300' }] : [] } },
+    refresh: () => ({ refreshed: 0 }),
+  })
+  const logs = []
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11, log: (...a) => logs.push(a.join(' ')) })
+  t.after(() => ark.close())
+  await ark.open()
+  for (let i = 0; i < 40 && !asked.some((x) => x.command === 'refresh'); i++) await new Promise((r) => setTimeout(r, 5))
+  const order = asked.filter((x) => x.command).map((x) => x.command)
+  assert.ok(order.indexOf('schedule_refreshes') > order.indexOf('catch_up'), order.join(','))
+  assert.ok(order.indexOf('refresh') > order.indexOf('schedule_refreshes'), order.join(','))
+  assert.ok(logs.some((l) => /renewal scheduled for 3 coin\(s\), heights 1944,2001/.test(l)), logs.join(' | '))
+  // Nothing new to schedule: nothing logged, the refresh still asked.
+  const count = (c) => asked.filter((x) => x.command === c).length
+  await ark.renewDue()   // the pass at open, if it is still running
+  const s0 = count('schedule_refreshes'), r0 = count('refresh'), n = logs.length
+  await ark.renewDue()
+  assert.equal(count('schedule_refreshes'), s0 + 1)
+  assert.equal(count('refresh'), r0 + 1)
+  assert.ok(!logs.slice(n).some((l) => /renewal scheduled/.test(l)))
 })
