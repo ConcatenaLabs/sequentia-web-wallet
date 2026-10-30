@@ -98,6 +98,8 @@ export const USER_WORDS = Object.freeze({
   upTo: (x) => `Up to ${x} can be traded now.`,
   notOffered: (get, pay) => `Not offered right now: nobody offers ${get} for ${pay} in one step.`,
   notListed: (get, pay) => `${get} for ${pay} is not offered.`,
+  // Nothing to choose under You receive: no pair admitted for what is paid, or none read yet.
+  nothingOffered: (pay) => `Not offered right now: nobody offers anything for ${pay}.`,
   enter: 'Enter how much you pay.',
   tooSmall: 'That amount is too small to trade.',
   noFirmOffer: 'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',

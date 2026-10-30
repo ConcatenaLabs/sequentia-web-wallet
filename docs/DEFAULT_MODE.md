@@ -170,7 +170,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   after the next Bitcoin blocks. (<N> min)"
 - Refusals: "This trade could not be made. Nothing moved."; "The other side declined. Nothing was
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
-  is not offered."; "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
+  is not offered."; "Not offered right now: nobody offers anything for <pay>." (nothing can be
+  chosen under You receive); "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
   is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere); "Your
   <pay> is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved." (held, and shown in
   the balance, but not yet where a trade pays from: just arrived, or still being moved in by the

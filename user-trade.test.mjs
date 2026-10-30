@@ -18,6 +18,15 @@ test('no string the user composer can show names a rail or developer word', () =
   assert.deepEqual(literals, [], 'every word is a USER_WORDS entry')
 })
 
+test('no sentence the composer shows names an empty asset', () => {
+  // A refusal said with nothing chosen under You receive once read " for BTC is not offered.".
+  const src = readFileSync(new URL('./user-composer.js', import.meta.url), 'utf8')
+  const empty = [...src.matchAll(/USER_WORDS\.\w+\(\s*(?:''|""|``)/g)].map((m) => m[0])
+  assert.deepEqual(empty, [], 'a USER_WORDS sentence is given an empty name')
+  assert.equal(USER_WORDS.nothingOffered('BTC'), 'Not offered right now: nobody offers anything for BTC.')
+  assert.deepEqual(forbiddenIn(USER_WORDS.nothingOffered('BTC')), [])
+})
+
 test('the word list catches rail words as words', () => {
   assert.deepEqual(forbiddenIn('Paid from your leaves in the next round'), ['round', 'leaves'])
   assert.deepEqual(forbiddenIn('Surrounded, relayed'), [])
