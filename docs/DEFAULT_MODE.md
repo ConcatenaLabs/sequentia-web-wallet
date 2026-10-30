@@ -147,6 +147,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   <fee> BTC." An invoice for anything else is refused with "This invoice asks for <TICKER>. Only
   invoices for BTC are paid here."; one larger than what is held this way with "You can pay up to
   <amount> BTC this way now."
+- **A pay link**: a page that sells something for BTC hands its invoice over with
+  `…/wallet/#pay?invoice=<invoice>`. The wallet opens on Send with the invoice in **Pay an
+  invoice**, checked as if pasted, and nothing is paid until the person presses **Pay invoice**.
+  The page that sent the link is not named.
 - These two cards are the only invoice cards default mode shows, and only while the wallet holds
   BTC this way. Invoices for other assets, the asset pickers, room to receive and the status pill
   of the wallet's Lightning nodes are in developer mode.
