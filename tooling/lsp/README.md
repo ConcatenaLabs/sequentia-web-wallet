@@ -56,7 +56,14 @@ is sent. The invoices a hosted Sequentia node makes (`/node/receive`, and
 `/node/invoice` without a payment hash) name its asset and are made with
 `allow_unfunded=true`: the node refuses an invoice in an asset with no channel
 open or opening, and the inbound channel is the LSP's to open, which the wallet
-asks for just before. The rules are in `invoice-asset.mjs`.
+asks for just before. Every hosted node's invoice, either chain, is made with
+`exposeprivatechannels=true`, so it carries a route hint over that unannounced
+inbound channel: a node with a channel flagged for announcement leaves its
+unannounced ones out of its hints, and without a hint no other wallet's node can
+reach it before its channels are announced. When a payment finds no way to the
+payee, `/node/pay` answers `502` with a `reason`: `payee_cannot_receive` (the
+invoice offers no way in: the payee has no room to receive that amount yet) or
+`no_route`, beside the node's own `error`. The rules are in `invoice-asset.mjs`.
 
 `asset` accepts a ticker (`GOLD`) or a 32-byte hex asset id. The pair is
 `<asset>/BTC`, where the BTC leg is a real Bitcoin-LN channel in production, or

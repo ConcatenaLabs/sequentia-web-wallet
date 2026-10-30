@@ -5417,9 +5417,15 @@ function initLnSendReceive(){
       // A payment has no "offer": the no-route case is said in the payer's terms, the rest as prettyErr says it.
       const raw = String((e && e.message) || e || '');
       st.className = 'status err';
-      st.textContent = /no route|route not found|failed to find a route|routehints were unusable|not reachable|WIRE_UNKNOWN_NEXT_PEER/i.test(raw)
-        ? 'No Lightning route to the person you are paying had room for this amount, so nothing was sent. Try a smaller amount, or ask them for a new invoice in a minute.'
-        : 'Payment failed: ' + prettyErr(e);
+      // The LSP says what failed (`reason`): the payee has no room to receive yet, or no route was
+      // found. Developer mode adds the node's own words.
+      const reason = e && e.body && e.body.reason;
+      const said = reason === 'payee_cannot_receive'
+        ? 'The person you are paying cannot receive this much over Lightning yet, so nothing was sent. Ask them for a new invoice once they can.'
+        : (reason === 'no_route' || /no route|route not found|failed to find a route|routehints were unusable|not reachable|WIRE_UNKNOWN_NEXT_PEER/i.test(raw))
+          ? 'No Lightning route to the person you are paying could carry this payment, so nothing was sent. Try again in a minute, or ask them for a new invoice.'
+          : 'Payment failed: ' + prettyErr(e);
+      st.textContent = said + (devMode() && reason ? ' (' + raw.slice(0, 300) + ')' : '');
     }
     finally { sendBtn.disabled = false; }
   };

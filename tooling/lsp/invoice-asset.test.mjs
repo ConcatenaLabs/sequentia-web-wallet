@@ -1,7 +1,7 @@
 // invoice-asset.mjs: which invoices a hosted node may pay, and what its own invoices name.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { payAssetVerdict, hostedInvoiceArgs, hostedNodeAsset, invoiceAsset } from './invoice-asset.mjs';
+import { payAssetVerdict, hostedInvoiceArgs, hostedNodeAsset, invoiceAsset, payFailureReason } from './invoice-asset.mjs';
 
 const GOLD = 'd024f89a8119d84ecf31fcabc87bc94e2b7d7966bc47dfb76b6237e75f2defdb';
 const SILV = 'ab'.repeat(32);
@@ -34,7 +34,17 @@ test('Bitcoin invoices go to the Bitcoin node, Sequentia ones never do', () => {
 
 test('a hosted Sequentia node\'s invoices name its asset and allow the channel to follow', () => {
   assert.equal(hostedNodeAsset(goldNode), GOLD);
-  assert.deepStrictEqual(hostedInvoiceArgs(goldNode), [`asset=${GOLD}`, 'allow_unfunded=true']);
-  assert.deepStrictEqual(hostedInvoiceArgs(btcNode), []);
+  assert.deepStrictEqual(hostedInvoiceArgs(goldNode), [`asset=${GOLD}`, 'allow_unfunded=true', 'exposeprivatechannels=true']);
+  assert.deepStrictEqual(hostedInvoiceArgs(btcNode), ['exposeprivatechannels=true']);
   assert.deepStrictEqual(hostedInvoiceArgs({ chain: 'seq', asset_id: 'nothex' }), []);
+});
+
+// #331: two wallets' hosted nodes could not pay each other, and the page blamed liquidity.
+test('a payee whose invoice offers no way in cannot receive yet; other misses are routing', () => {
+  const unreachable = 'pay: Destination 02ab is not reachable directly and all routehints were unusable.';
+  assert.equal(payFailureReason({ decoded: { routes: undefined }, error: unreachable }), 'payee_cannot_receive');
+  assert.equal(payFailureReason({ decoded: { routes: [] }, error: unreachable }), 'payee_cannot_receive');
+  assert.equal(payFailureReason({ decoded: { routes: [[{ pubkey: '02cd' }]] }, error: unreachable }), 'no_route');
+  assert.equal(payFailureReason({ decoded: {}, error: 'failed: WIRE_UNKNOWN_NEXT_PEER' }), 'no_route');
+  assert.equal(payFailureReason({ decoded: {}, error: 'pay: Ran out of routes to try' }), null);
 });
