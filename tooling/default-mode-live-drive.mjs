@@ -12,6 +12,7 @@
 //   show   wallet <name>'s balance figures and headline, written to <work>/<name>.totals.json
 //   pay    wallet <name> pays a BTC invoice handed over by a link (`#pay?invoice=…`), as a page
 //          selling something for BTC does: Send opens with it filled in, and the drive presses Pay
+//          (`--paste` pastes it into Pay an invoice instead, for a page without the link)
 //   restore  the phrase of <name> opened in a fresh profile; its figures compared with <name>'s
 //
 //   node tooling/default-mode-live-drive.mjs <work-dir> <step> <name> [args…]
@@ -29,6 +30,9 @@ import { forbiddenIn } from '../user-trade.js'
 const argv = process.argv.slice(2)
 const flag = (n, d) => { const i = argv.indexOf(n); if (i < 0) return d; const v = argv[i + 1]; argv.splice(i, 2); return v }
 const base = flag('--base', 'http://127.0.0.1:8791/wallet/')
+// `pay --paste`: the invoice is pasted into Pay an invoice instead of handed over by the link, for
+// a page that predates the link.
+const paste = argv.includes('--paste'); if (paste) argv.splice(argv.indexOf('--paste'), 1)
 const [workArg, step, name, ...rest] = argv
 if (!workArg || !step || !name) { console.error('usage: default-mode-live-drive.mjs <work-dir> <step> <name> [args…]'); process.exit(2) }
 const work = resolve(workArg)
@@ -241,10 +245,16 @@ async function main () {
     const inv = rest[0]
     if (!inv) throw new Error('pay needs an invoice')
     const page = await openWallet(name)
-    await page.go(base + '#pay?invoice=' + encodeURIComponent(inv))
-    await page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000)
+    if (paste) {
+      await tab(page, 'send')
+      await page.waitFor("!document.querySelector('#lnSendCard').classList.contains('hide')", 120000)
+      await page.eval(`(()=>{ const t=document.querySelector('#lnSendBolt11'); t.value=${JSON.stringify(inv)}; t.dispatchEvent(new Event('input')); return true })()`)
+    } else {
+      await page.go(base + '#pay?invoice=' + encodeURIComponent(inv))
+      await page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000)
+    }
     const filled = await page.waitFor(`(()=>{ const t=document.querySelector('#lnSendBolt11'); return t && t.value.trim() === ${JSON.stringify(inv)} && !document.querySelector('#lnSendCard').classList.contains('hide') ? true : false })()`, 120000)
-    check('the link opens Send with the invoice filled in', !!filled)
+    check(paste ? 'the invoice is in Pay an invoice' : 'the link opens Send with the invoice filled in', !!filled)
     const words = forbiddenIn(await visibleText(page)).filter((w) => !['on-chain', 'lightning', 'channel', 'channels'].includes(w))
     check('the card says none of the words default mode never says', !words.length, words)
     await shot(page, `${name}-pay-1-filled.png`)
