@@ -8,7 +8,7 @@
 // USER_MODE_FORBIDDEN_WORDS (user-trade.test.mjs checks both, the browser drive the page).
 //
 // ctx: { root (element), engine (createEngine's), assetMeta(hex) -> {ticker, precision},
-//   fmtAtoms(atoms, precision), parseAtoms(text, precision), knownAssets() -> [hex],
+//   fmtAtoms(atoms, precision) (fmtShow, optional: the same, grouped, for amounts read), parseAtoms(text, precision), knownAssets() -> [hex],
 //   held(hex) -> atoms the person holds (the figure the Balance tab shows), admittedReceives(pay)
 //   -> [hex] (optional: the receive picker lists those after what is offered now),
 //   market: { relay() -> the relay's base URL, pairOf(a, b) -> {base, quote} } (optional: the
@@ -52,7 +52,9 @@ export function mountUserComposer (ctx) {
   const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
   const name = (h) => (h === 'BTC' ? 'BTC' : ((ctx.assetMeta(h) || {}).ticker || String(h).slice(0, 8)))
   const prec = (h) => (h === 'BTC' ? 8 : ((ctx.assetMeta(h) || {}).precision ?? 0))
-  const amt = (h, atoms) => `${ctx.fmtAtoms(big(atoms), prec(h))} ${name(h)}`
+  // Amounts the person reads are grouped as Balance groups them; an amount put in a field is plain.
+  const show = (atoms, p) => (ctx.fmtShow || ctx.fmtAtoms)(atoms, p)
+  const amt = (h, atoms) => `${show(big(atoms), prec(h))} ${name(h)}`
 
   // What can be paid: BTC always, and an asset only while the wallet holds some (a fresh wallet
   // pays from BTC alone); what can be got is every asset the book knows.
@@ -140,7 +142,7 @@ export function mountUserComposer (ctx) {
       const m = ctx.assetMeta(h) || {}
       return { hex: h, ticker: name(h), name: h === 'BTC' ? 'Bitcoin' : (m.name || ''), held: atoms > 0n,
         hidden: !!(ctx.isHidden && ctx.isHidden(h)), offered: offered.has(h), tradable: tradable.has(h), cur: h === value,
-        bal: atoms > 0n ? { b: ctx.fmtAtoms(atoms, prec(h)), r: ctx.refValue ? ctx.refValue(h, atoms) : '' } : null }
+        bal: atoms > 0n ? { b: show(atoms, prec(h)), r: ctx.refValue ? ctx.refValue(h, atoms) : '' } : null }
     }), (hex) => onchange(hex), { hint: PICKER_WORDS.hintSearch })
     return b
   }
