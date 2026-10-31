@@ -54,6 +54,9 @@ In practice:
   under it as **"<amount> <TICKER> moved out of the Ark to keep it safe while you were away"**
   while the wallet, open again, puts it back by itself; it is then arriving until that is final.
   Developer mode names it `kept_safe`.
+- A coin another wallet paid this one is made the wallet's own in the operator's next settlement,
+  by itself, which ends what its senders could still do with it. Until that settlement is final it
+  is arriving, as above. Nothing is said about it.
 - A coin the wallet left past its expiry, which the operator took and repays as a new coin less
   its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
   The wallet claims it by itself the next time it opens, or once restored from its phrase.
@@ -368,6 +371,13 @@ What it shows beyond the Market and Trade sections above:
   tab: the wallet writes each down as it happens, in the browser that holds it, and shows them
   in the one list, by time, with what the chain holds. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
   "Pending", and that goes once it is confirmed.
+- A payment on either chain that has waited two blocks is sped up by the wallet itself (a small
+  payment to itself that pays for both, `speed-up.js`), and again, paying more, each time it waits
+  two more. Its row then reads "Taking longer than usual: the wallet paid a little more to speed it
+  up." The speed-up has no row of its own. The same goes for what the wallet takes on the chain by
+  itself, such as a coin moved out to keep it safe. Developer mode does nothing by itself: every
+  waiting transaction offers **Speed up**, with the rate for both together, beside Bump fee and
+  Replace on Sequentia.
 - Which rails a trade used ("BTC on-chain · GOLD over Lightning", "over Lightning") is shown in
   developer mode only.
 
