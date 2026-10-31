@@ -120,6 +120,9 @@ JavaScript. The browser extension copies this file into its `vendor/`; change it
 Root is flat: production modules and tests sit side by side.
 
 - `index.html` — the wallet core: boot, balances, send/receive, fees, staking, history, OpenAMP, QR.
+- `instant-history.js` — History's rows for what is paid and received in seconds and for the Trade
+  tab's trades: a per-wallet log the page writes as payments happen (`leafArrived`, `payCode`,
+  `offboard`), merged with the composer's own trade records, never copied from them.
 - `stake-records.js` — joining, moving and leaving a staking pool, and unbonding: every
   transaction over a bare script of the staking key, built and signed by SWK for the height of the
   block it enters. It refuses to sign without a chain tip, because the signature a stake record

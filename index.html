@@ -1697,7 +1697,8 @@ import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { attachChooser, PICKER_WORDS } from './asset-picker.js';
 import { mountBtcArk, arkConfig, BTC_WORDS } from './btc-ark.js';
-import { createEngine as createUserTrade } from './user-trade.js';
+import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
+import { noteArrival, noteSent, instantLog, instantRows } from './instant-history.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
@@ -2635,12 +2636,15 @@ async function treeSendReview(r, onDone){
     const t0=performance.now();
     try{
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset);
+      try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
       console.log('[tree send] paid in', ms, 'ms');
       st.className='status ok'; st.textContent = DEFAULT_WORDS.sent(amt, m0.ticker, (ms/1000).toFixed(1));
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
       if(onDone) onDone(); renderBalance();
-    }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
+    }catch(e){
+      // The library holds none of it spendable yet (just received, not final): said as arriving.
+      st.className='status err'; st.textContent = /in live coins/.test(String(e?.message||'')) ? DEFAULT_WORDS.stillArriving(m0.ticker) : prettyErr(e); ok.disabled=false; }
   };
 }
 
@@ -2665,6 +2669,7 @@ async function offboardReview(r, onDone){
     try{
       const v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q });
       const mins = arrivalMinutes(v && v.round_within_seconds) || minutes;
+      try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true }); }catch{}
       console.log('[offboard]', v && v.offboard, v && v.state);
       st.className='status ok'; st.textContent = DEFAULT_WORDS.sentLater(amt, m0.ticker, mins);
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
@@ -3619,7 +3624,7 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
       const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -8561,13 +8566,20 @@ function renderHistory(){
   // would be a claim about the chain that nobody has checked: show the last snapshot (dated, on
   // the status line above), or say the history is being read.
   let rows, live=_scannedOnce;
+  // What the wallet paid and was paid in seconds, and its trades: kept by the page as they happen,
+  // so they show at once, before any sync.
+  const instant = instantHistoryRows();
   if(live){ try{ rows=historyRows(); }catch(e){ list.innerHTML=''; list.appendChild(el('div','err','History error: '+(e?.message??e))); return; } }
   else if(_snap && Array.isArray(_snap.hist)) rows=_snap.hist;
+  else if(instant.length) rows=[];
   else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your history…')); _histCounts.seq=null; arrangeHistory(); return; }
   list.innerHTML='';
   const pending=livePending();
-  _histCounts.seq=rows.length+pending.length; arrangeHistory();
-  if(!rows.length && !pending.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  _histCounts.seq=rows.length+pending.length+instant.length; arrangeHistory();
+  if(!rows.length && !pending.length && !instant.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  // Each instant row goes in before the first chain row older than it.
+  let ii=0;
+  const flushInstant=(beforeTs)=>{ while(ii<instant.length && (beforeTs==null || (instant[ii].at||0)/1000 >= beforeTs)) list.appendChild(instantItem(instant[ii++])); };
   // Sends this wallet has broadcast and the wollet has not recorded yet, newest first, on top.
   for(const p of pending.slice().reverse()){
     const item=el('div','item');
@@ -8601,6 +8613,7 @@ function renderHistory(){
   for(const r of ordered){
     const txid=r.txid, k=kinds[txid];
     const g=groups.byTx.get(txid);
+    if(r.height && r.ts && !g) flushInstant(r.ts);
     if(g && !boxes.has(g)){ const head=swapGroupRow(groups.members.get(g), groups.titles.get(g)); list.appendChild(head.item); list.appendChild(head.box); boxes.set(g, head.box); }
     const into = g ? boxes.get(g) : list;
     // Rows saved before swaps were named carry "unknown": name them from their legs too.
@@ -8661,6 +8674,38 @@ function renderHistory(){
     if(g) item.classList.add('child');
     into.appendChild(item);
   }
+  flushInstant(null);
+}
+// The rows of instant-history.js, from the page's log and the Trade tab's own trade records.
+function instantHistoryRows(){
+  let recs=[];
+  try{ recs = userTrade ? userTrade.records() : JSON.parse(localStorage.getItem('swk.usertrade.'+walletTag())||'[]'); }catch{}
+  try{ return instantRows(instantLog(localStorage, walletTag()), recs); }catch(e){ console.warn('[history] instant rows:', e?.message??e); return []; }
+}
+// One row, as default mode words it (docs/DEFAULT_MODE.md, History): a trade is "Swapped <pay> for
+// <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
+function instantItem(r){
+  const metaOf=(h)=> h==='BTC' ? { ticker:'BTC', precision:8 } : assetMeta(h);
+  const fmtLeg=(l)=>{ const m=metaOf(l.asset), a=BigInt(l.atoms); return fmtAtoms(a<0n?-a:a, m.precision)+' '+m.ticker; };
+  const item=el('div','item instant');
+  const swap = r.kind==='swap' || r.kind==='returned';
+  item.appendChild(el('span','badge dir '+(swap?'b-swap':r.kind==='in'?'b-in':'b-out'), swap?'SWAP':r.kind==='in'?'IN':'OUT'));
+  const mid=el('div','grow');
+  let head, status='';
+  if(r.kind==='swap'){ head='Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1]); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
+  else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
+  else head = r.kind==='in' ? 'Received' : 'Sent';
+  mid.appendChild(el('div',null, head));
+  const when = r.at ? whenText(r.at) : '';
+  const sub=[when, status, r.kind==='out' && r.later && Date.now()-r.at < 3600000 ? 'Pending' : ''].filter(Boolean).join(' · ');
+  if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
+  item.appendChild(mid);
+  const amts=el('div','amts');
+  for(const l of r.legs){ const out = r.kind==='out' || BigInt(l.atoms)<0n; amts.appendChild(el('span','amt '+(out?'neg':'pos'), (out?'-':'+')+fmtLeg(l))); }
+  const fees = r.fee ? [r.fee] : (r.kind==='swap' ? (r.fees||[]) : []);
+  for(const f of fees) amts.appendChild(el('span','fee','fee '+fmtLeg(f)));
+  item.appendChild(amts);
+  return item;
 }
 // Whether the network still holds an unconfirmed transaction. A transaction can leave every
 // mempool without confirming: evicted when the mempool is full, expired after two weeks, or
