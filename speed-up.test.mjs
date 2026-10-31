@@ -48,3 +48,13 @@ test('the words default mode shows use none of its forbidden words', () => {
     for (const w of USER_MODE_FORBIDDEN_WORDS) assert.ok(!new RegExp('\\b' + w + '\\b', 'i').test(s), `"${s}" says "${w}"`)
   }
 })
+
+test('user mode refreshes what it receives only where the page turns it on', async () => {
+  const { refreshReceivedOn } = await import('./leaves.js')
+  globalThis.window = globalThis.window || {}
+  delete globalThis.window.SEQ_REFRESH_RECEIVED
+  assert.equal(refreshReceivedOn(), false, 'off by default')
+  globalThis.window.SEQ_REFRESH_RECEIVED = true
+  assert.equal(refreshReceivedOn(), true)
+  delete globalThis.window.SEQ_REFRESH_RECEIVED
+})

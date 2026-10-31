@@ -108,6 +108,10 @@ export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
 // How often user mode asks the library to refresh what it received out of round.
 export const REFRESH_EVERY_MS = 120_000
+// Whether user mode refreshes what it receives out of round by itself: off unless the page asks.
+export function refreshReceivedOn () {
+  try { return typeof window !== 'undefined' && window.SEQ_REFRESH_RECEIVED === true } catch { return false }
+}
 // The library's commands that only read (bark/src/arca/command.rs reads_only): a quote's.
 export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 'refusals', 'participations', 'schedule', 'orders',
   'swaps', 'plans', 'info', 'supply', 'board_quote', 'quote', 'settle_quote', 'take_quote', 'order_fill_quote', 'order_quote',
@@ -790,7 +794,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // while the page's own on-chain payment may still be spending coins. Developer mode does it
   // only when asked. Until the round is final the coin counts as arriving. Nothing is said unless
   // it goes wrong: a refusal is kept in S.lastRefresh and asked again at the next turn.
+  // Off unless the page sets window.SEQ_REFRESH_RECEIVED = true: a refresh the operator cannot
+  // fund at once waits in its queue, and the coins it holds can be neither traded nor sent until
+  // it runs or expires, which the operator's info does not tell the wallet beforehand.
   async function refreshReceived () {
+    if (!refreshReceivedOn()) return
     if (!S.open || dev() || !pinned() || S.asked) return
     if (S.refreshedAt != null && now() - S.refreshedAt < REFRESH_EVERY_MS) return
     try { if (ctx.onchainQuiet && ctx.onchainQuiet()) return } catch {}
