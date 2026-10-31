@@ -285,7 +285,7 @@ export function mountLeafRail(ctx) {
     b.innerHTML = '';
     const sh = S.shape;
     const head = el('div', 'swleaf-head');
-    head.appendChild(el('span', 'swsec-lab', 'Leaves'));
+    head.appendChild(el('span', 'swsec-lab', 'Ark'));
     head.appendChild(el('span', 'sub', sh.kind === 'take' ? 'a take from leaves, in the operator’s round'
       : sh.kind === 'swap' ? 'an in-tree swap with another wallet'
         : sh.kind === 'place' ? 'an order placed on the chain from leaves' : ''));

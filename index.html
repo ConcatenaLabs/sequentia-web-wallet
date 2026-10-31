@@ -6457,7 +6457,13 @@ function renderBalance(){
     // Default mode shows no rail (docs/DEFAULT_MODE.md): the split between on-chain, the
     // tree and Lightning, and every move between them, are developer mode's.
     const dm = devMode();
-    if(dm && (hasLn || leafAtoms>0n || staked>0n || arkAtoms>0n)) blk('On-chain', amt(on));
+    // The Ark part has one name on both chains, as Lightning has: the row's asset says which chain.
+    // A BTC row's ark is Bitcoin's (Bark); an asset's is Sequentia's (Arca). Once the wallet has
+    // joined that ark, developer mode shows the part even at zero, so the three rails always read
+    // side by side.
+    const arkPart = kind==='BTC' ? arkAtoms : leafAtoms;
+    const arkJoined = kind==='BTC' ? !!(btcArk && btcArk.isOpen()) : !!(leavesApi && leavesApi.isOpen());
+    if(dm && (hasLn || arkPart>0n || arkJoined || staked>0n)) blk('On-chain', amt(on));
     if(dm && lnOn && leg && hasLn){
       const l=blk('Lightning', amt(lnAtoms));
       if(opening) l.appendChild(el('div','bt-dim','channel opening'));
@@ -6480,10 +6486,12 @@ function renderBalance(){
         button(acts, room>0n ? 'More room to receive' : 'Add room to receive', 'Have the service open a channel to you, so '+ticker+' can arrive over Lightning', ()=>lnReceiveRoomDialog(leg));
       if(acts.children.length) l.appendChild(acts);
     }
-    if(dm && leafAtoms>0n) blk('Leaves', amt(leafAtoms));
     // The ark's part is a rail: split out in developer mode only. What it has not taken in yet is
     // "arriving" under the figure, in both modes.
-    if(dm && arkAtoms>0n) blk('Bitcoin ark', amt(arkAtoms));
+    if(dm && (arkPart>0n || arkJoined)){
+      const k=blk('Ark', amt(arkPart));
+      k.title = kind==='BTC' ? 'Bitcoin Ark (Bark): BTC on an ark on Bitcoin itself' : 'Sequentia Ark (Arca): '+ticker+' in the operator’s tree';
+    }
     { const arr = kind==='BTC' && btcArk && btcArk.isOpen() ? btcArk.figures().arriving : 0n;
       if(arr>0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arr), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); } }
     if(staked>0n) blk('Staked', amt(staked));
