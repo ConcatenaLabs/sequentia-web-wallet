@@ -91,7 +91,7 @@ test('a trade is "received" as soon as the maker completed it, with the wallet\'
   Object.assign(E.recs[0], { source: 'leaf-maker', swapState: 'done', sentAt: Date.now() })
   let o = await S.orders('https://s/dex/')
   assert.equal(o.trades[0].state, 'received')
-  assert.equal(o.trades[0].note, USER_WORDS.receivedSettling)
+  assert.equal(o.trades[0].note, USER_WORDS.received)
   // Still settling a quarter of an hour on: said to be slow, never "Sent".
   Object.assign(E.recs[0], { sentAt: Date.now() - 15 * 60000, settleState: ['released', 'pending'] })
   o = await S.orders('https://s/dex/')

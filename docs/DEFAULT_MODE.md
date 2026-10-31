@@ -241,27 +241,39 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   what is typed: "The book can fill up to <amount> <TICKER> now." (never for what the price's
   rounding leaves, less than one atom of what is received). Review then shows the exact amounts
   and fees: what is paid can be a few atoms below what was typed, when the price leaves a
-  remainder too small to buy anything, and that remainder stays in the wallet. While pricing:
-  "Finding the best price…". If the price moves: "The price moved. Here is the new one."
+  remainder too small to buy anything, and that remainder stays in the wallet. Until Review, the
+  amount that follows the price is an estimate and reads as one: "about" beside it. While Review
+  asks for the exact price: "Getting the exact price…". If the price moves: "The price moved.
+  Here is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
-- Statuses: **Sent**, then **Settled**. If a trade is undone: "Returned: nothing traded." or
+- **Trade** returns the screen at once: the trade shows under **Open** as "Sending…" while its
+  step is taken, and goes on there whether the person stays, leaves or closes the wallet. What
+  was entered, and a price being asked for, is kept when the wallet goes to the background, is
+  locked or is reopened.
+- Statuses, the same in Your trades, in History and on every surface: "Sending…", **Sent**,
+  "Received, settling", then **Settled**. If a trade is undone: "Returned: nothing traded." or
   "Returned: nothing traded. Fees of <fees> were paid." A purchase with BTC whose other side's
   offer ran out while it waited, and was not renewed, says "Returned: nothing traded. The other
   side's offer ran out while the trade waited."
-- Settling waits for the network. Where the operator calls a coin settled once its block is
-  certified (an anchor depth of 0, as on the testnet), that is a minute or two; where it also
-  waits for Bitcoin blocks, a trade can take an hour or more. While it waits the row says what is
-  already true, with the minutes it has waited once that is one or more: "Waiting for the other
-  side. Nothing has left your wallet yet." (buying with BTC, until the asset is held for the
-  wallet); "Sent (<N> min)"; and once what the trade brings is held, "Received. Settled in a
-  minute or two. (<N> min)", or "Received. Settled after the next Bitcoin blocks. (<N> min)"
+- Settling waits for the network, and no status promises how long: the only time a row shows is
+  the minutes it has waited, once that is one or more. While it waits the row says what is
+  already true: "Waiting for the other side. Nothing has left your wallet yet." (buying with BTC,
+  until the asset is held for the wallet); "Sent (<N> min)"; "Paid. Your BTC is on its way."
+  (selling for BTC, once the asset is paid); and once what the trade brings is held, "Received,
+  settling (<N> min)", or after ten minutes still settling "Received, and yours to use. Settling
+  with the network is taking longer than usual."
 - Refusals: "This trade could not be made. Nothing moved."; "The other side declined. Nothing was
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
   is not offered."; "Not offered right now: nobody offers anything for <pay>." (nothing can be
   chosen under You receive); "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
-  is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere); "Your
+  is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere);
+  "Your BTC is being moved so it can be traded. It is ready after <n> Bitcoin blocks. Nothing has
+  moved yet." (BTC held at the wallet's address, none yet where a trade pays BTC from: the wallet
+  moves what the trade needs by itself, at most what one move of the Bitcoin ark carries, and
+  prices the trade again every 20 s), and on a ticket that pays only part of what was typed,
+  "More of your BTC is being moved so it can be traded, ready after <n> Bitcoin blocks."; "Your
   <pay> is on its way: it is ready to trade in a minute or two. Nothing has moved.", or, where the
   operator also waits for Bitcoin blocks, "Your <pay> is not ready to trade yet: it is once the
   next Bitcoin blocks settle it. Nothing has moved." (held, and shown in the balance, but not yet

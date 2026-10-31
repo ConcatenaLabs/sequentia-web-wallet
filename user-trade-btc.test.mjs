@@ -247,3 +247,20 @@ test('buying with BTC: a renewed invoice under another hash is not paid', async 
   const { s, r } = await boughtPastTheInvoice('other-hash')
   assert.equal(r.state, 'returned'); assert.deepEqual(s.btcPaid, [])
 })
+
+// Ambra #162: BTC held at the wallet's address and none on the ark is never "You have no BTC": the
+// wallet moves what the trade needs and says so.
+test('BTC at the address and none on the ark: moved for the trade, never no-funds', async () => {
+  const s = standIn()
+  const moved = []
+  const empty = { ...s.btc, balance: async () => 0n }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: empty,
+    btcAtAddress: () => 17700000000n, btcMove: (n) => moved.push(n) })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.equal(q.why, 'btc-moving')
+  assert.deepEqual(moved, [50000n])
+  assert.equal(USER_WORDS.btcMoving(2), 'Your BTC is being moved so it can be traded. It is ready after 2 Bitcoin blocks. Nothing has moved yet.')
+  const none = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: empty,
+    btcAtAddress: () => 0n, btcMove: (n) => moved.push(n) })
+  assert.equal((await none.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })).why, 'no-funds')
+})
