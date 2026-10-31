@@ -53,6 +53,16 @@ requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in
 in it may decide anything the library decides. The page's copy never names the operator
 protocol: developer mode speaks of leaves, rounds and the operator.
 
+`lightning-to-ark.js` is default mode's move of what a wallet's own hosted Lightning channels
+hold (a wallet made before default mode held its coins in the Ark): the BTC channel pays an
+invoice of the wallet's own Bitcoin ark, each asset channel a `lightning_receive` of its leaf
+wallet, only from a channel locked in, within the page's Lightning payment limit, never in
+developer mode or while a person uses the wallet; the figure holds it under "Moving …" meanwhile,
+and an emptied channel is closed to the wallet's address when cheap and safe. It has no DOM
+(`lightning-to-ark.test.mjs`); `index.html`'s `initLnToArk` gives it the page, and the extension
+copies it into its `vendor/` with its own host: change it here first. Ambra mobile's
+`lightning_to_ark.dart` is the same move in the same words.
+
 `btc-ark/pkg/` is tracked too: Bark's wallet for Bitcoin arks, built from arca's `bark-wasm/` by
 `tooling/build-btc-ark.sh <arca checkout>` (paths remapped the same way), run inside
 `btc-ark/worker.js`. It holds default mode's BTC on the Bitcoin ark named by `SEQ_BTC_ARK`: native

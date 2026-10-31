@@ -79,6 +79,6 @@ test('the cards use them, in every mode', () => {
   assert.match(room, /lnSayStep\(box, a\.text, a\.step\)/)
   const i = html.indexOf('if (sendBtn) sendBtn.onclick'); const send = html.slice(i, html.indexOf('\n  };', i))
   assert.ok(send.indexOf('lnPayShortfall(asset, bolt11)') < send.indexOf('lnConnectLeg('), 'checked before the node is brought online')
-  assert.match(send, /No Lightning route to the person you are paying had room for this amount/)
+  assert.match(send, /No Lightning route to the person you are paying could carry this payment/)
   assert.ok(!/different offer/.test(send))
 })

@@ -1727,6 +1727,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
     refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
+    // ---- the wallet's own upkeep outside this module (lightning-to-ark.js) ----
+    // What the library said of itself and the operator (`info`), and the coins as last read.
+    info: () => S.info,
+    coins: () => S.coins,
+    // Whether a person is using the wallet now, or did within the last twenty seconds.
+    personBusy: () => !!S.asked || now() - (S.lastAsked || 0) < MAILBOX_QUIET_MS,
+    // A command of the wallet's own, run when nothing else runs and never counted as a person's.
+    own: async (cmd, args) => {
+      if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' })
+      while (S.busy) await sleep(50)
+      S.busy = true
+      try { return await run(cmd, args || {}) } finally { S.busy = false }
+    },
     stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer) },
   }
   render()
