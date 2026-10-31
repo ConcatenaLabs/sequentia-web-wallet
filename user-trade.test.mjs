@@ -412,7 +412,7 @@ test('a purchase of BTC whose payment is made reads "Paid. Your BTC is on its wa
   const r = { source: 'btc-gateway', dir: 'sell', state: 'sent', sentAt: 1000, at: 1000 }
   assert.equal(tradeStateWord(r, 1000), USER_WORDS.btcOnItsWay)
   assert.deepEqual(forbiddenIn(USER_WORDS.btcOnItsWay), [])
-  assert.equal(tradeStateWord({ ...r, btcPaid: true }, 1000), USER_WORDS.receivedSettling)
+  assert.equal(tradeStateWord({ ...r, btcPaid: true }, 1000), USER_WORDS.received)
 })
 
 test('engine: no trade is moved on while a person waits on a quote', async () => {
@@ -508,16 +508,16 @@ test('engine: at anchor depth 0 a coin not ready yet is on its way; a coin a reo
   assert.equal(USER_WORDS.redoing('USDX'), 'Your USDX is being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once that settles. Nothing has moved.')
   // The person's words hold none of default mode's forbidden words.
   for (const w of [USER_WORDS.notReady('USDX', true), USER_WORDS.partReady('0.01 USDX', 'USDX', true), USER_WORDS.freeing('GOLD', true),
-    USER_WORDS.redoing('USDX'), USER_WORDS.receivedSoon]) assert.deepEqual(forbiddenIn(w), [], w)
+    USER_WORDS.redoing('USDX'), USER_WORDS.received]) assert.deepEqual(forbiddenIn(w), [], w)
   assert.equal(USER_WORDS.partReady('0.0149 USDX', 'USDX', true), 'Only 0.0149 USDX of your USDX can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.')
 })
 
 test('a trade whose coins are held settles in a minute or two at anchor depth 0', () => {
   const T0 = 1_000_000
   const r = { source: 'leaf-maker', state: 'sent', sentAt: T0, swapState: 'done' }
-  assert.equal(tradeStateWord(r, T0 + 30000, true), USER_WORDS.receivedSoon)
-  assert.equal(tradeStateWord(r, T0 + 3 * 60000, true), 'Received. Settled in a minute or two. (3 min)')
-  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.receivedSettling)
+  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.received)
+  assert.equal(tradeStateWord(r, T0 + 3 * 60000), 'Received, settling (3 min)')
+  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.received)
 })
 
 test('engine: a small free coin beside a planned one frees the planned coin, never "on its way"', async () => {

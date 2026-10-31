@@ -4050,12 +4050,23 @@ async function btcBroadcastHex(hex){
   if(!r.ok || !/^[0-9a-fA-F]{64}$/.test(t)) throw new Error(t || ('HTTP ' + r.status));
   return t;
 }
-function btcArkBoardSoon(){
+// How many of the largest boards the wallet keeps on the ark by itself: past it, BTC at the
+// address stays there (in the one BTC figure, sendable as ever) until a trade asks for more.
+// Thousands of coins on the ark would slow every command the wallet makes there.
+const BTC_ARK_KEEP_BOARDS = 4;
+let _btcArkWanted = 0n;
+// A trade paying more BTC than the ark holds asks for `sats` more from the address, now.
+function btcArkBoardFor(sats){ _btcArkWanted = BigInt(sats); _btcArkBoardAt = 0; btcArkBoardSoon(true); }
+function btcArkBoardSoon(asked){
   if(!btcArkRoutes() || !(btcBalance > 0n)) return;
-  if(Date.now() - _btcSentAt < 120000 || Date.now() - _btcArkBoardAt < 30000) return;   // the page's own BTC payment is fresh
+  if(!asked && (Date.now() - _btcSentAt < 120000 || Date.now() - _btcArkBoardAt < 30000)) return;   // the page's own BTC payment is fresh
+  try{
+    const max = btcArk.info() && btcArk.info().max_vtxo_sat != null ? BigInt(btcArk.info().max_vtxo_sat) : null;
+    if(!(_btcArkWanted > 0n) && max != null && btcArk.figures().total >= max * BigInt(BTC_ARK_KEEP_BOARDS)) return;
+  }catch{}
   _btcArkBoardAt = Date.now();
   btcArk.board({ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, broadcast: btcBroadcastHex })
-    .then((r)=>{ if(r) sync().catch(()=>{}); })
+    .then((r)=>{ if(r){ const a = BigInt(r.amount || 0); _btcArkWanted = _btcArkWanted > a ? _btcArkWanted - a : 0n; sync().catch(()=>{}); } })
     .catch((e)=> console.warn('[btc ark] board:', e?.message??e));
 }
 // A BTC payment from the ark: what is sent, to whom, its fee, reviewed before anything moves.
@@ -4150,6 +4161,10 @@ function initUserComposer(){
       const o = ((await r.json()).vout || [])[vout]; return o && o.value != null ? String(o.value) : null;
     },
     admitted: async ()=> ({ pairs: servedPairs(await userModePairs(), leavesApi ? leavesApi.supervisedAssets() : []), genesis: await chainGenesis() }),
+    // BTC at the wallet's address, moved to the Bitcoin ark for a trade that pays more than the ark
+    // holds: in default mode, where the ark is where a trade's BTC is paid from.
+    btcAtAddress: ()=> (btcArkRoutes() ? btcBalance : 0n),
+    btcMove: (sats)=> btcArkBoardFor(sats),
     // The wallet's Bitcoin Lightning (btc-lightning.js), once the service runs it; until then no
     // trade is made for or with BTC.
     // In default mode the trades pay and are paid in the Bitcoin ark: a sale for BTC is a Lightning

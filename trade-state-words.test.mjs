@@ -14,8 +14,8 @@ test('a purchase with BTC: waiting for the other side, then sent, then received 
   assert.equal(tradeStateWord(r, T0 + 26 * min + 5000), 'Sent', 'the BTC is being paid')
   Object.assign(r, { preimage: 'ab', receiveState: 'received' })
   assert.ok(heldAlready(r))
-  assert.equal(tradeStateWord(r, T0 + 26 * min + 30000), USER_WORDS.receivedSettling)
-  assert.equal(tradeStateWord(r, T0 + 76 * min), 'Received. Settled after the next Bitcoin blocks. (50 min)')
+  assert.equal(tradeStateWord(r, T0 + 26 * min + 30000), USER_WORDS.received)
+  assert.equal(tradeStateWord(r, T0 + 76 * min), 'Received, settling (50 min)')
   r.state = 'settled'
   assert.equal(tradeStateWord(r, T0 + 90 * min), 'Settled')
 })
@@ -31,5 +31,5 @@ test('a swap and a take are held once done or released; a sale once its BTC came
 })
 
 test('the waiting words say none of the words default mode never says', () => {
-  for (const w of [USER_WORDS.waitingOther, USER_WORDS.receivedSettling, USER_WORDS.minutes('Sent', 4)]) assert.deepEqual(forbiddenIn(w), [], w)
+  for (const w of [USER_WORDS.waitingOther, USER_WORDS.received, USER_WORDS.minutes('Sent', 4)]) assert.deepEqual(forbiddenIn(w), [], w)
 })
