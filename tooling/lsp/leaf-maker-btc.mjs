@@ -65,6 +65,8 @@ const LOCKING_SECONDS = 120
 const INVOICE_SECONDS = 4 * 3600
 // After a BTC payment to a wallet failed, how long the desk waits before it pays again.
 const PAY_AGAIN_MS = 30000
+// What a node answers when the invoice paid is not its own, or no longer open.
+const UNKNOWN_INVOICE = /incorrect_or_unknown_payment_details|doesn't know invoice/
 
 // Whether a swap's BTC (`s.give` sat) may be paid before the asset received for it is final, under
 // the desk's caps `b` (unfinal_max_sats per swap, unfinal_total_sats in all, a payment counting for
@@ -373,6 +375,10 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup }) {
         // that failed) is paid again, not taken for this one's failure.
         const before = st.state === 'failed' && Number(st.at || 0) < Number(s.paying_at || 0)
         if (st.state === 'none' || before) st = await node.pay({ invoice: s.invoice_btc, maxFeeSats: big(s.route_fee ?? b.max_route_fee_sats ?? 0), maxDelay: Number(s.route_delay || s.min_final_cltv || 18) + EXTRA_BLOCKS })
+        // The wallet's node no longer knows the invoice (its receive given up): paying again can
+        // never succeed, and the wallet's payment to the desk returns to it when the operator's
+        // hold runs out.
+        if (st.state === 'failed' && UNKNOWN_INVOICE.test(String(st.reason || ''))) { s.state = 'void'; log('btc swap', s.swap, 'void: the wallet\'s node no longer knows its invoice'); return }
         if (st.state === 'failed') { s.state = 'offered'; s.retry_at = Date.now() + PAY_AGAIN_MS; log('btc swap', s.swap, 'payment failed:', st.reason || '', '(paid again in', PAY_AGAIN_MS / 1000, 's)'); return }
         if (st.state !== 'complete') return
         s.preimage = st.preimage

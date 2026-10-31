@@ -238,7 +238,8 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         if (!(e && (e.kind === 'refused' || /^refused\b/i.test(String(e.message))))) { log('[user trade] not ready yet:', e.message); return put(rec) }
         log('[user trade] the leaf will not do:', e.message); rec.state = 'returned'; rec.returnedAt = now(); rec.why = e.message; return put(rec)
       }
-      if (!r.ready) return put(rec)
+      // Why the asset is not final yet, said once each time it changes.
+      if (!r.ready) { if (rec.notReady !== (r.why || '')) { rec.notReady = r.why || ''; log('[user trade] the asset is not final yet:', rec.notReady) } return put(rec) }
       rec.state = 'sent'; rec.sentAt = now(); rec.paying = true
       put(rec)
     }
