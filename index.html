@@ -1247,6 +1247,7 @@
         <label class="lbl">Stake tSEQ</label>
         <p class="sub" style="margin:0 0 12px">Staking locks tSEQ in a time-locked script to support the Sequentia network. Your stake weight equals the amount staked, so there's no benefit to a longer lock; the wallet uses the network's minimum lock.</p>
         <div class="field"><label class="lbl">Amount</label><input id="stAmount" class="mono" placeholder="0.0"></div>
+        <div class="field"><label class="lbl">Pay the fee in</label><select id="stFeeAsset" style="width:100%"></select></div>
         <button class="primary" id="btnStake" style="margin-top:14px">Review stake</button>
         <div class="status err" id="stakeErr"></div>
         <div class="kv" style="margin-top:12px"><span class="k">Minimum stake</span><span class="v" id="stMin">40,000 tSEQ</span></div>
@@ -1676,7 +1677,7 @@ import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
 import { displayPair } from './swap.js';
-import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag } from './swap.js';
+import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -2460,7 +2461,7 @@ function fillFeeAssetSelect(sel){
     // drop the transaction. Say how many, when the server can tell.
     const fi = _feeInfo && _feeInfo[String(r.hex).toLowerCase()];
     const o=el('option'); o.disabled=true;
-    o.textContent = r.tk + (fi && fi.accepted_by > 0 ? ' · accepted by '+fi.accepted_by+' of '+fi.nodes+' nodes only' : ' · not accepted for fees');
+    o.textContent = r.tk + (fi && fi.accepted_by > 0 ? ' · not accepted everywhere yet' : ' · not accepted for fees');
     sel.appendChild(o);
   }
   if(prev && [...sel.options].some(o=>o.value===prev && !o.disabled)) sel.value=prev;
@@ -3525,10 +3526,12 @@ async function openWallet(phrase){
   const restored = await restoreWolletState();
   endRestore(restored ? 'restored' : 'nothing to restore');
   let keptTab=null; try{ keptTab=sessionStorage.getItem('swk.tab'); }catch{}
-  addrIndex=null; views('app'); show('btnGear', true); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
+  addrIndex=null; views('app'); show('btnGear', true); addRecipientRow(); initAppRefUI(); initSwapTab();
   // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
-  // on at any time; the leaf wallet starts only while the mode is on.
+  // on at any time; the leaf wallet starts only while the mode is on. Balance is first drawn once it
+  // is mounted, so the figures it last gave this wallet are in the first one.
   try{ initLeaves(); }catch(e){ console.warn('[leaves] init failed:', e?.message??e); }
+  tab('balance');
   try{ initContracts(); }catch(e){ console.warn('[contracts] init failed:', e?.message??e); }
   try{ initBtcArk(); }catch(e){ console.warn('[btc ark] init failed:', e?.message??e); }
   // A reload opens on the tab that was open (a tab of developer mode only while it is on).
@@ -3618,6 +3621,20 @@ async function openWallet(phrase){
 // operator keeps its leaf wallet syncing in either mode; user mode shows nothing of it
 // but its value in each asset's figure and the headline.
 let leavesApi = null, pageApi = null;
+// The wallet's tag (what its settings, kept figures and codes are filed under): swap.js's walletTag,
+// the same hash of the same descriptor, read from the page's own wollet, so it is right from the
+// moment the wallet is built rather than once the Trade tab's context is set up.
+function walletTag(){
+  try{
+    if(wollet){
+      const src = wollet.descriptor().toString();
+      let h = 0x811c9dc5 >>> 0;
+      for(let i = 0; i < src.length; i++){ h ^= src.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+      return h.toString(16).padStart(8, '0');
+    }
+  }catch{}
+  return swapWalletTag();
+}
 const devMode = ()=> devModeOn(localStorage, walletTag());
 // body.devmode drives the .dev-only elements; the Lightning pill words differ by mode too.
 function applyModeClass(){
@@ -3654,7 +3671,7 @@ function initLeaves(){
     pinned: ()=> (typeof window!=='undefined') ? window.SEQ_ARCA : null,
     serverInfo: async (server)=>{ const r=await fetch(server + '/v1/info', { cache:'no-store' }); if(!r.ok) throw new Error('the server answered HTTP ' + r.status); return await r.json(); },
     // The page and the leaf wallet spend the same coins: no board while the page's own payment is fresh.
-    onchainQuiet: ()=> _ownTxRing.some(t=> Date.now() - t.at < BOARD_QUIET_MS),
+    onchainQuiet: ()=> _ownTxRing.some(t=> Date.now() - t.at < BOARD_QUIET_MS) || Date.now() < _keepOnChainUntil,
     onOpen: ()=>{ try{ renderBalance(); }catch{} try{ renderReceive(); }catch{} },
     onBoarded: ()=>{ setTimeout(()=>{ try{ sync(); }catch{} }, 1500); },
   }, $('leavesRoot'), $('devModeRoot'));
@@ -5248,7 +5265,8 @@ async function refreshLnStatus(){
   if(note) note.classList.toggle('hide', !devMode());
   try{ await refreshOwnLnNodeKeys(); }catch{}   // so /status includes this device's own nodes across reloads
   try{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); $('lnBalStatus').textContent=''; }
-  catch(e){ $('lnBalStatus').className='status err'; $('lnBalStatus').textContent='Lightning status unavailable: '+prettyErr(e); }
+  // The hosted nodes' status is developer mode's (docs/DEFAULT_MODE.md, BTC): default mode says nothing of it.
+  catch(e){ if(devMode()){ $('lnBalStatus').className='status err'; $('lnBalStatus').textContent='Lightning status unavailable: '+prettyErr(e); } else { $('lnBalStatus').className='status'; $('lnBalStatus').textContent=''; console.warn('[ln] status:', e?.message??e); } }
   try{ renderBalance(); }catch{}   // fold the fresh LN spendable into the asset rows
   try{ lnStatusPill(); }catch{}
   try{ reconnectOwnNodes(); }catch(e){ console.warn('[ln] own-node reconnect:', e?.message??e); }  // re-attach OWN per-user node signers as their channels appear
@@ -8068,18 +8086,21 @@ function cjRenderHistory(){
   }
 }
 
+function cjOnChain(hex){ try{ return cjUtxos().filter(u=>u.asset===hex).reduce((s,u)=>s+u.atoms, 0n); }catch{ return 0n; } }
 function cjPlan(){
   const lane=cjLanes[Number($('cjLane').value)||0];
   if(!lane){ $('cjPlan').textContent=''; return; }
   const m=assetMeta(lane.asset);
   const k=Math.max(1, Math.floor(Number($('cjCount').value)||1));
-  const held=cjUtxos().filter(u=>u.asset===lane.asset).reduce((s,u)=>s+u.atoms, 0n);
+  // What the wallet holds of the asset, wherever it holds it: what is not on the chain yet is moved
+  // there when the mix starts (cjRun).
+  const held=cjOnChain(lane.asset) + instantAtoms(lane.asset);
   const cost=BigInt(k)*(lane.denom+lane.coordFee);
   const fee=BigInt(k)*lane.coordFee;
   const parts=[
     `Mixing ${k} × ${fmtAtoms(lane.denom, m.precision)} ${m.ticker}`,
     fee>0n ? `coordination fee ${fmtAtoms(fee, m.precision)} ${m.ticker}` : 'no coordination fee',
-    `you hold ${fmtAtoms(held, m.precision)} ${m.ticker} in transparent coins`,
+    `you hold ${fmtAmount(held, m.precision)} ${m.ticker}`,
   ];
   if(cost>held) parts.push('not enough for that many: lower the count');
   else parts.push(`change ${fmtAtoms(held-cost, m.precision)} ${m.ticker} comes back blinded`);
@@ -8138,17 +8159,17 @@ function cjSay(phase, detail){
   switch(phase){
     case 'selecting':          return 'Choosing coins…';
     case 'registering-inputs': return `Registering ${d.inputs} coin(s) for ${d.denominations} denomination(s)…`;
-    case 'waiting':            return d.phase==='output' ? 'Waiting for the round to open output registration…'
-                                : d.phase==='signing' ? 'Waiting for the round transaction…'
+    case 'waiting':            return d.phase==='output' ? 'Waiting for the mix to take the new addresses…'
+                                : d.phase==='signing' ? 'Waiting for the mix\'s transaction…'
                                 : 'Waiting for other participants…';
     case 'registering-outputs':return `Registering mixed address ${d.registered} of ${d.of} (anonymously)…`;
     case 'verifying':          return 'Checking the round pays exactly what it promised…';
     case 'signing':            return 'Signing my own coins…';
     case 'signed':             return 'Signed. Waiting for everyone else…';
-    case 'pegging-in':         return 'Sending Bitcoin to the bridge…';
-    case 'waiting-for-peg-in': return 'Waiting for the bridge to credit SBTC (Bitcoin confirmations)…';
+    case 'pegging-in':         return 'Sending Bitcoin to be pegged as SBTC…';
+    case 'waiting-for-peg-in': return 'Waiting for the SBTC to be credited (Bitcoin confirmations)…';
     case 'pegged-in':          return 'SBTC credited. Joining a round…';
-    case 'pegging-out':        return 'Sending the mixed coins back through the bridge…';
+    case 'pegging-out':        return 'Sending the mixed coins back as Bitcoin…';
     case 'pegged-out':         return 'Done: Bitcoin sent to a fresh address of yours.';
     default:                   return phase;
   }
@@ -8162,6 +8183,7 @@ async function cjRun(){
   cjBusy=true; $('cjGo').disabled=true;
   const st=$('cjRunStatus'); st.className='status'; st.textContent='Starting…';
   try{
+    await ensureOnChain([{ hex:lane.asset, atoms:BigInt(k)*(lane.denom+lane.coordFee) }], (t)=>{ st.textContent=t; }, 'mixed', cjOnChain);
     const res=await cjMix({ assetId:lane.asset, denominations:k, onStatus:(p,d)=>{ st.textContent=cjSay(p,d); } });
     st.className='status'; st.textContent='Mixed. Transaction '+res.txid.slice(0,20)+'…';
     cjLogAdd({ at:Date.now(), asset:lane.asset, txid:res.txid, denominations:res.denominations,
@@ -9276,6 +9298,7 @@ function stakeLine(s, st){
 }
 
 function renderStake(){
+  try{ fillStakeFeeAssets(); }catch{}
   try{ $('stPubkey').textContent = signer.stakerPublicKey(); }catch{ $('stPubkey').textContent='—'; }
   const list=$('stakeList'); list.innerHTML='';
   let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }
@@ -9749,7 +9772,115 @@ $('acMin').onchange = () => {
   refreshAcStatus().catch(()=>{});
 };
 $('acSlip').onchange = () => { setRewardSettings({ maxSlippageBp: Number($('acSlip').value) }); refreshAcStatus().catch(()=>{}); };
-$('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').textContent='';
+// ---------- what a stake, a delegation or a mix needs on the chain ----------
+// Default mode holds what a person receives where it is paid in seconds (the Ark). A stake, a
+// pool's delegation record and a mix are made from coins the wallet holds on the chain, so the
+// wallet moves what is missing out of the Ark to its own address by itself (the library's quoted
+// offboard), says so, and waits for it to arrive; the person then reviews and signs as always.
+// Meanwhile, and for a while after, its upkeep leaves those coins on the chain (onchainQuiet).
+let _keepOnChainUntil = 0;
+const KEEP_ON_CHAIN_MS = 15 * 60_000, MOVE_WAIT_MS = 45 * 60_000, OPEN_WAIT_MS = 3 * 60_000;
+function onChainAtoms(hex){ try{ return BigInt(balObj()[hex]||0); }catch{ return 0n; } }
+function instantAtoms(hex){ try{ return (leavesApi && !devMode()) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n; }catch{ return 0n; } }
+// A margin for the network fees of `vbytes` of transactions, in atoms of `hex`, at the wallet's
+// default rate, twice over: what is moved for them is never short, and what is left stays the wallet's.
+function feeMarginAtoms(hex, vbytes = 1000){
+  const R = feeRateFor(hex), rfa = BigInt(DEFAULT_FEERATE) * BigInt(vbytes) * 2n / 1000n;
+  return (rfa * BigInt(EXCHANGE_RATE_SCALE) + R - 1n) / R;
+}
+const amountWords = (hex, atoms) => fmtAmount(atoms, assetMeta(hex).precision ?? 8) + ' ' + assetMeta(hex).ticker;
+// needs: [{hex, atoms}] on the chain; have(hex): what counts there (default: the chain's balance).
+// Answers whether anything was moved.
+// What the operator can pay out of an asset in a round now (its published `fundable`), in atoms,
+// or null when it does not say.
+async function operatorFundable(hex){
+  try{
+    const server = window.SEQ_ARCA && window.SEQ_ARCA.server; if(!server) return null;
+    const j = await fetch(server + '/v1/info', { cache:'no-store' }).then(r=> r.ok ? r.json() : null);
+    const a = j && (j.assets||[]).find(x=> x && x.asset===hex);
+    return a && a.fundable!=null ? BigInt(a.fundable) : null;
+  }catch{ return null; }
+}
+// The moves out of the Ark to this wallet's own addresses that are under way, by the library's
+// word (offboards): waiting for a round, in one, or being paid on the chain.
+async function movesUnderWay(){
+  try{ return ((await leavesApi.command('offboards')) || []).filter(o=> ['waiting','in_round','unlocking'].includes(o.state) && o.address && isOwnAddress(o.address)); }
+  catch{ return []; }
+}
+async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
+  let missing = [];
+  for(const n of needs){ const h = have(n.hex); if(h < n.atoms) missing.push({ hex:n.hex, atoms:n.atoms - h }); }
+  if(!missing.length) return false;
+  if(devMode()){ const m = missing[0]; throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
+  // What the wallet holds for instant payments is read once it has opened: wait for that, saying so.
+  if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
+    say(DEFAULT_WORDS.waitOpening);
+    const until = Date.now() + OPEN_WAIT_MS;
+    while(!leavesApi.isOpen() && Date.now() < until) await new Promise(r=>setTimeout(r, 1000));
+  }
+  if(!leavesApi || !leavesApi.isOpen()) throw new Error(DEFAULT_WORDS.stillOpening);
+  // A move asked before (this page earlier, or before a reload) counts: it is waited for, never asked twice.
+  const under = await movesUnderWay();
+  const coming = (hex)=> under.filter(o=>o.asset===hex).reduce((n,o)=> n + BigInt(o.amount||0), 0n);
+  const all = missing.map(m=>({ ...m }));
+  missing = missing.map(m=>({ hex:m.hex, atoms: m.atoms - coming(m.hex) })).filter(m=> m.atoms > 0n);
+  // The operator pays nothing below its smallest leaf of the asset: a smaller need moves that much.
+  for(const m of missing){ let least = 0n; try{ least = leavesApi.minLeaf ? leavesApi.minLeaf(m.hex) : 0n; }catch{} if(m.atoms < least) m.atoms = least; }
+  for(const m of missing){ const can = instantAtoms(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
+  const address = wollet.address(undefined).address().toUnconfidential().toString();
+  _keepOnChainUntil = Date.now() + MOVE_WAIT_MS + KEEP_ON_CHAIN_MS;
+  let minutes = arrivalMinutes(leavesApi.roundInterval());
+  const what = (missing.length ? missing : all).map(m=>amountWords(m.hex, m.atoms)).join(' and ');
+  // A round pays the whole coin a move gives (what is moved and its change) out of the operator's
+  // wallet: when that is more than the operator can fund now, nothing is asked, so no coin waits.
+  const quotes = [];
+  for(const m of missing){
+    let q; try{ q = await leavesApi.offboardQuote({ asset: m.hex, amount: String(m.atoms), address }); }
+    catch(e){ console.warn('[on chain] quote:', e?.message??e); _keepOnChainUntil = Date.now(); throw new Error(DEFAULT_WORDS.notMoved); }
+    const pays = m.atoms + BigInt((q && q.change) || 0), can = await operatorFundable(m.hex);
+    if(can != null && pays > can){ _keepOnChainUntil = Date.now(); console.warn('[on chain] the operator can fund', String(can), 'of', String(pays)); throw new Error(DEFAULT_WORDS.cannotMoveNow(amountWords(m.hex, m.atoms))); }
+    quotes.push(q);
+  }
+  say(DEFAULT_WORDS.movingOut(what, purpose, minutes));
+  try{
+    for(const [i, m] of missing.entries()){
+      const q = quotes[i];
+      const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, shown: q });
+      minutes = arrivalMinutes(v && v.round_within_seconds) || minutes;
+      try{ noteSent(localStorage, walletTag(), { asset: m.hex, atoms: m.atoms, fee: q && q.fee ? { asset: m.hex, atoms: BigInt(q.fee.amount||0) } : null, later: true }); }catch{}
+    }
+  }catch(e){ console.warn('[on chain] moving out of the Ark:', e?.message??e); _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; throw new Error(DEFAULT_WORDS.notMoved); }
+  say(DEFAULT_WORDS.movingOut(what, purpose, minutes));
+  // The library's sync carries the move through the operator's settlement; the page's reads the chain.
+  const until = Date.now() + MOVE_WAIT_MS;
+  let n = 0;
+  while(Date.now() < until){
+    await new Promise(r=>setTimeout(r, 10_000));
+    if(++n % 3 === 0){
+      try{ await leavesApi.syncNow(); }catch(e){ console.warn('[on chain] sync:', e?.message??e); }
+      // Still waiting for a round after a few minutes: the operator cannot pay that much on the
+      // chain yet. Said plainly; the move goes ahead by itself once it can, and the coins stay the wallet's.
+      if(n >= 18 && (await movesUnderWay()).some(o=>o.state==='waiting')) say(DEFAULT_WORDS.movingWaits(what, purpose));
+    }
+    try{ await sync(); }catch{}
+    if(needs.every(n=> have(n.hex) >= n.atoms)){ _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; return true; }
+  }
+  _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS;
+  throw new Error(DEFAULT_WORDS.notReady);
+}
+// The stake's fee asset: tSEQ unless the person chose another held asset the network takes for fees.
+function fillStakeFeeAssets(){
+  const sel=$('stFeeAsset'); if(!sel) return;
+  const prev=sel.value; sel.innerHTML='';
+  const hs=new Set([POLICY_HEX, ...Object.keys(balObj())]); try{ if(leavesApi) for(const h of leavesApi.leafAssets()) hs.add(h); }catch{}
+  for(const h of hs){
+    if(h!==POLICY_HEX && !(assetFigure(h) > 0n)) continue;
+    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)) continue;
+    const o=el('option'); o.value=h; o.textContent=h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker; sel.appendChild(o);
+  }
+  if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;
+}
+$('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').className='status err'; $('stakeErr').textContent='';
   try{
     await afterRecordedSpends();
     const csv=STAKE_CSV;
@@ -9759,7 +9890,22 @@ $('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').tex
     if(atoms<=0n) throw new Error('enter an amount to stake');
     if(atoms<STAKE_MIN_ATOMS) throw new Error('stake is below the network minimum of '+fmtAtoms(STAKE_MIN_ATOMS,8)+' tSEQ');
     const ref=(input._refMode && (input.value||'').trim()) ? {typed:(input.value||'').trim(), ccy:(input._refCcy||REF)} : null;
-    const pset=network.txBuilder().addStakeOutput(pubkey, csv, atoms).feeRate(DEFAULT_FEERATE).finish(wollet);
+    // The minimum counts the fee only when the fee is paid in tSEQ: with too little tSEQ for both,
+    // the wallet offers another held asset that can pay it.
+    fillStakeFeeAssets();
+    let feeHex = $('stFeeAsset').value || POLICY_HEX;
+    const tseq = onChainAtoms(POLICY_HEX) + instantAtoms(POLICY_HEX);
+    if(feeHex===POLICY_HEX && tseq >= atoms && tseq < atoms + feeMarginAtoms(POLICY_HEX)){
+      const other=[...$('stFeeAsset').options].map(o=>o.value).find(h=> h!==POLICY_HEX && onChainAtoms(h)+instantAtoms(h) >= feeMarginAtoms(h));
+      if(!other) throw new Error(DEFAULT_WORDS.stakeFeeShort);
+      $('stFeeAsset').value=other;
+      throw new Error(DEFAULT_WORDS.stakeFeeOther(assetMeta(other).ticker));
+    }
+    const fee = feeMarginAtoms(feeHex);
+    await ensureOnChain(feeHex===POLICY_HEX ? [{ hex:POLICY_HEX, atoms: atoms + fee }] : [{ hex:POLICY_HEX, atoms }, { hex:feeHex, atoms: fee }],
+      (t)=>{ $('stakeErr').className='status'; $('stakeErr').textContent=t; }, 'staked');
+    $('stakeErr').className='status err'; $('stakeErr').textContent='';
+    const pset=applyFee(network.txBuilder().addStakeOutput(pubkey, csv, atoms), feeHex).finish(wollet);
     // The review says what is being signed: a stake, its lock and the key it pays, not a payment.
     const extra=[['What it does', 'Locks this tSEQ in a stake that only this wallet\'s staker key can spend. Once its lock has passed it can be unbonded, and '+UNBOND_ANCHOR_DEPTH.toLocaleString()+' Bitcoin blocks (about two weeks) later claimed back into this wallet.'],
       ['Lock', STAKE_PERIOD_LABEL], ['Staker key', pubkey]];
@@ -9768,8 +9914,8 @@ $('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').tex
       st.push({pubkey, csv, period:STAKE_PERIOD_LABEL, atoms:atoms.toString(), txid:txid.toString(), time:Date.now()});
       localStorage.setItem(STAKES, JSON.stringify(st));
       $('stAmount').value=''; renderStake();
-    }, POLICY_HEX, {rows:[{atoms, hex:POLICY_HEX, ref}], extra, feeAssetHex:POLICY_HEX});
-  }catch(e){ $('stakeErr').textContent=plainErr(e); }
+    }, feeHex, {rows:[{atoms, hex:POLICY_HEX, ref}], extra, feeAssetHex:feeHex});
+  }catch(e){ $('stakeErr').className='status err'; $('stakeErr').textContent=plainErr(e); }
 });
 
 
@@ -9893,9 +10039,11 @@ async function signAuthorization(pubkey, atoms){
   });
 }
 
+// The pool board's payout line, in the wallet's words: the board says "on-chain" and "operator
+// commission", which default mode never says.
 function poolPayoutLine(p){
   if(!p) return 'unknown';
-  return p.payout || 'unknown';
+  return String(p.payout || 'unknown').replace(/\boperator commission\b/g, "the pool's commission").replace(/\bon-chain\b/g, 'on the chain');
 }
 
 function renderPools(){
@@ -9973,13 +10121,13 @@ function renderDelegation(){
   }
   if(pool.declared === false){
     warn('This signer has not declared itself a pool: it has committed to no payout policy and never asked for '
-       + 'delegations. It keeps everything its blocks earn, and nothing on-chain obliges it to pay you.');
+       + 'delegations. It keeps everything its blocks earn, and nothing on the chain obliges it to pay you.');
   } else if(!pool.policy_in_force){
-    warn('This pool has committed to no payout policy, so by default it keeps everything its blocks earn. Nothing on-chain obliges it to pay you.');
+    warn('This pool has committed to no payout policy, so by default it keeps everything its blocks earn. Nothing on the chain obliges it to pay you.');
   } else if(pool.policy_in_force.mode==='direct'){
     warn('This pool pays a committed address. The chain stops it redirecting the reward silently, but does not check that address shares anything with you.');
   } else if(pool.policy_in_force.mode==='split'){
-    warn('This pool shares rewards proportionally: they pool up on-chain and anyone can trigger the payout. Leaving forfeits your unclaimed share, so claim your rewards before you leave.');
+    warn('This pool shares rewards proportionally: they pool up on the chain and anyone can trigger the payout. Leaving forfeits your unclaimed share, so claim your rewards before you leave.');
   }
   for(const q of (pool.policy_pending||[])){
     const secs = q.blocks_away * (POOLS.block_seconds||60);
@@ -10038,6 +10186,10 @@ const tSEQ = (atoms) => fmtAtoms(BigInt(atoms), 8)+' tSEQ';
 // transaction spends that coin. Both are built and shown before either is
 // signed into the chain.
 async function reviewJoin(target){
+  // The delegation record and its two fees are paid in tSEQ from coins on the chain.
+  await ensureOnChain([{ hex:POLICY_HEX, atoms: stakeRecords.RECORD_ATOMS + feeMarginAtoms(POLICY_HEX, 2000) }],
+    (t)=>{ $('delegErr').className='status'; $('delegErr').textContent=t; }, 'used to join the pool');
+  $('delegErr').className='status err'; $('delegErr').textContent='';
   const ctx = stakeCtx();
   const p = await stakeRecords.prepareJoin(ctx, target);
   const kv = [
@@ -10078,7 +10230,7 @@ $('btnDelegate').onclick=async()=>{
       return;
     }
     await reviewJoin(target);
-  }catch(e){ $('delegErr').textContent = e?.message ?? String(e); }
+  }catch(e){ $('delegErr').className='status err'; $('delegErr').textContent = plainErr(e); }
 };
 
 $('btnUndelegate').onclick=async()=>{

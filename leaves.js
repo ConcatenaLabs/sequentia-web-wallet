@@ -1721,6 +1721,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     offboardQuote: (args) => command('offboard_quote', args),
     offboard: (args) => command('offboard', args).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
     // The operator's interval between settlements, in seconds, or null.
+    // The operator's smallest leaf of an asset, in atoms (an output below it is refused), or 0n.
+    minLeaf: (hex) => { const a = ((S.info && S.info.server_info && S.info.server_info.assets) || []).find((x) => x && x.asset === hex); return a ? big(a.min_leaf) : 0n },
     roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },

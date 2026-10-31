@@ -161,6 +161,29 @@ modes (`asset-picker.js`):
   - "This receive code was paid already: ask for a new one. Nothing was sent."
   - "This payment was declined; nothing was sent."
 
+## Stake, pools and Mix
+
+- A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain, and
+  default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
+  Ark to its own address by itself (never less than the operator's smallest coin of the asset),
+  and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
+  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"). Once it
+  has arrived the usual review opens; nothing is signed before it.
+- When the operator cannot pay that much on the chain now (its published `fundable`, against
+  the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be
+  moved out of the Ark right now: the network has too little of it free. Nothing has moved: try
+  again later."
+- A move already under way is waited for, never asked twice. One the operator cannot pay on the
+  chain yet says "<amount> <TICKER> cannot be moved out of the Ark yet: the network moves it as
+  soon as it can, and it stays yours meanwhile. …"; one that has not arrived within 45 minutes,
+  "What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes."
+- Too little held: "Not enough <TICKER>: <amount> <TICKER> short." The 40,000 tSEQ minimum
+  counts the fee only when the fee is paid in tSEQ: the stake card has **Pay the fee in**, and
+  with too little tSEQ for both the wallet chooses another held asset there and says "Not enough
+  tSEQ for the stake and its fee: the fee is paid in <TICKER> instead, chosen below. Press Review
+  stake again."
+- Mix says what is held of the asset, wherever it is held: "you hold <amount> <TICKER>".
+
 ## BTC
 
 BTC is held on a Bitcoin ark: native bitcoin, never pegged, in a wallet of the same phrase, and

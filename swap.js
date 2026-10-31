@@ -525,7 +525,7 @@ export function canonicalPair(a, b){
   if (ra !== rb) return ra > rb ? { base: b, quote: a } : { base: a, quote: b };
   return String(a) < String(b) ? { base: a, quote: b } : { base: b, quote: a };
 }
-// The direction a pair is read in, on every screen (docs/DEFAULT_MODE.md, Market): BTC against a
+// The direction default mode's market reads a pair in (docs/DEFAULT_MODE.md, Market): BTC against a
 // fiat stablecoin is priced in the stablecoin ("1 BTC = 77,200 USDX"), as people price bitcoin;
 // every other pair as canonicalPair has it, BTC the quote against anything else. Display only:
 // books and markets are keyed by canonicalPair, and the relay serves a market either way.
@@ -535,9 +535,11 @@ export function displayPair(a, b){
   if (b === 'BTC' && fiat(a)) return { base: b, quote: a };
   return canonicalPair(a, b);
 }
-// The pair's DISPLAY direction, honouring the user's flip toggle.
+// The pair's DISPLAY direction in developer mode's composer, honouring the user's flip toggle. It
+// stays canonicalPair's: the cross-chain book builds its ladder priced in BTC (renderXBook), and the
+// sweep estimate reads the ladder only in that frame.
 function pairDir(a, b){
-  const d = displayPair(a, b);
+  const d = canonicalPair(a, b);
   return S.priceFlip ? { base: d.quote, quote: d.base } : d;
 }
 // Format "1 base = N quote" from a RECEIVE-per-PAY scalar (what the composer/quote paths natively have).
