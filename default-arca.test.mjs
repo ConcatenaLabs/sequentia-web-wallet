@@ -5,7 +5,7 @@
 import assert from 'node:assert'
 import { test } from 'node:test'
 import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
-  boardValue, boardAll } from './default-arca.js'
+  boardValue, boardAll, onchainLessBoards, boardSpent } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
 const OP = 'b6f4c5924ad81947658cf85bb93d9267efc54c7fcb2e4577e8c954c68fa087bb'
@@ -100,6 +100,7 @@ test('a board carries what is left after its own fee, signed on the fee quoted f
   const v = await boardAll(run, { asset: B, onchain: 50000n, min: 10000n })
   assert.equal(v.value, '49550')
   assert.deepEqual(v.shown, { asset: B, amount: '450' })
+  assert.equal(v.spent, '50000', 'the board took its amount and its fee off the chain')
   assert.deepEqual(calls.map(([c, a]) => `${c} ${a.amount}`), ['board_quote 10000', 'board_quote 49700', 'board_quote 49550', 'board 49550'])
 })
 
@@ -155,4 +156,20 @@ test('a coin kept safe while the wallet was away is shown in the plain words, fr
   assert.equal(keptSafeAtoms(balance, 'b'.repeat(64)), 0n)
   assert.equal(keptSafeAtoms(null, A), 0n)
   assert.equal(DEFAULT_WORDS.keptSafe('0.02', 'XYZ'), '0.02 XYZ moved out of the Ark to keep it safe while you were away')
+})
+
+test('a board just made comes off the chain\'s part until the page\'s reading shows it spent', () => {
+  const t = 1_800_000_000_000
+  const rec = boardSpent(457_502_99918786n, 457_502_99918786n, t)   // all of it boarded, fee included
+  assert.deepEqual(onchainLessBoards(rec, 457_502_99918786n, t + 1000), { atoms: 0n, seen: false })
+  // The reading shows the spend: counted as it reads, and the record is done.
+  assert.deepEqual(onchainLessBoards(rec, 0n, t + 60_000), { atoms: 0n, seen: true })
+  // A board of part of what is held: only what it spent comes off.
+  const part = boardSpent(1_000n, 600n, t)
+  assert.deepEqual(onchainLessBoards(part, 1_000n, t), { atoms: 400n, seen: false })
+  assert.deepEqual(onchainLessBoards(part, 400n, t), { atoms: 400n, seen: true })
+  // Never longer than half an hour, never below zero, nothing without a board.
+  assert.deepEqual(onchainLessBoards(part, 1_000n, t + 31 * 60_000), { atoms: 1_000n, seen: true })
+  assert.equal(onchainLessBoards(boardSpent(500n, 500n, t), 300n, t).atoms, 0n)
+  assert.deepEqual(onchainLessBoards(null, 7n, t), { atoms: 7n, seen: true })
 })
