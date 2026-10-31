@@ -6492,6 +6492,12 @@ function renderBalance(){
       const left=BigInt(b[o.hex]||0)-BigInt(o.atoms); b[o.hex]=(left>0n?left:0n).toString();
     }
   }
+  // A board the leaf wallet just made spent these coins, and its leaf counts as arriving in the
+  // tree already: until this page's reading shows them spent, they come off the chain's part.
+  if(leavesApi && leavesApi.onchainLessBoards){
+    b={...b};
+    for(const h of Object.keys(b)){ try{ b[h]=leavesApi.onchainLessBoards(h, b[h]).toString(); }catch{} }
+  }
   const list=$('assetList'); list.innerHTML=''; list.classList.add('btable');
   // One view of the balance in every mode: one figure per asset, its parts in the row's details.
   list.classList.add('user');

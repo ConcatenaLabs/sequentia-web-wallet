@@ -80,7 +80,7 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, JOIN_RETRY_MS } from './default-arca.js'
+import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
@@ -97,6 +97,7 @@ export const JOINED_KEY = 'swk.leaves.joined'        // + '.' + tag: this wallet
 export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf address handed to pages
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
+export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 // A receive code is shown again while it has at least this long before it lapses.
@@ -768,6 +769,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // is the person's; never while a person waits on the wallet, or while the page's own on-chain
   // payment may still be spending coins; coins the library refused to board are asked again
   // only once they change. The coin shows as arriving until the board is final.
+  function boardsKept () {
+    try { return JSON.parse(ctx.store.getItem(tagged(BOARDS_KEY, tag())) || '{}') || {} } catch { return {} }
+  }
+  function keepBoard (asset, rec) {
+    const all = boardsKept()
+    if (rec) all[asset] = rec; else delete all[asset]
+    try { ctx.store.setItem(tagged(BOARDS_KEY, tag()), JSON.stringify(all)) } catch {}
+  }
   async function boardArrivals () {
     if (!S.open || dev() || !pinned() || S.asked) return
     try { if (ctx.onchainQuiet && ctx.onchainQuiet()) { upkeepSoon(30_000); return } } catch {}
@@ -782,7 +791,13 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (refused.get(c.asset) === String(c.onchain)) continue
       try {
         const v = await boardAll(run, c)
-        if (v) { boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }; emit('leafArrived', { asset: c.asset, value: String(c.onchain), kind: 'board' }) }
+        if (v) {
+          boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }
+          // Until the page's reading of the chain shows the board's coins spent, they are taken off
+          // it: the board's leaf counts as arriving from now (onchainLessBoards).
+          if (v.spent) keepBoard(c.asset, boardSpent(c.onchain, v.spent, now()))
+          emit('leafArrived', { asset: c.asset, value: String(c.onchain), kind: 'board' })
+        }
         else refused.set(c.asset, String(c.onchain))
         log(`[leaves] board of ${c.asset.slice(0, 8)}: ${v ? 'boarded ' + (v.value || '') : 'nothing to board after the fee'}`)
       } catch (e) { refused.set(c.asset, String(c.onchain)); S.lastBoard = { at: now(), asset: c.asset, error: e }; log(`[leaves] board of ${c.asset.slice(0, 8)} refused: ${e && e.message}`) }
@@ -1727,6 +1742,15 @@ export function mountLeaves (ctx, root, settingsRoot) {
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
     refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
+    // `atoms` of an asset as the page's own reading of the chain shows them, less what a board just
+    // made spent that the reading does not show spent yet (default-arca.js onchainLessBoards).
+    onchainLessBoards: (hex, atoms) => {
+      const all = boardsKept()
+      if (!all[hex]) return big(atoms)
+      const r = onchainLessBoards(all[hex], atoms, now())
+      if (r.seen) keepBoard(hex, null)
+      return r.atoms
+    },
     // ---- the wallet's own upkeep outside this module (lightning-to-ark.js) ----
     // What the library said of itself and the operator (`info`), and the coins as last read.
     info: () => S.info,
