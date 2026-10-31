@@ -245,6 +245,10 @@ const FIRM_RETRY_MS = 3000
 // firm terms always get at least QUOTE_FIRM_MIN_MS of it.
 export const QUOTE_FIRM_MS = 8000
 const QUOTE_FIRM_MIN_MS = 3000
+// When the BTC desk is the only source a trade can take (buying or selling BTC), its firm terms
+// (an offer and a Lightning invoice) are waited for this long, not QUOTE_FIRM_MS: there is no
+// other answer to take instead, and a late one was a refusal for nothing.
+export const BTC_ONLY_FIRM_MS = 20000
 // The book's entries read while the amount was typed stand for the quote this long.
 const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
@@ -790,9 +794,11 @@ export function createEngine (deps) {
     const cands = []
     const worth = worthFirming(ind).slice(0, 8)
     // Wall-clock time: the person's wait (deps.now may be a test's stand-in clock).
-    const until = Math.max(started + firmMs, Date.now() + Math.min(QUOTE_FIRM_MIN_MS, firmMs))
+    const btcOnly = worth.length > 0 && worth.every(({ e }) => e.source === 'btc-gateway')
+    const window = btcOnly ? Math.max(firmMs, deps.btcOnlyFirmMs || BTC_ONLY_FIRM_MS) : firmMs
+    const until = Math.max(started + window, Date.now() + Math.min(QUOTE_FIRM_MIN_MS, window))
     for (let round = 0; round < 2 && !cands.length; round++) {
-      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, firmMs / 2)) break; await sleep(FIRM_RETRY_MS) }
+      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, window / 2)) break; await sleep(FIRM_RETRY_MS) }
       const got = await Promise.all(worth.map(({ e }) => inTime(firm(e, payAsset, receiveAsset, A, haveOf(e), until), until - Date.now())))
       for (const c of got) if (c) cands.push(c)
     }

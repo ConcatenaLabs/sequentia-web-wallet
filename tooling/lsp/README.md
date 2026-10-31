@@ -224,7 +224,7 @@ a pass. The library reads every coin it holds before each command, so a maker ho
 coins answers each command in minutes, and its firm offers lapse.
 
 The library answers one command at a time, so a taker's firm offer waits behind whatever the
-maker's own upkeep is running. Quotes are served from the last reading and never wait. A firm
+maker's own upkeep is running. Quotes are served from the last reading and never wait: before its first reading, just after it starts, it quotes nothing. A firm
 offer, in-tree or at the BTC desk, is sized on that reading too, while it is under five minutes old.
 It then asks the library for one command, the offer, which goes ahead of every queued command
 (the library refuses an offer it cannot pay). An acceptance goes ahead the same way, and the
