@@ -61,6 +61,8 @@
   .words span b{color:var(--dim);margin-right:7px;font-weight:500}
   .warn{background:#2a1d0a;border:1px solid #6b4e12;color:#ffcf7a;border-radius:10px;padding:10px 12px;font-size:13px;margin-top:12px}
   .status{font-size:13px;min-height:18px;margin-top:10px}
+  /* An invoice's output box and a card's status line take no room, and draw no frame, until they say something. */
+  #lnRecvBolt11:empty,#lnRecvStatus:empty,#lnSendStatus:empty{display:none}
   .ok{color:var(--green)} .err{color:var(--red)}
   /* shown in developer mode only (body.devmode is set from the wallet's mode) */
   body:not(.devmode) .dev-only{display:none !important}
@@ -3299,6 +3301,7 @@ function prefillInvoice(inv){
   tab('send');
   const t=$('lnSendBolt11'); if(!t) return;
   t.value=inv; t.dispatchEvent(new Event('input'));
+  try{ refreshLnSendReceive(); }catch{}
   try{ $('lnSendCard').scrollIntoView({block:'center'}); $('lnSendBtn').focus(); }catch{}
 }
 // Parse and act on the current location.hash. Three routes (spec 1.9 WW-2/WW-3, and `pay`); anything else is
@@ -3824,7 +3827,7 @@ function initBtcArk(){
     makeWorker: ()=> new Worker(new URL('./btc-ark/worker.js', import.meta.url), { type:'module' }),
     mnemonic: ()=> (localStorage.getItem(KEY) || '').trim(), config,
     decode: (s)=> decodeBolt11(s),
-    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} try{ refreshLnSendReceive(); }catch{} },
     log: (...a)=> console.log(...a),
   });
   btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
@@ -3991,7 +3994,7 @@ function initUserComposer(){
     log: (...a)=> console.log(...a),
   });
   userComposer = mountUserComposer({
-    root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, parseAtoms,
+    root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
     knownAssets: userKnownAssets, held: userHeld,
     isHidden: isAssetHidden, refValue: refValueStr,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
@@ -5201,9 +5204,14 @@ function refreshLnSendReceive(){
   // Default mode with BTC on the Bitcoin ark: BTC is paid and received over Lightning from there.
   // Default mode shows them only as the BTC cards of the ark, in plain words; developer mode shows
   // every asset's Lightning cards.
-  const dev = devMode(), arkOn = btcArkRoutes(), on = dev ? (lnOn || arkOn) : arkOn;
+  // Default mode shows the BTC invoice cards only while the wallet holds BTC on the ark; until then
+  // BTC is received with the receive code (an amount on it carries an invoice).
+  const dev = devMode(), arkOn = btcArkRoutes(), arkHeld = arkOn && btcArk.figures().total > 0n, on = dev ? (lnOn || arkOn) : arkHeld;
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
-  if (sc) sc.classList.toggle('hide', !on);
+  // An invoice a page handed over (`#pay?invoice=`) keeps Pay an invoice on screen, so it can be
+  // read, and refused in words when there is too little to pay it.
+  const handed = !!(($('lnSendBolt11')||{}).value||'').trim();
+  if (sc) sc.classList.toggle('hide', !(on || (!dev && arkOn && handed)));
   if (rc) rc.classList.toggle('hide', !on);
   if (lnOn && dev){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
   else if (arkOn){ for (const id of ['lnRecvAsset', 'lnSendAsset']){ const sel = $(id); if (sel) sel.innerHTML = '<option value="BTC">BTC</option>'; } }
@@ -6929,11 +6937,24 @@ function oampSetQr(imgId, payload){
 function walletAssetRow(v, text){
   const t = String(text || '').split(' · ')[0].trim();
   if(v === '') return { ticker: t, name: '', pin: true };
-  if(v === 'BTC') return { ticker: 'BTC', name: 'Bitcoin', held: btcBalance > 0n, bal: btcBalance > 0n ? { b: fmtAtoms(btcBalance, 8), r: refValueStr('BTC', btcBalance) } : null };
+  // The asset's one figure, as Balance shows it: what is held wherever it is held.
+  const atoms = assetFigure(v);
+  if(v === 'BTC') return { ticker: 'BTC', name: 'Bitcoin', held: atoms > 0n, bal: atoms > 0n ? { b: fmtAmount(atoms, 8), r: refValueStr('BTC', atoms) } : null };
   const m = String(v).startsWith('oamp:') ? {} : (assetMeta(v) || {});
-  let atoms = 0n; try{ atoms = BigInt(balObj()[v] || 0); }catch{}
   return { ticker: t || m.ticker || String(v).slice(0, 8), name: m.name || '', held: atoms > 0n, hidden: isAssetHidden(v),
-    bal: atoms > 0n ? { b: fmtAtoms(atoms, m.precision || 0), r: refValueStr(v, atoms) } : null };
+    bal: atoms > 0n ? { b: fmtAmount(atoms, m.precision || 0), r: refValueStr(v, atoms) } : null };
+}
+// What the wallet holds of an asset, wherever it holds it (the figure Balance shows for it): on the
+// chain, for instant payments, on Lightning, staked; BTC also on the Bitcoin ark.
+function assetFigure(v){
+  if(String(v).startsWith('oamp:')) return (oampBalances[String(v).slice(5)]?.atoms) || 0n;
+  let n = 0n;
+  try{ n += v==='BTC' ? (btcBalance || 0n) : BigInt(balObj()[v] || 0); }catch{}
+  try{ if(v!=='BTC' && leavesApi) n += leavesApi.leafAtoms(v) || 0n; }catch{}
+  try{ if(v==='BTC') n += btcArkAtoms(); }catch{}
+  try{ n += lnBalanceFor(v) || 0n; }catch{}
+  try{ if(v===POLICY_HEX) n += stakedAtoms(); }catch{}
+  return n;
 }
 function assetChooser(sel){
   if(!sel || sel._chooser || !sel.parentNode) return sel && sel._chooser;
@@ -7108,6 +7129,7 @@ function updateFeeForSendType(){
   if(isBtcSend()){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4); this is a parent-chain payment.'; }
   else { updateFeeAssetHint(); }
   if(sendFee){ sendFee.refresh(); sendFeeResize(); }
+  showSendFee();
 }
 // Only one scanner at a time; also stop the camera if the page is hidden/unloaded with it open.
 let activeScannerCleanup=null;
@@ -7269,6 +7291,23 @@ async function sendVsize(hex){
 }
 var sendFee=null, _sendResizeT=null;   // var: read by functions a boot path may call before this line runs
 function sendFeeResize(){ clearTimeout(_sendResizeT); _sendResizeT=setTimeout(()=>{ if(sendFee) sendFee.resize(); }, 700); }
+// Default mode shows the network fee line only for a payment the wallet makes on the chain from its
+// own coins. A receive code is paid in seconds, and a payment out of what the wallet holds for
+// instant payments says its fee in the review: a line there would wait for a total that never comes.
+function showSendFee(){
+  const box=$('sendFeeBox'); if(!box) return;
+  let chain=true;
+  if(!devMode()){
+    for(const r of ($('recipients')?.children||[])){
+      const addr=(r.querySelector('.raddr')?.value||'').trim(), hex=r.querySelector('.rasset')?.value;
+      if(!hex || hex==='BTC') continue;
+      if(!addr || (leavesApi && leavesApi.treeRoute(addr))){ chain=false; continue; }
+      let atoms=0n; try{ atoms=parseAtoms(r.querySelector('.ramt').value, assetMeta(hex).precision||0); }catch{}
+      if(atoms > availableFor(hex) || availableFor(hex) <= 0n) chain=false;
+    }
+  }
+  box.classList.toggle('hide', !chain);
+}
 function mountSendFee(){
   const box=$('sendFeeBox'); if(!box || sendFee) return;
   const sel=$('feeAsset'); sel.remove();
@@ -7377,7 +7416,7 @@ function addRecipientRow(){
     if(!hex){ availLine.textContent=''; return; }
     const prec = hex==='BTC' ? 8 : (assetMeta(hex).precision||0);
     const tk = hex==='BTC' ? 'BTC' : assetMeta(hex).ticker;
-    availLine.textContent = 'balance ' + fmtAtoms(sendableFor(hex), prec) + ' ' + tk; };
+    availLine.textContent = 'balance ' + fmtAmount(sendableFor(hex), prec) + ' ' + tk; };
   // Restricted (OpenAMP) sends go to a recipient AID, not a tb1/tsqb1 address — relabel the field.
   const raddr=r.querySelector('.raddr');
   const updAddrPh=()=>{ if(isOampAsset(rsel.value)){ r.querySelector('.addr-row').previousElementSibling.textContent='Recipient AID'; raddr.placeholder='recipient OpenAMP account id'; }
@@ -7385,8 +7424,8 @@ function addRecipientRow(){
   updAddrPh();
   const warn=r.querySelector('.rwarn');
   r._checkAddr=()=>{ warn.textContent=recipientProblem(raddr.value.trim(), rsel.value)||''; };
-  raddr.addEventListener('input', ()=>{ r._checkAddr(); sendFeeResize(); });
-  r.querySelector('.ramt').addEventListener('input', sendFeeResize);
+  raddr.addEventListener('input', ()=>{ r._checkAddr(); sendFeeResize(); showSendFee(); });
+  r.querySelector('.ramt').addEventListener('input', ()=>{ sendFeeResize(); showSendFee(); });
   r.querySelector('.maxbtn').onclick=()=>fillMax(r);
   rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); r._refreshAvail(); updAddrPh(); r._checkAddr(); };   // default the fee to the sent asset; re-value too
   r._refreshAvail();

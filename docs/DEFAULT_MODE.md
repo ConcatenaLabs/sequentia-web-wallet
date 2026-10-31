@@ -31,7 +31,8 @@ In practice:
 - **BTC** is native bitcoin, never pegged, and is always the first row. A fresh wallet shows
   exactly one row: BTC at 0.
 - Assets are named by their ticker and use their own decimals. Default mode never shows an amount
-  in atoms or sats.
+  in atoms or sats. Every amount a person reads is grouped the way Balance groups it ("500,000
+  USDX"); an amount filled into a field is plain, so it can be edited.
 
 ## Balance
 
@@ -123,6 +124,9 @@ modes (`asset-picker.js`):
 
 - The field is **Recipient**, with the hint "a receive code, an address or an invoice". Next to
   the asset is its one figure, "balance <amount>".
+- The network fee line shows only for a payment made on the chain from the wallet's own coins.
+  A receive code is paid in seconds, and a payment out of what the wallet holds for instant
+  payments says its fee in the review.
 - A receive code is paid the fastest way the wallet holds: an asset at its `sequentia` part from
   what the wallet holds for instant payments, BTC at its `ark` part from the Bitcoin ark, or at
   its invoice from the ark or from Lightning. Only when none of these fits is it paid at its
@@ -183,7 +187,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   invoice**, checked as if pasted, and nothing is paid until the person presses **Pay invoice**.
   The page that sent the link is not named.
 - These two cards are the only invoice cards default mode shows, and only while the wallet holds
-  BTC this way. Invoices for other assets, the asset pickers, room to receive and the status pill
+  BTC this way. Until then BTC is received with the receive code, whose amount field puts an
+  invoice in it; an invoice handed over by a pay link shows **Pay an invoice** all the same. Invoices for other assets, the asset pickers, room to receive and the status pill
   of the wallet's Lightning nodes are in developer mode.
 - A trade's BTC is paid and received the same way.
 
