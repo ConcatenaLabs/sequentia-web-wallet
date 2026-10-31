@@ -43,6 +43,11 @@ In practice:
   the block it rested on, stays in the figure and appears under it as **"<amount> <TICKER> being
   redone after a Bitcoin reorganisation"** until the network takes it in again. It is never shown
   as gone.
+- A coin the wallet left unrefreshed while it was away is taken on the chain under its own key
+  before it could be swept, by the operator or a watchtower. It stays in the figure and appears
+  under it as **"<amount> <TICKER> moved out of the Ark to keep it safe while you were away"**
+  while the wallet, open again, puts it back by itself; it is then arriving until that is final.
+  Developer mode names it `kept_safe`.
 - A coin the wallet left past its expiry, which the operator took and repays as a new coin less
   its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
   The wallet claims it by itself the next time it opens, or once restored from its phrase.

@@ -80,7 +80,7 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, anchorDepth, boardCandidates, boardAll, JOIN_RETRY_MS } from './default-arca.js'
+import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, JOIN_RETRY_MS } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
@@ -1658,6 +1658,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     arriving: (hex) => arrivingAtoms(S.balance, hex),
     // Of what is arriving, what is being redone after a Bitcoin reorganisation, in atoms.
     redoing: (hex) => redoingAtoms(S.coins, hex),
+    // What was moved out to keep it safe while the wallet was away, until it is put back, in atoms.
+    keptSafe: (hex) => keptSafeAtoms(S.balance, hex),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its
     // block is certified), or null before the library has said.
     anchorDepth: () => anchorDepth(S.info),
