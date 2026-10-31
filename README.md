@@ -95,9 +95,10 @@ Open **https://sequentiatestnet.com/wallet/** in a modern desktop or mobile brow
 (WebAssembly and `localStorage` required; the live QR camera additionally needs a secure
 context, which the live site is). Create a new wallet or restore one from a 12-word phrase.
 
-Get testnet funds from the **Issuance** tab: one-click faucet buttons for tSEQ and the demo
-assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com/faucet pays
-straight to your current address). The line under the buttons says when the coins have reached
+Get testnet funds from the **Issuance** tab: one-click faucet buttons for BTC (testnet4), tSEQ
+and the demo assets USDX, EURX, GOLD, SILVR, OILX (the faucet at
+https://sequentiatestnet.com/faucet pays the wallet's receive code; BTC lands on the Bitcoin ark,
+where the wallet holds it, in seconds). The line under the buttons says when the coins have reached
 the wallet.
 
 The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign,

@@ -110,7 +110,10 @@ modes (`asset-picker.js`):
   the screen without the person leaving it.
 - **Faucet** (testnet): the faucet pays the receive code. When it has paid: "Received <amount>
   <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address instead, in the
-  same click.
+  same click. Its first button is **BTC**: the faucet pays the code's address on the Bitcoin ark,
+  and the line reads "Received <amount> BTC." once it is there; while the wallet holds no BTC
+  that way yet, it pays the address, and the line reads "The faucet sent <amount> BTC. It arrives
+  after a Bitcoin block."
 
 ## Send
 
