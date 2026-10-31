@@ -86,6 +86,9 @@ export function forbiddenIn (text) {
 export const USER_WORDS = Object.freeze({
   pay: 'You pay',
   get: 'You receive',
+  // The control between the two sides: it exchanges them, each amount staying with its asset.
+  flip: 'Swap You pay and You receive',
+  flipMark: '⇅',
   amount: 'Amount',
   max: 'Max',
   balance: (x) => `balance ${x}`,
@@ -694,9 +697,11 @@ export function createEngine (deps) {
       const A = big(pay)
       if (A <= 0n) return { ok: false, why: 'too-small' }
       let best = null
-      for (const e of es) { const s = sizeEntry(e, A); if (s && (!best || s.receive > best.receive)) best = s }
+      for (const e of es) { const s = sizeEntry(e, A); if (s && (!best || s.receive > best.receive)) best = { ...s, e } }
       if (!best) return { ok: false, why: 'too-small' }
-      return out(A, best.receive, best.pay < A)
+      // Short only when the source cannot take the whole amount (its size or its lot rules): what
+      // the price's rounding leaves of the amount, less than one atom of what is received, is not.
+      return out(A, best.receive, best.receive < (A * best.e.rateDen) / best.e.rateNum)
     }
     const R = big(receive)
     if (R <= 0n) return { ok: false, why: 'too-small' }

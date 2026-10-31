@@ -48,6 +48,13 @@ export function mountUserComposer (ctx) {
     estTimer: null, estSeq: 0,
     offered: { pay: null, list: [], at: 0, loading: false } }
   const OFFERS_MS = ctx.offersMs || 60000
+  // The pair and the amount typed are kept for the browser tab's session (ctx.session, a
+  // sessionStorage), so a reload, or a tab the browser put to sleep, opens on them again. A ticket
+  // is never kept: its price is asked again.
+  const KEPT = ['pay', 'get', 'amount', 'recv', 'fixed', 'payChosen', 'getChosen']
+  const keptKey = () => 'swk.composer.' + (ctx.tag ? ctx.tag() : 'default')
+  try { const k = ctx.session && JSON.parse(ctx.session.getItem(keptKey()) || 'null'); if (k && typeof k === 'object') for (const f of KEPT) if (k[f] != null) S[f] = k[f] } catch {}
+  function keep () { try { if (ctx.session) { const k = {}; for (const f of KEPT) k[f] = S[f] ?? null; ctx.session.setItem(keptKey(), JSON.stringify(k)) } } catch {} }
   const doc = ctx.root.ownerDocument || document
   const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e }
   const name = (h) => (h === 'BTC' ? 'BTC' : ((ctx.assetMeta(h) || {}).ticker || String(h).slice(0, 8)))
@@ -162,7 +169,7 @@ export function mountUserComposer (ctx) {
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
     row1.appendChild(chooser('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
     const inp = el('input', 'uc-amount'); inp.id = 'ucAmount'; inp.inputMode = 'decimal'; inp.placeholder = USER_WORDS.amount; inp.value = S.amount
-    inp.oninput = () => { S.amount = inp.value; S.fixed = 'pay'; S.error = ''; if (S.ticket) { reset(); paintTicket() } schedule() }
+    inp.oninput = () => { S.amount = inp.value; S.fixed = 'pay'; S.error = ''; keep(); if (S.ticket) { reset(); paintTicket() } schedule() }
     row1.appendChild(inp)
     const have = el('div', 'sub uc-have'); have.id = 'ucHave'
     have.appendChild(el('span', null, USER_WORDS.balance(amt(S.pay, ctx.held(S.pay) || 0n))))
@@ -171,6 +178,18 @@ export function mountUserComposer (ctx) {
     have.appendChild(max)
     row1.appendChild(have)
     box.appendChild(row1)
+    // ⇅ exchanges the two sides; the amount typed stays with its asset, now on the other side.
+    const flipRow = el('div', 'uc-flip-row')
+    const flip = el('button', 'ghost uc-flip', USER_WORDS.flipMark); flip.type = 'button'; flip.id = 'ucFlip'
+    flip.title = USER_WORDS.flip; flip.setAttribute('aria-label', USER_WORDS.flip); flip.disabled = !S.get
+    flip.onclick = () => {
+      if (!S.get) return
+      ;[S.pay, S.get] = [S.get, S.pay]; [S.amount, S.recv] = [S.recv, S.amount]
+      S.fixed = S.fixed === 'pay' ? 'receive' : 'pay'; S.payChosen = true; S.getChosen = true
+      reset(); render(); schedule(0)
+    }
+    flipRow.appendChild(flip)
+    box.appendChild(flipRow)
     // You receive
     const row2 = el('div', 'uc-row')
     row2.appendChild(el('label', 'lbl', USER_WORDS.get))
@@ -178,7 +197,7 @@ export function mountUserComposer (ctx) {
     if (!S.get || !gl.includes(S.get)) S.get = defaultGet(gl)
     row2.appendChild(chooser('ucGet', gl, S.get, pickGet))
     const rin = el('input', 'uc-amount'); rin.id = 'ucReceive'; rin.inputMode = 'decimal'; rin.placeholder = USER_WORDS.amount; rin.value = S.recv
-    rin.oninput = () => { S.recv = rin.value; S.fixed = 'receive'; S.error = ''; if (S.ticket) { reset(); paintTicket() } schedule() }
+    rin.oninput = () => { S.recv = rin.value; S.fixed = 'receive'; S.error = ''; keep(); if (S.ticket) { reset(); paintTicket() } schedule() }
     row2.appendChild(rin)
     box.appendChild(row2)
     // The ticket and the button
@@ -188,6 +207,7 @@ export function mountUserComposer (ctx) {
     // Trades
     const list = el('div', 'uc-trades'); list.id = 'ucTrades'; box.appendChild(list)
     r.appendChild(box)
+    keep()
     paintTicket()
     paintTrades()
     loadOffered()

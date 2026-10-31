@@ -197,9 +197,14 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - **You pay** and **You receive**, each an asset and an amount, then **Review** and **Trade**. The
   two amounts are tethered: the one typed stays as typed, and the other follows the best price
   the book offers now, again every few seconds while the tab is shown. Under You pay:
-  "balance <amount> <TICKER>" and **Max**. When the book cannot fill what is typed: "The book can
-  fill up to <amount> <TICKER> now." Review then shows the exact amounts and fees; while
-  pricing: "Finding the best price…". If the price moves: "The price moved. Here is the new one."
+  "balance <amount> <TICKER>" and **Max**. Between the two sides, **⇅** ("Swap You pay and You
+  receive") exchanges them: each asset takes the other's place and the amount typed goes with its
+  asset, so 100 USDX typed under You pay is 100 USDX under You receive. When the book cannot fill
+  what is typed: "The book can fill up to <amount> <TICKER> now." (never for what the price's
+  rounding leaves, less than one atom of what is received). Review then shows the exact amounts
+  and fees: what is paid can be a few atoms below what was typed, when the price leaves a
+  remainder too small to buy anything, and that remainder stays in the wallet. While pricing:
+  "Finding the best price…". If the price moves: "The price moved. Here is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
@@ -237,6 +242,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   answered within a few seconds is left out of the price rather than waited for.
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
+- The open tab, the pair and the amount typed are kept for the browser tab's session: a reload
+  opens on them again. A ticket is not kept; Review asks for the price again.
 
 ## Market
 
@@ -244,8 +251,10 @@ Default mode is a trading screen, not only a form: once a pair is chosen, its ma
 **You pay**. The words are in `MARKET_WORDS` (`market-view.js`).
 
 - The pair is named "<base> / <quote>", one way for both sides of a trade: the same direction the
-  rest of the wallet prices it in ("1 <base> = N <quote>"; BTC and the fiat stablecoins are the
-  quote).
+  rest of the wallet prices it in ("1 <base> = N <quote>"). The quote is the asset people price the
+  other in: when BTC pairs with a fiat stablecoin, the stablecoin is the quote ("1 BTC = 77,200
+  USDX"); against any other asset BTC is the quote ("1 GOLD = 0.05 BTC"); otherwise a fiat
+  stablecoin is the quote, and between two other assets the order is fixed by their ids.
 - Under it, the last price in the quote's units and its change over the last 24 hours, with
   "24h". Then "High <price> · Low <price> · Volume <amount> <base>" for the last 24 hours.
 - A price chart, with three ranges: **1D**, **1W**, **1M**, its times along the bottom and its
