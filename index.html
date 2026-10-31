@@ -2518,6 +2518,7 @@ function paintFeeRateNote(){ if(sendFee) sendFee.check(); }
 // ---------- Bitcoin (testnet4) — same BIP84 keychain, identical tb1 addresses ----------
 const T4_API = location.origin + '/testnet4/api';
 const GAP = 20;                          // address gap limit scanned on each chain
+let _btcScanAt = 0;   // when btcScan last finished (lnCloseSeen)
 let btcRoot = null, btcBalance = 0n, btcUsed = new Set(), btcChangeNext = 0, btcScanLimit = GAP+1;
 const BTC_DUST = 294n;            // P2WPKH dust threshold (sats)
 const BTC_DEFAULT_FEERATE = 2;    // sat/vB default for testnet4
@@ -2547,6 +2548,7 @@ async function btcScan(){
     if(!anyUsed) break;
   }
   btcBalance = bal; btcUsed = used; btcChangeNext = chgMax+1; btcScanLimit = scanned;
+  _btcScanAt = Date.now();
 }
 
 // gather spendable utxos across the full scanned range (same window as btcScan, plus any
@@ -3882,6 +3884,19 @@ async function lnCloseToWallet({ kind, channel }){
   approveCloseDestination(prov.key, dest.scriptHex);
   return closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||channel.node_key, scid: channel.short_channel_id, destination: dest.address, unilateraltimeout: CLOSE_UNILATERAL_S });
 }
+// Whether the wallet's own scan counts what a close of its channel paid it (txid): for a Sequentia
+// asset, once the wollet holds the transaction; for BTC, once a scan of the addresses ran after
+// the transaction reached testnet4's mempool.
+const _closeSeenAt = new Map();
+async function lnCloseSeen(kind, txid){
+  if(kind!=='BTC'){ try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return false; } }
+  if(!_closeSeenAt.has(txid)){
+    const r = await fetch(`${T4_API}/tx/${txid}/status`).catch(()=>null);
+    if(!(r && r.ok)) return false;
+    _closeSeenAt.set(txid, Date.now());
+  }
+  return _btcScanAt > _closeSeenAt.get(txid);
+}
 function initLnToArk(){
   if(lnToArk) return;
   lnToArk = mountLightningToArk({
@@ -3899,11 +3914,13 @@ function initLnToArk(){
     allowance: async (kind)=> allowanceAtoms(window.SEQ_LN_PAYMENT_LIMITS || { reference: null }, kind, lnSignerRate(kind)),
     closeFee: async (kind)=> lnCloseFeeEstimate(kind),
     close: (p)=> lnCloseToWallet(p),
+    seen: (kind, txid)=> lnCloseSeen(kind, txid),
     store: localStorage, tag: ()=> walletTag(),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
     log: (...a)=> console.log(...a),
   });
   setInterval(()=>{ if(!wollet || !lnToArk || devMode()) return; lnToArk.tick().catch(()=>{}); lnToArk.tickAssets().catch(()=>{}); }, LN_TO_ARK_EVERY_MS);
+}
 function btcArkRoutes(){ return !!btcArk && btcArk.isOpen() && !devMode(); }
 // The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
 // server cosigns the board first, then finish() signs it with the page's key.

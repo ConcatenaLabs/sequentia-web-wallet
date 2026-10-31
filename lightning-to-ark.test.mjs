@@ -133,6 +133,7 @@ function page (o = {}) {
     onChange: () => { W.changes++ }, log: (...a) => W.logs.push(a.join(' ')), now: () => t, sleep: async (ms) => { t += ms },
   }
   W.m = mountLightningToArk(deps)
+  W.deps = deps
   W.store = store
   return W
 }
@@ -275,4 +276,33 @@ test('assets: what is moving is shown again at once after a reload', async () =>
   const again = mountLightningToArk({ ...W2.m.state.deps, store: { getItem: (k) => W2.store.get(k) ?? null, setItem: (k, v) => W2.store.set(k, v) }, tag: () => 'w1', now: () => 1_800_000_000_000, kindOf })
   assert.equal(again.moving(USDX), m)
   assert.equal(again.channelPart(USDX, 100_000_010n), 5_050_000_000n)
+})
+
+test('what an emptied channel\'s close pays stays in the figure until the wallet\'s own scan counts it', async () => {
+  const W = page({ channels: [usdxCh()] })
+  let seen = false
+  W.m = mountLightningToArk({ ...W.deps, seen: async () => seen })
+  await W.m.tickAssets()
+  W.coins = [{ state: 'receiving', asset: USDX, value: String(5_000_000_000n - 50_000_000n - 10n - 1n) }]
+  W.channels = [usdxCh({ spendable_units: 0, balance_units: 50_000_010 })]
+  await W.m.tickAssets()
+  assert.equal(W.closes.length, 1)
+  // The channel has left the status; its 50,000,010 atoms are on their way to the address.
+  W.channels = []
+  assert.equal(W.m.channelPart(USDX, 0n), 50_000_010n)
+  await W.m.checkClosed()
+  assert.equal(W.m.channelPart(USDX, 0n), 50_000_010n, 'not counted on the chain yet')
+  seen = true
+  await W.m.checkClosed()
+  assert.equal(W.m.channelPart(USDX, 0n), 0n, 'the chain counts it now: never twice')
+})
+
+test('without a way to tell, a close\'s payment is not held (never counted twice)', async () => {
+  const W = page({ channels: [usdxCh()] })
+  await W.m.tickAssets()
+  W.coins = [{ state: 'receiving', asset: USDX, value: String(5_000_000_000n - 50_000_000n - 10n - 1n) }]
+  W.channels = [usdxCh({ spendable_units: 0, balance_units: 50_000_010 })]
+  await W.m.tickAssets()
+  assert.equal(W.closes.length, 1)
+  assert.equal(W.m.channelPart(USDX, 0n), 0n)
 })
