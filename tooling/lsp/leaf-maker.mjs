@@ -322,6 +322,7 @@ async function main () {
     return sp
   }
   let holdings = null
+  let firstReading = null   // the reading a quote asked for before the first one, while it runs
   // Orders resting in the tree, a ladder a pair, listed on the relay (leaf-maker-rest.mjs).
   const rester = await restDesk({ cfg, cmd, log, liveRates, spendable })
   if (rester) log('the resting desk is open, its listings signed by', rester.makerPub)
@@ -437,7 +438,10 @@ async function main () {
         // so the offer finds the library free, at most once every three minutes so a reader that
         // polls cannot stop the upkeep.
         if (Date.now() - lastHold > HOLD_EVERY_MS) { lastHold = Date.now(); lib.hold(HOLD_MS) }
-        const sp = holdings ? holdings.sp : await spendable(true)
+        // Before its first reading (just started, the library reading its store) it quotes
+        // nothing, at once: a taker asks the other sources rather than waiting on this one.
+        if (!holdings) { if (!firstReading) firstReading = spendable(true).catch(() => {}).finally(() => { firstReading = null }); return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [] }) }
+        const sp = holdings.sp
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
       }
