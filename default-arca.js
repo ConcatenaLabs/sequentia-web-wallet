@@ -236,10 +236,34 @@ export async function boardAll (run, c, tries = 3) {
     let q
     try { q = await run('board_quote', { asset: c.asset, amount: String(v) }) } catch { fee = fee * 2n + 1n; continue }
     const f = big(q && q.fee && q.fee.amount)
-    if (v + f <= c.onchain) return await run('board', { asset: c.asset, amount: String(v), shown: q.fee })
+    if (v + f <= c.onchain) {
+      const r = await run('board', { asset: c.asset, amount: String(v), shown: q.fee })
+      // What the board took off the chain (its amount and its fee), for onchainLessBoards.
+      return r && typeof r === 'object' ? { ...r, spent: String(v + f) } : r
+    }
     fee = f
   }
   return null
+}
+
+// What a board just made takes off the chain: `onchain` atoms as the page's own reading of the
+// chain shows them, less what the board spent (`board`: { spent, below, at }, from boardSpent)
+// while that reading does not show it spent yet. The board's leaf counts as arriving in the tree
+// from the moment it is made, so without this the coins count twice until the reading catches
+// up (a block, or the page's next scan). The board is taken as seen once the reading drops to
+// what it left (`below`), or after half an hour. -> { atoms, seen }
+export const BOARD_SEEN_MS = 30 * 60_000
+export function onchainLessBoards (board, onchain, nowMs) {
+  const o = big(onchain)
+  if (!board) return { atoms: o, seen: true }
+  if (o <= big(board.below) || nowMs - Number(board.at) > BOARD_SEEN_MS) return { atoms: o, seen: true }
+  const v = o - big(board.spent)
+  return { atoms: v > 0n ? v : 0n, seen: false }
+}
+// The record onchainLessBoards keeps for a board of `held` atoms on the chain (the library's
+// reading when it boarded) that spent `spent`, made at `at`.
+export function boardSpent (held, spent, at) {
+  return { spent: String(big(spent)), below: String(big(held) - big(spent)), at }
 }
 
 // The assets a wallet lists to pay or send from: BTC always (the parent chain, first-class,
