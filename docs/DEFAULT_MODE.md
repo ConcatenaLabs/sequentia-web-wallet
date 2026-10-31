@@ -315,7 +315,9 @@ What it shows beyond the Market and Trade sections above:
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
 - A payment's row has its description (or "Received" / "Sent"), its time and its amount as +/-.
 - A payment is in History the moment it leaves, and a payment arriving as soon as the network has
-  it. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
+  it. This holds for what is paid and received in seconds too, and for every trade of the Trade
+  tab: the wallet writes each down as it happens, in the browser that holds it, and shows them
+  in the one list, by time, with what the chain holds. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
   "Pending", and that goes once it is confirmed.
 - Which rails a trade used ("BTC on-chain · GOLD over Lightning", "over Lightning") is shown in
   developer mode only.
