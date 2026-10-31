@@ -18,7 +18,14 @@ test('the stake review is titled as a stake, not a payment', () => {
 
 test('the stake review names what it does, the lock and the staker key', () => {
   for (const row of ["'What it does'", "'Lock', STAKE_PERIOD_LABEL", "'Staker key', pubkey"]) assert.ok(handler.includes(row), row)
-  assert.match(handler, /\{rows:\[\{atoms, hex:POLICY_HEX, ref\}\], extra, feeAssetHex:POLICY_HEX\}/)
+  assert.match(handler, /\{rows:\[\{atoms, hex:POLICY_HEX, ref\}\], extra, feeAssetHex:feeHex\}/)
+})
+
+test('the stake is made from coins on the chain, moved out of the Ark first, its fee in tSEQ or another held asset', () => {
+  assert.match(handler, /await ensureOnChain\(feeHex===POLICY_HEX \? \[\{ hex:POLICY_HEX, atoms: atoms \+ fee \}\]/)
+  assert.match(handler, /applyFee\(network\.txBuilder\(\)\.addStakeOutput\(pubkey, csv, atoms\), feeHex\)/)
+  assert.match(handler, /DEFAULT_WORDS\.stakeFeeOther/)
+  assert.match(html, /onchainQuiet: \(\)=> _ownTxRing\.some\([^\n]*\|\| Date\.now\(\) < _keepOnChainUntil/, 'the upkeep leaves the moved coins on the chain')
 })
 
 test('the lock is stated as it lasts: 43,200 blocks at a block a minute, about 30 days', () => {

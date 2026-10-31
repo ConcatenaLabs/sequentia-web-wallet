@@ -30,6 +30,12 @@ function arrivesWords (minutes) {
   return minutes <= 5 ? 'It arrives in a few minutes.' : `It arrives in about ${minutes} minutes.`
 }
 
+// When coins moved out of the Ark are ready, from the operator's interval in minutes.
+function readyWords (minutes) {
+  if (!minutes) return 'They are ready shortly.'
+  return minutes <= 5 ? 'They are ready in a few minutes.' : `They are ready in about ${minutes} minutes.`
+}
+
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
   // Held, spendable before, and taken back out of the chain with the Bitcoin block it rested on:
@@ -65,6 +71,18 @@ export const DEFAULT_WORDS = Object.freeze({
   fee: (amount, ticker) => `Fee ${amount} ${ticker}`,
   sentLater: (amount, ticker, minutes) => `Sent ${amount} ${ticker}. ${arrivesWords(minutes)}`,
   faucetReceived: (what) => `Received ${what}.`,
+  // A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain: what
+  // they need is moved out of the Ark first, by the wallet itself.
+  movingOut: (what, purpose, minutes) => `Moving ${what} out of the Ark so it can be ${purpose}. ${readyWords(minutes)} Keep this page open.`,
+  movingWaits: (what, purpose) => `${what} cannot be moved out of the Ark yet: the network moves it as soon as it can, and it stays yours meanwhile. It is ${purpose} then, while this page is open; or come back later and press the button again.`,
+  cannotMoveNow: (what) => `${what} cannot be moved out of the Ark right now: the network has too little of it free. Nothing has moved: try again later.`,
+  notEnough: (amount, ticker) => `Not enough ${ticker}: ${amount} ${ticker} short.`,
+  stillOpening: 'Your wallet is still opening: try again in a moment.',
+  waitOpening: 'Your wallet is still opening; this goes on by itself once it has.',
+  notMoved: 'This could not be moved out of the Ark just now. Nothing was spent: try again in a moment.',
+  notReady: 'What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes.',
+  stakeFeeOther: (ticker) => `Not enough tSEQ for the stake and its fee: the fee is paid in ${ticker} instead, chosen below. Press Review stake again.`,
+  stakeFeeShort: 'Not enough tSEQ for the stake and its fee: stake a little less, or hold an asset that can pay the fee.',
 })
 
 // The minutes a payment to an address from the tree takes at most, from the operator's interval
