@@ -56,6 +56,16 @@ In practice:
   its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
   The wallet claims it by itself the next time it opens, or once restored from its phrase.
   Developer mode names it `returning`.
+- What a wallet holds where it cannot be sent in seconds (its own Lightning channels, in a
+  wallet made before its coins were held this way) moves by itself to where it can: BTC to the
+  Bitcoin ark, every other asset into the operator's tree, claimed at the next round. Nothing is
+  asked. A move is paid only from a channel that is open for payments, within the day's
+  Lightning payment limit when the wallet sets one (nine tenths of it, the rest on a later day),
+  and never while the person is using the wallet. It stays in the figure while it moves, and the
+  line under the figure reads **"Moving <amount> <TICKER> so it can be sent in seconds."** A
+  payment refused before it left moves nothing and is tried again later. A channel the move
+  emptied is closed to the wallet's address when that is cheap and safe, and what it held comes
+  back as arriving; otherwise it stays, and developer mode says why under its Lightning part.
 - The row's details show only what a person may act on: **Staked**, **Arriving**, and a freeze,
   as "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts the
   freeze."
@@ -162,7 +172,7 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - BTC a wallet holds where it cannot be sent in seconds (its own Lightning channel, in a wallet
   made before BTC was held this way) moves there by itself too, and stays spendable where it is
   until it has. While it moves, the line under the figure reads "Moving <amount> BTC so it can
-  be sent in seconds."
+  be sent in seconds." (`lightning-to-ark.js`; the same move for assets is under Balance).
 - The wallet keeps what it holds there current by itself, and arranges each time it is open for
   that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
   was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it

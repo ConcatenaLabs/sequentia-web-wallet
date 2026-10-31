@@ -1696,6 +1696,7 @@ import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
 import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList } from './default-arca.js';
+import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { makeSiteOrders } from './site-orders.js';
@@ -3839,6 +3840,7 @@ function initBtcArk(){
     log: (...a)=> console.log(...a),
   });
   btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
+  initLnToArk();
 }
 // BTC on the Bitcoin ark, in BTC's one figure: the wallet's own answer once it is open, until then
 // the last one it gave this wallet, kept per wallet so a reload opens on it (display only).
@@ -3847,6 +3849,61 @@ function btcArkAtoms(){
   if(btcArk && btcArk.isOpen() && (!btcArk.read || btcArk.read())){ const t=btcArk.figures().total; try{ localStorage.setItem(btcArkKeptKey(), t.toString()); }catch{} return t; }
   try{ const v=localStorage.getItem(btcArkKeptKey()); return v && /^\d+$/.test(v) ? BigInt(v) : 0n; }catch{ return 0n; }
 }
+// ---------- default mode: the wallet's own Lightning balances move to the Ark (lightning-to-ark.js) ----------
+// A wallet that opened its own channels before default mode held its coins in the Ark: its BTC
+// channel pays an invoice of its own Bitcoin ark, each asset channel a Lightning receive of its leaf
+// wallet, by themselves, while the figure stays whole and says "Moving …". Never in developer mode.
+let lnToArk = null;
+const LN_TO_ARK_EVERY_MS = 30_000;
+// What closing a channel of `kind` costs this side, as an estimate: a cooperative close of about
+// 200 vB at the wallet's default rate, in the channel's own atoms.
+function lnCloseFeeEstimate(kind){
+  if(kind==='BTC') return 200n * BigInt(BTC_DEFAULT_FEERATE);
+  const e = feeRateEntry(kind), r = e && e.rate;
+  if(!(r>0)) return null;
+  return (200n * BigInt(DEFAULT_FEERATE/1000) * 100_000_000n + BigInt(r) - 1n) / BigInt(r);
+}
+// A channel's rate as the signer values it (reference atoms per 10^8 of its atoms), or null.
+function lnSignerRate(kind){
+  if(kind==='btc'){ const p=_btcUsd(); return p>0 ? BigInt(Math.round(p*1e8)) : null; }
+  const e = feeRateEntry(kind); return e && e.rate>0 ? BigInt(e.rate) : null;
+}
+// Closes an emptied channel of `kind` cooperatively to an address of this wallet, as Move on-chain does.
+async function lnCloseToWallet({ kind, channel }){
+  const phrase=(localStorage.getItem(KEY)||'').trim();
+  if(!phrase) throw new Error('the wallet is locked');
+  const leg = kind==='BTC' ? { chain:'btc', asset:null, ticker:'BTC' } : { chain:'seq', asset:kind, ticker:assetMeta(kind).ticker };
+  const prov = leg.chain==='btc'
+    ? await provisionAndConnect({ chain:'btc', label:'BTC', policy:lnPolicy(),
+        deriveIdentity: ()=>{ const k=lnNodeIdentity(phrase,'btc'); return { transportPrivkey:k.deviceTransportPrivkey, signingSeed:k.deviceSigningSeed }; } })
+    : await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: leg.ticker, policy:lnPolicy(), deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
+  if(!(prov && prov.connected)) throw new Error('the device signer is not online');
+  const dest = await lnWalletCloseDestination(leg);
+  approveCloseDestination(prov.key, dest.scriptHex);
+  return closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||channel.node_key, scid: channel.short_channel_id, destination: dest.address, unilateraltimeout: CLOSE_UNILATERAL_S });
+}
+function initLnToArk(){
+  if(lnToArk) return;
+  lnToArk = mountLightningToArk({
+    dev: ()=> devMode(),
+    personBusy: ()=> (leavesApi && leavesApi.personBusy && leavesApi.personBusy()) || Date.now() - (_btcSentAt||0) < 60_000,
+    channels: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=> c && c.node_key),
+    kindOf: (c)=> (c.asset_label==='BTC' || c.leg==='btc') ? 'BTC' : lnChannelAsset(c),
+    refreshChannels: async ()=>{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); try{ renderBalance(); }catch{} },
+    connect: (kind)=> lnConnectLeg(kind),
+    pay: async (p)=>{ const r = await lnApi.nodePay(p); if(!(r && r.paid)) throw new Error((r && r.error) || 'the payment did not complete'); return r; },
+    payStatus: (p)=> seqlnNodePayStatus(p),
+    ark: { isOpen: ()=> !!btcArk && btcArk.isOpen(), invoice: (sats, d)=> btcArk.invoice(sats, d), received: (h)=> btcArk.received(h), refresh: ()=> btcArk.refresh() },
+    leaves: { isOpen: ()=> !!leavesApi && leavesApi.isOpen(), info: ()=> leavesApi.info(), coins: ()=> leavesApi.coins() || [],
+      run: (c, a)=> leavesApi.own(c, a), refresh: ()=> leavesApi.refreshSoon() },
+    allowance: async (kind)=> allowanceAtoms(window.SEQ_LN_PAYMENT_LIMITS || { reference: null }, kind, lnSignerRate(kind)),
+    closeFee: async (kind)=> lnCloseFeeEstimate(kind),
+    close: (p)=> lnCloseToWallet(p),
+    store: localStorage, tag: ()=> walletTag(),
+    onChange: ()=>{ try{ renderBalance(); }catch{} },
+    log: (...a)=> console.log(...a),
+  });
+  setInterval(()=>{ if(!wollet || !lnToArk || devMode()) return; lnToArk.tick().catch(()=>{}); lnToArk.tickAssets().catch(()=>{}); }, LN_TO_ARK_EVERY_MS);
 function btcArkRoutes(){ return !!btcArk && btcArk.isOpen() && !devMode(); }
 // The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
 // server cosigns the board first, then finish() signs it with the page's key.
@@ -6431,7 +6488,8 @@ function renderBalance(){
   // textContent), so build nodes, never HTML strings.
   const lnOn = (()=>{ try { return seqlnState().deployed; } catch { return false; } })();
   const btcFunding = !!(lnLastStatus && lnLastStatus.funding && lnLastStatus.funding.btc);
-  const lnAtomsFor = (kind)=>{ try { return lnBalanceFor(kind); } catch { return 0n; } };
+  // What is on its way from the wallet's own channel to the Ark stays in the figure (lightning-to-ark.js).
+  const lnAtomsFor = (kind)=>{ let r = 0n; try { r = lnBalanceFor(kind); } catch {} try { if(lnToArk && !devMode()) r = lnToArk.channelPart(kind, r); } catch {} return r; };
   const lnSendFor = (kind)=>{ try { return BigInt(Math.round(lnSendableNow(kind).units||0)); } catch { return 0n; } };
   const ownChansFor = (kind)=>{ try { return lnOwnChannelsFor(kind)||[]; } catch { return []; } };
 
@@ -6442,6 +6500,7 @@ function renderBalance(){
   const rowFull = ({ticker, refKey, precision, onchainAtoms, kind, nameNode, foot, movable, leg, known, alwaysShow})=>{
     // Before Lightning is wired up and the service has answered, the last known Lightning part.
     const lnAtoms = (lnOn || !lnLastStatus) ? lnAtomsFor(kind) : 0n;
+    const movingAtoms = (lnToArk && !devMode()) ? (lnToArk.moving(kind) || 0n) : 0n;
     const own     = lnOn ? ownChansFor(kind) : [];
     // Leaves count in the asset's one figure in both modes; developer mode also splits it.
     const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
@@ -6472,6 +6531,7 @@ function renderBalance(){
     if(redoing > 0n){ const rd=el('div','bt-redoing', DEFAULT_WORDS.redoing(amt(redoing), ticker)); rd.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(rd); }
     let keptSafe = 0n; try { if(kind!=='BTC' && leavesApi && !devMode() && leavesApi.keptSafe) keptSafe = leavesApi.keptSafe(kind) || 0n; } catch {}
     if(keptSafe > 0n){ const ks=el('div','bt-kept-safe', DEFAULT_WORDS.keptSafe(amt(keptSafe), ticker)); ks.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ks); }
+    if(movingAtoms > 0n){ const mv=el('div','bt-moving', DEFAULT_WORDS.moving(amt(movingAtoms), ticker)); mv.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(mv); }
     if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
     // ONE VIEW FOR EVERY MODE. A bolt beside the ticker says whether the asset has a Lightning
     // channel (yellow) or not yet (grey); the row's details, one tap away, hold its parts (on-chain |
@@ -6498,6 +6558,7 @@ function renderBalance(){
     if(dm && lnOn && leg && hasLn){
       const l=blk('Lightning', amt(lnAtoms));
       if(opening) l.appendChild(el('div','bt-dim','channel opening'));
+      for(const ch of own){ const w = lnToArk && ch.scid ? lnToArk.closeWhy(ch.scid) : null; if(w) l.appendChild(el('div','bt-dim','Channel '+ch.scid+' stays open: '+w+'.')); }
       const cap=el('div','bt-cap');
       const line=(k, v, cls)=>{ const d=el('div'); d.appendChild(el('span',null,k+' ')); d.appendChild(el('b',cls||null,v)); cap.appendChild(d); };
       // Like room to receive: nothing to send until a channel is open, said as "not yet".
@@ -6521,7 +6582,7 @@ function renderBalance(){
     // The ark's part is a rail: split out in developer mode only. What it has not taken in yet is
     // "arriving" under the figure, in both modes.
     if(dm && arkAtoms>0n) blk('Bitcoin ark', amt(arkAtoms));
-    { const arr = kind==='BTC' && btcArk && btcArk.isOpen() ? btcArk.figures().arriving : 0n;
+    { const arr = kind==='BTC' && btcArk && btcArk.isOpen() && !(movingAtoms > 0n) ? btcArk.figures().arriving : 0n;
       if(arr>0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arr), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); } }
     if(staked>0n) blk('Staked', amt(staked));
     // No channel yet: the one thing to do is move the asset to Lightning, which asks for room itself.
@@ -8581,7 +8642,9 @@ async function renderLnHistory(){
     }catch(e){ if(/unknown node key/.test(String(e && e.message || e))) _lnNoNode.set(key, now + 600000); /* else not answering now: left out */ }
   }));
   let trades=[]; try{ trades=lnTradeHistory(); }catch{}
-  const rows=lnHistoryRows({ nodes, trades });
+  let rows=lnHistoryRows({ nodes, trades });
+  // A move of the wallet's own from its channel to the Ark is no payment: default mode lists none.
+  if(lnToArk && !devMode()){ const own=lnToArk.ownHashes(); rows=rows.filter(r=> !own.has(String(r.hash||'').toLowerCase())); }
   card.classList.toggle('hide', !nodes.length && !trades.length);
   list.innerHTML='';
   if(!rows.length){ list.appendChild(el('div','muted','No Lightning payments yet.')); return; }

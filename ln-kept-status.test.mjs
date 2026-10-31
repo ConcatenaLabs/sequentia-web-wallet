@@ -39,7 +39,7 @@ test('after a reload the balance holds the last known Lightning part until /stat
 test('only the balance reads the kept channels; every /status is kept', () => {
   for (const name of ['lnSpendableFor', 'lnSendableNow', 'lnReceivableFor']) assert.ok(!fn(name).includes('lnKeptChannels'), name);
   assert.equal((html.match(/lnLastStatus = await seqlnGetStatus\(\)/g) || []).length, 0);
-  assert.equal((html.match(/lnLastStatus = lnKeepStatus\(await seqlnGetStatus\(\)\)/g) || []).length, 3);
+  assert.equal((html.match(/lnLastStatus = lnKeepStatus\(await seqlnGetStatus\(\)\)/g) || []).length, 4);
 });
 
 test('the balance row reads the kept part before Lightning is wired up', () => {
