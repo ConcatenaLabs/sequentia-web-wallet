@@ -32,7 +32,7 @@ function fakeNode (paid) {
   return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => srv.close() })))
 }
 
-async function run (btcCaps, holdSeconds) {
+async function run (btcCaps, holdSeconds, fast = null) {
   const paid = []
   const n = await fakeNode(paid)
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'btcdesk-early-store-'))
@@ -40,7 +40,7 @@ async function run (btcCaps, holdSeconds) {
   const cmd = async (name, a) => {
     asked.push(name)
     if (name === 'lightning_receive') return { invoice: 'lnsq1operator', payment_hash: HASH }
-    if (name === 'lightning_receives') return { [HASH]: { state: 'issuing', timeout: Math.floor(Date.now() / 1000) + holdSeconds } }
+    if (name === 'lightning_receives') return { [HASH]: fast ? { state: 'waiting' } : { state: 'issuing', timeout: Math.floor(Date.now() / 1000) + holdSeconds } }
     if (name === 'lightning_receive_ready') return { ready: false, why: 'the received leaf\'s round has not come' }
     if (name === 'lightning_payments') return {}
     if (name === 'lightning_receive_preimage') return {}
@@ -49,11 +49,15 @@ async function run (btcCaps, holdSeconds) {
   try {
     const cfg = { store_dir: store, offer_ttl_seconds: 300,
       btc: { rpc: n.sock, keep_sats: '20000', ...btcCaps, pairs: [{ give: 'BTC', want: X, rate_num: '1', rate_den: '1', min_give: '1000' }] } }
-    const desk = await btcDesk({ cfg, cmd, log: () => {}, liveRates: () => new Map() })
+    // `fast`: what the operator answers on the hash, read by `stepNow` without the library (whose
+    // record still says waiting: no sync since).
+    const lookup = fast && (async (h) => (h === HASH ? { state: fast, timeout: Math.floor(Date.now() / 1000) + holdSeconds } : null))
+    const desk = await btcDesk({ cfg, cmd, log: () => {}, liveRates: () => new Map(), lookup })
     const [code, f] = await desk.route('POST', '/v1/btc/firm', { give_asset: 'BTC', want_asset: X, give: '12000', invoice: 'lntb1wallet' },
       async () => new Map([[X, 10_000_000n]]), '0')
     assert.equal(code, 200, JSON.stringify(f))
-    await desk.tick()
+    asked.length = 0
+    await (fast ? desk.stepNow() : desk.tick())
     return { paid, asked, state: desk.swaps.get(f.swap).state }
   } finally { n.close() }
 }
@@ -76,4 +80,20 @@ test('a hold of the operator\'s that would not outlast the BTC route is not paid
   const r = await run({ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 60)
   assert.equal(r.paid.length, 0)
   assert.equal(r.state, 'offered')
+})
+
+test('between the upkeep\'s passes, a purchase the operator accepted is paid within the caps, without the library', async () => {
+  const r = await run({ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 24 * 3600, 'accepted')
+  assert.equal(r.paid.length, 1, 'the wallet\'s invoice is paid')
+  assert.ok(!r.asked.includes('lightning_receives') && !r.asked.includes('lightning_receive_ready') && !r.asked.includes('sync'), r.asked.join())
+  assert.equal(r.state, 'claiming')
+})
+
+test('between the passes, nothing is paid before the operator accepts, or outside the caps', async () => {
+  for (const [caps, said] of [[{ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 'open'], [{}, 'accepted']]) {
+    const r = await run(caps, 24 * 3600, said)
+    assert.equal(r.paid.length, 0, JSON.stringify(caps) + ' ' + said)
+    assert.equal(r.state, 'offered')
+    assert.deepEqual(r.asked, [], 'the library is not asked')
+  }
 })

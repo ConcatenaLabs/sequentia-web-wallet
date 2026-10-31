@@ -304,7 +304,15 @@ async function main () {
   if (reporter) log('trades are reported to', reporter.relay, 'signed by', reporter.pub)
   const reportTrade = (t) => { if (reporter) { try { reporter.report(t) } catch (e) { log('report:', e.message) } } }
   // BTC for an asset and back, from the maker's own Bitcoin Lightning node, when it has one.
-  const desk = await btcDesk({ cfg, cmd, log, liveRates, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
+  // The operator's answer on a payment into its tree, read straight from it: the desk's steps
+  // between the upkeep's passes do not wait behind the library's queue.
+  const lookup = async (hash) => {
+    const r = await fetch(String(op.server).replace(/\/+$/, '') + '/v1/lightning_receive_status', { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payment_hash: hash }), signal: AbortSignal.timeout(5000) })
+    return r.ok ? r.json() : null
+  }
+  const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
+  if (desk) setInterval(() => { desk.stepNow().catch((e) => log('btc:', e.message)) }, Number(cfg.btc.step_seconds ?? 2) * 1000)
   if (desk) log('the BTC desk is open')
 
   const firm = new Map()   // swap -> { give_asset, give, expires }

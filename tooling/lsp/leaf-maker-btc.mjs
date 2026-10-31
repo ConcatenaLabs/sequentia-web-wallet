@@ -30,6 +30,8 @@
 //   "keep_sats": "100000" (what its channels keep), "invoice_seconds": 3600, "max_route_fee_sats":
 //   "1000" (the most it pays to route a payment to a wallet's node),
 //   "unfinal_max_sats": "0", "unfinal_total_sats": "0", "unfinal_window_seconds": 7200 (see below),
+//   "step_seconds": 2 (how often, between the maker's upkeep passes, a purchase the operator has
+//   accepted is paid within those caps, and a payment begun is followed),
 //   "pairs": [ { "give": "BTC", "want": "<hex>", "rate_num", "rate_den", "min_give" },
 //              { "give": "<hex>", "want": "BTC", … } ] } — or "price": true with the maker's price
 // feed, its "assets" naming "BTC" too. Swaps are kept in the store directory (btc-swaps.json), so a
@@ -84,7 +86,9 @@ export function checkBtcConfig (b) {
   return b
 }
 
-export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
+// `lookup(hash)`, when given: the operator's own answer on the payment into its tree under `hash`
+// (its `lightning_receive_status`), read without the library, for `stepNow`.
+export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup }) {
   const b = checkBtcConfig(cfg.btc)
   if (!b) return null
   const lockingMs = Number(b.locking_seconds ?? LOCKING_SECONDS) * 1000
@@ -277,8 +281,13 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
     return [200, { swap: s.swap, state: s.state }]
   }
 
+  // `tick` and `stepNow` take turns: each moves the same swaps on.
+  let turn = Promise.resolve(), stepping = false
+  const inTurn = (fn) => { const t = turn.then(fn, fn); turn = t.catch(() => {}); return t }
+
   // Each open swap, moved on as far as it goes now (the caller syncs the library first).
-  async function tick () {
+  const tick = () => inTurn(tickNow)
+  async function tickNow () {
     await refreshBalance()
     if (Date.now() - probedAt > 120000) { probedAt = Date.now(); await probeCaps() }
     const open = [...swaps.values()].filter((s) => OPEN.has(s.state))
@@ -295,6 +304,34 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
   }
 
   const unfinalAllowed = (s) => mayPayUnfinal(b, swaps.values(), s, Date.now())
+
+  // Between the upkeep's passes, which on a busy library come a minute or two apart (`tick` runs
+  // after the library's sync), what moves on without the library: a BTC purchase the operator
+  // has accepted, paid at once within the owner's caps (the wallet waits on it), and a BTC payment
+  // begun, followed to its end. A purchase outside the caps waits for its leaf to be held for good,
+  // which only the library can say, at the next pass.
+  async function stepNow () {
+    if (stepping || !lookup) return
+    stepping = true
+    try {
+      await inTurn(async () => {
+        for (const s of swaps.values()) {
+          if (s.give_asset !== 'BTC') continue
+          try {
+            if (s.state === 'offered') {
+              if (!unfinalAllowed(s)) continue
+              const st = await lookup(s.hash).catch(() => null)
+              if (!st || st.state !== 'accepted' || !Number(st.timeout)) continue
+              await step(s, { state: 'issuing', timeout: Number(st.timeout) }, {})
+            } else if (s.state === 'paying') {
+              await step(s, {}, {})
+            }
+          } catch (e) { log('btc swap', s.swap, e.message) }
+        }
+        save()
+      })
+    } finally { stepping = false }
+  }
 
   async function step (s, rcv, pay) {
     if (s.give_asset === 'BTC') {
@@ -371,5 +408,5 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade }) {
     return null
   }
 
-  return { quotes, route, tick, swaps }
+  return { quotes, route, tick, stepNow, swaps }
 }
