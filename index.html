@@ -3915,6 +3915,7 @@ function initLnToArk(){
     closeFee: async (kind)=> lnCloseFeeEstimate(kind),
     close: (p)=> lnCloseToWallet(p),
     seen: (kind, txid)=> lnCloseSeen(kind, txid),
+    seenNow: (kind, txid)=>{ if(kind==='BTC') return undefined; try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return undefined; } },
     store: localStorage, tag: ()=> walletTag(),
     onChange: ()=>{ try{ renderBalance(); }catch{} },
     log: (...a)=> console.log(...a),

@@ -320,3 +320,30 @@ test('assets: the move stops counting the moment its leaf is the wallet\'s, in a
   assert.equal(W.m.moving(USDX), null, 'no pass ran, yet nothing is moving')
   assert.equal(W.m.channelPart(USDX, 100_000_010n), 100_000_010n, 'the channel counts what it reads')
 })
+
+test('a move holds the figure at what all the asset\'s channels held, not only the paying one\'s', async () => {
+  const other = usdxCh({ node_key: 'seq:usdx:cc', short_channel_id: '3x1x0', state: 'CHANNELD_AWAITING_LOCKIN', spendable_units: 0, balance_units: 500_000_000 })
+  const W = page({ channels: [usdxCh(), other] })
+  await W.m.tickAssets()
+  assert.ok(W.m.moving(USDX) > 0n)
+  // lnBalanceFor counts both channels: 5,050,000,000 + 500,000,000.
+  assert.equal(W.m.channelPart(USDX, 5_550_000_000n), 5_550_000_000n)
+})
+
+test('what a close pays is held from the moment its channel leaves the list, and not once the wallet holds it', async () => {
+  const W = page({ channels: [usdxCh({ spendable_units: 0, balance_units: 50_000_010 })] })
+  let release, holdsDuring = null, txs = new Set()
+  W.m = mountLightningToArk({ ...W.deps, seen: async () => false, seenNow: (k, t) => txs.has(t),
+    close: (p) => new Promise((ok) => { W.closes.push(p); release = ok }) })
+  const t = W.m.tickAssets()
+  for (let i = 0; i < 50 && !release; i++) await new Promise((r) => setImmediate(r))
+  assert.equal(W.m.channelPart(USDX, 50_000_010n), 50_000_010n, 'still listed: the channel itself counts, once')
+  W.channels = []   // closing: the service no longer lists it in a CHANNELD state
+  holdsDuring = W.m.channelPart(USDX, 0n)
+  release({ closing_txid: 'dd'.repeat(32), type: 'mutual' })
+  await t
+  assert.equal(holdsDuring, 50_000_010n, 'held while the close had not answered')
+  assert.equal(W.m.channelPart(USDX, 0n), 50_000_010n, 'held after it answered')
+  txs.add('dd'.repeat(32))
+  assert.equal(W.m.channelPart(USDX, 0n), 0n, 'the wallet holds the transaction: not twice')
+})
