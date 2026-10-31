@@ -324,14 +324,16 @@ page is open: it syncs on the library's schedule (above), and after a sync, at m
 minutes and at the first one after the page opens, it runs the library's `care`. That takes up
 every open claim of a distribution named for one of the wallet's addresses, looking under every
 address the wallet handed out and 20 more, so the asset appears in its figure on the Balance tab.
-It signs a refresh plan for every leaf of a round at the first `care` after the leaf is made,
-two expiries ahead, the operator's fee for a step bounded at 0.2% of the leaf and taken from the
-leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
+It signs a refresh plan for a leaf of a round once the plan's first step could run within ten
+days (the library's reach), two expiries ahead, so a leaf is free to trade and pay out of round
+for most of its life; a wallet closed before that and kept away past the leaf's expiry has it
+repaid by the operator, less the late-refresh fee. Each step's fee is the operator's, bounded at
+0.2% of the leaf and taken from the leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
 leaf of a round, so a leaf received or boarded out of round is refreshed into a round, under the
 same bound, once its refresh could run within ten days (that refresh costs a fee, so it waits),
 and its new leaf is planned at the next `care`. A leaf the operator will not plan stays
 unplanned, with the operator's reason in developer mode, and is refreshed by sync while the page
-is open. A wallet then closed across that leaf's expiry keeps it, whenever it closes: the
+is open. A wallet closed once its leaf is planned keeps it across the leaf's expiry: the
 operator runs the plan's steps and the wallet takes the new leaf up when it opens again. And it
 cancels a plan whose leaf has moved.
 

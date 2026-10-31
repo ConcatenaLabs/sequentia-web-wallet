@@ -25,8 +25,10 @@
 // hourly and only after two quiet minutes). Care takes up
 // every open claim named for one of the wallet's receive keys (scanning the addresses
 // the kit handed out and 20 more), cancels each refresh plan whose coin has moved, and
-// signs a plan for every leaf of a round at once (`plan_within`: PLAN_EVERY_ROUND_LEAF),
-// so that a wallet closed across that coin's expiry keeps it, whenever it closes. A coin
+// signs a plan for a leaf of a round once its first step could run within the library's
+// reach (ten days), so a leaf stays free to trade and pay out of round for most of its life,
+// and a wallet closed across its expiry keeps it; one closed earlier and kept away past the
+// expiry finds the coin repaid by the operator, less its late-refresh fee. A coin
 // received or boarded out of round is refreshed into a round first once its refresh
 // could run within ten days, since that refresh costs a fee; it is free to pay until
 // then. A planned coin is paid out of round by no wallet, so a payment the unplanned
@@ -115,9 +117,6 @@ export const BOND_QUIET_MS = 120_000
 export const TICK_MS = 60_000
 // How often `care` runs at most, after a sync or a tick of the schedule.
 export const CARE_EVERY_MS = 10 * 60_000
-// `care`'s planning reach: every leaf of a round is planned at the first care after it
-// is made (the library's PLAN_EVERY_ROUND_LEAF).
-export const PLAN_EVERY_ROUND_LEAF = 4294967295
 // A payment through a release: how often the wallet syncs while it waits for the round
 // that frees the planned coins, how long it waits at most, and how many releases one
 // payment may need (a release can fall short by the new leaf's own margins).
@@ -125,9 +124,10 @@ export const RELEASE_POLL_MS = 15_000
 export const RELEASE_WAIT_MS = 3 * 3600_000
 export const RELEASE_TRIES = 3
 
-// The arguments `care` runs with: the page's claim scan, and every leaf of a round planned.
+// The arguments `care` runs with: the page's claim scan. Its planning reach is the library's
+// own: a leaf of a round is planned once its first step could run within ten days.
 export function careArgs (scan) {
-  const a = { plan_within: PLAN_EVERY_ROUND_LEAF }
+  const a = {}
   if (scan) a.scan = scan
   return a
 }
@@ -1236,7 +1236,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function renderCare () {
     const c = card('Kept by itself: claims and refresh plans')
     c.id = 'leafCare'
-    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for every leaf of a round, so a closed wallet keeps it across its expiry. A leaf received or boarded out of round is free to pay, and is refreshed into a round once its refresh could run within ten days. A planned leaf is paid out of round by no wallet: a payment the unplanned leaves cannot cover gives the planned leaves it needs up in the next round and is made once that round is final, by itself. Release does that for one plan now.'))
+    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for a leaf of a round once its refresh could run within ten days, so a closed wallet keeps it across its expiry. A leaf received or boarded out of round is free to pay, and is refreshed into a round once its refresh could run within ten days. A planned leaf is paid out of round by no wallet: a payment the unplanned leaves cannot cover gives the planned leaves it needs up in the next round and is made once that round is final, by itself. Release does that for one plan now.'))
     const lc = S.lastCare
     if (lc) {
       c.dataset.careAt = String(lc.at)
