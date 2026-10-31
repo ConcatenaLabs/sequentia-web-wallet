@@ -147,7 +147,7 @@ export function boardAmount (utxos, info, boardFee, feerate = BOARD_FEERATE) {
 //   onChange()              called when the balance changes
 //   log(...)
 export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = () => {}, log = () => {}, now = () => Date.now() }) {
-  let worker = null, seq = 0, opened = null, isOpen = false, figures = arkFigures(null), info = null, timer = null
+  let worker = null, seq = 0, opened = null, isOpen = false, figures = arkFigures(null), info = null, timer = null, read = false
   const waiting = new Map()
 
   function call (op, args, timeout = RUN_TIMEOUT_MS) {
@@ -211,7 +211,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
     const b = await run('balance')
     const f = arkFigures(b)
     const changed = f.total !== figures.total || f.spendable !== figures.spendable || f.arriving !== figures.arriving
-    figures = f
+    figures = f; read = true
     if (changed) { try { onChange(f) } catch {} }
     return f
   }
@@ -385,7 +385,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   }
 
   return {
-    open, isOpen: () => isOpen, refresh, renewDue, figures: () => figures, info: () => info,
+    open, isOpen: () => isOpen, read: () => isOpen && read, refresh, renewDue, figures: () => figures, info: () => info,
     route: (to) => routeOf(to, decode), quote, send, payOutcome, board, invoice, received, lightning, run,
     close () { if (timer) clearInterval(timer); timer = null; if (worker) worker.terminate(); worker = null; isOpen = false; opened = null },
   }
