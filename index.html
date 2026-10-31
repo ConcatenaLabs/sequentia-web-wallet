@@ -3617,7 +3617,7 @@ function initLeaves(){
     btcOnchain: ()=> btcBalance || 0n,
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
-    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
@@ -3824,7 +3824,13 @@ function initBtcArk(){
   });
   btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
 }
-function btcArkAtoms(){ return (btcArk && btcArk.isOpen()) ? btcArk.figures().total : 0n; }
+// BTC on the Bitcoin ark, in BTC's one figure: the wallet's own answer once it is open, until then
+// the last one it gave this wallet, kept per wallet so a reload opens on it (display only).
+function btcArkKeptKey(){ return 'swk.btcArk.total.'+walletTag(); }
+function btcArkAtoms(){
+  if(btcArk && btcArk.isOpen() && (!btcArk.read || btcArk.read())){ const t=btcArk.figures().total; try{ localStorage.setItem(btcArkKeptKey(), t.toString()); }catch{} return t; }
+  try{ const v=localStorage.getItem(btcArkKeptKey()); return v && /^\d+$/.test(v) ? BigInt(v) : 0n; }catch{ return 0n; }
+}
 function btcArkRoutes(){ return !!btcArk && btcArk.isOpen() && !devMode(); }
 // The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
 // server cosigns the board first, then finish() signs it with the page's key.
@@ -6134,9 +6140,15 @@ function whenText(at){
 }
 // The status line of Balance and History, kept identical on both: whether the figures are live,
 // being read, or the last ones known and from when.
+let _syncState = null;
 function setSyncStatus(state, err){
+  _syncState = [state, err];
   let cls='status', html='';
-  const snapAt = !_scannedOnce && _snap && _snap.at ? _snap.at : 0;
+  // "Up to date." only once every part of the figure has been read: the chain's, and what the
+  // wallet holds for instant payments (until the library gives it, the balance shows the last one).
+  let leavesWait = false; try{ leavesWait = state==='ok' && !!leavesApi && leavesApi.expected() && !leavesApi.balanceRead(); }catch{}
+  if(leavesWait) state='syncing';
+  const snapAt = (!_scannedOnce || leavesWait) && _snap && _snap.at ? _snap.at : 0;
   if(state==='syncing'){
     html='<span class="spin"></span>'+(snapAt ? 'Syncing… showing your wallet as of '+esc(whenText(snapAt))+'.' : 'Syncing…');
   } else if(state==='ok'){ cls='status ok'; html='Up to date.'; }
@@ -8149,6 +8161,8 @@ async function requestFaucet(asset){
       if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
       _recvCode=null;
       const what=`${Number(j.amount).toLocaleString()} ${j.asset}`;
+      // In the balance at once, as arriving, until the wallet has taken it in.
+      try{ if(j.leaf) leavesApi.expect(String(j.leaf.asset||'').toLowerCase(), j.leaf.atoms); }catch{}
       $('faucetStatus').className='status ok'; $('faucetStatus').textContent=`Sent ${what} · arriving…`;
       await leavesApi.syncNow();
       $('faucetStatus').textContent=DEFAULT_WORDS.faucetReceived(what);

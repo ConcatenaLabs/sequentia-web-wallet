@@ -98,6 +98,7 @@ export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf ad
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
+export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
 // User mode: how often the open page reads the wallet's mailbox, so that a payment to its receive
@@ -491,7 +492,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const log = (m) => { try { (ctx.log || console.log)(m) } catch {} }
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
     refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
-    careAt: null, lastCare: null, plans: null, claims: null, distributions: null }
+    careAt: null, lastCare: null, plans: null, claims: null, distributions: null, kept: null }
   // What is typed into a form survives a re-render (sync re-renders the panels by itself).
   const bind = (node) => {
     if (S.form[node.id] != null) node.value = S.form[node.id]
@@ -554,6 +555,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open) return
     const [b, c, p, s, r] = [await run('balance'), await run('coins'), await run('participations'), await run('schedule'), await run('refusals')]
     S.balance = b; S.coins = c || []; S.participations = p || []; S.schedule = s; S.refusals = r || []
+    try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
     // The plans are shown in developer mode only; reading them asks nothing of the operator.
     if (dev()) { try { const pl = await run('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
     if (ctx.onChange) try { ctx.onChange() } catch {}
@@ -571,6 +573,25 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   const tag = () => { try { return ctx.walletTag ? ctx.walletTag() : 'default' } catch { return 'default' } }
+  // What the balance shows: the library's answer once it has given one this session; until then the
+  // last one it gave this wallet, so a reload opens on the figures it closed on (display only:
+  // nothing is paid or chosen from it, and every command waits for the library itself).
+  const shown = () => {
+    if (S.balance) return S.balance
+    const k = tag()
+    if (!S.kept || S.kept.tag !== k) { let v = null; try { v = JSON.parse(ctx.store.getItem(tagged(BALANCE_KEY, k)) || 'null') } catch {} S.kept = { tag: k, v } }
+    return S.kept.v
+  }
+  // A payment another service says it has made to this wallet (the faucet, paying the receive
+  // code), counted as arriving from that moment until the library's balance holds it, or for two
+  // minutes at most: the person sees it the moment they are told it was sent.
+  S.expected = []
+  const liveLeaves = (hex) => { const b = leafBalances(shown()).get(hex); return b ? b.leaves : 0n }
+  const expecting = (hex) => {
+    const t = now()
+    S.expected = S.expected.filter((x) => t < x.until && liveLeaves(x.hex) < x.base + x.atoms)
+    return S.expected.filter((x) => x.hex === hex).reduce((n, x) => n + x.atoms, 0n)
+  }
   const dev = () => devModeOn(ctx.store, tag())
   const emit = (name, data) => { if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {} }
   const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
@@ -1650,16 +1671,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // The assets the operator serves supervised.
     supervisedAssets: () => supervisedAssets(S.info),
     address,
-    leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
-    leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),
+    leafAtoms: (hex) => liveLeaves(hex) + expecting(hex),
+    leafAssets: () => [...new Set([...[...leafBalances(shown()).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a), ...S.expected.map((x) => x.hex)])].filter((h) => liveLeaves(h) + expecting(h) > 0n),
+    // A payment made to this wallet that the library has not taken in yet: `hex`, `atoms`.
+    expect: (hex, atoms) => {
+      if (!/^[0-9a-f]{64}$/.test(String(hex || '')) || !(big(atoms) > 0n)) return
+      S.expected.push({ hex, atoms: big(atoms), base: liveLeaves(hex), until: now() + 120000 })
+      if (ctx.onChange) try { ctx.onChange() } catch {}
+    },
     syncNow,
     // ---- default mode (default-arca.js) ----
     // What of an asset is arriving (held, not yet spendable), in atoms.
-    arriving: (hex) => arrivingAtoms(S.balance, hex),
+    arriving: (hex) => arrivingAtoms(shown(), hex) + expecting(hex),
     // Of what is arriving, what is being redone after a Bitcoin reorganisation, in atoms.
     redoing: (hex) => redoingAtoms(S.coins, hex),
     // What was moved out to keep it safe while the wallet was away, until it is put back, in atoms.
-    keptSafe: (hex) => keptSafeAtoms(S.balance, hex),
+    keptSafe: (hex) => keptSafeAtoms(shown(), hex),
+    // Whether the library has given its balance this session (the figures are its own, not the
+    // last ones kept), or the wallet has nothing with an operator to read.
+    balanceRead: () => !!S.balance,
+    // Whether this wallet has, or joins by itself, a wallet with an operator whose balance is to be read.
+    expected: () => !!(S.open || S.starting || joinedOperator(ctx.store, tag()) || (!dev() && pinned())),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its
     // block is certified), or null before the library has said.
     anchorDepth: () => anchorDepth(S.info),

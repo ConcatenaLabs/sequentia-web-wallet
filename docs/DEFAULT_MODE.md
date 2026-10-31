@@ -39,6 +39,9 @@ In practice:
   top is **one total** in the reference currency, across every asset.
 - What has been received and cannot be spent yet appears under the figure as
   **"<amount> <TICKER> arriving"**. Once it can be spent, it is simply part of the figure.
+- The page opens on the figures the wallet last read, every part of them, and updates them in
+  place. The line above the list reads "Syncing… showing your wallet as of <time>" until each part
+  has been read again, then **"Up to date."**
 - A coin that could be spent, and that a Bitcoin reorganisation took back out of the chain with
   the block it rested on, stays in the figure and appears under it as **"<amount> <TICKER> being
   redone after a Bitcoin reorganisation"** until the network takes it in again. It is never shown
@@ -108,12 +111,13 @@ modes (`asset-picker.js`):
   shows another key than the one pinned), the address is shown instead and nothing is said about
   why. The wallet tries again on its own, and once it can, the code takes the address's place on
   the screen without the person leaving it.
-- **Faucet** (testnet): the faucet pays the receive code. When it has paid: "Received <amount>
-  <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address instead, in the
-  same click. Its first button is **BTC**: the faucet pays the code's address on the Bitcoin ark,
-  and the line reads "Received <amount> BTC." once it is there; while the wallet holds no BTC
-  that way yet, it pays the address, and the line reads "The faucet sent <amount> BTC. It arrives
-  after a Bitcoin block."
+- **Faucet** (testnet): the faucet pays the receive code. Once it says it has sent the payment,
+  the amount is under the asset's figure as arriving, and when the wallet has it: "Received
+  <amount> <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address
+  instead, in the same click. Its first button is **BTC**: the faucet pays the code's address on
+  the Bitcoin ark, and the line reads "Received <amount> BTC." once it is there; while the wallet
+  holds no BTC that way yet, it pays the address, and the line reads "The faucet sent <amount>
+  BTC. It arrives after a Bitcoin block."
 
 ## Send
 
