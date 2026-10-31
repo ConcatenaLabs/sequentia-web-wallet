@@ -850,8 +850,8 @@
         <button class="ghost hide" id="lnRecvCopy" style="margin-top:8px">Copy invoice</button>
       </div>
       <div class="card hide" id="recvOampCard">
-        <label class="lbl">Receive a restricted asset (OpenAMP)</label>
-        <p class="sub" style="margin:0 0 10px">Restricted assets are held in your OpenAMP account. Give a sender your account id (AID), or the deposit address for one asset.</p>
+        <label class="lbl">Receive a restricted asset</label>
+        <p class="sub" style="margin:0 0 10px">Restricted assets are held in an account kept for this wallet. Give a sender your account id, or the deposit address for one asset.</p>
         <label class="lbl">Your account id (AID)</label>
         <div class="mono" id="recvOampAid" style="margin:4px 0 10px">—</div>
         <img id="recvOampAidQr" alt="AID QR" style="image-rendering:pixelated;border:12px solid #fff;width:180px;height:180px;display:none;margin:0 0 10px">
@@ -1220,7 +1220,7 @@
         <div class="row" style="margin-top:10px">
           <div class="grow"><label class="lbl">Issuer domain</label><input id="isDomain" value="sequentiatestnet.com" placeholder="example.com"></div>
         </div>
-        <p class="sub" style="margin-top:6px">Commits an on-chain contract and lists the asset in the public registry, so wallets, explorers and the node UI show its name and ticker instead of a raw id. Defaults to the testnet demo domain, which verifies automatically. Use your own domain if you will serve the registry's proof file there, or clear it to issue a private, unlisted asset.</p>
+        <p class="sub" style="margin-top:6px">Records the asset's contract on the chain and lists the asset in the public registry, so wallets and explorers show its name and ticker instead of a raw id. Defaults to the testnet demo domain, which verifies automatically. Use your own domain if you will serve the registry's proof file there, or clear it to issue a private, unlisted asset.</p>
         <button class="primary" id="btnIssue" style="margin-top:14px">Review issuance</button>
         <div class="status err" id="issueErr"></div>
       </div>
@@ -1266,7 +1266,7 @@
         <div class="kv"><span class="k">Status</span><span class="v" id="delegStatus">Not delegating</span></div>
         <div class="kv" id="delegPoolRow" style="display:none"><span class="k">Pool</span><span class="v mono" id="delegPool">—</span></div>
         <label class="lbl" style="margin-top:14px">Choose a pool</label>
-        <p class="sub" style="margin:0 0 6px">"Pays out" is what each pool has committed to on-chain. A pool that has committed to nothing keeps every fee its blocks earn.</p>
+        <p class="sub" style="margin:0 0 6px">"Pays out" is what each pool has committed, in public, to pay. A pool that has committed to nothing keeps every fee its blocks earn.</p>
         <div class="list" id="poolList"><div class="muted">Loading pools…</div></div>
         <div class="field" style="margin-top:10px"><label class="lbl">Or paste a pool signer key</label><input id="delegSigner" class="mono" placeholder="66 hex characters"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
@@ -1280,8 +1280,8 @@
         <p class="sub" style="margin:0 0 12px">What staking has paid you, in whatever assets the fees were paid in. Sequentia has no block subsidy: a block earns its own transaction fees and nothing else, so rewards arrive in the assets the payers chose. Block rewards are spendable 1,000 blocks after they are earned; a pool payout is spendable at once.</p>
         <div class="list" id="rewardList"><div class="muted">No staking rewards yet.</div></div>
         <label class="lbl" style="margin-top:18px">Convert rewards automatically</label>
-        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing on SeqDEX, as the rewards arrive and whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting.</p>
-        <p class="sub" style="margin:0 0 10px"><strong>Once this is on, the wallet sells without asking again.</strong> It never converts more than staking has paid you, never touches your stake, and never converts what it cannot get a fair price for — but the selling itself is unattended, which is the point of it. Turn it off and it stops at the next check.</p>
+        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing as it arrives, whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting.</p>
+        <p class="sub" style="margin:0 0 10px"><strong>Once this is on, the wallet sells without asking again.</strong> It never converts more than staking has paid you, never touches your stake, and never converts what it cannot get a fair price for. The selling itself is unattended: that is the point of it. Turn it off and it stops at the next check.</p>
         <label class="row" style="gap:8px;align-items:center;margin:0 0 12px">
           <input type="checkbox" id="acEnabled">
           <span>Convert my staking rewards</span>
@@ -1345,13 +1345,13 @@
     <section data-panel="sign" class="hide">
       <div class="card">
         <label class="lbl">Sign a request</label>
-        <p class="sub" style="margin:0 0 10px">Sign a non-spending request: an OpenAMP wallet-link or login challenge, a document hash, or a message with your staking key, which is how you sign in to a site that reads your stake, such as Levo. This can never move funds or authorize a transfer.</p>
+        <p class="sub" style="margin:0 0 10px">Sign a request that spends nothing: a restricted asset's wallet link or login, a document's fingerprint, or a message with your staking key, which is how you sign in to a site that reads your stake, such as Levo. This can never move funds or authorize a transfer.</p>
         <div class="warn hide" id="oampSignOriginWarn"></div>
         <div class="field">
           <label class="lbl">What are you signing</label>
           <select id="oampSignMode">
-            <option value="challenge">An OpenAMP challenge (wallet link or login)</option>
-            <option value="document">A document hash (e-signature)</option>
+            <option value="challenge">A restricted asset's wallet link or login</option>
+            <option value="document">A document's fingerprint (e-signature)</option>
             <option value="staker">A message with my staking key (Levo sign-in)</option>
           </select>
         </div>
@@ -1385,8 +1385,8 @@
       <div class="card">
         <label class="lbl">Sign a message with your wallet key</label>
         <p class="sub" style="margin:0 0 10px">The classic signature: made with the private key behind one of
-          your own addresses, and checkable by anyone running a node — <span class="icode">verifymessage</span>,
-          on Sequentia or on Bitcoin, with nothing to look up and no account id involved. Use it to prove an
+          your own addresses, and checkable by anyone with Sequentia Core or Bitcoin Core (<span class="icode">verifymessage</span>),
+          with nothing to look up and no account id involved. Use it to prove an
           address is yours. Like the signature above it cannot move funds.</p>
         <div class="field">
           <label class="lbl">Message</label>
@@ -2471,7 +2471,7 @@ function populateIssueFeeAssets(){
   fillFeeAssetSelect($('raFeeAsset'));   // the reissue/burn card gets the same open fee choice
   const hint=$('isFeeHint');
   if(hint) hint.textContent = (sel && sel.options.length) ? 'The network fee is paid in this asset.'
-    : 'No held asset is priced for fees on this node yet.';
+    : 'None of the assets you hold is accepted for fees yet.';
 }
 // Apply the chosen fee asset (any held, node-priced asset) to a reissue/burn builder + return the
 // fee-asset hex so reviewBroadcast labels it correctly. Non-policy assets take feeAsset(id, rate).
@@ -3359,7 +3359,7 @@ async function boot(){
     show('boot', false);
     const c=el('div','card'); c.style.cssText='max-width:560px;margin:40px auto';
     c.appendChild(el('label','lbl','The wallet is open in another tab'));
-    c.appendChild(el('div','sub','Use that tab, or close it and reload this one. One tab at a time keeps a single device signing for your Lightning channels.'));
+    c.appendChild(el('div','sub','Use that tab, or close it and reload this one.'));
     document.body.appendChild(c);
     return;
   }
@@ -8003,7 +8003,7 @@ function cjPlan(){
     fee>0n ? `coordination fee ${fmtAtoms(fee, m.precision)} ${m.ticker}` : 'no coordination fee',
     `you hold ${fmtAtoms(held, m.precision)} ${m.ticker} in transparent coins`,
   ];
-  if(cost>held) parts.push('— not enough for that many; lower the count');
+  if(cost>held) parts.push('not enough for that many: lower the count');
   else parts.push(`change ${fmtAtoms(held-cost, m.precision)} ${m.ticker} comes back blinded`);
   // The network fee is absent on purpose: the coordinator pays it, in its own fee asset, so mixing
   // an asset never requires holding another one.
@@ -8034,9 +8034,9 @@ async function renderMix(){
       // description of a round that has not started its clock yet, and it tells a user that showing
       // up is what makes it happen rather than that something is broken.
       const state = l.waiting
-        ? (l.participants >= 1 ? `${l.participants} here, needs ${l.minParticipants - l.participants} more` : 'nobody here yet — be the first')
+        ? (l.participants >= 1 ? `${l.participants} here, needs ${l.minParticipants - l.participants} more` : 'nobody here yet: be the first')
         : (l.deadlineMs != null ? `${l.participants} in, closes in ${Math.max(0, Math.round(l.deadlineMs/1000))}s` : `${l.participants} in`);
-      o.textContent=`${m.ticker||l.label} — ${fmtAtoms(l.denom, m.precision)} per denomination · ${state}`;
+      o.textContent=`${m.ticker||l.label}: ${fmtAtoms(l.denom, m.precision)} per denomination · ${state}`;
       sel.appendChild(o);
     });
     show('cjLaneCard', cjLanes.length>0);
@@ -8189,11 +8189,14 @@ $('btnGear').onclick=()=>tab('settings');
 $('btnCreate').onclick=()=>{ const m=Mnemonic.fromRandom(12); window._pending=m.toString();
   const w=$('words'); w.innerHTML=''; window._pending.split(' ').forEach((x,i)=>{ const s=el('span'); s.innerHTML=`<b>${i+1}</b>${x}`; w.appendChild(s); });
   views('createView'); };
-$('btnConfirm').onclick=()=>openWallet(window._pending);
-$('btnCancelCreate').onclick=()=>views('welcome');
+// Once the backup is confirmed, or the new wallet given up, the phrase leaves the page: its words
+// are taken out of the create view and the variable that held them is cleared.
+function forgetPendingPhrase(){ const w=$('words'); if(w) w.replaceChildren(); const m=window._pending; window._pending=null; return m; }
+$('btnConfirm').onclick=()=>openWallet(forgetPendingPhrase());
+$('btnCancelCreate').onclick=()=>{ forgetPendingPhrase(); views('welcome'); };
 $('btnImport').onclick=()=>{ $('importErr').textContent=''; $('importPhrase').value=''; views('importView'); };
 $('btnCancelImport').onclick=()=>views('welcome');
-$('btnDoImport').onclick=async()=>{ try{ await openWallet($('importPhrase').value); }
+$('btnDoImport').onclick=async()=>{ try{ const f=$('importPhrase'); const m=f.value; await openWallet(m); f.value=''; }
   catch(e){ $('importErr').textContent='Invalid phrase: '+(e?.message??e); } };
 
 $('btnSync').onclick=sync;
