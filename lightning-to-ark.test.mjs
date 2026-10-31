@@ -306,3 +306,14 @@ test('without a way to tell, a close\'s payment is not held (never counted twice
   assert.equal(W.closes.length, 1)
   assert.equal(W.m.channelPart(USDX, 0n), 0n)
 })
+
+test('assets: the move stops counting the moment its leaf is the wallet\'s, in any state, not at the next pass', async () => {
+  const W = page({ channels: [usdxCh()] })
+  await W.m.tickAssets()
+  const amount = 5_000_000_000n - 50_000_000n - 10n
+  assert.equal(W.m.moving(USDX), amount)
+  // The leaf wallet's sync claims the leaf, held at once: the figure counts it from now.
+  W.coins = [{ state: 'held', asset: USDX, value: String(amount - 1n) }]
+  assert.equal(W.m.moving(USDX), null, 'no pass ran, yet nothing is moving')
+  assert.equal(W.m.channelPart(USDX, 100_000_010n), 100_000_010n, 'the channel counts what it reads')
+})
