@@ -84,13 +84,13 @@ test('what is moving: paid from the channel, not lapsed, until its leaf is the w
 
 test('an emptied channel closes when cheap and safe, else says why it stays', () => {
   const c = btcCh({ spendable_units: 0, balance_units: 1010 })
-  assert.deepEqual(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 200n, moved: true }), { close: true, why: null })
-  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 200n, moved: false }).why, /no move/)
-  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 200n, moved: true, moving: true }).why, /on its way/)
-  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 600n, moved: true }).why, /cost too much/)
-  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: null, moved: true }).why, /cannot be priced/)
-  assert.match(closeVerdict({ channel: btcCh(), left: 101000n, spendable: 100000n, fee: 200n, moved: true }).why, /enough to move/)
-  assert.match(closeVerdict({ channel: { ...c, state: 'CHANNELD_AWAITING_LOCKIN' }, left: 1010n, spendable: 0n, fee: 1n, moved: true }).why, /not open/)
+  assert.deepEqual(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 200n }), { close: true, why: null })
+  assert.match(closeVerdict({ channel: c, left: 0n, spendable: 0n, fee: 200n }).why, /nothing of this wallet/)
+  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 200n, moving: true }).why, /on its way/)
+  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: 600n }).why, /cost too much/)
+  assert.match(closeVerdict({ channel: c, left: 1010n, spendable: 0n, fee: null }).why, /cannot be priced/)
+  assert.match(closeVerdict({ channel: btcCh(), left: 101000n, spendable: 100000n, fee: 200n }).why, /enough to move/)
+  assert.match(closeVerdict({ channel: { ...c, state: 'CHANNELD_AWAITING_LOCKIN' }, left: 1010n, spendable: 0n, fee: 1n }).why, /not open/)
 })
 
 // A page on fakes: the channels, the node, the ark and the leaf wallet.
@@ -250,11 +250,14 @@ test('assets: too little to reach the smallest leaf moves nothing; a refused quo
   assert.ok(W2.logs.some((l) => /not moved now: the operator/.test(l)))
 })
 
-test('a channel never moved from is never closed; a costly close is not made and says why', async () => {
-  const W = page({ channels: [usdxCh({ spendable_units: 0, balance_units: 1000 })] })
+test('a channel this browser never moved from is closed once emptied (a restored wallet); a costly close is not made and says why', async () => {
+  const W = page({ channels: [usdxCh({ spendable_units: 0, balance_units: 50_000_010 })] })
   await W.m.tickAssets()
-  assert.equal(W.closes.length, 0)
-  assert.match(W.m.closeWhy('2x1x0'), /no move/)
+  assert.equal(W.closes.length, 1, 'what is left, too little to move, comes back to the wallet')
+  const W1 = page({ channels: [usdxCh({ spendable_units: 0, balance_units: 0 })] })
+  await W1.m.tickAssets()
+  assert.equal(W1.closes.length, 0)
+  assert.match(W1.m.closeWhy('2x1x0'), /nothing of this wallet/)
   const W2 = page({ channels: [btcCh()], closeFee: 600n })
   await W2.m.tick()
   W2.channels = [btcCh({ spendable_units: 0, balance_units: 1010 })]
