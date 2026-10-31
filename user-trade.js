@@ -122,6 +122,10 @@ export const USER_WORDS = Object.freeze({
   busy: (pay) => `Your ${pay} is held by an order you placed or a move your wallet is making, and can be traded once that completes. Nothing has moved.`,
   // Kept by the wallet's plan to refresh it while the wallet is closed, which only a round can end:
   // the wallet gives it up in its next round for a coin it can trade.
+  // The best offers are orders resting in the tree that only coins expiring later can fill: the
+  // wallet refreshes its older coins in the next round, and prices the trade again once they are in.
+  readying: (pay, soon) => soon ? `Getting your ${pay} ready for this trade: it is ready in a minute or two. Nothing has moved.`
+    : `Getting your ${pay} ready for this trade: it is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
   freeing: (pay, soon) => soon ? `Your ${pay} is being made ready to trade: it is ready in a minute or two. Nothing has moved.`
     : `Your ${pay} is being made ready to trade: it is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
   pricing: 'Finding the best price…',
@@ -249,6 +253,9 @@ const QUOTE_FIRM_MIN_MS = 3000
 // (an offer and a Lightning invoice) are waited for this long, not QUOTE_FIRM_MS: there is no
 // other answer to take instead, and a late one was a refusal for nothing.
 export const BTC_ONLY_FIRM_MS = 20000
+// How long a refresh asked to get coins ready for a resting order is waited on before it is asked
+// again: its round, and the round's block being certified.
+export const READYING_MS = 10 * 60_000
 // The book's entries read while the amount was typed stand for the quote this long.
 const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
@@ -551,6 +558,10 @@ export function createEngine (deps) {
           const s2 = r2 > 0n ? sizeEntry(entry, (r2 * entry.rateNum) / entry.rateDen) : null
           if (s2 && s2.receive < r) { r = s2.receive; continue }
         }
+        // Only coins expiring no earlier than the order's coin fill it, and the wallet's that do
+        // hold too little: noted, so a quote that finds no other offer gets those coins ready.
+        const old = /that expire no earlier than the order's coin \(median time (\d+)\) keep (\d+) past their checkpoints/.exec(String(e && e.message))
+        if (old) tooOldFrom = Math.max(tooOldFrom || 0, Number(old[1]))
         log('[user trade] order_fill_resting_quote:', e.message); return null
       }
       if (!q.gets || q.gets.asset !== receiveAsset || big(q.gets.amount) !== r || !q.fee || q.fee.asset !== payAsset) { log('[user trade] the resting fill is not the one asked'); return null }
@@ -641,7 +652,7 @@ export function createEngine (deps) {
 
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
-  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'redoing'|'busy'|'freeing'|'too-small'|'no-firm-offer',
+  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'redoing'|'busy'|'freeing'|'readying'|'too-small'|'no-firm-offer',
   //      soon? } (soon: what is not ready yet is ready in a minute or two)
   //  | { ok: false, why: 'part-ready', ready } (atoms payable now, too few for any offer)
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
@@ -706,6 +717,36 @@ export function createEngine (deps) {
   // The wallet's own upkeep waits too, for the whole of it, not only while a command runs: a sync
   // started between the steps of a quote (while a maker answers) held the next step for its whole
   // length (deps.leaves.hold, leaves.js asking).
+  // The least expiry (median time) a resting order's coin asked of the wallet's coins in this
+  // quote, when one refused them for expiring sooner; null otherwise.
+  let tooOldFrom = null
+  // When the wallet last asked a refresh of an asset's coins for a resting order (ms), so a quote
+  // asked again while that round runs says so rather than asking again.
+  const readyingSince = new Map()
+  // Refreshes the wallet's live coins of `asset` that expire before median time `from`, in the
+  // operator's next round (planned ones through their release): its new coins expire later than
+  // any order resting now. Whether coins are being made ready.
+  async function readyCoins (asset, from) {
+    const since = readyingSince.get(asset)
+    if (since && now() - since < READYING_MS) return true
+    const coins = ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === asset && c.state === 'live')
+    const planned = plannedCoins(await run('plans').catch(() => ({ plans: [] })))
+    const old = coins.filter((c) => Number(c.expiry || 0) < from)
+    if (!old.length) return false
+    const kept = old.filter((c) => planned.has(c.leaf_id)).map((c) => c.leaf_id)
+    const free = old.filter((c) => !planned.has(c.leaf_id)).map((c) => c.leaf_id)
+    try {
+      if (kept.length && deps.release) await Promise.resolve(deps.release(asset, kept))
+      if (free.length) {
+        const q = await run('quote', { leaves: free })
+        await run('participate', { leaves: free, shown: q && q.coins })
+      }
+    } catch (e) { log('[user trade] getting coins ready:', e && e.message); return false }
+    readyingSince.set(asset, now())
+    log('[user trade] coins of', String(asset).slice(0, 8), 'refreshed for a resting order:', free.length + kept.length)
+    return true
+  }
+
   // Asks the wallet to free the live coins of `asset` an open offline-refresh plan keeps, in its
   // next round (deps.release): the library pays such a coin out of round only once a round has
   // freed it. Whether it asked. `mine`: the wallet's coins of the asset, when already read.
@@ -731,6 +772,7 @@ export function createEngine (deps) {
 
   async function quote ({ payAsset, receiveAsset, amount }) {
     const started = Date.now()
+    tooOldFrom = null
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
@@ -805,6 +847,12 @@ export function createEngine (deps) {
     const best = chooseCandidate(cands)
     for (const c of cands) if (c !== best) drop(c)
     // Offered, but nobody gave firm terms: that is not the amount's fault.
+    // No firm offer, and the resting orders refused the wallet's coins only for expiring before
+    // the order's coin: those coins are refreshed in the next round (a new coin expires later
+    // than any order resting now), and the trade is priced again once they are in.
+    if (!best && tooOldFrom != null && payAsset !== 'BTC' && await readyCoins(payAsset, tooOldFrom)) {
+      return { ok: false, why: 'readying', held: String(haveLeaf), soon: soonNow }
+    }
     if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }

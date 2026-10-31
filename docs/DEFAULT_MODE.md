@@ -213,7 +213,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   where a trade pays from: just arrived, or still being moved in by the wallet); "Your <pay> is
   being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once
   that settles. Nothing has moved." (it could be traded, and a Bitcoin reorganisation took it
-  back out of the chain); "Only <amount> of your <pay> can be traded now, too little for any
+  back out of the chain); "Getting your <pay> ready for this trade: it is ready in a minute or two.
+  Nothing has moved." (the offers are orders resting in the tree that only coins expiring later can
+  fill: the wallet refreshes its older coins in the next round by itself, and prices the trade
+  again while the person waits, taking the next order if that one went); "Only <amount> of your <pay> can be traded now, too little for any
   offer: the rest is on its way, ready in a minute or two. Nothing has moved.", or "… the rest is
   ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
   most of what is held is not ready yet); "Nobody could confirm a price for this just now.

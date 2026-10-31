@@ -150,3 +150,35 @@ test('orders that cannot be filled make way for the next one: the engine does no
   assert.ok(q.ok, q.why)
   assert.equal(q.choice.id, ORDER)
 })
+
+test('coins expiring before the resting order\'s are refreshed for the trade, never "nobody could confirm"', async () => {
+  const s = standIn()
+  s.coins[0].expiry = 1700000000
+  const quoteOf = s.lib.command.bind(s.lib)
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting_quote') { s.calls.push(cmd); throw new Error(`refused: the wallet's live coins of asset ${X} that expire no earlier than the order's coin (median time 1790000000) keep 0 past their checkpoints; the fill of 10 costs 20 and its fee, with change of none or at least 1000`) }
+    return quoteOf(cmd, a)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: async () => ({}), makers: () => [], relayBook: s.relayBook, relayFills: s.relayFills, admitted, store: s.store, anchorDepth: () => 0 })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.deepEqual([q.ok, q.why, q.soon], [false, 'readying', true])
+  assert.deepEqual(s.parts.length, 1, 'the old coin given up in the next round')
+  assert.ok(s.calls.includes('participate'))
+  // Asked again while that round runs: still getting ready, nothing asked twice.
+  const n = s.calls.filter((c) => c === 'participate').length
+  assert.equal((await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })).why, 'readying')
+  assert.equal(s.calls.filter((c) => c === 'participate').length, n)
+})
+
+test('a coin new enough for the order is never refreshed for it', async () => {
+  const s = standIn()
+  const quoteOf = s.lib.command.bind(s.lib)
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting_quote') { s.calls.push(cmd); throw new Error(`refused: the wallet's live coins of asset ${X} that expire no earlier than the order's coin (median time 1790000000) keep 0 past their checkpoints`) }
+    return quoteOf(cmd, a)
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: async () => ({}), makers: () => [], relayBook: s.relayBook, relayFills: s.relayFills, admitted, store: s.store })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.equal(q.why, 'no-firm-offer', 'its coin (expiry 1800000000) is not older than the order\'s: nothing to refresh')
+  assert.ok(!s.calls.includes('participate'))
+})

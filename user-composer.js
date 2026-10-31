@@ -30,6 +30,10 @@ const NONE = '…'
 const CARET = '▾'
 
 // How long a trade is followed every few seconds, and how often after that.
+// While the wallet gets coins ready for a trade, the trade is priced again this often, this many
+// times at most (about ten minutes: a round and its block).
+export const READY_RETRY_MS = 20_000
+export const READY_TRIES = 30
 export const FOLLOW_FAST_MS = 120_000
 export const FOLLOW_SLOW_MS = 30_000
 
@@ -229,13 +233,27 @@ export function mountUserComposer (ctx) {
     try {
       const q = await ctx.engine.quote({ payAsset: S.pay, receiveAsset: S.get, amount: String(atoms) })
       if (q.ok) { S.ticket = q.ticket; S.choice = q.choice }
-      else S.error = q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.partReady(amt(S.pay, q.ready), name(S.pay), q.soon) : q.why === 'too-small' ? USER_WORDS.tooSmall
+      else S.error = q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.partReady(amt(S.pay, q.ready), name(S.pay), q.soon) : q.why === 'too-small' ? USER_WORDS.tooSmall
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
+      // Coins being made ready for this trade: priced again by itself while the person waits,
+      // every READY_RETRY_MS, as long as nothing they typed changed.
+      if (!q.ok && q.why === 'readying') readyAgain()
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
     } finally { S.busy = false; paintTicket() }
+  }
+
+  let readyTimer = null, readyTries = 0
+  function readyAgain () {
+    const asked = `${S.pay}|${S.get}|${S.amount}`
+    clearTimeout(readyTimer)
+    if (++readyTries > READY_TRIES) { readyTries = 0; return }
+    readyTimer = setTimeout(() => {
+      if (`${S.pay}|${S.get}|${S.amount}` !== asked || S.busy || S.ticket) { readyTries = 0; return }
+      review()
+    }, READY_RETRY_MS)
   }
 
   async function confirm () {
