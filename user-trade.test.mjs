@@ -516,3 +516,22 @@ test('a trade whose coins are held settles in a minute or two at anchor depth 0'
   assert.equal(tradeStateWord(r, T0 + 3 * 60000, true), 'Received. Settled in a minute or two. (3 min)')
   assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.receivedSettling)
 })
+
+test('engine: a small free coin beside a planned one frees the planned coin, never "on its way"', async () => {
+  const s = standIn()
+  // 0.01 free, 30 kept by an open offline-refresh plan: the offer needs more than the free coin.
+  s.coins[0].value = '1000'
+  s.coins.push({ leaf_id: 'c2', asset: X, value: '3000000000', state: 'live', kind: 'batch' })
+  s.plans.push({ plan_id: 'p2', coin: 'c2', state: 'open' })
+  const freed = []
+  const q = await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']),
+    held: () => 3000001000n, release: (a, l) => freed.push([a, l]), anchorDepth: () => 0 }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([q.why, q.soon, freed], ['freeing', true, [[X, ['c2']]]])
+  // No planned coin: the part-ready answer stands.
+  s.plans.length = 0
+  s.coins.splice(1, 1)
+  const r = await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']),
+    held: () => 1000n, release: (a, l) => freed.push([a, l]) }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(r.why, 'part-ready')
+  assert.equal(freed.length, 1)
+})

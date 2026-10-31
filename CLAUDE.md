@@ -90,9 +90,9 @@ there, but leaves count in each asset's figure and the headline. Each asset's fi
 on-chain, leaves, Lightning and, for tSEQ, what is staked (`stakedAtoms` in `index.html`), in
 both modes; user mode shows that one figure, what is arriving, and no rail, Move or room to
 receive. After a sync, at most every ten minutes, `leaves.js` runs the library's `care` (claims taken up,
-every leaf of a round planned, a plan whose leaf moved cancelled) in either mode, with `claimScan`
-from the page (the kit's next receive index and 20 more) and `plan_within` set to plan every leaf
-of a round; developer mode lists plans with Cancel and Release (`plan_release`). Every leaf
+a leaf of a round planned once its first step could run within the library's ten-day reach, a
+plan whose leaf moved cancelled) in either mode, with `claimScan` from the page (the kit's next
+receive index and 20 more); developer mode lists plans with Cancel and Release (`plan_release`). Every leaf
 command a person or a page starts goes through `paying` in `leaves.js` (the API's `command` and
 `pay`, the user composer's commands included): a refusal of kind `planned` releases the leaves
 it names, waits for their round, and asks again. Keep that one path. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
