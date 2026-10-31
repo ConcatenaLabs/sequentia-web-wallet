@@ -175,9 +175,11 @@ export function makeSiteOrders (d) {
     if (q.why === 'not-listed') return W.notListed(tick(get), tick(pay))
     if (q.why === 'not-offered') return W.notOffered(tick(get), tick(pay))
     if (q.why === 'no-funds') return W.noFunds(tick(pay))
-    if (q.why === 'not-ready') return W.notReady(tick(pay))
+    if (q.why === 'not-ready') return W.notReady(tick(pay), q.soon)
+    if (q.why === 'redoing') return W.redoing(tick(pay))
     if (q.why === 'busy') return W.busy(tick(pay))
-    if (q.why === 'freeing') return W.freeing(tick(pay))
+    if (q.why === 'freeing') return W.freeing(tick(pay), q.soon)
+    if (q.why === 'part-ready') return W.partReady(fmt(pay, q.ready), tick(pay), q.soon)
     if (q.why === 'too-small') return W.tooSmall
     if (q.why === 'no-firm-offer') return W.noFirmOffer
     // A reason this list does not know is never told as the amount's fault.
