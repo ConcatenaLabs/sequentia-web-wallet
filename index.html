@@ -763,6 +763,7 @@
         <label class="lbl">Testnet faucet</label>
         <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to your wallet. Network fees are payable in any asset you hold, all on equal footing.</p>
         <div class="row" id="faucetBtns">
+          <button data-faucet="BTC">BTC</button>
           <button data-faucet="USDX">USDX</button>
           <button data-faucet="EURX">EURX</button>
           <button data-faucet="GOLD">GOLD</button>
@@ -8136,6 +8137,7 @@ async function requestFaucet(asset){
   const btns=[...document.querySelectorAll('#faucetBtns button')];
   btns.forEach(b=>b.disabled=true);
   $('faucetStatus').className='status'; $('faucetStatus').innerHTML='<span class="spin"></span>Requesting from the faucet…';
+  if(asset==='BTC'){ try{ await requestFaucetBtc(); }finally{ btns.forEach(b=>b.disabled=false); } return; }
   // Default mode, coins in the tree: the faucet pays the wallet's receive code, which arrives in
   // seconds; should it refuse that, the address, as before.
   if(!devMode() && leavesApi && leavesApi.isOpen()){
@@ -8181,6 +8183,31 @@ async function requestFaucet(asset){
     }, 3000);
   }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
   finally{ btns.forEach(b=>b.disabled=false); }
+}
+// BTC from the faucet (testnet4): it pays the wallet's receive code, at its address on the Bitcoin
+// ark when the wallet holds BTC there (in seconds), else at the address (after a Bitcoin block).
+async function requestFaucetBtc(){
+  const fs=$('faucetStatus');
+  try{
+    const address=wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential().toString();
+    let ark=null;
+    if(btcArk && btcArk.isOpen()){ try{ ark=(await btcArk.run('address')).address; }catch(e){ console.warn('[faucet] ark address:', e?.message??e); } }
+    const code=buildPayCode({ address, ark: ark||undefined });
+    const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:code,asset:'BTC'})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    const what=`${j.amount} BTC`;
+    fs.className='status ok';
+    if(j.ark){
+      fs.textContent=`Sent ${what} · arriving…`;
+      try{ await btcArk.run('sync'); await btcArk.refresh(); }catch{}
+      fs.textContent=DEFAULT_WORDS.faucetReceived(what);
+      try{ renderBalance(); }catch{}
+    } else {
+      fs.textContent=BTC_WORDS.sentBlock(j.amount).replace(/^Sent/, 'The faucet sent');
+      setTimeout(sync, 8000);
+    }
+  }catch(e){ fs.className='status err'; fs.textContent='Faucet error: '+(e?.message??e); }
 }
 document.querySelectorAll('#faucetBtns button').forEach(b=>{ b.onclick=()=>requestFaucet(b.dataset.faucet); });
 $('btnAddRec').onclick=addRecipientRow;
