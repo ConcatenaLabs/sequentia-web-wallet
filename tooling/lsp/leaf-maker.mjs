@@ -95,6 +95,24 @@ import { restDesk } from './leaf-maker-rest.mjs'
 import { tradeReporter, makerRelayKey } from './trade-report.mjs'
 import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
 
+// The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
+// for its offers at once, few enough that the library reads its store quickly before each command.
+export const MAX_COINS = 32
+// The most coins of an asset merged in one pass: four participations of 16.
+export const MERGE_PER_PASS = 64
+
+// The coins of `asset` to merge so that at most `cap` live ones are left: the smallest live coins it
+// boarded or took from a round (a coin it received is refreshed by itself, as are those in
+// `exclude`), enough to bring the count to `cap`, MERGE_PER_PASS at most; none when under the cap.
+export function coinsToMerge (coins, asset, cap, exclude = []) {
+  const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live')
+  if (live.length <= cap) return []
+  const b = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
+  return live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id))
+    .sort((x, y) => (b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
+    .slice(0, Math.min(MERGE_PER_PASS, live.length - cap + 1)).map((c) => c.leaf_id)
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
@@ -335,6 +353,10 @@ async function main () {
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
       // another asset the maker holds on the chain that the node takes (the wallet rule; never a
       // fallback to one privileged asset).
+      // Its live coins of each asset: past `max_coins` it boards no more, and merges the rest.
+      const counted = new Map()
+      try { for (const c of (await cmd('coins')) || []) if (c && c.state === 'live') counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
+      const cap = (a) => Number(perAsset(cfg.max_coins, a, String(MAX_COINS)))
       try {
         const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}
         // The assets it gives: in-tree, and for BTC at its desk.
@@ -346,6 +368,7 @@ async function main () {
           const coin = perAsset(cfg.coin_size, a, null)
           if (coin && amount > big(coin)) amount = big(coin)
           if (amount < big((gives.find((x) => x.give === a) || {}).min_give || 1)) continue
+          if ((counted.get(a) || 0) >= cap(a)) continue
           const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
           let done = false, why = null
           for (const fee of feeAssets) {
@@ -380,6 +403,19 @@ async function main () {
           log('settling', due.length, 'received coins:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
           for (const d of due) seen.delete(d)
         } catch (e) { log('settle:', e.message) }
+      }
+      // More live coins of an asset than `max_coins`: the smallest are merged in the operator's
+      // next round, MERGE_PER_PASS at most a pass (the library gives up 16 a participation), so
+      // every command it makes reads a store of bounded size.
+      for (const [a, n] of counted) {
+        if (n <= cap(a)) continue
+        const merge = coinsToMerge(coins, a, cap(a), due)
+        if (merge.length < 2) continue
+        try {
+          const q = await cmd('quote', { leaves: merge })
+          const r = await cmd('participate', { leaves: merge, shown: q.coins })
+          log('merging', merge.length, 'coins of', a.slice(0, 8), `(${n} held, at most ${cap(a)}):`, JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
+        } catch (e) { log('merge:', e.message) }
       }
     }
   }
