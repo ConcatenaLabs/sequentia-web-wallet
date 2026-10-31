@@ -64,8 +64,8 @@ In practice:
   and never while the person is using the wallet. It stays in the figure while it moves, and the
   line under the figure reads **"Moving <amount> <TICKER> so it can be sent in seconds."** A
   payment refused before it left moves nothing and is tried again later. A channel the move
-  emptied is closed to the wallet's address when that is cheap and safe, and what it held comes
-  back as arriving; otherwise it stays, and developer mode says why under its Lightning part.
+  emptied is closed to the wallet's address when that is cheap and safe, and what it held stays
+  in the figure on its way back; otherwise it stays, and developer mode says why under its Lightning part.
 - The row's details show only what a person may act on: **Staked**, **Arriving**, and a freeze,
   as "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts the
   freeze."
