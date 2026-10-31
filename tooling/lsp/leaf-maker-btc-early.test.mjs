@@ -10,7 +10,7 @@ import { btcDesk } from './leaf-maker-btc.mjs'
 
 const HASH = 'cd'.repeat(32)
 const X = 'aa'.repeat(32)
-function fakeNode (paid, failedAt = 0) {
+function fakeNode (paid, failedAt = 0, payError = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'btcdesk-early-'))
   const sock = path.join(dir, 'lightning-rpc')
   const now = () => Math.floor(Date.now() / 1000)
@@ -20,6 +20,8 @@ function fakeNode (paid, failedAt = 0) {
       buf += d
       let req; try { req = JSON.parse(buf) } catch { return }
       const m = req.method
+      // A payment the destination refuses is recorded failed, as the node records it.
+      if (payError && m === 'pay') { failedAt = now(); return c.end(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: 203, message: payError } })) }
       const result = m === 'listpeerchannels' ? { channels: [{ state: 'CHANNELD_NORMAL', spendable_msat: 400000000, receivable_msat: 300000000 }] }
         : m === 'decode' ? { valid: true, amount_msat: 12000000, payment_hash: HASH, created_at: now(), expiry: 7200, min_final_cltv_expiry: 18, payee: '02'.padEnd(66, '1'), routes: [] }
         : m === 'getroute' ? { route: [{ amount_msat: 12001000, delay: 40 }] }
@@ -33,9 +35,9 @@ function fakeNode (paid, failedAt = 0) {
   return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => srv.close() })))
 }
 
-async function run (btcCaps, holdSeconds, fast = null, failedAt = 0) {
+async function run (btcCaps, holdSeconds, fast = null, failedAt = 0, payError = null) {
   const paid = []
-  const n = await fakeNode(paid, failedAt)
+  const n = await fakeNode(paid, failedAt, payError)
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'btcdesk-early-store-'))
   const asked = []
   const cmd = async (name, a) => {
@@ -103,4 +105,15 @@ test('a BTC payment that failed before (the wallet away to take it) is paid agai
   const r = await run({ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 24 * 3600, 'accepted', Math.floor(Date.now() / 1000) - 600)
   assert.equal(r.paid.length, 1, 'paid again')
   assert.equal(r.state, 'claiming')
+})
+
+test('a wallet invoice its node no longer knows voids the swap: it is not paid again', async () => {
+  const r = await run({ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 24 * 3600, 'accepted', 0,
+    "Destination said it doesn't know invoice: incorrect_or_unknown_payment_details")
+  assert.equal(r.state, 'void')
+})
+
+test('a payment that failed otherwise is offered again', async () => {
+  const r = await run({ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 24 * 3600, 'accepted', 0, 'Ran out of routes to try')
+  assert.equal(r.state, 'offered')
 })
