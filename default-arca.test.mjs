@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, boardCandidates,
+import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -132,4 +132,18 @@ test('the arrival time is the operator\'s interval in whole minutes, or none', (
   assert.equal(DEFAULT_WORDS.arrivesWithin(1), 'It arrives in a few minutes.')
   assert.equal(DEFAULT_WORDS.sentLater('1', 'GOLD', 1), 'Sent 1 GOLD. It arrives in a few minutes.')
   assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
+})
+
+test('of what is arriving, the coins a Bitcoin reorganisation took back are said apart', () => {
+  const coins = [{ asset: A, value: '700', state: 'pending', redoing: true }, { asset: A, value: '300', state: 'pending', redoing: false },
+    { asset: B, value: '5', state: 'pending', redoing: true }, { asset: A, value: '9', state: 'live' }]
+  assert.equal(redoingAtoms(coins, A), 700n)
+  assert.equal(redoingAtoms(coins, B), 5n)
+  assert.equal(redoingAtoms(null, A), 0n)
+  assert.equal(DEFAULT_WORDS.redoing('0.000007', 'USDX'), '0.000007 USDX being redone after a Bitcoin reorganisation')
+  assert.deepEqual(forbiddenIn(DEFAULT_WORDS.redoing('1', 'USDX')), [])
+  assert.equal(anchorDepth({ anchor_depth: 0 }), 0)
+  assert.equal(anchorDepth({ anchor_depth: 2 }), 2)
+  assert.equal(anchorDepth({}), null)
+  assert.equal(anchorDepth(null), null)
 })

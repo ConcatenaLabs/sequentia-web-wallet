@@ -483,3 +483,36 @@ test('engine: an amount that would trade, paid from coins mostly not ready yet, 
   assert.equal(q.ready, '5000')
   assert.deepEqual(forbiddenIn(USER_WORDS.partReady('0.00005 XT', 'XT')), [])
 })
+
+test('engine: at anchor depth 0 a coin not ready yet is on its way; a coin a reorganisation took back is being redone', async () => {
+  const s = standIn()
+  const base = { leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), held: () => 3000000n }
+  // A coin received a moment ago, its block not yet certified.
+  s.coins[0].state = 'pending'
+  const q0 = await createEngine({ ...base, anchorDepth: () => 0 }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([q0.why, q0.soon], ['not-ready', true])
+  assert.equal(USER_WORDS.notReady('USDX', q0.soon), 'Your USDX is on its way: it is ready to trade in a minute or two. Nothing has moved.')
+  // An operator that also waits for Bitcoin blocks, or a library that has not said: the Bitcoin words.
+  for (const anchorDepth of [() => 2, () => null, undefined]) {
+    const q = await createEngine({ ...base, anchorDepth }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+    assert.deepEqual([q.why, q.soon], ['not-ready', false])
+    assert.match(USER_WORDS.notReady('USDX', q.soon), /next Bitcoin blocks settle it/)
+  }
+  // Spendable once, then out of the chain with its Bitcoin block: being redone, never a loss.
+  s.coins[0].redoing = true
+  const r = await createEngine({ ...base, anchorDepth: () => 0 }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(r.why, 'redoing')
+  assert.equal(USER_WORDS.redoing('USDX'), 'Your USDX is being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once that settles. Nothing has moved.')
+  // The person's words hold none of default mode's forbidden words.
+  for (const w of [USER_WORDS.notReady('USDX', true), USER_WORDS.partReady('0.01 USDX', 'USDX', true), USER_WORDS.freeing('GOLD', true),
+    USER_WORDS.redoing('USDX'), USER_WORDS.receivedSoon]) assert.deepEqual(forbiddenIn(w), [], w)
+  assert.equal(USER_WORDS.partReady('0.0149 USDX', 'USDX', true), 'Only 0.0149 USDX of your USDX can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.')
+})
+
+test('a trade whose coins are held settles in a minute or two at anchor depth 0', () => {
+  const T0 = 1_000_000
+  const r = { source: 'leaf-maker', state: 'sent', sentAt: T0, swapState: 'done' }
+  assert.equal(tradeStateWord(r, T0 + 30000, true), USER_WORDS.receivedSoon)
+  assert.equal(tradeStateWord(r, T0 + 3 * 60000, true), 'Received. Settled in a minute or two. (3 min)')
+  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.receivedSettling)
+})

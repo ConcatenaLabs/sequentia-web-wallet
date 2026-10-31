@@ -3968,6 +3968,8 @@ function initUserComposer(){
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
     // as none; and default mode's board of coins on the chain, asked for at once.
     held: (a)=> userHeld(a),
+    // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
+    anchorDepth: ()=> leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null,
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
     // Coins an open refresh plan keeps are freed for a trade in the wallet's next round.
     release: (a, leaves)=> leavesApi ? leavesApi.releaseFor(a, leaves) : null,
@@ -6428,8 +6430,11 @@ function renderBalance(){
     let frozenAt = 0n; try { if(kind!=='BTC' && leavesApi) frozenAt = leavesApi.frozenAtoms(kind) || 0n; } catch {}
     if(frozenAt > 0n){ const fz=el('div','bt-frozen', frozenSentence(amt(frozenAt), ticker)); fz.style.cssText='color:var(--amber2,#e0a800);font-size:12px;margin-top:2px'; a.appendChild(fz); }
     // Default mode: what is held in the tree and not yet spendable (a board not yet final) says so.
-    let arriving = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arriving = leavesApi.arriving(kind) || 0n; } catch {}
-    if(arriving > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
+    // Of it, what a Bitcoin reorganisation took back out of the chain is said apart: never a loss.
+    let arriving = 0n, redoing = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()){ arriving = leavesApi.arriving(kind) || 0n; redoing = leavesApi.redoing(kind) || 0n; } } catch {}
+    if(redoing > arriving) redoing = arriving;
+    if(arriving - redoing > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving - redoing), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
+    if(redoing > 0n){ const rd=el('div','bt-redoing', DEFAULT_WORDS.redoing(amt(redoing), ticker)); rd.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(rd); }
     if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
     // ONE VIEW FOR EVERY MODE. A bolt beside the ticker says whether the asset has a Lightning
     // channel (yellow) or not yet (grey); the row's details, one tap away, hold its parts (on-chain |

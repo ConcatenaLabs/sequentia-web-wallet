@@ -76,7 +76,9 @@ test('one figure per asset in every mode; the rails and their actions in develop
   assert.match(rb, /if\(dm && lnOn && leg && hasLn\)\{/);
   assert.match(rb, /if\(dm && leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
   assert.match(rb, /if\(staked>0n\) blk\('Staked', amt\(staked\)\);/);
-  assert.match(rb, /DEFAULT_WORDS\.arriving\(amt\(arriving\), ticker\)/);
+  assert.match(rb, /DEFAULT_WORDS\.arriving\(amt\(arriving - redoing\), ticker\)/);
+  // What a Bitcoin reorganisation took back out of the chain is said apart, never as gone.
+  assert.match(rb, /DEFAULT_WORDS\.redoing\(amt\(redoing\), ticker\)/);
   // Without a channel the one action is Move to Lightning, in developer mode's details, never on the row.
   assert.match(rb, /if\(dm && lnOn && leg && !hasLn && toLn\)\{ const d=el\('div','bt-blk'\); button\(d, 'Move to Lightning'/);
   assert.match(rb, /nameNode:nameEl, foot:sub, movable,/);

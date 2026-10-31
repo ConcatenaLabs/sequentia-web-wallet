@@ -39,6 +39,10 @@ In practice:
   top is **one total** in the reference currency, across every asset.
 - What has been received and cannot be spent yet appears under the figure as
   **"<amount> <TICKER> arriving"**. Once it can be spent, it is simply part of the figure.
+- A coin that could be spent, and that a Bitcoin reorganisation took back out of the chain with
+  the block it rested on, stays in the figure and appears under it as **"<amount> <TICKER> being
+  redone after a Bitcoin reorganisation"** until the network takes it in again. It is never shown
+  as gone.
 - A coin the wallet left past its expiry, which the operator took and repays as a new coin less
   its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
   The wallet claims it by itself the next time it opens, or once restored from its phrase.
@@ -186,19 +190,26 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   "Returned: nothing traded. Fees of <fees> were paid." A purchase with BTC whose other side's
   offer ran out while it waited, and was not renewed, says "Returned: nothing traded. The other
   side's offer ran out while the trade waited."
-- Settling waits for Bitcoin blocks, so a trade can take an hour or more. While it waits the row
-  says what is already true, with the minutes it has waited once that is one or more: "Waiting
-  for the other side. Nothing has left your wallet yet." (buying with BTC, until the asset is held
-  for the wallet); "Sent (<N> min)"; and once what the trade brings is held, "Received. Settled
-  after the next Bitcoin blocks. (<N> min)"
+- Settling waits for the network. Where the operator calls a coin settled once its block is
+  certified (an anchor depth of 0, as on the testnet), that is a minute or two; where it also
+  waits for Bitcoin blocks, a trade can take an hour or more. While it waits the row says what is
+  already true, with the minutes it has waited once that is one or more: "Waiting for the other
+  side. Nothing has left your wallet yet." (buying with BTC, until the asset is held for the
+  wallet); "Sent (<N> min)"; and once what the trade brings is held, "Received. Settled in a
+  minute or two. (<N> min)", or "Received. Settled after the next Bitcoin blocks. (<N> min)"
 - Refusals: "This trade could not be made. Nothing moved."; "The other side declined. Nothing was
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
   is not offered."; "Not offered right now: nobody offers anything for <pay>." (nothing can be
   chosen under You receive); "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
   is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere); "Your
-  <pay> is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved." (held, and shown in
-  the balance, but not yet where a trade pays from: just arrived, or still being moved in by the
-  wallet); "Only <amount> of your <pay> can be traded now, too little for any offer: the rest is
+  <pay> is on its way: it is ready to trade in a minute or two. Nothing has moved.", or, where the
+  operator also waits for Bitcoin blocks, "Your <pay> is not ready to trade yet: it is once the
+  next Bitcoin blocks settle it. Nothing has moved." (held, and shown in the balance, but not yet
+  where a trade pays from: just arrived, or still being moved in by the wallet); "Your <pay> is
+  being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once
+  that settles. Nothing has moved." (it could be traded, and a Bitcoin reorganisation took it
+  back out of the chain); "Only <amount> of your <pay> can be traded now, too little for any
+  offer: the rest is on its way, ready in a minute or two. Nothing has moved.", or "… the rest is
   ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
   most of what is held is not ready yet); "Nobody could confirm a price for this just now.
   Nothing has moved: try again in a moment."
