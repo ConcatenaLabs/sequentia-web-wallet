@@ -106,6 +106,8 @@ export const CODE_MARGIN_S = 86_400
 // code shows within seconds rather than at the schedule's next sync.
 export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
+// How often user mode asks the library to refresh what it received out of round.
+export const REFRESH_EVERY_MS = 120_000
 // The library's commands that only read (bark/src/arca/command.rs reads_only): a quote's.
 export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 'refusals', 'participations', 'schedule', 'orders',
   'swaps', 'plans', 'info', 'supply', 'board_quote', 'quote', 'settle_quote', 'take_quote', 'order_fill_quote', 'order_quote',
@@ -471,6 +473,18 @@ export function when (t, now) {
 }
 
 // The steps of one exit answer, for the drill's log.
+// The last transaction an exit drill broadcast (its claim, else its last step), for Speed up.
+export function lastBroadcast (runs) {
+  for (const r of [...(runs || [])].reverse()) {
+    const v = r && r.value
+    if (!v) continue
+    if (v.claim) return typeof v.claim === 'string' ? v.claim : v.claim.txid
+    const steps = v.broadcast || []
+    if (steps.length) return steps[steps.length - 1].txid
+  }
+  return null
+}
+
 export function exitSteps (answer) {
   return ((answer && answer.broadcast) || []).map((s) => ({
     txid: s.txid,
@@ -764,7 +778,30 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (careDue(S.careAt, now(), careEvery)) await careIfDue()
       else if (S.bondLater) await bondIfIdle()
       await boardArrivals()
+      await refreshReceived()
     } finally { S.busy = false; render() }
+  }
+
+  // ---- user mode: what is received out of round is refreshed at the next round ----
+  // A coin another wallet paid this one out of round rests on its senders until it is refreshed
+  // in a round (until then a sender together with the operator could spend it again). In user
+  // mode the library gives every such coin up in the operator's next round for a coin of its own
+  // (`refresh_received`), at most once every REFRESH_EVERY_MS, never ahead of a person, and never
+  // while the page's own on-chain payment may still be spending coins. Developer mode does it
+  // only when asked. Until the round is final the coin counts as arriving. Nothing is said unless
+  // it goes wrong: a refusal is kept in S.lastRefresh and asked again at the next turn.
+  async function refreshReceived () {
+    if (!S.open || dev() || !pinned() || S.asked) return
+    if (S.refreshedAt != null && now() - S.refreshedAt < REFRESH_EVERY_MS) return
+    try { if (ctx.onchainQuiet && ctx.onchainQuiet()) return } catch {}
+    S.refreshedAt = now()
+    try {
+      const v = await run('refresh_received', {})
+      S.lastRefresh = { at: now(), value: v }
+      const n = ((v && v.refreshed) || []).length
+      if (n) { log(`[leaves] ${n} coin(s) received out of round given up in the next round`); await reload() }
+      for (const l of (v && v.left) || []) log(`[leaves] a received coin left as it is: ${l.why}`)
+    } catch (e) { S.lastRefresh = { at: now(), error: e }; log('[leaves] refreshing what was received: ' + (e && e.message)) }
   }
 
   // ---- user mode: coins that land on the chain go into the tree by themselves ----
@@ -1562,9 +1599,25 @@ export function mountLeaves (ctx, root, settingsRoot) {
       c.appendChild(box)
     } else if (!coin || coin.state !== 'exited') {
       const b = button('Run the exit again', () => drill(S.drill.leaf)); b.id = 'btnLeafExitAgain'; b.disabled = S.busy
-      const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(b); c.appendChild(r)
+      const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(b)
+      // The last transaction the exit broadcast, sped up by a child (`speed_up`): the library
+      // finds the output of the wallet's it spends, and says why when there is none.
+      const last = lastBroadcast(S.drill.runs)
+      if (last) {
+        const sp = button('Speed up', () => speedUp(last), 'ghost'); sp.id = 'btnLeafSpeedUp'; sp.disabled = S.busy
+        r.appendChild(sp)
+      }
+      c.appendChild(r)
     }
     root.appendChild(c)
+  }
+
+  async function speedUp (txid) {
+    try {
+      const v = await act('speed_up', () => run('speed_up', { txid }))
+      S.drill.runs.push({ at: now(), value: { state: 'sped up', note: `child ${v.child} spends ${v.spends}; the waiting transactions and it pay ${v.rate_per_kvb} reference atoms a kvB together, fee ${amt(v.fee.asset, v.fee.amount)}${v.second_input ? ', a second input paying it' : ''}${v.replaced ? ', replacing ' + v.replaced : ''}` } })
+    } catch (e) { S.drill.runs.push({ at: now(), error: e }) }
+    render()
   }
 
   function renderParticipations () {

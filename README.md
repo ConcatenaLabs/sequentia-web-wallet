@@ -63,7 +63,8 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry
 - Staking the Sequence token (tSEQ) with the network-minimum CSV lock, unbonding it, and
   staking-pool delegation (join a pool, switch, or leave; the coins never move)
-- Transaction history on both chains with RBF fee bump, CPFP, and replace
+- Transaction history on both chains with RBF fee bump, CPFP, and replace (Sequentia) and CPFP
+  (Bitcoin) in developer mode; default mode speeds up a waiting transaction by itself
 - OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
   Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
 - Classic signed messages over a wallet address key, in the format `verifymessage` accepts,
@@ -186,9 +187,11 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   stake record is signed for the height of the block it enters, so the wallet refuses to
   build one when it cannot read the chain tip.
 - **History**: transactions on both chains, with explorer links (Bitcoin's first when it has any;
-  with none on either chain, one line says so), and rescue actions for stuck
-  Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
-  selection as a send. They appear once a payment has missed a block. Each dialog says what the
+  with none on either chain, one line says so), and, in developer mode, rescue actions for stuck
+  transactions: on Sequentia RBF fee bump, CPFP, and replace, each with the same any-asset fee
+  selection as a send, and on Bitcoin CPFP (**Speed up**). They appear once a payment has missed a
+  block. Default mode offers none of them and speeds up a payment that has waited two blocks by
+  itself (`speed-up.js`). Each dialog says what the
   stuck transaction pays, as a multiple of the network's minimum rate, suggests a rate in the
   chosen asset's own units, and says what the rescue comes to; it checks again before signing
   that the transaction is still unconfirmed. Each row's details say why an unconfirmed
