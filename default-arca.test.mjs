@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -146,4 +146,13 @@ test('of what is arriving, the coins a Bitcoin reorganisation took back are said
   assert.equal(anchorDepth({ anchor_depth: 2 }), 2)
   assert.equal(anchorDepth({}), null)
   assert.equal(anchorDepth(null), null)
+})
+
+test('a coin kept safe while the wallet was away is shown in the plain words, from the library\'s balance', () => {
+  const A = 'a'.repeat(64)
+  const balance = { arca: { [A]: { exiting: '2000000', kept_safe: '2000000' } } }
+  assert.equal(keptSafeAtoms(balance, A), 2000000n)
+  assert.equal(keptSafeAtoms(balance, 'b'.repeat(64)), 0n)
+  assert.equal(keptSafeAtoms(null, A), 0n)
+  assert.equal(DEFAULT_WORDS.keptSafe('0.02', 'XYZ'), '0.02 XYZ moved out of the Ark to keep it safe while you were away')
 })
