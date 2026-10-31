@@ -63,6 +63,8 @@ const LOCKING_SECONDS = 120
 // How long an invoice of the desk's runs (`invoice_seconds` overrides it): long enough for the
 // usual wait for the asset to be final, and renewed under the same hash past that (`reinvoice`).
 const INVOICE_SECONDS = 4 * 3600
+// After a BTC payment to a wallet failed, how long the desk waits before it pays again.
+const PAY_AGAIN_MS = 30000
 
 // Whether a swap's BTC (`s.give` sat) may be paid before the asset received for it is final, under
 // the desk's caps `b` (unfinal_max_sats per swap, unfinal_total_sats in all, a payment counting for
@@ -337,6 +339,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup }) {
     if (s.give_asset === 'BTC') {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
       if (s.state === 'offered') {
+        if (s.retry_at && Date.now() < s.retry_at) return
         if (rcv.state !== 'issuing') { if (Date.now() > s.expires + 3600 * 1000 && rcv.state === 'waiting') s.state = 'lapsed'; return }
         // Only the library's refusal says the leaf will never do; an operator that does not answer
         // now (a restart) is asked again at the next pass, the wallet's payment held meanwhile.
@@ -362,12 +365,15 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup }) {
         }
         const d = await node.decode(s.invoice_btc)
         if (d.expires_at - Date.now() / 1000 < INVOICE_LEFT_SECONDS) { s.state = 'void'; log('btc swap', s.swap, 'the wallet\'s invoice runs out'); return }
-        s.state = 'paying'; save()
+        s.state = 'paying'; s.paying_at = Math.floor(Date.now() / 1000); save()
       }
       if (s.state === 'paying') {
         let st = await node.payStatus(s.hash)
-        if (st.state === 'none') st = await node.pay({ invoice: s.invoice_btc, maxFeeSats: big(s.route_fee ?? b.max_route_fee_sats ?? 0), maxDelay: Number(s.route_delay || s.min_final_cltv || 18) + EXTRA_BLOCKS })
-        if (st.state === 'failed') { s.state = 'offered'; log('btc swap', s.swap, 'payment failed:', st.reason || ''); return }
+        // An attempt that failed before this one began (the wallet was away to take it, a route
+        // that failed) is paid again, not taken for this one's failure.
+        const before = st.state === 'failed' && Number(st.at || 0) < Number(s.paying_at || 0)
+        if (st.state === 'none' || before) st = await node.pay({ invoice: s.invoice_btc, maxFeeSats: big(s.route_fee ?? b.max_route_fee_sats ?? 0), maxDelay: Number(s.route_delay || s.min_final_cltv || 18) + EXTRA_BLOCKS })
+        if (st.state === 'failed') { s.state = 'offered'; s.retry_at = Date.now() + PAY_AGAIN_MS; log('btc swap', s.swap, 'payment failed:', st.reason || '', '(paid again in', PAY_AGAIN_MS / 1000, 's)'); return }
         if (st.state !== 'complete') return
         s.preimage = st.preimage
         await cmd('lightning_receive_preimage', { hash: s.hash, preimage: st.preimage })

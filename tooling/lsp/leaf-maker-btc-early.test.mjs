@@ -10,7 +10,7 @@ import { btcDesk } from './leaf-maker-btc.mjs'
 
 const HASH = 'cd'.repeat(32)
 const X = 'aa'.repeat(32)
-function fakeNode (paid) {
+function fakeNode (paid, failedAt = 0) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'btcdesk-early-'))
   const sock = path.join(dir, 'lightning-rpc')
   const now = () => Math.floor(Date.now() / 1000)
@@ -23,7 +23,8 @@ function fakeNode (paid) {
       const result = m === 'listpeerchannels' ? { channels: [{ state: 'CHANNELD_NORMAL', spendable_msat: 400000000, receivable_msat: 300000000 }] }
         : m === 'decode' ? { valid: true, amount_msat: 12000000, payment_hash: HASH, created_at: now(), expiry: 7200, min_final_cltv_expiry: 18, payee: '02'.padEnd(66, '1'), routes: [] }
         : m === 'getroute' ? { route: [{ amount_msat: 12001000, delay: 40 }] }
-        : m === 'listpays' ? { pays: paid.length ? [{ status: 'complete', preimage: 'ee'.repeat(32), amount_sent_msat: 12001000, amount_msat: 12000000 }] : [] }
+        : m === 'listpays' ? { pays: [...(failedAt ? [{ status: 'failed', created_at: failedAt }] : []),
+          ...(paid.length ? [{ status: 'complete', preimage: 'ee'.repeat(32), amount_sent_msat: 12001000, amount_msat: 12000000, created_at: now() }] : [])] }
         : m === 'pay' ? (paid.push(req.params.bolt11), { status: 'complete', payment_preimage: 'ee'.repeat(32), amount_sent_msat: 12001000, amount_msat: 12000000 })
         : {}
       c.end(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }))
@@ -32,9 +33,9 @@ function fakeNode (paid) {
   return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => srv.close() })))
 }
 
-async function run (btcCaps, holdSeconds, fast = null) {
+async function run (btcCaps, holdSeconds, fast = null, failedAt = 0) {
   const paid = []
-  const n = await fakeNode(paid)
+  const n = await fakeNode(paid, failedAt)
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'btcdesk-early-store-'))
   const asked = []
   const cmd = async (name, a) => {
@@ -96,4 +97,10 @@ test('between the passes, nothing is paid before the operator accepts, or outsid
     assert.equal(r.state, 'offered')
     assert.deepEqual(r.asked, [], 'the library is not asked')
   }
+})
+
+test('a BTC payment that failed before (the wallet away to take it) is paid again, not taken for a new failure', async () => {
+  const r = await run({ unfinal_max_sats: '50000', unfinal_total_sats: '500000' }, 24 * 3600, 'accepted', Math.floor(Date.now() / 1000) - 600)
+  assert.equal(r.paid.length, 1, 'paid again')
+  assert.equal(r.state, 'claiming')
 })
