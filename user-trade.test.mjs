@@ -321,6 +321,9 @@ test('engine: the two amounts, estimated either way round, with no firm offer as
   assert.deepEqual(c.short, { pay: '1333334', receive: '1000000' })
   const d = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '4000000' })
   assert.equal(d.receive, '1000000'); assert.ok(d.short, 'paying more than the book takes says how much it can')
+  // 400,001 at 4 per 3 buys 300,000, and one atom is left that buys nothing: the book fills it.
+  const r = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '400001' })
+  assert.deepEqual([r.ok, r.receive, r.short], [true, '300000', null], 'the price\'s rounding is not the book running short')
   assert.equal((await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '0' })).why, 'too-small')
   assert.ok(!s.posts.some(([p]) => p === 'firm'), 'no maker was asked for a firm offer')
   assert.equal((await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: () => ({ pairs: { chains: {} }, genesis: 'g' }), store: s.store }).estimate({ payAsset: X, receiveAsset: Y, pay: '1' })).why, 'not-listed')

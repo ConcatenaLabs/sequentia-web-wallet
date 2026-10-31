@@ -82,6 +82,8 @@
   .ucomp .uc-amount{flex:1;min-width:140px}
   .ucomp .uc-have{flex-basis:100%;display:flex;justify-content:space-between;align-items:center;gap:8px}
   .ucomp .uc-max{padding:2px 10px;font-size:12px}
+  .ucomp .uc-flip-row{display:flex;justify-content:center;margin:2px 0 -4px}
+  .ucomp .uc-flip{padding:2px 14px;font-size:18px;line-height:1.2;border-radius:999px}
   .ucomp .uc-ticket .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
   .ucomp .uc-note.err{color:var(--bad,#c33)}
   .ucomp .uc-trade{display:flex;justify-content:space-between;gap:12px}
@@ -1673,6 +1675,7 @@ import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, m
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
+import { displayPair } from './swap.js';
 import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
@@ -3236,6 +3239,8 @@ function renderRoomStepper(host){
   paint();
 }
 function tab(name){
+  // The open tab is kept for the browser tab's session: a reload opens on it again.
+  try{ sessionStorage.setItem('swk.tab', name); }catch{}
   document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
   // More stands for the tab chosen from it, and is lit while one of those is open.
   { const inMore=$('moreList') && $('moreList').querySelector('button.active');
@@ -3516,12 +3521,15 @@ async function openWallet(phrase){
   const endRestore = timer('open wallet › restore cached scan', { count:false });
   const restored = await restoreWolletState();
   endRestore(restored ? 'restored' : 'nothing to restore');
+  let keptTab=null; try{ keptTab=sessionStorage.getItem('swk.tab'); }catch{}
   addrIndex=null; views('app'); show('btnGear', true); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
   // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
   // on at any time; the leaf wallet starts only while the mode is on.
   try{ initLeaves(); }catch(e){ console.warn('[leaves] init failed:', e?.message??e); }
   try{ initContracts(); }catch(e){ console.warn('[contracts] init failed:', e?.message??e); }
   try{ initBtcArk(); }catch(e){ console.warn('[btc ark] init failed:', e?.message??e); }
+  // A reload opens on the tab that was open (a tab of developer mode only while it is on).
+  try{ if(keptTab && keptTab!=='balance'){ const b=document.querySelector('#tabs button[data-tab="'+CSS.escape(keptTab)+'"]'); if(b && !b.classList.contains('hide')) tab(keptTab); } }catch{}
   // Register the OpenAMP identity + load restricted-asset metadata before the first sync, so
   // restricted rows/balances can render in the same pass. Non-fatal if the enclave is unreachable.
   const endOamp = timer('open wallet › OpenAMP init');
@@ -3995,11 +4003,12 @@ function initUserComposer(){
   });
   userComposer = mountUserComposer({
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
+    session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
     knownAssets: userKnownAssets, held: userHeld,
     isHidden: isAssetHidden, refValue: refValueStr,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
     // The chosen pair's market, from the relay's one trade log (market-view.js).
-    market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> canonicalPair(a, b) },
+    market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> displayPair(a, b) },
   });
   // The pairs and the chain are read once; the composer draws when they are in.
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
