@@ -80,7 +80,7 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS } from './default-arca.js'
+import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
@@ -628,6 +628,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
       S.joinError = null
       S.openedAt = now()
+      // The other operators' watchtowers, beside the operator's own: the wallet deposits each
+      // coin with them too, sealed, at its next sync.
+      try { await run('set_default_watchtowers', { urls: defaultWatchtowers(ctx.pinned && ctx.pinned()) }) } catch (e) {
+        log('[leaves] default watchtowers not set: ' + ((e && e.message) || e))
+      }
     } catch (e) {
       S.open = false
       S.joinError = e

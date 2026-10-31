@@ -1637,6 +1637,10 @@
     server:   location.origin + '/arca',
     node_url: location.origin + '/node-rpc',
     operator: 'b6f4c5924ad81947658cf85bb93d9267efc54c7fcb2e4577e8c954c68fa087bb',
+    // The watchtowers other operators run for this operator's users, which the wallet deposits
+    // its coins with beside those the operator names: arca.albertodeluigi.com's, and operator
+    // B's (the testnet's stand-in second operator).
+    watchtowers: ['https://arca.albertodeluigi.com/watchtower', location.origin + '/watchtower-b'],
   };
   // The Bitcoin ark that holds default mode's BTC (btc-ark.js): its server (gRPC-web, same origin)
   // and the Esplora server the wallet reads testnet4 from. A page that sets SEQ_BTC_ARK = null

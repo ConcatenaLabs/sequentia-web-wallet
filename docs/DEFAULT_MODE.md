@@ -47,8 +47,10 @@ In practice:
   the block it rested on, stays in the figure and appears under it as **"<amount> <TICKER> being
   redone after a Bitcoin reorganisation"** until the network takes it in again. It is never shown
   as gone.
-- A coin the wallet left unrefreshed while it was away is taken on the chain under its own key
-  before it could be swept, by the operator or a watchtower. It stays in the figure and appears
+- A coin the wallet left unrefreshed while it was away, or one paid to it whose sender took an
+  earlier coin of its lineage back on the chain, is taken on the chain under its own key by the
+  operator or a watchtower: the wallet deposits each coin, sealed and with nothing shown, with
+  the watchtowers its operator names and those the other operators run for its users. It stays in the figure and appears
   under it as **"<amount> <TICKER> moved out of the Ark to keep it safe while you were away"**
   while the wallet, open again, puts it back by itself; it is then arriving until that is final.
   Developer mode names it `kept_safe`.

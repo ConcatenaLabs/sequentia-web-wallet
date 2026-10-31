@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll, onchainLessBoards, boardSpent } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -172,4 +172,13 @@ test('a board just made comes off the chain\'s part until the page\'s reading sh
   assert.deepEqual(onchainLessBoards(part, 1_000n, t + 31 * 60_000), { atoms: 1_000n, seen: true })
   assert.equal(onchainLessBoards(boardSpent(500n, 500n, t), 300n, t).atoms, 0n)
   assert.deepEqual(onchainLessBoards(null, 7n, t), { atoms: 7n, seen: true })
+})
+
+test('the page names the other operators\' watchtowers, and nothing else', () => {
+  assert.deepEqual(defaultWatchtowers({ watchtowers: ['https://arca.example/watchtower/', 'https://x/watchtower-b', 'http://127.0.0.1:3537'] }),
+    ['https://arca.example/watchtower', 'https://x/watchtower-b', 'http://127.0.0.1:3537'])
+  assert.deepEqual(defaultWatchtowers({ watchtowers: ['http://evil.example/w', 'javascript:alert(1)', 7, 'https://a b'] }), [])
+  assert.deepEqual(defaultWatchtowers(null), [])
+  assert.deepEqual(defaultWatchtowers({}), [])
+  assert.equal(defaultWatchtowers({ watchtowers: Array(12).fill('https://t') }).length, 8)
 })
