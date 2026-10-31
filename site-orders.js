@@ -179,6 +179,7 @@ export function makeSiteOrders (d) {
     if (q.why === 'redoing') return W.redoing(tick(pay))
     if (q.why === 'busy') return W.busy(tick(pay))
     if (q.why === 'freeing') return W.freeing(tick(pay), q.soon)
+    if (q.why === 'readying') return W.readying(tick(pay), q.soon)
     if (q.why === 'part-ready') return W.partReady(fmt(pay, q.ready), tick(pay), q.soon)
     if (q.why === 'too-small') return W.tooSmall
     if (q.why === 'no-firm-offer') return W.noFirmOffer
