@@ -107,6 +107,28 @@ test('sends go where the destination says, priced by the wallet first', async ()
   ark.close()
 })
 
+test("Max: what the ark can pay a destination, its fee taken off", async () => {
+  const { w } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '50000', total: '50000' }),
+    send_fee: () => ({ fee: '0' }),
+    // A fee that grows with the amount: 1% plus 500.
+    offboard_fee: (a) => ({ fee: String(Math.ceil(Number(a.sats) / 100) + 500) }),
+  })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
+  await ark.open()
+  try {
+    assert.equal(await ark.max(ARK), 50000n)
+    const m = await ark.max(TB1)
+    const q = await ark.quote(TB1, m)
+    assert.ok(!q.short, 'the most Max offers can be sent')
+    assert.ok(50000n - m - q.fee < 2n, 'and nothing is left behind')
+    // A code is paid at its Ark part; an invoice names its own amount.
+    assert.equal(await ark.max('bitcoin:' + TB1 + '?ark=' + ARK), 50000n)
+    assert.equal(await ark.max(LNTB), null)
+  } finally { ark.close() }
+})
+
 test('a board: the server cosigns before the page signs and sends the funding', async () => {
   const order = []
   const { w } = standIn({
