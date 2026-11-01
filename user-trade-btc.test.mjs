@@ -38,7 +38,7 @@ function standIn () {
         case 'lightning_receive_ready':
           assert.equal(a.need_seconds, needSeconds(18))
           return s.ready ? { ready: true } : { ready: false, why: 'the received leaf\'s round is not final' }
-        case 'lightning_receive_preimage': s.receives[a.hash].preimage = a.preimage; s.receives[a.hash].state = 'received'; s.coins.push({ leaf_id: 'r1', asset: X, value: s.claimed, state: 'live' }); return {}
+        case 'lightning_receive_preimage': s.receives[a.hash].preimage = a.preimage; s.receives[a.hash].state = 'received'; s.receives[a.hash].leaf = 'r1'; s.coins.push({ leaf_id: 'r1', asset: X, value: s.claimed, state: 'live' }); return {}
         case 'quote': return { coins: (a.leaves || []).map((l) => ({ leaf_id: l, fee: '3' })) }
         case 'participate': s.parts = a.leaves.map((l, i) => ({ participation: 'p' + i, state: 'pending' })); return { participations: s.parts }
         default: throw new Error('no command ' + cmd)
@@ -263,4 +263,24 @@ test('BTC at the address and none on the ark: moved for the trade, never no-fund
   const none = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: empty,
     btcAtAddress: () => 0n, btcMove: (n) => moved.push(n) })
   assert.equal((await none.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })).why, 'no-funds')
+})
+
+test('buying with BTC: the claimed coin is settled even when the claim came out below the quote', async () => {
+  const s = standIn()
+  s.makerSats = 50000n
+  // The operator's fee rates rose between the ticket and the claim: the claim's margins took 7
+  // atoms more than the quote said, so no coin has the quoted value.
+  s.claimed = String(100000n - 616n - 7n)
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  s.receives[H].state = 'issuing'; s.ready = true
+  await eng.advance(eng.records()[0])
+  let r = await eng.advance(eng.records()[0])
+  assert.ok(r.settle, 'the coin the claim made goes into the next round')
+  assert.deepEqual(r.settle.coins, ['r1'])
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
 })
