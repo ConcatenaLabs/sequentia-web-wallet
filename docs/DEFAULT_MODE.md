@@ -168,6 +168,8 @@ modes (`asset-picker.js`):
     The sentence above is for when even that cannot be made.
   - "This receive code was paid already: ask for a new one. Nothing was sent."
   - "This payment was declined; nothing was sent."
+  - "This wallet is out of date for this: update it, then try again. Nothing was taken." when
+    the operator declines a payment or a settlement because the wallet needs updating.
 
 ## Stake, pools and Mix
 

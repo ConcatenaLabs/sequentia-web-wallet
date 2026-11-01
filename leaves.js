@@ -191,6 +191,8 @@ export function frozenSentence (amount, ticker) {
 // plainly; every other refusal as it is.
 export function plainRefusal (e) {
   const m = String((e && e.message) || '')
+  // The operator's own reason, when it asks for the wallet to be updated: said so, plainly.
+  if (e && e.code === 'declined' && /\bupdate the wallet\b/i.test(m)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: UPDATE_WORDS })
   if (e && e.code === 'declined') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: DECLINED_WORDS })
   if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
   // A receive code is paid once: the operator refuses a second payment to its key.
@@ -204,6 +206,10 @@ export function plainRefusal (e) {
 // A payment the operator's signer refuses for what it asks, which it would refuse again
 // however often it were asked (the server's `declined`): the library has put the coins back.
 export const DECLINED_WORDS = 'This payment was declined; nothing was sent.'
+// The operator declines what an out-of-date wallet asks (one that hands its forfeits over only
+// after a round is broadcast, to an operator building batches without a sweep), and says to
+// update it: in its words, plainly.
+export const UPDATE_WORDS = 'This wallet is out of date for this: update it, then try again. Nothing was taken.'
 
 export const CODE_PAID_WORDS = 'This receive code was paid already: ask for a new one. Nothing was sent.'
 
