@@ -40,6 +40,13 @@ In practice:
   top is **one total** in the reference currency, across every asset.
 - What has been received and cannot be spent yet appears under the figure as
   **"<amount> <TICKER> arriving"**. Once it can be spent, it is simply part of the figure.
+- What the wallet holds that cannot move before a date, such as tokens bought in a sale that
+  vests, is part of the figure and appears under it as **"<amount> <TICKER> vests on <date>"**,
+  the date in words: "100 ORNG vests on 3 November 2026". One line for each date. An asset held
+  only this way still has its row. It is never counted as what can be spent, and every Max
+  leaves it out. From that date the wallet takes it by itself, and it is
+  then part of the figure, arriving until that is final. Developer mode lists it with the rest of
+  the wallet's claims.
 - The page opens on the figures the wallet last read, every part of them, and updates them in
   place. The line above the list reads "Syncing… showing your wallet as of <time>" until each part
   has been read again, then **"Up to date."**
@@ -74,7 +81,8 @@ In practice:
   payment refused before it left moves nothing and is tried again later. A channel the move
   emptied is closed to the wallet's address when that is cheap and safe, and what it held stays
   in the figure on its way back; otherwise it stays, and developer mode says why under its Lightning part.
-- The row's details show only what a person may act on: **Staked**, **Arriving**, and a freeze,
+- The row's details show only what a person may act on: **Staked**, **Arriving**, **Vests on
+  <date>**, and a freeze,
   as "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts the
   freeze."
 - The split by rail (on-chain, instant, Lightning) and every move between rails are in developer
@@ -166,6 +174,9 @@ modes (`asset-picker.js`):
     minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
     line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
     The sentence above is for when even that cannot be made.
+  - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
+    when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
+    action that would spend it say the same sentence, with the earliest date of what it needs.
   - "This receive code was paid already: ask for a new one. Nothing was sent."
   - "This payment was declined; nothing was sent."
   - "This wallet is out of date for this: update it, then try again. Nothing was taken." when
