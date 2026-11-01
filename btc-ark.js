@@ -340,13 +340,36 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
       amount = (big(d.amountMsat) + 999n) / 1000n
     }
     if (amount <= 0n) return { route, short: 'Enter an amount.' }
-    let fee
-    if (route === 'ark') fee = big((await run('send_fee', { sats: String(amount) })).fee)
-    else if (route === 'invoice') fee = big((await run('pay_fee', { sats: String(amount) })).fee)
-    else fee = big((await run('offboard_fee', { address: dest, sats: String(amount) })).fee)
+    const fee = await feeOf(route, dest, amount)
     await refresh().catch(() => {})
     if (figures.spendable < amount + fee) return { route, dest, sats: amount, fee, short: 'not enough here' }
     return { route, dest, sats: amount, fee }
+  }
+  async function feeOf (route, dest, amount) {
+    if (route === 'ark') return big((await run('send_fee', { sats: String(amount) })).fee)
+    if (route === 'invoice') return big((await run('pay_fee', { sats: String(amount) })).fee)
+    return big((await run('offboard_fee', { address: dest, sats: String(amount) })).fee)
+  }
+
+  // The most the ark can pay `to` now, its fee taken off: Send's Max. -> sats (0n when the fee
+  // takes it all), or null when the ark does not pay this destination or an invoice names it.
+  async function max (to) {
+    const d0 = destination(to, decode)
+    if (!d0 || !isOpen || d0.route === 'invoice') return null
+    await refresh().catch(() => {})
+    const have = figures.spendable
+    let amount = have
+    let best = 0n
+    // A fee may grow with the amount: price the amount, take the fee off, price again, keeping
+    // the largest amount that fits with its own fee.
+    for (let i = 0; i < 6 && amount > 0n; i++) {
+      const fee = await feeOf(d0.route, d0.dest, amount)
+      if (amount + fee <= have && amount > best) best = amount
+      const next = have - fee
+      if (next === amount) break
+      amount = next
+    }
+    return best
   }
 
   // Pays what quote() priced. -> { route, txid? , preimage? }
@@ -473,7 +496,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
 
   return {
     open, isOpen: () => isOpen, read: () => isOpen && read, refresh, renewDue, figures: () => figures, info: () => info,
-    route: (to) => routeOf(to, decode), quote, send, payOutcome, board, invoice, received, lightning, run,
+    route: (to) => routeOf(to, decode), quote, max, send, payOutcome, board, invoice, received, lightning, run,
     // Leaving the Ark alone: what default mode says (exitNote), whether the wallet keeps what arrives
     // at its address out of the Ark meanwhile (exitHolds), and developer mode's own steps.
     exitCheck, exitNote: () => exitNote && exitNote.text, exitHolds: () => exitHolds,

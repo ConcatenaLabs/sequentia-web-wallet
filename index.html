@@ -4030,6 +4030,9 @@ function initLnToArk(){
   setInterval(()=>{ if(!wollet || !lnToArk || devMode()) return; lnToArk.tick().catch(()=>{}); lnToArk.tickAssets().catch(()=>{}); }, LN_TO_ARK_EVERY_MS);
 }
 function btcArkRoutes(){ return !!btcArk && btcArk.isOpen() && !devMode(); }
+// What the ark holds is spent from Send in both modes: developer mode shows it as a place of its
+// own, but BTC there is still the wallet's to send.
+function btcArkPays(){ return !!btcArk && btcArk.isOpen(); }
 // The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
 // server cosigns the board first, then finish() signs it with the page's key.
 async function btcDrainUnsigned(address, sats){
@@ -4081,10 +4084,15 @@ async function btcArkSendReview(r, onDone){
   const route = btcArk.route(r.addr);
   const sats = route === 'invoice' ? null : parseAtoms(r.amtS, 8);
   if(route !== 'invoice' && !(sats > 0n)) throw new Error('amount must be greater than zero');
+  // Developer mode pays an address from the chain whenever the chain's coins cover it.
+  if(devMode() && route === 'chain' && btcBalance >= sats) return false;
   const q = await btcArk.quote(r.addr, sats);
   if(!q) return false;
   if(q.short){
-    if(route === 'chain' && q.sats != null && btcBalance >= q.sats) return false;   // the address is paid from the chain, as before
+    // Too little in the ark: an address, or a code's address, is paid from the chain, as before.
+    let chainAddr = route === 'chain' ? r.addr : null;
+    if(!chainAddr && /^bitcoin:/i.test(r.addr)){ try{ chainAddr = readPayCode(r.addr)?.address || null; }catch{} }
+    if(chainAddr && q.sats != null && btcBalance >= q.sats){ r.addr = chainAddr; return false; }
     throw new Error(q.short === 'not enough here' ? BTC_WORDS.upTo(fmtAtoms(btcArk.figures().spendable, 8)) : q.short);
   }
   const to = route === 'invoice' ? BTC_WORDS.toInvoice : /^bitcoin:/i.test(r.addr) ? BTC_WORDS.toCode : (r.addr.slice(0, 14) + '…');
@@ -6557,7 +6565,7 @@ async function _syncImpl(){
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 let _onchainSeen = null;   // the on-chain balance the last sync read, to board what is new
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
-function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkRoutes() ? btcArk.figures().spendable : 0n);
+function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkPays() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
   const b=balObj(); return b[hex]||0n; }
 // What the Send tab says can be sent of an asset: on the chain, and, in default mode, what the
@@ -7120,7 +7128,7 @@ function payCodeRoute(text, asset){
   let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
   if(!c) return { dest: text, byAddress: false };
   if(asset === 'BTC'){
-    if(c.ark && btcArkRoutes()) return { dest: text, byAddress: false };
+    if(c.ark && btcArkPays()) return { dest: text, byAddress: false };
     if(c.lightning && btcArkRoutes()) return { dest: c.lightning, byAddress: false };
     return { dest: c.address || text, byAddress: !!c.address };
   }
@@ -7648,6 +7656,18 @@ async function fillMax(r){
       const dests=[...$('recipients').children].map(o=>o.querySelector('.raddr').value.trim());
       const sat=Math.max(sendFee && sendFee.perKvb>0 ? sendFee.perKvb/1000 : BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
       max = total - others - BigInt(Math.ceil(btcVbytes(utxos.length, [...dests, null])*sat));
+      // One recipient the ark can pay: what the ark can send it, its fee off (btc-ark.js max).
+      // Send tries the ark first and falls back on the chain for an address, so the larger of
+      // the two can be sent; a bare Ark address only the ark pays.
+      if(btcArkPays() && dests.length===1){
+        const typed=dests[0];
+        const route=typed ? btcArk.route(payCodeDestination(typed, 'BTC')) : null;
+        if(!typed && max<=0n && btcArk.figures().spendable>0n) throw new Error('enter the address first, so the fee can be sized');
+        if(route && route!=='invoice'){
+          const a=await btcArk.max(payCodeDestination(typed, 'BTC'));
+          if(a!=null) max = route==='ark' && !/^bitcoin:/i.test(typed) ? a : (a>max ? a : max);
+        }
+      }
     } else {
       max = BigInt(availableFor(hex)) - others;
       if(sendFee && sendFee.hex===hex && !isOampAsset(hex)){
@@ -8625,9 +8645,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     if(btcRows.length && btcRows.length!==rows.length)
       throw new Error("Bitcoin and Sequentia assets can't be sent in the same transaction");
     if(btcRows.length){
-      // Default mode: BTC leaves from the Bitcoin ark when it can pay this (btc-ark.js); an
-      // invoice or an Ark address only the ark pays.
-      if(btcRows.length===1 && btcArkRoutes() && btcArk.route(btcRows[0].addr)){
+      // BTC leaves from the Bitcoin ark when it can pay this (btc-ark.js); an invoice or an Ark
+      // address only the ark pays. Developer mode pays invoices over its own Lightning.
+      const arkRoute = btcRows.length===1 && btcArkPays() ? btcArk.route(btcRows[0].addr) : null;
+      if(arkRoute && !(devMode() && arkRoute==='invoice')){
         if(await btcArkSendReview(btcRows[0], reset)) return;
       }
       const outputs=rows.map(r=>{ const amount=parseAtoms(r.amtS, 8);
