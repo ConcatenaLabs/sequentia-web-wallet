@@ -102,7 +102,12 @@ both modes; user mode shows that one figure, what is arriving, and no rail, Move
 receive. After a sync, at most every ten minutes, `leaves.js` runs the library's `care` (claims taken up,
 a leaf of a round planned once its first step could run within the library's ten-day reach, a
 plan whose leaf moved cancelled) in either mode, with `claimScan` from the page (the kit's next
-receive index and 20 more); developer mode lists plans with Cancel and Release (`plan_release`). Every leaf
+receive index and 20 more); developer mode lists plans with Cancel and Release (`plan_release`). After
+each care, and at most every two minutes besides, it reads the library's `claims` (only it gives a
+vesting claim's asset and value) and keeps what vests later for the wallet (`vestingLots` in
+`default-arca.js`): part of the asset's figure and the headline in both modes, one line per date
+under the figure, never in what can be spent, so no Max counts it, and Send, Trade, Stake and Mix
+refuse an amount that needs it (`refuseIfVesting` in `index.html`, the engine's `vesting`). Every leaf
 command a person or a page starts goes through `paying` in `leaves.js` (the API's `command` and
 `pay`, the user composer's commands included): a refusal of kind `planned` releases the leaves
 it names, waits for their round, and asks again. Keep that one path. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it

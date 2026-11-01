@@ -177,6 +177,9 @@ modes (`asset-picker.js`):
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
+    When the network itself refuses a coin that has not vested, it names only the date: "Part
+    of this vests on <date>, and can be used from then. Nothing has moved." (without a date: "Part
+    of this has not vested yet, and can be used once it has. Nothing has moved.")
   - "This receive code was paid already: ask for a new one. Nothing was sent."
   - "This payment was declined; nothing was sent."
   - "This wallet is out of date for this: update it, then try again. Nothing was taken." when
@@ -484,7 +487,7 @@ and at the top of Help. The words are in `REPORT_WORDS` (`problem-report.js`).
 None of these words appear on any screen in default mode, in the wallet's own text: rail,
 round, leaf, operator, tree, board, covenant, expiry, atom, sat, forfeit, checkpoint,
 reassignment, exit, unroll, anchor, channel, node, room, relay, maker, hash, preimage, HTLC,
-submarine, LSP, bridge, gateway, on-chain, Lightning. Nor do these controls: a choice of rail, a
+submarine, LSP, bridge, gateway, on-chain, Lightning, claim, distribution, lapse, locktime. Nor do these controls: a choice of rail, a
 move between rails, a receive request form, an exit drill, contract internals, a fee-rate field,
 or a "native asset" label. A refusal the wallet passes on from another service is said in
 these words too, never in the service's own.

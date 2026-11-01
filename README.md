@@ -117,8 +117,12 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   counts everything of it the wallet holds: on-chain, leaves, Lightning (the wallet's share of
   its own channels, reserve included) and, for tSEQ, what is staked (each bonded stake, each
   unbonding output not yet claimed back, and the delegation record). A row shows that one
-  figure, with what is still arriving under it ("10 GOLD arriving"). A tap opens its details:
-  what is staked, and its asset id and Hide. In developer mode the details also hold its parts
+  figure, with what is still arriving under it ("10 GOLD arriving"). What the wallet holds that
+  cannot move before a date, such as tokens bought in a sale that vests, is part of the figure,
+  with a line under it for each date ("100 ORNG vests on 3 November 2026"); it is never counted
+  as what can be spent, so Max leaves it out, and Send, Trade, Stake and Mix refuse an amount
+  that needs it, saying from when it can be used. From that date the wallet takes it by itself.
+  A tap opens its details: what is staked, what vests on each date, and its asset id and Hide. In developer mode the details also hold its parts
   (on-chain, Lightning with what it can send and receive, leaves), with a bolt beside the
   ticker that is yellow when the asset has a Lightning channel, and the controls that move it
   to and from Lightning or ask for room to receive.
