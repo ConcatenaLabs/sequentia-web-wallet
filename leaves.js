@@ -108,9 +108,11 @@ export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
 // How often user mode asks the library to refresh what it received out of round.
 export const REFRESH_EVERY_MS = 120_000
-// Whether user mode refreshes what it receives out of round by itself: off unless the page asks.
+// Whether user mode refreshes what it receives out of round by itself: on unless the page sets
+// window.SEQ_REFRESH_RECEIVED = false. The library gives a coin up only where the operator can
+// fund its refresh and takes back a refresh that waits, so a coin received stays the wallet's to pay with.
 export function refreshReceivedOn () {
-  try { return typeof window !== 'undefined' && window.SEQ_REFRESH_RECEIVED === true } catch { return false }
+  try { return !(typeof window !== 'undefined' && window.SEQ_REFRESH_RECEIVED === false) } catch { return true }
 }
 // The library's commands that only read (bark/src/arca/command.rs reads_only): a quote's.
 export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 'refusals', 'participations', 'schedule', 'orders',
@@ -794,9 +796,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // while the page's own on-chain payment may still be spending coins. Developer mode does it
   // only when asked. Until the round is final the coin counts as arriving. Nothing is said unless
   // it goes wrong: a refusal is kept in S.lastRefresh and asked again at the next turn.
-  // Off unless the page sets window.SEQ_REFRESH_RECEIVED = true: a refresh the operator cannot
-  // fund at once waits in its queue, and the coins it holds can be neither traded nor sent until
-  // it runs or expires, which the operator's info does not tell the wallet beforehand.
+  // On unless the page sets window.SEQ_REFRESH_RECEIVED = false. The library gives up a coin only
+  // with an operator that takes back a refresh that waits, and only as much of each asset as the
+  // operator can fund now; a refresh that still waits is taken back after two minutes, and a
+  // payment or a trade that needs its coins takes it back first.
   async function refreshReceived () {
     if (!refreshReceivedOn()) return
     if (!S.open || dev() || !pinned() || S.asked) return

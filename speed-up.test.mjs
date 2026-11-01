@@ -49,12 +49,12 @@ test('the words default mode shows use none of its forbidden words', () => {
   }
 })
 
-test('user mode refreshes what it receives only where the page turns it on', async () => {
+test('user mode refreshes what it receives unless the page turns it off', async () => {
   const { refreshReceivedOn } = await import('./leaves.js')
   globalThis.window = globalThis.window || {}
   delete globalThis.window.SEQ_REFRESH_RECEIVED
-  assert.equal(refreshReceivedOn(), false, 'off by default')
-  globalThis.window.SEQ_REFRESH_RECEIVED = true
-  assert.equal(refreshReceivedOn(), true)
+  assert.equal(refreshReceivedOn(), true, 'on by default')
+  globalThis.window.SEQ_REFRESH_RECEIVED = false
+  assert.equal(refreshReceivedOn(), false)
   delete globalThis.window.SEQ_REFRESH_RECEIVED
 })
