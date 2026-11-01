@@ -21,6 +21,9 @@ function fakeEngine () {
     const ticket = { payAsset, receiveAsset, amountIn: String(pay), amountOut: String(out), fees: [{ asset: payAsset, atoms: '10' }] }
     return { ok: true, ticket, choice: { pay } }
   }
+  // The makers' published prices: what paying for `receive` takes.
+  E.estimate = async ({ payAsset, receive }) => (E.noEstimate ? { ok: false, why: 'too-small' }
+    : { ok: true, pay: String(payAsset === Q ? BigInt(receive) * 4000n : (BigInt(receive) + 3899n) / 3900n), receive: String(receive), short: null })
   E.drop = (c) => E.dropped.push(c)
   E.confirm = async (choice, ticket) => { const r = { id: 'r' + E.recs.length, state: 'sent', ticket }; E.recs.push(r); return r }
   E.records = () => E.recs
@@ -62,8 +65,19 @@ test('rest terms and the limit check: the price is quote atoms per whole base un
   assert.equal(meetsLimit({ ...buy, price: 4000n * U }, { amountIn: String(2000n * U), amountOut: String(U / 2n) }, U), true)
 })
 
+test('a market buy is priced from the published prices and asked firm once, for its own size', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't' })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  assert.equal(q.kind, 'take')
+  assert.deepEqual(E.quotes.map((x) => x.amount), [4000n * 10n ** 8n], 'one firm offer, for 1 GOLD at 4000, never for all the wallet holds')
+  assert.equal(E.dropped.length, 0)
+})
+
 test('a market buy is sized from a first price, shown, and settled as one trade', async () => {
   const E = fakeEngine(), L = fakeLeaves()
+  // No published price to be had: a first firm price for all the wallet can pay sizes it.
+  E.noEstimate = true
   const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't' })
   const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
   assert.equal(q.kind, 'take')

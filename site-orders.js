@@ -188,11 +188,26 @@ export function makeSiteOrders (d) {
   }
 
   // One trade of the engine for the order: a sale pays its amount; a purchase pays what the book
-  // asks for its amount, read from a first price for all the wallet can pay.
+  // asks for its amount. A market purchase reads that from the makers' published prices (no firm
+  // offer, nothing held), then asks a firm offer for it: one round with each maker, of the
+  // purchase's size. A firm offer for all the wallet can pay, only to learn the price, cost a
+  // second round, and a slow maker's first answer could use up the time a person waits; it is
+  // what is asked when no published price is to be had.
   async function tradeQuote (o) {
     const pay = o.side === 'sell' ? o.base : o.quote
     const get = o.side === 'sell' ? o.quote : o.base
     if (o.side === 'sell') return { pay, get, q: await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: o.amount }) }
+    if (o.price == null && d.engine.estimate) {
+      const est = await d.engine.estimate({ payAsset: pay, receiveAsset: get, receive: o.amount }).catch(() => null)
+      if (est && est.ok && big(est.pay) > 0n) {
+        const q = await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: big(est.pay) })
+        if (!q.ok || big(q.ticket.amountOut) <= o.amount) return { pay, get, q }
+        try { d.engine.drop(q.choice) } catch {}
+        const want = ceilDiv(o.amount * big(q.ticket.amountIn), big(q.ticket.amountOut))
+        return { pay, get, q: await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: want }) }
+      }
+      if (est && !est.ok && (est.why === 'not-listed' || est.why === 'not-offered')) return { pay, get, q: est }
+    }
     const probeAmount = o.price != null ? ceilDiv(o.amount * o.price, unitOf(o.base)) : 10n ** 18n
     const probe = await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: probeAmount })
     if (!probe.ok) return { pay, get, q: probe }
