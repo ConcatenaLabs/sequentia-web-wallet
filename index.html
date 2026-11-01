@@ -1909,20 +1909,13 @@ function supervisionBadge(hex){
   b.style.cssText='color:var(--amber2,#e0a800);margin-left:5px;font-size:11px;cursor:help';
   return b;
 }
-// A small trust indicator to render next to a ticker (E1): a green ✓ for registry-verified assets
-// (tooltip names the vouching domain), an amber ⚠ for an id NOT in the registry (anyone can mint an
-// asset with any ticker, so an unregistered id is a potential impostor — warn before trusting it),
-// or null for a registered-but-unverified asset (neutral). Returns a DOM node or null.
+// A trust mark next to a ticker (E1), only where it says something: an amber ⚠ for an id NOT in the
+// registry (anyone can mint an asset with any ticker, so an unregistered id is a potential impostor —
+// warn before trusting it). Every other asset has none; a verified one names its vouching domain in
+// its details (verifiedNote). Returns a DOM node or null.
 function trustBadge(hex){
   if(!hex || hex.startsWith('oamp:')) return null;   // restricted assets carry their own enclave trust model
-  if(assetVerified(hex)){
-    const b=el('span'); b.textContent='✓';
-    b.title = hex==='BTC' ? 'Bitcoin, the parent chain'
-            : hex===POLICY_HEX ? 'The Sequence token'
-            : ('Verified in the Sequentia asset registry'+(assetDomain(hex)?(' · '+assetDomain(hex)):''));
-    b.setAttribute('aria-label','verified'); b.style.cssText='color:#3ddc84;margin-left:5px;font-weight:700;cursor:help';
-    return b;
-  }
+  if(assetVerified(hex)) return null;
   if(!assetRegistered(hex)){
     const b=el('span'); b.textContent='⚠';
     b.title='Not in the asset registry. Anyone can issue an asset with any ticker. Verify the issuer before trusting or trading it.';
@@ -1930,6 +1923,13 @@ function trustBadge(hex){
     return b;
   }
   return null;
+}
+// In an asset's details, beside its id: the domain the registry verified it against.
+function verifiedNote(hex){
+  if(!hex || hex==='BTC' || hex.startsWith('oamp:') || !assetVerified(hex) || !assetDomain(hex)) return null;
+  const s=el('span','sub', ' · verified by '+assetDomain(hex));
+  s.title='Verified in the Sequentia asset registry'; s.style.cssText='margin-left:6px';
+  return s;
 }
 let POLICY_HEX='';
 // True when we have NO authoritative precision for this asset — assetMeta() only
@@ -6717,7 +6717,7 @@ function renderBalance(){
     const a=el('div');
     const head=el('div','bt-tk');
     head.appendChild(el('span','tk', ticker));
-    const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: verified ✓ / unregistered ⚠
+    const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: unregistered ⚠, nothing otherwise
     const sb=supervisionBadge(kind); if(sb) head.appendChild(sb);   // issuer can freeze holders
     a.appendChild(head);
     // A holding its issuer has frozen for this wallet: one plain sentence, in both modes, never hidden.
@@ -6887,6 +6887,7 @@ function renderBalance(){
     const nameEl = (known && meta.name && meta.name!=='Asset' && meta.name!==meta.ticker) ? el('span',null, meta.name) : null;
     sub.appendChild(document.createTextNode('Asset id '));
     sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
+    { const v=verifiedNote(h); if(v) sub.appendChild(v); }
     if(tokenOf(h)){
       const of=tokenOf(h), om=assetMeta(of);
       const tb=el('span','badge b-token','reissuance token'); tb.title='Whoever holds this can issue more '+om.ticker+'. Keep it safe.'; sub.appendChild(tb);
