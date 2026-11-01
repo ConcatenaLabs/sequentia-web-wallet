@@ -732,7 +732,7 @@ works normally without the restricted rows.
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
-| `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
+| `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
@@ -745,7 +745,8 @@ works normally without the restricted rows.
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
 | `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md), and the live leaf maker (`leaf-maker.mjs`) user mode trades with. Four of its modules (`settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
 | `tooling/build-btc-ark.sh` | Builds `btc-ark/pkg` from an arca checkout's `bark-wasm/`, every build-machine path remapped. |
-| `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from an arca checkout's `wallet-wasm/`, every build-machine path remapped. |
+| `tooling/fetch-leaf-wallet.sh` | Puts the arca CI build of the leaf wallet for one master commit into `leaves/pkg`, exactly, with its `BUILT_FROM` and `SHA256SUMS`: what every release commits. |
+| `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from a local arca checkout's `wallet-wasm/`, every build-machine path remapped: for trying an unmerged arca change, never committed. |
 | `tooling/leaf-node.mjs` | The leaf library (`leaves/pkg`) run in Node, with its storage and synchronous requests given to it: for the leaf maker and the drill. |
 | `*.test.mjs` | Node test suites (no browser needed). |
 
