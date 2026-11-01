@@ -83,7 +83,9 @@
 //                                                one hash-lock, from the maker's own Bitcoin
 //                                                Lightning node (leaf-maker-btc.mjs says how)
 // Every coin the maker receives is refreshed in the operator's next round once it has rested
-// `settle_seconds`, so what it trades settles as the takers' coins do.
+// `settle_seconds`, so what it trades settles as the takers' coins do; on its first pass after a
+// start, every coin it already holds; and at once, all of them, when an offer is refused because
+// it would hold more out of round than the operator's bond covers.
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -111,6 +113,24 @@ export function coinsToMerge (coins, asset, cap, exclude = []) {
   return live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id))
     .sort((x, y) => (b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
     .slice(0, Math.min(MERGE_PER_PASS, live.length - cap + 1)).map((c) => c.leaf_id)
+}
+
+// The library's refusal of a payment that would leave the wallet holding more out of round than the
+// operator's bond covers.
+export const OUT_OF_ROUND_FULL = /would hold out of round .* more than the bond/
+
+// The received coins (`kind` transfer, live) to refresh now: each one rested `restMs` since `seen`
+// first noted it at `now`; every one when `all` (an offer was refused for what the maker holds out
+// of round); and on the `first` pass after a start, every one already held, whose rest is unknown
+// and was most likely spent already: a restart never makes them wait out a whole rest again.
+export function receivedDue (coins, seen, now, restMs, { all = false, first = false } = {}) {
+  const due = []
+  for (const c of coins || []) {
+    if (!c || c.state !== 'live' || c.kind !== 'transfer') continue
+    if (!seen.has(c.leaf_id)) seen.set(c.leaf_id, first ? now - restMs - 1 : now)
+    if (all || now - seen.get(c.leaf_id) > restMs) due.push(c.leaf_id)
+  }
+  return due
 }
 
 // The arguments of a library command. One ahead of the queue (`first`) answers a taker (a firm
@@ -326,6 +346,10 @@ async function main () {
 
   const firm = new Map()   // swap -> { give_asset, give, expires }
   const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
+  // An offer refused because the maker holds too much out of round (the operator's bond caps it):
+  // every coin it received is refreshed at the next pass, not after its rest, and that pass runs now.
+  let outOfRoundFull = false
+  let firstPass = true
   let busy = false
   let lastBoardRefusal = null
   // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
@@ -406,20 +430,19 @@ async function main () {
         if (st !== 'open') { firm.delete(id); continue }
         if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }) } catch (e) { log('cancel', id, e.message) } firm.delete(id) }
       }
-      // Coins it received, once rested, are refreshed in the operator's next round.
+      // Coins it received, once rested, are refreshed in the operator's next round; all of them at
+      // once when an offer was refused for what the maker holds out of round.
       const coins = (await cmd('coins')) || []
-      const due = []
-      for (const c of coins) {
-        if (c.state !== 'live' || c.kind !== 'transfer') continue
-        if (!seen.has(c.leaf_id)) seen.set(c.leaf_id, t)
-        if (t - seen.get(c.leaf_id) > (cfg.settle_seconds ?? 600) * 1000) due.push(c.leaf_id)
-      }
+      const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull, first: firstPass })
+      firstPass = false
       if (due.length) {
         try {
           const q = await cmd('quote', { leaves: due })
           const r = await cmd('participate', { leaves: due, shown: q.coins })
-          log('settling', due.length, 'received coins:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
+          log('settling', due.length, 'received coins' + (outOfRoundFull ? ' (offers refused for what it holds out of round)' : '') + ':',
+            JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
           for (const d of due) seen.delete(d)
+          outOfRoundFull = false
         } catch (e) { log('settle:', e.message) }
       }
       // More live coins of an asset than `max_coins`: the smallest are merged in the operator's
@@ -514,6 +537,7 @@ async function main () {
       return send(res, 404, { error: 'no such path' })
     } catch (e) {
       log('refused', p, e.message)
+      if (OUT_OF_ROUND_FULL.test(e.message || '')) { outOfRoundFull = true; setImmediate(tick) }
       return send(res, 409, { error: e.message, kind: e.kind || null })
     }
   })
