@@ -54,10 +54,12 @@ In practice:
   under it as **"<amount> <TICKER> moved out of the Ark to keep it safe while you were away"**
   while the wallet, open again, puts it back by itself; it is then arriving until that is final.
   Developer mode names it `kept_safe`.
-- Where the page turns it on (`window.SEQ_REFRESH_RECEIVED`, off by default), a coin another
-  wallet paid this one is made the wallet's own in the operator's next settlement, by itself,
-  which ends what its senders could still do with it. Until that settlement is final it is
-  arriving, as above. Nothing is said about it.
+- A coin another wallet paid this one is made the wallet's own in the operator's next settlement,
+  by itself, which ends what its senders could still do with it, wherever the operator can fund
+  that settlement now. Until it is final the coin is arriving, as above, and still pays: a
+  settlement that waits for the operator is taken back after two minutes, and a payment or a trade
+  that needs the coin takes it back first. Nothing is said about it. A page can turn this off
+  (`window.SEQ_REFRESH_RECEIVED = false`).
 - A coin the wallet left past its expiry, which the operator took and repays as a new coin less
   its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
   The wallet claims it by itself the next time it opens, or once restored from its phrase.
