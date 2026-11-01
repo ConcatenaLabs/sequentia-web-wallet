@@ -210,6 +210,19 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
   was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it
   opens.
+- When the service holding BTC for instant payments refuses to renew it or stops answering, and
+  BTC there would need renewing within a day, the wallet moves it to its own Bitcoin address by
+  itself, paying the Bitcoin network fees from that address. Only BTC worth more than the move
+  costs goes. The line under the figure reads "The service holding <amount> BTC for instant
+  payments stopped renewing it, so it is moving to your Bitcoin address. Bitcoin network fees:
+  about <fee> BTC, paid from your Bitcoin address.", then "Moving <amount> BTC to your Bitcoin
+  address, one Bitcoin block at a time.", and at the end "<amount> BTC arrived at your Bitcoin
+  address, moved there because the service holding it for instant payments stopped renewing it.
+  Bitcoin network fees: about <fee> BTC." While it moves, BTC arriving at the address stays there.
+  When the address holds too little to pay the fees, the line says how much to receive there first;
+  BTC worth less than its move says it stays and is renewed once the service answers again.
+  Nothing else moves BTC this way in default mode; developer mode adds an **Exit…** button to the
+  Bitcoin ark's part of BTC, which prices each coin and refuses one not worth its exit.
 - **Receive BTC with an invoice**: "Make an invoice for BTC. Once it is paid, the BTC is yours in
   seconds." Then "Invoice ready. Share it to receive <amount> BTC." and, when paid, "Received ✓
   <amount> BTC."

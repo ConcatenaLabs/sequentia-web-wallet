@@ -72,7 +72,9 @@ test('one figure per asset in every mode; the rails and their actions in develop
   assert.match(rb, /const dm = devMode\(\);/);
   assert.match(rb, /if\(dm && \(hasLn \|\| leafAtoms>0n \|\| staked>0n \|\| arkAtoms>0n\)\) blk\('On-chain', amt\(on\)\);/);
   // BTC held on the Bitcoin ark: in BTC's one figure in both modes, its own part in developer mode.
-  assert.match(rb, /if\(dm && arkAtoms>0n\) blk\('Bitcoin ark', amt\(arkAtoms\)\);/);
+  assert.match(rb, /if\(dm && arkAtoms>0n\)\{ const d=blk\('Bitcoin ark', amt\(arkAtoms\)\);/);
+  // The exit by hand is a developer-mode button on that part only (#501).
+  assert.match(rb, /if\(dm && arkAtoms>0n\)\{[^\n]*btcArkExitDialog\(\)/);
   assert.match(rb, /if\(dm && lnOn && leg && hasLn\)\{/);
   assert.match(rb, /if\(dm && leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
   assert.match(rb, /if\(staked>0n\) blk\('Staked', amt\(staked\)\);/);

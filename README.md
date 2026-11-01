@@ -57,7 +57,12 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   what the phrase's other wallets did (`catch_up`): the coins they boarded or received, and those
   of its own they spent. Each coin's renewal is scheduled with the ark's server whenever the page
   is open (`schedule_refreshes`): the server runs it by itself shortly before the coin's expiry,
-  with the page closed, and the renewed coin is taken in at the next open
+  with the page closed, and the renewed coin is taken in at the next open. When the ark's server
+  refuses the wallet or stops answering and a coin worth its exit is within a day of expiry, the
+  wallet takes it to the chain without the server (`exit_auto`): Bark broadcasts the coin's
+  pre-signed exit, pays each step's fee from the page's own Bitcoin address and claims the coin to
+  it. Developer mode prices each coin and exits by hand (**Exit…**); a coin worth less than its
+  exit is refused in words. The address needs confirmed BTC for the fees
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry
@@ -719,7 +724,7 @@ works normally without the restricted rows.
 | `site-orders.js` | A site's market and limit orders settled as the Trade tab settles a trade: the user composer's engine, or an order placed from leaves that rests. No DOM; the browser extension copies it into its `vendor/`. |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
-| `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, and the composer's `deps.btc` on the ark. No DOM. |
+| `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, the composer's `deps.btc` on the ark, and the exit without the ark's server (Bark's unilateral exit, fees paid from the page's own Bitcoin coins, claimed to its address) with what default mode says about it. No DOM. |
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
