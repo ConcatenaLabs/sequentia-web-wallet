@@ -284,3 +284,72 @@ test('buying with BTC: the claimed coin is settled even when the claim came out 
   r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'settled')
 })
+
+// A stand-in whose claim lands as `land` leaves the claimed coin, once the library has had it.
+function claimedThen (land) {
+  const s = standIn()
+  s.makerSats = 50000n
+  s.claimed = String(100000n - 616n)
+  const inner = s.lib.command
+  s.lib.command = (cmd, a) => {
+    const r = inner(cmd, a)
+    if (cmd === 'lightning_receive_preimage') land(s, s.coins.find((x) => x.leaf_id === 'r1'))
+    return r
+  }
+  return s
+}
+
+async function bought (s) {
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  s.receives[H].state = 'issuing'; s.ready = true
+  await eng.advance(eng.records()[0])
+  return eng
+}
+
+test('buying with BTC: a claimed coin the library gave up to a refresh is settled by that refresh', async () => {
+  const PID = '9a'.repeat(32)
+  // The library's refresh of received coins takes the claimed coin as soon as it lands.
+  const s = claimedThen((s, c) => { c.state = 'given'; c.note = 'participation ' + PID; s.parts = [{ participation: PID, state: 'pending' }] })
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  assert.deepEqual(r.settle, { coins: ['r1'], participations: [PID] }, 'the refresh that took the coin is followed')
+  assert.ok(!s.calls.includes('participate'), 'no round of its own is asked for the coin')
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'sent', 'waiting while the refresh waits')
+  // The refresh is taken back (the operator kept it waiting): the coin is live again, and settled
+  // in a round of the trade's own.
+  s.parts[0].state = 'void'
+  const c = s.coins.find((x) => x.leaf_id === 'r1'); c.state = 'live'; c.note = ''
+  r = await eng.advance(eng.records()[0])
+  r = await eng.advance(eng.records()[0])
+  assert.deepEqual(r.settle && r.settle.coins, ['r1'])
+  assert.ok(s.calls.includes('participate'), 'a round of the trade\'s own')
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+})
+
+test('buying with BTC: a claimed coin already spent by its released refresh is settled', async () => {
+  const PID = '7b'.repeat(32)
+  const s = claimedThen((s, c) => {
+    c.state = 'spent'; c.spent_by = 'participation ' + PID
+    s.parts = [{ participation: PID, state: 'released', new_leaves: [{ state: 'live' }] }]
+  })
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  if (r.state !== 'settled') r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+  assert.ok(!s.calls.includes('participate'))
+})
+
+test('buying with BTC: a claimed coin paid on out of round leaves nothing to settle', async () => {
+  const s = claimedThen((s, c) => { c.state = 'spent'; c.spent_by = 'transfer ' + 'ab'.repeat(32) })
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  if (r.state !== 'settled') r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+  assert.ok(!s.calls.includes('participate'))
+})
