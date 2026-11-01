@@ -3943,6 +3943,8 @@ function initBtcArk(){
     decode: (s)=> decodeBolt11(s),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} try{ refreshLnSendReceive(); }catch{} },
     log: (...a)=> console.log(...a),
+    fmt: (sats)=> fmtAtoms(BigInt(sats), 8),
+    store: { get: (k)=> localStorage.getItem('swk.'+k+'.'+walletTag()), set: (k, v)=> v == null ? localStorage.removeItem('swk.'+k+'.'+walletTag()) : localStorage.setItem('swk.'+k+'.'+walletTag(), v) },
   });
   btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
   initLnToArk();
@@ -4059,6 +4061,8 @@ let _btcArkWanted = 0n;
 function btcArkBoardFor(sats){ _btcArkWanted = BigInt(sats); _btcArkBoardAt = 0; btcArkBoardSoon(true); }
 function btcArkBoardSoon(asked){
   if(!btcArkRoutes() || !(btcBalance > 0n)) return;
+  // While BTC leaves the ark alone, or needs the address's BTC to pay its way out, nothing goes in.
+  if(btcArk.exitHolds && btcArk.exitHolds()) return;
   if(!asked && (Date.now() - _btcSentAt < 120000 || Date.now() - _btcArkBoardAt < 30000)) return;   // the page's own BTC payment is fresh
   try{
     const max = btcArk.info() && btcArk.info().max_vtxo_sat != null ? BigInt(btcArk.info().max_vtxo_sat) : null;
@@ -5721,6 +5725,38 @@ async function lnWalletCloseDestination(leg){
     return { address: u.toString(), scriptHex: hexOfBytes(u.scriptPubkey().bytes()) };
   });
 }
+// Developer mode: Bark's unilateral exit of BTC on the Bitcoin ark, by hand. Each coin is priced
+// alone; a coin not worth its exit says why and cannot be chosen. The fees are paid from this
+// wallet's Bitcoin address (its BIP84 coins), and each coin is claimed to it when its exit is done.
+async function btcArkExitDialog(){
+  const m=el('div','modal'); const c=el('div','card');
+  c.appendChild(el('label','lbl','Exit from the Bitcoin ark'));
+  c.appendChild(el('div','sub','Takes coins to your Bitcoin address without the ark server: every transaction above each coin is broadcast, a block at a time, and its fee is paid by a child from your Bitcoin address\'s confirmed BTC. After the exit delay the coin is claimed to your address. Use it when the ark refuses you or is down; while it answers, sending to your Bitcoin address costs far less.'));
+  const list=el('div','sub'); list.style.marginTop='8px'; list.textContent='Pricing each coin…';
+  const st=el('div','sub'); st.style.marginTop='8px';
+  const row=el('div','row'); row.style.marginTop='10px';
+  const go=el('button','primary','Exit the coins worth it'); const cancel=el('button','ghost','Close');
+  go.disabled=true; cancel.onclick=()=>m.remove();
+  row.appendChild(go); row.appendChild(cancel); c.appendChild(list); c.appendChild(st); c.appendChild(row); m.appendChild(c); document.body.appendChild(m);
+  try{
+    const [e, s] = await Promise.all([btcArk.exitEstimate(), btcArk.exitStatus().catch(()=>({ exits: [] }))]);
+    list.textContent='';
+    const live=(s.exits||[]).filter(x=>!['claimed','canceled','spent_elsewhere'].includes(x.state));
+    for(const x of live) list.appendChild(el('div',null,'Exiting '+x.id.slice(0,12)+'…: '+x.state.replace(/_/g,' ')+(x.claimable_height ? ', claimable at block '+x.claimable_height : '')));
+    for(const k of (e.coins||[])) list.appendChild(el('div',null, fmtAtoms(BigInt(k.amount),8)+' BTC, '+k.blocks_left+' blocks to expiry, exit costs '+(k.cost!=null ? fmtAtoms(BigInt(k.cost),8)+' BTC' : 'unknown')+(k.worth ? '' : ' — '+(k.why_not||'not worth its exit'))));
+    if(!(e.coins||[]).length && !live.length) list.textContent='No coin in the ark to exit.';
+    const w=e.worth;
+    if(w){
+      st.textContent='Together: '+fmtAtoms(BigInt(w.cost),8)+' BTC in fees ('+w.transactions+' transactions), paid from '+e.address+', which holds '+fmtAtoms(BigInt(e.funding_confirmed),8)+' BTC confirmed. '+(w.fundable ? '' : 'That is not enough for the whole walk: receive more BTC there first.');
+      go.disabled=!w.fundable;
+    }
+    go.onclick=async()=>{
+      go.disabled=true; st.textContent='Starting the exit…';
+      try{ const r=await btcArk.exitStart(w.vtxos); st.textContent='Exit started for '+r.started.length+' coin(s): '+fmtAtoms(BigInt(r.amount),8)+' BTC to '+e.address+', about '+fmtAtoms(BigInt(r.cost),8)+' BTC in fees. It moves on by itself every minute while this page is open.'; btcArk.exitCheck(true).catch(()=>{}); }
+      catch(err){ st.textContent=String(err?.message||err); go.disabled=false; }
+    };
+  }catch(err){ list.textContent='The exit could not be priced: '+String(err?.message||err); }
+}
 function closeToChainDialog(leg, own){
   const chan = own[0];   // one channel per own node in practice; scid names it exactly
   const m=el('div','modal'); const c=el('div','card');
@@ -6724,9 +6760,12 @@ function renderBalance(){
     if(dm && leafAtoms>0n) blk('Leaves', amt(leafAtoms));
     // The ark's part is a rail: split out in developer mode only. What it has not taken in yet is
     // "arriving" under the figure, in both modes.
-    if(dm && arkAtoms>0n) blk('Bitcoin ark', amt(arkAtoms));
+    if(dm && arkAtoms>0n){ const d=blk('Bitcoin ark', amt(arkAtoms)); const acts=el('div','bt-acts'); button(acts, 'Exit…', 'Take coins out of the Bitcoin ark to your Bitcoin address without the ark server, paying the Bitcoin fees from that address', ()=>btcArkExitDialog()); d.appendChild(acts); }
     { const arr = kind==='BTC' && btcArk && btcArk.isOpen() && !(movingAtoms > 0n) ? btcArk.figures().arriving : 0n;
       if(arr>0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arr), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); } }
+    // BTC leaving the ark alone (btc-ark.js exitNoteOf): what happened and what it cost, in both modes.
+    { const note = kind==='BTC' && btcArk && btcArk.exitNote ? btcArk.exitNote() : null;
+      if(note){ const ex=el('div','bt-exit', note); ex.style.cssText='color:var(--amber2,#e0a800);font-size:12px;margin-top:2px'; a.appendChild(ex); } }
     if(staked>0n) blk('Staked', amt(staked));
     // No channel yet: the one thing to do is move the asset to Lightning, which asks for room itself.
     if(dm && lnOn && leg && !hasLn && toLn){ const d=el('div','bt-blk'); button(d, 'Move to Lightning', 'Open a channel to send and receive '+ticker+' instantly.', ()=>moveToLightningDialog(leg), 'mv'); det.appendChild(d); }
