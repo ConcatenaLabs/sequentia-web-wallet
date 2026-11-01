@@ -271,6 +271,10 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       const r2 = ((await run('lightning_receives')) || {})[rec.hash] || {}
       rec.receiveState = r2.state || null
       if (r2.state !== 'received') return put(rec)
+      // The coin the claim made is the one settled, named by its id: its value is the quote's only
+      // while the operator's fee rates hold, and a coin looked for by a value it no longer has is
+      // never found.
+      if (r2.leaf && (rec.settleTargets || []).length === 1 && !rec.settleTargets[0].leaf_id) { rec.settleTargets = [{ ...rec.settleTargets[0], leaf_id: r2.leaf }]; put(rec) }
       // The claimed coin is settled in the next round, at no more than the ticket's fee.
       if ((await settleStep(rec)) === 'settled') { rec.state = 'settled'; rec.settledAt = now() }
     }
