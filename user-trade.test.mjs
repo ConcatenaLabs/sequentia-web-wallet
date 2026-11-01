@@ -54,6 +54,13 @@ test('what the library can pay now leaves out coins an offline-refresh plan name
   assert.equal(m.get(Y), 9n)
 })
 
+test('a coin given up in a refresh that waits is the library\'s to pay with: the trade takes the refresh back', () => {
+  const coins = [{ leaf_id: 'a', asset: X, value: '100', state: 'live' }, { leaf_id: 'r', asset: X, value: '600', state: 'given', refresh_waiting: 'p1' },
+    { leaf_id: 'o', asset: X, value: '40', state: 'given' }]
+  assert.equal(spendableFrom(coins, { plans: [] }, { waiting: true }).get(X), 700n)
+  assert.equal(spendableFrom(coins, { plans: [] }).get(X), 100n, 'a maker counts only its live coins')
+})
+
 
 
 
@@ -135,6 +142,18 @@ test('engine: an in-tree trade from ticket to Settled, the ticket the library\'s
   s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
   r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'settled')
+})
+
+test('engine: a coin just received, given up in a refresh that waits, is priced and traded', async () => {
+  const s = standIn()
+  s.coins[0].state = 'given'
+  s.coins[0].refresh_waiting = 'p1'
+  let t = 0
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => (t += 1000) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.equal(rec.state, 'sent')
 })
 
 test('engine: a swap whose coins are far from the operator\'s limit is done the moment the maker completes it, no round asked', async () => {
