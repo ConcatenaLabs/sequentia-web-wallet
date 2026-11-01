@@ -191,6 +191,25 @@ test('engine: a maker that never completes: the swap is cancelled and the coin c
   assert.equal(s.coins[0].state, 'live')
 })
 
+test('engine: an amount that needs what vests later is refused with its date, before any maker is asked', async () => {
+  const s = standIn()
+  const base = { leaves: s.lib, fetchJson: s.fetchJson, store: s.store, admitted: admitted(['leaf-maker']) }
+  let asked = 0
+  const makers = () => { asked++; return ['http://m'] }
+  const vesting = (a) => (a === X ? [{ asset: X, vest: 1793664000, vests: '3 November 2026', atoms: '9000000' }] : [])
+  s.coins[0].state = 'spent'
+  // Held only as what vests later.
+  const q = await createEngine({ ...base, makers, vesting, held: () => 0n }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual({ ...q }, { ok: false, why: 'vesting', atoms: '400000', vests: '3 November 2026' })
+  assert.equal(asked, 0, 'no maker asked')
+  // Part spendable now, the rest vesting: the part that is not spendable is said.
+  const p = await createEngine({ ...base, makers, vesting, held: () => 100000n }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual({ ...p }, { ok: false, why: 'vesting', atoms: '300000', vests: '3 November 2026' })
+  // More than even all of it: the ordinary answer.
+  const n = await createEngine({ ...base, makers: () => ['http://m'], vesting, held: () => 0n }).quote({ payAsset: X, receiveAsset: Y, amount: '9400000' })
+  assert.equal(n.why, 'no-funds')
+})
+
 test('engine: not listed, not offered, no funds', async () => {
   const s = standIn()
   const base = { leaves: s.lib, fetchJson: s.fetchJson, store: s.store }

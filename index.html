@@ -1700,7 +1700,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
@@ -3753,6 +3753,7 @@ function initLeaves(){
     // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
+    claimsEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CLAIMS_MS)) || undefined,
     // Default mode joins the page's operator by itself (default-arca.js), once its server shows the pinned key.
     pinned: ()=> (typeof window!=='undefined') ? window.SEQ_ARCA : null,
     serverInfo: async (server)=>{ const r=await fetch(server + '/v1/info', { cache:'no-store' }); if(!r.ok) throw new Error('the server answered HTTP ' + r.status); return await r.json(); },
@@ -3885,6 +3886,7 @@ function userKnownAssets(){
   const s = new Set(['BTC']);
   try { for(const k of Object.keys(balObj())) s.add(k); } catch {}
   try { if(leavesApi) for(const k of leavesApi.leafAssets()) s.add(k); } catch {}
+  try { if(leavesApi && leavesApi.vestingAssets) for(const k of leavesApi.vestingAssets()) s.add(k); } catch {}
   try { for(const k of Object.keys(REGISTRY_ASSETS || {})) s.add(k); } catch {}
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
@@ -4188,6 +4190,8 @@ function initUserComposer(){
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
     // as none; and default mode's board of coins on the chain, asked for at once.
     held: (a)=> userHeld(a),
+    // What vests later: a trade that needs it is refused with its date.
+    vesting: (a)=> vestingLotsFor(a),
     // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
     anchorDepth: ()=> leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null,
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
@@ -4201,7 +4205,7 @@ function initUserComposer(){
   userComposer = mountUserComposer({
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
     session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
-    knownAssets: userKnownAssets, held: userHeld,
+    knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor,
     isHidden: isAssetHidden, refValue: refValueStr,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
     // The chosen pair's market, from the relay's one trade log (market-view.js).
@@ -6599,6 +6603,21 @@ function stakedAtoms(){
   if(deleg && deleg.atoms!=null) n += BigInt(deleg.atoms);
   return n;
 }
+// What of an asset vests later (a vesting allocation, leaves.js vesting): part of its figure and the
+// headline in both modes, never of what can be spent, so no Max and no spendable figure counts it.
+function vestingFor(hex){ try{ return (hex!=='BTC' && leavesApi && leavesApi.vestingAtoms) ? (leavesApi.vestingAtoms(hex)||0n) : 0n; }catch{ return 0n; } }
+function vestingLotsFor(hex){ try{ return (hex!=='BTC' && leavesApi && leavesApi.vesting) ? leavesApi.vesting(hex) : []; }catch{ return []; } }
+// Default mode: an action asked for `asked` atoms of an asset, of which only `spendable` can be
+// used now, refuses when the rest is what vests later, with the earliest date all of it can be
+// used from (docs/DEFAULT_MODE.md). Nothing is signed. Anything else is left to the action.
+function refuseIfVesting(hex, asked, spendable){
+  if(devMode() || hex==='BTC') return;
+  const v = vestingShort(vestingLotsFor(hex), hex, asked, spendable);
+  if(!v) return;
+  const m = assetMeta(hex);
+  if(v.arriving) throw new Error(DEFAULT_WORDS.stillArriving(m.ticker));
+  throw new Error(DEFAULT_WORDS.notVested(fmtAmount(v.atoms, m.precision ?? 8), m.ticker, v.vests));
+}
 function balAmt(text){ return el('div','bt-amt', text); }
 // The ticker and the currency sit under the figure on a desktop (the header names the currency) and
 // beside it on a phone, so a long figure never wraps mid-number.
@@ -6623,7 +6642,7 @@ function refreshComposerHeld(){
     const panel = document.querySelector('[data-panel=swap]');
     if(!panel || panel.classList.contains('hide')) return;
     if(userComposer.state.ticket || userComposer.state.busy) return;
-    const sig = userKnownAssets().filter(a=> userHeld(a) > 0n).sort().join(',');
+    const sig = userKnownAssets().filter(a=> userHeld(a) + vestingFor(a) > 0n).sort().join(',');
     if(sig === _ucHeldSig) return;
     _ucHeldSig = sig;
     userComposer.render();
@@ -6687,7 +6706,9 @@ function renderBalance(){
     const staked = stakedFor(kind);
     // BTC held in the Bitcoin ark counts in BTC's one figure, in both modes.
     const arkAtoms = kind==='BTC' ? btcArkAtoms() : 0n;
-    const totalAtoms = on + lnAtoms + leafAtoms + staked + arkAtoms;
+    // What vests later (a vesting allocation) is part of the figure, never of what can be spent.
+    const vestAtoms = vestingFor(kind);
+    const totalAtoms = on + lnAtoms + leafAtoms + staked + arkAtoms + vestAtoms;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
@@ -6706,11 +6727,17 @@ function renderBalance(){
     // Of it, what a Bitcoin reorganisation took back out of the chain is said apart: never a loss.
     let arriving = 0n, redoing = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()){ arriving = leavesApi.arriving(kind) || 0n; redoing = leavesApi.redoing(kind) || 0n; } } catch {}
     if(redoing > arriving) redoing = arriving;
+    // What vests later: one line for each date still to come, in both modes; what has vested and
+    // the wallet is taking up is arriving.
+    const vestAll = vestAtoms > 0n ? vestingLotsFor(kind) : [];
+    const vestLots = vestAll.filter(l=> !l.arriving);
+    for(const l of vestAll) if(l.arriving && !devMode()) arriving += BigInt(l.atoms);
     if(arriving - redoing > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving - redoing), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     if(redoing > 0n){ const rd=el('div','bt-redoing', DEFAULT_WORDS.redoing(amt(redoing), ticker)); rd.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(rd); }
     let keptSafe = 0n; try { if(kind!=='BTC' && leavesApi && !devMode() && leavesApi.keptSafe) keptSafe = leavesApi.keptSafe(kind) || 0n; } catch {}
     if(keptSafe > 0n){ const ks=el('div','bt-kept-safe', DEFAULT_WORDS.keptSafe(amt(keptSafe), ticker)); ks.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ks); }
     if(movingAtoms > 0n){ const mv=el('div','bt-moving', DEFAULT_WORDS.moving(amt(movingAtoms), ticker)); mv.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(mv); }
+    for(const l of vestLots){ const vs=el('div','bt-vests', DEFAULT_WORDS.vests(amt(BigInt(l.atoms)), ticker, l.vests)); vs.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(vs); }
     if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
     // ONE VIEW FOR EVERY MODE. A bolt beside the ticker says whether the asset has a Lightning
     // channel (yellow) or not yet (grey); the row's details, one tap away, hold its parts (on-chain |
@@ -6767,6 +6794,7 @@ function renderBalance(){
     { const note = kind==='BTC' && btcArk && btcArk.exitNote ? btcArk.exitNote() : null;
       if(note){ const ex=el('div','bt-exit', note); ex.style.cssText='color:var(--amber2,#e0a800);font-size:12px;margin-top:2px'; a.appendChild(ex); } }
     if(staked>0n) blk('Staked', amt(staked));
+    for(const l of vestLots) blk(DEFAULT_WORDS.vestsOn(l.vests), amt(BigInt(l.atoms)));
     // No channel yet: the one thing to do is move the asset to Lightning, which asks for room itself.
     if(dm && lnOn && leg && !hasLn && toLn){ const d=el('div','bt-blk'); button(d, 'Move to Lightning', 'Open a channel to send and receive '+ticker+' instantly.', ()=>moveToLightningDialog(leg), 'mv'); det.appendChild(d); }
     if(foot){ const f=el('div','bt-foot'); f.appendChild(foot); det.appendChild(f); }
@@ -6788,6 +6816,8 @@ function renderBalance(){
   if(leavesApi) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
   // So does the Sequence token when all of it is staked.
   if(POLICY_HEX && stakedFor(POLICY_HEX)>0n) seqKeys.add(POLICY_HEX);
+  // And an asset held only as what vests later.
+  if(leavesApi && leavesApi.vestingAssets) for(const h of leavesApi.vestingAssets()) seqKeys.add(h);
   if(lnLastStatus && lnLastStatus.channels){
     for(const c of lnLastStatus.channels){
       const isBtc=(c.asset_label==='BTC'||c.leg==='btc');
@@ -6804,7 +6834,7 @@ function renderBalance(){
       const lv=lnPart>0n ? refValue(refKey, lnPart) : null; if(lv) totalLn+=lv.v; } else if((atoms||0n)>0n) allPriced=false; };
   { const ln=lnOn?lnAtomsFor('BTC'):0n; addToTotal('BTC', btcBal + ln + btcArkAtoms(), ln); }
   const leafFor = (h)=> leavesApi ? leavesApi.leafAtoms(h) : 0n;
-  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h) + stakedFor(h), ln); }
+  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h) + stakedFor(h) + vestingFor(h), ln); }
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
   // (WW-4 / spec 1.5(a)). Keyed 'oamp:'+id so assetMeta/priceTicker resolve the real ticker+precision;
   // an unpriced restricted asset falls into the allPriced=false path like any other unpriced asset.
@@ -6841,7 +6871,7 @@ function renderBalance(){
   // move to the collapsed "Hidden assets" section at the bottom of the list; they also
   // leave the default asset-picker dropdowns but stay findable there by search (swap.js
   // pickerMatches). BTC (the parent chain) is never partitioned out.
-  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h) + stakedFor(h);
+  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h) + stakedFor(h) + vestingFor(h);
   // Auto-fold UNLABELED assets (unknown precision — the wallet can't name/scale them, so the
   // user never deliberately holds them) into the collapsed hidden section, so a few
   // received-by-accident dust tokens no longer clutter the main balance list. Still labelable
@@ -7236,6 +7266,8 @@ function ownedOptions(sel){
   const others=[];
   try{ if(leavesApi) for(const h of leavesApi.leafAssets()) others.push([h, leavesApi.leafAtoms(h)]); }catch{}
   try{ for(const c of ((lnLastStatus && lnLastStatus.channels) || [])) if(c.asset && c.leg!=='btc') others.push([c.asset, lnBalanceFor(c.asset)]); }catch{}
+  // What vests later: listed, so a send of it says from when it can be.
+  try{ if(leavesApi && leavesApi.vestingAssets) for(const h of leavesApi.vestingAssets()) others.push([h, vestingFor(h)]); }catch{}
   for(const h of heldAssetList(b, others)) add(h);
   // Restricted (OpenAMP) assets the AID holds — routed through the enclave transfer API, not lwk.
   for(const id of Object.keys(oampBalances)) if((oampBalances[id]?.atoms||0n)>0n) add('oamp:'+id);
@@ -8567,6 +8599,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       return;
     }
     for(const r of rows){ const p=recipientProblem(r.addr, r.asset); if(p) throw new Error(p); }
+    // Default mode: more than can be spent now, the rest vesting later, is refused with its date.
+    { const want=new Map(); for(const r of rows) if(r.asset!=='BTC'){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
+      for(const [h, a] of want) refuseIfVesting(h, a, sendableFor(h)); }
     // A receive code of the operator this wallet holds its coins with is paid in the tree, in
     // seconds (default-arca.js treeRoute); everything else goes on as it always has.
     const codeRows=rows.filter(r=>leavesApi && leavesApi.treeRoute(r.addr));
@@ -10017,6 +10052,8 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   for(const n of needs){ const h = have(n.hex); if(h < n.atoms) missing.push({ hex:n.hex, atoms:n.atoms - h }); }
   if(!missing.length) return false;
   if(devMode()){ const m = missing[0]; throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
+  // More than can be used now, the rest vesting later: refused with its date, before anything moves.
+  for(const n of needs) refuseIfVesting(n.hex, n.atoms, have(n.hex) + instantAtoms(n.hex));
   // What the wallet holds for instant payments is read once it has opened: wait for that, saying so.
   if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
     say(DEFAULT_WORDS.waitOpening);
@@ -10100,6 +10137,7 @@ $('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').cla
     fillStakeFeeAssets();
     let feeHex = $('stFeeAsset').value || POLICY_HEX;
     const tseq = onChainAtoms(POLICY_HEX) + instantAtoms(POLICY_HEX);
+    refuseIfVesting(POLICY_HEX, atoms, tseq);
     if(feeHex===POLICY_HEX && tseq >= atoms && tseq < atoms + feeMarginAtoms(POLICY_HEX)){
       const other=[...$('stFeeAsset').options].map(o=>o.value).find(h=> h!==POLICY_HEX && onChainAtoms(h)+instantAtoms(h) >= feeMarginAtoms(h));
       if(!other) throw new Error(DEFAULT_WORDS.stakeFeeShort);

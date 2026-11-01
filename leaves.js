@@ -66,6 +66,7 @@
 //   claimScan()         optional: how many receive keys `care` looks for claims under
 //                       (the kit wallet's next receive index and 20 more)
 //   careEveryMs         optional: how often `care` runs at most (default CARE_EVERY_MS)
+//   claimsEveryMs       optional: how often `claims` is read at most (default CLAIMS_EVERY_MS)
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 //   pinned()            optional: the page's operator ({ server, node_url, operator }, the key
@@ -80,7 +81,7 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS } from './default-arca.js'
+import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
@@ -100,6 +101,7 @@ export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive
 export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
+export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
 // User mode: how often the open page reads the wallet's mailbox, so that a payment to its receive
@@ -195,6 +197,9 @@ export function plainRefusal (e) {
   if (e && e.code === 'declined' && /\bupdate the wallet\b/i.test(m)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: UPDATE_WORDS })
   if (e && e.code === 'declined') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: DECLINED_WORDS })
   if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
+  // A coin that has not vested (the operator's `vesting`): its date, plainly.
+  const vested = vestingRefusal(e)
+  if (vested) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: vested })
   // A receive code is paid once: the operator refuses a second payment to its key.
   if (e && e.code === 'key_reused') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: CODE_PAID_WORDS })
   if ((e && e.code === 'frozen') || /\bfrozen\b|\bpaused\b/i.test(m)) {
@@ -515,11 +520,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const now = ctx.now || (() => Date.now())
   const tickMs = ctx.tickMs || TICK_MS
   const careEvery = ctx.careEveryMs || CARE_EVERY_MS
+  const claimsEvery = ctx.claimsEveryMs || CLAIMS_EVERY_MS
   const sleep = ctx.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const log = (m) => { try { (ctx.log || console.log)(m) } catch {} }
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
     refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
-    careAt: null, lastCare: null, plans: null, claims: null, distributions: null, kept: null }
+    careAt: null, lastCare: null, plans: null, claims: null, distributions: null, kept: null, claimsAt: null, vesting: null }
   // What is typed into a form survives a re-render (sync re-renders the panels by itself).
   const bind = (node) => {
     if (S.form[node.id] != null) node.value = S.form[node.id]
@@ -911,7 +917,39 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
       for (const c of (v && v.claims) || []) if (c && c.taken_up && !c.error) emit('leafArrived', { leaf_id: c.leaf_id, value: String(c.value ?? ''), kind: 'claim' })
     } catch (e) { S.lastCare = { at: now(), error: e } }
+    await claimsIfDue(true)
     await bondIfIdle()
+  }
+
+  // What vests later (default-arca.js vestingLots): the library's `claims`, read at most every
+  // CLAIMS_EVERY_MS and after each care, in either mode, and kept for the wallet, so the figure
+  // shows it from the last reading while the wallet opens, syncs or is offline. A claim whose
+  // date has passed and that care has not taken up yet has care run at its next chance.
+  async function claimsIfDue (force = false) {
+    if (!S.open) return
+    if (!force && S.claimsAt != null && now() - S.claimsAt < claimsEvery) return
+    if (S.asked) { S.upkeepLater = true; return }
+    S.claimsAt = now()
+    try {
+      const scan = claimScan()
+      const v = await run('claims', scan ? { scan } : {})
+      const lots = vestingLots(v)
+      const was = JSON.stringify(vestingKept())
+      S.vesting = { tag: tag(), lots }
+      try { ctx.store.setItem(tagged(VESTING_KEY, tag()), JSON.stringify(lots)) } catch {}
+      if (vestedOpen(v)) { S.careAt = null; upkeepSoon(2000) }
+      if (JSON.stringify(lots) !== was && ctx.onChange) try { ctx.onChange() } catch {}
+    } catch (e) { log('[leaves] claims: ' + (e && e.message)) }
+  }
+  // What vests later as last read: this session's reading, else the one kept for this wallet.
+  function vestingKept () {
+    const k = tag()
+    if (!S.vesting || S.vesting.tag !== k) {
+      let v = null
+      try { v = JSON.parse(ctx.store.getItem(tagged(VESTING_KEY, k)) || 'null') } catch {}
+      S.vesting = { tag: k, lots: Array.isArray(v) ? v : [] }
+    }
+    return S.vesting.lots
   }
 
   // The bond's watch, unless a person is waiting: then once they are not.
@@ -972,6 +1010,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
       } else if (!S.busy && careDue(S.careAt, now(), careEvery)) {
         S.busy = true
         try { await careIfDue() } finally { S.busy = false }
+      } else if (!S.busy) {
+        S.busy = true
+        try { await claimsIfDue() } finally { S.busy = false }
       }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
     schedule()
@@ -1777,6 +1818,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     redoing: (hex) => redoingAtoms(S.coins, hex),
     // What was moved out to keep it safe while the wallet was away, until it is put back, in atoms.
     keptSafe: (hex) => keptSafeAtoms(shown(), hex),
+    // What vests later (a vesting allocation), as `claims` last listed it: each asset's entries
+    // ({ asset, vest, vests, atoms }), earliest first; in atoms; and the assets anything vests in.
+    // Part of the figure, never of what can be spent.
+    vesting: (hex) => (hex ? vestingFor(vestingKept(), hex) : vestingKept()),
+    vestingAtoms: (hex) => vestingAtoms(vestingKept(), hex),
+    vestingAssets: () => vestingAssets(vestingKept()),
     // Whether the library has given its balance this session (the figures are its own, not the
     // last ones kept), or the wallet has nothing with an operator to read.
     balanceRead: () => !!S.balance,

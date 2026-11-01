@@ -94,11 +94,11 @@ test('one figure per asset in every mode; the rails and their actions in develop
 
 test('staked tokens count in the figure and the headline, each stake once', () => {
   const rb = fn('renderBalance');
-  assert.match(rb, /const totalAtoms = on \+ lnAtoms \+ leafAtoms \+ staked \+ arkAtoms;/);
+  assert.match(rb, /const totalAtoms = on \+ lnAtoms \+ leafAtoms \+ staked \+ arkAtoms \+ vestAtoms;/);
   assert.match(rb, /const arkAtoms = kind==='BTC' \? btcArkAtoms\(\) : 0n;/);
   assert.match(rb, /addToTotal\('BTC', btcBal \+ ln \+ btcArkAtoms\(\), ln\)/);
-  assert.match(rb, /addToTotal\(h, BigInt\(b\[h\]\|\|0n\) \+ ln \+ leafFor\(h\) \+ stakedFor\(h\), ln\)/);
-  assert.match(rb, /const totalOf=\(h\)=> BigInt\(b\[h\]\|\|0n\) \+ \(lnOn\?lnAtomsFor\(h\):0n\) \+ leafFor\(h\) \+ stakedFor\(h\);/);
+  assert.match(rb, /addToTotal\(h, BigInt\(b\[h\]\|\|0n\) \+ ln \+ leafFor\(h\) \+ stakedFor\(h\) \+ vestingFor\(h\), ln\)/);
+  assert.match(rb, /const totalOf=\(h\)=> BigInt\(b\[h\]\|\|0n\) \+ \(lnOn\?lnAtomsFor\(h\):0n\) \+ leafFor\(h\) \+ stakedFor\(h\) \+ vestingFor\(h\);/);
   const stakes = [
     { txid: 'a', atoms: '4000000000000' },                       // not read yet: its bond
     { txid: 'b', atoms: '5000000000000' },                       // bonded
