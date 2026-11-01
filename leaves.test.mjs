@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -347,6 +347,16 @@ test('a payment the operator declines reads plainly in user mode and keeps its c
   const u = new LeafError({ kind: 'unreachable', message: 'cosign_transfer: the server answered 503 signer_unavailable: …' })
   assert.equal(plainRefusal(u), u)
   for (const w of ['leaf', 'signer', 'operator', 'round', 'tree']) assert.ok(!new RegExp(`\\b${w}\\b`, 'i').test(DECLINED_WORDS), w)
+})
+
+test('an operator that asks for the wallet to be updated is said so in user mode, never "declined"', async () => {
+  const e = new LeafError({ kind: 'server_refused', code: 'declined', status: 422, message: 'the server refused submit_participation (422 declined): this wallet hands over its forfeits only after a round is broadcast, and this operator builds batches without a sweep, whose rounds go out only once every forfeit is in: update the wallet to refresh, offboard or pay out here. Nothing was taken: the coins given up are still yours' })
+  const p = plainRefusal(e)
+  assert.equal(p.message, UPDATE_WORDS)
+  assert.equal(p.code, 'declined')
+  const { forbiddenIn } = await import('./user-trade.js')
+  assert.deepEqual(forbiddenIn(UPDATE_WORDS), [])
+  for (const w of ['leaf', 'signer', 'operator', 'round', 'tree', 'forfeit', 'batch', 'sweep']) assert.ok(!new RegExp(`\\b${w}\\b`, 'i').test(UPDATE_WORDS), w)
 })
 
 test('a pair with a supervised asset keeps only the in-tree swap', () => {
