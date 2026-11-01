@@ -113,6 +113,15 @@ export function coinsToMerge (coins, asset, cap, exclude = []) {
     .slice(0, Math.min(MERGE_PER_PASS, live.length - cap + 1)).map((c) => c.leaf_id)
 }
 
+// The arguments of a library command. One ahead of the queue (`first`) answers a taker (a firm
+// offer, an acceptance, a swap's state): its start re-checks only the coins, each against the chain
+// and its lineage watched (`recheck: 'coins'`), and leaves the following of the participations'
+// rounds, which gives coins back and guards no spend, to the upkeep's sync on its timer. That part
+// reads every released round again: five seconds and more on a busy machine, ahead of every answer.
+export function commandArgs (args, first) {
+  return first ? { ...(args || {}), recheck: 'coins' } : (args || {})
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
@@ -231,7 +240,7 @@ async function main () {
     ...(cfg.min_exit_delay_units ? { min_exit_delay_units: cfg.min_exit_delay_units } : {}),
   })
   const pause = (ms) => new Promise((r) => setTimeout(r, ms))
-  const cmd = (name, args, first = false) => w.command(name, args || {}, { first })
+  const cmd = (name, args, first = false) => w.command(name, commandArgs(args, first), { first })
   const info = await cmd('info')
   // --address: the maker's on-chain address (to fund what it boards), then exits.
   if (process.argv.includes('--address')) { console.log(JSON.stringify({ address: (await cmd('address')).address })); process.exit(0) }
