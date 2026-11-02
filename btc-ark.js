@@ -189,15 +189,17 @@ export function splitPay (sats, firstCap, secondCap, dust = 0n) {
 
 // What a board of the confirmed coins `utxos` (each { value }) carries: what is left after the
 // funding's fee at `feerate` (one P2WPKH input each, one taproot output) and the ark's board fee,
-// or null when that is below the ark's least board. -> { amount, chainFee } or null.
-export function boardAmount (utxos, info, boardFee, feerate = BOARD_FEERATE) {
+// or null when that is below the ark's least board. `cap`, when set, is the most it carries (the
+// page's limit, ark-limits.js); the coins left over come back as change. -> { amount, chainFee } or null.
+export function boardAmount (utxos, info, boardFee, feerate = BOARD_FEERATE, cap = null) {
   const conf = (utxos || []).filter((u) => u && u.confirmed !== false)
   if (!conf.length || !info) return null
   const sum = conf.reduce((n, u) => n + big(u.value), 0n)
   const vbytes = BigInt(Math.ceil(10.75 + 68 * conf.length + 43))
   const chainFee = vbytes * BigInt(feerate)
-  const amount = sum - chainFee
+  let amount = sum - chainFee
   const min = big(info.min_board_sat) + big(boardFee) + BOARD_MARGIN_SATS
+  if (cap != null && amount > big(cap)) amount = big(cap)
   if (amount < min) return null
   const max = info.max_vtxo_sat != null ? big(info.max_vtxo_sat) : null
   return { amount: max != null && amount > max ? max : amount, chainFee, inputs: conf.length }
@@ -429,6 +431,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   //   buildUnsigned(address, sats)   -> { psbtHex, txid, finish() -> { hex } }: one output to the
   //                                  address, the page's coins in, no change
   //   broadcast(hex)                 -> txid
+  //   cap                            optional: the most the board carries, in sats
   // -> the board's answer, or null when nothing is boarded.
   let boarding = null
   function board (chain) {
@@ -436,10 +439,10 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
     boarding = (async () => {
       if (!isOpen) return null
       const utxos = (await chain.utxos()).filter((u) => u.confirmed)
-      const first = boardAmount(utxos, info, 0n)
+      const first = boardAmount(utxos, info, 0n, BOARD_FEERATE, chain.cap ?? null)
       if (!first) return null
       const ba = await run('board_address', { sats: String(first.amount) })
-      const plan = boardAmount(utxos, info, big(ba.fee))
+      const plan = boardAmount(utxos, info, big(ba.fee), BOARD_FEERATE, chain.cap ?? null)
       if (!plan) return null
       const built = await chain.buildUnsigned(ba.address, plan.amount)
       // The server cosigns the board before the funding is signed and sent: the wallet then waits
