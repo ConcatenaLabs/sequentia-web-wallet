@@ -54,6 +54,13 @@ test('what the library can pay now leaves out coins an offline-refresh plan name
   assert.equal(m.get(Y), 9n)
 })
 
+test('a coin given up in a refresh that waits is the library\'s to pay with: the trade takes the refresh back', () => {
+  const coins = [{ leaf_id: 'a', asset: X, value: '100', state: 'live' }, { leaf_id: 'r', asset: X, value: '600', state: 'given', refresh_waiting: 'p1' },
+    { leaf_id: 'o', asset: X, value: '40', state: 'given' }]
+  assert.equal(spendableFrom(coins, { plans: [] }, { waiting: true }).get(X), 700n)
+  assert.equal(spendableFrom(coins, { plans: [] }).get(X), 100n, 'a maker counts only its live coins')
+})
+
 
 
 
@@ -137,6 +144,18 @@ test('engine: an in-tree trade from ticket to Settled, the ticket the library\'s
   assert.equal(r.state, 'settled')
 })
 
+test('engine: a coin just received, given up in a refresh that waits, is priced and traded', async () => {
+  const s = standIn()
+  s.coins[0].state = 'given'
+  s.coins[0].refresh_waiting = 'p1'
+  let t = 0
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => (t += 1000) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.equal(rec.state, 'sent')
+})
+
 test('engine: a swap whose coins are far from the operator\'s limit is done the moment the maker completes it, no round asked', async () => {
   const s = standIn()
   // The library counts the swap's hops (1 here) and the operator allows 5.
@@ -170,6 +189,25 @@ test('engine: a maker that never completes: the swap is cancelled and the coin c
   r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'returned')
   assert.equal(s.coins[0].state, 'live')
+})
+
+test('engine: an amount that needs what vests later is refused with its date, before any maker is asked', async () => {
+  const s = standIn()
+  const base = { leaves: s.lib, fetchJson: s.fetchJson, store: s.store, admitted: admitted(['leaf-maker']) }
+  let asked = 0
+  const makers = () => { asked++; return ['http://m'] }
+  const vesting = (a) => (a === X ? [{ asset: X, vest: 1793664000, vests: '3 November 2026', atoms: '9000000' }] : [])
+  s.coins[0].state = 'spent'
+  // Held only as what vests later.
+  const q = await createEngine({ ...base, makers, vesting, held: () => 0n }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual({ ...q }, { ok: false, why: 'vesting', atoms: '400000', vests: '3 November 2026' })
+  assert.equal(asked, 0, 'no maker asked')
+  // Part spendable now, the rest vesting: the part that is not spendable is said.
+  const p = await createEngine({ ...base, makers, vesting, held: () => 100000n }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual({ ...p }, { ok: false, why: 'vesting', atoms: '300000', vests: '3 November 2026' })
+  // More than even all of it: the ordinary answer.
+  const n = await createEngine({ ...base, makers: () => ['http://m'], vesting, held: () => 0n }).quote({ payAsset: X, receiveAsset: Y, amount: '9400000' })
+  assert.equal(n.why, 'no-funds')
 })
 
 test('engine: not listed, not offered, no funds', async () => {
@@ -321,6 +359,9 @@ test('engine: the two amounts, estimated either way round, with no firm offer as
   assert.deepEqual(c.short, { pay: '1333334', receive: '1000000' })
   const d = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '4000000' })
   assert.equal(d.receive, '1000000'); assert.ok(d.short, 'paying more than the book takes says how much it can')
+  // 400,001 at 4 per 3 buys 300,000, and one atom is left that buys nothing: the book fills it.
+  const r = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '400001' })
+  assert.deepEqual([r.ok, r.receive, r.short], [true, '300000', null], 'the price\'s rounding is not the book running short')
   assert.equal((await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '0' })).why, 'too-small')
   assert.ok(!s.posts.some(([p]) => p === 'firm'), 'no maker was asked for a firm offer')
   assert.equal((await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: () => ({ pairs: { chains: {} }, genesis: 'g' }), store: s.store }).estimate({ payAsset: X, receiveAsset: Y, pay: '1' })).why, 'not-listed')
@@ -409,7 +450,7 @@ test('a purchase of BTC whose payment is made reads "Paid. Your BTC is on its wa
   const r = { source: 'btc-gateway', dir: 'sell', state: 'sent', sentAt: 1000, at: 1000 }
   assert.equal(tradeStateWord(r, 1000), USER_WORDS.btcOnItsWay)
   assert.deepEqual(forbiddenIn(USER_WORDS.btcOnItsWay), [])
-  assert.equal(tradeStateWord({ ...r, btcPaid: true }, 1000), USER_WORDS.receivedSettling)
+  assert.equal(tradeStateWord({ ...r, btcPaid: true }, 1000), USER_WORDS.received)
 })
 
 test('engine: no trade is moved on while a person waits on a quote', async () => {
@@ -505,14 +546,33 @@ test('engine: at anchor depth 0 a coin not ready yet is on its way; a coin a reo
   assert.equal(USER_WORDS.redoing('USDX'), 'Your USDX is being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once that settles. Nothing has moved.')
   // The person's words hold none of default mode's forbidden words.
   for (const w of [USER_WORDS.notReady('USDX', true), USER_WORDS.partReady('0.01 USDX', 'USDX', true), USER_WORDS.freeing('GOLD', true),
-    USER_WORDS.redoing('USDX'), USER_WORDS.receivedSoon]) assert.deepEqual(forbiddenIn(w), [], w)
+    USER_WORDS.redoing('USDX'), USER_WORDS.received]) assert.deepEqual(forbiddenIn(w), [], w)
   assert.equal(USER_WORDS.partReady('0.0149 USDX', 'USDX', true), 'Only 0.0149 USDX of your USDX can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.')
 })
 
 test('a trade whose coins are held settles in a minute or two at anchor depth 0', () => {
   const T0 = 1_000_000
   const r = { source: 'leaf-maker', state: 'sent', sentAt: T0, swapState: 'done' }
-  assert.equal(tradeStateWord(r, T0 + 30000, true), USER_WORDS.receivedSoon)
-  assert.equal(tradeStateWord(r, T0 + 3 * 60000, true), 'Received. Settled in a minute or two. (3 min)')
-  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.receivedSettling)
+  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.received)
+  assert.equal(tradeStateWord(r, T0 + 3 * 60000), 'Received, settling (3 min)')
+  assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.received)
+})
+
+test('engine: a small free coin beside a planned one frees the planned coin, never "on its way"', async () => {
+  const s = standIn()
+  // 0.01 free, 30 kept by an open offline-refresh plan: the offer needs more than the free coin.
+  s.coins[0].value = '1000'
+  s.coins.push({ leaf_id: 'c2', asset: X, value: '3000000000', state: 'live', kind: 'batch' })
+  s.plans.push({ plan_id: 'p2', coin: 'c2', state: 'open' })
+  const freed = []
+  const q = await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']),
+    held: () => 3000001000n, release: (a, l) => freed.push([a, l]), anchorDepth: () => 0 }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([q.why, q.soon, freed], ['freeing', true, [[X, ['c2']]]])
+  // No planned coin: the part-ready answer stands.
+  s.plans.length = 0
+  s.coins.splice(1, 1)
+  const r = await createEngine({ leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']),
+    held: () => 1000n, release: (a, l) => freed.push([a, l]) }).quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(r.why, 'part-ready')
+  assert.equal(freed.length, 1)
 })

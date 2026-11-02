@@ -218,8 +218,13 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 Every coin it receives is refreshed in the operator's next round once it has rested
 `settle_seconds`, so what it trades settles as the takers' coins do.
 
+It keeps at most `max_coins` live coins of an asset (32 by default, or per asset): past that it
+boards no more of the asset, and merges its smallest coins in the operator's next round, 64 at most
+a pass. The library reads every coin it holds before each command, so a maker holding thousands of
+coins answers each command in minutes, and its firm offers lapse.
+
 The library answers one command at a time, so a taker's firm offer waits behind whatever the
-maker's own upkeep is running. Quotes are served from the last reading and never wait. A firm
+maker's own upkeep is running. Quotes are served from the last reading and never wait: before its first reading, just after it starts, it quotes nothing. A firm
 offer, in-tree or at the BTC desk, is sized on that reading too, while it is under five minutes old.
 It then asks the library for one command, the offer, which goes ahead of every queued command
 (the library refuses an offer it cannot pay). An acceptance goes ahead the same way, and the
@@ -251,7 +256,7 @@ pool, fee, service, founder, drip) is refused at start.
   "operator": { "server": "https://host/arca", "node_url": "http://127.0.0.1:18891/", "node_user": "user", "node_password_file": "/var/lib/leaf-maker/node-password" },
   "pairs": [ { "give": "<asset id>", "want": "<asset id>", "rate_num": "1", "rate_den": "1", "min_give": "10000" } ],
   "fee_margin": "2000", "board_keep": "100000",
-  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600
+  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "max_coins": 32
 }
 ```
 

@@ -37,6 +37,9 @@
 //                                 before a coin in it can be traded (the library's `info`
 //                                 `anchor_depth`), or null; optional: at 0 a coin not ready yet is
 //                                 on its way and ready in a minute or two
+//   vesting(asset)             -> what of an asset vests later ([{ asset, vest, vests, atoms }], the
+//                                 wallet's last `claims` reading, default-arca.js vestingLots); optional:
+//                                 with it, a pay amount that needs what has not vested is 'vesting'
 //   held(asset)                -> what the wallet shows it holds of an asset, wherever it is; optional:
 //                                 with it, a pay asset held but not payable now is 'not-ready', not
 //                                 'no-funds'
@@ -55,6 +58,7 @@ import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries,
 import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
+import { DEFAULT_WORDS, vestingShort } from './default-arca.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -74,7 +78,7 @@ export const MAX_FEE_PPM = 10_000
 export const USER_MODE_FORBIDDEN_WORDS = Object.freeze(['rail', 'rails', 'round', 'rounds', 'leaf', 'leaves', 'operator', 'covenant',
   'covenants', 'expiry', 'atom', 'atoms', 'forfeit', 'forfeits', 'channel', 'channels', 'relay', 'maker', 'makers', 'hash', 'preimage',
   'htlc', 'submarine', 'lsp', 'tree', 'anchor', 'unroll', 'exit', 'checkpoint', 'reassignment', 'on-chain', 'lightning', 'bridge', 'gateway',
-  'node', 'nodes'])
+  'node', 'nodes', 'claim', 'claims', 'distribution', 'distributions', 'lapse', 'lapses', 'lapsed', 'locktime', 'locktimes'])
 
 export function forbiddenIn (text) {
   const t = String(text || '').toLowerCase()
@@ -86,6 +90,9 @@ export function forbiddenIn (text) {
 export const USER_WORDS = Object.freeze({
   pay: 'You pay',
   get: 'You receive',
+  // The control between the two sides: it exchanges them, each amount staying with its asset.
+  flip: 'Swap You pay and You receive',
+  flipMark: '⇅',
   amount: 'Amount',
   max: 'Max',
   balance: (x) => `balance ${x}`,
@@ -108,6 +115,8 @@ export const USER_WORDS = Object.freeze({
   tooSmall: 'That amount is too small to trade.',
   noFirmOffer: 'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',
   noFunds: (pay) => `You have no ${pay} to trade.`,
+  // More than can be traded now, the rest vesting later (the wallet's one sentence for it).
+  notVested: DEFAULT_WORDS.notVested,
   // Held, and shown in the balance, but not where a trade can pay it from yet (just arrived, or
   // still being moved in by the wallet): never "you have none". `soon`: the operator calls a coin
   // ready once its block is certified (anchor depth 0), so it is ready in a minute or two.
@@ -122,9 +131,21 @@ export const USER_WORDS = Object.freeze({
   busy: (pay) => `Your ${pay} is held by an order you placed or a move your wallet is making, and can be traded once that completes. Nothing has moved.`,
   // Kept by the wallet's plan to refresh it while the wallet is closed, which only a round can end:
   // the wallet gives it up in its next round for a coin it can trade.
+  // The best offers are orders resting in the tree that only coins expiring later can fill: the
+  // wallet refreshes its older coins in the next round, and prices the trade again once they are in.
+  readying: (pay, soon) => soon ? `Getting your ${pay} ready for this trade: it is ready in a minute or two. Nothing has moved.`
+    : `Getting your ${pay} ready for this trade: it is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
   freeing: (pay, soon) => soon ? `Your ${pay} is being made ready to trade: it is ready in a minute or two. Nothing has moved.`
     : `Your ${pay} is being made ready to trade: it is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
-  pricing: 'Finding the best price…',
+  // The amount not typed, while it follows the book's price now: an estimate, said as one.
+  about: 'about',
+  // Review, while the sources are asked for terms they hold to: the amount shown is the estimate.
+  pricing: 'Getting the exact price…',
+  // BTC held at the wallet's address, which a trade cannot pay from until the wallet has moved it
+  // where trades pay BTC from (the Bitcoin ark): a move confirmed by `blocks` Bitcoin blocks (no
+  // time: Bitcoin's blocks keep none).
+  btcMoving: (blocks) => `Your BTC is being moved so it can be traded. It is ready after ${btcBlocks(blocks)}. Nothing has moved yet.`,
+  btcMore: (blocks) => `More of your BTC is being moved so it can be traded, ready after ${btcBlocks(blocks)}.`,
   priceMoved: 'The price moved. Here is the new one.',
   sent: 'Sent',
   settled: 'Settled',
@@ -132,19 +153,23 @@ export const USER_WORDS = Object.freeze({
   waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
   // A purchase of BTC whose payment is made: the BTC comes once the other side pays it out.
   btcOnItsWay: 'Paid. Your BTC is on its way.',
-  receivedSettling: 'Received. Settled after the next Bitcoin blocks.',
-  receivedSoon: 'Received. Settled in a minute or two.',
+  // What the trade brings is the wallet's; only its settling with the network is left. One word on
+  // every surface, with no time: how long settling takes is the network's, not the trade's.
+  received: 'Received, settling',
   receivedSlow: 'Received, and yours to use. Settling with the network is taking longer than usual.',
   minutes: (word, n) => `${word} (${n} min)`,
   returned: 'Returned: nothing traded.',
   returnedFees: (fees) => `Returned: nothing traded. Fees of ${fees} were paid.`,
   returnedLapsed: 'Returned: nothing traded. The other side\'s offer ran out while the trade waited.',
-  working: 'Working…',
+  // A trade confirmed and being sent: the screen is free at once, the trade goes on in Open.
+  sending: 'Sending…',
   failed: 'This trade could not be made. Nothing moved.',
   recent: 'Your trades',
   openTrades: 'Open',
   pastTrades: 'Past',
 })
+
+function btcBlocks (n) { return Number(n) === 1 ? 'a Bitcoin block' : `${Number(n) || 2} Bitcoin blocks` }
 
 // Whether what an open trade brings is held already, and only its settling is left: a purchase
 // with BTC once the BTC is paid and the asset claimed, a sale for BTC once the BTC came, a swap once
@@ -158,15 +183,15 @@ export function heldAlready (r) {
 }
 
 // What the list of trades says of one: Sent, then Settled; a trade waiting on the other side or on
-// its settling says so, with the minutes it has waited once it has waited one. `soon`: the
-// operator calls a coin settled once its block is certified (anchor depth 0).
-export function tradeStateWord (r, now = Date.now(), soon = false) {
+// its settling says so, with the minutes it has waited once it has waited one. The same words in the
+// Trade tab's Open trades, in History and on every other surface: none of them promises a time.
+export function tradeStateWord (r, now = Date.now()) {
   const W = USER_WORDS
   if (r.state === 'settled') return W.settled
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' || r.state === 'failed') return W.returned
-  if (r.state === 'confirming') return W.working
+  if (r.state === 'confirming') return W.sending
   const since = (t) => Math.floor((now - (t || r.at || now)) / 60000)
   // Buying with BTC: nothing has left the wallet until its asset is held for it.
   if (r.state === 'waiting') { const m = since(r.waitingSince); return m >= 1 ? W.minutes(W.waitingOther, m) : W.waitingOther }
@@ -174,7 +199,7 @@ export function tradeStateWord (r, now = Date.now(), soon = false) {
   // Received, its settling still waiting with the network after ten minutes (the network had no
   // room for it yet): said so, the coins being the wallet's all along.
   const held = heldAlready(r)
-  const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : soon ? W.receivedSoon : W.receivedSettling)
+  const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.received)
     : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : W.sent
   return m >= 1 ? W.minutes(word, m) : word
 }
@@ -201,7 +226,9 @@ export function pickerOrder (assets, held, name) {
 }
 
 // What the library can pay now, per asset, out of round: its live coins, less the coin of every
-// open offline-refresh plan, which the library never spends outside a round.
+// open offline-refresh plan, which the library never spends outside a round. With `waiting`, also
+// every coin given up in a refresh still waiting for a round (`refresh_waiting`): a trade takes
+// that refresh back first and pays with the coin, and its quote prices it so.
 // What a payment the library refused for want of funds is short by, in atoms of the asset paid: what
 // it takes with its margins less what the wallet holds, or the operator's smallest leaf when the
 // change would fall below it (paying that much less leaves change of at least that). 0n otherwise.
@@ -226,11 +253,12 @@ export function worthFirming (ind) {
 export function plannedCoins (plans) {
   return new Set(((plans && plans.plans) || []).filter((p) => !/^(done|cancelled|stopped|finished)$/.test(String(p.state || ''))).map((p) => p.coin))
 }
-export function spendableFrom (coins, plans) {
+export function spendableFrom (coins, plans, { waiting = false } = {}) {
   const planned = plannedCoins(plans)
   const out = new Map()
   for (const c of coins || []) {
-    if (!c || c.state !== 'live' || planned.has(c.leaf_id)) continue
+    if (!c || planned.has(c.leaf_id)) continue
+    if (c.state !== 'live' && !(waiting && c.state === 'given' && c.refresh_waiting)) continue
     out.set(c.asset, (out.get(c.asset) || 0n) + big(c.value))
   }
   return out
@@ -245,6 +273,13 @@ const FIRM_RETRY_MS = 3000
 // firm terms always get at least QUOTE_FIRM_MIN_MS of it.
 export const QUOTE_FIRM_MS = 8000
 const QUOTE_FIRM_MIN_MS = 3000
+// When the BTC desk is the only source a trade can take (buying or selling BTC), its firm terms
+// (an offer and a Lightning invoice) are waited for this long, not QUOTE_FIRM_MS: there is no
+// other answer to take instead, and a late one was a refusal for nothing.
+export const BTC_ONLY_FIRM_MS = 20000
+// How long a refresh asked to get coins ready for a resting order is waited on before it is asked
+// again: its round, and the round's block being certified.
+export const READYING_MS = 10 * 60_000
 // The book's entries read while the amount was typed stand for the quote this long.
 const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
@@ -299,7 +334,7 @@ export function createEngine (deps) {
     let coins
     try { coins = await run('coins') } catch (e) { log('[user trade] no leaves:', e && e.message); return new Map() }
     const plans = await run('plans').catch(() => ({ plans: [] }))
-    return spendableFrom(coins, plans)
+    return spendableFrom(coins, plans, { waiting: true })
   }
 
   // The candidates' entries for a directed pair, from every admitted source.
@@ -547,6 +582,10 @@ export function createEngine (deps) {
           const s2 = r2 > 0n ? sizeEntry(entry, (r2 * entry.rateNum) / entry.rateDen) : null
           if (s2 && s2.receive < r) { r = s2.receive; continue }
         }
+        // Only coins expiring no earlier than the order's coin fill it, and the wallet's that do
+        // hold too little: noted, so a quote that finds no other offer gets those coins ready.
+        const old = /that expire no earlier than the order's coin \(median time (\d+)\) keep (\d+) past their checkpoints/.exec(String(e && e.message))
+        if (old) tooOldFrom = Math.max(tooOldFrom || 0, Number(old[1]))
         log('[user trade] order_fill_resting_quote:', e.message); return null
       }
       if (!q.gets || q.gets.asset !== receiveAsset || big(q.gets.amount) !== r || !q.fee || q.fee.asset !== payAsset) { log('[user trade] the resting fill is not the one asked'); return null }
@@ -637,7 +676,7 @@ export function createEngine (deps) {
 
   // The ticket for paying `amount` atoms of `payAsset` for `receiveAsset`.
   // -> { ok: true, ticket: { payAsset, receiveAsset, amountIn, amountOut, fees, upTo? }, choice }
-  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'redoing'|'busy'|'freeing'|'too-small'|'no-firm-offer',
+  //  | { ok: false, why: 'not-listed'|'not-offered'|'no-funds'|'not-ready'|'redoing'|'busy'|'freeing'|'readying'|'too-small'|'no-firm-offer',
   //      soon? } (soon: what is not ready yet is ready in a minute or two)
   //  | { ok: false, why: 'part-ready', ready } (atoms payable now, too few for any offer)
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
@@ -679,9 +718,11 @@ export function createEngine (deps) {
       const A = big(pay)
       if (A <= 0n) return { ok: false, why: 'too-small' }
       let best = null
-      for (const e of es) { const s = sizeEntry(e, A); if (s && (!best || s.receive > best.receive)) best = s }
+      for (const e of es) { const s = sizeEntry(e, A); if (s && (!best || s.receive > best.receive)) best = { ...s, e } }
       if (!best) return { ok: false, why: 'too-small' }
-      return out(A, best.receive, best.pay < A)
+      // Short only when the source cannot take the whole amount (its size or its lot rules): what
+      // the price's rounding leaves of the amount, less than one atom of what is received, is not.
+      return out(A, best.receive, best.receive < (A * best.e.rateDen) / best.e.rateNum)
     }
     const R = big(receive)
     if (R <= 0n) return { ok: false, why: 'too-small' }
@@ -702,6 +743,49 @@ export function createEngine (deps) {
   // The wallet's own upkeep waits too, for the whole of it, not only while a command runs: a sync
   // started between the steps of a quote (while a maker answers) held the next step for its whole
   // length (deps.leaves.hold, leaves.js asking).
+  // The least expiry (median time) a resting order's coin asked of the wallet's coins in this
+  // quote, when one refused them for expiring sooner; null otherwise.
+  let tooOldFrom = null
+  // When the wallet last asked a refresh of an asset's coins for a resting order (ms), so a quote
+  // asked again while that round runs says so rather than asking again.
+  const readyingSince = new Map()
+  // Refreshes the wallet's live coins of `asset` that expire before median time `from`, in the
+  // operator's next round (planned ones through their release): its new coins expire later than
+  // any order resting now. Whether coins are being made ready.
+  async function readyCoins (asset, from) {
+    const since = readyingSince.get(asset)
+    if (since && now() - since < READYING_MS) return true
+    const coins = ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === asset && c.state === 'live')
+    const planned = plannedCoins(await run('plans').catch(() => ({ plans: [] })))
+    const old = coins.filter((c) => Number(c.expiry || 0) < from)
+    if (!old.length) return false
+    const kept = old.filter((c) => planned.has(c.leaf_id)).map((c) => c.leaf_id)
+    const free = old.filter((c) => !planned.has(c.leaf_id)).map((c) => c.leaf_id)
+    try {
+      if (kept.length && deps.release) await Promise.resolve(deps.release(asset, kept))
+      if (free.length) {
+        const q = await run('quote', { leaves: free })
+        await run('participate', { leaves: free, shown: q && q.coins })
+      }
+    } catch (e) { log('[user trade] getting coins ready:', e && e.message); return false }
+    readyingSince.set(asset, now())
+    log('[user trade] coins of', String(asset).slice(0, 8), 'refreshed for a resting order:', free.length + kept.length)
+    return true
+  }
+
+  // Asks the wallet to free the live coins of `asset` an open offline-refresh plan keeps, in its
+  // next round (deps.release): the library pays such a coin out of round only once a round has
+  // freed it. Whether it asked. `mine`: the wallet's coins of the asset, when already read.
+  async function freePlanned (asset, mine) {
+    if (!deps.release) return false
+    const coins = mine || ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === asset)
+    const planned = plannedCoins(await run('plans').catch(() => ({ plans: [] })))
+    const kept = coins.filter((c) => c.state === 'live' && planned.has(c.leaf_id)).map((c) => c.leaf_id)
+    if (!kept.length) return false
+    try { await Promise.resolve(deps.release(asset, kept)) } catch (e) { log('[user trade] release:', e && e.message) }
+    return true
+  }
+
   // Whether the operator calls a coin ready once its block is certified (anchor depth 0).
   function soon () {
     try { const d = deps.anchorDepth ? deps.anchorDepth() : null; return d !== null && d !== undefined && Number(d) === 0 } catch { return false }
@@ -714,8 +798,22 @@ export function createEngine (deps) {
 
   async function quote ({ payAsset, receiveAsset, amount }) {
     const started = Date.now()
+    tooOldFrom = null
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
+    // More than the wallet holds to spend, the rest vesting later: refused with the date from
+    // which all of it can be used (default-arca.js vestingShort), whatever the pair. Nothing is
+    // asked of a maker.
+    if (payAsset !== 'BTC' && deps.vesting) {
+      const lots = await Promise.resolve(deps.vesting(payAsset)).catch(() => [])
+      if (lots && lots.length) {
+        const can = deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : ((await spendable()).get(payAsset) || 0n)
+        const v = vestingShort(lots, payAsset, A, can)
+        // Vested, and being taken up by the wallet: ready in a moment.
+        if (v && v.arriving) return { ok: false, why: 'not-ready', held: String(can + v.atoms), soon: true }
+        if (v) return { ok: false, why: 'vesting', atoms: String(v.atoms), vests: v.vests }
+      }
+    }
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
     const sources = admittedSources(ad.pairs, ad.genesis, payAsset, receiveAsset)
     if (!sources.length) return { ok: false, why: 'not-listed' }
@@ -724,6 +822,16 @@ export function createEngine (deps) {
     const haveLeaf = payAsset === 'BTC'
       ? (deps.btc ? big(await Promise.resolve(deps.btc.balance()).catch(() => 0n)) : 0n)
       : (await spendable()).get(payAsset) || 0n
+    // BTC the wallet holds at its address, which a trade cannot pay from until it is moved where
+    // trades pay BTC from: moved for the trade by itself (deps.btcMove), and said so; never "no BTC".
+    let moving = false
+    if (payAsset === 'BTC' && haveLeaf < A && deps.btcMove && deps.btcAtAddress) {
+      const atAddress = big(await Promise.resolve(deps.btcAtAddress()).catch(() => 0n))
+      if (atAddress > 0n) {
+        try { deps.btcMove(A - haveLeaf); moving = true } catch (e) { log('[user trade] btc move:', e && e.message) }
+        if (haveLeaf <= 0n) return { ok: false, why: 'btc-moving', moving: true }
+      }
+    }
     const haveChain = payAsset !== 'BTC' && deps.onchain && sources.includes('onchain-fill')
       ? big(await Promise.resolve(deps.onchain.balance(payAsset)).catch(() => 0n)) : 0n
     // A coin not ready yet is ready in a minute or two when the operator calls it ready once its
@@ -740,12 +848,7 @@ export function createEngine (deps) {
         const mine = ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === payAsset)
         // Live coins kept by an open offline-refresh plan are freed through the wallet's next round
         // (deps.release, the page's plan_release), as a payment from them is.
-        const planned = plannedCoins(await run('plans').catch(() => ({ plans: [] })))
-        const kept = mine.filter((c) => c.state === 'live' && planned.has(c.leaf_id)).map((c) => c.leaf_id)
-        if (kept.length && deps.release) {
-          try { await Promise.resolve(deps.release(payAsset, kept)) } catch (e) { log('[user trade] release:', e && e.message) }
-          return { ok: false, why: 'freeing', held: String(held), soon: soonNow }
-        }
+        if (await freePlanned(payAsset, mine)) return { ok: false, why: 'freeing', held: String(held), soon: soonNow }
         const busy = !mine.some((c) => c.state === 'pending') && mine.some((c) => BUSY_STATES.includes(c.state))
         // Coins a Bitcoin reorganisation took back out of the chain, being redone: never a loss.
         if (!busy && mine.some((c) => c.redoing === true)) return { ok: false, why: 'redoing', held: String(held) }
@@ -769,6 +872,10 @@ export function createEngine (deps) {
     // rest of what it holds is not ready yet (coins waiting on their blocks). Said so, never
     // "too small".
     if (!ind.length && es.some((e) => haveOf(e) < A && sizeEntry(e, A))) {
+      if (payAsset === 'BTC' && moving) return { ok: false, why: 'btc-moving', moving: true }
+      // The rest may be held in coins an offline-refresh plan keeps: those are freed through the
+      // wallet's next round, whatever the free coins hold, never left waiting for nothing.
+      if (payAsset !== 'BTC' && await freePlanned(payAsset)) return { ok: false, why: 'freeing', held: String(haveLeaf), soon: soonNow }
       const ready = es.reduce((m, e) => (haveOf(e) > m ? haveOf(e) : m), 0n)
       return { ok: false, why: 'part-ready', ready: String(ready), soon: soonNow }
     }
@@ -779,21 +886,29 @@ export function createEngine (deps) {
     const cands = []
     const worth = worthFirming(ind).slice(0, 8)
     // Wall-clock time: the person's wait (deps.now may be a test's stand-in clock).
-    const until = Math.max(started + firmMs, Date.now() + Math.min(QUOTE_FIRM_MIN_MS, firmMs))
+    const btcOnly = worth.length > 0 && worth.every(({ e }) => e.source === 'btc-gateway')
+    const window = btcOnly ? Math.max(firmMs, deps.btcOnlyFirmMs || BTC_ONLY_FIRM_MS) : firmMs
+    const until = Math.max(started + window, Date.now() + Math.min(QUOTE_FIRM_MIN_MS, window))
     for (let round = 0; round < 2 && !cands.length; round++) {
-      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, firmMs / 2)) break; await sleep(FIRM_RETRY_MS) }
+      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, window / 2)) break; await sleep(FIRM_RETRY_MS) }
       const got = await Promise.all(worth.map(({ e }) => inTime(firm(e, payAsset, receiveAsset, A, haveOf(e), until), until - Date.now())))
       for (const c of got) if (c) cands.push(c)
     }
     const best = chooseCandidate(cands)
     for (const c of cands) if (c !== best) drop(c)
     // Offered, but nobody gave firm terms: that is not the amount's fault.
+    // No firm offer, and the resting orders refused the wallet's coins only for expiring before
+    // the order's coin: those coins are refreshed in the next round (a new coin expires later
+    // than any order resting now), and the trade is priced again once they are in.
+    if (!best && tooOldFrom != null && payAsset !== 'BTC' && await readyCoins(payAsset, tooOldFrom)) {
+      return { ok: false, why: 'readying', held: String(haveLeaf), soon: soonNow }
+    }
     if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }
     const have = haveOf(best.entry)
     if (have < A && best.give <= have) ticket.upTo = String(have)
-    return { ok: true, ticket, choice: best }
+    return { ok: true, ticket, choice: best, moving }
   }
 
   // Confirms a ticket's choice: writes the trade's record, then takes the one step. Answers the
@@ -974,6 +1089,20 @@ export function createEngine (deps) {
     return put(rec)
   }
 
+  // The participation of the wallet's own that took coin `c`: named on a coin given up to it
+  // (`refresh_waiting`, or the library's note "participation <id>"), and on one it spent once
+  // released (`spent_by`). -> id | null
+  function roundOf (c) {
+    if (!c) return null
+    const named = (v) => ((/^participation ([0-9a-f]{64})$/.exec(String(v || '')) || [])[1]) || null
+    if (c.state === 'given') return c.refresh_waiting || named(c.note)
+    if (c.state === 'spent') return named(c.spent_by)
+    return null
+  }
+  // A coin the wallet paid on, or put into an order, a distribution or an offboard of its own,
+  // after the trade brought it.
+  const movedOn = (c) => c.state === 'spent' || c.state === 'given'
+
   // The operator's limit on reassignments since a round (`info.depth_limit`); null when unknown.
   async function depthLimit () {
     const info = await operatorInfo()
@@ -987,37 +1116,54 @@ export function createEngine (deps) {
 
   // The coins a trade brings, or leaves as change on a reassignment, settled in the operator's
   // next round at no more than the fees its ticket showed: { settle: { coins, participations } }
-  // on the record once asked; 'settled' once every round is final. -> 'waiting'|'settled'
+  // on the record once asked; 'settled' once every round is final. A coin the library has already
+  // given up to a round of its own (its refresh of received coins takes a coin as soon as it lands)
+  // is settled by that round, followed under its own id; one paid on out of round leaves nothing of
+  // the trade to settle. -> 'waiting'|'settled'
   async function settleStep (rec) {
     const targets = rec.settleTargets || []
     if (!targets.length) return 'settled'
     if (!rec.settle) {
-      const fresh = ((await run('coins')) || []).filter((c) => !(rec.before || []).includes(c.leaf_id) && c.state === 'live')
+      const all = ((await run('coins')) || []).filter((c) => c && !(rec.before || []).includes(c.leaf_id))
       const coins = []
+      const taken = []
+      const used = new Set()
+      const targetOf = new Map()
       for (const t of targets) {
-        const c = fresh.find((x) => !coins.includes(x) && x.asset === t.asset && String(x.value) === String(t.value))
-        if (!c) return 'waiting'
-        coins.push(c)
+        // A target that names its coin is that coin; otherwise the coin of its asset and value.
+        const c = t.leaf_id ? all.find((x) => x.leaf_id === t.leaf_id)
+          : all.find((x) => !used.has(x) && x.asset === t.asset && String(x.value) === String(t.value) && (x.state === 'live' || roundOf(x)))
+        if (c) used.add(c)
+        const pid = roundOf(c)
+        if (pid) { taken.push({ coin: c.leaf_id, participation: pid }); continue }
+        if (c && c.state === 'live') { coins.push(c); targetOf.set(c.leaf_id, t); continue }
+        if (c && t.leaf_id && movedOn(c)) continue
+        const why = t.leaf_id ? `coin ${t.leaf_id} is not live yet` : `no live coin of ${t.value} of ${t.asset} yet`
+        if (rec.settleWhy !== why) { rec.settleWhy = why; put(rec); log('[user trade] settle waits:', why) }
+        return 'waiting'
       }
       // Only a coin one reassignment short of the operator's limit needs a round now: the rest stay
       // spendable at once (a round can take minutes, and holds the coin meanwhile), and the wallet's
       // own upkeep refreshes them before their dates. A library that does not count hops settles
       // every coin, as before.
-      const limit = await depthLimit()
+      const limit = coins.length ? await depthLimit() : null
       const deep = coins.filter((c) => c.hops == null || limit == null || Number(c.hops) >= limit - 1)
-      if (!deep.length) return 'settled'
-      coins.splice(0, coins.length, ...deep)
-      let q
-      try { q = await run('quote', { leaves: coins.map((c) => c.leaf_id), max_fee_ppm: MAX_FEE_PPM }) } catch (e) { log('[user trade] settle quote:', e.message); return 'waiting' }
-      for (const qc of q.coins || []) {
-        const t = targets[coins.findIndex((c) => c.leaf_id === qc.leaf_id)]
-        if (!t || big(qc.fee) > big(t.fee)) { log('[user trade] a settle fee rose above the ticket:', qc.leaf_id, String(qc.fee)); return 'waiting' }
+      if (!deep.length && !taken.length) return 'settled'
+      const parts = []
+      if (deep.length) {
+        let q
+        try { q = await run('quote', { leaves: deep.map((c) => c.leaf_id), max_fee_ppm: MAX_FEE_PPM }) } catch (e) { log('[user trade] settle quote:', e.message); return 'waiting' }
+        for (const qc of q.coins || []) {
+          const t = targetOf.get(qc.leaf_id)
+          if (!t || big(qc.fee) > big(t.fee)) { log('[user trade] a settle fee rose above the ticket:', qc.leaf_id, String(qc.fee)); return 'waiting' }
+        }
+        let r
+        try { r = await run('participate', { leaves: deep.map((c) => c.leaf_id), max_fee_ppm: MAX_FEE_PPM, shown: q.coins }) } catch (e) { log('[user trade] participate:', e.message); return 'waiting' }
+        const ok = ((r && r.participations) || []).filter((p) => p && !p.error && p.participation)
+        if (!ok.length) { log('[user trade] participate:', JSON.stringify(r)); return 'waiting' }
+        parts.push(...ok.map((p) => p.participation))
       }
-      let r
-      try { r = await run('participate', { leaves: coins.map((c) => c.leaf_id), max_fee_ppm: MAX_FEE_PPM, shown: q.coins }) } catch (e) { log('[user trade] participate:', e.message); return 'waiting' }
-      const parts = ((r && r.participations) || []).filter((p) => p && !p.error && p.participation)
-      if (!parts.length) { log('[user trade] participate:', JSON.stringify(r)); return 'waiting' }
-      rec.settle = { coins: coins.map((c) => c.leaf_id), participations: parts.map((p) => p.participation) }
+      rec.settle = { coins: [...deep.map((c) => c.leaf_id), ...taken.map((t) => t.coin)], participations: [...new Set([...parts, ...taken.map((t) => t.participation)])] }
       put(rec)
       return 'waiting'
     }

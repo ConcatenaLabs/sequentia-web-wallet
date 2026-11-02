@@ -128,7 +128,9 @@ export function clnBitcoinWallet (rpc) {
       const done = ps.find((p) => p.status === 'complete')
       if (done) return { state: 'complete', preimage: done.preimage }
       if (ps.some((p) => p.status === 'pending')) return { state: 'pending' }
-      return { state: 'failed' }
+      // When the latest attempt began (Unix seconds): a caller paying again tells an old failure
+      // from its own.
+      return { state: 'failed', at: Math.max(...ps.map((p) => Number(p.created_at) || 0)) }
     },
   }
 }

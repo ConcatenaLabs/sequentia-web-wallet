@@ -16,3 +16,13 @@ test('the line says Received once the wallet holds the transaction', () => {
   assert.match(body, /if\(seen\)\{ clearInterval\(_faucetWatch\); say\(`Received \$\{what\} ✓ · `, ' · it is in your balance\.'\); \}/)
   assert.match(body, /clearInterval\(_faucetWatch\);\s*const until=Date\.now\(\)\+10\*60\*1000;/, 'a new request replaces the last watch, and a watch ends')
 })
+
+test('BTC comes from the faucet too, to the receive code, at its ark address when the wallet has one', () => {
+  assert.match(html, /<div class="row" id="faucetBtns">\s*<button data-faucet="BTC">BTC<\/button>/, 'BTC is the first button')
+  assert.match(body, /if\(asset==='BTC'\)\{ try\{ await requestFaucetBtc\(\); \}/)
+  const j = html.indexOf('async function requestFaucetBtc('); const btc = html.slice(j, html.indexOf('\n}', j))
+  assert.match(btc, /buildPayCode\(\{ address, ark: ark\|\|undefined \}\)/)
+  assert.match(btc, /body:JSON\.stringify\(\{address:code,asset:'BTC'\}\)/)
+  assert.match(btc, /DEFAULT_WORDS\.faucetReceived\(what\)/)
+  assert.match(btc, /BTC_WORDS\.sentBlock\(j\.amount\)\.replace\(\/\^Sent\/, 'The faucet sent'\)/)
+})

@@ -61,11 +61,15 @@
   .words span b{color:var(--dim);margin-right:7px;font-weight:500}
   .warn{background:#2a1d0a;border:1px solid #6b4e12;color:#ffcf7a;border-radius:10px;padding:10px 12px;font-size:13px;margin-top:12px}
   .status{font-size:13px;min-height:18px;margin-top:10px}
+  /* An invoice's output box and a card's status line take no room, and draw no frame, until they say something. */
+  #lnRecvBolt11:empty,#lnRecvStatus:empty,#lnSendStatus:empty{display:none}
   .ok{color:var(--green)} .err{color:var(--red)}
   /* shown in developer mode only (body.devmode is set from the wallet's mode) */
   body:not(.devmode) .dev-only{display:none !important}
   a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
+  .recv-amt-row{display:flex;gap:8px;margin:0 0 10px}
+  .recv-amt-row.hide{display:none}
   /* user mode's Trade tab: the user composer only (user-composer.js) */
   .uc-dev-hidden{display:none!important}
   .ucomp{display:flex;flex-direction:column;gap:12px;max-width:520px}
@@ -80,6 +84,8 @@
   .ucomp .uc-amount{flex:1;min-width:140px}
   .ucomp .uc-have{flex-basis:100%;display:flex;justify-content:space-between;align-items:center;gap:8px}
   .ucomp .uc-max{padding:2px 10px;font-size:12px}
+  .ucomp .uc-flip-row{display:flex;justify-content:center;margin:2px 0 -4px}
+  .ucomp .uc-flip{padding:2px 14px;font-size:18px;line-height:1.2;border-radius:999px}
   .ucomp .uc-ticket .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
   .ucomp .uc-note.err{color:var(--bad,#c33)}
   .ucomp .uc-trade{display:flex;justify-content:space-between;gap:12px}
@@ -457,6 +463,8 @@
   /* A leg on Leaf: the leaf panel settles the trade; the composer's own placement controls stay hidden. */
   body.swleaf-on #swReview, body.swleaf-on #swWhy, body.swleaf-on #swFeeRow, body.swleaf-on #swTiming,
   body.swleaf-on #swOfflineWrap, body.swleaf-on #swConfWrap, body.swleaf-on #swErr, body.swleaf-on #swStatus{display:none !important}
+  body.swark-on #swReview, body.swark-on #swWhy, body.swark-on #swFeeRow, body.swark-on #swTiming,
+  body.swark-on #swOfflineWrap, body.swark-on #swConfWrap, body.swark-on #swErr, body.swark-on #swStatus{display:none !important}
   .swleaf .swleaf-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
   .swleaf .swleaf-rows .kv{display:flex;gap:10px;justify-content:space-between;font-size:12.5px}
   .swleaf .swleaf-rows .kv .k{color:var(--dim);flex:0 0 auto}
@@ -763,6 +771,7 @@
         <label class="lbl">Testnet faucet</label>
         <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to your wallet. Network fees are payable in any asset you hold, all on equal footing.</p>
         <div class="row" id="faucetBtns">
+          <button data-faucet="BTC">BTC</button>
           <button data-faucet="USDX">USDX</button>
           <button data-faucet="EURX">EURX</button>
           <button data-faucet="GOLD">GOLD</button>
@@ -802,7 +811,7 @@
       <div class="card">
         <label class="lbl" id="recvLbl">Receive</label>
         <p class="sub" id="recvTip" style="margin:0 0 10px">Your address for BTC and every Sequentia asset: the same tb1 address on both chains.</p>
-        <input id="recvAmt" class="mono hide" inputmode="decimal" style="width:100%;margin:0 0 10px">
+        <div id="recvAmtRow" class="recv-amt-row hide"><input id="recvAmt" class="mono" inputmode="decimal" style="flex:1 1 auto;min-width:0"><select id="recvAsset" style="flex:0 0 auto;width:auto"></select></div>
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
         <div class="row" style="margin-top:12px">
@@ -845,8 +854,8 @@
         <button class="ghost hide" id="lnRecvCopy" style="margin-top:8px">Copy invoice</button>
       </div>
       <div class="card hide" id="recvOampCard">
-        <label class="lbl">Receive a restricted asset (OpenAMP)</label>
-        <p class="sub" style="margin:0 0 10px">Restricted assets are held in your OpenAMP account. Give a sender your account id (AID), or the deposit address for one asset.</p>
+        <label class="lbl">Receive a restricted asset</label>
+        <p class="sub" style="margin:0 0 10px">Restricted assets are held in an account kept for this wallet. Give a sender your account id, or the deposit address for one asset.</p>
         <label class="lbl">Your account id (AID)</label>
         <div class="mono" id="recvOampAid" style="margin:4px 0 10px">—</div>
         <img id="recvOampAidQr" alt="AID QR" style="image-rendering:pixelated;border:12px solid #fff;width:180px;height:180px;display:none;margin:0 0 10px">
@@ -1012,6 +1021,8 @@
                 </div>
                 <!-- developer mode: a leg on Leaf is settled by this panel (leaf-rail.js), not by Place order -->
                 <div class="swleaf hide" id="swLeafBox"></div>
+                <!-- developer mode: BTC on Ark is settled by this panel (ark-rail.js), not by Place order -->
+                <div class="swleaf hide" id="swArkBox"></div>
                 <div class="swtiming ok" id="swTiming">
                   <span class="swtiming-ic" id="swTimingIcon" aria-hidden="true">&#8226;</span>
                   <span class="swtiming-tx" id="swTimingText">Pick two assets to see how long it takes.</span>
@@ -1215,7 +1226,7 @@
         <div class="row" style="margin-top:10px">
           <div class="grow"><label class="lbl">Issuer domain</label><input id="isDomain" value="sequentiatestnet.com" placeholder="example.com"></div>
         </div>
-        <p class="sub" style="margin-top:6px">Commits an on-chain contract and lists the asset in the public registry, so wallets, explorers and the node UI show its name and ticker instead of a raw id. Defaults to the testnet demo domain, which verifies automatically. Use your own domain if you will serve the registry's proof file there, or clear it to issue a private, unlisted asset.</p>
+        <p class="sub" style="margin-top:6px">Records the asset's contract on the chain and lists the asset in the public registry, so wallets and explorers show its name and ticker instead of a raw id. Defaults to the testnet demo domain, which verifies automatically. Use your own domain if you will serve the registry's proof file there, or clear it to issue a private, unlisted asset.</p>
         <button class="primary" id="btnIssue" style="margin-top:14px">Review issuance</button>
         <div class="status err" id="issueErr"></div>
       </div>
@@ -1242,6 +1253,7 @@
         <label class="lbl">Stake tSEQ</label>
         <p class="sub" style="margin:0 0 12px">Staking locks tSEQ in a time-locked script to support the Sequentia network. Your stake weight equals the amount staked, so there's no benefit to a longer lock; the wallet uses the network's minimum lock.</p>
         <div class="field"><label class="lbl">Amount</label><input id="stAmount" class="mono" placeholder="0.0"></div>
+        <div class="field"><label class="lbl">Pay the fee in</label><select id="stFeeAsset" style="width:100%"></select></div>
         <button class="primary" id="btnStake" style="margin-top:14px">Review stake</button>
         <div class="status err" id="stakeErr"></div>
         <div class="kv" style="margin-top:12px"><span class="k">Minimum stake</span><span class="v" id="stMin">40,000 tSEQ</span></div>
@@ -1261,7 +1273,7 @@
         <div class="kv"><span class="k">Status</span><span class="v" id="delegStatus">Not delegating</span></div>
         <div class="kv" id="delegPoolRow" style="display:none"><span class="k">Pool</span><span class="v mono" id="delegPool">—</span></div>
         <label class="lbl" style="margin-top:14px">Choose a pool</label>
-        <p class="sub" style="margin:0 0 6px">"Pays out" is what each pool has committed to on-chain. A pool that has committed to nothing keeps every fee its blocks earn.</p>
+        <p class="sub" style="margin:0 0 6px">"Pays out" is what each pool has committed, in public, to pay. A pool that has committed to nothing keeps every fee its blocks earn.</p>
         <div class="list" id="poolList"><div class="muted">Loading pools…</div></div>
         <div class="field" style="margin-top:10px"><label class="lbl">Or paste a pool signer key</label><input id="delegSigner" class="mono" placeholder="66 hex characters"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
@@ -1275,8 +1287,8 @@
         <p class="sub" style="margin:0 0 12px">What staking has paid you, in whatever assets the fees were paid in. Sequentia has no block subsidy: a block earns its own transaction fees and nothing else, so rewards arrive in the assets the payers chose. Block rewards are spendable 1,000 blocks after they are earned; a pool payout is spendable at once.</p>
         <div class="list" id="rewardList"><div class="muted">No staking rewards yet.</div></div>
         <label class="lbl" style="margin-top:18px">Convert rewards automatically</label>
-        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing on SeqDEX, as the rewards arrive and whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting.</p>
-        <p class="sub" style="margin:0 0 10px"><strong>Once this is on, the wallet sells without asking again.</strong> It never converts more than staking has paid you, never touches your stake, and never converts what it cannot get a fair price for — but the selling itself is unattended, which is the point of it. Turn it off and it stops at the next check.</p>
+        <p class="sub" style="margin:0 0 10px">Sell each reward for one asset of your choosing as it arrives, whenever there is a market for the pair. Rewards are gathered per asset and converted once they are worth converting.</p>
+        <p class="sub" style="margin:0 0 10px"><strong>Once this is on, the wallet sells without asking again.</strong> It never converts more than staking has paid you, never touches your stake, and never converts what it cannot get a fair price for. The selling itself is unattended: that is the point of it. Turn it off and it stops at the next check.</p>
         <label class="row" style="gap:8px;align-items:center;margin:0 0 12px">
           <input type="checkbox" id="acEnabled">
           <span>Convert my staking rewards</span>
@@ -1340,13 +1352,13 @@
     <section data-panel="sign" class="hide">
       <div class="card">
         <label class="lbl">Sign a request</label>
-        <p class="sub" style="margin:0 0 10px">Sign a non-spending request: an OpenAMP wallet-link or login challenge, a document hash, or a message with your staking key, which is how you sign in to a site that reads your stake, such as Levo. This can never move funds or authorize a transfer.</p>
+        <p class="sub" style="margin:0 0 10px">Sign a request that spends nothing: a restricted asset's wallet link or login, a document's fingerprint, or a message with your staking key, which is how you sign in to a site that reads your stake, such as Levo. This can never move funds or authorize a transfer.</p>
         <div class="warn hide" id="oampSignOriginWarn"></div>
         <div class="field">
           <label class="lbl">What are you signing</label>
           <select id="oampSignMode">
-            <option value="challenge">An OpenAMP challenge (wallet link or login)</option>
-            <option value="document">A document hash (e-signature)</option>
+            <option value="challenge">A restricted asset's wallet link or login</option>
+            <option value="document">A document's fingerprint (e-signature)</option>
             <option value="staker">A message with my staking key (Levo sign-in)</option>
           </select>
         </div>
@@ -1380,8 +1392,8 @@
       <div class="card">
         <label class="lbl">Sign a message with your wallet key</label>
         <p class="sub" style="margin:0 0 10px">The classic signature: made with the private key behind one of
-          your own addresses, and checkable by anyone running a node — <span class="icode">verifymessage</span>,
-          on Sequentia or on Bitcoin, with nothing to look up and no account id involved. Use it to prove an
+          your own addresses, and checkable by anyone with Sequentia Core or Bitcoin Core (<span class="icode">verifymessage</span>),
+          with nothing to look up and no account id involved. Use it to prove an
           address is yours. Like the signature above it cannot move funds.</p>
         <div class="field">
           <label class="lbl">Message</label>
@@ -1631,6 +1643,10 @@
     server:   location.origin + '/arca',
     node_url: location.origin + '/node-rpc',
     operator: 'b6f4c5924ad81947658cf85bb93d9267efc54c7fcb2e4577e8c954c68fa087bb',
+    // The watchtowers other operators run for this operator's users, which the wallet deposits
+    // its coins with beside those the operator names: arca.albertodeluigi.com's, and operator
+    // B's (the testnet's stand-in second operator).
+    watchtowers: ['https://arca.albertodeluigi.com/watchtower', location.origin + '/watchtower-b'],
   };
   // The Bitcoin ark that holds default mode's BTC (btc-ark.js): its server (gRPC-web, same origin)
   // and the Esplora server the wallet reads testnet4 from. A page that sets SEQ_BTC_ARK = null
@@ -1642,6 +1658,10 @@
     esplora: location.origin + '/testnet4/api',
     network: 'testnet4',
   };
+  // The most a payment of an asset to a wallet of another operator goes over Lightning for, in
+  // USD (asset-lightning.js): above it, or when the way cannot carry it, it goes to the receive
+  // code's address on the chain. null: no limit.
+  if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = 1000;
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1670,7 +1690,8 @@ import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, m
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
-import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag } from './swap.js';
+import { displayPair } from './swap.js';
+import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, resetCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -1689,14 +1710,20 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort } from './default-arca.js';
+import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
+import { mountArkRail } from './ark-rail.js';
+import { isStaleTipError } from './reorg.js';
 import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { attachChooser, PICKER_WORDS } from './asset-picker.js';
 import { mountBtcArk, arkConfig, BTC_WORDS } from './btc-ark.js';
-import { createEngine as createUserTrade } from './user-trade.js';
+import { dueNow, markRaised, raiseRate, btcChildPlan, SPEED_WORDS } from './speed-up.js';
+import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
+import { noteArrival, noteSent, instantLog, instantRows } from './instant-history.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
@@ -1895,20 +1922,13 @@ function supervisionBadge(hex){
   b.style.cssText='color:var(--amber2,#e0a800);margin-left:5px;font-size:11px;cursor:help';
   return b;
 }
-// A small trust indicator to render next to a ticker (E1): a green ✓ for registry-verified assets
-// (tooltip names the vouching domain), an amber ⚠ for an id NOT in the registry (anyone can mint an
-// asset with any ticker, so an unregistered id is a potential impostor — warn before trusting it),
-// or null for a registered-but-unverified asset (neutral). Returns a DOM node or null.
+// A trust mark next to a ticker (E1), only where it says something: an amber ⚠ for an id NOT in the
+// registry (anyone can mint an asset with any ticker, so an unregistered id is a potential impostor —
+// warn before trusting it). Every other asset has none; a verified one names its vouching domain in
+// its details (verifiedNote). Returns a DOM node or null.
 function trustBadge(hex){
   if(!hex || hex.startsWith('oamp:')) return null;   // restricted assets carry their own enclave trust model
-  if(assetVerified(hex)){
-    const b=el('span'); b.textContent='✓';
-    b.title = hex==='BTC' ? 'Bitcoin, the parent chain'
-            : hex===POLICY_HEX ? 'The Sequence token'
-            : ('Verified in the Sequentia asset registry'+(assetDomain(hex)?(' · '+assetDomain(hex)):''));
-    b.setAttribute('aria-label','verified'); b.style.cssText='color:#3ddc84;margin-left:5px;font-weight:700;cursor:help';
-    return b;
-  }
+  if(assetVerified(hex)) return null;
   if(!assetRegistered(hex)){
     const b=el('span'); b.textContent='⚠';
     b.title='Not in the asset registry. Anyone can issue an asset with any ticker. Verify the issuer before trusting or trading it.';
@@ -1916,6 +1936,13 @@ function trustBadge(hex){
     return b;
   }
   return null;
+}
+// In an asset's details, beside its id: the domain the registry verified it against.
+function verifiedNote(hex){
+  if(!hex || hex==='BTC' || hex.startsWith('oamp:') || !assetVerified(hex) || !assetDomain(hex)) return null;
+  const s=el('span','sub', ' · verified by '+assetDomain(hex));
+  s.title='Verified in the Sequentia asset registry'; s.style.cssText='margin-left:6px';
+  return s;
 }
 let POLICY_HEX='';
 // True when we have NO authoritative precision for this asset — assetMeta() only
@@ -2452,7 +2479,7 @@ function fillFeeAssetSelect(sel){
     // drop the transaction. Say how many, when the server can tell.
     const fi = _feeInfo && _feeInfo[String(r.hex).toLowerCase()];
     const o=el('option'); o.disabled=true;
-    o.textContent = r.tk + (fi && fi.accepted_by > 0 ? ' · accepted by '+fi.accepted_by+' of '+fi.nodes+' nodes only' : ' · not accepted for fees');
+    o.textContent = r.tk + (fi && fi.accepted_by > 0 ? ' · not accepted everywhere yet' : ' · not accepted for fees');
     sel.appendChild(o);
   }
   if(prev && [...sel.options].some(o=>o.value===prev && !o.disabled)) sel.value=prev;
@@ -2464,7 +2491,7 @@ function populateIssueFeeAssets(){
   fillFeeAssetSelect($('raFeeAsset'));   // the reissue/burn card gets the same open fee choice
   const hint=$('isFeeHint');
   if(hint) hint.textContent = (sel && sel.options.length) ? 'The network fee is paid in this asset.'
-    : 'No held asset is priced for fees on this node yet.';
+    : 'None of the assets you hold is accepted for fees yet.';
 }
 // Apply the chosen fee asset (any held, node-priced asset) to a reissue/burn builder + return the
 // fee-asset hex so reviewBroadcast labels it correctly. Non-policy assets take feeAsset(id, rate).
@@ -2510,6 +2537,7 @@ function paintFeeRateNote(){ if(sendFee) sendFee.check(); }
 // ---------- Bitcoin (testnet4) — same BIP84 keychain, identical tb1 addresses ----------
 const T4_API = location.origin + '/testnet4/api';
 const GAP = 20;                          // address gap limit scanned on each chain
+let _btcScanAt = 0;   // when btcScan last finished (lnCloseSeen)
 let btcRoot = null, btcBalance = 0n, btcUsed = new Set(), btcChangeNext = 0, btcScanLimit = GAP+1;
 const BTC_DUST = 294n;            // P2WPKH dust threshold (sats)
 const BTC_DEFAULT_FEERATE = 2;    // sat/vB default for testnet4
@@ -2539,6 +2567,7 @@ async function btcScan(){
     if(!anyUsed) break;
   }
   btcBalance = bal; btcUsed = used; btcChangeNext = chgMax+1; btcScanLimit = scanned;
+  _btcScanAt = Date.now();
 }
 
 // gather spendable utxos across the full scanned range (same window as btcScan, plus any
@@ -2634,13 +2663,81 @@ async function treeSendReview(r, onDone){
     const t0=performance.now();
     try{
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset);
+      try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
       console.log('[tree send] paid in', ms, 'ms');
       st.className='status ok'; st.textContent = DEFAULT_WORDS.sent(amt, m0.ticker, (ms/1000).toFixed(1));
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
       if(onDone) onDone(); renderBalance();
-    }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
+    }catch(e){
+      // The library holds none of it spendable yet (just received, not final): said as arriving.
+      st.className='status err'; st.textContent = /in live coins/.test(String(e?.message||'')) ? DEFAULT_WORDS.stillArriving(m0.ticker) : prettyErr(e); ok.disabled=false; }
   };
+}
+
+// A payment to a receive code of another operator, over Lightning (asset-lightning.js): the leaf
+// library quotes paying the code's invoice in the asset (`lightning_pay_quote`) and pays it only on
+// that quote (`lightning_pay` with `shown`), out of the tree, through this operator's node to the
+// receiver's. The payment is settled once the receiving wallet takes its coin, within a minute or
+// so; until then the review reads "On its way". One the way refuses, before it leaves or after
+// (it then comes back to the wallet), offers the code's address (`toAddress`). -> false when the
+// library will not quote it: the caller pays the address then.
+const LN_FOLLOW_MS = 5 * 60_000;
+async function assetLightningReview(r, onDone, toAddress){
+  const m0 = assetMeta(r.asset);
+  const atoms = parseAtoms(r.amtS, m0.precision||0);
+  if(atoms<=0n) throw new Error('amount must be greater than zero');
+  let q;
+  try{ q = await leavesApi.command('lightning_pay_quote', { invoice: r.addr, asset: r.asset }); }
+  catch(e){ console.warn('[asset lightning] quote:', e?.message??e); return false; }
+  const amt = fmtAtoms(atoms, m0.precision||0);
+  const fee = q && q.fee ? BigInt(q.fee) : 0n;
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
+  { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  ok.textContent = DEFAULT_WORDS.send;
+  const offerAddress = (text)=>{
+    st.className='status err'; st.textContent = text;
+    if(!r.codeAddress){ ok.classList.add('hide'); return; }
+    ok.classList.remove('hide'); ok.disabled=false; ok.textContent = DEFAULT_WORDS.toAddress;
+    ok.onclick = ()=>{ m.remove(); toAddress(); };
+  };
+  ok.onclick=async()=>{
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
+    const t0=performance.now();
+    let v;
+    try{ v = await leavesApi.command('lightning_pay', { invoice: r.addr, asset: r.asset, shown: q }); }
+    catch(e){
+      console.warn('[asset lightning] pay:', e?.message??e);
+      if(isRouteRefusal(e)) offerAddress(DEFAULT_WORDS.lnNotThrough);
+      else { st.className='status err'; st.textContent = /in live coins/.test(String(e?.message||'')) ? DEFAULT_WORDS.stillArriving(m0.ticker) : prettyErr(e); ok.disabled=false; }
+      return;
+    }
+    const hash = v && v.paying && v.paying.payment_hash;
+    console.log('[asset lightning] paying', hash);
+    { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+    ok.classList.add('hide');
+    if(onDone) onDone(); try{ renderBalance(); }catch{}
+    st.className='status'; st.innerHTML='<span class="spin"></span>' + esc(DEFAULT_WORDS.lnOnItsWay);
+    // Followed until the operator decides it: each sync moves it on (paid, or taken back).
+    while(performance.now() - t0 < LN_FOLLOW_MS){
+      try{ await leavesApi.syncNow(); }catch{}
+      let p=null; try{ p = ((await leavesApi.own('lightning_payments', {})) || {})[hash]; }catch{}
+      const state = p && p.state;
+      if(state==='paid'){
+        try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
+        st.className='status ok'; st.textContent = DEFAULT_WORDS.sent(amt, m0.ticker, ((performance.now()-t0)/1000).toFixed(1));
+        try{ renderBalance(); }catch{} return;
+      }
+      if(state==='failed' || state==='returned'){
+        console.warn('[asset lightning] came back:', p && p.reason);
+        try{ renderBalance(); }catch{}
+        offerAddress(DEFAULT_WORDS.lnCameBack); return;
+      }
+      await new Promise(ok2=> setTimeout(ok2, 4000));
+    }
+    st.className='status'; st.textContent = DEFAULT_WORDS.lnOnItsWay;
+  };
+  return true;
 }
 
 // A payment to an address out of the tree (leaves.js offboard): the library quotes it, the
@@ -2657,13 +2754,14 @@ async function offboardReview(r, onDone){
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
   const minutes = arrivalMinutes(leavesApi.roundInterval());
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
-  { const line=el('p','sub', DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
     try{
       const v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q });
       const mins = arrivalMinutes(v && v.round_within_seconds) || minutes;
+      try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true }); }catch{}
       console.log('[offboard]', v && v.offboard, v && v.state);
       st.className='status ok'; st.textContent = DEFAULT_WORDS.sentLater(amt, m0.ticker, mins);
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
@@ -2695,6 +2793,87 @@ async function btcReviewBroadcast(outputs, onDone, satPerVb, note = []){
       if(onDone) onDone(txt); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
   };
+}
+
+// ---------- speeding up a BTC transaction that waits (child pays for parent; speed-up.js) ----------
+// A child spends the wallet's output in the waiting transaction (its change, or a payment to it) and
+// pays for both. A later raise speeds up the latest child, counting every transaction it waits on.
+function btcChildren(){ try{ return JSON.parse(localStorage.getItem('swk.btcChildren.'+walletTag())||'{}')||{}; }catch{ return {}; } }
+function noteBtcChild(child, parent){ const c=btcChildren(); c[child]=parent; try{ localStorage.setItem('swk.btcChildren.'+walletTag(), JSON.stringify(c)); }catch{} }
+function btcSpedBook(){ try{ return JSON.parse(localStorage.getItem('swk.btcSped.'+walletTag())||'{}')||{}; }catch{ return {}; } }
+function saveBtcSpedBook(b){ try{ localStorage.setItem('swk.btcSped.'+walletTag(), JSON.stringify(b)); }catch{} }
+// The waiting transactions from `txid` down its children, the last one the child spends.
+function btcChain(txid){ const kids=btcChildren(), chain=[txid]; for(let i=0;i<8;i++){ const next=Object.keys(kids).find(c=>kids[c]===chain[chain.length-1]); if(!next) break; chain.push(next); } return chain; }
+async function btcBuildChild(txid, satPerVb){
+  const chain = btcChain(txid);
+  const infos = await Promise.all(chain.map(id=>fetch(`${T4_API}/tx/${id}`).then(r=>r.ok?r.json():null).catch(()=>null)));
+  if(!infos[0]) throw new Error('This transaction is not on the network any more.');
+  if(infos[0].status && infos[0].status.confirmed) throw new Error('This transaction is in a block already.');
+  // The last of the chain still waiting is the one the child spends.
+  let last = 0; for(let i=1;i<infos.length;i++) if(infos[i] && !(infos[i].status && infos[i].status.confirmed)) last = i;
+  const live = infos.slice(0, last+1);
+  const parentVsize = live.reduce((s,t)=>s+Math.ceil(t.weight/4), 0), parentFee = live.reduce((s,t)=>s+(t.fee||0), 0);
+  const utxos = await btcGatherUtxos();
+  const handles = utxos.filter(u=>u.txid===chain[last]);
+  const extra = utxos.filter(u=>u.txid!==chain[last] && u.confirmed).sort((a,b)=> a.value<b.value?1:a.value>b.value?-1:0);
+  const rate = Math.max(Number(satPerVb)||BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
+  const plan = btcChildPlan({ handles, extra, parentVsize, parentFee, rate, vsizeOf:(n)=>btcVbytes(n, 1), dust: BTC_DUST });
+  const tx = new btc.Transaction();
+  for(const u of plan.inputs) tx.addInput({ txid:u.txid, index:u.vout, witnessUtxo:{ script:u.script, amount:u.value }, sequence: 0xfffffffd });
+  const changeIndex = btcChangeNext;
+  tx.addOutputAddress(btcAddr(true, changeIndex), plan.change, btc.TEST_NETWORK);
+  const seen=new Set();
+  for(const u of plan.inputs){ const k=[...u.priv].join(','); if(seen.has(k)) continue; seen.add(k); tx.sign(u.priv); }
+  tx.finalize();
+  return { hex: tx.hex, txid: tx.id, fee: plan.fee, inputs: plan.inputs.length, vsize: tx.vsize, changeIndex,
+    parentRate: parentFee/parentVsize, pairRate: (parentFee + Number(plan.fee))/(parentVsize + tx.vsize), of: chain[last] };
+}
+async function btcSpeedUp(txid, satPerVb){
+  const c = await btcBuildChild(txid, satPerVb);
+  const r = await fetch(`${T4_API}/tx`, { method:'POST', body:c.hex });
+  const txt = (await r.text()).trim();
+  if(!r.ok) throw new Error(txt||('HTTP '+r.status));
+  btcChangeNext = Math.max(btcChangeNext, c.changeIndex+1);
+  noteBtcChild(txt, c.of); noteBtcSent(txt, -c.fee);
+  return { ...c, txid: txt };
+}
+// Developer mode: a rate, the child's fee and the pair's rate, then Speed up.
+async function btcSpeedDialog(txid){
+  let t; try{ t = await fetch(`${T4_API}/tx/${txid}`).then(r=>r.json()); }catch(e){ toast(prettyErr(e)); return; }
+  const rate0 = Math.max(BTC_DEFAULT_FEERATE, Math.ceil(2*(t.fee||0)/Math.ceil(t.weight/4)));
+  const {m, ok, st} = modalRows({ title:'Speed up (child pays for parent)', kv:[['Waiting', txid.slice(0,12)+'…'+txid.slice(-6)],
+    ['It pays', `${t.fee} sat · ${Math.ceil(t.weight/4)} vB`]] });
+  const inp = el('input'); inp.type='number'; inp.min='1'; inp.step='1'; inp.value=String(rate0);
+  const lbl = el('label','lbl','Both together pay (sat/vB)'), line = el('p','sub','');
+  const row = m.querySelector('.card .row'); m.querySelector('.card').insertBefore(lbl, row); m.querySelector('.card').insertBefore(inp, row); m.querySelector('.card').insertBefore(line, row);
+  const show = async () => { try{ const c = await btcBuildChild(txid, Number(inp.value)); line.textContent = `The child pays ${c.fee} sat (${c.vsize} vB, ${c.inputs} input${c.inputs>1?'s':''}); the two together ${c.pairRate.toFixed(2)} sat/vB.`; }catch(e){ line.textContent = prettyErr(e); } };
+  inp.oninput = show; show();
+  ok.textContent = 'Speed up';
+  ok.onclick = async () => {
+    ok.disabled = true; st.className='status'; st.innerHTML='<span class="spin"></span>Broadcasting…';
+    try{ const c = await btcSpeedUp(txid, Number(inp.value)); st.className='status ok'; st.textContent = 'Sent the speed-up '+c.txid.slice(0,12)+'…'; renderBtcHistory().catch(()=>{}); }
+    catch(e){ st.className='status err'; st.textContent = 'Speed up failed: '+prettyErr(e); ok.disabled = false; }
+  };
+}
+// Default mode: every BTC transaction of the wallet's that has waited two blocks is sped up by
+// itself, at twice the default rate, doubled at each raise (speed-up.js).
+let _btcSpeeding = false;
+async function autoSpeedBtc(rows){
+  if(devMode() || _btcSpeeding || !btcRoot) return;
+  _btcSpeeding = true;
+  try{
+    const tip = Number(await fetch(`${T4_API}/blocks/tip/height`).then(r=>r.ok?r.text():'0'));
+    if(!(tip > 0)) return;
+    const kids = btcChildren(), book = btcSpedBook();
+    const due = dueNow(book, rows.filter(r=>!r.conf && !kids[r.txid]).map(r=>r.txid), tip);
+    for(const id of due){
+      const e = book[id];
+      try{ const c = await btcSpeedUp(id, raiseRate(BTC_DEFAULT_FEERATE, e.raises)); console.log('[speed up] BTC', id, 'by', c.txid, c.fee+' sat'); }
+      catch(err){ console.warn('[speed up] BTC', id, err?.message??err); }
+      markRaised(book, id, tip);
+    }
+    saveBtcSpedBook(book);
+  }finally{ _btcSpeeding = false; }
 }
 
 // ---------- BTC-leg HTLC helper (cross-chain swap, Phase 6d-2) ----------
@@ -3228,6 +3407,8 @@ function renderRoomStepper(host){
   paint();
 }
 function tab(name){
+  // The open tab is kept for the browser tab's session: a reload opens on it again.
+  try{ sessionStorage.setItem('swk.tab', name); }catch{}
   document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
   // More stands for the tab chosen from it, and is lit while one of those is open.
   { const inMore=$('moreList') && $('moreList').querySelector('button.active');
@@ -3293,6 +3474,7 @@ function prefillInvoice(inv){
   tab('send');
   const t=$('lnSendBolt11'); if(!t) return;
   t.value=inv; t.dispatchEvent(new Event('input'));
+  try{ refreshLnSendReceive(); }catch{}
   try{ $('lnSendCard').scrollIntoView({block:'center'}); $('lnSendBtn').focus(); }catch{}
 }
 // Parse and act on the current location.hash. Three routes (spec 1.9 WW-2/WW-3, and `pay`); anything else is
@@ -3345,7 +3527,7 @@ async function boot(){
     show('boot', false);
     const c=el('div','card'); c.style.cssText='max-width:560px;margin:40px auto';
     c.appendChild(el('label','lbl','The wallet is open in another tab'));
-    c.appendChild(el('div','sub','Use that tab, or close it and reload this one. One tab at a time keeps a single device signing for your Lightning channels.'));
+    c.appendChild(el('div','sub','Use that tab, or close it and reload this one.'));
     document.body.appendChild(c);
     return;
   }
@@ -3507,12 +3689,17 @@ async function openWallet(phrase){
   const endRestore = timer('open wallet › restore cached scan', { count:false });
   const restored = await restoreWolletState();
   endRestore(restored ? 'restored' : 'nothing to restore');
-  addrIndex=null; views('app'); show('btnGear', true); tab('balance'); addRecipientRow(); initAppRefUI(); initSwapTab();
+  let keptTab=null; try{ keptTab=sessionStorage.getItem('swk.tab'); }catch{}
+  addrIndex=null; views('app'); show('btnGear', true); addRecipientRow(); initAppRefUI(); initSwapTab();
   // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
-  // on at any time; the leaf wallet starts only while the mode is on.
+  // on at any time; the leaf wallet starts only while the mode is on. Balance is first drawn once it
+  // is mounted, so the figures it last gave this wallet are in the first one.
   try{ initLeaves(); }catch(e){ console.warn('[leaves] init failed:', e?.message??e); }
+  tab('balance');
   try{ initContracts(); }catch(e){ console.warn('[contracts] init failed:', e?.message??e); }
   try{ initBtcArk(); }catch(e){ console.warn('[btc ark] init failed:', e?.message??e); }
+  // A reload opens on the tab that was open (a tab of developer mode only while it is on).
+  try{ if(keptTab && keptTab!=='balance'){ const b=document.querySelector('#tabs button[data-tab="'+CSS.escape(keptTab)+'"]'); if(b && !b.classList.contains('hide')) tab(keptTab); } }catch{}
   // Register the OpenAMP identity + load restricted-asset metadata before the first sync, so
   // restricted rows/balances can render in the same pass. Non-fatal if the enclave is unreachable.
   const endOamp = timer('open wallet › OpenAMP init');
@@ -3598,6 +3785,20 @@ async function openWallet(phrase){
 // operator keeps its leaf wallet syncing in either mode; user mode shows nothing of it
 // but its value in each asset's figure and the headline.
 let leavesApi = null, pageApi = null;
+// The wallet's tag (what its settings, kept figures and codes are filed under): swap.js's walletTag,
+// the same hash of the same descriptor, read from the page's own wollet, so it is right from the
+// moment the wallet is built rather than once the Trade tab's context is set up.
+function walletTag(){
+  try{
+    if(wollet){
+      const src = wollet.descriptor().toString();
+      let h = 0x811c9dc5 >>> 0;
+      for(let i = 0; i < src.length; i++){ h ^= src.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+      return h.toString(16).padStart(8, '0');
+    }
+  }catch{}
+  return swapWalletTag();
+}
 const devMode = ()=> devModeOn(localStorage, walletTag());
 // body.devmode drives the .dev-only elements; the Lightning pill words differ by mode too.
 function applyModeClass(){
@@ -3616,9 +3817,9 @@ function initLeaves(){
     btcOnchain: ()=> btcBalance || 0n,
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
-    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='leafArrived'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
       const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -3630,11 +3831,12 @@ function initLeaves(){
     // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
+    claimsEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CLAIMS_MS)) || undefined,
     // Default mode joins the page's operator by itself (default-arca.js), once its server shows the pinned key.
     pinned: ()=> (typeof window!=='undefined') ? window.SEQ_ARCA : null,
     serverInfo: async (server)=>{ const r=await fetch(server + '/v1/info', { cache:'no-store' }); if(!r.ok) throw new Error('the server answered HTTP ' + r.status); return await r.json(); },
     // The page and the leaf wallet spend the same coins: no board while the page's own payment is fresh.
-    onchainQuiet: ()=> _ownTxRing.some(t=> Date.now() - t.at < BOARD_QUIET_MS),
+    onchainQuiet: ()=> _ownTxRing.some(t=> Date.now() - t.at < BOARD_QUIET_MS) || Date.now() < _keepOnChainUntil,
     onOpen: ()=>{ try{ renderBalance(); }catch{} try{ renderReceive(); }catch{} },
     onBoarded: ()=>{ setTimeout(()=>{ try{ sync(); }catch{} }, 1500); },
   }, $('leavesRoot'), $('devModeRoot'));
@@ -3645,6 +3847,9 @@ function initLeaves(){
   try{ initLeafRail(); }catch(e){ console.warn('[leaf rail] init failed:', e?.message??e); }
   // The Trade tab in user mode: the user composer (user-composer.js, user-trade.js).
   try{ initUserComposer(); }catch(e){ console.warn('[user composer] init failed:', e?.message??e); }
+  // The composer's Ark choice (developer mode): BTC in the Bitcoin ark against leaves, by the
+  // user composer's engine.
+  try{ initArkRail(); }catch(e){ console.warn('[ark rail] init failed:', e?.message??e); }
   // The page API: the wallet's mode and leaf rail for code running in this page, and the
   // mode for the wallet's other pages on this origin (wallet-api.js, docs/PAGE_API.md).
   try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window, site: siteDeps() }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
@@ -3762,6 +3967,7 @@ function userKnownAssets(){
   const s = new Set(['BTC']);
   try { for(const k of Object.keys(balObj())) s.add(k); } catch {}
   try { if(leavesApi) for(const k of leavesApi.leafAssets()) s.add(k); } catch {}
+  try { if(leavesApi && leavesApi.vestingAssets) for(const k of leavesApi.vestingAssets()) s.add(k); } catch {}
   try { for(const k of Object.keys(REGISTRY_ASSETS || {})) s.add(k); } catch {}
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
@@ -3818,13 +4024,96 @@ function initBtcArk(){
     makeWorker: ()=> new Worker(new URL('./btc-ark/worker.js', import.meta.url), { type:'module' }),
     mnemonic: ()=> (localStorage.getItem(KEY) || '').trim(), config,
     decode: (s)=> decodeBolt11(s),
-    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} try{ refreshLnSendReceive(); }catch{} },
     log: (...a)=> console.log(...a),
+    fmt: (sats)=> fmtAtoms(BigInt(sats), 8),
+    store: { get: (k)=> localStorage.getItem('swk.'+k+'.'+walletTag()), set: (k, v)=> v == null ? localStorage.removeItem('swk.'+k+'.'+walletTag()) : localStorage.setItem('swk.'+k+'.'+walletTag(), v) },
   });
   btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
+  initLnToArk();
 }
-function btcArkAtoms(){ return (btcArk && btcArk.isOpen()) ? btcArk.figures().total : 0n; }
+// BTC on the Bitcoin ark, in BTC's one figure: the wallet's own answer once it is open, until then
+// the last one it gave this wallet, kept per wallet so a reload opens on it (display only).
+function btcArkKeptKey(){ return 'swk.btcArk.total.'+walletTag(); }
+function btcArkAtoms(){
+  if(btcArk && btcArk.isOpen() && (!btcArk.read || btcArk.read())){ const t=btcArk.figures().total; try{ localStorage.setItem(btcArkKeptKey(), t.toString()); }catch{} return t; }
+  try{ const v=localStorage.getItem(btcArkKeptKey()); return v && /^\d+$/.test(v) ? BigInt(v) : 0n; }catch{ return 0n; }
+}
+// ---------- default mode: the wallet's own Lightning balances move to the Ark (lightning-to-ark.js) ----------
+// A wallet that opened its own channels before default mode held its coins in the Ark: its BTC
+// channel pays an invoice of its own Bitcoin ark, each asset channel a Lightning receive of its leaf
+// wallet, by themselves, while the figure stays whole and says "Moving …". Never in developer mode.
+let lnToArk = null;
+const LN_TO_ARK_EVERY_MS = 30_000;
+// What closing a channel of `kind` costs this side, as an estimate: a cooperative close of about
+// 200 vB at the wallet's default rate, in the channel's own atoms.
+function lnCloseFeeEstimate(kind){
+  if(kind==='BTC') return 200n * BigInt(BTC_DEFAULT_FEERATE);
+  const e = feeRateEntry(kind), r = e && e.rate;
+  if(!(r>0)) return null;
+  return (200n * BigInt(DEFAULT_FEERATE/1000) * 100_000_000n + BigInt(r) - 1n) / BigInt(r);
+}
+// A channel's rate as the signer values it (reference atoms per 10^8 of its atoms), or null.
+function lnSignerRate(kind){
+  if(kind==='btc'){ const p=_btcUsd(); return p>0 ? BigInt(Math.round(p*1e8)) : null; }
+  const e = feeRateEntry(kind); return e && e.rate>0 ? BigInt(e.rate) : null;
+}
+// Closes an emptied channel of `kind` cooperatively to an address of this wallet, as Move on-chain does.
+async function lnCloseToWallet({ kind, channel }){
+  const phrase=(localStorage.getItem(KEY)||'').trim();
+  if(!phrase) throw new Error('the wallet is locked');
+  const leg = kind==='BTC' ? { chain:'btc', asset:null, ticker:'BTC' } : { chain:'seq', asset:kind, ticker:assetMeta(kind).ticker };
+  const prov = leg.chain==='btc'
+    ? await provisionAndConnect({ chain:'btc', label:'BTC', policy:lnPolicy(),
+        deriveIdentity: ()=>{ const k=lnNodeIdentity(phrase,'btc'); return { transportPrivkey:k.deviceTransportPrivkey, signingSeed:k.deviceSigningSeed }; } })
+    : await provisionAndConnect({ chain:'seq', assetId: leg.asset, label: leg.ticker, policy:lnPolicy(), deriveIdentity: (id)=>lnDeriveAsset(phrase, id) });
+  if(!(prov && prov.connected)) throw new Error('the device signer is not online');
+  const dest = await lnWalletCloseDestination(leg);
+  approveCloseDestination(prov.key, dest.scriptHex);
+  return closeChannelLsp({ chain: leg.chain, asset: leg.asset||undefined, node: prov.key||channel.node_key, scid: channel.short_channel_id, destination: dest.address, unilateraltimeout: CLOSE_UNILATERAL_S });
+}
+// Whether the wallet's own scan counts what a close of its channel paid it (txid): for a Sequentia
+// asset, once the wollet holds the transaction; for BTC, once a scan of the addresses ran after
+// the transaction reached testnet4's mempool.
+const _closeSeenAt = new Map();
+async function lnCloseSeen(kind, txid){
+  if(kind!=='BTC'){ try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return false; } }
+  if(!_closeSeenAt.has(txid)){
+    const r = await fetch(`${T4_API}/tx/${txid}/status`).catch(()=>null);
+    if(!(r && r.ok)) return false;
+    _closeSeenAt.set(txid, Date.now());
+  }
+  return _btcScanAt > _closeSeenAt.get(txid);
+}
+function initLnToArk(){
+  if(lnToArk) return;
+  lnToArk = mountLightningToArk({
+    dev: ()=> devMode(),
+    personBusy: ()=> (leavesApi && leavesApi.personBusy && leavesApi.personBusy()) || Date.now() - (_btcSentAt||0) < 60_000,
+    channels: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=> c && c.node_key),
+    kindOf: (c)=> (c.asset_label==='BTC' || c.leg==='btc') ? 'BTC' : lnChannelAsset(c),
+    refreshChannels: async ()=>{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); try{ renderBalance(); }catch{} },
+    connect: (kind)=> lnConnectLeg(kind),
+    pay: async (p)=>{ const r = await lnApi.nodePay(p); if(!(r && r.paid)) throw new Error((r && r.error) || 'the payment did not complete'); return r; },
+    payStatus: (p)=> seqlnNodePayStatus(p),
+    ark: { isOpen: ()=> !!btcArk && btcArk.isOpen(), invoice: (sats, d)=> btcArk.invoice(sats, d), received: (h)=> btcArk.received(h), refresh: ()=> btcArk.refresh() },
+    leaves: { isOpen: ()=> !!leavesApi && leavesApi.isOpen(), info: ()=> leavesApi.info(), coins: ()=> leavesApi.coins() || [],
+      run: (c, a)=> leavesApi.own(c, a), refresh: ()=> leavesApi.refreshSoon() },
+    allowance: async (kind)=> allowanceAtoms(window.SEQ_LN_PAYMENT_LIMITS || { reference: null }, kind, lnSignerRate(kind)),
+    closeFee: async (kind)=> lnCloseFeeEstimate(kind),
+    close: (p)=> lnCloseToWallet(p),
+    seen: (kind, txid)=> lnCloseSeen(kind, txid),
+    seenNow: (kind, txid)=>{ if(kind==='BTC') return undefined; try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return undefined; } },
+    store: localStorage, tag: ()=> walletTag(),
+    onChange: ()=>{ try{ renderBalance(); }catch{} },
+    log: (...a)=> console.log(...a),
+  });
+  setInterval(()=>{ if(!wollet || !lnToArk || devMode()) return; lnToArk.tick().catch(()=>{}); lnToArk.tickAssets().catch(()=>{}); }, LN_TO_ARK_EVERY_MS);
+}
 function btcArkRoutes(){ return !!btcArk && btcArk.isOpen() && !devMode(); }
+// What the ark holds is spent from Send in both modes: developer mode shows it as a place of its
+// own, but BTC there is still the wallet's to send.
+function btcArkPays(){ return !!btcArk && btcArk.isOpen(); }
 // The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
 // server cosigns the board first, then finish() signs it with the page's key.
 async function btcDrainUnsigned(address, sats){
@@ -3849,12 +4138,25 @@ async function btcBroadcastHex(hex){
   if(!r.ok || !/^[0-9a-fA-F]{64}$/.test(t)) throw new Error(t || ('HTTP ' + r.status));
   return t;
 }
-function btcArkBoardSoon(){
+// How many of the largest boards the wallet keeps on the ark by itself: past it, BTC at the
+// address stays there (in the one BTC figure, sendable as ever) until a trade asks for more.
+// Thousands of coins on the ark would slow every command the wallet makes there.
+const BTC_ARK_KEEP_BOARDS = 4;
+let _btcArkWanted = 0n;
+// A trade paying more BTC than the ark holds asks for `sats` more from the address, now.
+function btcArkBoardFor(sats){ _btcArkWanted = BigInt(sats); _btcArkBoardAt = 0; btcArkBoardSoon(true); }
+function btcArkBoardSoon(asked){
   if(!btcArkRoutes() || !(btcBalance > 0n)) return;
-  if(Date.now() - _btcSentAt < 120000 || Date.now() - _btcArkBoardAt < 30000) return;   // the page's own BTC payment is fresh
+  // While BTC leaves the ark alone, or needs the address's BTC to pay its way out, nothing goes in.
+  if(btcArk.exitHolds && btcArk.exitHolds()) return;
+  if(!asked && (Date.now() - _btcSentAt < 120000 || Date.now() - _btcArkBoardAt < 30000)) return;   // the page's own BTC payment is fresh
+  try{
+    const max = btcArk.info() && btcArk.info().max_vtxo_sat != null ? BigInt(btcArk.info().max_vtxo_sat) : null;
+    if(!(_btcArkWanted > 0n) && max != null && btcArk.figures().total >= max * BigInt(BTC_ARK_KEEP_BOARDS)) return;
+  }catch{}
   _btcArkBoardAt = Date.now();
   btcArk.board({ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, broadcast: btcBroadcastHex })
-    .then((r)=>{ if(r) sync().catch(()=>{}); })
+    .then((r)=>{ if(r){ const a = BigInt(r.amount || 0); _btcArkWanted = _btcArkWanted > a ? _btcArkWanted - a : 0n; sync().catch(()=>{}); } })
     .catch((e)=> console.warn('[btc ark] board:', e?.message??e));
 }
 // A BTC payment from the ark: what is sent, to whom, its fee, reviewed before anything moves.
@@ -3863,10 +4165,15 @@ async function btcArkSendReview(r, onDone){
   const route = btcArk.route(r.addr);
   const sats = route === 'invoice' ? null : parseAtoms(r.amtS, 8);
   if(route !== 'invoice' && !(sats > 0n)) throw new Error('amount must be greater than zero');
+  // Developer mode pays an address from the chain whenever the chain's coins cover it.
+  if(devMode() && route === 'chain' && btcBalance >= sats) return false;
   const q = await btcArk.quote(r.addr, sats);
   if(!q) return false;
   if(q.short){
-    if(route === 'chain' && q.sats != null && btcBalance >= q.sats) return false;   // the address is paid from the chain, as before
+    // Too little in the ark: an address, or a code's address, is paid from the chain, as before.
+    let chainAddr = route === 'chain' ? r.addr : null;
+    if(!chainAddr && /^bitcoin:/i.test(r.addr)){ try{ chainAddr = readPayCode(r.addr)?.address || null; }catch{} }
+    if(chainAddr && q.sats != null && btcBalance >= q.sats){ r.addr = chainAddr; return false; }
     throw new Error(q.short === 'not enough here' ? BTC_WORDS.upTo(fmtAtoms(btcArk.figures().spendable, 8)) : q.short);
   }
   const to = route === 'invoice' ? BTC_WORDS.toInvoice : /^bitcoin:/i.test(r.addr) ? BTC_WORDS.toCode : (r.addr.slice(0, 14) + '…');
@@ -3949,11 +4256,17 @@ function initUserComposer(){
       const o = ((await r.json()).vout || [])[vout]; return o && o.value != null ? String(o.value) : null;
     },
     admitted: async ()=> ({ pairs: servedPairs(await userModePairs(), leavesApi ? leavesApi.supervisedAssets() : []), genesis: await chainGenesis() }),
+    // BTC at the wallet's address, moved to the Bitcoin ark for a trade that pays more than the ark
+    // holds: in default mode, where the ark is where a trade's BTC is paid from.
+    btcAtAddress: ()=> (btcArkRoutes() ? btcBalance : 0n),
+    btcMove: (sats)=> btcArkBoardFor(sats),
     // The wallet's Bitcoin Lightning (btc-lightning.js), once the service runs it; until then no
     // trade is made for or with BTC.
-    // In default mode the trades pay and are paid in the Bitcoin ark: a sale for BTC is a Lightning
-    // receive into it (no room to buy first), a purchase is paid from it.
-    get btc(){ return btcArkRoutes() ? btcArk.lightning() : userBtcLightning(); },
+    // Whenever the Bitcoin ark is open the trades pay and are paid in it, in both modes (developer
+    // mode's Ark rail, ark-rail.js): a sale for BTC is a Lightning receive into it (no room to buy
+    // first), a purchase is paid from it. One wallet for every trade, so a trade resumed after the
+    // mode changed pays with the wallet it was made with.
+    get btc(){ return btcArkPays() ? btcArk.lightning() : userBtcLightning(); },
     // The wallet's own on-chain coins, which take a covenant order on the chain in one FILL: a
     // wallet that holds nothing in the tree trades from them (user-onchain.js).
     onchain: makeUserOnchain({
@@ -3968,6 +4281,8 @@ function initUserComposer(){
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
     // as none; and default mode's board of coins on the chain, asked for at once.
     held: (a)=> userHeld(a),
+    // What vests later: a trade that needs it is refused with its date.
+    vesting: (a)=> vestingLotsFor(a),
     // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
     anchorDepth: ()=> leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null,
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
@@ -3979,16 +4294,33 @@ function initUserComposer(){
     log: (...a)=> console.log(...a),
   });
   userComposer = mountUserComposer({
-    root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, parseAtoms,
-    knownAssets: userKnownAssets, held: userHeld,
+    root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
+    session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
+    knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor,
     isHidden: isAssetHidden, refValue: refValueStr,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
     // The chosen pair's market, from the relay's one trade log (market-view.js).
-    market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> canonicalPair(a, b) },
+    market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> displayPair(a, b) },
   });
   // The pairs and the chain are read once; the composer draws when they are in.
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
   applyTradeMode();
+}
+
+// ---------- developer mode: the composer's Ark rail ----------
+// ark-rail.js adds "Ark" to the BTC side of the Trade tab's Pay from / Receive to: a market trade of
+// BTC in the Bitcoin ark for a Sequentia asset in leaves, settled by the user composer's engine
+// (user-trade.js, user-trade-btc.js). Every amount and refusal is the engine's.
+let arkRailApi = null;
+function initArkRail(){
+  if(arkRailApi) return;
+  arkRailApi = mountArkRail({
+    $, el, dev: devMode, open: ()=> btcArkPays(), spendable: ()=> btcArk.figures().spendable,
+    engine: ()=>{ if(!userTrade) throw new Error('the trade engine is not ready yet'); return userTrade; },
+    composer: composerState, setRail: setComposerRail,
+    leafUsable: ()=> !!(leavesApi && leavesApi.isOpen && leavesApi.isOpen()),
+    assetMeta, fmtAtoms, parseAtoms,
+  });
 }
 
 // ---------- developer mode: the composer's leaf rail ----------
@@ -5150,7 +5482,8 @@ async function refreshLnStatus(){
   if(note) note.classList.toggle('hide', !devMode());
   try{ await refreshOwnLnNodeKeys(); }catch{}   // so /status includes this device's own nodes across reloads
   try{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); $('lnBalStatus').textContent=''; }
-  catch(e){ $('lnBalStatus').className='status err'; $('lnBalStatus').textContent='Lightning status unavailable: '+prettyErr(e); }
+  // The hosted nodes' status is developer mode's (docs/DEFAULT_MODE.md, BTC): default mode says nothing of it.
+  catch(e){ if(devMode()){ $('lnBalStatus').className='status err'; $('lnBalStatus').textContent='Lightning status unavailable: '+prettyErr(e); } else { $('lnBalStatus').className='status'; $('lnBalStatus').textContent=''; console.warn('[ln] status:', e?.message??e); } }
   try{ renderBalance(); }catch{}   // fold the fresh LN spendable into the asset rows
   try{ lnStatusPill(); }catch{}
   try{ reconnectOwnNodes(); }catch(e){ console.warn('[ln] own-node reconnect:', e?.message??e); }  // re-attach OWN per-user node signers as their channels appear
@@ -5189,9 +5522,14 @@ function refreshLnSendReceive(){
   // Default mode with BTC on the Bitcoin ark: BTC is paid and received over Lightning from there.
   // Default mode shows them only as the BTC cards of the ark, in plain words; developer mode shows
   // every asset's Lightning cards.
-  const dev = devMode(), arkOn = btcArkRoutes(), on = dev ? (lnOn || arkOn) : arkOn;
+  // Default mode shows the BTC invoice cards only while the wallet holds BTC on the ark; until then
+  // BTC is received with the receive code (an amount on it carries an invoice).
+  const dev = devMode(), arkOn = btcArkRoutes(), arkHeld = arkOn && btcArk.figures().total > 0n, on = dev ? (lnOn || arkOn) : arkHeld;
   const sc = $('lnSendCard'), rc = $('lnRecvCard');
-  if (sc) sc.classList.toggle('hide', !on);
+  // An invoice a page handed over (`#pay?invoice=`) keeps Pay an invoice on screen, so it can be
+  // read, and refused in words when there is too little to pay it.
+  const handed = !!(($('lnSendBolt11')||{}).value||'').trim();
+  if (sc) sc.classList.toggle('hide', !(on || (!dev && arkOn && handed)));
   if (rc) rc.classList.toggle('hide', !on);
   if (lnOn && dev){ fillLnAssetSelect($('lnRecvAsset'), true); fillLnAssetSelect($('lnSendAsset')); lnPaintRecvRoom(); }
   else if (arkOn){ for (const id of ['lnRecvAsset', 'lnSendAsset']){ const sel = $(id); if (sel) sel.innerHTML = '<option value="BTC">BTC</option>'; } }
@@ -5497,6 +5835,38 @@ async function lnWalletCloseDestination(leg){
     const u = a.toUnconfidential ? a.toUnconfidential() : a;
     return { address: u.toString(), scriptHex: hexOfBytes(u.scriptPubkey().bytes()) };
   });
+}
+// Developer mode: Bark's unilateral exit of BTC on the Bitcoin ark, by hand. Each coin is priced
+// alone; a coin not worth its exit says why and cannot be chosen. The fees are paid from this
+// wallet's Bitcoin address (its BIP84 coins), and each coin is claimed to it when its exit is done.
+async function btcArkExitDialog(){
+  const m=el('div','modal'); const c=el('div','card');
+  c.appendChild(el('label','lbl','Exit from the Bitcoin ark'));
+  c.appendChild(el('div','sub','Takes coins to your Bitcoin address without the ark server: every transaction above each coin is broadcast, a block at a time, and its fee is paid by a child from your Bitcoin address\'s confirmed BTC. After the exit delay the coin is claimed to your address. Use it when the ark refuses you or is down; while it answers, sending to your Bitcoin address costs far less.'));
+  const list=el('div','sub'); list.style.marginTop='8px'; list.textContent='Pricing each coin…';
+  const st=el('div','sub'); st.style.marginTop='8px';
+  const row=el('div','row'); row.style.marginTop='10px';
+  const go=el('button','primary','Exit the coins worth it'); const cancel=el('button','ghost','Close');
+  go.disabled=true; cancel.onclick=()=>m.remove();
+  row.appendChild(go); row.appendChild(cancel); c.appendChild(list); c.appendChild(st); c.appendChild(row); m.appendChild(c); document.body.appendChild(m);
+  try{
+    const [e, s] = await Promise.all([btcArk.exitEstimate(), btcArk.exitStatus().catch(()=>({ exits: [] }))]);
+    list.textContent='';
+    const live=(s.exits||[]).filter(x=>!['claimed','canceled','spent_elsewhere'].includes(x.state));
+    for(const x of live) list.appendChild(el('div',null,'Exiting '+x.id.slice(0,12)+'…: '+x.state.replace(/_/g,' ')+(x.claimable_height ? ', claimable at block '+x.claimable_height : '')));
+    for(const k of (e.coins||[])) list.appendChild(el('div',null, fmtAtoms(BigInt(k.amount),8)+' BTC, '+k.blocks_left+' blocks to expiry, exit costs '+(k.cost!=null ? fmtAtoms(BigInt(k.cost),8)+' BTC' : 'unknown')+(k.worth ? '' : ' — '+(k.why_not||'not worth its exit'))));
+    if(!(e.coins||[]).length && !live.length) list.textContent='No coin in the ark to exit.';
+    const w=e.worth;
+    if(w){
+      st.textContent='Together: '+fmtAtoms(BigInt(w.cost),8)+' BTC in fees ('+w.transactions+' transactions), paid from '+e.address+', which holds '+fmtAtoms(BigInt(e.funding_confirmed),8)+' BTC confirmed. '+(w.fundable ? '' : 'That is not enough for the whole walk: receive more BTC there first.');
+      go.disabled=!w.fundable;
+    }
+    go.onclick=async()=>{
+      go.disabled=true; st.textContent='Starting the exit…';
+      try{ const r=await btcArk.exitStart(w.vtxos); st.textContent='Exit started for '+r.started.length+' coin(s): '+fmtAtoms(BigInt(r.amount),8)+' BTC to '+e.address+', about '+fmtAtoms(BigInt(r.cost),8)+' BTC in fees. It moves on by itself every minute while this page is open.'; btcArk.exitCheck(true).catch(()=>{}); }
+      catch(err){ st.textContent=String(err?.message||err); go.disabled=false; }
+    };
+  }catch(err){ list.textContent='The exit could not be priced: '+String(err?.message||err); }
 }
 function closeToChainDialog(leg, own){
   const chan = own[0];   // one channel per own node in practice; scid names it exactly
@@ -6023,6 +6393,7 @@ function initSwapTab(){
     get addrIndex(){ return addrIndex; },
     get btcBalance(){ return btcBalance; },   // parent-chain balance, so BTC shows a balance like any other asset
     get leafRail(){ return leafRailApi; },    // developer mode's Leaf choice and its panel (leaf-rail.js)
+    get arkRail(){ return arkRailApi; },      // developer mode's Ark choice for BTC and its panel (ark-rail.js)
     // The recovery phrase (in-memory; used only to re-derive taker funding keys for a
     // covenant FILL) + a fetch against the wallet's OWN Sequentia esplora /api.
     get mnemonic(){ return localStorage.getItem(KEY) || ''; },
@@ -6133,9 +6504,15 @@ function whenText(at){
 }
 // The status line of Balance and History, kept identical on both: whether the figures are live,
 // being read, or the last ones known and from when.
+let _syncState = null;
 function setSyncStatus(state, err){
+  _syncState = [state, err];
   let cls='status', html='';
-  const snapAt = !_scannedOnce && _snap && _snap.at ? _snap.at : 0;
+  // "Up to date." only once every part of the figure has been read: the chain's, and what the
+  // wallet holds for instant payments (until the library gives it, the balance shows the last one).
+  let leavesWait = false; try{ leavesWait = state==='ok' && !!leavesApi && leavesApi.expected() && !leavesApi.balanceRead(); }catch{}
+  if(leavesWait) state='syncing';
+  const snapAt = (!_scannedOnce || leavesWait) && _snap && _snap.at ? _snap.at : 0;
   if(state==='syncing'){
     html='<span class="spin"></span>'+(snapAt ? 'Syncing… showing your wallet as of '+esc(whenText(snapAt))+'.' : 'Syncing…');
   } else if(state==='ok'){ cls='status ok'; html='Up to date.'; }
@@ -6237,6 +6614,21 @@ let _scannedOnce = false;   // false until the first live scan completes; gates 
 // subscribe, and each relay event handler calls sync(); without coalescing those pile up
 // into overlapping wasm scans that block the main thread (frozen UI) and re-enter the
 // shared esplora client. Reuse a single in-flight scan until it settles.
+// The blocks the wallet saw left the chain (a Sequentia block anchored to a Bitcoin block that left
+// testnet4 is invalid, and so is every block after it), so SWK refuses every update below the
+// height it holds (reorg.js). Its state is dropped, with the scan cache, which may hold the same
+// blocks, and the wallet is scanned again from empty: what it holds is then only what the chain
+// holds now. The page's own broadcasts are applied again on top, as after any scan. Runs inside
+// the sync's queued turn.
+async function rebuildAfterReorg(e){
+  console.warn('[sync] the chain went back below this wallet, rebuilding from empty:', e?.message??e);
+  try{ await idbPut(wolletKey(), null); await idbPut(wolletKey()+':at', null); }catch{}
+  _cacheRestored = false; _cachePersisted = false;
+  wollet = new Wollet(network, signer.wpkhSlip77Descriptor());
+  const u = await client.fullScan(wollet);
+  if(u) wollet.applyUpdate(u);
+  try { reapplyOwnTxs(); } catch {}
+}
 function sync(){
   if (_syncInFlight) return _syncInFlight;
   _syncInFlight = _syncImpl().finally(() => { _syncInFlight = null; });
@@ -6257,11 +6649,18 @@ async function _syncImpl(){
     const scans = queued('sync › Sequentia scans', async () => {
       const comp = companionWollet();
       const [update, compUpdate] = await Promise.all([
-        part('primary scan', client.fullScan(wollet)),
-        comp ? part('companion scan', companionClient.fullScan(comp).catch(e => { console.warn('[sync] companion scan:', e?.message??e); return null; })) : null,
+        part('primary scan', client.fullScan(wollet).catch(e => ({ refused: e }))),
+        comp ? part('companion scan', companionClient.fullScan(comp).catch(e => { console.warn('[sync] companion scan:', e?.message??e); if(isStaleTipError(e)) resetCompanion(); return null; })) : null,
       ]);
-      if(update){ wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }   // re-apply own broadcasts the scan may predate
-      try { applyCompanionUpdate(compUpdate); } catch(e){ console.warn('[sync] companion apply:', e?.message??e); }
+      try{
+        if(update && update.refused) throw update.refused;
+        if(update){ wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }   // re-apply own broadcasts the scan may predate
+      }catch(e){
+        // The chain went back below what the wallet saw (reorg.js): rebuilt from empty, never stuck.
+        if(!isStaleTipError(e)) throw e;
+        await rebuildAfterReorg(e);
+      }
+      try { applyCompanionUpdate(compUpdate); } catch(e){ console.warn('[sync] companion apply:', e?.message??e); if(isStaleTipError(e)) resetCompanion(); }
     });
     // ...alongside the other chain, the fee-asset rates and the restricted-asset balances
     await Promise.all([scans, part('Bitcoin scan', btcScan()), part('fee rates', fetchFeeRates()), part('fee info', fetchFeeInfo()),
@@ -6288,7 +6687,7 @@ async function _syncImpl(){
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 let _onchainSeen = null;   // the on-chain balance the last sync read, to board what is new
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
-function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkRoutes() ? btcArk.figures().spendable : 0n);
+function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkPays() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
   const b=balObj(); return b[hex]||0n; }
 // What the Send tab says can be sent of an asset: on the chain, and, in default mode, what the
@@ -6334,6 +6733,21 @@ function stakedAtoms(){
   if(deleg && deleg.atoms!=null) n += BigInt(deleg.atoms);
   return n;
 }
+// What of an asset vests later (a vesting allocation, leaves.js vesting): part of its figure and the
+// headline in both modes, never of what can be spent, so no Max and no spendable figure counts it.
+function vestingFor(hex){ try{ return (hex!=='BTC' && leavesApi && leavesApi.vestingAtoms) ? (leavesApi.vestingAtoms(hex)||0n) : 0n; }catch{ return 0n; } }
+function vestingLotsFor(hex){ try{ return (hex!=='BTC' && leavesApi && leavesApi.vesting) ? leavesApi.vesting(hex) : []; }catch{ return []; } }
+// Default mode: an action asked for `asked` atoms of an asset, of which only `spendable` can be
+// used now, refuses when the rest is what vests later, with the earliest date all of it can be
+// used from (docs/DEFAULT_MODE.md). Nothing is signed. Anything else is left to the action.
+function refuseIfVesting(hex, asked, spendable){
+  if(devMode() || hex==='BTC') return;
+  const v = vestingShort(vestingLotsFor(hex), hex, asked, spendable);
+  if(!v) return;
+  const m = assetMeta(hex);
+  if(v.arriving) throw new Error(DEFAULT_WORDS.stillArriving(m.ticker));
+  throw new Error(DEFAULT_WORDS.notVested(fmtAmount(v.atoms, m.precision ?? 8), m.ticker, v.vests));
+}
 function balAmt(text){ return el('div','bt-amt', text); }
 // The ticker and the currency sit under the figure on a desktop (the header names the currency) and
 // beside it on a phone, so a long figure never wraps mid-number.
@@ -6358,7 +6772,7 @@ function refreshComposerHeld(){
     const panel = document.querySelector('[data-panel=swap]');
     if(!panel || panel.classList.contains('hide')) return;
     if(userComposer.state.ticket || userComposer.state.busy) return;
-    const sig = userKnownAssets().filter(a=> userHeld(a) > 0n).sort().join(',');
+    const sig = userKnownAssets().filter(a=> userHeld(a) + vestingFor(a) > 0n).sort().join(',');
     if(sig === _ucHeldSig) return;
     _ucHeldSig = sig;
     userComposer.render();
@@ -6382,6 +6796,12 @@ function renderBalance(){
       const left=BigInt(b[o.hex]||0)-BigInt(o.atoms); b[o.hex]=(left>0n?left:0n).toString();
     }
   }
+  // A board the leaf wallet just made spent these coins, and its leaf counts as arriving in the
+  // tree already: until this page's reading shows them spent, they come off the chain's part.
+  if(leavesApi && leavesApi.onchainLessBoards){
+    b={...b};
+    for(const h of Object.keys(b)){ try{ b[h]=leavesApi.onchainLessBoards(h, b[h]).toString(); }catch{} }
+  }
   const list=$('assetList'); list.innerHTML=''; list.classList.add('btable');
   // One view of the balance in every mode: one figure per asset, its parts in the row's details.
   list.classList.add('user');
@@ -6396,7 +6816,8 @@ function renderBalance(){
   // textContent), so build nodes, never HTML strings.
   const lnOn = (()=>{ try { return seqlnState().deployed; } catch { return false; } })();
   const btcFunding = !!(lnLastStatus && lnLastStatus.funding && lnLastStatus.funding.btc);
-  const lnAtomsFor = (kind)=>{ try { return lnBalanceFor(kind); } catch { return 0n; } };
+  // What is on its way from the wallet's own channel to the Ark stays in the figure (lightning-to-ark.js).
+  const lnAtomsFor = (kind)=>{ let r = 0n; try { r = lnBalanceFor(kind); } catch {} try { if(lnToArk && !devMode()) r = lnToArk.channelPart(kind, r); } catch {} return r; };
   const lnSendFor = (kind)=>{ try { return BigInt(Math.round(lnSendableNow(kind).units||0)); } catch { return 0n; } };
   const ownChansFor = (kind)=>{ try { return lnOwnChannelsFor(kind)||[]; } catch { return []; } };
 
@@ -6407,6 +6828,7 @@ function renderBalance(){
   const rowFull = ({ticker, refKey, precision, onchainAtoms, kind, nameNode, foot, movable, leg, known, alwaysShow})=>{
     // Before Lightning is wired up and the service has answered, the last known Lightning part.
     const lnAtoms = (lnOn || !lnLastStatus) ? lnAtomsFor(kind) : 0n;
+    const movingAtoms = (lnToArk && !devMode()) ? (lnToArk.moving(kind) || 0n) : 0n;
     const own     = lnOn ? ownChansFor(kind) : [];
     // Leaves count in the asset's one figure in both modes; developer mode also splits it.
     const leafAtoms = (kind!=='BTC' && leavesApi) ? leavesApi.leafAtoms(kind) : 0n;
@@ -6414,7 +6836,9 @@ function renderBalance(){
     const staked = stakedFor(kind);
     // BTC held in the Bitcoin ark counts in BTC's one figure, in both modes.
     const arkAtoms = kind==='BTC' ? btcArkAtoms() : 0n;
-    const totalAtoms = on + lnAtoms + leafAtoms + staked + arkAtoms;
+    // What vests later (a vesting allocation) is part of the figure, never of what can be spent.
+    const vestAtoms = vestingFor(kind);
+    const totalAtoms = on + lnAtoms + leafAtoms + staked + arkAtoms + vestAtoms;
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
@@ -6423,7 +6847,7 @@ function renderBalance(){
     const a=el('div');
     const head=el('div','bt-tk');
     head.appendChild(el('span','tk', ticker));
-    const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: verified ✓ / unregistered ⚠
+    const tb=trustBadge(kind); if(tb) head.appendChild(tb);   // E1: unregistered ⚠, nothing otherwise
     const sb=supervisionBadge(kind); if(sb) head.appendChild(sb);   // issuer can freeze holders
     a.appendChild(head);
     // A holding its issuer has frozen for this wallet: one plain sentence, in both modes, never hidden.
@@ -6433,8 +6857,17 @@ function renderBalance(){
     // Of it, what a Bitcoin reorganisation took back out of the chain is said apart: never a loss.
     let arriving = 0n, redoing = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()){ arriving = leavesApi.arriving(kind) || 0n; redoing = leavesApi.redoing(kind) || 0n; } } catch {}
     if(redoing > arriving) redoing = arriving;
+    // What vests later: one line for each date still to come, in both modes; what has vested and
+    // the wallet is taking up is arriving.
+    const vestAll = vestAtoms > 0n ? vestingLotsFor(kind) : [];
+    const vestLots = vestAll.filter(l=> !l.arriving);
+    for(const l of vestAll) if(l.arriving && !devMode()) arriving += BigInt(l.atoms);
     if(arriving - redoing > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving - redoing), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     if(redoing > 0n){ const rd=el('div','bt-redoing', DEFAULT_WORDS.redoing(amt(redoing), ticker)); rd.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(rd); }
+    let keptSafe = 0n; try { if(kind!=='BTC' && leavesApi && !devMode() && leavesApi.keptSafe) keptSafe = leavesApi.keptSafe(kind) || 0n; } catch {}
+    if(keptSafe > 0n){ const ks=el('div','bt-kept-safe', DEFAULT_WORDS.keptSafe(amt(keptSafe), ticker)); ks.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ks); }
+    if(movingAtoms > 0n){ const mv=el('div','bt-moving', DEFAULT_WORDS.moving(amt(movingAtoms), ticker)); mv.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(mv); }
+    for(const l of vestLots){ const vs=el('div','bt-vests', DEFAULT_WORDS.vests(amt(BigInt(l.atoms)), ticker, l.vests)); vs.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(vs); }
     if(nameNode){ const nd=el('div','bt-name'); nd.appendChild(nameNode); a.appendChild(nd); }
     // ONE VIEW FOR EVERY MODE. A bolt beside the ticker says whether the asset has a Lightning
     // channel (yellow) or not yet (grey); the row's details, one tap away, hold its parts (on-chain |
@@ -6467,6 +6900,7 @@ function renderBalance(){
     if(dm && lnOn && leg && hasLn){
       const l=blk('Lightning', amt(lnAtoms));
       if(opening) l.appendChild(el('div','bt-dim','channel opening'));
+      for(const ch of own){ const w = lnToArk && ch.scid ? lnToArk.closeWhy(ch.scid) : null; if(w) l.appendChild(el('div','bt-dim','Channel '+ch.scid+' stays open: '+w+'.')); }
       const cap=el('div','bt-cap');
       const line=(k, v, cls)=>{ const d=el('div'); d.appendChild(el('span',null,k+' ')); d.appendChild(el('b',cls||null,v)); cap.appendChild(d); };
       // Like room to receive: nothing to send until a channel is open, said as "not yet".
@@ -6491,10 +6925,16 @@ function renderBalance(){
     if(dm && (arkPart>0n || arkJoined)){
       const k=blk('Ark', amt(arkPart));
       k.title = kind==='BTC' ? 'Bitcoin Ark (Bark): BTC on an ark on Bitcoin itself' : 'Sequentia Ark (Arca): '+ticker+' in the operator’s tree';
+      // The exit by hand, BTC on the Bitcoin ark only (#501).
+      if(kind==='BTC' && arkAtoms>0n){ const acts=el('div','bt-acts'); button(acts, 'Exit…', 'Take coins out of the Bitcoin ark to your Bitcoin address without the ark server, paying the Bitcoin fees from that address', ()=>btcArkExitDialog()); k.appendChild(acts); }
     }
-    { const arr = kind==='BTC' && btcArk && btcArk.isOpen() ? btcArk.figures().arriving : 0n;
+    { const arr = kind==='BTC' && btcArk && btcArk.isOpen() && !(movingAtoms > 0n) ? btcArk.figures().arriving : 0n;
       if(arr>0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arr), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); } }
+    // BTC leaving the ark alone (btc-ark.js exitNoteOf): what happened and what it cost, in both modes.
+    { const note = kind==='BTC' && btcArk && btcArk.exitNote ? btcArk.exitNote() : null;
+      if(note){ const ex=el('div','bt-exit', note); ex.style.cssText='color:var(--amber2,#e0a800);font-size:12px;margin-top:2px'; a.appendChild(ex); } }
     if(staked>0n) blk('Staked', amt(staked));
+    for(const l of vestLots) blk(DEFAULT_WORDS.vestsOn(l.vests), amt(BigInt(l.atoms)));
     // No channel yet: the one thing to do is move the asset to Lightning, which asks for room itself.
     if(dm && lnOn && leg && !hasLn && toLn){ const d=el('div','bt-blk'); button(d, 'Move to Lightning', 'Open a channel to send and receive '+ticker+' instantly.', ()=>moveToLightningDialog(leg), 'mv'); det.appendChild(d); }
     if(foot){ const f=el('div','bt-foot'); f.appendChild(foot); det.appendChild(f); }
@@ -6516,6 +6956,8 @@ function renderBalance(){
   if(leavesApi) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
   // So does the Sequence token when all of it is staked.
   if(POLICY_HEX && stakedFor(POLICY_HEX)>0n) seqKeys.add(POLICY_HEX);
+  // And an asset held only as what vests later.
+  if(leavesApi && leavesApi.vestingAssets) for(const h of leavesApi.vestingAssets()) seqKeys.add(h);
   if(lnLastStatus && lnLastStatus.channels){
     for(const c of lnLastStatus.channels){
       const isBtc=(c.asset_label==='BTC'||c.leg==='btc');
@@ -6532,7 +6974,7 @@ function renderBalance(){
       const lv=lnPart>0n ? refValue(refKey, lnPart) : null; if(lv) totalLn+=lv.v; } else if((atoms||0n)>0n) allPriced=false; };
   { const ln=lnOn?lnAtomsFor('BTC'):0n; addToTotal('BTC', btcBal + ln + btcArkAtoms(), ln); }
   const leafFor = (h)=> leavesApi ? leavesApi.leafAtoms(h) : 0n;
-  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h) + stakedFor(h), ln); }
+  for(const h of seqKeys){ const ln=lnOn?lnAtomsFor(h):0n; addToTotal(h, BigInt(b[h]||0n) + ln + leafFor(h) + stakedFor(h) + vestingFor(h), ln); }
   // Restricted (OpenAMP) balances are ONE ROW AMONG EQUALS: price them into the headline total too
   // (WW-4 / spec 1.5(a)). Keyed 'oamp:'+id so assetMeta/priceTicker resolve the real ticker+precision;
   // an unpriced restricted asset falls into the allPriced=false path like any other unpriced asset.
@@ -6569,7 +7011,7 @@ function renderBalance(){
   // move to the collapsed "Hidden assets" section at the bottom of the list; they also
   // leave the default asset-picker dropdowns but stay findable there by search (swap.js
   // pickerMatches). BTC (the parent chain) is never partitioned out.
-  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h) + stakedFor(h);
+  const totalOf=(h)=> BigInt(b[h]||0n) + (lnOn?lnAtomsFor(h):0n) + leafFor(h) + stakedFor(h) + vestingFor(h);
   // Auto-fold UNLABELED assets (unknown precision — the wallet can't name/scale them, so the
   // user never deliberately holds them) into the collapsed hidden section, so a few
   // received-by-accident dust tokens no longer clutter the main balance list. Still labelable
@@ -6585,6 +7027,7 @@ function renderBalance(){
     const nameEl = (known && meta.name && meta.name!=='Asset' && meta.name!==meta.ticker) ? el('span',null, meta.name) : null;
     sub.appendChild(document.createTextNode('Asset id '));
     sub.appendChild(txLink('/explorer/asset/'+h, h.slice(0,10)+'…'+h.slice(-6)));
+    { const v=verifiedNote(h); if(v) sub.appendChild(v); }
     if(tokenOf(h)){
       const of=tokenOf(h), om=assetMeta(of);
       const tb=el('span','badge b-token','reissuance token'); tb.title='Whoever holds this can issue more '+om.ticker+'. Keep it safe.'; sub.appendChild(tb);
@@ -6777,53 +7220,106 @@ function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen
 // request in one payment request (pay-code.js). -> the code, or the bare request while the ark
 // has not answered (the code is drawn again once it has).
 let _recvArk = null, _recvArkAsk = null;
-// An amount asked for (optional, in BTC): the code then names it, with an invoice of the Bitcoin
-// ark's for exactly it, which a Lightning wallet pays. `_recvInv` is that invoice, made once per
-// amount and code.
-let _recvInv = null, _recvInvAsk = null, _recvInvWatch = 0;
-function recvAmountSats(){ try{ const v=($('recvAmt').value||'').trim(); if(!v) return 0n; const a=parseAtoms(v, 8); return a>0n ? a : 0n; }catch{ return 0n; } }
+// An amount asked for (optional), in BTC or in an asset the operator receives over Lightning
+// (`recvAsset`): the code then carries an invoice for exactly it, which a Lightning wallet pays.
+// For BTC the code also names the amount (`amount=`, which BIP321 counts in BTC) and the invoice is
+// the Bitcoin ark's; for an asset it is the operator's node's in the asset, paid into the wallet's
+// leaf (the leaf library's `lightning_receive`), which a wallet of another operator pays over
+// Lightning (asset-lightning.js). `_recvInv` is that invoice, made once per asset and amount; one
+// the wallet could not get is not asked again for the same asset and amount (`_recvInvFailed`).
+let _recvInv = null, _recvInvAsk = null, _recvInvWatch = 0, _recvInvFailed = null;
+function recvAsset(){ const s=$('recvAsset'); return (s && s.value) || 'BTC'; }
+function recvAmountAtoms(){ try{ const v=($('recvAmt').value||'').trim(); if(!v) return 0n; const h=recvAsset(); const a=parseAtoms(v, h==='BTC' ? 8 : (assetMeta(h).precision||0)); return a>0n ? a : 0n; }catch{ return 0n; } }
+// The assets a receive code can ask an amount of: BTC, and each asset the operator receives in.
+function recvAssetChoices(){
+  let legs=[]; try{ legs = leavesApi && leavesApi.isOpen() ? receivableAssets(leavesApi.info()) : []; }catch{}
+  return ['BTC', ...legs];
+}
 function payCodeText(){
   if(!_recvCode) return null;
   if(!_recvArk && btcArk && btcArk.isOpen() && !_recvArkAsk)
     _recvArkAsk = btcArk.run('address').then(a=>{ _recvArk = a.address; }).catch(e=> console.warn('[receive code] ark:', e?.message??e)).finally(()=>{ _recvArkAsk = null; renderReceive(); });
-  const sats = recvAmountSats();
-  if(sats>0n && btcArkRoutes() && (!_recvInv || _recvInv.sats!==sats) && !_recvInvAsk){
-    _recvInvAsk = btcArk.invoice(sats, 'Receive').then(inv=>{ _recvInv = { ...inv, sats }; watchRecvInvoice(_recvInv); })
-      .catch(e=> console.warn('[receive code] invoice:', e?.message??e)).finally(()=>{ _recvInvAsk = null; renderReceive(); });
+  const asset = recvAsset(), atoms = recvAmountAtoms(), key = asset + ':' + atoms;
+  const can = atoms>0n && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
+  const mine = (inv)=> inv && inv.asset===asset && inv.atoms===atoms;
+  if(can && !mine(_recvInv) && !_recvInvAsk && _recvInvFailed!==key){
+    const ask = asset==='BTC' ? btcArk.invoice(atoms, 'Receive')
+      : leavesApi.command('lightning_receive', { asset, amount: String(atoms), description: 'Receive' });
+    _recvInvAsk = ask.then(inv=>{ _recvInv = { ...inv, sats: asset==='BTC' ? atoms : undefined, asset, atoms }; watchRecvInvoice(_recvInv); })
+      .catch(e=>{ _recvInvFailed = key; console.warn('[receive code] invoice:', e?.message??e); }).finally(()=>{ _recvInvAsk = null; renderReceive(); });
   }
   let address = null; try{ address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential()); }catch{}
   if(!address) return _recvCode.text;
-  const inv = sats>0n && _recvInv && _recvInv.sats===sats ? _recvInv : null;
-  return buildPayCode({ address, amount: sats>0n ? fmtAtoms(sats, 8).replace(/[^0-9.]/g, '') : undefined,
+  const inv = can && mine(_recvInv) ? _recvInv : null;
+  return buildPayCode({ address, amount: asset==='BTC' && atoms>0n ? fmtAtoms(atoms, 8).replace(/[^0-9.]/g, '') : undefined,
     lightning: inv ? inv.invoice : undefined, ark: _recvArk || undefined, sequentia: _recvCode.text });
 }
-// The code's invoice is claimed as soon as it is paid; the code then shows a new one.
+// The code's invoice is claimed as soon as it is paid; the code then shows a new one. An asset's
+// is the leaf library's receive: once a payment is held for it the wallet syncs, which claims the
+// leaf and settles the payment; one that lapsed or failed is drawn again.
 function watchRecvInvoice(inv){
   const mine = ++_recvInvWatch;
   (async()=>{
     while(mine===_recvInvWatch && Date.now()/1000 < Number(inv.expires_at)){
-      let r=null; try{ r = await btcArk.received(inv.payment_hash); }catch{}
-      if(mine!==_recvInvWatch) return;
-      if(r && r.state==='paid'){ _recvInv=null; try{ renderBalance(); renderReceive(); }catch{} return; }
-      await new Promise(ok=> setTimeout(ok, 3000));
+      if(inv.asset==='BTC'){
+        let r=null; try{ r = await btcArk.received(inv.payment_hash); }catch{}
+        if(mine!==_recvInvWatch) return;
+        if(r && r.state==='paid'){ _recvInv=null; try{ renderBalance(); renderReceive(); }catch{} return; }
+      } else {
+        let all=null; try{ all = await leavesApi.own('lightning_receives', {}); }catch{}
+        if(mine!==_recvInvWatch) return;
+        const st = all ? receiveState(all[inv.payment_hash], Date.now()/1000) : 'open';
+        if(st!=='open'){
+          _recvInv=null;
+          if(st==='paid'){ try{ await leavesApi.syncNow(); }catch{} }
+          try{ renderBalance(); renderReceive(); }catch{} return;
+        }
+      }
+      await new Promise(ok=> setTimeout(ok, inv.asset==='BTC' ? 3000 : 5000));
     }
+    if(mine===_recvInvWatch){ _recvInv=null; try{ renderReceive(); }catch{} }
   })();
 }
+// What the review says when a receive code's invoice in the asset is passed over for its address
+// (asset-lightning.js `why`); a reason not here says nothing more than the address does.
+const LN_ADDRESS_WHY = {
+  limit: (limit)=> DEFAULT_WORDS.byAddressAbove(limit.toLocaleString(undefined, { maximumFractionDigits: 2 })),
+  liquidity: ()=> DEFAULT_WORDS.byAddressNoWay,
+  unavailable: ()=> DEFAULT_WORDS.byAddressNoWay,
+  lock: ()=> DEFAULT_WORDS.byAddressNoWay,
+  unpriced: ()=> DEFAULT_WORDS.byAddressNoWay,
+};
+// The invoices a payment over Lightning could not go through to, this session: the next review
+// of the same code pays its address instead.
+const _lnPassedOver = new Set();
 // Where a payment of `asset` to `text` goes when `text` is a receive code, instant first: its
 // Sequentia part (the library's request, rebuilt from the code's short form) for an asset the
-// tree pays, its Ark part for BTC the ark pays (btcArk takes the code as it is), else its
-// address, and then `byAddress` is set so the review says so in plain words. Anything that is
-// not a code is returned as it is. -> { dest, byAddress }
-function payCodeRoute(text, asset){
+// tree pays; for an asset sent to a wallet of another operator, its invoice in the asset, over
+// Lightning, when asset-lightning.js says so (`lightning` set, and `address` the code's address
+// should the payment not go through); its Ark part for BTC the ark pays (btcArk takes the code as
+// it is); else its address, and then `byAddress` is set so the review says so in plain words, with
+// `why` its own sentence when the code's invoice was passed over. Anything that is not a code is
+// returned as it is. `atoms` is the amount sent, when known.
+// -> { dest, byAddress, lightning?, address?, why? }
+function payCodeRoute(text, asset, atoms){
   let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
   if(!c) return { dest: text, byAddress: false };
   if(asset === 'BTC'){
-    if(c.ark && btcArkRoutes()) return { dest: text, byAddress: false };
+    if(c.ark && btcArkPays()) return { dest: text, byAddress: false };
     if(c.lightning && btcArkRoutes()) return { dest: c.lightning, byAddress: false };
     return { dest: c.address || text, byAddress: !!c.address };
   }
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
   if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
+  if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
+    const limitUsd = lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
+    const r = assetLightningRoute({ invoice: c.lightning, asset, atoms, precision: assetMeta(asset).precision||0,
+      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000 });
+    const passed = _lnPassedOver.has(String(c.lightning).toLowerCase());
+    if(r.route === 'lightning' && !passed) return { dest: r.invoice, byAddress: false, lightning: true, address: c.address || null };
+    const why = passed ? DEFAULT_WORDS.byAddressNoWay : LN_ADDRESS_WHY[r.why] ? LN_ADDRESS_WHY[r.why](limitUsd) : null;
+    if(c.address) return { dest: c.address, byAddress: true, why };
+  }
   return { dest: c.address || text, byAddress: !!c.address };
 }
 function payCodeDestination(text, asset){ return payCodeRoute(text, asset).dest; }
@@ -6841,7 +7337,14 @@ function renderReceiveCode(){
       .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
     return;
   }
-  const ra=$('recvAmt'); ra.classList.remove('hide'); ra.placeholder = BTC_WORDS.amountHint;
+  // The amount, and what it is in: BTC, or an asset the operator receives in over Lightning.
+  $('recvAmtRow').classList.remove('hide');
+  { const sel=$('recvAsset'), choices=recvAssetChoices(), was=sel.value||'BTC';
+    if(sel._choices!==choices.join()){
+      sel.innerHTML=''; for(const h of choices){ const o=document.createElement('option'); o.value=h; o.textContent= h==='BTC' ? 'BTC' : assetMeta(h).ticker; sel.appendChild(o); }
+      sel.value = choices.includes(was) ? was : 'BTC'; sel._choices=choices.join(); }
+    sel.classList.toggle('hide', choices.length<2);
+    $('recvAmt').placeholder = sel.value==='BTC' ? BTC_WORDS.amountHint : DEFAULT_WORDS.amountHint; }
   const code = payCodeText();
   $('addr').textContent = code;
   try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
@@ -6852,7 +7355,7 @@ function renderReceive(){
   $('btnRecvMode').classList.toggle('hide', true);
   $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
   if(receiveCodeMode()){ renderReceiveCode(); renderOampReceive(); return; }
-  $('recvAmt').classList.add('hide');
+  $('recvAmtRow').classList.add('hide');
   $('btnConf').classList.remove('hide');
   $('addr').classList.remove('recv-code');
   $('recvLbl').textContent = 'Receive'; $('btnCopy').textContent = 'Copy';
@@ -6917,11 +7420,24 @@ function oampSetQr(imgId, payload){
 function walletAssetRow(v, text){
   const t = String(text || '').split(' · ')[0].trim();
   if(v === '') return { ticker: t, name: '', pin: true };
-  if(v === 'BTC') return { ticker: 'BTC', name: 'Bitcoin', held: btcBalance > 0n, bal: btcBalance > 0n ? { b: fmtAtoms(btcBalance, 8), r: refValueStr('BTC', btcBalance) } : null };
+  // The asset's one figure, as Balance shows it: what is held wherever it is held.
+  const atoms = assetFigure(v);
+  if(v === 'BTC') return { ticker: 'BTC', name: 'Bitcoin', held: atoms > 0n, bal: atoms > 0n ? { b: fmtAmount(atoms, 8), r: refValueStr('BTC', atoms) } : null };
   const m = String(v).startsWith('oamp:') ? {} : (assetMeta(v) || {});
-  let atoms = 0n; try{ atoms = BigInt(balObj()[v] || 0); }catch{}
   return { ticker: t || m.ticker || String(v).slice(0, 8), name: m.name || '', held: atoms > 0n, hidden: isAssetHidden(v),
-    bal: atoms > 0n ? { b: fmtAtoms(atoms, m.precision || 0), r: refValueStr(v, atoms) } : null };
+    bal: atoms > 0n ? { b: fmtAmount(atoms, m.precision || 0), r: refValueStr(v, atoms) } : null };
+}
+// What the wallet holds of an asset, wherever it holds it (the figure Balance shows for it): on the
+// chain, for instant payments, on Lightning, staked; BTC also on the Bitcoin ark.
+function assetFigure(v){
+  if(String(v).startsWith('oamp:')) return (oampBalances[String(v).slice(5)]?.atoms) || 0n;
+  let n = 0n;
+  try{ n += v==='BTC' ? (btcBalance || 0n) : BigInt(balObj()[v] || 0); }catch{}
+  try{ if(v!=='BTC' && leavesApi) n += leavesApi.leafAtoms(v) || 0n; }catch{}
+  try{ if(v==='BTC') n += btcArkAtoms(); }catch{}
+  try{ n += lnBalanceFor(v) || 0n; }catch{}
+  try{ if(v===POLICY_HEX) n += stakedAtoms(); }catch{}
+  return n;
 }
 function assetChooser(sel){
   if(!sel || sel._chooser || !sel.parentNode) return sel && sel._chooser;
@@ -6951,6 +7467,8 @@ function ownedOptions(sel){
   const others=[];
   try{ if(leavesApi) for(const h of leavesApi.leafAssets()) others.push([h, leavesApi.leafAtoms(h)]); }catch{}
   try{ for(const c of ((lnLastStatus && lnLastStatus.channels) || [])) if(c.asset && c.leg!=='btc') others.push([c.asset, lnBalanceFor(c.asset)]); }catch{}
+  // What vests later: listed, so a send of it says from when it can be.
+  try{ if(leavesApi && leavesApi.vestingAssets) for(const h of leavesApi.vestingAssets()) others.push([h, vestingFor(h)]); }catch{}
   for(const h of heldAssetList(b, others)) add(h);
   // Restricted (OpenAMP) assets the AID holds — routed through the enclave transfer API, not lwk.
   for(const id of Object.keys(oampBalances)) if((oampBalances[id]?.atoms||0n)>0n) add('oamp:'+id);
@@ -7096,6 +7614,7 @@ function updateFeeForSendType(){
   if(isBtcSend()){ const hint=$('feeAssetHint'); if(hint) hint.textContent='Fee paid in BTC (Bitcoin testnet4); this is a parent-chain payment.'; }
   else { updateFeeAssetHint(); }
   if(sendFee){ sendFee.refresh(); sendFeeResize(); }
+  showSendFee();
 }
 // Only one scanner at a time; also stop the camera if the page is hidden/unloaded with it open.
 let activeScannerCleanup=null;
@@ -7257,6 +7776,23 @@ async function sendVsize(hex){
 }
 var sendFee=null, _sendResizeT=null;   // var: read by functions a boot path may call before this line runs
 function sendFeeResize(){ clearTimeout(_sendResizeT); _sendResizeT=setTimeout(()=>{ if(sendFee) sendFee.resize(); }, 700); }
+// Default mode shows the network fee line only for a payment the wallet makes on the chain from its
+// own coins. A receive code is paid in seconds, and a payment out of what the wallet holds for
+// instant payments says its fee in the review: a line there would wait for a total that never comes.
+function showSendFee(){
+  const box=$('sendFeeBox'); if(!box) return;
+  let chain=true;
+  if(!devMode()){
+    for(const r of ($('recipients')?.children||[])){
+      const addr=(r.querySelector('.raddr')?.value||'').trim(), hex=r.querySelector('.rasset')?.value;
+      if(!hex || hex==='BTC') continue;
+      if(!addr || (leavesApi && leavesApi.treeRoute(addr))){ chain=false; continue; }
+      let atoms=0n; try{ atoms=parseAtoms(r.querySelector('.ramt').value, assetMeta(hex).precision||0); }catch{}
+      if(atoms > availableFor(hex) || availableFor(hex) <= 0n) chain=false;
+    }
+  }
+  box.classList.toggle('hide', !chain);
+}
 function mountSendFee(){
   const box=$('sendFeeBox'); if(!box || sendFee) return;
   const sel=$('feeAsset'); sel.remove();
@@ -7313,6 +7849,18 @@ async function fillMax(r){
       const dests=[...$('recipients').children].map(o=>o.querySelector('.raddr').value.trim());
       const sat=Math.max(sendFee && sendFee.perKvb>0 ? sendFee.perKvb/1000 : BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
       max = total - others - BigInt(Math.ceil(btcVbytes(utxos.length, [...dests, null])*sat));
+      // One recipient the ark can pay: what the ark can send it, its fee off (btc-ark.js max).
+      // Send tries the ark first and falls back on the chain for an address, so the larger of
+      // the two can be sent; a bare Ark address only the ark pays.
+      if(btcArkPays() && dests.length===1){
+        const typed=dests[0];
+        const route=typed ? btcArk.route(payCodeDestination(typed, 'BTC')) : null;
+        if(!typed && max<=0n && btcArk.figures().spendable>0n) throw new Error('enter the address first, so the fee can be sized');
+        if(route && route!=='invoice'){
+          const a=await btcArk.max(payCodeDestination(typed, 'BTC'));
+          if(a!=null) max = route==='ark' && !/^bitcoin:/i.test(typed) ? a : (a>max ? a : max);
+        }
+      }
     } else {
       max = BigInt(availableFor(hex)) - others;
       if(sendFee && sendFee.hex===hex && !isOampAsset(hex)){
@@ -7342,6 +7890,19 @@ async function fillMax(r){
   }catch(e){ st.textContent=plainErr(e); }
   finally{ btn.disabled=false; }
 }
+// A receive code whose invoice is in an asset asks for that asset and amount: the row takes both,
+// when the amount is still empty and the wallet can send the asset.
+function fillFromCode(r){
+  const amt=r.querySelector('.ramt'), sel=r.querySelector('.rasset');
+  if(!amt || amt._refMode || (amt.value||'').trim()) return;
+  let c=null; try{ c=readPayCode(r.querySelector('.raddr').value.trim()); }catch{}
+  if(!c || !c.lightning) return;
+  const d=decodeBolt11(c.lightning);
+  if(!d || !d.ok || d.chain!=='seq' || !d.asset || d.amountMsat==null || d.amountMsat % 1000n !== 0n) return;
+  if(![...sel.options].some(o=>o.value===d.asset)) return;
+  if(sel.value!==d.asset){ sel.value=d.asset; sel.dispatchEvent(new Event('change')); }
+  amt.value=fmtAtoms(d.amountMsat/1000n, assetMeta(d.asset).precision||0).replace(/,/g,''); amt.dispatchEvent(new Event('input'));
+}
 function addRecipientRow(){
   const box=$('recipients'); const i=box.children.length;
   const r=el('div','rec');
@@ -7365,7 +7926,7 @@ function addRecipientRow(){
     if(!hex){ availLine.textContent=''; return; }
     const prec = hex==='BTC' ? 8 : (assetMeta(hex).precision||0);
     const tk = hex==='BTC' ? 'BTC' : assetMeta(hex).ticker;
-    availLine.textContent = 'balance ' + fmtAtoms(sendableFor(hex), prec) + ' ' + tk; };
+    availLine.textContent = 'balance ' + fmtAmount(sendableFor(hex), prec) + ' ' + tk; };
   // Restricted (OpenAMP) sends go to a recipient AID, not a tb1/tsqb1 address — relabel the field.
   const raddr=r.querySelector('.raddr');
   const updAddrPh=()=>{ if(isOampAsset(rsel.value)){ r.querySelector('.addr-row').previousElementSibling.textContent='Recipient AID'; raddr.placeholder='recipient OpenAMP account id'; }
@@ -7373,8 +7934,8 @@ function addRecipientRow(){
   updAddrPh();
   const warn=r.querySelector('.rwarn');
   r._checkAddr=()=>{ warn.textContent=recipientProblem(raddr.value.trim(), rsel.value)||''; };
-  raddr.addEventListener('input', ()=>{ r._checkAddr(); sendFeeResize(); });
-  r.querySelector('.ramt').addEventListener('input', sendFeeResize);
+  raddr.addEventListener('input', ()=>{ fillFromCode(r); r._checkAddr(); sendFeeResize(); showSendFee(); });
+  r.querySelector('.ramt').addEventListener('input', ()=>{ sendFeeResize(); showSendFee(); });
   r.querySelector('.maxbtn').onclick=()=>fillMax(r);
   rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); r._refreshAvail(); updAddrPh(); r._checkAddr(); };   // default the fee to the sent asset; re-value too
   r._refreshAvail();
@@ -7930,20 +8491,23 @@ function cjRenderHistory(){
   }
 }
 
+function cjOnChain(hex){ try{ return cjUtxos().filter(u=>u.asset===hex).reduce((s,u)=>s+u.atoms, 0n); }catch{ return 0n; } }
 function cjPlan(){
   const lane=cjLanes[Number($('cjLane').value)||0];
   if(!lane){ $('cjPlan').textContent=''; return; }
   const m=assetMeta(lane.asset);
   const k=Math.max(1, Math.floor(Number($('cjCount').value)||1));
-  const held=cjUtxos().filter(u=>u.asset===lane.asset).reduce((s,u)=>s+u.atoms, 0n);
+  // What the wallet holds of the asset, wherever it holds it: what is not on the chain yet is moved
+  // there when the mix starts (cjRun).
+  const held=cjOnChain(lane.asset) + instantAtoms(lane.asset);
   const cost=BigInt(k)*(lane.denom+lane.coordFee);
   const fee=BigInt(k)*lane.coordFee;
   const parts=[
     `Mixing ${k} × ${fmtAtoms(lane.denom, m.precision)} ${m.ticker}`,
     fee>0n ? `coordination fee ${fmtAtoms(fee, m.precision)} ${m.ticker}` : 'no coordination fee',
-    `you hold ${fmtAtoms(held, m.precision)} ${m.ticker} in transparent coins`,
+    `you hold ${fmtAmount(held, m.precision)} ${m.ticker}`,
   ];
-  if(cost>held) parts.push('— not enough for that many; lower the count');
+  if(cost>held) parts.push('not enough for that many: lower the count');
   else parts.push(`change ${fmtAtoms(held-cost, m.precision)} ${m.ticker} comes back blinded`);
   // The network fee is absent on purpose: the coordinator pays it, in its own fee asset, so mixing
   // an asset never requires holding another one.
@@ -7974,9 +8538,9 @@ async function renderMix(){
       // description of a round that has not started its clock yet, and it tells a user that showing
       // up is what makes it happen rather than that something is broken.
       const state = l.waiting
-        ? (l.participants >= 1 ? `${l.participants} here, needs ${l.minParticipants - l.participants} more` : 'nobody here yet — be the first')
+        ? (l.participants >= 1 ? `${l.participants} here, needs ${l.minParticipants - l.participants} more` : 'nobody here yet: be the first')
         : (l.deadlineMs != null ? `${l.participants} in, closes in ${Math.max(0, Math.round(l.deadlineMs/1000))}s` : `${l.participants} in`);
-      o.textContent=`${m.ticker||l.label} — ${fmtAtoms(l.denom, m.precision)} per denomination · ${state}`;
+      o.textContent=`${m.ticker||l.label}: ${fmtAtoms(l.denom, m.precision)} per denomination · ${state}`;
       sel.appendChild(o);
     });
     show('cjLaneCard', cjLanes.length>0);
@@ -8000,17 +8564,17 @@ function cjSay(phase, detail){
   switch(phase){
     case 'selecting':          return 'Choosing coins…';
     case 'registering-inputs': return `Registering ${d.inputs} coin(s) for ${d.denominations} denomination(s)…`;
-    case 'waiting':            return d.phase==='output' ? 'Waiting for the round to open output registration…'
-                                : d.phase==='signing' ? 'Waiting for the round transaction…'
+    case 'waiting':            return d.phase==='output' ? 'Waiting for the mix to take the new addresses…'
+                                : d.phase==='signing' ? 'Waiting for the mix\'s transaction…'
                                 : 'Waiting for other participants…';
     case 'registering-outputs':return `Registering mixed address ${d.registered} of ${d.of} (anonymously)…`;
     case 'verifying':          return 'Checking the round pays exactly what it promised…';
     case 'signing':            return 'Signing my own coins…';
     case 'signed':             return 'Signed. Waiting for everyone else…';
-    case 'pegging-in':         return 'Sending Bitcoin to the bridge…';
-    case 'waiting-for-peg-in': return 'Waiting for the bridge to credit SBTC (Bitcoin confirmations)…';
+    case 'pegging-in':         return 'Sending Bitcoin to be pegged as SBTC…';
+    case 'waiting-for-peg-in': return 'Waiting for the SBTC to be credited (Bitcoin confirmations)…';
     case 'pegged-in':          return 'SBTC credited. Joining a round…';
-    case 'pegging-out':        return 'Sending the mixed coins back through the bridge…';
+    case 'pegging-out':        return 'Sending the mixed coins back as Bitcoin…';
     case 'pegged-out':         return 'Done: Bitcoin sent to a fresh address of yours.';
     default:                   return phase;
   }
@@ -8024,6 +8588,7 @@ async function cjRun(){
   cjBusy=true; $('cjGo').disabled=true;
   const st=$('cjRunStatus'); st.className='status'; st.textContent='Starting…';
   try{
+    await ensureOnChain([{ hex:lane.asset, atoms:BigInt(k)*(lane.denom+lane.coordFee) }], (t)=>{ st.textContent=t; }, 'mixed', cjOnChain);
     const res=await cjMix({ assetId:lane.asset, denominations:k, onStatus:(p,d)=>{ st.textContent=cjSay(p,d); } });
     st.className='status'; st.textContent='Mixed. Transaction '+res.txid.slice(0,20)+'…';
     cjLogAdd({ at:Date.now(), asset:lane.asset, txid:res.txid, denominations:res.denominations,
@@ -8129,11 +8694,14 @@ $('btnGear').onclick=()=>tab('settings');
 $('btnCreate').onclick=()=>{ const m=Mnemonic.fromRandom(12); window._pending=m.toString();
   const w=$('words'); w.innerHTML=''; window._pending.split(' ').forEach((x,i)=>{ const s=el('span'); s.innerHTML=`<b>${i+1}</b>${x}`; w.appendChild(s); });
   views('createView'); };
-$('btnConfirm').onclick=()=>openWallet(window._pending);
-$('btnCancelCreate').onclick=()=>views('welcome');
+// Once the backup is confirmed, or the new wallet given up, the phrase leaves the page: its words
+// are taken out of the create view and the variable that held them is cleared.
+function forgetPendingPhrase(){ const w=$('words'); if(w) w.replaceChildren(); const m=window._pending; window._pending=null; return m; }
+$('btnConfirm').onclick=()=>openWallet(forgetPendingPhrase());
+$('btnCancelCreate').onclick=()=>{ forgetPendingPhrase(); views('welcome'); };
 $('btnImport').onclick=()=>{ $('importErr').textContent=''; $('importPhrase').value=''; views('importView'); };
 $('btnCancelImport').onclick=()=>views('welcome');
-$('btnDoImport').onclick=async()=>{ try{ await openWallet($('importPhrase').value); }
+$('btnDoImport').onclick=async()=>{ try{ const f=$('importPhrase'); const m=f.value; await openWallet(m); f.value=''; }
   catch(e){ $('importErr').textContent='Invalid phrase: '+(e?.message??e); } };
 
 $('btnSync').onclick=sync;
@@ -8142,6 +8710,7 @@ async function requestFaucet(asset){
   const btns=[...document.querySelectorAll('#faucetBtns button')];
   btns.forEach(b=>b.disabled=true);
   $('faucetStatus').className='status'; $('faucetStatus').innerHTML='<span class="spin"></span>Requesting from the faucet…';
+  if(asset==='BTC'){ try{ await requestFaucetBtc(); }finally{ btns.forEach(b=>b.disabled=false); } return; }
   // Default mode, coins in the tree: the faucet pays the wallet's receive code, which arrives in
   // seconds; should it refuse that, the address, as before.
   if(!devMode() && leavesApi && leavesApi.isOpen()){
@@ -8153,6 +8722,8 @@ async function requestFaucet(asset){
       if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
       _recvCode=null;
       const what=`${Number(j.amount).toLocaleString()} ${j.asset}`;
+      // In the balance at once, as arriving, until the wallet has taken it in.
+      try{ if(j.leaf) leavesApi.expect(String(j.leaf.asset||'').toLowerCase(), j.leaf.atoms); }catch{}
       $('faucetStatus').className='status ok'; $('faucetStatus').textContent=`Sent ${what} · arriving…`;
       await leavesApi.syncNow();
       $('faucetStatus').textContent=DEFAULT_WORDS.faucetReceived(what);
@@ -8188,6 +8759,31 @@ async function requestFaucet(asset){
   }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
   finally{ btns.forEach(b=>b.disabled=false); }
 }
+// BTC from the faucet (testnet4): it pays the wallet's receive code, at its address on the Bitcoin
+// ark when the wallet holds BTC there (in seconds), else at the address (after a Bitcoin block).
+async function requestFaucetBtc(){
+  const fs=$('faucetStatus');
+  try{
+    const address=wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential().toString();
+    let ark=null;
+    if(btcArk && btcArk.isOpen()){ try{ ark=(await btcArk.run('address')).address; }catch(e){ console.warn('[faucet] ark address:', e?.message??e); } }
+    const code=buildPayCode({ address, ark: ark||undefined });
+    const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:code,asset:'BTC'})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    const what=`${j.amount} BTC`;
+    fs.className='status ok';
+    if(j.ark){
+      fs.textContent=`Sent ${what} · arriving…`;
+      try{ await btcArk.run('sync'); await btcArk.refresh(); }catch{}
+      fs.textContent=DEFAULT_WORDS.faucetReceived(what);
+      try{ renderBalance(); }catch{}
+    } else {
+      fs.textContent=BTC_WORDS.sentBlock(j.amount).replace(/^Sent/, 'The faucet sent');
+      setTimeout(sync, 8000);
+    }
+  }catch(e){ fs.className='status err'; fs.textContent='Faucet error: '+(e?.message??e); }
+}
 document.querySelectorAll('#faucetBtns button').forEach(b=>{ b.onclick=()=>requestFaucet(b.dataset.faucet); });
 $('btnAddRec').onclick=addRecipientRow;
 $('btnHistSync').onclick=()=>sync();
@@ -8203,9 +8799,16 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     // A receive code (pay-code.js) is paid the way that fits what is sent: an asset at its
     // Sequentia part when the tree takes it, BTC at its Ark part when the Bitcoin ark pays it,
     // and anything else at its address.
-    for(const r of rows){ const d = payCodeRoute(r.addr, r.asset); r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); }
-    const byAddressNote = (btc) => rows.some(r=>r.byAddress)
-      ? [['', DEFAULT_WORDS.byAddress(btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock)]] : [];
+    // An asset to a wallet of another operator goes over Lightning when its code carries an invoice
+    // in it for the amount and asset-lightning.js's rule lets it (`lightning`).
+    for(const r of rows){
+      let atoms=null; if(r.asset!=='BTC' && !isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, sendPrecision(r.asset)); }catch{} }
+      const d = payCodeRoute(r.addr, r.asset, atoms);
+      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null;
+    }
+    const byAddressNote = (btc) => { const w = rows.find(r=>r.byAddress); if(!w) return [];
+      const arrives = btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock;
+      return [['', w.why ? w.why + ' ' + arrives : DEFAULT_WORDS.byAddress(arrives)]]; };
     if(!rows.length) throw new Error('add at least one recipient');
     const reset=()=>{ $('recipients').innerHTML=''; addRecipientRow(); };
     // Restricted (OpenAMP) assets settle on the enclave ledger, not on-chain — one transfer, one
@@ -8229,6 +8832,19 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       return;
     }
     for(const r of rows){ const p=recipientProblem(r.addr, r.asset); if(p) throw new Error(p); }
+    // Default mode: more than can be spent now, the rest vesting later, is refused with its date.
+    { const want=new Map(); for(const r of rows) if(r.asset!=='BTC'){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
+      for(const [h, a] of want) refuseIfVesting(h, a, sendableFor(h)); }
+    // A receive code of another operator, with an invoice in the asset that the rule lets through,
+    // is paid over Lightning out of the tree; when the way cannot carry it, at the code's address.
+    if(rows.some(r=>r.lightning)){
+      if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed);
+      const r=rows[0];
+      const again=()=>{ _lnPassedOver.add(r.addr); $('btnReview').click(); };
+      if(await assetLightningReview(r, reset, again)) return;
+      if(!r.codeAddress) throw new Error(DEFAULT_WORDS.byAddressNoWay);
+      r.addr=r.codeAddress; r.lightning=false; r.byAddress=true; r.why=DEFAULT_WORDS.byAddressNoWay;
+    }
     // A receive code of the operator this wallet holds its coins with is paid in the tree, in
     // seconds (default-arca.js treeRoute); everything else goes on as it always has.
     const codeRows=rows.filter(r=>leavesApi && leavesApi.treeRoute(r.addr));
@@ -8252,9 +8868,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     if(btcRows.length && btcRows.length!==rows.length)
       throw new Error("Bitcoin and Sequentia assets can't be sent in the same transaction");
     if(btcRows.length){
-      // Default mode: BTC leaves from the Bitcoin ark when it can pay this (btc-ark.js); an
-      // invoice or an Ark address only the ark pays.
-      if(btcRows.length===1 && btcArkRoutes() && btcArk.route(btcRows[0].addr)){
+      // BTC leaves from the Bitcoin ark when it can pay this (btc-ark.js); an invoice or an Ark
+      // address only the ark pays. Developer mode pays invoices over its own Lightning.
+      const arkRoute = btcRows.length===1 && btcArkPays() ? btcArk.route(btcRows[0].addr) : null;
+      if(arkRoute && !(devMode() && arkRoute==='invoice')){
         if(await btcArkSendReview(btcRows[0], reset)) return;
       }
       const outputs=rows.map(r=>{ const amount=parseAtoms(r.amtS, 8);
@@ -8282,6 +8899,7 @@ $('btnNewAddr').onclick=()=>{
 $('btnRecvMode').onclick=()=>{ showAddrDefault=!showAddrDefault; renderReceive(); };
 // An amount typed on Receive redraws the code (its invoice is made for the amount once typing stops).
 { let t=null; $('recvAmt').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(()=>{ _recvInv=null; _recvInvWatch++; renderReceive(); }, 600); }); }
+$('recvAsset').addEventListener('change', ()=>{ _recvInv=null; _recvInvWatch++; renderReceive(); });
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
 $('xpubForm').onchange=()=>renderXpubForm();
@@ -8490,7 +9108,9 @@ async function renderLnHistory(){
     }catch(e){ if(/unknown node key/.test(String(e && e.message || e))) _lnNoNode.set(key, now + 600000); /* else not answering now: left out */ }
   }));
   let trades=[]; try{ trades=lnTradeHistory(); }catch{}
-  const rows=lnHistoryRows({ nodes, trades });
+  let rows=lnHistoryRows({ nodes, trades });
+  // A move of the wallet's own from its channel to the Ark is no payment: default mode lists none.
+  if(lnToArk && !devMode()){ const own=lnToArk.ownHashes(); rows=rows.filter(r=> !own.has(String(r.hash||'').toLowerCase())); }
   card.classList.toggle('hide', !nodes.length && !trades.length);
   list.innerHTML='';
   if(!rows.length){ list.appendChild(el('div','muted','No Lightning payments yet.')); return; }
@@ -8526,13 +9146,20 @@ function renderHistory(){
   // would be a claim about the chain that nobody has checked: show the last snapshot (dated, on
   // the status line above), or say the history is being read.
   let rows, live=_scannedOnce;
+  // What the wallet paid and was paid in seconds, and its trades: kept by the page as they happen,
+  // so they show at once, before any sync.
+  const instant = instantHistoryRows();
   if(live){ try{ rows=historyRows(); }catch(e){ list.innerHTML=''; list.appendChild(el('div','err','History error: '+(e?.message??e))); return; } }
   else if(_snap && Array.isArray(_snap.hist)) rows=_snap.hist;
+  else if(instant.length) rows=[];
   else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your history…')); _histCounts.seq=null; arrangeHistory(); return; }
   list.innerHTML='';
   const pending=livePending();
-  _histCounts.seq=rows.length+pending.length; arrangeHistory();
-  if(!rows.length && !pending.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  _histCounts.seq=rows.length+pending.length+instant.length; arrangeHistory();
+  if(!rows.length && !pending.length && !instant.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  // Each instant row goes in before the first chain row older than it.
+  let ii=0;
+  const flushInstant=(beforeTs)=>{ while(ii<instant.length && (beforeTs==null || (instant[ii].at||0)/1000 >= beforeTs)) list.appendChild(instantItem(instant[ii++])); };
   // Sends this wallet has broadcast and the wollet has not recorded yet, newest first, on top.
   for(const p of pending.slice().reverse()){
     const item=el('div','item');
@@ -8563,9 +9190,13 @@ function renderHistory(){
   // One order, one row: the fills of a market order (one transaction per offer it took) are folded
   // under a row with the order's totals, opened with a click. swapGroups names them.
   const groups=swapGroups(ordered), boxes=new Map();
+  const devRows = devMode();
   for(const r of ordered){
     const txid=r.txid, k=kinds[txid];
+    // Default mode shows one row a payment: a speed-up is part of the payment it sped up.
+    if(!devRows && k && k.kind==='speedup') continue;
     const g=groups.byTx.get(txid);
+    if(r.height && r.ts && !g) flushInstant(r.ts);
     if(g && !boxes.has(g)){ const head=swapGroupRow(groups.members.get(g), groups.titles.get(g)); list.appendChild(head.item); list.appendChild(head.box); boxes.set(g, head.box); }
     const into = g ? boxes.get(g) : list;
     // Rows saved before swaps were named carry "unknown": name them from their legs too.
@@ -8595,6 +9226,8 @@ function renderHistory(){
     let tipNow = 0; try{ tipNow = wollet.tip().height(); }catch{}
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
     if(dropped){}
+    else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
+    else if(!devRows){}
     else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -8626,6 +9259,39 @@ function renderHistory(){
     if(g) item.classList.add('child');
     into.appendChild(item);
   }
+  flushInstant(null);
+  if(live && !devRows) autoSpeedSeq(rows).catch((e)=>console.warn('[speed up]', e?.message??e));
+}
+// The rows of instant-history.js, from the page's log and the Trade tab's own trade records.
+function instantHistoryRows(){
+  let recs=[];
+  try{ recs = userTrade ? userTrade.records() : JSON.parse(localStorage.getItem('swk.usertrade.'+walletTag())||'[]'); }catch{}
+  try{ return instantRows(instantLog(localStorage, walletTag()), recs); }catch(e){ console.warn('[history] instant rows:', e?.message??e); return []; }
+}
+// One row, as default mode words it (docs/DEFAULT_MODE.md, History): a trade is "Swapped <pay> for
+// <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
+function instantItem(r){
+  const metaOf=(h)=> h==='BTC' ? { ticker:'BTC', precision:8 } : assetMeta(h);
+  const fmtLeg=(l)=>{ const m=metaOf(l.asset), a=BigInt(l.atoms); return fmtAtoms(a<0n?-a:a, m.precision)+' '+m.ticker; };
+  const item=el('div','item instant');
+  const swap = r.kind==='swap' || r.kind==='returned';
+  item.appendChild(el('span','badge dir '+(swap?'b-swap':r.kind==='in'?'b-in':'b-out'), swap?'SWAP':r.kind==='in'?'IN':'OUT'));
+  const mid=el('div','grow');
+  let head, status='';
+  if(r.kind==='swap'){ head='Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1]); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
+  else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
+  else head = r.kind==='in' ? 'Received' : 'Sent';
+  mid.appendChild(el('div',null, head));
+  const when = r.at ? whenText(r.at) : '';
+  const sub=[when, status, r.kind==='out' && r.later && Date.now()-r.at < 3600000 ? 'Pending' : ''].filter(Boolean).join(' · ');
+  if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
+  item.appendChild(mid);
+  const amts=el('div','amts');
+  for(const l of r.legs){ const out = r.kind==='out' || BigInt(l.atoms)<0n; amts.appendChild(el('span','amt '+(out?'neg':'pos'), (out?'-':'+')+fmtLeg(l))); }
+  const fees = r.fee ? [r.fee] : (r.kind==='swap' ? (r.fees||[]) : []);
+  for(const f of fees) amts.appendChild(el('span','fee','fee '+fmtLeg(f)));
+  item.appendChild(amts);
+  return item;
 }
 // Whether the network still holds an unconfirmed transaction. A transaction can leave every
 // mempool without confirming: evicted when the mempool is full, expired after two weeks, or
@@ -8710,7 +9376,10 @@ function drawBtcRows(list, rows){
   rows = [...btcPendingSends().filter(p=>!known.has(p.txid)).map(p=>({ txid:p.txid, delta:p.delta, conf:false, height:0, time:0, mine:true })), ...rows];
   _histCounts.btc=rows.length; arrangeHistory();
   if(!rows.length){ list.appendChild(el('div','muted','No Bitcoin transactions yet.')); return; }
+  const dev = devMode(), kids = btcChildren(), sped = new Set(Object.values(kids));
   for(const t of rows){
+    // Default mode shows one row a payment: a speed-up is part of the payment it sped up.
+    if(!dev && kids[t.txid]) continue;
     const delta=BigInt(t.delta), incoming = delta >= 0n;
     const item=el('div','item');
     item.appendChild(el('span','badge dir '+(incoming?'b-in':'b-out'), incoming?'IN':'OUT'));
@@ -8718,6 +9387,13 @@ function drawBtcRows(list, rows){
     const when = t.conf ? (t.time ? new Date(t.time*1000).toLocaleString() : 'block '+t.height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/testnet4/tx/'+t.txid, t.txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub'+(t.conf?'':' unconf'), when+(t.mine ? ' · just sent, the explorer has not listed it yet' : ' · Bitcoin testnet4')));
+    if(!t.conf && !dev && sped.has(t.txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
+    if(!t.conf && dev && kids[t.txid]) mid.appendChild(el('div','kind','Speeds up '+kids[t.txid].slice(0,8)+'…'));
+    if(!t.conf && dev && !t.mine){
+      const b=el('button','ghost','Speed up'); b.style.cssText='padding:4px 10px;font-size:12px;margin-top:6px';
+      b.onclick=()=>btcSpeedDialog(t.txid);
+      mid.appendChild(b);
+    }
     item.appendChild(mid);
     const mag = delta<0n ? -delta : delta;
     item.appendChild(el('span','amt '+(incoming?'pos':'neg'), (incoming?'':'-')+fmtAtoms(mag,8)+' BTC'));
@@ -8769,6 +9445,7 @@ async function renderBtcHistory(){
   { const seenIds=new Set(rows.map(r=>r.txid)); const p=btcPendingSends(); const left=p.filter(x=>!seenIds.has(x.txid)); if(left.length!==p.length) saveBtcPending(left); }
   drawBtcRows(list, rows);
   keepBtcRows(rows);
+  if(!devMode()) autoSpeedBtc(rows).catch((e)=>console.warn('[speed up] BTC', e?.message??e));
 }
 // Into the snapshot too, so the next open shows these until its own first sync completes.
 function keepBtcRows(rows){
@@ -9026,6 +9703,47 @@ async function doCpfp(parentTxid, fee){
   }catch(e){ toast(e && e.settled ? e.message : 'Speed up failed: '+prettyErr(e)); }
 }
 
+// Default mode: every Sequentia transaction of the wallet's that has waited two blocks is sped up by
+// a child, by itself, in the fee asset the stuck one paid in or, when no producer prices that, in
+// the first priced asset the wallet holds; the pair at twice the network's floor, doubled at each
+// raise (speed-up.js). A raise replaces the earlier child. One whose fee asset no producer prices
+// at all is left: a child cannot make it worth mining.
+let _seqSpeeding = false;
+function seqSpedBook(){ try{ return JSON.parse(localStorage.getItem('swk.seqSped.'+walletTag())||'{}')||{}; }catch{ return {}; } }
+function saveSeqSpedBook(b){ try{ localStorage.setItem('swk.seqSped.'+walletTag(), JSON.stringify(b)); }catch{} }
+async function autoSpeedSeq(rows){
+  if(devMode() || _seqSpeeding || !wollet || !signer) return;
+  _seqSpeeding = true;
+  try{
+    let tip = 0; try{ tip = wollet.tip().height(); }catch{}
+    if(!(tip > 0)) return;
+    const kinds = txKinds(), book = seqSpedBook();
+    const waiting = rows.filter(r=>!r.height && (r.type==='outgoing'||r.type==='incoming'||r.type==='self') && !(kinds[r.txid] && kinds[r.txid].kind==='speedup')).map(r=>r.txid);
+    for(const id of dueNow(book, waiting, tip)){
+      const e = book[id];
+      try{
+        const stuck = stuckTx(id);
+        if(stuck.feeHex && !stuck.priced) throw new Error('its fee asset is priced by no producer');
+        const priced = (h) => feeRateEntry(h) && feeRateEntry(h).rate > 0;
+        const hex = stuck.priced ? stuck.feeHex : Object.keys(balObj()).find(priced);
+        if(!hex) throw new Error('the wallet holds no asset a producer prices');
+        const target = raiseRate(minRef(), e.raises);
+        const draft = applyFeeUnits(wollet.cpfpOf(new Txid(id)), hex, refRateToUnits(hex, minRef())).finish(wollet);
+        const cv = draft.extractTx().bytes().length + 27 * Math.max(1, draft.inputs().length);
+        const childRef = Math.max(minRef(), (target * (stuck.vsize + cv) - stuck.feeRef) / cv);
+        const pset = applyFeeUnits(wollet.cpfpOf(new Txid(id)), hex, refRateToUnits(hex, childRef)).finish(wollet);
+        const finalized = wollet.finalize(signer.sign(pset));
+        const child = (await broadcastClient.broadcast(finalized)).toString();
+        noteOwnTx(finalized); noteTxKind(child, { kind:'speedup', of:id });
+        queued('speed up › record the spend', () => { try { wollet.applyTransaction(ownTx(finalized)); } catch {} }).catch(()=>{});
+        console.log('[speed up]', id, 'by', child, 'at', target, 'reference atoms a vB for the pair');
+      }catch(err){ console.warn('[speed up]', id, err?.message??err); }
+      markRaised(book, id, tip);
+    }
+    saveSeqSpedBook(book);
+  }finally{ _seqSpeeding = false; }
+}
+
 // ---------- stake ----------
 // Where each bonded stake stands, by its bond txid, as last read from the chain
 // (stake-records.js stakeState). Re-read on every refresh, never sticky.
@@ -9065,6 +9783,7 @@ function stakeLine(s, st){
 }
 
 function renderStake(){
+  try{ fillStakeFeeAssets(); }catch{}
   try{ $('stPubkey').textContent = signer.stakerPublicKey(); }catch{ $('stPubkey').textContent='—'; }
   const list=$('stakeList'); list.innerHTML='';
   let st; try{ st=JSON.parse(localStorage.getItem(STAKES)||'[]'); }catch{ st=[]; }
@@ -9538,7 +10257,117 @@ $('acMin').onchange = () => {
   refreshAcStatus().catch(()=>{});
 };
 $('acSlip').onchange = () => { setRewardSettings({ maxSlippageBp: Number($('acSlip').value) }); refreshAcStatus().catch(()=>{}); };
-$('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').textContent='';
+// ---------- what a stake, a delegation or a mix needs on the chain ----------
+// Default mode holds what a person receives where it is paid in seconds (the Ark). A stake, a
+// pool's delegation record and a mix are made from coins the wallet holds on the chain, so the
+// wallet moves what is missing out of the Ark to its own address by itself (the library's quoted
+// offboard), says so, and waits for it to arrive; the person then reviews and signs as always.
+// Meanwhile, and for a while after, its upkeep leaves those coins on the chain (onchainQuiet).
+let _keepOnChainUntil = 0;
+const KEEP_ON_CHAIN_MS = 15 * 60_000, MOVE_WAIT_MS = 45 * 60_000, OPEN_WAIT_MS = 3 * 60_000;
+function onChainAtoms(hex){ try{ return BigInt(balObj()[hex]||0); }catch{ return 0n; } }
+function instantAtoms(hex){ try{ return (leavesApi && !devMode()) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n; }catch{ return 0n; } }
+// A margin for the network fees of `vbytes` of transactions, in atoms of `hex`, at the wallet's
+// default rate, twice over: what is moved for them is never short, and what is left stays the wallet's.
+function feeMarginAtoms(hex, vbytes = 1000){
+  const R = feeRateFor(hex), rfa = BigInt(DEFAULT_FEERATE) * BigInt(vbytes) * 2n / 1000n;
+  return (rfa * BigInt(EXCHANGE_RATE_SCALE) + R - 1n) / R;
+}
+const amountWords = (hex, atoms) => fmtAmount(atoms, assetMeta(hex).precision ?? 8) + ' ' + assetMeta(hex).ticker;
+// needs: [{hex, atoms}] on the chain; have(hex): what counts there (default: the chain's balance).
+// Answers whether anything was moved.
+// What the operator can pay out of an asset in a round now (its published `fundable`), in atoms,
+// or null when it does not say.
+async function operatorFundable(hex){
+  try{
+    const server = window.SEQ_ARCA && window.SEQ_ARCA.server; if(!server) return null;
+    const j = await fetch(server + '/v1/info', { cache:'no-store' }).then(r=> r.ok ? r.json() : null);
+    const a = j && (j.assets||[]).find(x=> x && x.asset===hex);
+    return a && a.fundable!=null ? BigInt(a.fundable) : null;
+  }catch{ return null; }
+}
+// The moves out of the Ark to this wallet's own addresses that are under way, by the library's
+// word (offboards): waiting for a round, in one, or being paid on the chain.
+async function movesUnderWay(){
+  try{ return ((await leavesApi.command('offboards')) || []).filter(o=> ['waiting','in_round','unlocking'].includes(o.state) && o.address && isOwnAddress(o.address)); }
+  catch{ return []; }
+}
+async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
+  let missing = [];
+  for(const n of needs){ const h = have(n.hex); if(h < n.atoms) missing.push({ hex:n.hex, atoms:n.atoms - h }); }
+  if(!missing.length) return false;
+  if(devMode()){ const m = missing[0]; throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
+  // More than can be used now, the rest vesting later: refused with its date, before anything moves.
+  for(const n of needs) refuseIfVesting(n.hex, n.atoms, have(n.hex) + instantAtoms(n.hex));
+  // What the wallet holds for instant payments is read once it has opened: wait for that, saying so.
+  if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
+    say(DEFAULT_WORDS.waitOpening);
+    const until = Date.now() + OPEN_WAIT_MS;
+    while(!leavesApi.isOpen() && Date.now() < until) await new Promise(r=>setTimeout(r, 1000));
+  }
+  if(!leavesApi || !leavesApi.isOpen()) throw new Error(DEFAULT_WORDS.stillOpening);
+  // A move asked before (this page earlier, or before a reload) counts: it is waited for, never asked twice.
+  const under = await movesUnderWay();
+  const coming = (hex)=> under.filter(o=>o.asset===hex).reduce((n,o)=> n + BigInt(o.amount||0), 0n);
+  const all = missing.map(m=>({ ...m }));
+  missing = missing.map(m=>({ hex:m.hex, atoms: m.atoms - coming(m.hex) })).filter(m=> m.atoms > 0n);
+  // The operator pays nothing below its smallest leaf of the asset: a smaller need moves that much.
+  for(const m of missing){ let least = 0n; try{ least = leavesApi.minLeaf ? leavesApi.minLeaf(m.hex) : 0n; }catch{} if(m.atoms < least) m.atoms = least; }
+  for(const m of missing){ const can = instantAtoms(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
+  const address = wollet.address(undefined).address().toUnconfidential().toString();
+  _keepOnChainUntil = Date.now() + MOVE_WAIT_MS + KEEP_ON_CHAIN_MS;
+  let minutes = arrivalMinutes(leavesApi.roundInterval());
+  const what = (missing.length ? missing : all).map(m=>amountWords(m.hex, m.atoms)).join(' and ');
+  // A round pays the whole coin a move gives (what is moved and its change) out of the operator's
+  // wallet: when that is more than the operator can fund now, nothing is asked, so no coin waits.
+  const quotes = [];
+  for(const m of missing){
+    let q; try{ q = await leavesApi.offboardQuote({ asset: m.hex, amount: String(m.atoms), address }); }
+    catch(e){ console.warn('[on chain] quote:', e?.message??e); _keepOnChainUntil = Date.now(); throw new Error(DEFAULT_WORDS.notMoved); }
+    const pays = m.atoms + BigInt((q && q.change) || 0), can = await operatorFundable(m.hex);
+    if(can != null && pays > can){ _keepOnChainUntil = Date.now(); console.warn('[on chain] the operator can fund', String(can), 'of', String(pays)); throw new Error(DEFAULT_WORDS.cannotMoveNow(amountWords(m.hex, m.atoms))); }
+    quotes.push(q);
+  }
+  say(DEFAULT_WORDS.movingOut(what, purpose, minutes));
+  try{
+    for(const [i, m] of missing.entries()){
+      const q = quotes[i];
+      const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, shown: q });
+      minutes = arrivalMinutes(v && v.round_within_seconds) || minutes;
+      try{ noteSent(localStorage, walletTag(), { asset: m.hex, atoms: m.atoms, fee: q && q.fee ? { asset: m.hex, atoms: BigInt(q.fee.amount||0) } : null, later: true }); }catch{}
+    }
+  }catch(e){ console.warn('[on chain] moving out of the Ark:', e?.message??e); _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; throw new Error(DEFAULT_WORDS.notMoved); }
+  say(DEFAULT_WORDS.movingOut(what, purpose, minutes));
+  // The library's sync carries the move through the operator's settlement; the page's reads the chain.
+  const until = Date.now() + MOVE_WAIT_MS;
+  let n = 0;
+  while(Date.now() < until){
+    await new Promise(r=>setTimeout(r, 10_000));
+    if(++n % 3 === 0){
+      try{ await leavesApi.syncNow(); }catch(e){ console.warn('[on chain] sync:', e?.message??e); }
+      // Still waiting for a round after a few minutes: the operator cannot pay that much on the
+      // chain yet. Said plainly; the move goes ahead by itself once it can, and the coins stay the wallet's.
+      if(n >= 18 && (await movesUnderWay()).some(o=>o.state==='waiting')) say(DEFAULT_WORDS.movingWaits(what, purpose));
+    }
+    try{ await sync(); }catch{}
+    if(needs.every(n=> have(n.hex) >= n.atoms)){ _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; return true; }
+  }
+  _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS;
+  throw new Error(DEFAULT_WORDS.notReady);
+}
+// The stake's fee asset: tSEQ unless the person chose another held asset the network takes for fees.
+function fillStakeFeeAssets(){
+  const sel=$('stFeeAsset'); if(!sel) return;
+  const prev=sel.value; sel.innerHTML='';
+  const hs=new Set([POLICY_HEX, ...Object.keys(balObj())]); try{ if(leavesApi) for(const h of leavesApi.leafAssets()) hs.add(h); }catch{}
+  for(const h of hs){
+    if(h!==POLICY_HEX && !(assetFigure(h) > 0n)) continue;
+    if(!(feeRateEntry(h) && feeRateEntry(h).rate>0)) continue;
+    const o=el('option'); o.value=h; o.textContent=h===POLICY_HEX ? 'tSEQ' : assetMeta(h).ticker; sel.appendChild(o);
+  }
+  if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;
+}
+$('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').className='status err'; $('stakeErr').textContent='';
   try{
     await afterRecordedSpends();
     const csv=STAKE_CSV;
@@ -9548,7 +10377,23 @@ $('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').tex
     if(atoms<=0n) throw new Error('enter an amount to stake');
     if(atoms<STAKE_MIN_ATOMS) throw new Error('stake is below the network minimum of '+fmtAtoms(STAKE_MIN_ATOMS,8)+' tSEQ');
     const ref=(input._refMode && (input.value||'').trim()) ? {typed:(input.value||'').trim(), ccy:(input._refCcy||REF)} : null;
-    const pset=network.txBuilder().addStakeOutput(pubkey, csv, atoms).feeRate(DEFAULT_FEERATE).finish(wollet);
+    // The minimum counts the fee only when the fee is paid in tSEQ: with too little tSEQ for both,
+    // the wallet offers another held asset that can pay it.
+    fillStakeFeeAssets();
+    let feeHex = $('stFeeAsset').value || POLICY_HEX;
+    const tseq = onChainAtoms(POLICY_HEX) + instantAtoms(POLICY_HEX);
+    refuseIfVesting(POLICY_HEX, atoms, tseq);
+    if(feeHex===POLICY_HEX && tseq >= atoms && tseq < atoms + feeMarginAtoms(POLICY_HEX)){
+      const other=[...$('stFeeAsset').options].map(o=>o.value).find(h=> h!==POLICY_HEX && onChainAtoms(h)+instantAtoms(h) >= feeMarginAtoms(h));
+      if(!other) throw new Error(DEFAULT_WORDS.stakeFeeShort);
+      $('stFeeAsset').value=other;
+      throw new Error(DEFAULT_WORDS.stakeFeeOther(assetMeta(other).ticker));
+    }
+    const fee = feeMarginAtoms(feeHex);
+    await ensureOnChain(feeHex===POLICY_HEX ? [{ hex:POLICY_HEX, atoms: atoms + fee }] : [{ hex:POLICY_HEX, atoms }, { hex:feeHex, atoms: fee }],
+      (t)=>{ $('stakeErr').className='status'; $('stakeErr').textContent=t; }, 'staked');
+    $('stakeErr').className='status err'; $('stakeErr').textContent='';
+    const pset=applyFee(network.txBuilder().addStakeOutput(pubkey, csv, atoms), feeHex).finish(wollet);
     // The review says what is being signed: a stake, its lock and the key it pays, not a payment.
     const extra=[['What it does', 'Locks this tSEQ in a stake that only this wallet\'s staker key can spend. Once its lock has passed it can be unbonded, and '+UNBOND_ANCHOR_DEPTH.toLocaleString()+' Bitcoin blocks (about two weeks) later claimed back into this wallet.'],
       ['Lock', STAKE_PERIOD_LABEL], ['Staker key', pubkey]];
@@ -9557,8 +10402,8 @@ $('btnStake').onclick=()=>busyButton($('btnStake'), async()=>{ $('stakeErr').tex
       st.push({pubkey, csv, period:STAKE_PERIOD_LABEL, atoms:atoms.toString(), txid:txid.toString(), time:Date.now()});
       localStorage.setItem(STAKES, JSON.stringify(st));
       $('stAmount').value=''; renderStake();
-    }, POLICY_HEX, {rows:[{atoms, hex:POLICY_HEX, ref}], extra, feeAssetHex:POLICY_HEX});
-  }catch(e){ $('stakeErr').textContent=plainErr(e); }
+    }, feeHex, {rows:[{atoms, hex:POLICY_HEX, ref}], extra, feeAssetHex:feeHex});
+  }catch(e){ $('stakeErr').className='status err'; $('stakeErr').textContent=plainErr(e); }
 });
 
 
@@ -9682,9 +10527,11 @@ async function signAuthorization(pubkey, atoms){
   });
 }
 
+// The pool board's payout line, in the wallet's words: the board says "on-chain" and "operator
+// commission", which default mode never says.
 function poolPayoutLine(p){
   if(!p) return 'unknown';
-  return p.payout || 'unknown';
+  return String(p.payout || 'unknown').replace(/\boperator commission\b/g, "the pool's commission").replace(/\bon-chain\b/g, 'on the chain');
 }
 
 function renderPools(){
@@ -9762,13 +10609,13 @@ function renderDelegation(){
   }
   if(pool.declared === false){
     warn('This signer has not declared itself a pool: it has committed to no payout policy and never asked for '
-       + 'delegations. It keeps everything its blocks earn, and nothing on-chain obliges it to pay you.');
+       + 'delegations. It keeps everything its blocks earn, and nothing on the chain obliges it to pay you.');
   } else if(!pool.policy_in_force){
-    warn('This pool has committed to no payout policy, so by default it keeps everything its blocks earn. Nothing on-chain obliges it to pay you.');
+    warn('This pool has committed to no payout policy, so by default it keeps everything its blocks earn. Nothing on the chain obliges it to pay you.');
   } else if(pool.policy_in_force.mode==='direct'){
     warn('This pool pays a committed address. The chain stops it redirecting the reward silently, but does not check that address shares anything with you.');
   } else if(pool.policy_in_force.mode==='split'){
-    warn('This pool shares rewards proportionally: they pool up on-chain and anyone can trigger the payout. Leaving forfeits your unclaimed share, so claim your rewards before you leave.');
+    warn('This pool shares rewards proportionally: they pool up on the chain and anyone can trigger the payout. Leaving forfeits your unclaimed share, so claim your rewards before you leave.');
   }
   for(const q of (pool.policy_pending||[])){
     const secs = q.blocks_away * (POOLS.block_seconds||60);
@@ -9827,6 +10674,10 @@ const tSEQ = (atoms) => fmtAtoms(BigInt(atoms), 8)+' tSEQ';
 // transaction spends that coin. Both are built and shown before either is
 // signed into the chain.
 async function reviewJoin(target){
+  // The delegation record and its two fees are paid in tSEQ from coins on the chain.
+  await ensureOnChain([{ hex:POLICY_HEX, atoms: stakeRecords.RECORD_ATOMS + feeMarginAtoms(POLICY_HEX, 2000) }],
+    (t)=>{ $('delegErr').className='status'; $('delegErr').textContent=t; }, 'used to join the pool');
+  $('delegErr').className='status err'; $('delegErr').textContent='';
   const ctx = stakeCtx();
   const p = await stakeRecords.prepareJoin(ctx, target);
   const kv = [
@@ -9867,7 +10718,7 @@ $('btnDelegate').onclick=async()=>{
       return;
     }
     await reviewJoin(target);
-  }catch(e){ $('delegErr').textContent = e?.message ?? String(e); }
+  }catch(e){ $('delegErr').className='status err'; $('delegErr').textContent = plainErr(e); }
 };
 
 $('btnUndelegate').onclick=async()=>{

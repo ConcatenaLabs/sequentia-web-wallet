@@ -30,11 +30,23 @@ function arrivesWords (minutes) {
   return minutes <= 5 ? 'It arrives in a few minutes.' : `It arrives in about ${minutes} minutes.`
 }
 
+// When coins moved out of the Ark are ready, from the operator's interval in minutes.
+function readyWords (minutes) {
+  if (!minutes) return 'They are ready shortly.'
+  return minutes <= 5 ? 'They are ready in a few minutes.' : `They are ready in about ${minutes} minutes.`
+}
+
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
   // Held, spendable before, and taken back out of the chain with the Bitcoin block it rested on:
   // still the wallet's, and counted, while the network takes it in again.
   redoing: (amount, ticker) => `${amount} ${ticker} being redone after a Bitcoin reorganisation`,
+  // Not refreshed while the wallet was away: taken on the chain under its own key before it could
+  // be swept, and put back by itself once the wallet is open again. Part of the figure meanwhile.
+  keptSafe: (amount, ticker) => `${amount} ${ticker} moved out of the Ark to keep it safe while you were away`,
+  // Held where it cannot be sent in seconds (a wallet's own Lightning channel, in a wallet made
+  // before), on its way to where it can (lightning-to-ark.js). Part of the figure meanwhile.
+  moving: (amount, ticker) => `Moving ${amount} ${ticker} so it can be sent in seconds.`,
   codeLabel: 'Receive code',
   receiveTip: 'Any asset, any amount. A payment from another Sequentia wallet arrives in seconds. Each code is paid once; a new one shows when it is.',
   receiveWait: 'Making your receive code\u2026',
@@ -48,6 +60,18 @@ export const DEFAULT_WORDS = Object.freeze({
   // A receive code paid at its address, because nothing the wallet holds pays it in seconds.
   byAddress: (arrives) => `This can't arrive in seconds from what you hold now, so it goes to the address. ${arrives}`,
   arrivesNextBlock: 'It arrives after the next block, in about a minute.',
+  // A receive code of a wallet elsewhere whose invoice is not used (asset-lightning.js): above the
+  // page's limit, or when the way to that wallet cannot carry the payment now.
+  byAddressAbove: (limit) => `A payment of more than ${limit} USD to this wallet goes to the address.`,
+  byAddressNoWay: 'This can’t arrive in seconds right now, so it goes to the address.',
+  // A payment to a wallet elsewhere, in seconds: held until that wallet takes it; refused or come
+  // back, it is offered to the address.
+  lnOnItsWay: 'On its way: it arrives once the other wallet takes it.',
+  lnNotThrough: 'This couldn’t go through in seconds, and nothing was sent. Send it to the address instead? It arrives after the next block, in about a minute.',
+  lnCameBack: 'This couldn’t go through in seconds and came back to you. Send it to the address instead? It arrives after the next block, in about a minute.',
+  toAddress: 'Send to the address',
+  // Receive: the optional amount when it is asked in an asset rather than BTC.
+  amountHint: 'Amount (optional)',
   send: 'Send',
   sending: 'Sending\u2026',
   sent: (amount, ticker, seconds) => `Sent ${amount} ${ticker} (${seconds} s).`,
@@ -59,6 +83,27 @@ export const DEFAULT_WORDS = Object.freeze({
   fee: (amount, ticker) => `Fee ${amount} ${ticker}`,
   sentLater: (amount, ticker, minutes) => `Sent ${amount} ${ticker}. ${arrivesWords(minutes)}`,
   faucetReceived: (what) => `Received ${what}.`,
+  // A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain: what
+  // they need is moved out of the Ark first, by the wallet itself.
+  movingOut: (what, purpose, minutes) => `Moving ${what} out of the Ark so it can be ${purpose}. ${readyWords(minutes)} Keep this page open.`,
+  movingWaits: (what, purpose) => `${what} cannot be moved out of the Ark yet: the network moves it as soon as it can, and it stays yours meanwhile. It is ${purpose} then, while this page is open; or come back later and press the button again.`,
+  cannotMoveNow: (what) => `${what} cannot be moved out of the Ark right now: the network has too little of it free. Nothing has moved: try again later.`,
+  notEnough: (amount, ticker) => `Not enough ${ticker}: ${amount} ${ticker} short.`,
+  stillOpening: 'Your wallet is still opening: try again in a moment.',
+  waitOpening: 'Your wallet is still opening; this goes on by itself once it has.',
+  notMoved: 'This could not be moved out of the Ark just now. Nothing was spent: try again in a moment.',
+  notReady: 'What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes.',
+  stakeFeeOther: (ticker) => `Not enough tSEQ for the stake and its fee: the fee is paid in ${ticker} instead, chosen below. Press Review stake again.`,
+  stakeFeeShort: 'Not enough tSEQ for the stake and its fee: stake a little less, or hold an asset that can pay the fee.',
+  // What the wallet holds that nothing can move before a date (a vesting allocation): part of the
+  // figure, one line under it for each date, never counted as what can be spent.
+  vests: (amount, ticker, date) => `${amount} ${ticker} vests on ${date}`,
+  vestsOn: (date) => `Vests on ${date}`,
+  // Any action asked for more than can be spent now, the rest of it held until a date.
+  notVested: (amount, ticker, date) => `${amount} ${ticker} of this vests on ${date}, and can be used from then. Nothing has moved.`,
+  // The same, refused by the network, which names only the date.
+  vestingRefused: (date) => `Part of this vests on ${date}, and can be used from then. Nothing has moved.`,
+  vestingRefusedUndated: 'Part of this has not vested yet, and can be used once it has. Nothing has moved.',
 })
 
 // The minutes a payment to an address from the tree takes at most, from the operator's interval
@@ -79,9 +124,11 @@ export function addressRoute (amount, onchain, treeSpendable) {
 }
 
 // The coin states a balance counts as arriving: held, not yet spendable (a board not yet final,
-// a transfer recorded and not yet completed; `returning`, a coin the operator took at its expiry
-// while the wallet was away, which it owes back and repays as a new coin).
-export const ARRIVING_STATES = Object.freeze(['pending', 'returning'])
+// a transfer recorded and not yet completed; `given`, a coin given up in the next round for a new
+// one, such as a coin received out of round that the wallet refreshes by itself; `returning`, a
+// coin the operator took at its expiry while the wallet was away, which it owes back and repays
+// as a new coin).
+export const ARRIVING_STATES = Object.freeze(['pending', 'given', 'returning'])
 
 // How often a wallet that could not join the page's operator tries again, while the page is open.
 export const JOIN_RETRY_MS = 120_000
@@ -101,6 +148,17 @@ export function pinnedOperator (cfg) {
   if (typeof nodeUrl !== 'string' || !/^https?:\/\//.test(nodeUrl)) return null
   if (typeof operator !== 'string' || !/^[0-9a-f]{64}$/.test(operator)) return null
   return { server: server.replace(/\/+$/, ''), node_url: nodeUrl, operator }
+}
+
+// The watchtowers the page names beside those its operator names (`watchtowers` in its
+// operator's configuration): those other operators run for this operator's users, so a coin
+// does not rest on its own operator alone to name who watches for it. Only https URLs (or
+// http on this machine), at most eight; the library deposits with one only when its info says
+// it watches for the wallet's own operator, and passes over the rest.
+export function defaultWatchtowers (cfg) {
+  const list = (cfg && Array.isArray(cfg.watchtowers)) ? cfg.watchtowers : []
+  return list.filter((u) => typeof u === 'string' && (/^https:\/\/[^\s]+$/.test(u) || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/[^\s]*)?$/.test(u)))
+    .map((u) => u.replace(/\/+$/, '')).slice(0, 8)
 }
 
 // The operator's server must show the key the page pinned before the wallet joins it, and the
@@ -148,6 +206,13 @@ export function arrivingAtoms (balance, asset) {
   let n = 0n
   for (const s of ARRIVING_STATES) n += big(states[s])
   return n
+}
+
+// What of an asset was moved out to keep it safe while the wallet was away (the library's balance
+// `kept_safe`, part of what it counts as `exiting`), in atoms, until the wallet has put it back.
+export function keptSafeAtoms (balance, asset) {
+  const states = (balance && balance.arca && balance.arca[asset]) || {}
+  return big(states.kept_safe)
 }
 
 // What of an asset is being redone: coins the library marks `redoing` (spendable once, then taken
@@ -205,10 +270,34 @@ export async function boardAll (run, c, tries = 3) {
     let q
     try { q = await run('board_quote', { asset: c.asset, amount: String(v) }) } catch { fee = fee * 2n + 1n; continue }
     const f = big(q && q.fee && q.fee.amount)
-    if (v + f <= c.onchain) return await run('board', { asset: c.asset, amount: String(v), shown: q.fee })
+    if (v + f <= c.onchain) {
+      const r = await run('board', { asset: c.asset, amount: String(v), shown: q.fee })
+      // What the board took off the chain (its amount and its fee), for onchainLessBoards.
+      return r && typeof r === 'object' ? { ...r, spent: String(v + f) } : r
+    }
     fee = f
   }
   return null
+}
+
+// What a board just made takes off the chain: `onchain` atoms as the page's own reading of the
+// chain shows them, less what the board spent (`board`: { spent, below, at }, from boardSpent)
+// while that reading does not show it spent yet. The board's leaf counts as arriving in the tree
+// from the moment it is made, so without this the coins count twice until the reading catches
+// up (a block, or the page's next scan). The board is taken as seen once the reading drops to
+// what it left (`below`), or after half an hour. -> { atoms, seen }
+export const BOARD_SEEN_MS = 30 * 60_000
+export function onchainLessBoards (board, onchain, nowMs) {
+  const o = big(onchain)
+  if (!board) return { atoms: o, seen: true }
+  if (o <= big(board.below) || nowMs - Number(board.at) > BOARD_SEEN_MS) return { atoms: o, seen: true }
+  const v = o - big(board.spent)
+  return { atoms: v > 0n ? v : 0n, seen: false }
+}
+// The record onchainLessBoards keeps for a board of `held` atoms on the chain (the library's
+// reading when it boarded) that spent `spent`, made at `at`.
+export function boardSpent (held, spent, at) {
+  return { spent: String(big(spent)), below: String(big(held) - big(spent)), at }
 }
 
 // The assets a wallet lists to pay or send from: BTC always (the parent chain, first-class,
@@ -224,3 +313,106 @@ export function heldAssetList (balances, others = []) {
   return out
 }
 
+
+// ---- what the wallet holds that cannot move before a date (a vesting allocation) ----
+//
+// A vesting distribution pays a key of the wallet a coin nobody can move before its vest date.
+// The leaf library's `claims` lists it (state `vesting`, `vest` a median time, `vests` the date in
+// words); from that date its `care` takes it up by itself and it is an ordinary coin. Until then
+// the wallet shows it under the asset's figure, counts it in the figure and the headline, and
+// never as what can be spent. `care` and `claim` list a vesting claim without its asset or value:
+// only `claims` is read for this.
+
+// How often the wallet reads its claims at most (and once after each care).
+export const CLAIMS_EVERY_MS = 120_000
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+// The UTC date of a unix time in words, as the library writes it: "3 November 2026".
+export function dateWords (t) {
+  const d = new Date(Number(t) * 1000)
+  if (!Number.isFinite(d.getTime())) return ''
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+}
+
+// A `claims` answer -> what vests, one entry for each asset and date (claims vesting on the same
+// day are one line), earliest first: [{ asset, vest, vests, atoms }] (`vest` the earliest median
+// time of the entry, `atoms` a decimal string, so the list crosses a message boundary as it is).
+// A claim whose date has passed and that the wallet has not taken up yet (state `open`, with a
+// vest time) stays in the figure as arriving, `arriving: true`, one entry per asset, until care
+// takes it up a moment later: the figure never dips between the date and the take-up.
+export function vestingLots (claims) {
+  const by = new Map()
+  for (const c of Array.isArray(claims) ? claims : []) {
+    if (!c || c.held || typeof c.asset !== 'string') continue
+    const vest = Number(c.vest)
+    const atoms = big(c.value)
+    if (c.vest == null || !Number.isFinite(vest) || vest <= 0 || atoms <= 0n) continue
+    const arriving = c.state === 'open'
+    if (c.state !== 'vesting' && !arriving) continue
+    const vests = (typeof c.vests === 'string' && c.vests) || dateWords(vest)
+    const k = c.asset + '|' + (arriving ? '' : vests)
+    const e = by.get(k)
+    if (e) { e.atoms += atoms; if (vest < e.vest) { e.vest = vest; if (arriving) e.vests = vests } } else by.set(k, { asset: c.asset, vest, vests, atoms, ...(arriving ? { arriving: true } : {}) })
+  }
+  return [...by.values()].sort((a, b) => a.vest - b.vest || (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0))
+    .map((e) => ({ ...e, atoms: e.atoms.toString() }))
+}
+
+// What of an asset has vested and is arriving (taken up by the wallet a moment later), in atoms.
+export function vestedArriving (lots, asset) {
+  return vestingFor(lots, asset).filter((l) => l.arriving).reduce((n, l) => n + big(l.atoms), 0n)
+}
+
+// The entries of one asset still to vest (one line under the figure for each), earliest first.
+export function vestingLines (lots, asset) {
+  return vestingFor(lots, asset).filter((l) => !l.arriving)
+}
+
+// The entries of one asset, earliest first.
+export function vestingFor (lots, asset) {
+  return (Array.isArray(lots) ? lots : []).filter((l) => l && l.asset === asset)
+}
+
+// What of an asset vests later, in atoms.
+export function vestingAtoms (lots, asset) {
+  return vestingFor(lots, asset).reduce((n, l) => n + big(l.atoms), 0n)
+}
+
+// The assets anything vests in.
+export function vestingAssets (lots) {
+  return [...new Set((Array.isArray(lots) ? lots : []).filter((l) => l && big(l.atoms) > 0n).map((l) => l.asset))]
+}
+
+// Whether `asked` atoms of an asset need what has not vested: more than `spendable`, and no more
+// than what vests on top of it. -> null, or { atoms: the part of what is asked that is not
+// spendable now, vest, vests: the earliest date from which all of it can be used }, or, when what
+// has vested and is arriving covers it, { atoms, arriving: true } (it can be used in a moment).
+// Asked for more than even all of it covers, it is plainly not enough: null, for the action's own
+// refusal.
+export function vestingShort (lots, asset, asked, spendable) {
+  const a = big(asked), s = big(spendable) > 0n ? big(spendable) : 0n
+  if (a <= s) return null
+  const need = a - s
+  let got = vestedArriving(lots, asset)
+  if (got > 0n && got >= need) return { atoms: need, arriving: true }
+  for (const l of vestingLines(lots, asset)) {
+    got += big(l.atoms)
+    if (got >= need) return { atoms: need, vest: l.vest, vests: l.vests }
+  }
+  return null
+}
+
+// A refusal of the network's for a coin that has not vested (the operator's code `vesting`, its
+// message naming the median time) in plain words, or null for any other.
+export function vestingRefusal (e) {
+  if (!e || e.code !== 'vesting') return null
+  const m = /median time (\d+)/.exec(String(e.message || ''))
+  const date = m ? dateWords(Number(m[1])) : ''
+  return date ? DEFAULT_WORDS.vestingRefused(date) : DEFAULT_WORDS.vestingRefusedUndated
+}
+
+// Whether a reading of `claims` shows a claim whose vest date has passed that the wallet has not
+// taken up yet: care is then run at once rather than at its pace, so it becomes a coin by itself.
+export function vestedOpen (claims) {
+  return (Array.isArray(claims) ? claims : []).some((c) => c && c.state === 'open' && !c.held && c.vest != null)
+}

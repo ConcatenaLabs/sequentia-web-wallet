@@ -19,8 +19,8 @@ index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools,
  │   └─ leaf-request.js    reads a receive request for the approval dialog (copied to the extension)
  │   └─ leaves/worker.js   dedicated worker running leaves/pkg/ (the operator wallet library, WASM,
  │                         tracked): blocking HTTP as synchronous XHR, its SQLite store on OPFS
- ├─ btc-ark.js             default mode's BTC on the Bitcoin ark: route of a BTC payment, the board
- │   │                     of confirmed BTC from the page's key, the composer's deps.btc
+ ├─ btc-ark.js             BTC on the Bitcoin ark: route of a BTC payment, the board of confirmed
+ │   │                     BTC from the page's key, the trade engine's deps.btc while it is open
  │   └─ btc-ark/worker.js  dedicated worker running btc-ark/pkg/ (Bark's wallet, WASM, tracked):
  │                         IndexedDB store, gRPC-web to the ark's server, Esplora for testnet4
  ├─ contracts.js           developer mode: the Contracts tab (template, instance, coin, path, the
@@ -137,7 +137,7 @@ deployment; everything else defaults to same-origin paths):
 | `SEQ_ONCHAIN_CONF` | `{n:1, t:'10 minutes'}` | Bitcoin on-chain confirmation estimate for the timing banner |
 | `SEQ_LEAVES_CARE_MS` | `600000` | how often, at most, the leaf wallet runs the library's `care` (claims taken up, refresh plans kept) after a sync or a tick |
 | `SEQ_USER_TRADE` | unset | unset or `true`: the Trade tab is the user composer (three inputs, one button, for the pairs `user-mode/pairs.json` admits on the page's chain) in default mode and the full composer in developer mode; `false`: the full composer in both modes |
-| `SEQ_ARCA` | `{ server: origin + '/arca', node_url: origin + '/node-rpc', operator: <the testnet operator's key> }` | the operator user mode keeps its coins with, its key pinned (`default-arca.js`); `null` joins none by itself |
+| `SEQ_ARCA` | `{ server: origin + '/arca', node_url: origin + '/node-rpc', operator: <the testnet operator's key>, watchtowers: [<other operators' watchtowers for its users>] }` | the operator user mode keeps its coins with, its key pinned (`default-arca.js`); `null` joins none by itself. `watchtowers` (`defaultWatchtowers`) are those other operators run for this operator's users: the wallet deposits each coin with them, sealed, beside the ones the operator names, so its coins do not rest on the operator alone to name who watches them; the library passes over one that watches for another operator |
 | `SEQ_LEAF_MAKERS` | `[origin + '/leafmaker', origin + '/leafmaker-btc']` | the live leaf makers user mode's Trade tab asks for in-tree swaps and BTC trades |
 | `SEQ_USER_MODE_PAIRS` | `user-mode/pairs.json` | the list of pairs user mode offers (a URL) |
 | `SEQ_LEAVES_TICK_MS` | `60000` | how often the page reads the leaf wallet's schedule (it syncs when the schedule is due, when the time the schedule gave after the last sync arrives, whatever it reads later, and every 30 s at most while something is in flight) |

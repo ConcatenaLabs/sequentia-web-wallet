@@ -25,8 +25,10 @@
 // hourly and only after two quiet minutes). Care takes up
 // every open claim named for one of the wallet's receive keys (scanning the addresses
 // the kit handed out and 20 more), cancels each refresh plan whose coin has moved, and
-// signs a plan for every leaf of a round at once (`plan_within`: PLAN_EVERY_ROUND_LEAF),
-// so that a wallet closed across that coin's expiry keeps it, whenever it closes. A coin
+// signs a plan for a leaf of a round once its first step could run within the library's
+// reach (ten days), so a leaf stays free to trade and pay out of round for most of its life,
+// and a wallet closed across its expiry keeps it; one closed earlier and kept away past the
+// expiry finds the coin repaid by the operator, less its late-refresh fee. A coin
 // received or boarded out of round is refreshed into a round first once its refresh
 // could run within ten days, since that refresh costs a fee; it is free to pay until
 // then. A planned coin is paid out of round by no wallet, so a payment the unplanned
@@ -64,6 +66,7 @@
 //   claimScan()         optional: how many receive keys `care` looks for claims under
 //                       (the kit wallet's next receive index and 20 more)
 //   careEveryMs         optional: how often `care` runs at most (default CARE_EVERY_MS)
+//   claimsEveryMs       optional: how often `claims` is read at most (default CLAIMS_EVERY_MS)
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 //   pinned()            optional: the page's operator ({ server, node_url, operator }, the key
@@ -78,14 +81,14 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, anchorDepth, boardCandidates, boardAll, JOIN_RETRY_MS } from './default-arca.js'
+import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
   user: 'User mode',
   userLine: 'One figure per asset, and the wallet chooses how value moves.',
   developer: 'Developer mode',
-  developerLine: 'Every rail by name, side by side (on-chain, leaves and Lightning), each with its balance and its manual controls, and the developer tools.',
+  developerLine: 'Every way the wallet can move value, side by side, each with its own balance and controls, and the developer tools.',
   note: 'Kept for this wallet. Sites that ask the wallet for its mode follow it.',
 })
 
@@ -95,13 +98,24 @@ export const JOINED_KEY = 'swk.leaves.joined'        // + '.' + tag: this wallet
 export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf address handed to pages
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
+export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
+export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
+export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
 // User mode: how often the open page reads the wallet's mailbox, so that a payment to its receive
 // code shows within seconds rather than at the schedule's next sync.
 export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
+// How often user mode asks the library to refresh what it received out of round.
+export const REFRESH_EVERY_MS = 120_000
+// Whether user mode refreshes what it receives out of round by itself: on unless the page sets
+// window.SEQ_REFRESH_RECEIVED = false. The library gives a coin up only where the operator can
+// fund its refresh and takes back a refresh that waits, so a coin received stays the wallet's to pay with.
+export function refreshReceivedOn () {
+  try { return !(typeof window !== 'undefined' && window.SEQ_REFRESH_RECEIVED === false) } catch { return true }
+}
 // The library's commands that only read (bark/src/arca/command.rs reads_only): a quote's.
 export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 'refusals', 'participations', 'schedule', 'orders',
   'swaps', 'plans', 'info', 'supply', 'board_quote', 'quote', 'settle_quote', 'take_quote', 'order_fill_quote', 'order_quote',
@@ -115,9 +129,6 @@ export const BOND_QUIET_MS = 120_000
 export const TICK_MS = 60_000
 // How often `care` runs at most, after a sync or a tick of the schedule.
 export const CARE_EVERY_MS = 10 * 60_000
-// `care`'s planning reach: every leaf of a round is planned at the first care after it
-// is made (the library's PLAN_EVERY_ROUND_LEAF).
-export const PLAN_EVERY_ROUND_LEAF = 4294967295
 // A payment through a release: how often the wallet syncs while it waits for the round
 // that frees the planned coins, how long it waits at most, and how many releases one
 // payment may need (a release can fall short by the new leaf's own margins).
@@ -125,9 +136,10 @@ export const RELEASE_POLL_MS = 15_000
 export const RELEASE_WAIT_MS = 3 * 3600_000
 export const RELEASE_TRIES = 3
 
-// The arguments `care` runs with: the page's claim scan, and every leaf of a round planned.
+// The arguments `care` runs with: the page's claim scan. Its planning reach is the library's
+// own: a leaf of a round is planned once its first step could run within ten days.
 export function careArgs (scan) {
-  const a = { plan_within: PLAN_EVERY_ROUND_LEAF }
+  const a = {}
   if (scan) a.scan = scan
   return a
 }
@@ -181,8 +193,13 @@ export function frozenSentence (amount, ticker) {
 // plainly; every other refusal as it is.
 export function plainRefusal (e) {
   const m = String((e && e.message) || '')
+  // The operator's own reason, when it asks for the wallet to be updated: said so, plainly.
+  if (e && e.code === 'declined' && /\bupdate the wallet\b/i.test(m)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: UPDATE_WORDS })
   if (e && e.code === 'declined') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: DECLINED_WORDS })
   if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
+  // A coin that has not vested (the operator's `vesting`): its date, plainly.
+  const vested = vestingRefusal(e)
+  if (vested) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: vested })
   // A receive code is paid once: the operator refuses a second payment to its key.
   if (e && e.code === 'key_reused') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: CODE_PAID_WORDS })
   if ((e && e.code === 'frozen') || /\bfrozen\b|\bpaused\b/i.test(m)) {
@@ -194,6 +211,10 @@ export function plainRefusal (e) {
 // A payment the operator's signer refuses for what it asks, which it would refuse again
 // however often it were asked (the server's `declined`): the library has put the coins back.
 export const DECLINED_WORDS = 'This payment was declined; nothing was sent.'
+// The operator declines what an out-of-date wallet asks (one that hands its forfeits over only
+// after a round is broadcast, to an operator building batches without a sweep), and says to
+// update it: in its words, plainly.
+export const UPDATE_WORDS = 'This wallet is out of date for this: update it, then try again. Nothing was taken.'
 
 export const CODE_PAID_WORDS = 'This receive code was paid already: ask for a new one. Nothing was sent.'
 
@@ -469,6 +490,18 @@ export function when (t, now) {
 }
 
 // The steps of one exit answer, for the drill's log.
+// The last transaction an exit drill broadcast (its claim, else its last step), for Speed up.
+export function lastBroadcast (runs) {
+  for (const r of [...(runs || [])].reverse()) {
+    const v = r && r.value
+    if (!v) continue
+    if (v.claim) return typeof v.claim === 'string' ? v.claim : v.claim.txid
+    const steps = v.broadcast || []
+    if (steps.length) return steps[steps.length - 1].txid
+  }
+  return null
+}
+
 export function exitSteps (answer) {
   return ((answer && answer.broadcast) || []).map((s) => ({
     txid: s.txid,
@@ -487,11 +520,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const now = ctx.now || (() => Date.now())
   const tickMs = ctx.tickMs || TICK_MS
   const careEvery = ctx.careEveryMs || CARE_EVERY_MS
+  const claimsEvery = ctx.claimsEveryMs || CLAIMS_EVERY_MS
   const sleep = ctx.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const log = (m) => { try { (ctx.log || console.log)(m) } catch {} }
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
     refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
-    careAt: null, lastCare: null, plans: null, claims: null, distributions: null }
+    careAt: null, lastCare: null, plans: null, claims: null, distributions: null, kept: null, claimsAt: null, vesting: null }
   // What is typed into a form survives a re-render (sync re-renders the panels by itself).
   const bind = (node) => {
     if (S.form[node.id] != null) node.value = S.form[node.id]
@@ -554,6 +588,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open) return
     const [b, c, p, s, r] = [await run('balance'), await run('coins'), await run('participations'), await run('schedule'), await run('refusals')]
     S.balance = b; S.coins = c || []; S.participations = p || []; S.schedule = s; S.refusals = r || []
+    try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
     // The plans are shown in developer mode only; reading them asks nothing of the operator.
     if (dev()) { try { const pl = await run('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
     if (ctx.onChange) try { ctx.onChange() } catch {}
@@ -571,6 +606,25 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   const tag = () => { try { return ctx.walletTag ? ctx.walletTag() : 'default' } catch { return 'default' } }
+  // What the balance shows: the library's answer once it has given one this session; until then the
+  // last one it gave this wallet, so a reload opens on the figures it closed on (display only:
+  // nothing is paid or chosen from it, and every command waits for the library itself).
+  const shown = () => {
+    if (S.balance) return S.balance
+    const k = tag()
+    if (!S.kept || S.kept.tag !== k) { let v = null; try { v = JSON.parse(ctx.store.getItem(tagged(BALANCE_KEY, k)) || 'null') } catch {} S.kept = { tag: k, v } }
+    return S.kept.v
+  }
+  // A payment another service says it has made to this wallet (the faucet, paying the receive
+  // code), counted as arriving from that moment until the library's balance holds it, or for two
+  // minutes at most: the person sees it the moment they are told it was sent.
+  S.expected = []
+  const liveLeaves = (hex) => { const b = leafBalances(shown()).get(hex); return b ? b.leaves : 0n }
+  const expecting = (hex) => {
+    const t = now()
+    S.expected = S.expected.filter((x) => t < x.until && liveLeaves(x.hex) < x.base + x.atoms)
+    return S.expected.filter((x) => x.hex === hex).reduce((n, x) => n + x.atoms, 0n)
+  }
   const dev = () => devModeOn(ctx.store, tag())
   const emit = (name, data) => { if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {} }
   const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
@@ -606,6 +660,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
       S.joinError = null
       S.openedAt = now()
+      // The other operators' watchtowers, beside the operator's own: the wallet deposits each
+      // coin with them too, sealed, at its next sync.
+      try { await run('set_default_watchtowers', { urls: defaultWatchtowers(ctx.pinned && ctx.pinned()) }) } catch (e) {
+        log('[leaves] default watchtowers not set: ' + ((e && e.message) || e))
+      }
     } catch (e) {
       S.open = false
       S.joinError = e
@@ -737,7 +796,35 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (careDue(S.careAt, now(), careEvery)) await careIfDue()
       else if (S.bondLater) await bondIfIdle()
       await boardArrivals()
+      await refreshReceived()
     } finally { S.busy = false; render() }
+  }
+
+  // ---- user mode: what is received out of round is refreshed at the next round ----
+  // A coin another wallet paid this one out of round rests on its senders until it is refreshed
+  // in a round (until then a sender together with the operator could spend it again). In user
+  // mode the library gives every such coin up in the operator's next round for a coin of its own
+  // (`refresh_received`), at most once every REFRESH_EVERY_MS, never ahead of a person, and never
+  // while the page's own on-chain payment may still be spending coins. Developer mode does it
+  // only when asked. Until the round is final the coin counts as arriving. Nothing is said unless
+  // it goes wrong: a refusal is kept in S.lastRefresh and asked again at the next turn.
+  // On unless the page sets window.SEQ_REFRESH_RECEIVED = false. The library gives up a coin only
+  // with an operator that takes back a refresh that waits, and only as much of each asset as the
+  // operator can fund now; a refresh that still waits is taken back after two minutes, and a
+  // payment or a trade that needs its coins takes it back first.
+  async function refreshReceived () {
+    if (!refreshReceivedOn()) return
+    if (!S.open || dev() || !pinned() || S.asked) return
+    if (S.refreshedAt != null && now() - S.refreshedAt < REFRESH_EVERY_MS) return
+    try { if (ctx.onchainQuiet && ctx.onchainQuiet()) return } catch {}
+    S.refreshedAt = now()
+    try {
+      const v = await run('refresh_received', {})
+      S.lastRefresh = { at: now(), value: v }
+      const n = ((v && v.refreshed) || []).length
+      if (n) { log(`[leaves] ${n} coin(s) received out of round given up in the next round`); await reload() }
+      for (const l of (v && v.left) || []) log(`[leaves] a received coin left as it is: ${l.why}`)
+    } catch (e) { S.lastRefresh = { at: now(), error: e }; log('[leaves] refreshing what was received: ' + (e && e.message)) }
   }
 
   // ---- user mode: coins that land on the chain go into the tree by themselves ----
@@ -747,6 +834,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // is the person's; never while a person waits on the wallet, or while the page's own on-chain
   // payment may still be spending coins; coins the library refused to board are asked again
   // only once they change. The coin shows as arriving until the board is final.
+  function boardsKept () {
+    try { return JSON.parse(ctx.store.getItem(tagged(BOARDS_KEY, tag())) || '{}') || {} } catch { return {} }
+  }
+  function keepBoard (asset, rec) {
+    const all = boardsKept()
+    if (rec) all[asset] = rec; else delete all[asset]
+    try { ctx.store.setItem(tagged(BOARDS_KEY, tag()), JSON.stringify(all)) } catch {}
+  }
   async function boardArrivals () {
     if (!S.open || dev() || !pinned() || S.asked) return
     try { if (ctx.onchainQuiet && ctx.onchainQuiet()) { upkeepSoon(30_000); return } } catch {}
@@ -761,7 +856,13 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (refused.get(c.asset) === String(c.onchain)) continue
       try {
         const v = await boardAll(run, c)
-        if (v) { boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }; emit('leafArrived', { asset: c.asset, value: String(c.onchain), kind: 'board' }) }
+        if (v) {
+          boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }
+          // Until the page's reading of the chain shows the board's coins spent, they are taken off
+          // it: the board's leaf counts as arriving from now (onchainLessBoards).
+          if (v.spent) keepBoard(c.asset, boardSpent(c.onchain, v.spent, now()))
+          emit('leafArrived', { asset: c.asset, value: String(c.onchain), kind: 'board' })
+        }
         else refused.set(c.asset, String(c.onchain))
         log(`[leaves] board of ${c.asset.slice(0, 8)}: ${v ? 'boarded ' + (v.value || '') : 'nothing to board after the fee'}`)
       } catch (e) { refused.set(c.asset, String(c.onchain)); S.lastBoard = { at: now(), asset: c.asset, error: e }; log(`[leaves] board of ${c.asset.slice(0, 8)} refused: ${e && e.message}`) }
@@ -816,7 +917,39 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
       for (const c of (v && v.claims) || []) if (c && c.taken_up && !c.error) emit('leafArrived', { leaf_id: c.leaf_id, value: String(c.value ?? ''), kind: 'claim' })
     } catch (e) { S.lastCare = { at: now(), error: e } }
+    await claimsIfDue(true)
     await bondIfIdle()
+  }
+
+  // What vests later (default-arca.js vestingLots): the library's `claims`, read at most every
+  // CLAIMS_EVERY_MS and after each care, in either mode, and kept for the wallet, so the figure
+  // shows it from the last reading while the wallet opens, syncs or is offline. A claim whose
+  // date has passed and that care has not taken up yet has care run at its next chance.
+  async function claimsIfDue (force = false) {
+    if (!S.open) return
+    if (!force && S.claimsAt != null && now() - S.claimsAt < claimsEvery) return
+    if (S.asked) { S.upkeepLater = true; return }
+    S.claimsAt = now()
+    try {
+      const scan = claimScan()
+      const v = await run('claims', scan ? { scan } : {})
+      const lots = vestingLots(v)
+      const was = JSON.stringify(vestingKept())
+      S.vesting = { tag: tag(), lots }
+      try { ctx.store.setItem(tagged(VESTING_KEY, tag()), JSON.stringify(lots)) } catch {}
+      if (vestedOpen(v)) { S.careAt = null; upkeepSoon(2000) }
+      if (JSON.stringify(lots) !== was && ctx.onChange) try { ctx.onChange() } catch {}
+    } catch (e) { log('[leaves] claims: ' + (e && e.message)) }
+  }
+  // What vests later as last read: this session's reading, else the one kept for this wallet.
+  function vestingKept () {
+    const k = tag()
+    if (!S.vesting || S.vesting.tag !== k) {
+      let v = null
+      try { v = JSON.parse(ctx.store.getItem(tagged(VESTING_KEY, k)) || 'null') } catch {}
+      S.vesting = { tag: k, lots: Array.isArray(v) ? v : [] }
+    }
+    return S.vesting.lots
   }
 
   // The bond's watch, unless a person is waiting: then once they are not.
@@ -877,6 +1010,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
       } else if (!S.busy && careDue(S.careAt, now(), careEvery)) {
         S.busy = true
         try { await careIfDue() } finally { S.busy = false }
+      } else if (!S.busy) {
+        S.busy = true
+        try { await claimsIfDue() } finally { S.busy = false }
       }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
     schedule()
@@ -1236,7 +1372,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function renderCare () {
     const c = card('Kept by itself: claims and refresh plans')
     c.id = 'leafCare'
-    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for every leaf of a round, so a closed wallet keeps it across its expiry. A leaf received or boarded out of round is free to pay, and is refreshed into a round once its refresh could run within ten days. A planned leaf is paid out of round by no wallet: a payment the unplanned leaves cannot cover gives the planned leaves it needs up in the next round and is made once that round is final, by itself. Release does that for one plan now.'))
+    c.appendChild(el('p', 'sub', 'After a sync, at most every ten minutes, the wallet takes up every claim named for one of its addresses and signs a refresh plan for a leaf of a round once its refresh could run within ten days, so a closed wallet keeps it across its expiry. A leaf received or boarded out of round is free to pay, and is refreshed into a round once its refresh could run within ten days. A planned leaf is paid out of round by no wallet: a payment the unplanned leaves cannot cover gives the planned leaves it needs up in the next round and is made once that round is final, by itself. Release does that for one plan now.'))
     const lc = S.lastCare
     if (lc) {
       c.dataset.careAt = String(lc.at)
@@ -1521,9 +1657,25 @@ export function mountLeaves (ctx, root, settingsRoot) {
       c.appendChild(box)
     } else if (!coin || coin.state !== 'exited') {
       const b = button('Run the exit again', () => drill(S.drill.leaf)); b.id = 'btnLeafExitAgain'; b.disabled = S.busy
-      const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(b); c.appendChild(r)
+      const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(b)
+      // The last transaction the exit broadcast, sped up by a child (`speed_up`): the library
+      // finds the output of the wallet's it spends, and says why when there is none.
+      const last = lastBroadcast(S.drill.runs)
+      if (last) {
+        const sp = button('Speed up', () => speedUp(last), 'ghost'); sp.id = 'btnLeafSpeedUp'; sp.disabled = S.busy
+        r.appendChild(sp)
+      }
+      c.appendChild(r)
     }
     root.appendChild(c)
+  }
+
+  async function speedUp (txid) {
+    try {
+      const v = await act('speed_up', () => run('speed_up', { txid }))
+      S.drill.runs.push({ at: now(), value: { state: 'sped up', note: `child ${v.child} spends ${v.spends}; the waiting transactions and it pay ${v.rate_per_kvb} reference atoms a kvB together, fee ${amt(v.fee.asset, v.fee.amount)}${v.second_input ? ', a second input paying it' : ''}${v.replaced ? ', replacing ' + v.replaced : ''}` } })
+    } catch (e) { S.drill.runs.push({ at: now(), error: e }) }
+    render()
   }
 
   function renderParticipations () {
@@ -1650,14 +1802,33 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // The assets the operator serves supervised.
     supervisedAssets: () => supervisedAssets(S.info),
     address,
-    leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
-    leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),
+    leafAtoms: (hex) => liveLeaves(hex) + expecting(hex),
+    leafAssets: () => [...new Set([...[...leafBalances(shown()).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a), ...S.expected.map((x) => x.hex)])].filter((h) => liveLeaves(h) + expecting(h) > 0n),
+    // A payment made to this wallet that the library has not taken in yet: `hex`, `atoms`.
+    expect: (hex, atoms) => {
+      if (!/^[0-9a-f]{64}$/.test(String(hex || '')) || !(big(atoms) > 0n)) return
+      S.expected.push({ hex, atoms: big(atoms), base: liveLeaves(hex), until: now() + 120000 })
+      if (ctx.onChange) try { ctx.onChange() } catch {}
+    },
     syncNow,
     // ---- default mode (default-arca.js) ----
     // What of an asset is arriving (held, not yet spendable), in atoms.
-    arriving: (hex) => arrivingAtoms(S.balance, hex),
+    arriving: (hex) => arrivingAtoms(shown(), hex) + expecting(hex),
     // Of what is arriving, what is being redone after a Bitcoin reorganisation, in atoms.
     redoing: (hex) => redoingAtoms(S.coins, hex),
+    // What was moved out to keep it safe while the wallet was away, until it is put back, in atoms.
+    keptSafe: (hex) => keptSafeAtoms(shown(), hex),
+    // What vests later (a vesting allocation), as `claims` last listed it: each asset's entries
+    // ({ asset, vest, vests, atoms }), earliest first; in atoms; and the assets anything vests in.
+    // Part of the figure, never of what can be spent.
+    vesting: (hex) => (hex ? vestingFor(vestingKept(), hex) : vestingKept()),
+    vestingAtoms: (hex) => vestingAtoms(vestingKept(), hex),
+    vestingAssets: () => vestingAssets(vestingKept()),
+    // Whether the library has given its balance this session (the figures are its own, not the
+    // last ones kept), or the wallet has nothing with an operator to read.
+    balanceRead: () => !!S.balance,
+    // Whether this wallet has, or joins by itself, a wallet with an operator whose balance is to be read.
+    expected: () => !!(S.open || S.starting || joinedOperator(ctx.store, tag()) || (!dev() && pinned())),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its
     // block is certified), or null before the library has said.
     anchorDepth: () => anchorDepth(S.info),
@@ -1687,12 +1858,36 @@ export function mountLeaves (ctx, root, settingsRoot) {
     offboardQuote: (args) => command('offboard_quote', args),
     offboard: (args) => command('offboard', args).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
     // The operator's interval between settlements, in seconds, or null.
+    // The operator's smallest leaf of an asset, in atoms (an output below it is refused), or 0n.
+    minLeaf: (hex) => { const a = ((S.info && S.info.server_info && S.info.server_info.assets) || []).find((x) => x && x.asset === hex); return a ? big(a.min_leaf) : 0n },
     roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
     refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
+    // `atoms` of an asset as the page's own reading of the chain shows them, less what a board just
+    // made spent that the reading does not show spent yet (default-arca.js onchainLessBoards).
+    onchainLessBoards: (hex, atoms) => {
+      const all = boardsKept()
+      if (!all[hex]) return big(atoms)
+      const r = onchainLessBoards(all[hex], atoms, now())
+      if (r.seen) keepBoard(hex, null)
+      return r.atoms
+    },
+    // ---- the wallet's own upkeep outside this module (lightning-to-ark.js) ----
+    // What the library said of itself and the operator (`info`), and the coins as last read.
+    info: () => S.info,
+    coins: () => S.coins,
+    // Whether a person is using the wallet now, or did within the last twenty seconds.
+    personBusy: () => !!S.asked || now() - (S.lastAsked || 0) < MAILBOX_QUIET_MS,
+    // A command of the wallet's own, run when nothing else runs and never counted as a person's.
+    own: async (cmd, args) => {
+      if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' })
+      while (S.busy) await sleep(50)
+      S.busy = true
+      try { return await run(cmd, args || {}) } finally { S.busy = false }
+    },
     stop: () => { clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer) },
   }
   render()

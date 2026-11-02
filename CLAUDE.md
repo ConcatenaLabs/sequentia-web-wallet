@@ -33,8 +33,8 @@ python3 -m http.server 8080     # then open http://127.0.0.1:8080/
 node --test                     # the node:test suites
 ```
 
-There are 154 `*.test.mjs` files (120 at the root, 34 under `tooling/lsp/`), and `node --test` runs
-every one of them. 25 are **standalone scripts** with their own `check()` harness: `node --test`
+The tests are the `*.test.mjs` files at the root and under `tooling/lsp/`, and `node --test` runs
+every one of them. Some are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
 
 Anything importing `swap.js` from Node needs a `localStorage` shim installed before the import;
@@ -42,16 +42,39 @@ Anything importing `swap.js` from Node needs a `localStorage` shim installed bef
 
 `lightning/pkg/` is a *different* wasm artifact (the SeqLN on-device signer) and **is** tracked.
 Do not confuse it with `pkg/`. So is `leaves/pkg/`, the leaf wallet of developer mode: the
-operator wallet library (`bark::arca` in `ConcatenaLabs/arca`) built from that repository's
-`wallet-wasm/` by `tooling/build-leaf-wallet.sh <arca checkout>`, which remaps every
-build-machine path (home directory, checkout, cargo cache) out of the wasm, refuses to copy one
-that still names any, and copies `leaf_wallet.js`, `leaf_wallet_bg.wasm` and `leaf_wallet.d.ts`
-into `leaves/pkg/`. A plain `wasm-pack build` leaves the builder's paths in a public file. It runs only
+operator wallet library (`bark::arca` in `ConcatenaLabs/arca`), built from that repository's
+`wallet-wasm/`. **What is committed is always that repository's CI build, copied exactly:** the
+`leaf-wallet-pkg` artifact of a commit on its master, fetched by `tooling/fetch-leaf-wallet.sh
+<arca commit>` with its `BUILT_FROM` (the commit) and `SHA256SUMS`, so the wasm a release serves
+is traced by its sha256 to one arca commit; `leaf-pkg-built-from.test.mjs` checks the files
+against those sums. Never commit a local build. `tooling/build-leaf-wallet.sh <arca checkout>`
+builds one for trying an unmerged arca change on this machine (every build-machine path remapped
+out of the wasm, as CI does). The Ambra browser extension vendors the same files. It runs only
 inside `leaves/worker.js`, a dedicated worker, because the library blocks on synchronous
 requests and keeps its SQLite store on OPFS. Nothing about a leaf is computed in JavaScript:
 `leaves.js` shows what the library answers, refusals in the library's own words, and nothing
 in it may decide anything the library decides. The page's copy never names the operator
 protocol: developer mode speaks of leaves, rounds and the operator.
+
+`lightning-to-ark.js` is default mode's move of what a wallet's own hosted Lightning channels
+hold (a wallet made before default mode held its coins in the Ark): the BTC channel pays an
+invoice of the wallet's own Bitcoin ark, each asset channel a `lightning_receive` of its leaf
+wallet, only from a channel locked in, within the page's Lightning payment limit, never in
+developer mode or while a person uses the wallet; the figure holds it under "Moving …" meanwhile,
+and an emptied channel is closed to the wallet's address when cheap and safe. It has no DOM
+(`lightning-to-ark.test.mjs`); `index.html`'s `initLnToArk` gives it the page, and the extension
+copies it into its `vendor/` with its own host: change it here first. Ambra mobile's
+`lightning_to_ark.dart` is the same move in the same words.
+
+`asset-lightning.js` is default mode's rule for an asset sent to a receive code of another
+operator: over Lightning, out of the tree (`lightning_pay_quote`, then `lightning_pay` with the
+quote as `shown`), when the code carries an invoice in the asset for the amount (a receive code
+with an amount in an asset carries one, from the leaf library's `lightning_receive`), the payment
+is worth no more than `window.SEQ_ASSET_LN_MAX_USD` (USD, never units of the asset), the
+operator's node can carry it and the invoice's final lock fits the operator's window with a hop
+to spare; else the code's address, and the review says why. It has no DOM
+(`asset-lightning.test.mjs`). Ambra mobile and the browser extension route receive codes in
+their own code: give them the same rule.
 
 `btc-ark/pkg/` is tracked too: Bark's wallet for Bitcoin arks, built from arca's `bark-wasm/` by
 `tooling/build-btc-ark.sh <arca checkout>` (paths remapped the same way), run inside
@@ -59,8 +82,9 @@ protocol: developer mode speaks of leaves, rounds and the operator.
 bitcoin, never pegged, from the page's own phrase under Bark's key path. `btc-ark.js` names the
 route (an invoice, an Ark address, a Bitcoin address) and shows the wallet's answers; every fee,
 coin and refusal is the wallet's. A board is cosigned by the ark's server before the page signs
-its funding: keep that order. In default mode the composer's `deps.btc` is the ark
-(`btcArk.lightning()`), so a BTC trade pays and is paid there; the payment's lock is bounded by
+its funding: keep that order. Whenever the ark is open the trade engine's `deps.btc` is the ark
+(`btcArk.lightning()`), in both modes, so a BTC trade pays and is paid there and a trade resumed
+after the mode changed pays with the wallet it was made with; the payment's lock is bounded by
 the server's longest (`max_route_delay`), which the trade checks against the coin it receives.
 
 The mode is kept for each wallet (`swk.mode.<walletTag>`, `leaves.js`), user mode by default,
@@ -90,9 +114,14 @@ there, but leaves count in each asset's figure and the headline. Each asset's fi
 on-chain, leaves, Lightning and, for tSEQ, what is staked (`stakedAtoms` in `index.html`), in
 both modes; user mode shows that one figure, what is arriving, and no rail, Move or room to
 receive. After a sync, at most every ten minutes, `leaves.js` runs the library's `care` (claims taken up,
-every leaf of a round planned, a plan whose leaf moved cancelled) in either mode, with `claimScan`
-from the page (the kit's next receive index and 20 more) and `plan_within` set to plan every leaf
-of a round; developer mode lists plans with Cancel and Release (`plan_release`). Every leaf
+a leaf of a round planned once its first step could run within the library's ten-day reach, a
+plan whose leaf moved cancelled) in either mode, with `claimScan` from the page (the kit's next
+receive index and 20 more); developer mode lists plans with Cancel and Release (`plan_release`). After
+each care, and at most every two minutes besides, it reads the library's `claims` (only it gives a
+vesting claim's asset and value) and keeps what vests later for the wallet (`vestingLots` in
+`default-arca.js`): part of the asset's figure and the headline in both modes, one line per date
+under the figure, never in what can be spent, so no Max counts it, and Send, Trade, Stake and Mix
+refuse an amount that needs it (`refuseIfVesting` in `index.html`, the engine's `vesting`). Every leaf
 command a person or a page starts goes through `paying` in `leaves.js` (the API's `command` and
 `pay`, the user composer's commands included): a refusal of kind `planned` releases the leaves
 it names, waits for their round, and asks again. Keep that one path. `wallet-api.js` is the page API (`docs/PAGE_API.md`); it
@@ -109,6 +138,13 @@ on-chain or Lightning paths, which would settle it as something it is not. The l
 an order as the relay serves it (byte fields in base64), so the panel hands it the relay's own
 JSON, never the copy `normRelayOffer` rewrote to hex.
 
+`ark-rail.js` is developer mode's Ark choice on the BTC side of a pair of BTC and a Sequentia
+asset. It settles as user mode's BTC trade does (the user composer's engine, `user-trade.js`, with
+the ark as `deps.btc`): a market trade, the asset's side on Leaf (choosing Ark sets it), every
+amount and refusal the engine's. Its seams into `swap.js` are the leaf rail's (`paneRail` covers
+both), and `leaf-rail.js` offers Leaf in a pair with BTC only while BTC's side is on Ark, leaving
+that trade to the Ark panel.
+
 `contracts.js` is developer mode's Contracts tab. The same rule holds: the kit's contract engine
 (`ContractTemplate`, `ContractInstance`, `ContractSpend`, `ContractApproval` in `pkg/`) reads,
 checks, builds, runs and signs; the module renders the approval it returns and signs the
@@ -120,6 +156,9 @@ JavaScript. The browser extension copies this file into its `vendor/`; change it
 Root is flat: production modules and tests sit side by side.
 
 - `index.html` — the wallet core: boot, balances, send/receive, fees, staking, history, OpenAMP, QR.
+- `instant-history.js` — History's rows for what is paid and received in seconds and for the Trade
+  tab's trades: a per-wallet log the page writes as payments happen (`leafArrived`, `payCode`,
+  `offboard`), merged with the composer's own trade records, never copied from them.
 - `stake-records.js` — joining, moving and leaving a staking pool, and unbonding: every
   transaction over a bare script of the staking key, built and signed by SWK for the height of the
   block it enters. It refuses to sign without a chain tip, because the signature a stake record

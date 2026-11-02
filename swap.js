@@ -525,7 +525,19 @@ export function canonicalPair(a, b){
   if (ra !== rb) return ra > rb ? { base: b, quote: a } : { base: a, quote: b };
   return String(a) < String(b) ? { base: a, quote: b } : { base: b, quote: a };
 }
-// The pair's DISPLAY direction, honouring the user's flip toggle.
+// The direction default mode's market reads a pair in (docs/DEFAULT_MODE.md, Market): BTC against a
+// fiat stablecoin is priced in the stablecoin ("1 BTC = 77,200 USDX"), as people price bitcoin;
+// every other pair as canonicalPair has it, BTC the quote against anything else. Display only:
+// books and markets are keyed by canonicalPair, and the relay serves a market either way.
+export function displayPair(a, b){
+  const fiat = (h) => h !== 'BTC' && _quoteRank(h) >= 860;
+  if (a === 'BTC' && fiat(b)) return { base: a, quote: b };
+  if (b === 'BTC' && fiat(a)) return { base: b, quote: a };
+  return canonicalPair(a, b);
+}
+// The pair's DISPLAY direction in developer mode's composer, honouring the user's flip toggle. It
+// stays canonicalPair's: the cross-chain book builds its ladder priced in BTC (renderXBook), and the
+// sweep estimate reads the ladder only in that frame.
 function pairDir(a, b){
   const d = canonicalPair(a, b);
   return S.priceFlip ? { base: d.quote, quote: d.base } : d;
@@ -1506,6 +1518,8 @@ function balStr(hex){
   const onchain = balAtoms(hex), instant = instantAtomsFor(hex);
   let s = 'Balance ' + showAmt(onchain, m.precision) + ' ' + m.ticker + ' on-chain';
   if (instant > 0n) s += ' · ' + showAmt(instant, m.precision) + ' Lightning';
+  const ark = arkAtomsFor(hex);
+  if (ark > 0n) s += ' · ' + showAmt(ark, m.precision) + ' Ark';
   return s;
 }
 
@@ -1856,7 +1870,9 @@ function legRailOptions(leg){
   const noLn = 'Lightning is not available on this server.';
   if (leg === 'pay'){
     const onChain = balAtoms(hex) > 0n, onLn = ln.spend > 0;
-    const none = !onChain && !onLn ? 'You hold no ' + tk + ' to pay with: receive some first, or pay with another asset.' : '';
+    // BTC held only in the ark: Ark pays it (ark-rail.js), or it is moved on-chain first.
+    const inArk = hex === 'BTC' && arkAtomsFor(hex) > 0n ? 'Your BTC is in the Ark: choose Ark, or move it on-chain first.' : '';
+    const none = inArk || (!onChain && !onLn ? 'You hold no ' + tk + ' to pay with: receive some first, or pay with another asset.' : '');
     return {
       chain: { ok: onChain, why: onChain ? '' : none || ('You have no ' + tk + ' on-chain: it is all on Lightning. Pay over Lightning, or move some on-chain from Balance.') },
       ln: { ok: onLn, why: onLn ? '' : !lnOn ? noLn : none || ('You have no ' + tk + ' on Lightning. Move some to Lightning from Balance to pay with it here, or pay on-chain.') },
@@ -1879,7 +1895,7 @@ function autoRails(){
   // Without mixed rails the choice is of a combination: both on-chain or both over Lightning. When
   // the two legs can share only one of them, that is the settlement, set here, and the composer
   // goes straight to Place instead of waiting on a choice that has one answer.
-  if (!mixedRailsAllowed() && S.payRail !== 'leaf' && S.recvRail !== 'leaf'){
+  if (!mixedRailsAllowed() && !paneRail(S.payRail) && !paneRail(S.recvRail)){
     const usable = (leg) => {
       const seg = C.$(leg === 'pay' ? 'swPayRailSeg' : 'swRecvRailSeg'); if (!seg) return [];
       const o = legRailOptions(leg);
@@ -1898,7 +1914,7 @@ function autoRails(){
     const o = legRailOptions(leg);
     const usable = ['chain', 'ln'].filter(r => { const b = seg.querySelector('button[data-r="' + r + '"]'); return o[r].ok && b && !b.disabled; });
     const cur = leg === 'pay' ? S.payRail : S.recvRail;
-    if (cur === 'leaf') continue;   // a Leaf choice is the leaf rail's (leaf-rail.js), never overridden here
+    if (paneRail(cur)) continue;   // a Leaf or Ark choice is its own rail's (leaf-rail.js, ark-rail.js), never overridden here
     if (usable.length === 1 && cur !== usable[0]) setRail(leg, usable[0]);
   }
 }
@@ -1933,7 +1949,12 @@ function updateRails(){
 }
 // The Leaf choice and its panel (developer mode) belong to leaf-rail.js, which index.html hands in
 // as C.leafRail. Every repaint of the rails gives it the chance to show, hide or drop its choice.
-function paintLeafRail(){ if (C && C.leafRail) try { C.leafRail.paint(); } catch (e) { console.warn('[leaf rail]', e && e.message); } }
+function paintLeafRail(){
+  if (C && C.leafRail) try { C.leafRail.paint(); } catch (e) { console.warn('[leaf rail]', e && e.message); }
+  if (C && C.arkRail) try { C.arkRail.paint(); } catch (e) { console.warn('[ark rail]', e && e.message); }
+}
+// The rails settled by a panel of their own, outside the composer's on-chain and Lightning paths.
+function paneRail(r){ return r === 'leaf' || r === 'ark'; }
 // What the leaf rail reads of the composer, and the one thing it sets: a leg's rail.
 export function composerState(){
   const d = (S.payAsset && S.receiveAsset) ? canonicalPair(S.payAsset, S.receiveAsset) : { base: null, quote: null };
@@ -2121,7 +2142,7 @@ function paintRailSegs(ra){
     const opts = legRailOptions(leg);
     seg.querySelectorAll('button[data-r]').forEach(b => {
       const r = b.dataset.r;
-      if (r === 'leaf') return;   // painted by the leaf rail (leaf-rail.js)
+      if (paneRail(r)) return;   // painted by the leaf rail (leaf-rail.js) or the Ark rail (ark-rail.js)
       b.classList.toggle('on', r === cur);
       // Where the wallet holds the asset decides first: a rail with nothing on it is shown off, and a
       // click on it says why and how to put something there (showRailRefusal), rather than nothing.
@@ -4552,7 +4573,7 @@ function pickerCandidates(side){
   // cards), then every other tradable asset — so a registry of thousands stays navigable via the
   // search box. This dropdown is what replaces the removed cards.
   const list = candidates.map(hex => {
-    const held = balAtoms(hex) > 0n || instantAtomsFor(hex) > 0n || leafAtomsFor(hex) > 0n;
+    const held = balAtoms(hex) > 0n || instantAtomsFor(hex) > 0n || leafAtomsFor(hex) > 0n || arkAtomsFor(hex) > 0n;
     return {
       hex, ticker: metaOf(hex).ticker, name: pickerName(hex), bal: balLine(hex),
       held, split: held ? heldSplitStr(hex) : '',
@@ -4613,10 +4634,13 @@ function pickerName(hex){ if (hex === 'BTC') return 'Bitcoin testnet4'; return C
 function heldSplitStr(hex){
   const m = metaOf(hex), instant = instantAtomsFor(hex), onchain = balAtoms(hex), leaf = leafAtomsFor(hex);
   return `<span class="z">${showAmt(instant, m.precision)} Lightning</span> · ${showAmt(onchain, m.precision)} on-chain`
-    + (leaf > 0n ? ` · ${showAmt(leaf, m.precision)} leaves` : '');
+    + (leaf > 0n ? ` · ${showAmt(leaf, m.precision)} leaves` : '')
+    + (arkAtomsFor(hex) > 0n ? ` · ${showAmt(arkAtomsFor(hex), m.precision)} Ark` : '');
 }
 // What the wallet holds of an asset as leaves, in developer mode only (leaf-rail.js); 0 otherwise.
 function leafAtomsFor(hex){ try { return (C.leafRail && C.leafRail.atoms) ? C.leafRail.atoms(hex) : 0n; } catch { return 0n; } }
+// What the wallet can pay of BTC from its Bitcoin ark, in developer mode only (ark-rail.js); 0 otherwise.
+function arkAtomsFor(hex){ try { return (C.arkRail && C.arkRail.atoms) ? C.arkRail.atoms(hex) : 0n; } catch { return 0n; } }
 
 // Which rows a picker query shows, how they are grouped, and the chooser itself: the shared
 // asset chooser (asset-picker.js, docs/DEFAULT_MODE.md "Choosing an asset"). No search: your
@@ -6641,8 +6665,9 @@ async function onReview(){
 }
 async function _onReviewInner(){
   const { $ } = C; $('swErr').textContent = '';
-  // A leg on Leaf is settled by the leaf rail's own panel (leaf-rail.js); nothing here may run on it.
-  if (S.payRail === 'leaf' || S.recvRail === 'leaf') return;
+  // A leg on Leaf or Ark is settled by that rail's own panel (leaf-rail.js, ark-rail.js); nothing
+  // here may run on it.
+  if (paneRail(S.payRail) || paneRail(S.recvRail)) return;
   const q = LAST_QUOTE;
   if (!q){ $('swErr').textContent = 'Enter an amount to get a quote first.'; return; }
   // RAIL-BLIND TAKE: before the rail-specific native dispatch, route the BEST-price offer across rails by its
@@ -10023,6 +10048,9 @@ export function covenantCreditBalance(){
 // other user of COMPANION out meanwhile.
 export function companionWollet(){ return ensureCompanion(); }
 export function applyCompanionUpdate(u){ if (u && COMPANION) COMPANION.applyUpdate(u); }
+// The chain went back below what the companion saw (reorg.js): it is dropped, and the next sync
+// scans a fresh one from empty.
+export function resetCompanion(){ COMPANION = null; }
 // The "credits received" block: proceeds paid into the taproot payout when a resting
 // order filled (possibly while the wallet was closed). Sweeping them into the main
 // wpkh balance is a follow-up; here the maker at least SEES them (task requirement).

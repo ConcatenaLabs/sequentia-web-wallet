@@ -83,7 +83,9 @@
 //                                                one hash-lock, from the maker's own Bitcoin
 //                                                Lightning node (leaf-maker-btc.mjs says how)
 // Every coin the maker receives is refreshed in the operator's next round once it has rested
-// `settle_seconds`, so what it trades settles as the takers' coins do.
+// `settle_seconds`, so what it trades settles as the takers' coins do; on its first pass after a
+// start, every coin it already holds; and at once, all of them, when an offer is refused because
+// it would hold more out of round than the operator's bond covers.
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -94,6 +96,51 @@ import { btcDesk } from './leaf-maker-btc.mjs'
 import { restDesk } from './leaf-maker-rest.mjs'
 import { tradeReporter, makerRelayKey } from './trade-report.mjs'
 import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
+
+// The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
+// for its offers at once, few enough that the library reads its store quickly before each command.
+export const MAX_COINS = 32
+// The most coins of an asset merged in one pass: four participations of 16.
+export const MERGE_PER_PASS = 64
+
+// The coins of `asset` to merge so that at most `cap` live ones are left: the smallest live coins it
+// boarded or took from a round (a coin it received is refreshed by itself, as are those in
+// `exclude`), enough to bring the count to `cap`, MERGE_PER_PASS at most; none when under the cap.
+export function coinsToMerge (coins, asset, cap, exclude = []) {
+  const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live')
+  if (live.length <= cap) return []
+  const b = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
+  return live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id))
+    .sort((x, y) => (b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
+    .slice(0, Math.min(MERGE_PER_PASS, live.length - cap + 1)).map((c) => c.leaf_id)
+}
+
+// The library's refusal of a payment that would leave the wallet holding more out of round than the
+// operator's bond covers.
+export const OUT_OF_ROUND_FULL = /would hold out of round .* more than the bond/
+
+// The received coins (`kind` transfer, live) to refresh now: each one rested `restMs` since `seen`
+// first noted it at `now`; every one when `all` (an offer was refused for what the maker holds out
+// of round); and on the `first` pass after a start, every one already held, whose rest is unknown
+// and was most likely spent already: a restart never makes them wait out a whole rest again.
+export function receivedDue (coins, seen, now, restMs, { all = false, first = false } = {}) {
+  const due = []
+  for (const c of coins || []) {
+    if (!c || c.state !== 'live' || c.kind !== 'transfer') continue
+    if (!seen.has(c.leaf_id)) seen.set(c.leaf_id, first ? now - restMs - 1 : now)
+    if (all || now - seen.get(c.leaf_id) > restMs) due.push(c.leaf_id)
+  }
+  return due
+}
+
+// The arguments of a library command. One ahead of the queue (`first`) answers a taker (a firm
+// offer, an acceptance, a swap's state): its start re-checks only the coins, each against the chain
+// and its lineage watched (`recheck: 'coins'`), and leaves the following of the participations'
+// rounds, which gives coins back and guards no spend, to the upkeep's sync on its timer. That part
+// reads every released round again: five seconds and more on a busy machine, ahead of every answer.
+export function commandArgs (args, first) {
+  return first ? { ...(args || {}), recheck: 'coins' } : (args || {})
+}
 
 const here = dirname(fileURLToPath(import.meta.url))
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
@@ -213,7 +260,7 @@ async function main () {
     ...(cfg.min_exit_delay_units ? { min_exit_delay_units: cfg.min_exit_delay_units } : {}),
   })
   const pause = (ms) => new Promise((r) => setTimeout(r, ms))
-  const cmd = (name, args, first = false) => w.command(name, args || {}, { first })
+  const cmd = (name, args, first = false) => w.command(name, commandArgs(args, first), { first })
   const info = await cmd('info')
   // --address: the maker's on-chain address (to fund what it boards), then exits.
   if (process.argv.includes('--address')) { console.log(JSON.stringify({ address: (await cmd('address')).address })); process.exit(0) }
@@ -286,11 +333,23 @@ async function main () {
   if (reporter) log('trades are reported to', reporter.relay, 'signed by', reporter.pub)
   const reportTrade = (t) => { if (reporter) { try { reporter.report(t) } catch (e) { log('report:', e.message) } } }
   // BTC for an asset and back, from the maker's own Bitcoin Lightning node, when it has one.
-  const desk = await btcDesk({ cfg, cmd, log, liveRates, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
+  // The operator's answer on a payment into its tree, read straight from it: the desk's steps
+  // between the upkeep's passes do not wait behind the library's queue.
+  const lookup = async (hash) => {
+    const r = await fetch(String(op.server).replace(/\/+$/, '') + '/v1/lightning_receive_status', { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payment_hash: hash }), signal: AbortSignal.timeout(5000) })
+    return r.ok ? r.json() : null
+  }
+  const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
+  if (desk) setInterval(() => { desk.stepNow().catch((e) => log('btc:', e.message)) }, Number(cfg.btc.step_seconds ?? 2) * 1000)
   if (desk) log('the BTC desk is open')
 
   const firm = new Map()   // swap -> { give_asset, give, expires }
   const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
+  // An offer refused because the maker holds too much out of round (the operator's bond caps it):
+  // every coin it received is refreshed at the next pass, not after its rest, and that pass runs now.
+  let outOfRoundFull = false
+  let firstPass = true
   let busy = false
   let lastBoardRefusal = null
   // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
@@ -304,6 +363,7 @@ async function main () {
     return sp
   }
   let holdings = null
+  let firstReading = null   // the reading a quote asked for before the first one, while it runs
   // Orders resting in the tree, a ladder a pair, listed on the relay (leaf-maker-rest.mjs).
   const rester = await restDesk({ cfg, cmd, log, liveRates, spendable })
   if (rester) log('the resting desk is open, its listings signed by', rester.makerPub)
@@ -335,6 +395,10 @@ async function main () {
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
       // another asset the maker holds on the chain that the node takes (the wallet rule; never a
       // fallback to one privileged asset).
+      // Its live coins of each asset: past `max_coins` it boards no more, and merges the rest.
+      const counted = new Map()
+      try { for (const c of (await cmd('coins')) || []) if (c && c.state === 'live') counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
+      const cap = (a) => Number(perAsset(cfg.max_coins, a, String(MAX_COINS)))
       try {
         const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}
         // The assets it gives: in-tree, and for BTC at its desk.
@@ -346,6 +410,7 @@ async function main () {
           const coin = perAsset(cfg.coin_size, a, null)
           if (coin && amount > big(coin)) amount = big(coin)
           if (amount < big((gives.find((x) => x.give === a) || {}).min_give || 1)) continue
+          if ((counted.get(a) || 0) >= cap(a)) continue
           const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
           let done = false, why = null
           for (const fee of feeAssets) {
@@ -365,21 +430,33 @@ async function main () {
         if (st !== 'open') { firm.delete(id); continue }
         if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }) } catch (e) { log('cancel', id, e.message) } firm.delete(id) }
       }
-      // Coins it received, once rested, are refreshed in the operator's next round.
+      // Coins it received, once rested, are refreshed in the operator's next round; all of them at
+      // once when an offer was refused for what the maker holds out of round.
       const coins = (await cmd('coins')) || []
-      const due = []
-      for (const c of coins) {
-        if (c.state !== 'live' || c.kind !== 'transfer') continue
-        if (!seen.has(c.leaf_id)) seen.set(c.leaf_id, t)
-        if (t - seen.get(c.leaf_id) > (cfg.settle_seconds ?? 600) * 1000) due.push(c.leaf_id)
-      }
+      const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull, first: firstPass })
+      firstPass = false
       if (due.length) {
         try {
           const q = await cmd('quote', { leaves: due })
           const r = await cmd('participate', { leaves: due, shown: q.coins })
-          log('settling', due.length, 'received coins:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
+          log('settling', due.length, 'received coins' + (outOfRoundFull ? ' (offers refused for what it holds out of round)' : '') + ':',
+            JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
           for (const d of due) seen.delete(d)
+          outOfRoundFull = false
         } catch (e) { log('settle:', e.message) }
+      }
+      // More live coins of an asset than `max_coins`: the smallest are merged in the operator's
+      // next round, MERGE_PER_PASS at most a pass (the library gives up 16 a participation), so
+      // every command it makes reads a store of bounded size.
+      for (const [a, n] of counted) {
+        if (n <= cap(a)) continue
+        const merge = coinsToMerge(coins, a, cap(a), due)
+        if (merge.length < 2) continue
+        try {
+          const q = await cmd('quote', { leaves: merge })
+          const r = await cmd('participate', { leaves: merge, shown: q.coins })
+          log('merging', merge.length, 'coins of', a.slice(0, 8), `(${n} held, at most ${cap(a)}):`, JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
+        } catch (e) { log('merge:', e.message) }
       }
     }
   }
@@ -401,7 +478,10 @@ async function main () {
         // so the offer finds the library free, at most once every three minutes so a reader that
         // polls cannot stop the upkeep.
         if (Date.now() - lastHold > HOLD_EVERY_MS) { lastHold = Date.now(); lib.hold(HOLD_MS) }
-        const sp = holdings ? holdings.sp : await spendable(true)
+        // Before its first reading (just started, the library reading its store) it quotes
+        // nothing, at once: a taker asks the other sources rather than waiting on this one.
+        if (!holdings) { if (!firstReading) firstReading = spendable(true).catch(() => {}).finally(() => { firstReading = null }); return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [] }) }
+        const sp = holdings.sp
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
       }
@@ -457,6 +537,7 @@ async function main () {
       return send(res, 404, { error: 'no such path' })
     } catch (e) {
       log('refused', p, e.message)
+      if (OUT_OF_ROUND_FULL.test(e.message || '')) { outOfRoundFull = true; setImmediate(tick) }
       return send(res, 409, { error: e.message, kind: e.kind || null })
     }
   })

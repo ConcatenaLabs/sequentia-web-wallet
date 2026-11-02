@@ -31,7 +31,8 @@ In practice:
 - **BTC** is native bitcoin, never pegged, and is always the first row. A fresh wallet shows
   exactly one row: BTC at 0.
 - Assets are named by their ticker and use their own decimals. Default mode never shows an amount
-  in atoms or sats.
+  in atoms or sats. Every amount a person reads is grouped the way Balance groups it ("500,000
+  USDX"); an amount filled into a field is plain, so it can be edited.
 
 ## Balance
 
@@ -39,15 +40,49 @@ In practice:
   top is **one total** in the reference currency, across every asset.
 - What has been received and cannot be spent yet appears under the figure as
   **"<amount> <TICKER> arriving"**. Once it can be spent, it is simply part of the figure.
+- What the wallet holds that cannot move before a date, such as tokens bought in a sale that
+  vests, is part of the figure and appears under it as **"<amount> <TICKER> vests on <date>"**,
+  the date in words: "100 ORNG vests on 3 November 2026". One line for each date. An asset held
+  only this way still has its row. It is never counted as what can be spent, and every Max
+  leaves it out. From that date the wallet takes it by itself, and it is
+  then part of the figure, arriving until that is final. Developer mode lists it with the rest of
+  the wallet's claims.
+- The page opens on the figures the wallet last read, every part of them, and updates them in
+  place. The line above the list reads "Syncing… showing your wallet as of <time>" until each part
+  has been read again, then **"Up to date."**
 - A coin that could be spent, and that a Bitcoin reorganisation took back out of the chain with
   the block it rested on, stays in the figure and appears under it as **"<amount> <TICKER> being
   redone after a Bitcoin reorganisation"** until the network takes it in again. It is never shown
   as gone.
+- A coin the wallet left unrefreshed while it was away, or one paid to it whose sender took an
+  earlier coin of its lineage back on the chain, is taken on the chain under its own key by the
+  operator or a watchtower: the wallet deposits each coin, sealed and with nothing shown, with
+  the watchtowers its operator names and those the other operators run for its users. It stays in the figure and appears
+  under it as **"<amount> <TICKER> moved out of the Ark to keep it safe while you were away"**
+  while the wallet, open again, puts it back by itself; it is then arriving until that is final.
+  Developer mode names it `kept_safe`.
+- A coin another wallet paid this one is made the wallet's own in the operator's next settlement,
+  by itself, which ends what its senders could still do with it, wherever the operator can fund
+  that settlement now. Until it is final the coin is arriving, as above, and still pays: a
+  settlement that waits for the operator is taken back after two minutes, and a payment or a trade
+  that needs the coin takes it back first. Nothing is said about it. A page can turn this off
+  (`window.SEQ_REFRESH_RECEIVED = false`).
 - A coin the wallet left past its expiry, which the operator took and repays as a new coin less
   its late fee, stays in the figure while it comes back and is shown the same way, as arriving.
   The wallet claims it by itself the next time it opens, or once restored from its phrase.
   Developer mode names it `returning`.
-- The row's details show only what a person may act on: **Staked**, **Arriving**, and a freeze,
+- What a wallet holds where it cannot be sent in seconds (its own Lightning channels, in a
+  wallet made before its coins were held this way) moves by itself to where it can: BTC to the
+  Bitcoin ark, every other asset into the operator's tree, claimed at the next round. Nothing is
+  asked. A move is paid only from a channel that is open for payments, within the day's
+  Lightning payment limit when the wallet sets one (nine tenths of it, the rest on a later day),
+  and never while the person is using the wallet. It stays in the figure while it moves, and the
+  line under the figure reads **"Moving <amount> <TICKER> so it can be sent in seconds."** A
+  payment refused before it left moves nothing and is tried again later. A channel the move
+  emptied is closed to the wallet's address when that is cheap and safe, and what it held stays
+  in the figure on its way back; otherwise it stays, and developer mode says why under its Lightning part.
+- The row's details show only what a person may act on: **Staked**, **Arriving**, **Vests on
+  <date>**, and a freeze,
   as "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts the
   freeze."
 - The split by rail (on-chain, instant, Lightning) and every move between rails are in developer
@@ -92,25 +127,37 @@ modes (`asset-picker.js`):
   either case, and codes made before the short form.
 - The code shows at once from what the wallet last drew, syncing or not, and stays until it is
   paid or its request lapses; a way to pay it that opens later is added to it in place.
-- Above the code, one optional field, empty by default: "Amount in BTC (optional)". With an
-  amount the code also names it (`amount=`) and carries an invoice of the wallet's on the Bitcoin
-  ark for exactly that amount (`lightning=`), which a Lightning wallet pays; the invoice is
-  claimed while the wallet is open, and a new one is made with the code. Without an amount the
-  code carries no invoice.
+- Above the code, one optional field, empty by default: "Amount in BTC (optional)", with a menu
+  beside it of what the amount is in: **BTC**, and each asset the operator receives over
+  Lightning (the menu shows only when there is more than BTC; for an asset the field reads
+  "Amount (optional)"). With an amount in BTC the code also names it (`amount=`) and carries an
+  invoice of the wallet's on the Bitcoin ark for exactly that amount (`lightning=`), which a
+  Lightning wallet pays. With an amount in an asset the code carries instead an invoice in that
+  asset of the operator's node (`lightning=`, the leaf library's `lightning_receive`), which a
+  wallet of another operator pays in seconds; `amount=` is left out, since it counts BTC. Either
+  invoice is claimed while the wallet is open, and a new one is made with the code. Without an
+  amount the code carries no invoice.
 - Buttons: **Copy receive code** (confirmation: "Receive code copied") and **New code**. The
   address alone is shown in developer mode.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server
   shows another key than the one pinned), the address is shown instead and nothing is said about
   why. The wallet tries again on its own, and once it can, the code takes the address's place on
   the screen without the person leaving it.
-- **Faucet** (testnet): the faucet pays the receive code. When it has paid: "Received <amount>
-  <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address instead, in the
-  same click.
+- **Faucet** (testnet): the faucet pays the receive code. Once it says it has sent the payment,
+  the amount is under the asset's figure as arriving, and when the wallet has it: "Received
+  <amount> <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address
+  instead, in the same click. Its first button is **BTC**: the faucet pays the code's address on
+  the Bitcoin ark, and the line reads "Received <amount> BTC." once it is there; while the wallet
+  holds no BTC that way yet, it pays the address, and the line reads "The faucet sent <amount>
+  BTC. It arrives after a Bitcoin block."
 
 ## Send
 
 - The field is **Recipient**, with the hint "a receive code, an address or an invoice". Next to
   the asset is its one figure, "balance <amount>".
+- The network fee line shows only for a payment made on the chain from the wallet's own coins.
+  A receive code is paid in seconds, and a payment out of what the wallet holds for instant
+  payments says its fee in the review.
 - A receive code is paid the fastest way the wallet holds: an asset at its `sequentia` part from
   what the wallet holds for instant payments, BTC at its `ark` part from the Bitcoin ark, or at
   its invoice from the ark or from Lightning. Only when none of these fits is it paid at its
@@ -118,6 +165,24 @@ modes (`asset-picker.js`):
   now, so it goes to the address. It arrives after a Bitcoin block." (for BTC; for an asset, "It
   arrives after the next block, in about a minute."). Anything that is not a code goes the way it
   always has. The wallet chooses; nothing asks the person.
+- An asset sent to a receive code of a wallet of another operator (its `sequentia` part names
+  another operator) goes over Lightning when the code carries an invoice in that asset for
+  exactly the amount sent (the row takes the asset and amount from it when its amount is
+  empty), the payment is worth no more than the page's limit in USD (`SEQ_ASSET_LN_MAX_USD`,
+  1,000 unless the page names another; never a number of units, since one unit of one asset can
+  be worth thousands of another), the operator's node in the asset is up with as much to spend
+  as the amount, and the invoice's final lock fits the operator's window for a payment with a hop
+  to spare (`asset-lightning.js`). The review is the tree's: **Send <amount> <TICKER>?**, "It
+  arrives in seconds.", a "Fee" line when there is one. Once sent it reads "On its way: it
+  arrives once the other wallet takes it." until the other wallet takes it, then "Sent <amount>
+  <TICKER> (<seconds> s).". Otherwise it is paid at the code's address, and the review says why
+  first: "A payment of more than <limit> USD to this wallet goes to the address." above the
+  limit, or "This can't arrive in seconds right now, so it goes to the address." when the way
+  cannot carry it (or the asset has no price to hold it to the limit), each followed by "It
+  arrives after the next block, in about a minute." A payment refused on its way, or that came
+  back, says so ("This couldn't go through in seconds, and nothing was sent." / "This couldn't
+  go through in seconds and came back to you.", then "Send it to the address instead? It arrives
+  after the next block, in about a minute.") with the button **Send to the address**.
 - The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds." and the
   buttons **Cancel** and **Send**.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
@@ -132,8 +197,39 @@ modes (`asset-picker.js`):
     minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
     line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
     The sentence above is for when even that cannot be made.
+  - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
+    when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
+    action that would spend it say the same sentence, with the earliest date of what it needs.
+    When the network itself refuses a coin that has not vested, it names only the date: "Part
+    of this vests on <date>, and can be used from then. Nothing has moved." (without a date: "Part
+    of this has not vested yet, and can be used once it has. Nothing has moved.")
   - "This receive code was paid already: ask for a new one. Nothing was sent."
   - "This payment was declined; nothing was sent."
+  - "This wallet is out of date for this: update it, then try again. Nothing was taken." when
+    the operator declines a payment or a settlement because the wallet needs updating.
+
+## Stake, pools and Mix
+
+- A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain, and
+  default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
+  Ark to its own address by itself (never less than the operator's smallest coin of the asset),
+  and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
+  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"). Once it
+  has arrived the usual review opens; nothing is signed before it.
+- When the operator cannot pay that much on the chain now (its published `fundable`, against
+  the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be
+  moved out of the Ark right now: the network has too little of it free. Nothing has moved: try
+  again later."
+- A move already under way is waited for, never asked twice. One the operator cannot pay on the
+  chain yet says "<amount> <TICKER> cannot be moved out of the Ark yet: the network moves it as
+  soon as it can, and it stays yours meanwhile. …"; one that has not arrived within 45 minutes,
+  "What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes."
+- Too little held: "Not enough <TICKER>: <amount> <TICKER> short." The 40,000 tSEQ minimum
+  counts the fee only when the fee is paid in tSEQ: the stake card has **Pay the fee in**, and
+  with too little tSEQ for both the wallet chooses another held asset there and says "Not enough
+  tSEQ for the stake and its fee: the fee is paid in <TICKER> instead, chosen below. Press Review
+  stake again."
+- Mix says what is held of the asset, wherever it is held: "you hold <amount> <TICKER>".
 
 ## BTC
 
@@ -146,11 +242,24 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - BTC a wallet holds where it cannot be sent in seconds (its own Lightning channel, in a wallet
   made before BTC was held this way) moves there by itself too, and stays spendable where it is
   until it has. While it moves, the line under the figure reads "Moving <amount> BTC so it can
-  be sent in seconds."
+  be sent in seconds." (`lightning-to-ark.js`; the same move for assets is under Balance).
 - The wallet keeps what it holds there current by itself, and arranges each time it is open for
   that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
   was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it
   opens.
+- When the service holding BTC for instant payments refuses to renew it or stops answering, and
+  BTC there would need renewing within a day, the wallet moves it to its own Bitcoin address by
+  itself, paying the Bitcoin network fees from that address. Only BTC worth more than the move
+  costs goes. The line under the figure reads "The service holding <amount> BTC for instant
+  payments stopped renewing it, so it is moving to your Bitcoin address. Bitcoin network fees:
+  about <fee> BTC, paid from your Bitcoin address.", then "Moving <amount> BTC to your Bitcoin
+  address, one Bitcoin block at a time.", and at the end "<amount> BTC arrived at your Bitcoin
+  address, moved there because the service holding it for instant payments stopped renewing it.
+  Bitcoin network fees: about <fee> BTC." While it moves, BTC arriving at the address stays there.
+  When the address holds too little to pay the fees, the line says how much to receive there first;
+  BTC worth less than its move says it stays and is renewed once the service answers again.
+  Nothing else moves BTC this way in default mode; developer mode adds an **Exit…** button to the
+  Bitcoin ark's part of BTC, which prices each coin and refuses one not worth its exit.
 - **Receive BTC with an invoice**: "Make an invoice for BTC. Once it is paid, the BTC is yours in
   seconds." Then "Invoice ready. Share it to receive <amount> BTC." and, when paid, "Received ✓
   <amount> BTC."
@@ -171,7 +280,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   invoice**, checked as if pasted, and nothing is paid until the person presses **Pay invoice**.
   The page that sent the link is not named.
 - These two cards are the only invoice cards default mode shows, and only while the wallet holds
-  BTC this way. Invoices for other assets, the asset pickers, room to receive and the status pill
+  BTC this way. Until then BTC is received with the receive code, whose amount field puts an
+  invoice in it; an invoice handed over by a pay link shows **Pay an invoice** all the same. Invoices for other assets, the asset pickers, room to receive and the status pill
   of the wallet's Lightning nodes are in developer mode.
 - A trade's BTC is paid and received the same way.
 
@@ -180,35 +290,55 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - **You pay** and **You receive**, each an asset and an amount, then **Review** and **Trade**. The
   two amounts are tethered: the one typed stays as typed, and the other follows the best price
   the book offers now, again every few seconds while the tab is shown. Under You pay:
-  "balance <amount> <TICKER>" and **Max**. When the book cannot fill what is typed: "The book can
-  fill up to <amount> <TICKER> now." Review then shows the exact amounts and fees; while
-  pricing: "Finding the best price…". If the price moves: "The price moved. Here is the new one."
+  "balance <amount> <TICKER>" and **Max**. Between the two sides, **⇅** ("Swap You pay and You
+  receive") exchanges them: each asset takes the other's place and the amount typed goes with its
+  asset, so 100 USDX typed under You pay is 100 USDX under You receive. When the book cannot fill
+  what is typed: "The book can fill up to <amount> <TICKER> now." (never for what the price's
+  rounding leaves, less than one atom of what is received). Review then shows the exact amounts
+  and fees: what is paid can be a few atoms below what was typed, when the price leaves a
+  remainder too small to buy anything, and that remainder stays in the wallet. Until Review, the
+  amount that follows the price is an estimate and reads as one: "about" beside it. While Review
+  asks for the exact price: "Getting the exact price…". If the price moves: "The price moved.
+  Here is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
-- Statuses: **Sent**, then **Settled**. If a trade is undone: "Returned: nothing traded." or
+- **Trade** returns the screen at once: the trade shows under **Open** as "Sending…" while its
+  step is taken, and goes on there whether the person stays, leaves or closes the wallet. What
+  was entered, and a price being asked for, is kept when the wallet goes to the background, is
+  locked or is reopened.
+- Statuses, the same in Your trades, in History and on every surface: "Sending…", **Sent**,
+  "Received, settling", then **Settled**. If a trade is undone: "Returned: nothing traded." or
   "Returned: nothing traded. Fees of <fees> were paid." A purchase with BTC whose other side's
   offer ran out while it waited, and was not renewed, says "Returned: nothing traded. The other
   side's offer ran out while the trade waited."
-- Settling waits for the network. Where the operator calls a coin settled once its block is
-  certified (an anchor depth of 0, as on the testnet), that is a minute or two; where it also
-  waits for Bitcoin blocks, a trade can take an hour or more. While it waits the row says what is
-  already true, with the minutes it has waited once that is one or more: "Waiting for the other
-  side. Nothing has left your wallet yet." (buying with BTC, until the asset is held for the
-  wallet); "Sent (<N> min)"; and once what the trade brings is held, "Received. Settled in a
-  minute or two. (<N> min)", or "Received. Settled after the next Bitcoin blocks. (<N> min)"
+- Settling waits for the network, and no status promises how long: the only time a row shows is
+  the minutes it has waited, once that is one or more. While it waits the row says what is
+  already true: "Waiting for the other side. Nothing has left your wallet yet." (buying with BTC,
+  until the asset is held for the wallet); "Sent (<N> min)"; "Paid. Your BTC is on its way."
+  (selling for BTC, once the asset is paid); and once what the trade brings is held, "Received,
+  settling (<N> min)", or after ten minutes still settling "Received, and yours to use. Settling
+  with the network is taking longer than usual."
 - Refusals: "This trade could not be made. Nothing moved."; "The other side declined. Nothing was
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
   is not offered."; "Not offered right now: nobody offers anything for <pay>." (nothing can be
   chosen under You receive); "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
-  is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere); "Your
+  is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere);
+  "Your BTC is being moved so it can be traded. It is ready after <n> Bitcoin blocks. Nothing has
+  moved yet." (BTC held at the wallet's address, none yet where a trade pays BTC from: the wallet
+  moves what the trade needs by itself, at most what one move of the Bitcoin ark carries, and
+  prices the trade again every 20 s), and on a ticket that pays only part of what was typed,
+  "More of your BTC is being moved so it can be traded, ready after <n> Bitcoin blocks."; "Your
   <pay> is on its way: it is ready to trade in a minute or two. Nothing has moved.", or, where the
   operator also waits for Bitcoin blocks, "Your <pay> is not ready to trade yet: it is once the
   next Bitcoin blocks settle it. Nothing has moved." (held, and shown in the balance, but not yet
   where a trade pays from: just arrived, or still being moved in by the wallet); "Your <pay> is
   being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once
   that settles. Nothing has moved." (it could be traded, and a Bitcoin reorganisation took it
-  back out of the chain); "Only <amount> of your <pay> can be traded now, too little for any
+  back out of the chain); "Getting your <pay> ready for this trade: it is ready in a minute or two.
+  Nothing has moved." (the offers are orders resting in the tree that only coins expiring later can
+  fill: the wallet refreshes its older coins in the next round by itself, and prices the trade
+  again while the person waits, taking the next order if that one went); "Only <amount> of your <pay> can be traded now, too little for any
   offer: the rest is on its way, ready in a minute or two. Nothing has moved.", or "… the rest is
   ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
   most of what is held is not ready yet); "Nobody could confirm a price for this just now.
@@ -217,15 +347,20 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   answered within a few seconds is left out of the price rather than waited for.
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
+- The open tab, the pair and the amount typed are kept for the browser tab's session: a reload
+  opens on them again. A ticket is not kept; Review asks for the price again.
 
 ## Market
 
-Default mode is a trading screen, not only a form: once a pair is chosen, its market shows above
-**You pay**. The words are in `MARKET_WORDS` (`market-view.js`).
+Default mode is a trading screen, not only a form: once a pair is chosen, its market shows under
+**You receive** and the trade's button, so the assets are picked before their market fills the
+screen. The words are in `MARKET_WORDS` (`market-view.js`).
 
 - The pair is named "<base> / <quote>", one way for both sides of a trade: the same direction the
-  rest of the wallet prices it in ("1 <base> = N <quote>"; BTC and the fiat stablecoins are the
-  quote).
+  rest of the wallet prices it in ("1 <base> = N <quote>"). The quote is the asset people price the
+  other in: when BTC pairs with a fiat stablecoin, the stablecoin is the quote ("1 BTC = 77,200
+  USDX"); against any other asset BTC is the quote ("1 GOLD = 0.05 BTC"); otherwise a fiat
+  stablecoin is the quote, and between two other assets the order is fixed by their ids.
 - Under it, the last price in the quote's units and its change over the last 24 hours, with
   "24h". Then "High <price> · Low <price> · Volume <amount> <base>" for the last 24 hours.
 - A price chart, with three ranges: **1D**, **1W**, **1M**, its times along the bottom and its
@@ -300,8 +435,17 @@ What it shows beyond the Market and Trade sections above:
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
 - A payment's row has its description (or "Received" / "Sent"), its time and its amount as +/-.
 - A payment is in History the moment it leaves, and a payment arriving as soon as the network has
-  it. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
+  it. This holds for what is paid and received in seconds too, and for every trade of the Trade
+  tab: the wallet writes each down as it happens, in the browser that holds it, and shows them
+  in the one list, by time, with what the chain holds. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
   "Pending", and that goes once it is confirmed.
+- A payment on either chain that has waited two blocks is sped up by the wallet itself (a small
+  payment to itself that pays for both, `speed-up.js`), and again, paying more, each time it waits
+  two more. Its row then reads "Taking longer than usual: the wallet paid a little more to speed it
+  up." The speed-up has no row of its own. The same goes for what the wallet takes on the chain by
+  itself, such as a coin moved out to keep it safe. Developer mode does nothing by itself: every
+  waiting transaction offers **Speed up**, with the rate for both together, beside Bump fee and
+  Replace on Sequentia.
 - Which rails a trade used ("BTC on-chain · GOLD over Lightning", "over Lightning") is shown in
   developer mode only.
 
@@ -367,7 +511,7 @@ and at the top of Help. The words are in `REPORT_WORDS` (`problem-report.js`).
 None of these words appear on any screen in default mode, in the wallet's own text: rail,
 round, leaf, operator, tree, board, covenant, expiry, atom, sat, forfeit, checkpoint,
 reassignment, exit, unroll, anchor, channel, node, room, relay, maker, hash, preimage, HTLC,
-submarine, LSP, bridge, gateway, on-chain, Lightning. Nor do these controls: a choice of rail, a
+submarine, LSP, bridge, gateway, on-chain, Lightning, claim, distribution, lapse, locktime. Nor do these controls: a choice of rail, a
 move between rails, a receive request form, an exit drill, contract internals, a fee-rate field,
 or a "native asset" label. A refusal the wallet passes on from another service is said in
 these words too, never in the service's own.

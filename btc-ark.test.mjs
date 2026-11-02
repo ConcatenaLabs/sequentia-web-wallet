@@ -2,7 +2,7 @@
 // against a stand-in worker that answers as the wallet does.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { arkConfig, routeOf, destination, arkFigures, boardAmount, mountBtcArk, BOARD_MARGIN_SATS, BTC_WORDS } from './btc-ark.js'
+import { arkConfig, routeOf, destination, arkFigures, boardAmount, mountBtcArk, BOARD_MARGIN_SATS, BTC_WORDS, exitNoteOf, fmtBtc } from './btc-ark.js'
 import { decodeBolt11 } from './bolt11.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -105,6 +105,28 @@ test('sends go where the destination says, priced by the wallet first', async ()
   await assert.rejects(ark.send(TB1, 60000n), /not enough here/)
   assert.equal(asked.filter((x) => x.command === 'send' || x.command === 'pay' || x.command === 'offboard').length, n)
   ark.close()
+})
+
+test("Max: what the ark can pay a destination, its fee taken off", async () => {
+  const { w } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '50000', total: '50000' }),
+    send_fee: () => ({ fee: '0' }),
+    // A fee that grows with the amount: 1% plus 500.
+    offboard_fee: (a) => ({ fee: String(Math.ceil(Number(a.sats) / 100) + 500) }),
+  })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
+  await ark.open()
+  try {
+    assert.equal(await ark.max(ARK), 50000n)
+    const m = await ark.max(TB1)
+    const q = await ark.quote(TB1, m)
+    assert.ok(!q.short, 'the most Max offers can be sent')
+    assert.ok(50000n - m - q.fee < 2n, 'and nothing is left behind')
+    // A code is paid at its Ark part; an invoice names its own amount.
+    assert.equal(await ark.max('bitcoin:' + TB1 + '?ark=' + ARK), 50000n)
+    assert.equal(await ark.max(LNTB), null)
+  } finally { ark.close() }
 })
 
 test('a board: the server cosigns before the page signs and sends the funding', async () => {
@@ -287,4 +309,55 @@ test('an invoice the payee holds is pending until they take it, and comes back w
   assert.deepEqual(forbiddenIn(BTC_WORDS.payWaiting), [])
   assert.deepEqual(forbiddenIn(BTC_WORDS.payCameBack), [])
   ark.close()
+})
+
+// #501: a coin leaves the ark alone only by the wallet's one rule (exit_auto), and default mode
+// says what happened and what it cost, in its own words.
+test('what default mode says about BTC leaving alone', () => {
+  assert.equal(exitNoteOf({ action: 'none', ark: 'answering', progress: null }), null)
+  assert.equal(exitNoteOf({ action: 'none', ark: 'unreachable', not_worth: [] }), null)
+  assert.equal(fmtBtc(209340n), '0.0020934')
+  assert.equal(fmtBtc(100000000n), '1')
+  const started = exitNoteOf({ action: 'started', ark: 'unreachable', started: { amount: '209340', cost: '8695' }, progress: { pending: 3 } })
+  assert.equal(started.kind, 'started')
+  assert.equal(started.text, BTC_WORDS.exitStarted('0.0020934', '0.00008695'))
+  assert.equal(exitNoteOf({ action: 'none', ark: 'unreachable', progress: { pending: 1, exits: [{ state: 'waiting_out_its_delay' }] } }, { pendingSats: 98250n }).text, BTC_WORDS.exitMoving('0.0009825'))
+  // Before the wallet counts it as leaving, the amount the start priced is said.
+  assert.equal(exitNoteOf({ action: 'none', ark: 'unreachable', progress: { exits: [{ state: 'on_its_way' }] } }, { lastAmount: '159840' }).text, BTC_WORDS.exitMoving('0.0015984'))
+  // A claim already sent is not 'moving': what arrived is said instead.
+  assert.equal(exitNoteOf({ action: 'none', ark: 'unreachable', progress: { pending: 1, exits: [{ state: 'claiming' }] } }, { pendingSats: 98250n }), null)
+  const arrived = exitNoteOf({ action: 'none', ark: 'unreachable', progress: { pending: 0, claimed: { amount: '98250' } } }, { lastCost: '8695' })
+  assert.equal(arrived.kind, 'arrived'); assert.match(arrived.text, /0\.0009825 BTC arrived at your Bitcoin address.*about 0\.00008695 BTC/)
+  const needs = exitNoteOf({ action: 'cannot_start', ark: 'refused', amount: '99670', needed: '1382', available: '0' })
+  assert.equal(needs.text, BTC_WORDS.exitNeedsFees('0.0009967', '0.00001382'))
+  const small = exitNoteOf({ action: 'none', ark: 'unreachable', not_worth: [{ amount: '2000' }] })
+  assert.equal(small.text, BTC_WORDS.exitNotWorth('0.00002'))
+  // While the ark answers, a coin too small to leave alone says nothing.
+  assert.equal(exitNoteOf({ action: 'none', ark: 'answering', not_worth: [{ amount: '2000' }] }), null)
+})
+
+test('the wallet asks its one rule at open and holds what arrives at the address while a coin leaves', async (t) => {
+  const { w, asked } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '0', pending_exit: '209340', total: '209340' }),
+    catch_up: () => ({ recovered: [], recovered_sat: '0', spent_elsewhere: [], failed: [], complete: true }),
+    schedule_refreshes: () => { throw new Error('the server cannot be reached') },
+    refresh: () => { throw new Error('the server cannot be reached') },
+    exit_auto: () => ({ action: 'started', ark: 'unreachable', not_worth: [], started: { started: ['a:0'], amount: '209340', cost: '8695' }, progress: { pending: 1 } }),
+    exit_estimate: () => ({ coins: [] }),
+  })
+  const kept = new Map()
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11,
+    store: { get: (k) => kept.get(k) ?? null, set: (k, v) => kept.set(k, v) } })
+  t.after(() => ark.close())
+  await ark.open()
+  for (let i = 0; i < 60 && !ark.exitNote(); i++) await new Promise((r) => setTimeout(r, 5))
+  assert.ok(asked.some((x) => x.command === 'exit_auto'))
+  assert.equal(ark.exitNote(), BTC_WORDS.exitStarted('0.0020934', '0.00008695'))
+  assert.equal(ark.exitHolds(), true)
+  assert.equal(kept.get('btcArk.exitCost'), '8695')
+  // Asked again at once: not before its time.
+  const n = asked.filter((x) => x.command === 'exit_auto').length
+  await ark.exitCheck()
+  assert.equal(asked.filter((x) => x.command === 'exit_auto').length, n)
 })

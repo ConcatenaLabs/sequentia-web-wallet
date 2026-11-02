@@ -31,3 +31,17 @@ test('between two other assets the lower id is the base, the Sequence token incl
   assert.equal(dir(id(7), id(5)), 'tSEQ/OILX');
   assert.equal(dir(id(6), id(7)), 'GOLD/OILX');
 });
+
+// docs/DEFAULT_MODE.md, Market: a pair is read as people price it. BTC against a fiat stablecoin
+// is priced in the stablecoin; against anything else BTC stays the quote. Books keep canonicalPair.
+test('BTC is read in a fiat stablecoin, and is the quote against everything else', () => {
+  const show = (a, b) => { const p = swap.displayPair(a, b); return (T[p.base] || p.base) + '/' + (T[p.quote] || p.quote); };
+  assert.equal(show(id(3), 'BTC'), 'BTC/USDX');
+  assert.equal(show('BTC', id(3)), 'BTC/USDX');
+  assert.equal(show('BTC', id(4)), 'BTC/EURX');
+  assert.equal(show(id(1), 'BTC'), 'BTC/USDC.e');
+  assert.equal(show(id(6), 'BTC'), 'GOLD/BTC');
+  assert.equal(show('BTC', id(5)), 'tSEQ/BTC');
+  assert.equal(show(id(5), id(3)), 'tSEQ/USDX', 'a pair without BTC reads as canonicalPair has it');
+  assert.equal(dir(id(3), 'BTC'), 'USDX/BTC', 'the book key does not move');
+});

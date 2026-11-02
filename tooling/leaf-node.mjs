@@ -287,7 +287,7 @@ export async function leafLibraryThread (storeRoot, { onSlow = null } = {}) {
           const full = w.run(args.name, args.args)
           value = full.result
           const re = (full.start && full.start.recheck) || {}
-          detail = { cost: full.cost || null, recheck: { ms: re.ms || null, read_again: re.read_again ?? null, lineages_only: !!re.lineages_only } }
+          detail = { cost: full.cost || null, recheck: { ms: re.ms || null, read_again: re.read_again ?? null, lineages_only: !!re.lineages_only, coins_only: !!re.coins_only } }
           // A sync's own steps, each with what it cost.
           if (full.result && full.result.cost_by_step) detail.steps = full.result.cost_by_step
         }

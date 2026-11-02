@@ -57,13 +57,19 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   what the phrase's other wallets did (`catch_up`): the coins they boarded or received, and those
   of its own they spent. Each coin's renewal is scheduled with the ark's server whenever the page
   is open (`schedule_refreshes`): the server runs it by itself shortly before the coin's expiry,
-  with the page closed, and the renewed coin is taken in at the next open
+  with the page closed, and the renewed coin is taken in at the next open. When the ark's server
+  refuses the wallet or stops answering and a coin worth its exit is within a day of expiry, the
+  wallet takes it to the chain without the server (`exit_auto`): Bark broadcasts the coin's
+  pre-signed exit, pays each step's fee from the page's own Bitcoin address and claims the coin to
+  it. Developer mode prices each coin and exits by hand (**Exit…**); a coin worth less than its
+  exit is refused in words. The address needs confirmed BTC for the fees
 - Mix tab: CoinJoin rounds through the seqcj coordinator, the round verified in the wallet before
   it signs
 - Asset issuance, reissue, burn; testnet faucet; asset labels fed by the Asset Registry
 - Staking the Sequence token (tSEQ) with the network-minimum CSV lock, unbonding it, and
   staking-pool delegation (join a pool, switch, or leave; the coins never move)
-- Transaction history on both chains with RBF fee bump, CPFP, and replace
+- Transaction history on both chains with RBF fee bump, CPFP, and replace (Sequentia) and CPFP
+  (Bitcoin) in developer mode; default mode speeds up a waiting transaction by itself
 - OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
   Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
 - Classic signed messages over a wallet address key, in the format `verifymessage` accepts,
@@ -95,9 +101,10 @@ Open **https://sequentiatestnet.com/wallet/** in a modern desktop or mobile brow
 (WebAssembly and `localStorage` required; the live QR camera additionally needs a secure
 context, which the live site is). Create a new wallet or restore one from a 12-word phrase.
 
-Get testnet funds from the **Issuance** tab: one-click faucet buttons for tSEQ and the demo
-assets USDX, EURX, GOLD, SILVR, OILX (the faucet at https://sequentiatestnet.com/faucet pays
-straight to your current address). The line under the buttons says when the coins have reached
+Get testnet funds from the **Issuance** tab: one-click faucet buttons for BTC (testnet4), tSEQ
+and the demo assets USDX, EURX, GOLD, SILVR, OILX (the faucet at
+https://sequentiatestnet.com/faucet pays the wallet's receive code; BTC lands on the Bitcoin ark,
+where the wallet holds it, in seconds). The line under the buttons says when the coins have reached
 the wallet.
 
 The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign,
@@ -110,8 +117,12 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   counts everything of it the wallet holds: on-chain, leaves, Lightning (the wallet's share of
   its own channels, reserve included) and, for tSEQ, what is staked (each bonded stake, each
   unbonding output not yet claimed back, and the delegation record). A row shows that one
-  figure, with what is still arriving under it ("10 GOLD arriving"). A tap opens its details:
-  what is staked, and its asset id and Hide. In developer mode the details also hold its parts
+  figure, with what is still arriving under it ("10 GOLD arriving"). What the wallet holds that
+  cannot move before a date, such as tokens bought in a sale that vests, is part of the figure,
+  with a line under it for each date ("100 ORNG vests on 3 November 2026"); it is never counted
+  as what can be spent, so Max leaves it out, and Send, Trade, Stake and Mix refuse an amount
+  that needs it, saying from when it can be used. From that date the wallet takes it by itself.
+  A tap opens its details: what is staked, what vests on each date, and its asset id and Hide. In developer mode the details also hold its parts
   (on-chain, Lightning with what it can send and receive, leaves), with a bolt beside the
   ticker that is yellow when the asset has a Lightning channel, and the controls that move it
   to and from Lightning or ask for room to receive.
@@ -185,9 +196,11 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   stake record is signed for the height of the block it enters, so the wallet refuses to
   build one when it cannot read the chain tip.
 - **History**: transactions on both chains, with explorer links (Bitcoin's first when it has any;
-  with none on either chain, one line says so), and rescue actions for stuck
-  Sequentia transactions: RBF fee bump, CPFP, and replace, each with the same any-asset fee
-  selection as a send. They appear once a payment has missed a block. Each dialog says what the
+  with none on either chain, one line says so), and, in developer mode, rescue actions for stuck
+  transactions: on Sequentia RBF fee bump, CPFP, and replace, each with the same any-asset fee
+  selection as a send, and on Bitcoin CPFP (**Speed up**). They appear once a payment has missed a
+  block. Default mode offers none of them and speeds up a payment that has waited two blocks by
+  itself (`speed-up.js`). Each dialog says what the
   stuck transaction pays, as a multiple of the network's minimum rate, suggests a rate in the
   chosen asset's own units, and says what the rescue comes to; it checks again before signing
   that the transaction is still unconfirmed. Each row's details say why an unconfirmed
@@ -240,13 +253,18 @@ without and tries again every two minutes. **Receive** gives one receive code, a
 the receive request in a short form so it scans at a glance): another wallet like this one pays
 an asset at its single-use Sequentia receive request and BTC at its Bitcoin ark address, both in
 seconds, and any other wallet pays the address. An optional
-amount (in BTC) adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
-Lightning wallet pays. The address alone
+amount in BTC adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
+Lightning wallet pays; an amount in an asset the operator receives over Lightning adds a
+`lightning=` invoice in that asset from the operator's node, which a wallet of another operator
+pays in seconds. The address alone
 is shown in developer mode. The
 testnet faucet pays the receive code, or the address when it does not pay that asset into
 receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
-pays a receive code of the same operator and chain in the tree, and everything else as it
+pays a receive code of the same operator and chain in the tree; an asset to a receive code of
+another operator over Lightning when the code carries an invoice in it for the amount and the
+payment is worth no more than `SEQ_ASSET_LN_MAX_USD` (1,000 USD unless the page names another;
+`asset-lightning.js`), else at the code's address on the chain; and everything else as it
 always has; an address the chain's coins cannot cover is paid out of the tree in the operator's
 next settlement (the library's `offboard`), its fee and arrival shown first. The open page reads
 the wallet's mailbox every few seconds, so a payment to its receive code shows as soon as the
@@ -324,14 +342,16 @@ page is open: it syncs on the library's schedule (above), and after a sync, at m
 minutes and at the first one after the page opens, it runs the library's `care`. That takes up
 every open claim of a distribution named for one of the wallet's addresses, looking under every
 address the wallet handed out and 20 more, so the asset appears in its figure on the Balance tab.
-It signs a refresh plan for every leaf of a round at the first `care` after the leaf is made,
-two expiries ahead, the operator's fee for a step bounded at 0.2% of the leaf and taken from the
-leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
+It signs a refresh plan for a leaf of a round once the plan's first step could run within ten
+days (the library's reach), two expiries ahead, so a leaf is free to trade and pay out of round
+for most of its life; a wallet closed before that and kept away past the leaf's expiry has it
+repaid by the operator, less the late-refresh fee. Each step's fee is the operator's, bounded at
+0.2% of the leaf and taken from the leaf in its own asset (a step in the leaf's free window costs nothing). A plan starts only from a
 leaf of a round, so a leaf received or boarded out of round is refreshed into a round, under the
 same bound, once its refresh could run within ten days (that refresh costs a fee, so it waits),
 and its new leaf is planned at the next `care`. A leaf the operator will not plan stays
 unplanned, with the operator's reason in developer mode, and is refreshed by sync while the page
-is open. A wallet then closed across that leaf's expiry keeps it, whenever it closes: the
+is open. A wallet closed once its leaf is planned keeps it across the leaf's expiry: the
 operator runs the plan's steps and the wallet takes the new leaf up when it opens again. And it
 cancels a plan whose leaf has moved.
 
@@ -405,7 +425,8 @@ can hold it.
 
 With developer mode on and an operator joined, the Trade tab's **Pay from** and **Receive to**
 offer **Leaf** beside On-chain and Lightning, for a pair of two Sequentia assets. BTC is never a
-leaf: a pair with BTC in it has no Leaf choice. A leg on Leaf is settled by the leaf panel under
+leaf: in a pair with BTC, Leaf is offered on the asset's side only while BTC's side is on **Ark**
+(below). A leg on Leaf is settled by the leaf panel under
 the choices, in place of **Place order**, and every amount, fee, date and refusal in it is the
 leaf wallet's own, shown before anything is signed:
 
@@ -428,6 +449,18 @@ leaf wallet's own, shown before anything is signed:
   after its date.
 
 Every other combination with a leaf is refused with the reason. User mode shows no Leaf choice.
+
+### Developer mode: BTC in the Ark in the Trade tab
+
+With developer mode on and the Bitcoin ark open, the BTC side of a pair of BTC and a Sequentia
+asset offers **Ark** beside On-chain and Lightning. Paying from the Ark needs BTC in it; the
+Pay from balance line shows what the Ark holds, and while all of the wallet's BTC is there, On-chain
+and Lightning say so: "Your BTC is in the Ark: choose Ark, or move it on-chain first" (Send moves it
+to the wallet's own address). An Ark trade is a market trade, settled as user mode settles a BTC
+trade: the BTC over the Ark's Lightning gateway, the asset in leaves, under one hash, with a maker's
+BTC desk. Choosing Ark sets the asset's side to Leaf; the Ark panel, in place of **Place order**,
+reviews the trade (what is paid, received, its fees, every figure the trade engine's), places it,
+and follows it to Settled. Limit, or any other rail on the asset's side, is refused with the reason.
 
 ### Developer mode: contract spends
 
@@ -708,16 +741,18 @@ works normally without the restricted rows.
 | `user-onchain.js` | The engine's on-chain coins: a transparent covenant order taken on the chain in one FILL from the wallet's own coins (`onchain-fill`), its fee in the asset paid. |
 | `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
 | `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
+| `ark-rail.js` | Developer mode's Ark choice for BTC in the Trade tab and its panel: a market trade of BTC in the Bitcoin ark for an asset in leaves, by the user composer's engine. |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog; and, over the channel, a site of this origin's account, balances and orders once its owner connects it ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `site-orders.js` | A site's market and limit orders settled as the Trade tab settles a trade: the user composer's engine, or an order placed from leaves that rests. No DOM; the browser extension copies it into its `vendor/`. |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
-| `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, and the composer's `deps.btc` on the ark. No DOM. |
+| `btc-ark.js` | BTC on the Bitcoin ark: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, the composer's `deps.btc` on the ark, and the exit without the ark's server (Bark's unilateral exit, fees paid from the page's own Bitcoin coins, claimed to its address) with what default mode says about it. No DOM. |
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
+| `asset-lightning.js` | Default mode's rule for an asset sent to a receive code of another operator: over Lightning (the code's invoice in the asset, within the limit in USD, the operator able to carry it, its lock within the operator's window), or the code's address and why. No DOM. |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
-| `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`. |
+| `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
 | `coinjoin.js` | The Mix tab's wallet side: coin selection, ownership proofs, blinded addresses, and the pre-sign verification of the coordinator's transaction. |
 | `blindsig.js` / `coinjoin-protocol.js` | Vendored from [`seqcj`](https://github.com/ConcatenaLabs/seqcj): Chaum RSA blind signatures and the participant half of the CoinJoin protocol. Kept byte-identical to the originals apart from the header. |
@@ -730,7 +765,9 @@ works normally without the restricted rows.
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
 | `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md), and the live leaf maker (`leaf-maker.mjs`) user mode trades with. Four of its modules (`settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
 | `tooling/build-btc-ark.sh` | Builds `btc-ark/pkg` from an arca checkout's `bark-wasm/`, every build-machine path remapped. |
-| `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from an arca checkout's `wallet-wasm/`, every build-machine path remapped. |
+| `tooling/vesting-live-check.mjs` | Reads a wallet's vesting lines on the public page and checks that Send refuses what has not vested, in headless Chromium; read only. |
+| `tooling/fetch-leaf-wallet.sh` | Puts the arca CI build of the leaf wallet for one master commit into `leaves/pkg`, exactly, with its `BUILT_FROM` and `SHA256SUMS`: what every release commits. |
+| `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from a local arca checkout's `wallet-wasm/`, every build-machine path remapped: for trying an unmerged arca change, never committed. |
 | `tooling/leaf-node.mjs` | The leaf library (`leaves/pkg`) run in Node, with its storage and synchronous requests given to it: for the leaf maker and the drill. |
 | `*.test.mjs` | Node test suites (no browser needed). |
 

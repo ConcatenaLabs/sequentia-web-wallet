@@ -38,7 +38,7 @@ function standIn () {
         case 'lightning_receive_ready':
           assert.equal(a.need_seconds, needSeconds(18))
           return s.ready ? { ready: true } : { ready: false, why: 'the received leaf\'s round is not final' }
-        case 'lightning_receive_preimage': s.receives[a.hash].preimage = a.preimage; s.receives[a.hash].state = 'received'; s.coins.push({ leaf_id: 'r1', asset: X, value: s.claimed, state: 'live' }); return {}
+        case 'lightning_receive_preimage': s.receives[a.hash].preimage = a.preimage; s.receives[a.hash].state = 'received'; s.receives[a.hash].leaf = 'r1'; s.coins.push({ leaf_id: 'r1', asset: X, value: s.claimed, state: 'live' }); return {}
         case 'quote': return { coins: (a.leaves || []).map((l) => ({ leaf_id: l, fee: '3' })) }
         case 'participate': s.parts = a.leaves.map((l, i) => ({ participation: 'p' + i, state: 'pending' })); return { participations: s.parts }
         default: throw new Error('no command ' + cmd)
@@ -246,4 +246,110 @@ test('buying with BTC: a maker that renews no invoice leaves the trade returned,
 test('buying with BTC: a renewed invoice under another hash is not paid', async () => {
   const { s, r } = await boughtPastTheInvoice('other-hash')
   assert.equal(r.state, 'returned'); assert.deepEqual(s.btcPaid, [])
+})
+
+// Ambra #162: BTC held at the wallet's address and none on the ark is never "You have no BTC": the
+// wallet moves what the trade needs and says so.
+test('BTC at the address and none on the ark: moved for the trade, never no-funds', async () => {
+  const s = standIn()
+  const moved = []
+  const empty = { ...s.btc, balance: async () => 0n }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: empty,
+    btcAtAddress: () => 17700000000n, btcMove: (n) => moved.push(n) })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.equal(q.why, 'btc-moving')
+  assert.deepEqual(moved, [50000n])
+  assert.equal(USER_WORDS.btcMoving(2), 'Your BTC is being moved so it can be traded. It is ready after 2 Bitcoin blocks. Nothing has moved yet.')
+  const none = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: empty,
+    btcAtAddress: () => 0n, btcMove: (n) => moved.push(n) })
+  assert.equal((await none.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })).why, 'no-funds')
+})
+
+test('buying with BTC: the claimed coin is settled even when the claim came out below the quote', async () => {
+  const s = standIn()
+  s.makerSats = 50000n
+  // The operator's fee rates rose between the ticket and the claim: the claim's margins took 7
+  // atoms more than the quote said, so no coin has the quoted value.
+  s.claimed = String(100000n - 616n - 7n)
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  s.receives[H].state = 'issuing'; s.ready = true
+  await eng.advance(eng.records()[0])
+  let r = await eng.advance(eng.records()[0])
+  assert.ok(r.settle, 'the coin the claim made goes into the next round')
+  assert.deepEqual(r.settle.coins, ['r1'])
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+})
+
+// A stand-in whose claim lands as `land` leaves the claimed coin, once the library has had it.
+function claimedThen (land) {
+  const s = standIn()
+  s.makerSats = 50000n
+  s.claimed = String(100000n - 616n)
+  const inner = s.lib.command
+  s.lib.command = (cmd, a) => {
+    const r = inner(cmd, a)
+    if (cmd === 'lightning_receive_preimage') land(s, s.coins.find((x) => x.leaf_id === 'r1'))
+    return r
+  }
+  return s
+}
+
+async function bought (s) {
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted('BTC', X), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: X, amount: '50000' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  s.receives[H].state = 'issuing'; s.ready = true
+  await eng.advance(eng.records()[0])
+  return eng
+}
+
+test('buying with BTC: a claimed coin the library gave up to a refresh is settled by that refresh', async () => {
+  const PID = '9a'.repeat(32)
+  // The library's refresh of received coins takes the claimed coin as soon as it lands.
+  const s = claimedThen((s, c) => { c.state = 'given'; c.note = 'participation ' + PID; s.parts = [{ participation: PID, state: 'pending' }] })
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  assert.deepEqual(r.settle, { coins: ['r1'], participations: [PID] }, 'the refresh that took the coin is followed')
+  assert.ok(!s.calls.includes('participate'), 'no round of its own is asked for the coin')
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'sent', 'waiting while the refresh waits')
+  // The refresh is taken back (the operator kept it waiting): the coin is live again, and settled
+  // in a round of the trade's own.
+  s.parts[0].state = 'void'
+  const c = s.coins.find((x) => x.leaf_id === 'r1'); c.state = 'live'; c.note = ''
+  r = await eng.advance(eng.records()[0])
+  r = await eng.advance(eng.records()[0])
+  assert.deepEqual(r.settle && r.settle.coins, ['r1'])
+  assert.ok(s.calls.includes('participate'), 'a round of the trade\'s own')
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'live' }] })
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+})
+
+test('buying with BTC: a claimed coin already spent by its released refresh is settled', async () => {
+  const PID = '7b'.repeat(32)
+  const s = claimedThen((s, c) => {
+    c.state = 'spent'; c.spent_by = 'participation ' + PID
+    s.parts = [{ participation: PID, state: 'released', new_leaves: [{ state: 'live' }] }]
+  })
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  if (r.state !== 'settled') r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+  assert.ok(!s.calls.includes('participate'))
+})
+
+test('buying with BTC: a claimed coin paid on out of round leaves nothing to settle', async () => {
+  const s = claimedThen((s, c) => { c.state = 'spent'; c.spent_by = 'transfer ' + 'ab'.repeat(32) })
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  if (r.state !== 'settled') r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+  assert.ok(!s.calls.includes('participate'))
 })
