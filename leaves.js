@@ -189,6 +189,15 @@ export function frozenSentence (amount, ticker) {
   return `${amount} ${ticker} is frozen by its issuer: it can't be sent until the issuer lifts the freeze.`
 }
 
+// A refusal for developer mode: the plain sentence first, when there is one, then the server's own
+// words in brackets ("This receive code was paid already… (… 409 key_reused …)"), so a developer
+// reads what to do as well as what the server said.
+export function devRefusal (e) {
+  const p = plainRefusal(e)
+  if (p === e) return e
+  return new LeafError({ kind: p.kind, code: p.code, status: p.status, message: `${p.message} (${String((e && e.message) || e)})` })
+}
+
 // A refusal for user mode: the bond's, a frozen coin's and one the operator declines said
 // plainly; every other refusal as it is.
 export function plainRefusal (e) {
@@ -1795,7 +1804,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     pay: (cmd, args) => {
       if (!S.open) return Promise.reject(new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' }))
       const read = COMPOSER_READS.has(String(cmd))
-      return asking(() => (read ? run(cmd, args || {}) : paying(cmd, args || {}))).catch((e) => { throw dev() ? e : plainRefusal(e) })
+      return asking(() => (read ? run(cmd, args || {}) : paying(cmd, args || {}))).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
     },
     // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
     frozenAtoms: (hex) => frozenAtoms(S.coins, S.balance).get(hex) || 0n,
@@ -1847,7 +1856,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       return asking(async () => {
         while (S.busy) await sleep(50)
         const t1 = now()
-        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset })).catch((e) => { throw dev() ? e : plainRefusal(e) })
+        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset })).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
         log(`[leaves] send: waited ${t1 - t0} ms for the wallet, paid in ${now() - t1} ms`)
         if (ctx.onChange) try { ctx.onChange() } catch {}
         return v
