@@ -34,6 +34,10 @@ export const BTC_WORDS = Object.freeze({
   sent: (amount, secs) => `Sent ${amount} BTC (${secs} s).`,
   sentBlock: (amount) => `Sent ${amount} BTC. It arrives after a Bitcoin block.`,
   upTo: (amount) => `You can send up to ${amount} BTC this way now.`,
+  fromAddress: 'From your Bitcoin address',
+  fromInstant: 'From what you hold for instant payments',
+  inTwo: 'Your Bitcoin address does not hold all of it, so the rest comes from what you hold for instant payments.',
+  sentPart: (amount, why) => `Sent ${amount} BTC; the rest did not go out: ${why}. Send the rest again.`,
   failed: (why) => `Nothing was sent: ${why}`,
   recvTitle: 'Receive BTC with an invoice',
   recvSub: 'Make an invoice for BTC. Once it is paid, the BTC is yours in seconds.',
@@ -166,6 +170,21 @@ export function arkFigures (b) {
   const spendable = big(b.spendable)
   const arriving = big(b.pending_board) + big(b.claimable_lightning_receive) + big(b.pending_in_round)
   return { total: big(b.total), spendable, arriving }
+}
+
+// How a payment of `sats` is split between where it is paid from first (`firstCap`, the most it
+// can send there, its fee off) and second (`secondCap`): all from the first when it covers it,
+// else what the first holds and the rest from the second. A part is never under `dust`: the
+// second's part is raised to it, out of the first's. -> [first, second], or null when the two
+// together fall short.
+export function splitPay (sats, firstCap, secondCap, dust = 0n) {
+  const s = big(sats), f = big(firstCap) > 0n ? big(firstCap) : 0n, c = big(secondCap) > 0n ? big(secondCap) : 0n, d = big(dust)
+  if (s <= 0n) return null
+  if (s <= f) return [s, 0n]
+  let a = f, b = s - f
+  if (b < d) { b = d; a = s - d }
+  if (a < d) { a = 0n; b = s }
+  return b <= c ? [a, b] : null
 }
 
 // What a board of the confirmed coins `utxos` (each { value }) carries: what is left after the

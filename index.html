@@ -1721,7 +1721,7 @@ import { isStaleTipError } from './reorg.js';
 import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { attachChooser, PICKER_WORDS } from './asset-picker.js';
-import { mountBtcArk, arkConfig, BTC_WORDS } from './btc-ark.js';
+import { mountBtcArk, arkConfig, BTC_WORDS, splitPay } from './btc-ark.js';
 import { dueNow, markRaised, raiseRate, btcChildPlan, SPEED_WORDS } from './speed-up.js';
 import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
 import { noteArrival, noteSent, instantLog, instantRows } from './instant-history.js';
@@ -4203,22 +4203,47 @@ function btcArkBoardSoon(asked){
     .then((r)=>{ if(r){ const a = BigInt(r.amount || 0); _btcArkWanted = _btcArkWanted > a ? _btcArkWanted - a : 0n; sync().catch(()=>{}); } })
     .catch((e)=> console.warn('[btc ark] board:', e?.message??e));
 }
+// The most the page's own BTC can pay `address` in one transaction: every coin in, its fee off
+// at `satPerVb` (sized with a change output, as Max does). -> sats, 0n when there is none.
+async function btcChainMax(address, satPerVb){
+  const utxos = await btcGatherUtxos();
+  const total = utxos.reduce((s,u)=> s+u.value, 0n);
+  const sat = Math.max(satPerVb > 0 ? satPerVb : BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
+  const m = total - BigInt(Math.ceil(btcVbytes(utxos.length, [address, null]) * sat));
+  return m > 0n ? m : 0n;
+}
 // A BTC payment from the ark: what is sent, to whom, its fee, reviewed before anything moves.
-// -> false when the ark cannot pay it and the page's own path can (too little in the ark).
-async function btcArkSendReview(r, onDone){
+// An address is paid from the page's own BTC first: the ark pays it out only for what that does
+// not cover, since paying an address out of the ark has a fee of its own. A receive code or an
+// Ark address is paid from the ark first, in seconds and with no fee. When neither covers it
+// alone, the two pay it together (btcSplitReview).
+// -> false when the page's own path pays it all (btcReviewBroadcast).
+async function btcArkSendReview(r, onDone, satPerVb = 0){
   const route = btcArk.route(r.addr);
   const sats = route === 'invoice' ? null : parseAtoms(r.amtS, 8);
   if(route !== 'invoice' && !(sats > 0n)) throw new Error('amount must be greater than zero');
-  // Developer mode pays an address from the chain whenever the chain's coins cover it.
-  if(devMode() && route === 'chain' && btcBalance >= sats) return false;
+  let chainAddr = route === 'chain' ? r.addr : null;
+  if(!chainAddr && /^bitcoin:/i.test(r.addr)){ try{ chainAddr = readPayCode(r.addr)?.address || null; }catch{} }
+  const chainCap = chainAddr && route !== 'invoice' ? await btcChainMax(chainAddr, satPerVb) : 0n;
+  // The page's own BTC first for an address, in both modes.
+  if(route === 'chain' && sats <= chainCap) return false;
+  if(route === 'chain' && chainCap > BTC_DUST){
+    const arkCap = (await btcArk.max(r.addr)) || 0n;
+    const parts = splitPay(sats, chainCap, arkCap, BTC_DUST);
+    if(!parts) throw new Error(BTC_WORDS.upTo(fmtAtoms(chainCap + arkCap, 8)));
+    return btcSplitReview(r, { chainAddr, chain: parts[0], ark: parts[1], arkTo: r.addr, satPerVb }, onDone);
+  }
   const q = await btcArk.quote(r.addr, sats);
   if(!q) return false;
   if(q.short){
-    // Too little in the ark: an address, or a code's address, is paid from the chain, as before.
-    let chainAddr = route === 'chain' ? r.addr : null;
-    if(!chainAddr && /^bitcoin:/i.test(r.addr)){ try{ chainAddr = readPayCode(r.addr)?.address || null; }catch{} }
-    if(chainAddr && q.sats != null && btcBalance >= q.sats){ r.addr = chainAddr; return false; }
-    throw new Error(q.short === 'not enough here' ? BTC_WORDS.upTo(fmtAtoms(btcArk.figures().spendable, 8)) : q.short);
+    // Too little in the ark: a code's address is paid from the page's own BTC when that covers
+    // it, else the two pay it together.
+    if(chainAddr && q.sats != null && chainCap >= q.sats){ r.addr = chainAddr; return false; }
+    if(q.short !== 'not enough here') throw new Error(q.short);
+    const arkCap = (await btcArk.max(r.addr)) || 0n;
+    const parts = chainAddr ? splitPay(sats, arkCap, chainCap, BTC_DUST) : null;
+    if(!parts) throw new Error(BTC_WORDS.upTo(fmtAtoms(arkCap + chainCap, 8)));
+    return btcSplitReview(r, { chainAddr, chain: parts[1], ark: parts[0], arkTo: r.addr, satPerVb }, onDone);
   }
   const to = route === 'invoice' ? BTC_WORDS.toInvoice : /^bitcoin:/i.test(r.addr) ? BTC_WORDS.toCode : (r.addr.slice(0, 14) + '…');
   const what = fmtAtoms(q.sats, 8);
@@ -4239,6 +4264,42 @@ async function btcArkSendReview(r, onDone){
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       st.textContent = route === 'chain' ? BTC_WORDS.sentBlock(what) : BTC_WORDS.sent(what, secs);
     }catch(e){ st.className = 'status err'; st.textContent = 'Failed: ' + prettyErr(e); ok.disabled = false; }
+  };
+  return true;
+}
+// One BTC payment made of two: `chain` sats from the page's own BTC to `chainAddr`, and `ark`
+// sats from the ark to `arkTo` (the same address, or the receive code whose address it is). The
+// review shows both parts and their fees; on Send the page's transaction is built and signed
+// first, so the ark pays only once the other part is ready to go, and then it is broadcast.
+async function btcSplitReview(r, { chainAddr, chain, ark, arkTo, satPerVb }, onDone){
+  if(!(ark > 0n)){ r.addr = chainAddr; return false; }
+  if(!(chain > 0n)) throw new Error(BTC_WORDS.upTo(fmtAtoms((await btcArk.max(arkTo)) || 0n, 8)));
+  const q = await btcArk.quote(arkTo, ark);
+  if(!q || q.short) throw new Error(BTC_WORDS.upTo(fmtAtoms(chain + ((await btcArk.max(arkTo)) || 0n), 8)));
+  // No board takes these coins into the ark while the review is open (btcArkBoardSoon).
+  _btcSentAt = Date.now();
+  const built = await btcBuildTx([{ address: chainAddr, amount: chain }], satPerVb > 0 ? satPerVb : btcFeeRate());
+  const what = fmtAtoms(chain + ark, 8);
+  const to = /^bitcoin:/i.test(r.addr) ? BTC_WORDS.toCode : (chainAddr.slice(0, 14) + '…');
+  const feeOf = (f)=> f > 0n ? fmtAtoms(f, 8) + ' BTC' : BTC_WORDS.noFee;
+  const kv = [[BTC_WORDS.to, to],
+    [BTC_WORDS.fromAddress, fmtAtoms(chain, 8) + ' BTC · ' + BTC_WORDS.fee + ' ' + feeOf(built.fee)],
+    [BTC_WORDS.fromInstant, fmtAtoms(ark, 8) + ' BTC · ' + BTC_WORDS.fee + ' ' + feeOf(q.fee)],
+    ['', BTC_WORDS.inTwo + ' ' + BTC_WORDS.arrivesBlock]];
+  const {m, ok, st} = modalRows({ title: BTC_WORDS.review(what), kv });
+  ok.textContent = BTC_WORDS.send;
+  ok.onclick = async()=>{
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.sending;
+    try{ await btcArk.send(arkTo, ark); }
+    catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.failed(prettyErr(e)); ok.disabled = false; return; }
+    ok.classList.add('hide'); { const no = m.querySelector('button.ghost'); if(no) no.textContent = 'Close'; }
+    try{
+      await btcBroadcastHex(built.hex);
+      if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);
+      _btcSentAt = Date.now();
+      st.className = 'status ok'; st.textContent = BTC_WORDS.sentBlock(what);
+    }catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.sentPart(fmtAtoms(ark, 8), prettyErr(e)); }
+    if(onDone) onDone(); renderBalance(); sync().catch(()=>{});
   };
   return true;
 }
@@ -7895,15 +7956,15 @@ async function fillMax(r){
       const sat=Math.max(sendFee && sendFee.perKvb>0 ? sendFee.perKvb/1000 : BTC_DEFAULT_FEERATE, BTC_MIN_FEERATE);
       max = total - others - BigInt(Math.ceil(btcVbytes(utxos.length, [...dests, null])*sat));
       // One recipient the ark can pay: what the ark can send it, its fee off (btc-ark.js max).
-      // Send tries the ark first and falls back on the chain for an address, so the larger of
-      // the two can be sent; a bare Ark address only the ark pays.
+      // An address or a receive code is paid from both together when neither covers it alone
+      // (btcSplitReview), so Max is the two summed; a bare Ark address only the ark pays.
       if(btcArkPays() && dests.length===1){
         const typed=dests[0];
         const route=typed ? btcArk.route(payCodeDestination(typed, 'BTC')) : null;
         if(!typed && max<=0n && btcArk.figures().spendable>0n) throw new Error('enter the address first, so the fee can be sized');
         if(route && route!=='invoice'){
           const a=await btcArk.max(payCodeDestination(typed, 'BTC'));
-          if(a!=null) max = route==='ark' && !/^bitcoin:/i.test(typed) ? a : (a>max ? a : max);
+          if(a!=null) max = route==='ark' && !/^bitcoin:/i.test(typed) ? a : (max>0n ? max : 0n) + a;
         }
       }
     } else {
@@ -8925,7 +8986,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       // address only the ark pays. Developer mode pays invoices over its own Lightning.
       const arkRoute = btcRows.length===1 && btcArkPays() ? btcArk.route(btcRows[0].addr) : null;
       if(arkRoute && !(devMode() && arkRoute==='invoice')){
-        if(await btcArkSendReview(btcRows[0], reset)) return;
+        if(await btcArkSendReview(btcRows[0], reset, sendFee ? sendFee.perKvb/1000 : 0)) return;
       }
       const outputs=rows.map(r=>{ const amount=parseAtoms(r.amtS, 8);
         if(amount<=0n) throw new Error('amount must be greater than zero');
