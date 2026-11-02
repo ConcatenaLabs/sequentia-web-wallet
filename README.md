@@ -420,7 +420,8 @@ can hold it.
 
 With developer mode on and an operator joined, the Trade tab's **Pay from** and **Receive to**
 offer **Leaf** beside On-chain and Lightning, for a pair of two Sequentia assets. BTC is never a
-leaf: a pair with BTC in it has no Leaf choice. A leg on Leaf is settled by the leaf panel under
+leaf: in a pair with BTC, Leaf is offered on the asset's side only while BTC's side is on **Ark**
+(below). A leg on Leaf is settled by the leaf panel under
 the choices, in place of **Place order**, and every amount, fee, date and refusal in it is the
 leaf wallet's own, shown before anything is signed:
 
@@ -443,6 +444,18 @@ leaf wallet's own, shown before anything is signed:
   after its date.
 
 Every other combination with a leaf is refused with the reason. User mode shows no Leaf choice.
+
+### Developer mode: BTC in the Ark in the Trade tab
+
+With developer mode on and the Bitcoin ark open, the BTC side of a pair of BTC and a Sequentia
+asset offers **Ark** beside On-chain and Lightning. Paying from the Ark needs BTC in it; the
+Pay from balance line shows what the Ark holds, and while all of the wallet's BTC is there, On-chain
+and Lightning say so: "Your BTC is in the Ark: choose Ark, or move it on-chain first" (Send moves it
+to the wallet's own address). An Ark trade is a market trade, settled as user mode settles a BTC
+trade: the BTC over the Ark's Lightning gateway, the asset in leaves, under one hash, with a maker's
+BTC desk. Choosing Ark sets the asset's side to Leaf; the Ark panel, in place of **Place order**,
+reviews the trade (what is paid, received, its fees, every figure the trade engine's), places it,
+and follows it to Settled. Limit, or any other rail on the asset's side, is refused with the reason.
 
 ### Developer mode: contract spends
 
@@ -723,12 +736,13 @@ works normally without the restricted rows.
 | `user-onchain.js` | The engine's on-chain coins: a transparent covenant order taken on the chain in one FILL from the wallet's own coins (`onchain-fill`), its fee in the asset paid. |
 | `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
 | `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
+| `ark-rail.js` | Developer mode's Ark choice for BTC in the Trade tab and its panel: a market trade of BTC in the Bitcoin ark for an asset in leaves, by the user composer's engine. |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
 | `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog; and, over the channel, a site of this origin's account, balances and orders once its owner connects it ([docs/PAGE_API.md](docs/PAGE_API.md)). |
 | `site-orders.js` | A site's market and limit orders settled as the Trade tab settles a trade: the user composer's engine, or an order placed from leaves that rests. No DOM; the browser extension copies it into its `vendor/`. |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
-| `btc-ark.js` | BTC on the Bitcoin ark in default mode: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, the composer's `deps.btc` on the ark, and the exit without the ark's server (Bark's unilateral exit, fees paid from the page's own Bitcoin coins, claimed to its address) with what default mode says about it. No DOM. |
+| `btc-ark.js` | BTC on the Bitcoin ark: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, the composer's `deps.btc` on the ark, and the exit without the ark's server (Bark's unilateral exit, fees paid from the page's own Bitcoin coins, claimed to its address) with what default mode says about it. No DOM. |
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |

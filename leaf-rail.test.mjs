@@ -18,6 +18,10 @@ test('Leaf is offered only in developer mode, for two Sequentia assets', () => {
   const nj = leafRailOffered({ dev: true, joined: false, payAsset: Y, receiveAsset: X });
   assert.deepEqual([nj.offered, nj.usable, nj.why], [true, false, LEAF_WORDS.join]);
   assert.equal(leafRailOffered({ dev: true, joined: true, payAsset: Y, receiveAsset: null }).offered, false);
+  // With BTC's side on Ark the asset's side is Leaf: the Ark rail's trade (ark-rail.js).
+  assert.deepEqual(leafRailOffered({ dev: true, joined: true, payAsset: 'BTC', receiveAsset: X, payRail: 'ark' }), { offered: true, usable: true, why: null });
+  assert.deepEqual(leafRailOffered({ dev: true, joined: false, payAsset: X, receiveAsset: 'BTC', recvRail: 'ark' }), { offered: true, usable: false, why: LEAF_WORDS.join });
+  assert.equal(leafShape({ payAsset: 'BTC', receiveAsset: X, base: X, quote: 'BTC', payRail: 'ark', recvRail: 'leaf', mode: 'take' }).kind, 'none');
 });
 
 test('each choice settles as the router plans it', () => {
@@ -123,7 +127,8 @@ test('the page wires the leaf rail beside the composer, and the composer never r
   assert.match(html, /body\.swleaf-on #swReview,[^{]*#swConfWrap[^{]*\{display:none !important\}/, 'the composer\'s controls hide while a leg is on Leaf');
   assert.match(html, /get leafRail\(\)\{ return leafRailApi; \}/);
   const swap = readFileSync(new URL('./swap.js', import.meta.url), 'utf8');
-  assert.match(swap, /if \(S\.payRail === 'leaf' \|\| S\.recvRail === 'leaf'\) return;/, 'onReview never places on a Leaf leg');
-  assert.match(swap, /if \(cur === 'leaf'\) continue;/, 'autoRails never overrides a Leaf choice');
-  assert.match(swap, /if \(r === 'leaf'\) return;   \/\/ painted by the leaf rail/);
+  assert.match(swap, /function paneRail\(r\)\{ return r === 'leaf' \|\| r === 'ark'; \}/, 'Leaf and Ark are settled by their own panels');
+  assert.match(swap, /if \(paneRail\(S\.payRail\) \|\| paneRail\(S\.recvRail\)\) return;/, 'onReview never places on a Leaf leg');
+  assert.match(swap, /if \(paneRail\(cur\)\) continue;/, 'autoRails never overrides a Leaf choice');
+  assert.match(swap, /if \(paneRail\(r\)\) return;   \/\/ painted by the leaf rail/);
 });

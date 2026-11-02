@@ -19,7 +19,8 @@
 //                                   where it rests with the wallet offline; the wallet lists
 //                                   it on the relay once it rests.
 //
-// BTC is never a leaf: a pair with BTC in it shows no Leaf choice. Every amount, fee, date and
+// BTC is never a leaf. A pair with BTC in it shows Leaf on the asset's side only while BTC's side
+// is on Ark (ark-rail.js): that trade is the Ark rail's to settle, and this panel stays out of it. Every amount, fee, date and
 // refusal on this rail is the leaf library's (leaves/worker.js runs it), shown in its own words
 // before anything is signed; nothing about a leaf is computed in this file. User mode shows
 // none of it.
@@ -29,7 +30,7 @@ import { buildUnifiedBook, bestFor } from './tooling/lsp/unified-book.mjs';
 
 export const LEAF_WORDS = Object.freeze({
   button: 'Leaf',
-  btc: 'BTC is never a leaf: it settles over Lightning or on the chain. Leaves trade two Sequentia assets.',
+  btc: 'BTC is never a leaf: it settles over Lightning, on the chain or in the Ark. Choose Ark for BTC to settle the asset in leaves.',
   join: 'Join a leaf operator in the Leaves tab to pay from leaves.',
   payToo: 'A trade that gives you a leaf is paid from leaves: choose Leaf to pay from too.',
   marketChain: 'A take from leaves gives you a leaf: choose Leaf to receive to, or Limit to place an order on the chain from your leaves.',
@@ -44,10 +45,14 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } };
 
 // Whether the Leaf choice is offered at all: developer mode, an operator joined, and a pair of
 // two Sequentia assets.
-export function leafRailOffered({ dev, joined, payAsset, receiveAsset }) {
+export function leafRailOffered({ dev, joined, payAsset, receiveAsset, payRail, recvRail }) {
   if (!dev) return { offered: false, why: null };
   if (!payAsset || !receiveAsset || payAsset === receiveAsset) return { offered: false, why: null };
-  if (payAsset === 'BTC' || receiveAsset === 'BTC') return { offered: false, why: LEAF_WORDS.btc };
+  if (payAsset === 'BTC' || receiveAsset === 'BTC') {
+    if ((payAsset === 'BTC' ? payRail : recvRail) !== 'ark') return { offered: false, why: LEAF_WORDS.btc };
+    if (!joined) return { offered: true, usable: false, why: LEAF_WORDS.join };
+    return { offered: true, usable: true, why: null };
+  }
   if (!joined) return { offered: true, usable: false, why: LEAF_WORDS.join };
   return { offered: true, usable: true, why: null };
 }
@@ -57,6 +62,8 @@ export function leafRailOffered({ dev, joined, payAsset, receiveAsset }) {
 // -> { kind: 'none'|'take'|'swap'|'place'|'refused', why?, plan?, path? }
 export function leafShape({ payAsset, receiveAsset, payRail, recvRail, mode, base, quote }) {
   if (payRail !== 'leaf' && recvRail !== 'leaf') return { kind: 'none' };
+  // BTC on Ark: the Ark rail's trade (ark-rail.js), not this panel's.
+  if ((payAsset === 'BTC' && payRail === 'ark') || (receiveAsset === 'BTC' && recvRail === 'ark')) return { kind: 'none' };
   if (payAsset === 'BTC' || receiveAsset === 'BTC') return { kind: 'refused', why: LEAF_WORDS.btc };
   if (!payRail || !recvRail) return { kind: 'pending' };
   if (payRail === 'ln' || recvRail === 'ln') return { kind: 'refused', why: LEAF_WORDS.ln };
@@ -231,28 +238,30 @@ export function mountLeafRail(ctx) {
 
   // The Leaf buttons in both rail choosers, shown only where the rail is offered.
   function paintButtons(c) {
-    const off = leafRailOffered({ dev: ctx.dev(), joined: joined(), payAsset: c.payAsset, receiveAsset: c.receiveAsset });
+    const off = leafRailOffered({ dev: ctx.dev(), joined: joined(), payAsset: c.payAsset, receiveAsset: c.receiveAsset, payRail: c.payRail, recvRail: c.recvRail });
     for (const [id, leg] of [['swPayRailSeg', 'pay'], ['swRecvRailSeg', 'recv']]) {
       const seg = ctx.$(id); if (!seg) continue;
+      // BTC's own side never shows Leaf, Ark or not.
+      const legOff = (leg === 'pay' ? c.payAsset : c.receiveAsset) === 'BTC' ? { offered: false } : off;
       let b = seg.querySelector('button[data-r="leaf"]');
       if (!b) {
         b = el('button', '', LEAF_WORDS.button); b.type = 'button'; b.dataset.r = 'leaf'; b.id = leg === 'pay' ? 'swPayLeaf' : 'swRecvLeaf';
         b.onclick = (ev) => {
           ev.stopPropagation();
           const now = ctx.composer();
-          const o = leafRailOffered({ dev: ctx.dev(), joined: joined(), payAsset: now.payAsset, receiveAsset: now.receiveAsset });
+          const o = leafRailOffered({ dev: ctx.dev(), joined: joined(), payAsset: now.payAsset, receiveAsset: now.receiveAsset, payRail: now.payRail, recvRail: now.recvRail });
           if (!o.usable) { showWhy(o.why); return }
           ctx.setRail(leg, 'leaf');
         };
         seg.appendChild(b);
       }
-      b.classList.toggle('hide', !off.offered);
-      b.style.display = off.offered ? '' : 'none';
-      b.classList.toggle('off', off.offered && !off.usable);
-      b.title = off.why || 'Settle this leg with leaves of the operator’s tree';
+      b.classList.toggle('hide', !legOff.offered);
+      b.style.display = legOff.offered ? '' : 'none';
+      b.classList.toggle('off', legOff.offered && !legOff.usable);
+      b.title = legOff.why || 'Settle this leg with leaves of the operator’s tree';
       b.classList.toggle('on', (leg === 'pay' ? c.payRail : c.recvRail) === 'leaf');
     }
-    // A Leaf choice the rail no longer offers (user mode, BTC in the pair) is dropped.
+    // A Leaf choice the rail no longer offers (user mode, BTC in the pair off Ark) is dropped.
     if (!off.offered || !off.usable) {
       if (c.payRail === 'leaf') ctx.setRail('pay', null);
       if (c.recvRail === 'leaf') ctx.setRail('recv', null);

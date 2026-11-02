@@ -19,8 +19,8 @@ index.html  (app shell: boot, tabs, balances, send/receive, fees, stake + pools,
  │   └─ leaf-request.js    reads a receive request for the approval dialog (copied to the extension)
  │   └─ leaves/worker.js   dedicated worker running leaves/pkg/ (the operator wallet library, WASM,
  │                         tracked): blocking HTTP as synchronous XHR, its SQLite store on OPFS
- ├─ btc-ark.js             default mode's BTC on the Bitcoin ark: route of a BTC payment, the board
- │   │                     of confirmed BTC from the page's key, the composer's deps.btc
+ ├─ btc-ark.js             BTC on the Bitcoin ark: route of a BTC payment, the board of confirmed
+ │   │                     BTC from the page's key, the trade engine's deps.btc while it is open
  │   └─ btc-ark/worker.js  dedicated worker running btc-ark/pkg/ (Bark's wallet, WASM, tracked):
  │                         IndexedDB store, gRPC-web to the ark's server, Esplora for testnet4
  ├─ contracts.js           developer mode: the Contracts tab (template, instance, coin, path, the
