@@ -57,6 +57,11 @@ export const DEFAULT_WORDS = Object.freeze({
   addressTip: 'Your address, the same tb1 address on both chains. For BTC, and for senders that ask for an address.',
   sendTitle: (amount, ticker) => `Send ${amount} ${ticker}?`,
   sendLine: 'It arrives in seconds.',
+  // The fee line of a payment in the Ark: none, said so rather than left out.
+  feeLabel: 'Fee',
+  noFee: 'No fees',
+  // Max for an asset held in the Ark, to a destination it pays with a fee: type the amount.
+  maxArkElsewhere: 'Max sizes a payment to a receive code. For this recipient, type the amount.',
   // A receive code paid at its address, because nothing the wallet holds pays it in seconds.
   byAddress: (arrives) => `This can't arrive in seconds from what you hold now, so it goes to the address. ${arrives}`,
   arrivesNextBlock: 'It arrives after the next block, in about a minute.',

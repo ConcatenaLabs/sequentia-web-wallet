@@ -2655,7 +2655,8 @@ async function treeSendReview(r, onDone){
   const held = leavesApi.leafAtoms(r.asset) || 0n, arriving = leavesApi.arriving(r.asset) || 0n;
   if(atoms > held - arriving) throw new Error(atoms <= held ? DEFAULT_WORDS.stillArriving(m0.ticker) : `You can send up to ${fmtAtoms(held - arriving, m0.precision||0)} ${m0.ticker} this way now.`);
   const amt = fmtAtoms(atoms, m0.precision||0);
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: []});
+  // A payment in the tree costs nothing: the review says so, as the Bitcoin ark's does.
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
@@ -2692,7 +2693,7 @@ async function assetLightningReview(r, onDone, toAddress){
   catch(e){ console.warn('[asset lightning] quote:', e?.message??e); return false; }
   const amt = fmtAtoms(atoms, m0.precision||0);
   const fee = q && q.fee ? BigInt(q.fee) : 0n;
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   const offerAddress = (text)=>{
@@ -2753,7 +2754,7 @@ async function offboardReview(r, onDone){
   const amt = fmtAtoms(atoms, m0.precision||0);
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
   const minutes = arrivalMinutes(leavesApi.roundInterval());
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
@@ -7862,8 +7863,16 @@ async function fillMax(r){
         }
       }
     } else {
-      max = BigInt(availableFor(hex)) - others;
-      if(sendFee && sendFee.hex===hex && !isOampAsset(hex)){
+      // Default mode keeps an asset in the Ark. A receive code of this operator (or none typed
+      // yet) is paid there in seconds with no fee, so Max is what the Ark can send now. Max from
+      // the chain's coins alone read 0 there and said "nothing left to send after the fee".
+      const typed=r.querySelector('.raddr').value.trim();
+      const tree=(!devMode() && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n;
+      const inTree=tree > 0n && (!typed || !!leavesApi.treeRoute(payCodeDestination(typed, hex)));
+      max = (inTree ? tree : BigInt(availableFor(hex))) - others;
+      // Elsewhere (an address, another operator's code) the Ark pays with a fee Max can't size yet.
+      if(!inTree && max<=0n && tree>0n) throw new Error(DEFAULT_WORDS.maxArkElsewhere);
+      if(!inTree && sendFee && sendFee.hex===hex && !isOampAsset(hex)){
         // Size the transaction with every coin of the asset in it, then take its fee off.
         const addr=r.querySelector('.raddr').value.trim();
         if(!addr) throw new Error('enter the address first, so the fee can be sized');
