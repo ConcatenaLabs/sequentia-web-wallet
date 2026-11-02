@@ -40,11 +40,17 @@ test('the wallet moves into the Ark up to the board limit, and receives up to th
   assert.equal(boardRoom(usdx(499_999n)), 1n)
 })
 
-test('the part above the hold limit is moved out, when it is worth a move', () => {
+test('the part above the hold limit is moved out once it is worth 1000 USD, all of it at once', () => {
+  assert.equal(MOVE_OUT_MIN_USD, 1000)
   const btc = (held) => ({ held, limitUsd: 2000, price: 100_000, precision: 8 })
   assert.equal(holdExcess(btc(2_000_000n)), 0n)
-  assert.equal(holdExcess(btc(2_030_000n)), 0n, `under ${MOVE_OUT_MIN_USD} USD above it stays`)
-  assert.equal(holdExcess(btc(2_500_000n)), 500_000n, '500 USD above it goes to the address')
+  assert.equal(holdExcess(btc(2_500_000n)), 0n, `under ${MOVE_OUT_MIN_USD} USD above it stays`)
+  assert.equal(holdExcess(btc(2_999_999n)), 0n)
+  assert.equal(holdExcess(btc(3_000_000n)), 1_000_000n, '1000 USD above it goes to the address')
+  assert.equal(holdExcess(btc(4_200_000n)), 2_200_000n, 'all that is above it, in one move')
+  const usdx = (held) => ({ held, limitUsd: 10000, price: 1, precision: 2 })
+  assert.equal(holdExcess(usdx(1_099_999n)), 0n)
+  assert.equal(holdExcess(usdx(1_100_000n)), 100_000n, 'an asset: 11000 held, 1000 moves')
   assert.equal(holdExcess({ held: 9n ** 20n, limitUsd: null, price: 1, precision: 2 }), 0n)
   assert.equal(holdExcess({ held: 9n ** 20n, limitUsd: 10000, price: null, precision: 2 }), 0n, 'no price, no move')
 })

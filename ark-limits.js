@@ -15,8 +15,9 @@ export const ARK_LIMITS = Object.freeze({
   asset: Object.freeze({ board: 5000, hold: 10000 }),
 })
 
-// A move out of the Ark costs a fee of its own: a part above `hold` worth less than this stays.
-export const MOVE_OUT_MIN_USD = 50
+// A move out of the Ark costs a fee of its own, so the wallet consolidates: the part above `hold`
+// stays there until it is worth at least this much, and then all of it moves at once.
+export const MOVE_OUT_MIN_USD = 1000
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const figure = (v, d) => (v === null ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 && v !== '' && v !== undefined ? Number(v) : d))
