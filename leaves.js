@@ -1180,7 +1180,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     let lnAssets = []; try { lnAssets = ctx.lnAssets ? ctx.lnAssets() : [] } catch {}
     const rows = railRows({ balances, btcOnchain: ctx.btcOnchain(), lnFor: ctx.lnFor, tickerOf: tick, lnAssets })
     const t = el('table', 'leaf-rails')
-    const head = el('tr'); for (const h of ['Asset', 'On-chain', 'Leaves', 'Lightning']) head.appendChild(el('th', null, h)); t.appendChild(head)
+    const head = el('tr'); for (const h of ['Asset', 'On-chain', 'Ark', 'Lightning']) head.appendChild(el('th', null, h)); t.appendChild(head)
     for (const r of rows) {
       const tr = el('tr'); tr.dataset.asset = r.kind
       const key = r.kind

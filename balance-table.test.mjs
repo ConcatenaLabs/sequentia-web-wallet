@@ -70,13 +70,18 @@ test('one figure per asset in every mode; the rails and their actions in develop
   // rails are developer mode's; what is arriving, staked or frozen shows in both.
   assert.match(rb, /if\(devMode\(\) && lnOn && leg\)\{\s*const bo=el\('span','bt-bolt'\+\(hasLn\?' on':''\)\);/);
   assert.match(rb, /const dm = devMode\(\);/);
-  assert.match(rb, /if\(dm && \(hasLn \|\| leafAtoms>0n \|\| staked>0n \|\| arkAtoms>0n\)\) blk\('On-chain', amt\(on\)\);/);
-  // BTC held on the Bitcoin ark: in BTC's one figure in both modes, its own part in developer mode.
-  assert.match(rb, /if\(dm && arkAtoms>0n\)\{ const d=blk\('Bitcoin ark', amt\(arkAtoms\)\);/);
-  // The exit by hand is a developer-mode button on that part only (#501).
-  assert.match(rb, /if\(dm && arkAtoms>0n\)\{[^\n]*btcArkExitDialog\(\)/);
+  assert.match(rb, /if\(dm && \(hasLn \|\| arkPart>0n \|\| arkJoined \|\| staked>0n\)\) blk\('On-chain', amt\(on\)\);/);
+  // The ark's part has one name on both chains, "Ark", like Lightning: Bitcoin's ark for BTC,
+  // Sequentia's (Arca's leaves) for an asset. In the one figure in both modes, its own part in
+  // developer mode, shown even at zero once the wallet has joined that ark.
+  assert.match(rb, /const arkPart = kind==='BTC' \? arkAtoms : leafAtoms;/);
+  assert.match(rb, /const arkJoined = kind==='BTC' \? !!\(btcArk && btcArk\.isOpen\(\)\) : !!\(leavesApi && leavesApi\.isOpen\(\)\);/);
+  assert.match(rb, /if\(dm && \(arkPart>0n \|\| arkJoined\)\)\{\s*const k=blk\('Ark', amt\(arkPart\)\);/);
+  assert.match(rb, /'Bitcoin Ark \(Bark\): BTC on an ark on Bitcoin itself' : 'Sequentia Ark \(Arca\): '\+ticker/);
+  assert.ok(!/blk\('(Leaves|Bitcoin ark)'/.test(rb), 'no rail named Leaves or Bitcoin ark');
+  // The exit by hand is a developer-mode button on BTC's Ark part only (#501).
+  assert.match(rb, /if\(kind==='BTC' && arkAtoms>0n\)\{[^\n]*btcArkExitDialog\(\)/);
   assert.match(rb, /if\(dm && lnOn && leg && hasLn\)\{/);
-  assert.match(rb, /if\(dm && leafAtoms>0n\) blk\('Leaves', amt\(leafAtoms\)\);/);
   assert.match(rb, /if\(staked>0n\) blk\('Staked', amt\(staked\)\);/);
   assert.match(rb, /DEFAULT_WORDS\.arriving\(amt\(arriving - redoing\), ticker\)/);
   // What a Bitcoin reorganisation took back out of the chain is said apart, never as gone.
