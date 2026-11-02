@@ -3584,7 +3584,8 @@ function buildWollet(phrase, kind){
 // Electrum seed (one BIP39 phrase in 4096 carries the segwit version prefix), so only then ask.
 function importSeedKind(phrase){
   const p = phrase.trim().replace(/\s+/g,' ');
-  const etype = Signer.electrumSeedType(p);
+  // A kit built before Electrum seeds has no electrumSeedType: every phrase is then BIP39.
+  const etype = typeof Signer.electrumSeedType === 'function' ? Signer.electrumSeedType(p) : null;
   if(!etype) return 'bip39';
   let bip39 = true; try{ new Mnemonic(p).free(); }catch{ bip39 = false; }
   if(bip39 && !confirm('This phrase is valid both as a BIP39 recovery phrase and as an Electrum seed.\n\nOK: import it as an Electrum seed.\nCancel: import it as a BIP39 phrase.')) return 'bip39';
