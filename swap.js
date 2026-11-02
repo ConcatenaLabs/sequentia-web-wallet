@@ -10048,6 +10048,9 @@ export function covenantCreditBalance(){
 // other user of COMPANION out meanwhile.
 export function companionWollet(){ return ensureCompanion(); }
 export function applyCompanionUpdate(u){ if (u && COMPANION) COMPANION.applyUpdate(u); }
+// The chain went back below what the companion saw (reorg.js): it is dropped, and the next sync
+// scans a fresh one from empty.
+export function resetCompanion(){ COMPANION = null; }
 // The "credits received" block: proceeds paid into the taproot payout when a resting
 // order filled (possibly while the wallet was closed). Sweeping them into the main
 // wpkh balance is a follow-up; here the maker at least SEES them (task requirement).

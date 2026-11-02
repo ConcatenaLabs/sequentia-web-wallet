@@ -1685,7 +1685,7 @@ import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
 import { displayPair } from './swap.js';
-import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
+import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, resetCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
 import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFromComposer, hasInFlight } from './xswap.js';
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
@@ -1709,6 +1709,7 @@ import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './light
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
+import { isStaleTipError } from './reorg.js';
 import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { attachChooser, PICKER_WORDS } from './asset-picker.js';
@@ -6541,6 +6542,21 @@ let _scannedOnce = false;   // false until the first live scan completes; gates 
 // subscribe, and each relay event handler calls sync(); without coalescing those pile up
 // into overlapping wasm scans that block the main thread (frozen UI) and re-enter the
 // shared esplora client. Reuse a single in-flight scan until it settles.
+// The blocks the wallet saw left the chain (a Sequentia block anchored to a Bitcoin block that left
+// testnet4 is invalid, and so is every block after it), so SWK refuses every update below the
+// height it holds (reorg.js). Its state is dropped, with the scan cache, which may hold the same
+// blocks, and the wallet is scanned again from empty: what it holds is then only what the chain
+// holds now. The page's own broadcasts are applied again on top, as after any scan. Runs inside
+// the sync's queued turn.
+async function rebuildAfterReorg(e){
+  console.warn('[sync] the chain went back below this wallet, rebuilding from empty:', e?.message??e);
+  try{ await idbPut(wolletKey(), null); await idbPut(wolletKey()+':at', null); }catch{}
+  _cacheRestored = false; _cachePersisted = false;
+  wollet = new Wollet(network, signer.wpkhSlip77Descriptor());
+  const u = await client.fullScan(wollet);
+  if(u) wollet.applyUpdate(u);
+  try { reapplyOwnTxs(); } catch {}
+}
 function sync(){
   if (_syncInFlight) return _syncInFlight;
   _syncInFlight = _syncImpl().finally(() => { _syncInFlight = null; });
@@ -6561,11 +6577,18 @@ async function _syncImpl(){
     const scans = queued('sync › Sequentia scans', async () => {
       const comp = companionWollet();
       const [update, compUpdate] = await Promise.all([
-        part('primary scan', client.fullScan(wollet)),
-        comp ? part('companion scan', companionClient.fullScan(comp).catch(e => { console.warn('[sync] companion scan:', e?.message??e); return null; })) : null,
+        part('primary scan', client.fullScan(wollet).catch(e => ({ refused: e }))),
+        comp ? part('companion scan', companionClient.fullScan(comp).catch(e => { console.warn('[sync] companion scan:', e?.message??e); if(isStaleTipError(e)) resetCompanion(); return null; })) : null,
       ]);
-      if(update){ wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }   // re-apply own broadcasts the scan may predate
-      try { applyCompanionUpdate(compUpdate); } catch(e){ console.warn('[sync] companion apply:', e?.message??e); }
+      try{
+        if(update && update.refused) throw update.refused;
+        if(update){ wollet.applyUpdate(update); try { reapplyOwnTxs(); } catch {} }   // re-apply own broadcasts the scan may predate
+      }catch(e){
+        // The chain went back below what the wallet saw (reorg.js): rebuilt from empty, never stuck.
+        if(!isStaleTipError(e)) throw e;
+        await rebuildAfterReorg(e);
+      }
+      try { applyCompanionUpdate(compUpdate); } catch(e){ console.warn('[sync] companion apply:', e?.message??e); if(isStaleTipError(e)) resetCompanion(); }
     });
     // ...alongside the other chain, the fee-asset rates and the restricted-asset balances
     await Promise.all([scans, part('Bitcoin scan', btcScan()), part('fee rates', fetchFeeRates()), part('fee info', fetchFeeInfo()),
