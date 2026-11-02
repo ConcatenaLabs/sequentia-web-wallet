@@ -60,7 +60,8 @@
 //   lnFor(kind)         -> BigInt atoms on Lightning ('BTC' or an asset hex)
 //   onChange()          called when leaf balances change (the Balance tab re-renders)
 //   onModeChange(mode)  called when the user changes the mode
-//   onEvent(name, data) the leaf events: 'leafArrived', 'leafSyncDue'
+//   onEvent(name, data) the leaf events: 'leafArrived', 'leafSyncDue', 'codeUsed' (the receive
+//                       code kept for Receive was paid or lapsed: show a new one)
 //   askFaucet(body)     optional: asks the testnet faucet to pay a receive request as a leaf
 //                       ({ request, asset? }); answers the faucet's JSON or throws its error
 //   claimScan()         optional: how many receive keys `care` looks for claims under
@@ -104,6 +105,18 @@ export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
+
+// Whether the receive code `kept` can still be shown, by the schedule read at `readAt` (ms): a
+// paid request leaves `receive_requests`, a lapsed one is no longer `waiting`, and one near its
+// lapse is shown no more. -> false when the schedule says it is used up, true when it says it is
+// open, null when it cannot say (no schedule, or one read before the code was handed out: a new
+// request is not in an older list). A receive code is paid once: the operator refuses a second
+// payment to its key (409 key_reused).
+export function codeOpen (kept, schedule, readAt) {
+  if (!kept || !kept.owner || !schedule || readAt == null || readAt < (kept.made || 0)) return null
+  const r = (schedule.receive_requests || []).find((x) => x.owner === kept.owner)
+  return !!r && r.state === 'waiting' && (r.lapses_at == null || r.lapses_at - (schedule.now || 0) > CODE_MARGIN_S)
+}
 // User mode: how often the open page reads the wallet's mailbox, so that a payment to its receive
 // code shows within seconds rather than at the schedule's next sync.
 export const MAILBOX_POLL_MS = 10_000
@@ -586,8 +599,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   async function reload () {
     if (!S.open) return
+    const t = now()
     const [b, c, p, s, r] = [await run('balance'), await run('coins'), await run('participations'), await run('schedule'), await run('refusals')]
-    S.balance = b; S.coins = c || []; S.participations = p || []; S.schedule = s; S.refusals = r || []
+    S.balance = b; S.coins = c || []; S.participations = p || []; S.refusals = r || []
+    readSchedule(s, t)
     try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
     // The plans are shown in developer mode only; reading them asks nothing of the operator.
     if (dev()) { try { const pl = await run('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
@@ -627,6 +642,17 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   const dev = () => devModeOn(ctx.store, tag())
   const emit = (name, data) => { if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {} }
+  // Every schedule read also says whether the receive code kept for the page was paid (or lapsed)
+  // meanwhile, by this page or while it was closed: the code is then forgotten and the page told
+  // ('codeUsed'), so Receive shows a new one rather than a code no sender can pay again.
+  const readSchedule = (s, at) => {
+    S.schedule = s; S.scheduleAt = at
+    const key = tagged(CODE_KEY, tag())
+    let kept = null; try { kept = JSON.parse(ctx.store.getItem(key) || 'null') } catch {}
+    if (codeOpen(kept, s, at) !== false) return
+    try { ctx.store.removeItem(key) } catch {}
+    emit('codeUsed', { owner: kept.owner })
+  }
   const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
 
   // Opens the leaf wallet: in developer mode always (the tab shows the join form when
@@ -992,8 +1018,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // between the steps of what they asked held the next step for its whole length.
     if (S.busy || S.asked) { S.timer = setTimeout(autoSync, S.asked ? 2000 : 5000); return }
     try {
+      const t = now()
       const s = await run('schedule')
-      S.schedule = s
+      readSchedule(s, t)
       if (s.due) emit('leafSyncDue', { now: s.now, next_sync_at: s.next_sync_at, why: s.why ?? null })
       const d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
       S.heldFor = d.held
@@ -1758,20 +1785,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return v
   }
 
-  // `quick`: the code shown before is shown at once while it has a day before it lapses, without
-  // waiting for the library (busy with the sync that opens it); a coin that arrives meanwhile
-  // (leafArrived) has the page ask again, and then the library says whether it was paid.
+  // `quick`: the code shown before is shown at once while it has a day before it lapses and no
+  // schedule read so far says it was paid, without waiting for the library (busy with the sync
+  // that opens it); the next schedule read that says so has the page ask again ('codeUsed'), as a
+  // coin that arrives does (leafArrived).
   async function receiveCode ({ quick = false } = {}) {
     const key = tagged(CODE_KEY, tag())
     let kept = null; try { kept = JSON.parse(ctx.store.getItem(key) || 'null') } catch {}
-    if (quick && kept && kept.text && kept.until && kept.until - now() / 1000 > CODE_MARGIN_S) return kept
+    if (quick && kept && kept.text && kept.until && kept.until - now() / 1000 > CODE_MARGIN_S && codeOpen(kept, S.schedule, S.scheduleAt) !== false) return kept
     if (kept && kept.text && kept.owner) {
-      let s = null; try { s = await asking(() => run('schedule')); S.schedule = s } catch {}
-      const r = ((s && s.receive_requests) || []).find((x) => x.owner === kept.owner)
-      if (r && r.state === 'waiting' && (r.lapses_at == null || r.lapses_at - ((s && s.now) || 0) > CODE_MARGIN_S)) return kept
+      const t = now()
+      let s = null; try { s = await asking(() => run('schedule')); S.schedule = s; S.scheduleAt = t } catch {}
+      if (codeOpen(kept, s, t)) return kept
     }
+    const made = now()
     const v = await command('receive', {})
-    const out = { text: v.request, owner: (v.details && v.details.owner) || null, until: (v.details && v.details.until) || null }
+    const out = { text: v.request, owner: (v.details && v.details.owner) || null, until: (v.details && v.details.until) || null, made }
     try { ctx.store.setItem(key, JSON.stringify(out)) } catch {}
     return out
   }
