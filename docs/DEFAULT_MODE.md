@@ -127,11 +127,16 @@ modes (`asset-picker.js`):
   either case, and codes made before the short form.
 - The code shows at once from what the wallet last drew, syncing or not, and stays until it is
   paid or its request lapses; a way to pay it that opens later is added to it in place.
-- Above the code, one optional field, empty by default: "Amount in BTC (optional)". With an
-  amount the code also names it (`amount=`) and carries an invoice of the wallet's on the Bitcoin
-  ark for exactly that amount (`lightning=`), which a Lightning wallet pays; the invoice is
-  claimed while the wallet is open, and a new one is made with the code. Without an amount the
-  code carries no invoice.
+- Above the code, one optional field, empty by default: "Amount in BTC (optional)", with a menu
+  beside it of what the amount is in: **BTC**, and each asset the operator receives over
+  Lightning (the menu shows only when there is more than BTC; for an asset the field reads
+  "Amount (optional)"). With an amount in BTC the code also names it (`amount=`) and carries an
+  invoice of the wallet's on the Bitcoin ark for exactly that amount (`lightning=`), which a
+  Lightning wallet pays. With an amount in an asset the code carries instead an invoice in that
+  asset of the operator's node (`lightning=`, the leaf library's `lightning_receive`), which a
+  wallet of another operator pays in seconds; `amount=` is left out, since it counts BTC. Either
+  invoice is claimed while the wallet is open, and a new one is made with the code. Without an
+  amount the code carries no invoice.
 - Buttons: **Copy receive code** (confirmation: "Receive code copied") and **New code**. The
   address alone is shown in developer mode.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server
@@ -160,6 +165,24 @@ modes (`asset-picker.js`):
   now, so it goes to the address. It arrives after a Bitcoin block." (for BTC; for an asset, "It
   arrives after the next block, in about a minute."). Anything that is not a code goes the way it
   always has. The wallet chooses; nothing asks the person.
+- An asset sent to a receive code of a wallet of another operator (its `sequentia` part names
+  another operator) goes over Lightning when the code carries an invoice in that asset for
+  exactly the amount sent (the row takes the asset and amount from it when its amount is
+  empty), the payment is worth no more than the page's limit in USD (`SEQ_ASSET_LN_MAX_USD`,
+  1,000 unless the page names another; never a number of units, since one unit of one asset can
+  be worth thousands of another), the operator's node in the asset is up with as much to spend
+  as the amount, and the invoice's final lock fits the operator's window for a payment with a hop
+  to spare (`asset-lightning.js`). The review is the tree's: **Send <amount> <TICKER>?**, "It
+  arrives in seconds.", a "Fee" line when there is one. Once sent it reads "On its way: it
+  arrives once the other wallet takes it." until the other wallet takes it, then "Sent <amount>
+  <TICKER> (<seconds> s).". Otherwise it is paid at the code's address, and the review says why
+  first: "A payment of more than <limit> USD to this wallet goes to the address." above the
+  limit, or "This can't arrive in seconds right now, so it goes to the address." when the way
+  cannot carry it (or the asset has no price to hold it to the limit), each followed by "It
+  arrives after the next block, in about a minute." A payment refused on its way, or that came
+  back, says so ("This couldn't go through in seconds, and nothing was sent." / "This couldn't
+  go through in seconds and came back to you.", then "Send it to the address instead? It arrives
+  after the next block, in about a minute.") with the button **Send to the address**.
 - The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds." and the
   buttons **Cancel** and **Send**.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed

@@ -68,6 +68,8 @@
   body:not(.devmode) .dev-only{display:none !important}
   a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
+  .recv-amt-row{display:flex;gap:8px;margin:0 0 10px}
+  .recv-amt-row.hide{display:none}
   /* user mode's Trade tab: the user composer only (user-composer.js) */
   .uc-dev-hidden{display:none!important}
   .ucomp{display:flex;flex-direction:column;gap:12px;max-width:520px}
@@ -809,7 +811,7 @@
       <div class="card">
         <label class="lbl" id="recvLbl">Receive</label>
         <p class="sub" id="recvTip" style="margin:0 0 10px">Your address for BTC and every Sequentia asset: the same tb1 address on both chains.</p>
-        <input id="recvAmt" class="mono hide" inputmode="decimal" style="width:100%;margin:0 0 10px">
+        <div id="recvAmtRow" class="recv-amt-row hide"><input id="recvAmt" class="mono" inputmode="decimal" style="flex:1 1 auto;min-width:0"><select id="recvAsset" style="flex:0 0 auto;width:auto"></select></div>
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
         <div class="row" style="margin-top:12px">
@@ -1656,6 +1658,10 @@
     esplora: location.origin + '/testnet4/api',
     network: 'testnet4',
   };
+  // The most a payment of an asset to a wallet of another operator goes over Lightning for, in
+  // USD (asset-lightning.js): above it, or when the way cannot carry it, it goes to the receive
+  // code's address on the chain. null: no limit.
+  if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = 1000;
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1707,6 +1713,7 @@ import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendRep
 import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
 import { isStaleTipError } from './reorg.js';
@@ -2668,6 +2675,71 @@ async function treeSendReview(r, onDone){
   };
 }
 
+// A payment to a receive code of another operator, over Lightning (asset-lightning.js): the leaf
+// library quotes paying the code's invoice in the asset (`lightning_pay_quote`) and pays it only on
+// that quote (`lightning_pay` with `shown`), out of the tree, through this operator's node to the
+// receiver's. The payment is settled once the receiving wallet takes its coin, within a minute or
+// so; until then the review reads "On its way". One the way refuses, before it leaves or after
+// (it then comes back to the wallet), offers the code's address (`toAddress`). -> false when the
+// library will not quote it: the caller pays the address then.
+const LN_FOLLOW_MS = 5 * 60_000;
+async function assetLightningReview(r, onDone, toAddress){
+  const m0 = assetMeta(r.asset);
+  const atoms = parseAtoms(r.amtS, m0.precision||0);
+  if(atoms<=0n) throw new Error('amount must be greater than zero');
+  let q;
+  try{ q = await leavesApi.command('lightning_pay_quote', { invoice: r.addr, asset: r.asset }); }
+  catch(e){ console.warn('[asset lightning] quote:', e?.message??e); return false; }
+  const amt = fmtAtoms(atoms, m0.precision||0);
+  const fee = q && q.fee ? BigInt(q.fee) : 0n;
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
+  { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  ok.textContent = DEFAULT_WORDS.send;
+  const offerAddress = (text)=>{
+    st.className='status err'; st.textContent = text;
+    if(!r.codeAddress){ ok.classList.add('hide'); return; }
+    ok.classList.remove('hide'); ok.disabled=false; ok.textContent = DEFAULT_WORDS.toAddress;
+    ok.onclick = ()=>{ m.remove(); toAddress(); };
+  };
+  ok.onclick=async()=>{
+    ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
+    const t0=performance.now();
+    let v;
+    try{ v = await leavesApi.command('lightning_pay', { invoice: r.addr, asset: r.asset, shown: q }); }
+    catch(e){
+      console.warn('[asset lightning] pay:', e?.message??e);
+      if(isRouteRefusal(e)) offerAddress(DEFAULT_WORDS.lnNotThrough);
+      else { st.className='status err'; st.textContent = /in live coins/.test(String(e?.message||'')) ? DEFAULT_WORDS.stillArriving(m0.ticker) : prettyErr(e); ok.disabled=false; }
+      return;
+    }
+    const hash = v && v.paying && v.paying.payment_hash;
+    console.log('[asset lightning] paying', hash);
+    { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+    ok.classList.add('hide');
+    if(onDone) onDone(); try{ renderBalance(); }catch{}
+    st.className='status'; st.innerHTML='<span class="spin"></span>' + esc(DEFAULT_WORDS.lnOnItsWay);
+    // Followed until the operator decides it: each sync moves it on (paid, or taken back).
+    while(performance.now() - t0 < LN_FOLLOW_MS){
+      try{ await leavesApi.syncNow(); }catch{}
+      let p=null; try{ p = ((await leavesApi.own('lightning_payments', {})) || {})[hash]; }catch{}
+      const state = p && p.state;
+      if(state==='paid'){
+        try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
+        st.className='status ok'; st.textContent = DEFAULT_WORDS.sent(amt, m0.ticker, ((performance.now()-t0)/1000).toFixed(1));
+        try{ renderBalance(); }catch{} return;
+      }
+      if(state==='failed' || state==='returned'){
+        console.warn('[asset lightning] came back:', p && p.reason);
+        try{ renderBalance(); }catch{}
+        offerAddress(DEFAULT_WORDS.lnCameBack); return;
+      }
+      await new Promise(ok2=> setTimeout(ok2, 4000));
+    }
+    st.className='status'; st.textContent = DEFAULT_WORDS.lnOnItsWay;
+  };
+  return true;
+}
+
 // A payment to an address out of the tree (leaves.js offboard): the library quotes it, the
 // review shows the amount, its fee and when it arrives, and it is made only on that quote.
 async function offboardReview(r, onDone){
@@ -2682,7 +2754,7 @@ async function offboardReview(r, onDone){
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
   const minutes = arrivalMinutes(leavesApi.roundInterval());
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: fee>0n ? [[DEFAULT_WORDS.fee(fmtAtoms(fee, m0.precision||0), m0.ticker), '']] : []});
-  { const line=el('p','sub', DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
@@ -7138,44 +7210,88 @@ function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen
 // request in one payment request (pay-code.js). -> the code, or the bare request while the ark
 // has not answered (the code is drawn again once it has).
 let _recvArk = null, _recvArkAsk = null;
-// An amount asked for (optional, in BTC): the code then names it, with an invoice of the Bitcoin
-// ark's for exactly it, which a Lightning wallet pays. `_recvInv` is that invoice, made once per
-// amount and code.
-let _recvInv = null, _recvInvAsk = null, _recvInvWatch = 0;
-function recvAmountSats(){ try{ const v=($('recvAmt').value||'').trim(); if(!v) return 0n; const a=parseAtoms(v, 8); return a>0n ? a : 0n; }catch{ return 0n; } }
+// An amount asked for (optional), in BTC or in an asset the operator receives over Lightning
+// (`recvAsset`): the code then carries an invoice for exactly it, which a Lightning wallet pays.
+// For BTC the code also names the amount (`amount=`, which BIP321 counts in BTC) and the invoice is
+// the Bitcoin ark's; for an asset it is the operator's node's in the asset, paid into the wallet's
+// leaf (the leaf library's `lightning_receive`), which a wallet of another operator pays over
+// Lightning (asset-lightning.js). `_recvInv` is that invoice, made once per asset and amount; one
+// the wallet could not get is not asked again for the same asset and amount (`_recvInvFailed`).
+let _recvInv = null, _recvInvAsk = null, _recvInvWatch = 0, _recvInvFailed = null;
+function recvAsset(){ const s=$('recvAsset'); return (s && s.value) || 'BTC'; }
+function recvAmountAtoms(){ try{ const v=($('recvAmt').value||'').trim(); if(!v) return 0n; const h=recvAsset(); const a=parseAtoms(v, h==='BTC' ? 8 : (assetMeta(h).precision||0)); return a>0n ? a : 0n; }catch{ return 0n; } }
+// The assets a receive code can ask an amount of: BTC, and each asset the operator receives in.
+function recvAssetChoices(){
+  let legs=[]; try{ legs = leavesApi && leavesApi.isOpen() ? receivableAssets(leavesApi.info()) : []; }catch{}
+  return ['BTC', ...legs];
+}
 function payCodeText(){
   if(!_recvCode) return null;
   if(!_recvArk && btcArk && btcArk.isOpen() && !_recvArkAsk)
     _recvArkAsk = btcArk.run('address').then(a=>{ _recvArk = a.address; }).catch(e=> console.warn('[receive code] ark:', e?.message??e)).finally(()=>{ _recvArkAsk = null; renderReceive(); });
-  const sats = recvAmountSats();
-  if(sats>0n && btcArkRoutes() && (!_recvInv || _recvInv.sats!==sats) && !_recvInvAsk){
-    _recvInvAsk = btcArk.invoice(sats, 'Receive').then(inv=>{ _recvInv = { ...inv, sats }; watchRecvInvoice(_recvInv); })
-      .catch(e=> console.warn('[receive code] invoice:', e?.message??e)).finally(()=>{ _recvInvAsk = null; renderReceive(); });
+  const asset = recvAsset(), atoms = recvAmountAtoms(), key = asset + ':' + atoms;
+  const can = atoms>0n && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
+  const mine = (inv)=> inv && inv.asset===asset && inv.atoms===atoms;
+  if(can && !mine(_recvInv) && !_recvInvAsk && _recvInvFailed!==key){
+    const ask = asset==='BTC' ? btcArk.invoice(atoms, 'Receive')
+      : leavesApi.command('lightning_receive', { asset, amount: String(atoms), description: 'Receive' });
+    _recvInvAsk = ask.then(inv=>{ _recvInv = { ...inv, sats: asset==='BTC' ? atoms : undefined, asset, atoms }; watchRecvInvoice(_recvInv); })
+      .catch(e=>{ _recvInvFailed = key; console.warn('[receive code] invoice:', e?.message??e); }).finally(()=>{ _recvInvAsk = null; renderReceive(); });
   }
   let address = null; try{ address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential()); }catch{}
   if(!address) return _recvCode.text;
-  const inv = sats>0n && _recvInv && _recvInv.sats===sats ? _recvInv : null;
-  return buildPayCode({ address, amount: sats>0n ? fmtAtoms(sats, 8).replace(/[^0-9.]/g, '') : undefined,
+  const inv = can && mine(_recvInv) ? _recvInv : null;
+  return buildPayCode({ address, amount: asset==='BTC' && atoms>0n ? fmtAtoms(atoms, 8).replace(/[^0-9.]/g, '') : undefined,
     lightning: inv ? inv.invoice : undefined, ark: _recvArk || undefined, sequentia: _recvCode.text });
 }
-// The code's invoice is claimed as soon as it is paid; the code then shows a new one.
+// The code's invoice is claimed as soon as it is paid; the code then shows a new one. An asset's
+// is the leaf library's receive: once a payment is held for it the wallet syncs, which claims the
+// leaf and settles the payment; one that lapsed or failed is drawn again.
 function watchRecvInvoice(inv){
   const mine = ++_recvInvWatch;
   (async()=>{
     while(mine===_recvInvWatch && Date.now()/1000 < Number(inv.expires_at)){
-      let r=null; try{ r = await btcArk.received(inv.payment_hash); }catch{}
-      if(mine!==_recvInvWatch) return;
-      if(r && r.state==='paid'){ _recvInv=null; try{ renderBalance(); renderReceive(); }catch{} return; }
-      await new Promise(ok=> setTimeout(ok, 3000));
+      if(inv.asset==='BTC'){
+        let r=null; try{ r = await btcArk.received(inv.payment_hash); }catch{}
+        if(mine!==_recvInvWatch) return;
+        if(r && r.state==='paid'){ _recvInv=null; try{ renderBalance(); renderReceive(); }catch{} return; }
+      } else {
+        let all=null; try{ all = await leavesApi.own('lightning_receives', {}); }catch{}
+        if(mine!==_recvInvWatch) return;
+        const st = all ? receiveState(all[inv.payment_hash], Date.now()/1000) : 'open';
+        if(st!=='open'){
+          _recvInv=null;
+          if(st==='paid'){ try{ await leavesApi.syncNow(); }catch{} }
+          try{ renderBalance(); renderReceive(); }catch{} return;
+        }
+      }
+      await new Promise(ok=> setTimeout(ok, inv.asset==='BTC' ? 3000 : 5000));
     }
+    if(mine===_recvInvWatch){ _recvInv=null; try{ renderReceive(); }catch{} }
   })();
 }
+// What the review says when a receive code's invoice in the asset is passed over for its address
+// (asset-lightning.js `why`); a reason not here says nothing more than the address does.
+const LN_ADDRESS_WHY = {
+  limit: (limit)=> DEFAULT_WORDS.byAddressAbove(limit.toLocaleString(undefined, { maximumFractionDigits: 2 })),
+  liquidity: ()=> DEFAULT_WORDS.byAddressNoWay,
+  unavailable: ()=> DEFAULT_WORDS.byAddressNoWay,
+  lock: ()=> DEFAULT_WORDS.byAddressNoWay,
+  unpriced: ()=> DEFAULT_WORDS.byAddressNoWay,
+};
+// The invoices a payment over Lightning could not go through to, this session: the next review
+// of the same code pays its address instead.
+const _lnPassedOver = new Set();
 // Where a payment of `asset` to `text` goes when `text` is a receive code, instant first: its
 // Sequentia part (the library's request, rebuilt from the code's short form) for an asset the
-// tree pays, its Ark part for BTC the ark pays (btcArk takes the code as it is), else its
-// address, and then `byAddress` is set so the review says so in plain words. Anything that is
-// not a code is returned as it is. -> { dest, byAddress }
-function payCodeRoute(text, asset){
+// tree pays; for an asset sent to a wallet of another operator, its invoice in the asset, over
+// Lightning, when asset-lightning.js says so (`lightning` set, and `address` the code's address
+// should the payment not go through); its Ark part for BTC the ark pays (btcArk takes the code as
+// it is); else its address, and then `byAddress` is set so the review says so in plain words, with
+// `why` its own sentence when the code's invoice was passed over. Anything that is not a code is
+// returned as it is. `atoms` is the amount sent, when known.
+// -> { dest, byAddress, lightning?, address?, why? }
+function payCodeRoute(text, asset, atoms){
   let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
   if(!c) return { dest: text, byAddress: false };
   if(asset === 'BTC'){
@@ -7185,6 +7301,15 @@ function payCodeRoute(text, asset){
   }
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
   if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
+  if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
+    const limitUsd = lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
+    const r = assetLightningRoute({ invoice: c.lightning, asset, atoms, precision: assetMeta(asset).precision||0,
+      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000 });
+    const passed = _lnPassedOver.has(String(c.lightning).toLowerCase());
+    if(r.route === 'lightning' && !passed) return { dest: r.invoice, byAddress: false, lightning: true, address: c.address || null };
+    const why = passed ? DEFAULT_WORDS.byAddressNoWay : LN_ADDRESS_WHY[r.why] ? LN_ADDRESS_WHY[r.why](limitUsd) : null;
+    if(c.address) return { dest: c.address, byAddress: true, why };
+  }
   return { dest: c.address || text, byAddress: !!c.address };
 }
 function payCodeDestination(text, asset){ return payCodeRoute(text, asset).dest; }
@@ -7202,7 +7327,14 @@ function renderReceiveCode(){
       .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
     return;
   }
-  const ra=$('recvAmt'); ra.classList.remove('hide'); ra.placeholder = BTC_WORDS.amountHint;
+  // The amount, and what it is in: BTC, or an asset the operator receives in over Lightning.
+  $('recvAmtRow').classList.remove('hide');
+  { const sel=$('recvAsset'), choices=recvAssetChoices(), was=sel.value||'BTC';
+    if(sel._choices!==choices.join()){
+      sel.innerHTML=''; for(const h of choices){ const o=document.createElement('option'); o.value=h; o.textContent= h==='BTC' ? 'BTC' : assetMeta(h).ticker; sel.appendChild(o); }
+      sel.value = choices.includes(was) ? was : 'BTC'; sel._choices=choices.join(); }
+    sel.classList.toggle('hide', choices.length<2);
+    $('recvAmt').placeholder = sel.value==='BTC' ? BTC_WORDS.amountHint : DEFAULT_WORDS.amountHint; }
   const code = payCodeText();
   $('addr').textContent = code;
   try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
@@ -7213,7 +7345,7 @@ function renderReceive(){
   $('btnRecvMode').classList.toggle('hide', true);
   $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
   if(receiveCodeMode()){ renderReceiveCode(); renderOampReceive(); return; }
-  $('recvAmt').classList.add('hide');
+  $('recvAmtRow').classList.add('hide');
   $('btnConf').classList.remove('hide');
   $('addr').classList.remove('recv-code');
   $('recvLbl').textContent = 'Receive'; $('btnCopy').textContent = 'Copy';
@@ -7748,6 +7880,19 @@ async function fillMax(r){
   }catch(e){ st.textContent=plainErr(e); }
   finally{ btn.disabled=false; }
 }
+// A receive code whose invoice is in an asset asks for that asset and amount: the row takes both,
+// when the amount is still empty and the wallet can send the asset.
+function fillFromCode(r){
+  const amt=r.querySelector('.ramt'), sel=r.querySelector('.rasset');
+  if(!amt || amt._refMode || (amt.value||'').trim()) return;
+  let c=null; try{ c=readPayCode(r.querySelector('.raddr').value.trim()); }catch{}
+  if(!c || !c.lightning) return;
+  const d=decodeBolt11(c.lightning);
+  if(!d || !d.ok || d.chain!=='seq' || !d.asset || d.amountMsat==null || d.amountMsat % 1000n !== 0n) return;
+  if(![...sel.options].some(o=>o.value===d.asset)) return;
+  if(sel.value!==d.asset){ sel.value=d.asset; sel.dispatchEvent(new Event('change')); }
+  amt.value=fmtAtoms(d.amountMsat/1000n, assetMeta(d.asset).precision||0).replace(/,/g,''); amt.dispatchEvent(new Event('input'));
+}
 function addRecipientRow(){
   const box=$('recipients'); const i=box.children.length;
   const r=el('div','rec');
@@ -7779,7 +7924,7 @@ function addRecipientRow(){
   updAddrPh();
   const warn=r.querySelector('.rwarn');
   r._checkAddr=()=>{ warn.textContent=recipientProblem(raddr.value.trim(), rsel.value)||''; };
-  raddr.addEventListener('input', ()=>{ r._checkAddr(); sendFeeResize(); showSendFee(); });
+  raddr.addEventListener('input', ()=>{ fillFromCode(r); r._checkAddr(); sendFeeResize(); showSendFee(); });
   r.querySelector('.ramt').addEventListener('input', ()=>{ sendFeeResize(); showSendFee(); });
   r.querySelector('.maxbtn').onclick=()=>fillMax(r);
   rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); r._refreshAvail(); updAddrPh(); r._checkAddr(); };   // default the fee to the sent asset; re-value too
@@ -8644,9 +8789,16 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     // A receive code (pay-code.js) is paid the way that fits what is sent: an asset at its
     // Sequentia part when the tree takes it, BTC at its Ark part when the Bitcoin ark pays it,
     // and anything else at its address.
-    for(const r of rows){ const d = payCodeRoute(r.addr, r.asset); r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); }
-    const byAddressNote = (btc) => rows.some(r=>r.byAddress)
-      ? [['', DEFAULT_WORDS.byAddress(btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock)]] : [];
+    // An asset to a wallet of another operator goes over Lightning when its code carries an invoice
+    // in it for the amount and asset-lightning.js's rule lets it (`lightning`).
+    for(const r of rows){
+      let atoms=null; if(r.asset!=='BTC' && !isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, sendPrecision(r.asset)); }catch{} }
+      const d = payCodeRoute(r.addr, r.asset, atoms);
+      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null;
+    }
+    const byAddressNote = (btc) => { const w = rows.find(r=>r.byAddress); if(!w) return [];
+      const arrives = btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock;
+      return [['', w.why ? w.why + ' ' + arrives : DEFAULT_WORDS.byAddress(arrives)]]; };
     if(!rows.length) throw new Error('add at least one recipient');
     const reset=()=>{ $('recipients').innerHTML=''; addRecipientRow(); };
     // Restricted (OpenAMP) assets settle on the enclave ledger, not on-chain — one transfer, one
@@ -8673,6 +8825,16 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     // Default mode: more than can be spent now, the rest vesting later, is refused with its date.
     { const want=new Map(); for(const r of rows) if(r.asset!=='BTC'){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
       for(const [h, a] of want) refuseIfVesting(h, a, sendableFor(h)); }
+    // A receive code of another operator, with an invoice in the asset that the rule lets through,
+    // is paid over Lightning out of the tree; when the way cannot carry it, at the code's address.
+    if(rows.some(r=>r.lightning)){
+      if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed);
+      const r=rows[0];
+      const again=()=>{ _lnPassedOver.add(r.addr); $('btnReview').click(); };
+      if(await assetLightningReview(r, reset, again)) return;
+      if(!r.codeAddress) throw new Error(DEFAULT_WORDS.byAddressNoWay);
+      r.addr=r.codeAddress; r.lightning=false; r.byAddress=true; r.why=DEFAULT_WORDS.byAddressNoWay;
+    }
     // A receive code of the operator this wallet holds its coins with is paid in the tree, in
     // seconds (default-arca.js treeRoute); everything else goes on as it always has.
     const codeRows=rows.filter(r=>leavesApi && leavesApi.treeRoute(r.addr));
@@ -8727,6 +8889,7 @@ $('btnNewAddr').onclick=()=>{
 $('btnRecvMode').onclick=()=>{ showAddrDefault=!showAddrDefault; renderReceive(); };
 // An amount typed on Receive redraws the code (its invoice is made for the amount once typing stops).
 { let t=null; $('recvAmt').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(()=>{ _recvInv=null; _recvInvWatch++; renderReceive(); }, 600); }); }
+$('recvAsset').addEventListener('change', ()=>{ _recvInv=null; _recvInvWatch++; renderReceive(); });
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };
 $('xpubForm').onchange=()=>renderXpubForm();

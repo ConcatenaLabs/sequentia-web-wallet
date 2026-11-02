@@ -253,13 +253,18 @@ without and tries again every two minutes. **Receive** gives one receive code, a
 the receive request in a short form so it scans at a glance): another wallet like this one pays
 an asset at its single-use Sequentia receive request and BTC at its Bitcoin ark address, both in
 seconds, and any other wallet pays the address. An optional
-amount (in BTC) adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
-Lightning wallet pays. The address alone
+amount in BTC adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
+Lightning wallet pays; an amount in an asset the operator receives over Lightning adds a
+`lightning=` invoice in that asset from the operator's node, which a wallet of another operator
+pays in seconds. The address alone
 is shown in developer mode. The
 testnet faucet pays the receive code, or the address when it does not pay that asset into
 receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
-pays a receive code of the same operator and chain in the tree, and everything else as it
+pays a receive code of the same operator and chain in the tree; an asset to a receive code of
+another operator over Lightning when the code carries an invoice in it for the amount and the
+payment is worth no more than `SEQ_ASSET_LN_MAX_USD` (1,000 USD unless the page names another;
+`asset-lightning.js`), else at the code's address on the chain; and everything else as it
 always has; an address the chain's coins cannot cover is paid out of the tree in the operator's
 next settlement (the library's `offboard`), its fee and arrival shown first. The open page reads
 the wallet's mailbox every few seconds, so a payment to its receive code shows as soon as the
@@ -744,6 +749,7 @@ works normally without the restricted rows.
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |
 | `btc-ark.js` | BTC on the Bitcoin ark: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, the composer's `deps.btc` on the ark, and the exit without the ark's server (Bark's unilateral exit, fees paid from the page's own Bitcoin coins, claimed to its address) with what default mode says about it. No DOM. |
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
+| `asset-lightning.js` | Default mode's rule for an asset sent to a receive code of another operator: over Lightning (the code's invoice in the asset, within the limit in USD, the operator able to carry it, its lock within the operator's window), or the code's address and why. No DOM. |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |

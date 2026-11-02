@@ -66,6 +66,16 @@ and an emptied channel is closed to the wallet's address when cheap and safe. It
 copies it into its `vendor/` with its own host: change it here first. Ambra mobile's
 `lightning_to_ark.dart` is the same move in the same words.
 
+`asset-lightning.js` is default mode's rule for an asset sent to a receive code of another
+operator: over Lightning, out of the tree (`lightning_pay_quote`, then `lightning_pay` with the
+quote as `shown`), when the code carries an invoice in the asset for the amount (a receive code
+with an amount in an asset carries one, from the leaf library's `lightning_receive`), the payment
+is worth no more than `window.SEQ_ASSET_LN_MAX_USD` (USD, never units of the asset), the
+operator's node can carry it and the invoice's final lock fits the operator's window with a hop
+to spare; else the code's address, and the review says why. It has no DOM
+(`asset-lightning.test.mjs`). Ambra mobile and the browser extension route receive codes in
+their own code: give them the same rule.
+
 `btc-ark/pkg/` is tracked too: Bark's wallet for Bitcoin arks, built from arca's `bark-wasm/` by
 `tooling/build-btc-ark.sh <arca checkout>` (paths remapped the same way), run inside
 `btc-ark/worker.js`. It holds default mode's BTC on the Bitcoin ark named by `SEQ_BTC_ARK`: native
