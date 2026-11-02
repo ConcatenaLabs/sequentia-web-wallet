@@ -461,6 +461,8 @@
   /* A leg on Leaf: the leaf panel settles the trade; the composer's own placement controls stay hidden. */
   body.swleaf-on #swReview, body.swleaf-on #swWhy, body.swleaf-on #swFeeRow, body.swleaf-on #swTiming,
   body.swleaf-on #swOfflineWrap, body.swleaf-on #swConfWrap, body.swleaf-on #swErr, body.swleaf-on #swStatus{display:none !important}
+  body.swark-on #swReview, body.swark-on #swWhy, body.swark-on #swFeeRow, body.swark-on #swTiming,
+  body.swark-on #swOfflineWrap, body.swark-on #swConfWrap, body.swark-on #swErr, body.swark-on #swStatus{display:none !important}
   .swleaf .swleaf-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
   .swleaf .swleaf-rows .kv{display:flex;gap:10px;justify-content:space-between;font-size:12.5px}
   .swleaf .swleaf-rows .kv .k{color:var(--dim);flex:0 0 auto}
@@ -1017,6 +1019,8 @@
                 </div>
                 <!-- developer mode: a leg on Leaf is settled by this panel (leaf-rail.js), not by Place order -->
                 <div class="swleaf hide" id="swLeafBox"></div>
+                <!-- developer mode: BTC on Ark is settled by this panel (ark-rail.js), not by Place order -->
+                <div class="swleaf hide" id="swArkBox"></div>
                 <div class="swtiming ok" id="swTiming">
                   <span class="swtiming-ic" id="swTimingIcon" aria-hidden="true">&#8226;</span>
                   <span class="swtiming-tx" id="swTimingText">Pick two assets to see how long it takes.</span>
@@ -1704,6 +1708,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
+import { mountArkRail } from './ark-rail.js';
 import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { attachChooser, PICKER_WORDS } from './asset-picker.js';
@@ -3769,6 +3774,9 @@ function initLeaves(){
   try{ initLeafRail(); }catch(e){ console.warn('[leaf rail] init failed:', e?.message??e); }
   // The Trade tab in user mode: the user composer (user-composer.js, user-trade.js).
   try{ initUserComposer(); }catch(e){ console.warn('[user composer] init failed:', e?.message??e); }
+  // The composer's Ark choice (developer mode): BTC in the Bitcoin ark against leaves, by the
+  // user composer's engine.
+  try{ initArkRail(); }catch(e){ console.warn('[ark rail] init failed:', e?.message??e); }
   // The page API: the wallet's mode and leaf rail for code running in this page, and the
   // mode for the wallet's other pages on this origin (wallet-api.js, docs/PAGE_API.md).
   try{ pageApi = mountPageApi({ leaves: leavesApi, el, assetMeta, fmtAtoms, win: window, site: siteDeps() }); }catch(e){ console.warn('[page api] init failed:', e?.message??e); }
@@ -4181,9 +4189,11 @@ function initUserComposer(){
     btcMove: (sats)=> btcArkBoardFor(sats),
     // The wallet's Bitcoin Lightning (btc-lightning.js), once the service runs it; until then no
     // trade is made for or with BTC.
-    // In default mode the trades pay and are paid in the Bitcoin ark: a sale for BTC is a Lightning
-    // receive into it (no room to buy first), a purchase is paid from it.
-    get btc(){ return btcArkRoutes() ? btcArk.lightning() : userBtcLightning(); },
+    // Whenever the Bitcoin ark is open the trades pay and are paid in it, in both modes (developer
+    // mode's Ark rail, ark-rail.js): a sale for BTC is a Lightning receive into it (no room to buy
+    // first), a purchase is paid from it. One wallet for every trade, so a trade resumed after the
+    // mode changed pays with the wallet it was made with.
+    get btc(){ return btcArkPays() ? btcArk.lightning() : userBtcLightning(); },
     // The wallet's own on-chain coins, which take a covenant order on the chain in one FILL: a
     // wallet that holds nothing in the tree trades from them (user-onchain.js).
     onchain: makeUserOnchain({
@@ -4222,6 +4232,22 @@ function initUserComposer(){
   // The pairs and the chain are read once; the composer draws when they are in.
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
   applyTradeMode();
+}
+
+// ---------- developer mode: the composer's Ark rail ----------
+// ark-rail.js adds "Ark" to the BTC side of the Trade tab's Pay from / Receive to: a market trade of
+// BTC in the Bitcoin ark for a Sequentia asset in leaves, settled by the user composer's engine
+// (user-trade.js, user-trade-btc.js). Every amount and refusal is the engine's.
+let arkRailApi = null;
+function initArkRail(){
+  if(arkRailApi) return;
+  arkRailApi = mountArkRail({
+    $, el, dev: devMode, open: ()=> btcArkPays(), spendable: ()=> btcArk.figures().spendable,
+    engine: ()=>{ if(!userTrade) throw new Error('the trade engine is not ready yet'); return userTrade; },
+    composer: composerState, setRail: setComposerRail,
+    leafUsable: ()=> !!(leavesApi && leavesApi.isOpen && leavesApi.isOpen()),
+    assetMeta, fmtAtoms, parseAtoms,
+  });
 }
 
 // ---------- developer mode: the composer's leaf rail ----------
@@ -6294,6 +6320,7 @@ function initSwapTab(){
     get addrIndex(){ return addrIndex; },
     get btcBalance(){ return btcBalance; },   // parent-chain balance, so BTC shows a balance like any other asset
     get leafRail(){ return leafRailApi; },    // developer mode's Leaf choice and its panel (leaf-rail.js)
+    get arkRail(){ return arkRailApi; },      // developer mode's Ark choice for BTC and its panel (ark-rail.js)
     // The recovery phrase (in-memory; used only to re-derive taker funding keys for a
     // covenant FILL) + a fetch against the wallet's OWN Sequentia esplora /api.
     get mnemonic(){ return localStorage.getItem(KEY) || ''; },

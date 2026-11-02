@@ -72,8 +72,9 @@ copies it into its `vendor/` with its own host: change it here first. Ambra mobi
 bitcoin, never pegged, from the page's own phrase under Bark's key path. `btc-ark.js` names the
 route (an invoice, an Ark address, a Bitcoin address) and shows the wallet's answers; every fee,
 coin and refusal is the wallet's. A board is cosigned by the ark's server before the page signs
-its funding: keep that order. In default mode the composer's `deps.btc` is the ark
-(`btcArk.lightning()`), so a BTC trade pays and is paid there; the payment's lock is bounded by
+its funding: keep that order. Whenever the ark is open the trade engine's `deps.btc` is the ark
+(`btcArk.lightning()`), in both modes, so a BTC trade pays and is paid there and a trade resumed
+after the mode changed pays with the wallet it was made with; the payment's lock is bounded by
 the server's longest (`max_route_delay`), which the trade checks against the coin it receives.
 
 The mode is kept for each wallet (`swk.mode.<walletTag>`, `leaves.js`), user mode by default,
@@ -126,6 +127,13 @@ leg, `updateRails` repaints it); keep them that way rather than routing a leaf t
 on-chain or Lightning paths, which would settle it as something it is not. The leaf library reads
 an order as the relay serves it (byte fields in base64), so the panel hands it the relay's own
 JSON, never the copy `normRelayOffer` rewrote to hex.
+
+`ark-rail.js` is developer mode's Ark choice on the BTC side of a pair of BTC and a Sequentia
+asset. It settles as user mode's BTC trade does (the user composer's engine, `user-trade.js`, with
+the ark as `deps.btc`): a market trade, the asset's side on Leaf (choosing Ark sets it), every
+amount and refusal the engine's. Its seams into `swap.js` are the leaf rail's (`paneRail` covers
+both), and `leaf-rail.js` offers Leaf in a pair with BTC only while BTC's side is on Ark, leaving
+that trade to the Ark panel.
 
 `contracts.js` is developer mode's Contracts tab. The same rule holds: the kit's contract engine
 (`ContractTemplate`, `ContractInstance`, `ContractSpend`, `ContractApproval` in `pkg/`) reads,
