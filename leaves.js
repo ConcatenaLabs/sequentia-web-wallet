@@ -68,6 +68,8 @@
 //                       (the kit wallet's next receive index and 20 more)
 //   careEveryMs         optional: how often `care` runs at most (default CARE_EVERY_MS)
 //   claimsEveryMs       optional: how often `claims` is read at most (default CLAIMS_EVERY_MS)
+//   boardRoom(asset)    optional: how many more atoms of the asset the wallet moves into the tree
+//                       by itself (ark-limits.js), null for no limit
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 //   pinned()            optional: the page's operator ({ server, node_url, operator }, the key
@@ -885,8 +887,13 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { S.balance = await run('balance') } catch (e) { log('[leaves] balance before boarding: ' + (e && e.message)); return }
     log('[leaves] on the chain: ' + JSON.stringify((S.balance && S.balance.sequentia_onchain) || {}))
     let boarded = false
-    for (const c of boardCandidates(S.balance, S.info)) {
+    for (const c0 of boardCandidates(S.balance, S.info)) {
       if (S.asked) { S.upkeepLater = true; break }
+      // The page's limit on what the wallet holds in the tree (ark-limits.js): the rest of the
+      // coins stay on the chain.
+      let room = null; try { room = ctx.boardRoom ? ctx.boardRoom(c0.asset) : null } catch {}
+      if (room != null && room < c0.min) continue
+      const c = room != null && room < c0.onchain ? { ...c0, onchain: room } : c0
       // The same coins the library refused to board are not asked again until they change.
       if (refused.get(c.asset) === String(c.onchain)) continue
       try {
