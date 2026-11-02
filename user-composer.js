@@ -13,7 +13,7 @@
 //   of it that vest later (optional: an asset held only so is listed to pay), admittedReceives(pay)
 //   -> [hex] (optional: the receive picker lists those after what is offered now),
 //   market: { relay() -> the relay's base URL, pairOf(a, b) -> {base, quote} } (optional: the
-//   chosen pair's market above the inputs, market-view.js), isHidden(hex) -> the person hid it
+//   chosen pair's market under the inputs, market-view.js), isHidden(hex) -> the person hid it
 //   (optional), refValue(hex, atoms) -> its value in words, "≈ $…" (optional) }
 // Both pickers are the shared asset chooser (asset-picker.js): a search box, your assets first
 // with their balances, BTC always, what the book offers now next, the rest found by searching.
@@ -175,9 +175,9 @@ export function mountUserComposer (ctx) {
     if (!S.pay || !S.payChosen) S.pay = defaultPay()
     r.innerHTML = ''
     const box = el('div', 'ucomp'); box.id = 'userComposer'
-    // The chosen pair's market: its chart, price, book and recent trades.
+    // The chosen pair's market (its chart, price, book and recent trades) goes under the button:
+    // the assets are chosen first, then the market of the pair they make.
     const mk = el('div', 'uc-market'); mk.id = 'ucMarket'
-    if (ctx.market) box.appendChild(mk)
     // You pay
     const row1 = el('div', 'uc-row')
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
@@ -224,6 +224,7 @@ export function mountUserComposer (ctx) {
     const t = el('div', 'uc-ticket'); t.id = 'ucTicket'; box.appendChild(t)
     const note = el('div', 'sub uc-note'); note.id = 'ucNote'; box.appendChild(note)
     const act = el('div', 'row uc-act'); act.id = 'ucAct'; box.appendChild(act)
+    if (ctx.market) box.appendChild(mk)
     // Trades
     const list = el('div', 'uc-trades'); list.id = 'ucTrades'; box.appendChild(list)
     r.appendChild(box)

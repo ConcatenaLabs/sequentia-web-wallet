@@ -329,8 +329,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 ## Market
 
-Default mode is a trading screen, not only a form: once a pair is chosen, its market shows above
-**You pay**. The words are in `MARKET_WORDS` (`market-view.js`).
+Default mode is a trading screen, not only a form: once a pair is chosen, its market shows under
+**You receive** and the trade's button, so the assets are picked before their market fills the
+screen. The words are in `MARKET_WORDS` (`market-view.js`).
 
 - The pair is named "<base> / <quote>", one way for both sides of a trade: the same direction the
   rest of the wallet prices it in ("1 <base> = N <quote>"). The quote is the asset people price the
