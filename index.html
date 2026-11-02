@@ -708,6 +708,7 @@
 
   <!-- ===== app ===== -->
   <div class="hide" id="app">
+    <div class="hide" id="electrumNote" style="font-size:13px;color:var(--amber2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px">Imported from an Electrum seed: on-chain only. Lightning, Ark, swaps, staking, delegation, CoinJoin and leaves need a BIP39 recovery phrase. Create a new wallet and move your funds to it to use them.</div>
     <!-- The five things most visits are for in one row; the rest behind More; Settings is the gear above. -->
     <div class="tabs" id="tabs">
       <button data-tab="balance" class="active"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a1 1 0 0 1-1-1V7Z"/><path d="M4 7l11-3v3"/><circle cx="16" cy="13" r="1.2"/></svg><span>Balance</span></button>
@@ -1758,7 +1759,8 @@ function isElectrumWallet(){ return seedKind() === ELECTRUM_SEGWIT; }
 // Lightning, trades, staking, delegation, CoinJoin and leaves re-derive their keys from a BIP39
 // mnemonic, and an Electrum seed is not one: those features read the phrase through bip39Phrase(),
 // which has none to give for an Electrum wallet, and say so through lockedMsg().
-const NO_BIP39 = 'This needs a BIP39 recovery phrase; a wallet imported from an Electrum seed cannot use it yet.';
+const ELECTRUM_LIMITS = 'This is an Electrum seed. With it you can receive and send on-chain, on Sequentia and on Bitcoin, but Lightning, Ark, swaps, staking, delegation, CoinJoin and leaves will not be available: they need a BIP39 recovery phrase.';
+const NO_BIP39 = 'This needs a BIP39 recovery phrase; a wallet imported from an Electrum seed cannot use it. Create a new wallet and move your funds to it.';
 function bip39Phrase(){ return isElectrumWallet() ? '' : (localStorage.getItem(KEY)||'').trim(); }
 function lockedMsg(){ return isElectrumWallet() ? NO_BIP39 : 'Your wallet is locked; unlock it and try again.'; }
 const LBL = 'swk.sequentia.assets';      // { assetHex: {name,ticker,precision} }
@@ -3586,7 +3588,10 @@ function importSeedKind(phrase){
   if(!etype) return 'bip39';
   let bip39 = true; try{ new Mnemonic(p).free(); }catch{ bip39 = false; }
   if(bip39 && !confirm('This phrase is valid both as a BIP39 recovery phrase and as an Electrum seed.\n\nOK: import it as an Electrum seed.\nCancel: import it as a BIP39 phrase.')) return 'bip39';
-  if(etype === 'segwit') return ELECTRUM_SEGWIT;
+  if(etype === 'segwit'){
+    if(!confirm(ELECTRUM_LIMITS + '\n\nWe suggest creating a new wallet and moving your funds to it.\n\nOK: open this wallet anyway.\nCancel: go back.')) return null;
+    return ELECTRUM_SEGWIT;
+  }
   if(etype === 'standard') throw new Error('this is an Electrum "standard" seed, whose addresses are legacy (1… / m…) ones. Only Electrum segwit seeds can be imported for now.');
   throw new Error('this is an Electrum 2FA seed, whose wallet needs TrustedCoin as cosigner; it cannot be imported.');
 }
@@ -3720,6 +3725,7 @@ async function openWallet(phrase, kind = 'bip39'){
   loadSnapshot();
   localStorage.setItem(KEY, phrase.trim().replace(/\s+/g,' '));
   if(kind === ELECTRUM_SEGWIT) localStorage.setItem(SEED_KIND_KEY, kind); else localStorage.removeItem(SEED_KIND_KEY);
+  show('electrumNote', kind === ELECTRUM_SEGWIT);
   // Restore the last scan BEFORE first render, so the balance + UTXOs are live immediately
   // (the wallet is usable while sync() below just refreshes). Best-effort; falls back to a full scan.
   const endRestore = timer('open wallet › restore cached scan', { count:false });
@@ -8738,7 +8744,7 @@ $('btnConfirm').onclick=()=>openWallet(forgetPendingPhrase());
 $('btnCancelCreate').onclick=()=>{ forgetPendingPhrase(); views('welcome'); };
 $('btnImport').onclick=()=>{ $('importErr').textContent=''; $('importPhrase').value=''; views('importView'); };
 $('btnCancelImport').onclick=()=>views('welcome');
-$('btnDoImport').onclick=async()=>{ try{ const f=$('importPhrase'); const m=f.value; await openWallet(m, importSeedKind(m)); f.value=''; }
+$('btnDoImport').onclick=async()=>{ try{ const f=$('importPhrase'); const m=f.value; const kind=importSeedKind(m); if(!kind) return; await openWallet(m, kind); f.value=''; }
   catch(e){ $('importErr').textContent='Invalid phrase: '+(e?.message??e); } };
 
 $('btnSync').onclick=sync;
