@@ -195,8 +195,10 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   the record's transaction spends that coin, which is what authorises it. Every spend of a
   stake record is signed for the height of the block it enters, so the wallet refuses to
   build one when it cannot read the chain tip.
-- **History**: transactions on both chains, with explorer links (Bitcoin's first when it has any;
-  with none on either chain, one line says so), and, in developer mode, rescue actions for stuck
+- **History**: one list of every movement, newest first: transactions on both chains with explorer
+  links, Lightning payments, trades and restricted transfers, each with its value and its fee in
+  the reference currency, and a filter above it for one asset (a trade shows under both of its
+  assets). With none at all, one line says so. In developer mode, rescue actions for stuck
   transactions: on Sequentia RBF fee bump, CPFP, and replace, each with the same any-asset fee
   selection as a send, and on Bitcoin CPFP (**Speed up**). They appear once a payment has missed a
   block. Default mode offers none of them and speeds up a payment that has waited two blocks by
@@ -730,7 +732,7 @@ works normally without the restricted rows.
 | `tip-watch.js` | Keeps the open wallet up to date: it reads both chains' tips every 30 s while the page is visible, and on becoming visible, and syncs when either has a new block, so a payment received shows without Refresh. |
 | `own-txs.js` | The page's own broadcasts of the last hour, put back into the wallet after a scan that has not returned them yet, and only then: the kit's `applyTransaction`, given a transaction the wallet already holds, would make spendable again a change output that the leaf wallet, another device or a covenant has spent since. |
 | `ln-invoice-watch.js` | Watches an invoice the Receive card made until the hosted node lists it as paid (`/node/history`), so the card can say "Received". |
-| `ln-history.js` | The History's Lightning card as rows: every payment the wallet's hosted nodes settled (`/node/history`), one row per payment hash, so a swap's two legs are one row with both amounts, the leg that settled on-chain named by the swap note the wallet keeps on its node. |
+| `ln-history.js` | The History's Lightning payments as rows: every payment the wallet's hosted nodes settled (`/node/history`), one row per payment hash, so a swap's two legs are one row with both amounts, the leg that settled on-chain named by the swap note the wallet keeps on its node. |
 | `bolt11.js` | What the wallet reads from a Lightning invoice: its network, amount, payment hash, final CLTV and, on Sequentia, the asset it is paid in (field `a`, which a Sequentia invoice must carry). Copied into the browser extension's `vendor/`. |
 | `signmessage.js` | Classic signed messages: the magic-prefixed hash, the recoverable signature, and the legacy address a verifier is given. |
 | `descriptor.js` | Output descriptors for the account key: the BIP380 checksum and the receive/change pair a watch-only import takes. |

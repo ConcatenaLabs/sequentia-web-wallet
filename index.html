@@ -340,6 +340,21 @@
   .feedot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px}
   .feedot.ok{background:var(--green)} .feedot.warn{background:var(--amber)} .feedot.no{background:var(--red)}
   #histList .item.clickable{cursor:pointer}
+  /* One history (orderHistory): the sources' lists are one column, ordered by time */
+  .hist-head{justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:2px}
+  .hist-tools{display:flex;gap:8px;align-items:center}
+  .hist-tools select{width:auto;max-width:180px}
+  .hist-all{display:flex;flex-direction:column;margin-top:6px}
+  .hist-src,.hist-src>.list{display:contents}
+  .hist-src .muted{display:none}
+  .hist-all .hist-off{display:none!important}
+  /* amount | value in the reference currency, the fee and its value under them */
+  .hamts{margin-left:auto;display:grid;grid-template-columns:auto auto;column-gap:14px;row-gap:2px;align-items:baseline;text-align:right}
+  .hamts .amt{margin-left:0}
+  .hamts .hval{font:13px ui-monospace,monospace;color:var(--txt);white-space:nowrap}
+  .hamts .fee,.hamts .hfval{font:11.5px ui-monospace,monospace;color:var(--dim);white-space:nowrap}
+  .hamts .fee.zero{font:italic 11.5px system-ui,sans-serif}
+  @media (max-width:560px){ .hamts{width:100%;justify-content:end} .hamts .fee{white-space:normal} }
   .txdetail{margin:0 0 10px 52px;padding:2px 0 2px 12px;border-left:2px solid var(--line)}
   .txdetail .kv{font-size:12.5px;padding:5px 0}
   .txdetail .kv:first-child{border-top:0}
@@ -1320,29 +1335,27 @@
 
     <!-- history -->
     <section data-panel="history" class="hide" id="historyPanel">
-      <div class="card hide" id="histEmptyCard"><div class="muted">No transactions yet.</div></div>
-      <div class="card" id="btcHistCard">
-        <label class="lbl">Bitcoin (testnet4) history</label>
-        <p class="sub" style="margin:0 0 6px">BTC on your tb1 address. Links open the Bitcoin testnet4 explorer.</p>
-        <div class="list" id="btcHistList"><div class="muted">Loading…</div></div>
-      </div>
-      <div class="card" id="seqHistCard">
-        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:2px">
-          <label class="lbl" style="margin:0">Sequentia history</label>
-          <button id="btnHistSync">Refresh</button>
+      <!-- One history: every movement on both chains, Lightning and restricted transfers in one list,
+           newest first (orderHistory), and a filter for one asset. Each source still draws its own
+           list; the lists sit in one column and are ordered by their rows' time. -->
+      <div class="card" id="histCard">
+        <div class="row hist-head">
+          <label class="lbl" style="margin:0">History</label>
+          <div class="hist-tools">
+            <select id="histAsset" aria-label="Show the movements of one asset"><option value="">All assets</option></select>
+            <button id="btnHistSync">Refresh</button>
+          </div>
         </div>
         <div class="status" id="histStatus"></div>
-        <div class="list" id="histList"><div class="muted">Syncing your history…</div></div>
-      </div>
-      <div class="card hide" id="lnHistCard">
-        <label class="lbl">Lightning history</label>
-        <p class="sub" style="margin:0 0 6px">Payments your Lightning nodes sent and received, and the swaps that settled over Lightning.</p>
-        <div class="list" id="lnHistList"><div class="muted">Loading…</div></div>
-      </div>
-      <div class="card" id="oampHistCard">
-        <label class="lbl">Restricted transfers (OpenAMP)</label>
-        <p class="sub" style="margin:0 0 6px">Transfers you've sent on the OpenAMP enclave ledger from this wallet, tracked here until they confirm. A confirmed transfer is final once its Bitcoin anchor is buried; depth is that anchor's Bitcoin confirmation count.</p>
-        <div class="list" id="oampHistList"><div class="muted">No restricted transfers yet.</div></div>
+        <div class="hist-all" id="histAll">
+          <div class="hist-src" id="btcHistCard"><div class="list" id="btcHistList"></div></div>
+          <div class="hist-src" id="seqHistCard"><div class="list" id="histList"></div></div>
+          <div class="hist-src hide" id="lnHistCard"><div class="list" id="lnHistList"></div></div>
+          <div class="hist-src" id="oampHistCard"><div class="list" id="oampHistList"></div></div>
+        </div>
+        <div class="muted hide" id="histEmptyCard">No transactions yet.</div>
+        <div class="muted hide" id="histNoneFor"></div>
+        <div class="muted hide" id="histLoading">Syncing your history…</div>
       </div>
     </section>
 
@@ -9159,6 +9172,88 @@ $('btnReveal').onclick=()=>{ $('seedReveal').textContent=localStorage.getItem(KE
 $('btnLock').onclick=()=>{ if(confirm('Remove this wallet from the browser? Make sure you have your recovery phrase.')){ localStorage.removeItem(KEY); localStorage.removeItem(SEED_KIND_KEY); location.reload(); } };
 
 // ---------- history ----------
+// One History for everything: each source (Bitcoin, Sequentia, Lightning, restricted transfers)
+// draws its rows into its own list, every row tagged with its time and the assets it involves
+// (tagRow); the lists are one column (.hist-all) and orderHistory puts the rows newest first, each
+// with what hangs under it (its details, a group's fills), and hides the rows of other assets
+// while one is chosen above the list.
+function tagRow(item, ms, hexes){
+  item.dataset.ts = String(ms > 0 ? ms : Number.MAX_SAFE_INTEGER);   // not yet in a block: on top
+  item.dataset.assets = [...new Set((hexes||[]).filter(Boolean))].join(',');
+  return item;
+}
+// A value in the reference currency, short: "12.34 USD", "<0.01 USD" for a value too small to show
+// in cents (a satoshi for BTC), '' when the asset has no price.
+function histValue(hex, atoms){
+  const a=BigInt(atoms||0); const rv=refValue(hex, a<0n ? -a : a);
+  if(!rv) return '';
+  const btc=rv.ref==='BTC', min=btc ? 1e-8 : 0.01;
+  if(rv.v>0 && rv.v<min) return '<'+(btc ? '0.00000001' : '0.01')+' '+refName(rv.ref);
+  return rv.v.toLocaleString(undefined,{minimumFractionDigits: btc ? 0 : 2, maximumFractionDigits: btc ? 8 : 2})+' '+refName(rv.ref);
+}
+// The right side of a row: each asset moved and its value, then the fee and its value. `legs`:
+// [{ hex, atoms }] signed, or with `out` set; `fees`: [{ hex, atoms }]. A movement out with no fee
+// paid by this wallet says "zero fee".
+function histAmounts(legs, fees, { out = false } = {}){
+  const box=el('div','hamts');
+  for(const l of legs){
+    const a=BigInt(l.atoms), neg = l.out!=null ? l.out : a<0n, m=assetMeta(l.hex), mag=a<0n ? -a : a;
+    box.appendChild(el('span','amt '+(neg?'neg':'pos'), (neg?'-':'+')+fmtAtoms(mag, m.precision)+' '+m.ticker));
+    box.appendChild(el('span','hval', histValue(l.hex, mag)));
+  }
+  const paid=(fees||[]).filter(f=>f && BigInt(f.atoms||0)>0n);
+  for(const f of paid){ const m=assetMeta(f.hex);
+    box.appendChild(el('span','fee','fee '+fmtAtoms(BigInt(f.atoms), m.precision)+' '+m.ticker));
+    box.appendChild(el('span','hfval', histValue(f.hex, f.atoms))); }
+  if(!paid.length && out){ box.appendChild(el('span','fee zero','zero fee')); box.appendChild(el('span','hfval','')); }
+  return box;
+}
+let _histAsset = null;
+function histAssetChosen(){ if(_histAsset==null){ try{ _histAsset=localStorage.getItem('swk.histAsset.'+walletTag())||''; }catch{ return ''; } } return _histAsset; }
+function orderHistory(){
+  const all=$('histAll'); if(!all) return;
+  const heads=[];
+  for(const list of all.querySelectorAll('.hist-src > .list')){
+    let head=null;
+    for(const c of list.children){
+      if(c.dataset.ts){ head={ el:c, ts:Number(c.dataset.ts), assets:(c.dataset.assets||'').split(',').filter(Boolean), tail:[] }; heads.push(head); }
+      else if(head && !c.classList.contains('muted')) head.tail.push(c);
+    }
+  }
+  heads.sort((a,b)=>b.ts-a.ts);
+  const want=histAssetChosen();
+  let shown=0;
+  heads.forEach((h, i)=>{
+    const off = !!want && !h.assets.includes(want);
+    if(!off) shown++;
+    h.el.style.order=String(i*100); h.el.classList.toggle('hist-off', off);
+    h.tail.forEach((t, j)=>{ t.style.order=String(i*100+j+1); t.classList.toggle('hist-off', off); });
+  });
+  // The filter lists every asset some row involves, by ticker; the one chosen stays listed.
+  const sel=$('histAsset');
+  if(sel){
+    const hexes=new Set(heads.flatMap(h=>h.assets)); if(want) hexes.add(want);
+    const opts=[...hexes].map(h=>({ h, t:assetMeta(h).ticker })).sort((a,b)=>a.h==='BTC'?-1:b.h==='BTC'?1:a.t.localeCompare(b.t));
+    const key=opts.map(o=>o.h).join(',');
+    if(sel._key!==key){
+      sel._key=key; sel.innerHTML='';
+      const all0=el('option',null,'All assets'); all0.value=''; sel.appendChild(all0);
+      for(const o of opts){ const op=el('option',null,o.t); op.value=o.h; sel.appendChild(op); }
+    }
+    sel.value=want;
+    if(!sel._wired){ sel._wired=true; sel.onchange=()=>{ _histAsset=sel.value; try{ localStorage.setItem('swk.histAsset.'+walletTag(), _histAsset); }catch{} orderHistory(); }; }
+  }
+  const empty=$('histEmptyCard'), none=$('histNoneFor'), loading=$('histLoading');
+  const reading = _histCounts.seq==null || _histCounts.btc==null;
+  if(loading) loading.classList.toggle('hide', !(reading && !heads.length));
+  if(empty) empty.classList.toggle('hide', !(!reading && !heads.length));
+  if(none){ none.classList.toggle('hide', !(heads.length && want && !shown)); none.textContent = want ? 'No movements of '+assetMeta(want).ticker+' yet.' : ''; }
+}
+// Every list a source redraws is ordered again, once however many rows went in (a timer, not a
+// frame: a tab in the background draws no frames, and its History would stay unordered).
+let _histOrderQ = false;
+function orderHistorySoon(){ if(_histOrderQ) return; _histOrderQ=true; setTimeout(()=>{ _histOrderQ=false; try{ orderHistory(); }catch(e){ console.warn('[history] order:', e?.message??e); } }); }
+{ const all=document.getElementById('histAll'); if(all) new MutationObserver(orderHistorySoon).observe(all, { childList:true, subtree:true }); }
 // The Sequentia history as rows of plain data: what renderHistory draws and what the snapshot keeps.
 // One asset out and another in, fee aside: a swap. The kit calls such a transaction "unknown"
 // (its in/out test is per asset), and History showed it as UNKNOWN.
@@ -9247,31 +9342,17 @@ function swapGroupRow(rows, title){
   mid.appendChild(el('div','sub'+(pending?' unconf':''), pending ? 'not all confirmed' : (first.ts ? new Date(first.ts*1000).toLocaleString() : 'block '+first.height)));
   mid.appendChild(el('div','kind', swapLine(legs)));
   item.appendChild(mid);
-  const amts=el('div','amts');
-  for(const l of legs.sort((a,b)=>BigInt(a.atoms)<0n?-1:1)){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n;
-    amts.appendChild(el('span','amt '+(neg?'neg':'pos'), (neg?'':'+')+fmtAtoms(l.atoms,am.precision)+' '+am.ticker)); }
-  for(const [hex,a] of fees){ const fm=assetMeta(hex), rv=refValueStr(hex, a);
-    amts.appendChild(el('span','fee','fees '+fmtAtoms(a,fm.precision)+' '+fm.ticker+(rv?' ('+rv+')':''))); }
-  item.appendChild(amts);
+  item.appendChild(histAmounts(legs.sort((a,b)=>BigInt(a.atoms)<0n?-1:1), [...fees].map(([hex,a])=>({ hex, atoms:a })), { out:true }));
+  tagRow(item, pending ? 0 : (first.ts||0)*1000 || 1, [...legs.map(l=>l.hex), ...fees.keys()]);
   item.title='Show the fills';
   item.onclick=(e)=>{ if(e.target.closest('button,a,input')) return;
     const open=box.classList.toggle('hide')===false;
     caret.textContent=(open?'▾ ':'▸ ')+rows.length+' fills'+(title ? ' · one market order' : ''); };
   return { item, box };
 }
-// Which history comes first: Bitcoin's when it has any transaction, else Sequentia's; with none on
-// either chain, one line says so. A count is null while that history is still being read, and an
-// unread history is never called empty. (_histCounts is declared near the top of the script.)
-function arrangeHistory(){
-  const panel=$('historyPanel'), seq=$('seqHistCard'), btcC=$('btcHistCard'), oamp=$('oampHistCard'), empty=$('histEmptyCard');
-  if(!panel || !seq || !btcC) return;
-  const none = _histCounts.seq===0 && _histCounts.btc===0 && !_histCounts.oamp;
-  empty.classList.toggle('hide', !none);
-  seq.classList.toggle('hide', none);
-  btcC.classList.toggle('hide', none);
-  if(oamp) oamp.classList.toggle('hide', !_histCounts.oamp);
-  // Always Bitcoin, then Sequentia, then Lightning: the order the markup gives them.
-}
+// Each source counts its rows: null while that history is still being read, so an unread history
+// is never called empty (orderHistory). (_histCounts is declared near the top of the script.)
+function arrangeHistory(){ orderHistorySoon(); }
 // Lightning in the History: what each of the wallet's own hosted nodes settled (GET /node/history:
 // invoices paid to it, holds it settled, payments it made), one row per payment hash, so a swap's two
 // legs read as one swap with both amounts (ln-history.js). The trade log only names a row the nodes
@@ -9318,11 +9399,10 @@ async function renderLnHistory(){
     const sub=[r.at ? whenText(r.at) : '', (swap && r.title && r.title!==head) ? r.title : '', rails, r.status].filter(Boolean).join(' · ');
     if(sub) mid.appendChild(el('div','sub', sub));
     item.appendChild(mid);
-    const amts=el('div','amts');
-    for(const l of r.legs){ const out=l.dir==='out';
-      amts.appendChild(el('span','amt '+(out?'neg':'pos'), (out?'-':'+')+fmtLeg(l))); }
-    if(r.fee){ amts.appendChild(el('span','fee','fee '+fmtLeg(r.fee))); }
-    item.appendChild(amts);
+    const hexOf=(a)=> a==='btc' ? 'BTC' : a;
+    const legs=r.legs.map(l=>({ hex:hexOf(l.asset), atoms:l.atoms, out:l.dir==='out' }));
+    item.appendChild(histAmounts(legs, r.fee ? [{ hex:hexOf(r.fee.asset), atoms:r.fee.atoms }] : [], { out: r.kind!=='in' }));
+    tagRow(item, r.at || 1, [...legs.map(l=>l.hex), r.fee && hexOf(r.fee.asset)]);
     list.appendChild(item);
   }
 }
@@ -9358,8 +9438,8 @@ function renderHistory(){
     { const _d=el('div'); _d.appendChild(txLink('/explorer/tx/'+p.txid, p.txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub unconf', self ? 'sending · to yourself: only the fee leaves the wallet' : 'sending · '+p.title));
     item.appendChild(mid);
-    const o=p.out[0] || p.fee;
-    if(o){ const am=assetMeta(o.hex); item.appendChild(el('span','amt neg', '-'+fmtAtoms(o.atoms,am.precision)+' '+am.ticker)); }
+    item.appendChild(histAmounts(p.out.map(o=>({ hex:o.hex, atoms:o.atoms, out:true })), p.fee ? [p.fee] : [], { out:true }));
+    tagRow(item, 0, [...p.out.map(o=>o.hex), p.fee && p.fee.hex]);
     list.appendChild(item);
   }
   // A speed-up is drawn right under the transaction it speeds up; a transaction a bump or replace
@@ -9431,13 +9511,9 @@ function renderHistory(){
     item.appendChild(mid);
     // Every asset the transaction moved for this wallet, then the fee it paid, in its asset and in
     // the reference currency. Snapshot rows from before these fields carry only hex/atoms.
-    const box=el('div','amts');
     const legs = Array.isArray(r.legs) ? r.legs : [{ hex:r.hex, atoms:r.atoms }];
-    for(const l of legs){ const am=assetMeta(l.hex), neg=BigInt(l.atoms)<0n;
-      const a=el('span','amt '+(neg?'neg':'pos'), (neg?'':'+')+fmtAtoms(l.atoms,am.precision)+' '+am.ticker); box.appendChild(a); }
-    if(r.fee){ const fm=assetMeta(r.fee.hex), rv=refValueStr(r.fee.hex, BigInt(r.fee.atoms));
-      box.appendChild(el('span','fee','fee '+fmtAtoms(r.fee.atoms,fm.precision)+' '+fm.ticker+(rv?' ('+rv+')':''))); }
-    item.appendChild(box);
+    item.appendChild(histAmounts(legs, r.fee ? [r.fee] : [], { out: type==='outgoing' || type==='burn' || type==='self' || type==='swap' }));
+    tagRow(item, r.height ? ((r.ts||0)*1000 || 1) : 0, [...legs.map(l=>l.hex), r.fee && r.fee.hex]);
     // A click opens the whole record under the row, and a second closes it.
     item.classList.add('clickable'); item.title='Show details';
     item.onclick=(e)=>{
@@ -9475,11 +9551,10 @@ function instantItem(r){
   const sub=[when, status, r.kind==='out' && r.later && Date.now()-r.at < 3600000 ? 'Pending' : ''].filter(Boolean).join(' · ');
   if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
   item.appendChild(mid);
-  const amts=el('div','amts');
-  for(const l of r.legs){ const out = r.kind==='out' || BigInt(l.atoms)<0n; amts.appendChild(el('span','amt '+(out?'neg':'pos'), (out?'-':'+')+fmtLeg(l))); }
-  const fees = r.fee ? [r.fee] : (r.kind==='swap' ? (r.fees||[]) : []);
-  for(const f of fees) amts.appendChild(el('span','fee','fee '+fmtLeg(f)));
-  item.appendChild(amts);
+  const legs = r.legs.map(l=>({ hex:l.asset, atoms:l.atoms, out: r.kind==='out' || BigInt(l.atoms)<0n }));
+  const fees = (r.fee ? [r.fee] : (r.kind==='swap' || r.kind==='returned' ? (r.fees||[]) : [])).map(f=>({ hex:f.asset, atoms:f.atoms }));
+  item.appendChild(histAmounts(legs, fees, { out: r.kind!=='in' }));
+  tagRow(item, r.at || 0, [...legs.map(l=>l.hex), ...fees.map(f=>f.hex)]);
   return item;
 }
 // Whether the network still holds an unconfirmed transaction. A transaction can leave every
@@ -9584,8 +9659,9 @@ function drawBtcRows(list, rows){
       mid.appendChild(b);
     }
     item.appendChild(mid);
-    const mag = delta<0n ? -delta : delta;
-    item.appendChild(el('span','amt '+(incoming?'pos':'neg'), (incoming?'':'-')+fmtAtoms(mag,8)+' BTC'));
+    // A payment out read before its fee was kept (an older snapshot, one just sent) shows no fee line.
+    item.appendChild(histAmounts([{ hex:'BTC', atoms:delta }], t.fee ? [{ hex:'BTC', atoms:t.fee }] : [], { out: !incoming && t.fee!=null }));
+    tagRow(item, t.conf ? ((t.time||0)*1000 || 1) : 0, ['BTC']);
     list.appendChild(item);
   }
 }
@@ -9628,7 +9704,9 @@ async function renderBtcHistory(){
     for(const vin of (t.vin||[])){ const po=vin.prevout; if(po && walletAddrs.has(po.scriptpubkey_address)) inSum+=BigInt(po.value||0); }
     for(const vo of (t.vout||[])){ if(walletAddrs.has(vo.scriptpubkey_address)) outSum+=BigInt(vo.value||0); }
     const st=t.status||{};
-    return { txid:t.txid, delta:(outSum-inSum).toString(), conf:!!st.confirmed, height:st.block_height||0, time:st.block_time||0 };
+    // The fee is this wallet's when it paid in: a payment out says what it cost.
+    return { txid:t.txid, delta:(outSum-inSum).toString(), conf:!!st.confirmed, height:st.block_height||0, time:st.block_time||0,
+      fee: inSum>0n && t.fee!=null ? String(t.fee) : null };
   });
   // A sent payment the explorer now lists needs no remembering.
   { const seenIds=new Set(rows.map(r=>r.txid)); const p=btcPendingSends(); const left=p.filter(x=>!seenIds.has(x.txid)); if(left.length!==p.length) saveBtcPending(left); }
@@ -11100,7 +11178,8 @@ function renderOampHistory(){
     else when += ' · pending, not yet confirmed';
     mid.appendChild(el('div','sub', when));
     item.appendChild(mid);
-    item.appendChild(el('span','amt', fmtAtoms(BigInt(x.atoms), x.precision)+' '+x.ticker));
+    item.appendChild(histAmounts([{ hex:'oamp:'+x.asset, atoms:x.atoms, out:true }], [], { out:false }));
+    tagRow(item, x.confirmed ? (x.time||1) : 0, ['oamp:'+x.asset]);
     list.appendChild(item);
   }
 }

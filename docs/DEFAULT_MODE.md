@@ -429,7 +429,15 @@ What it shows beyond the Market and Trade sections above:
 
 ## History
 
+- **One list for everything**, newest first: payments and trades on either chain, what is paid and
+  received in seconds, Lightning. No list per chain or per kind of payment.
+- Above it, a filter for one asset ("All assets" by default) and **Refresh**. One asset shows
+  every movement in it and every one that involves it: a swap of OILX for BTC shows under OILX and
+  under BTC.
 - **One row per payment or trade.** A trade is one row, however many legs it has.
+- Beside each amount, its value in the currency chosen in "Show values in"; under them, the fee
+  and its value. A value under one cent reads "<0.01 USD" (in the chosen currency). A payment out
+  or a trade for which the wallet paid no fee says "zero fee", small and in italics.
 - A trade's row is "Swapped <pay amount> <TICKER> for <get amount> <TICKER>", then a small line
   with the time and, while the trade is not settled, its status. On the right are
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
