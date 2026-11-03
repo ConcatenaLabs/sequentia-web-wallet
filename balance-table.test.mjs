@@ -67,7 +67,7 @@ test('one figure per asset in every mode; the rails and their actions in develop
   assert.match(rb, /list\.classList\.add\('user'\);/);
   assert.match(html, /\.btable\.user \.bt-o,\.btable\.user \.bt-l\{display:none\}/);
   // Default mode shows no rail (docs/DEFAULT_MODE.md): the bolt, the split and every move between
-  // rails are developer mode's; what is arriving, staked or frozen shows in both.
+  // rails are developer mode's, and so is what is on its way; what is staked or frozen shows in both.
   assert.match(rb, /if\(devMode\(\) && lnOn && leg\)\{\s*const bo=el\('span','bt-bolt'\+\(hasLn\?' on':''\)\);/);
   assert.match(rb, /const dm = devMode\(\);/);
   assert.match(rb, /if\(dm && \(hasLn \|\| arkPart>0n \|\| arkJoined \|\| staked>0n\)\) blk\('On-chain', amt\(on\)\);/);
@@ -86,6 +86,13 @@ test('one figure per asset in every mode; the rails and their actions in develop
   assert.match(rb, /DEFAULT_WORDS\.arriving\(amt\(arriving - redoing\), ticker\)/);
   // What a Bitcoin reorganisation took back out of the chain is said apart, never as gone.
   assert.match(rb, /DEFAULT_WORDS\.redoing\(amt\(redoing\), ticker\)/);
+  // Default mode shows one balance and nothing on its way between places (03/11/2026): a coin
+  // moving out of the Ark to the wallet's own address read as "arriving" for the whole coin.
+  assert.match(rb, /const parts = devMode\(\);/);
+  assert.match(rb, /if\(kind!=='BTC' && leavesApi && parts\)\{ arriving = leavesApi\.arriving\(kind\)/);
+  assert.match(rb, /if\(parts && movingAtoms > 0n\)\{ const mv=el\('div','bt-moving',/);
+  assert.match(rb, /const arr = parts && kind==='BTC' && btcArk/);
+  assert.match(rb, /if\(kind!=='BTC' && leavesApi && parts && leavesApi\.keptSafe\)/);
   // Without a channel the one action is Move to Lightning, in developer mode's details, never on the row.
   assert.match(rb, /if\(dm && lnOn && leg && !hasLn && toLn\)\{ const d=el\('div','bt-blk'\); button\(d, 'Move to Lightning'/);
   assert.match(rb, /nameNode:nameEl, foot:sub, movable,/);

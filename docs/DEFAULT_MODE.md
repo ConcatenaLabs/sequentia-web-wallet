@@ -38,8 +38,11 @@ In practice:
 
 - Each asset has **one figure**: everything the wallet holds of it, wherever it is held. At the
   top is **one total** in the reference currency, across every asset.
-- What has been received and cannot be spent yet appears under the figure as
-  **"<amount> <TICKER> arriving"**. Once it can be spent, it is simply part of the figure.
+- Nothing under the figure says that part of it is on its way somewhere: into the Ark, out of it
+  to the wallet's own address, or between rails. The figure is the balance, and that is all a
+  person sees. What cannot be spent yet is said only when they try to send it ("still
+  arriving"). Developer mode shows those parts under the figure as
+  **"<amount> <TICKER> arriving"** (and moving, redone, kept safe).
 - What the wallet holds that cannot move before a date, such as tokens bought in a sale that
   vests, is part of the figure and appears under it as **"<amount> <TICKER> vests on <date>"**,
   the date in words: "100 ORNG vests on 3 November 2026". One line for each date. An asset held
@@ -81,7 +84,7 @@ In practice:
   payment refused before it left moves nothing and is tried again later. A channel the move
   emptied is closed to the wallet's address when that is cheap and safe, and what it held stays
   in the figure on its way back; otherwise it stays, and developer mode says why under its Lightning part.
-- The row's details show only what a person may act on: **Staked**, **Arriving**, **Vests on
+- The row's details show only what a person may act on: **Staked**, **Vests on
   <date>**, and a freeze,
   as "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts the
   freeze."
