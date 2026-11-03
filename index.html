@@ -1732,7 +1732,7 @@ import { initXswap, renderXswap, fetchXmarkets, fetchXquote, fetchXbook, openFro
 import { initXrswap, fetchRQuote, openReverseFromComposer, hasInFlight as hasReverseInFlight, renderReverse, driveReverse } from './xrswap.js';
 import { initXmaker, startForwardMaker, startReverseMaker, liveMakerOffers, resumeMakerSwaps } from './xmaker.js';
 import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisconnect,
-  onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
+  onSeqlnStatus, seqlnState, seqlnAvailable, seqlnGetStatus, seqlnListNodes, seqlnNodeOnchain, seqlnNodeWithdraw, seqlnSwap, seqlnBook, seqlnUnifiedBook, seqlnLnBook, seqlnPostOffer, lnFinalityCopy,
   seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodeHistory, seqlnSwapNote, seqlnNodePay, seqlnNodePayHash, seqlnNodePayStatus, seqlnNodePayQuote, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed, creditNotes,
@@ -4861,9 +4861,10 @@ async function reconnectOwnNodes(){
     try{ lnLastStatus = lnKeepStatus(await seqlnGetStatus()); }catch{}
     try{ renderBalance(); lnStatusPill(); }catch{}
     // A node that booted holding coins on chain and no channel (a Move to Lightning cut short
-    // before the open, or what a channel's close paid it): read what it reports, and say so in
-    // the note with an "Open a new channel" button. Nothing opens a channel unasked: an
-    // interrupted Move the user started is finished by resumeMove from its own record.
+    // before the open, or what a channel's close paid it): read what it reports. Developer mode
+    // says so in the note with an "Open a new channel" button; default mode sends them home to
+    // the wallet's address (sendNodeCoinsHome). Nothing opens a channel unasked: an interrupted
+    // Move the user started is finished by resumeMove from its own record.
     for(const k of readyKeys){
       if(!/^(seq|btc):/i.test(k)) continue;
       try{
@@ -4871,6 +4872,7 @@ async function reconnectOwnNodes(){
         for(let i=0;i<10;i++){ try{ info = await seqlnNodeOnchain(k); }catch{ info=null; } if(info && info.node_up) break; await new Promise(r=>setTimeout(r,3000)); }
         if(info){ _lnNodeInfo[k] = { at: Date.now(), info }; }
       }catch(e){ console.warn('[ln] node on-chain report:', e?.message ?? e); }
+      sendNodeCoinsHome(k).catch((e)=> console.warn('[ln] sending the node\'s coins home:', e?.message ?? e));
     }
     try{ renderUpgradeNote(); }catch{}
   }
@@ -4883,6 +4885,30 @@ async function reconnectOwnNodes(){
 // dismissed; one open at a time per node, and only when the user asks.
 const _lnNodeInfo = {};                 // label -> { at, info } (/node/onchain)
 const _lnOpenGuard = makeOpenGuard();
+// Default mode: coins on an own node's wallet, outside its channels (what a close paid it, an
+// interrupted deposit), go home to the wallet's own address by themselves, so the balance is one
+// place and nothing asks the person about a node. The wallet names its address to the node's
+// device (approveCloseDestination), which signs a spend there and nowhere else, and the node
+// sends every such coin of its asset (POST /node/withdraw). Never in developer mode, whose note
+// offers the open; never while a Move to Lightning the user started is still to be finished
+// (resumeMove's record) or an open from those coins runs; once per node every LN_HOME_RETRY_MS.
+const _lnHomeAt = {};
+const LN_HOME_RETRY_MS = 10 * 60_000;
+async function sendNodeCoinsHome(label){
+  if(devMode()) return false;
+  const info = (_lnNodeInfo[label] || {}).info;
+  if(!(info && info.node_up && Number(info.onchain_msat) > 0)) return false;
+  if(loadMoveState() || _lnOpenGuard.text(label)) return false;
+  if(Date.now() - (_lnHomeAt[label] || 0) < LN_HOME_RETRY_MS) return false;
+  _lnHomeAt[label] = Date.now();
+  const dest = await lnWalletCloseDestination({ chain: /^btc(:|$)/i.test(label) ? 'btc' : 'seq' });
+  approveCloseDestination(label, dest.scriptHex);
+  const r = await seqlnNodeWithdraw(label, dest.address);
+  console.log('[ln] the node\'s coins outside its channels went home:', label, r && r.txid);
+  delete _lnNodeInfo[label];
+  try{ renderUpgradeNote(); renderBalance(); }catch{}
+  return true;
+}
 let _lnNoteFetch = false;
 async function refreshNodeNotes(){
   if(_lnNoteFetch) return;
@@ -4927,6 +4953,8 @@ function renderCreditNote(){
 }
 function renderUpgradeNote(){
   const host = $('lnUpgradeNote'); if(!host) return;
+  // Nodes, channels and their upgrade are developer mode's: default mode deals with them itself.
+  if(!devMode()){ host.textContent = ''; host.classList.add('hide'); return; }
   const old = predatingChannels();
   const labels = [...new Set([...Object.keys(old), ...Object.keys(_lnNodeInfo)])];
   host.textContent = '';
