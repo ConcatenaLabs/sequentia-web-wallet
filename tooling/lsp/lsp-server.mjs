@@ -5114,6 +5114,30 @@ const server = http.createServer(async (req, res) => {
         chain, node_up, onchain_msat: on.onchain_msat, outputs: on.outputs || [], channels, channel_states,
         stranded: node_up && on.onchain_msat > 0 && channels === 0 });
     }
+    // "Send home": every coin of a provisioned node's asset outside its channels (what a close paid
+    // the node, an interrupted deposit) to `destination`, the wallet's own address. The node's
+    // device signs it only to an address that wallet named to it (approveCloseDestination), so no
+    // caller can steer it elsewhere: to any other address the device returns it unsigned and the
+    // node sends nothing. A Sequentia address is the unconfidential one: the device signs explicit
+    // outputs only. -> { ok, txid }.
+    if (req.method === 'POST' && url.pathname === '/node/withdraw') {
+      if (!PROV) return send(res, 501, { ok: false, error: 'per-asset node provisioning is not enabled on this LSP' });
+      const body = await readBody(req);
+      if (!body || !body.node || !body.destination) return send(res, 400, { ok: false, error: 'need { node, destination }' });
+      const destination = String(body.destination);
+      if (!/^[0-9A-Za-z]{14,120}$/.test(destination)) return send(res, 400, { ok: false, error: 'destination is not an address' });
+      const rec = PROV.getByKey(String(body.node));
+      if (!rec) return send(res, 404, { ok: false, error: 'unknown node key' });
+      const args = [`destination=${destination}`, 'satoshi=all', 'minconf=0'];
+      if (rec.chain !== 'btc') args.push(`asset=${rec.asset_id}`);
+      try {
+        const w = await lnrpcKw('withdraw', args, rec.rpc);
+        if (!w || !w.txid) throw new Error('withdraw gave no txid');
+        return send(res, 200, { ok: true, txid: w.txid, destination });
+      } catch (e) {
+        return send(res, 400, { ok: false, error: String((e && e.message) || e) });
+      }
+    }
     // List the provisioned per-device nodes (with a live node-id refresh). Refresh by KEY:
     // several device-scoped nodes can share one asset id, so each is refreshed on its own key.
     if (req.method === 'GET' && url.pathname === '/node/list') {

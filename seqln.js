@@ -598,6 +598,13 @@ export function seqlnNodeOnchain(node_key) {
   return lspFetch('/node/onchain?node=' + encodeURIComponent(node_key));
 }
 
+// Send every coin of one of the device's OWN nodes outside its channels to `destination`, the
+// wallet's own address. The device signs it only once the wallet has named that address to it
+// (approveCloseDestination), so call that first. Returns { txid, destination }.
+export function seqlnNodeWithdraw(node_key, destination) {
+  return lspFetch('/node/withdraw', { method: 'POST', body: JSON.stringify({ node: node_key, destination }) });
+}
+
 // --- Sub-asset BUY (pay BTC on-chain, receive asset over Lightning) HODL primitives ------------
 // Ensure inbound asset liquidity to the user's OWN node so the maker can pay the asset over LN
 // (JIT 0-conf inbound channel). amount in ASSET SATS.
