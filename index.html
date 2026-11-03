@@ -8006,6 +8006,22 @@ function recipientProblem(addr, asset){
   if(a.isBlinded()) return 'Bitcoin can only be sent to a non-confidential address (tb1…). This is a confidential Sequentia address: ask the recipient for their non-confidential address, or send a Sequentia asset instead.';
   return null;
 }
+// The most a payment to `address` out of the Ark can be (offboardReview): what the Ark can spend of
+// the asset less the fee the library quotes for it, a fee paid on top of the amount. The fee is
+// learnt from a quote of half, then each amount is quoted again until amount and fee fit.
+async function offboardMax(hex, tree, address){
+  const feeOf=async(a)=>{ const q=await leavesApi.offboardQuote({ asset: hex, amount: String(a), address });
+    return q && q.fee && (!q.fee.asset || q.fee.asset===hex) ? BigInt(q.fee.amount||0) : 0n; };
+  try{
+    let amt=tree - await feeOf(tree/2n > 0n ? tree/2n : 1n);
+    for(let i=0; i<4 && amt>0n; i++){
+      let fee; try{ fee=await feeOf(amt); }catch{ amt -= amt/1000n > 0n ? amt/1000n : 1n; continue; }
+      if(amt + fee <= tree) return amt;
+      amt = tree - fee;
+    }
+  }catch(e){ console.warn('[send max] the Ark\'s quote:', e?.message??e); }
+  return 0n;
+}
 // Fill an amount with everything that can be sent: the balance less what the other recipients take
 // of the same asset, less the fee when the fee is paid in that asset too.
 async function fillMax(r){
@@ -8050,7 +8066,16 @@ async function fillMax(r){
       const tree=(!devMode() && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n;
       const inTree=tree > 0n && (!typed || !!leavesApi.treeRoute(payCodeDestination(typed, hex)));
       max = (inTree ? tree : BigInt(availableFor(hex))) - others;
-      // Elsewhere (an address, another operator's code) the Ark pays with a fee Max can't size yet.
+      // An address the chain's coins can't cover is paid out of the Ark (addressRoute), so Max to
+      // an address is what the Ark can send it with its fee off, whenever that is more than the
+      // chain's coins hold: the chain's coins alone (a few atoms beside an Ark of millions) could not
+      // even pay their own fee, and Max failed on them.
+      const dest=typed ? payCodeDestination(typed, hex) : '';
+      let toAddress=false; try{ if(dest){ new Address(dest); toAddress=true; } }catch{}
+      const offMax=(!inTree && toAddress && tree>0n && others===0n) ? await offboardMax(hex, tree, dest) : 0n;
+      if(offMax > BigInt(availableFor(hex))){ max=offMax; }
+      else {
+      // Another operator's code: the Ark pays it with a fee Max can't size yet.
       if(!inTree && max<=0n && tree>0n) throw new Error(DEFAULT_WORDS.maxArkElsewhere);
       if(!inTree && sendFee && sendFee.hex===hex && !isOampAsset(hex)){
         // Size the transaction with every coin of the asset in it, then take its fee off.
@@ -8070,6 +8095,7 @@ async function fillMax(r){
           try{ buildSendPset(rows, { hex, unitsPerVb: sendFee.unitsPerVb }); break; }
           catch(e){ const k=/missing (\d+) units/i.exec(String((e && e.message) || e)); if(!k) throw e; max -= BigInt(k[1]); }
         }
+      }
       }
     }
     if(max<=0n) throw new Error('nothing left to send after the fee');
