@@ -1694,9 +1694,10 @@
   // code's address on the chain. null: no limit.
   if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = 1000;
   // What default mode keeps in the Ark, in USD (ark-limits.js): BTC up to 1000 moved there from
-  // the wallet's own address and up to 2000 with what it receives there; each asset 5000 and
-  // 10000. Anything more stays, or goes, on the chain. A figure set to null has no limit.
-  if(window.SEQ_ARK_LIMITS === undefined) window.SEQ_ARK_LIMITS = { btc: { board: 1000, hold: 2000 }, asset: { board: 5000, hold: 10000 } };
+  // the wallet's own address; payments received take it to 2000, and then all above 1000 moves
+  // to the address. Each asset 5000 and 7500. One payment of 1000 or more goes to the address
+  // straight away. A figure set to null has no limit.
+  if(window.SEQ_ARK_LIMITS === undefined) window.SEQ_ARK_LIMITS = { btc: { board: 1000, hold: 2000, direct: 1000 }, asset: { board: 5000, hold: 7500, direct: 1000 } };
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1749,7 +1750,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
-import { arkLimits, boardRoom, receiveRoom, holdExcess } from './ark-limits.js';
+import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
 import { isStaleTipError } from './reorg.js';
@@ -3894,7 +3895,7 @@ function initLeaves(){
     mnemonic: ()=> bip39Phrase(),
     el, assetMeta, fmtAtoms, refValueStr,
     btcOnchain: ()=> btcBalance || 0n,
-    boardRoom: (hex)=> arkRoom(hex, 'board'),
+    boardRoom: (hex)=> arkRoom(hex),
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
@@ -4197,23 +4198,29 @@ function arkHeld(kind){
   try{ return kind==='BTC' ? (btcArk && btcArk.isOpen() ? btcArk.figures().total : 0n) : (leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(kind)||0n) : 0n); }
   catch{ return 0n; }
 }
-// The page's limit of `which` ('board' or 'hold') for `kind`, and its price and precision.
-function arkLimitOf(kind, which){
+// The page's limits for `kind` ({ board, hold }, USD), and its price and precision.
+function arkLimitsOf(kind){
   const l = arkLimits(window.SEQ_ARK_LIMITS)[kind==='BTC' ? 'btc' : 'asset'];
-  return { limitUsd: l[which], price: priceFor(priceTicker(kind)), precision: kind==='BTC' ? 8 : (assetMeta(kind).precision||0) };
+  return { board: l.board, hold: l.hold, direct: l.direct, price: priceFor(priceTicker(kind)), precision: kind==='BTC' ? 8 : (assetMeta(kind).precision||0) };
 }
-// How much more of `kind` the Ark takes: by the wallet itself ('board') or in payments ('hold').
-// No price yet (the feed not read, or BTC, which it always values, missing from it) holds
-// everything back until there is one; an asset the feed does not value has no limit.
-// -> atoms, or null for no limit.
-function arkRoom(kind, which){
-  const o = { held: arkHeld(kind), ...arkLimitOf(kind, which) };
+// How much more of `kind` the wallet moves into the Ark by itself. No price yet (the feed not
+// read, or BTC, which it always values, missing from it) holds everything back until there is
+// one; an asset the feed does not value has no limit. -> atoms, or null for no limit.
+function arkRoom(kind){
+  const l = arkLimitsOf(kind), o = { held: arkHeld(kind), limitUsd: l.board, price: l.price, precision: l.precision };
   if(o.limitUsd != null && !(o.price > 0) && (kind==='BTC' || !Object.keys(PRICES).length)) return 0n;
-  return which==='board' ? boardRoom(o) : receiveRoom(o);
+  return boardRoom(o);
 }
-// Past the 'hold' limit, the part above it is moved out to the wallet's own address, one move
-// at a time per kind, never in developer mode (whose rails are the person's), never while one
-// such move is under way.
+// Whether one payment of `atoms` of `kind` goes to the address, not the Ark (ark-limits.js), and
+// the sentence the review says it with. -> the sentence, or null. Default mode only.
+function arkDirectWhy(kind, atoms){
+  if(devMode() || atoms == null) return null;
+  const l = arkLimitsOf(kind);
+  return goesToAddress({ atoms, ...l }) ? DEFAULT_WORDS.byAddressLarge(directUsd(l).toLocaleString()) : null;
+}
+// Once the Ark holds the 'hold' limit, everything above 'board' moves out to the wallet's own
+// address, one move at a time per kind, never in developer mode (whose rails are the person's),
+// never while one such move is under way.
 let _arkOutBusy = false, _arkOutAt = 0;
 const ARK_OUT_EVERY_MS = 2 * 60_000;
 async function arkHoldTick(force){
@@ -4222,7 +4229,7 @@ async function arkHoldTick(force){
   _arkOutBusy = true; _arkOutAt = Date.now();
   try{
     if(btcArkRoutes()){
-      const over = holdExcess({ held: arkHeld('BTC'), ...arkLimitOf('BTC', 'hold') });
+      const over = moveOutAtoms({ held: arkHeld('BTC'), ...arkLimitsOf('BTC') });
       if(over > 0n){
         const to = btcAddr(false, unifiedNextUnused());
         const max = (await btcArk.max(to)) || 0n, sats = over < max ? over : max;
@@ -4237,7 +4244,7 @@ async function arkHoldTick(force){
       const under = await movesUnderWay();
       for(const h of leavesApi.leafAssets()){
         if(isOampAsset(h) || under.some(o=>o.asset===h)) continue;
-        const over = holdExcess({ held: arkHeld(h), ...arkLimitOf(h, 'hold') });
+        const over = moveOutAtoms({ held: arkHeld(h), ...arkLimitsOf(h) });
         const can = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n);
         const atoms = over < can ? over : can;
         if(!(atoms > 0n)) continue;
@@ -4296,7 +4303,7 @@ function btcArkBoardSoon(asked){
     if(!(_btcArkWanted > 0n) && max != null && btcArk.figures().total >= max * BigInt(BTC_ARK_KEEP_BOARDS)) return;
   }catch{}
   // Within the page's limit (ark-limits.js); a trade that asks for more BTC there gets it.
-  let cap = arkRoom('BTC', 'board');
+  let cap = arkRoom('BTC');
   if(cap != null && _btcArkWanted > cap) cap = _btcArkWanted;
   if(cap != null && cap <= 0n) return;
   _btcArkBoardAt = Date.now();
@@ -4348,7 +4355,7 @@ async function btcArkSendReview(r, onDone, satPerVb = 0){
   }
   const to = route === 'invoice' ? BTC_WORDS.toInvoice : /^bitcoin:/i.test(r.addr) ? BTC_WORDS.toCode : (r.addr.slice(0, 14) + '…');
   const what = fmtAtoms(q.sats, 8);
-  const kv = [[BTC_WORDS.to, to], [BTC_WORDS.fee, q.fee > 0n ? fmtAtoms(q.fee, 8) + ' BTC' : BTC_WORDS.noFee], ['', route === 'chain' ? BTC_WORDS.arrivesBlock : BTC_WORDS.arrivesNow]];
+  const kv = [[BTC_WORDS.to, to], [BTC_WORDS.fee, q.fee > 0n ? fmtAtoms(q.fee, 8) + ' BTC' : BTC_WORDS.noFee], ['', route === 'chain' ? (r.why ? r.why + ' ' : '') + BTC_WORDS.arrivesBlock : BTC_WORDS.arrivesNow]];
   const {m, ok, st} = modalRows({ title: BTC_WORDS.review(what), kv });
   ok.textContent = BTC_WORDS.send;
   ok.onclick = async()=>{
@@ -4386,7 +4393,7 @@ async function btcSplitReview(r, { chainAddr, chain, ark, arkTo, satPerVb }, onD
   const kv = [[BTC_WORDS.to, to],
     [BTC_WORDS.fromAddress, fmtAtoms(chain, 8) + ' BTC · ' + BTC_WORDS.fee + ' ' + feeOf(built.fee)],
     [BTC_WORDS.fromInstant, fmtAtoms(ark, 8) + ' BTC · ' + BTC_WORDS.fee + ' ' + feeOf(q.fee)],
-    ['', BTC_WORDS.inTwo + ' ' + BTC_WORDS.arrivesBlock]];
+    ['', (r.why ? r.why + ' ' : '') + BTC_WORDS.inTwo + ' ' + BTC_WORDS.arrivesBlock]];
   const {m, ok, st} = modalRows({ title: BTC_WORDS.review(what), kv });
   ok.textContent = BTC_WORDS.send;
   ok.onclick = async()=>{
@@ -7452,11 +7459,9 @@ function payCodeText(){
   if(!_recvArk && btcArk && btcArk.isOpen() && !_recvArkAsk)
     _recvArkAsk = btcArk.run('address').then(a=>{ _recvArk = a.address; }).catch(e=> console.warn('[receive code] ark:', e?.message??e)).finally(()=>{ _recvArkAsk = null; renderReceive(); });
   const asset = recvAsset(), atoms = recvAmountAtoms(), key = asset + ':' + atoms;
-  // The Ark is asked to receive only what it has room for (ark-limits.js): past its limit a
-  // payment comes to the address.
-  const room = (k)=>{ const r = arkRoom(k, 'hold'); return r == null ? null : r; };
-  const btcRoom = room('BTC');
-  const can = atoms>0n && (asset==='BTC' ? btcArkRoutes() && (btcRoom == null || atoms <= btcRoom) : recvAssetChoices().includes(asset) && (room(asset) == null || atoms <= room(asset)));
+  // An amount that goes to the address straight away (ark-limits.js) carries no invoice.
+  const large = atoms>0n && !!arkDirectWhy(asset, atoms);
+  const can = atoms>0n && !large && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
   const mine = (inv)=> inv && inv.asset===asset && inv.atoms===atoms;
   if(can && !mine(_recvInv) && !_recvInvAsk && _recvInvFailed!==key){
     const ask = asset==='BTC' ? btcArk.invoice(atoms, 'Receive')
@@ -7468,7 +7473,7 @@ function payCodeText(){
   if(!address) return _recvCode.text;
   const inv = can && mine(_recvInv) ? _recvInv : null;
   return buildPayCode({ address, amount: asset==='BTC' && atoms>0n ? fmtAtoms(atoms, 8).replace(/[^0-9.]/g, '') : undefined,
-    lightning: inv ? inv.invoice : undefined, ark: (btcRoom == null || btcRoom > 0n) ? (_recvArk || undefined) : undefined, sequentia: _recvCode.text });
+    lightning: inv ? inv.invoice : undefined, ark: _recvArk || undefined, sequentia: _recvCode.text });
 }
 // The code's invoice is claimed as soon as it is paid; the code then shows a new one. An asset's
 // is the leaf library's receive: once a payment is held for it the wallet syncs, which claims the
@@ -7520,6 +7525,9 @@ const _lnPassedOver = new Set();
 function payCodeRoute(text, asset, atoms){
   let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
   if(!c) return { dest: text, byAddress: false };
+  // One payment of hold - board or more (ark-limits.js) goes to the address straight away: the
+  // receiving wallet would only move it out of the Ark again.
+  if(c.address && !isOampAsset(asset)){ const why = arkDirectWhy(asset, atoms); if(why) return { dest: c.address, byAddress: true, why }; }
   if(asset === 'BTC'){
     if(c.ark && btcArkPays()) return { dest: text, byAddress: false };
     if(c.lightning && btcArkRoutes()) return { dest: c.lightning, byAddress: false };
@@ -9052,7 +9060,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     // An asset to a wallet of another operator goes over Lightning when its code carries an invoice
     // in it for the amount and asset-lightning.js's rule lets it (`lightning`).
     for(const r of rows){
-      let atoms=null; if(r.asset!=='BTC' && !isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, sendPrecision(r.asset)); }catch{} }
+      let atoms=null; if(!isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{} }
       const d = payCodeRoute(r.addr, r.asset, atoms);
       r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null;
     }
