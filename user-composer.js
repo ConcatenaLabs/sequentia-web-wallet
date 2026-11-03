@@ -2,8 +2,10 @@
 //
 // The engine (user-trade.js) reads the single-step book, prices the trade with the wallet's
 // own leaf library and settles it in one native step; this module draws it. Before the button
-// confirms, it shows three lines: what you pay, what you get, and the fees. After it, the trade
-// reads "Sent", then "Settled", or "Returned: nothing traded." Market trades only. Both pickers
+// confirms, it shows three lines: what you pay, what you get, and the fees. After it, a card over
+// the page follows the trade: "Sent", then "Settled", or "Returned: nothing traded."; closed, the
+// trade goes on in Your trades, under the button, and its end is said wherever the person is
+// (ctx.notify). Market trades only. Both pickers
 // list BTC first. Every word it can show is in USER_WORDS, and none is a word of
 // USER_MODE_FORBIDDEN_WORDS (user-trade.test.mjs checks both, the browser drive the page).
 //
@@ -14,7 +16,10 @@
 //   -> [hex] (optional: the receive picker lists those after what is offered now),
 //   market: { relay() -> the relay's base URL, pairOf(a, b) -> {base, quote} } (optional: the
 //   chosen pair's market under the inputs, market-view.js), isHidden(hex) -> the person hid it
-//   (optional), refValue(hex, atoms) -> its value in words, "≈ $…" (optional) }
+//   (optional), refValue(hex, atoms) -> its value in words, "≈ $…" (optional),
+//   links(record) -> [{ chain, href, text }] the transactions a trade made on a chain, in their
+//   explorers (optional), notify(text, { sticky, link }) -> said wherever the person is (optional),
+//   openHistory() -> shows History (optional) }
 // Both pickers are the shared asset chooser (asset-picker.js): a search box, your assets first
 // with their balances, BTC always, what the book offers now next, the rest found by searching.
 // The receive picker lists BTC first, then every asset the book offers for what is paid in one
@@ -48,7 +53,7 @@ export function payAssets (known, held, current, name) {
 
 export function mountUserComposer (ctx) {
   const S = { pay: null, get: null, amount: '', recv: '', fixed: 'pay', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
-    estTimer: null, estSeq: 0,
+    estTimer: null, estSeq: 0, card: null, ended: null,
     offered: { pay: null, list: [], at: 0, loading: false } }
   const OFFERS_MS = ctx.offersMs || 60000
   // The pair and the amount typed are kept for the browser tab's session (ctx.session, a
@@ -224,9 +229,9 @@ export function mountUserComposer (ctx) {
     const t = el('div', 'uc-ticket'); t.id = 'ucTicket'; box.appendChild(t)
     const note = el('div', 'sub uc-note'); note.id = 'ucNote'; box.appendChild(note)
     const act = el('div', 'row uc-act'); act.id = 'ucAct'; box.appendChild(act)
-    if (ctx.market) box.appendChild(mk)
-    // Trades
+    // Trades, under the button and above the market, where a trade just sent is seen.
     const list = el('div', 'uc-trades'); list.id = 'ucTrades'; box.appendChild(list)
+    if (ctx.market) box.appendChild(mk)
     r.appendChild(box)
     keep()
     paintTicket()
@@ -308,15 +313,22 @@ export function mountUserComposer (ctx) {
   async function confirm () {
     if (!S.choice) return
     S.busy = true; paintTicket()
+    seenEnds()
+    const before = new Set(ctx.engine.records().map((r) => r.id))
     try {
       const done = ctx.engine.confirm(S.choice, S.ticket)
       const later = Symbol('later')
       const first = await Promise.race([done, new Promise((r) => setTimeout(() => r(later), ctx.confirmShownMs ?? CONFIRM_SHOWN_MS))])
       if (first === later) done.catch((e) => console.warn('[user composer] confirm:', e && e.message)).finally(() => { paintTrades(); follow() })
+      // The engine writes the trade's record before its step: the new one is this trade.
+      const rec = first !== later && first && first.id ? first : ctx.engine.records().find((r) => !before.has(r.id))
+      if (rec) openCard(rec.id)
       reset(); S.amount = ''; S.recv = ''
       for (const id of ['#ucAmount', '#ucReceive']) { const i = ctx.root.querySelector(id); if (i) i.value = '' }
     } catch (e) {
       console.warn('[user composer] confirm:', e && e.message)
+      // A trade refused at once is said here, under the button: no notice repeats it.
+      seenEnds()
       // A price no longer held is priced again, and shown before anything is signed.
       if (e && e.code === 'lapsed') { reset(); S.note = USER_WORDS.priceMoved; S.busy = false; await review(); S.note = S.ticket ? USER_WORDS.priceMoved : S.note; paintTicket(); return }
       reset(); S.error = USER_WORDS.failed
@@ -328,25 +340,90 @@ export function mountUserComposer (ctx) {
     return tradeStateWord(r, Date.now())
   }
 
+  const ENDED = ['settled', 'returned', 'failed']
+  const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`
+
   function paintTrades () {
+    noteEnds()
+    paintCard()
     const list = ctx.root.querySelector('#ucTrades'); if (!list) return
     list.innerHTML = ''
     // A trade whose step did not answer is shown while it is looked for.
     // A trade being sent shows at once, as "Sending…".
     const recs = ctx.engine.records().filter((r) => (r.state !== 'confirming' || r.uncertain || Date.now() - (r.at || 0) < 10 * 60_000) && r.ticket).slice(-12).reverse()
+    list.classList.toggle('uc-has-open', recs.some((r) => !ENDED.includes(r.state)))
     if (!recs.length) return
     list.appendChild(el('label', 'lbl', USER_WORDS.recent))
-    // The person's open trades, then the past ones.
-    const done = (r) => ['settled', 'returned', 'failed'].includes(r.state)
+    // The person's open trades, then the past ones. A trade opens its card again.
+    const done = (r) => ENDED.includes(r.state)
     for (const [word, group] of [[USER_WORDS.openTrades, recs.filter((r) => !done(r))], [USER_WORDS.pastTrades, recs.filter(done).slice(0, 8)]]) {
       if (!group.length) continue
       list.appendChild(el('div', 'sub uc-group', word))
       for (const r of group) {
-        const d = el('div', 'kv uc-trade'); d.dataset.trade = r.id; d.dataset.state = r.state
-        d.appendChild(el('span', 'k', `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`))
+        const d = el('button', 'kv uc-trade'); d.type = 'button'; d.dataset.trade = r.id; d.dataset.state = r.state
+        d.onclick = () => openCard(r.id)
+        d.appendChild(el('span', 'k', what(r)))
         d.appendChild(el('span', 'v uc-state', stateWord(r)))
         list.appendChild(d)
       }
+    }
+  }
+
+  // ---- A trade's card ----
+  // Once a trade is sent, a card over the page says so: what is paid, what is received, the fees,
+  // and the trade's status, which it follows until the trade ends. A transaction the trade made on
+  // a chain links to that chain's explorer (ctx.links); a trade settled without one has no link.
+  // Closed, the trade goes on in Your trades.
+  function openCard (id) {
+    closeCard()
+    const m = el('div', 'modal uc-card-modal'); m.appendChild(el('div', 'card uc-card'))
+    m.onclick = (e) => { if (e.target === m) closeCard() }
+    doc.body.appendChild(m)
+    S.card = { id, m }
+    paintCard()
+  }
+  function closeCard () { if (S.card) { S.card.m.remove(); S.card = null } }
+  function paintCard () {
+    if (!S.card) return
+    if (!S.card.m.isConnected) { S.card = null; return }
+    const r = ctx.engine.records().find((x) => x.id === S.card.id)
+    if (!r || !r.ticket) { closeCard(); return }
+    const c = S.card.m.querySelector('.uc-card'); c.innerHTML = ''
+    const ended = ENDED.includes(r.state), ok = r.state === 'settled'
+    const head = el('div', 'sent-head')
+    const mark = el('div', 'sent-check uc-mark' + (ended && !ok ? ' uc-back' : ''), ok ? USER_WORDS.markDone : ended ? USER_WORDS.markBack : null)
+    if (!ended) mark.appendChild(el('span', 'spin'))
+    head.appendChild(mark)
+    const ht = el('div')
+    ht.appendChild(el('div', 'sent-title', ok ? USER_WORDS.cardSettled : ended ? USER_WORDS.cardReturned : USER_WORDS.cardSent))
+    ht.appendChild(el('div', 'sub', `${name(r.ticket.payAsset)} → ${name(r.ticket.receiveAsset)}`))
+    head.appendChild(ht); c.appendChild(head)
+    const line = (label, value, cls) => { const d = el('div', 'kv'); d.appendChild(el('span', 'k', label)); const v = el('span', 'v' + (cls ? ' ' + cls : '')); if (typeof value === 'string') v.textContent = value; else v.appendChild(value); d.appendChild(v); c.appendChild(d); return d }
+    line(USER_WORDS.amountIn, amt(r.ticket.payAsset, r.ticket.amountIn))
+    line(USER_WORDS.amountOut, amt(r.ticket.receiveAsset, r.ticket.amountOut))
+    c.appendChild(el('div', 'sub uc-cost', costLine(r.ticket.fees, amt, r.ticket.payAsset)))
+    line(USER_WORDS.cardState, stateWord(r), 'uc-card-state').dataset.state = r.state
+    for (const k of (ctx.links ? ctx.links(r) : [])) {
+      const a = el('a', null, k.text); a.href = k.href; a.target = '_blank'; a.rel = 'noopener'
+      line(USER_WORDS.txOn(k.chain), a, 'mono')
+    }
+    const act = el('div', 'row'); act.style.marginTop = '16px'
+    const close = el('button', 'primary', USER_WORDS.done); close.type = 'button'; close.onclick = closeCard; act.appendChild(close)
+    if (ctx.openHistory) { const h = el('button', 'ghost', USER_WORDS.viewHistory); h.type = 'button'; h.onclick = () => { closeCard(); ctx.openHistory() }; act.appendChild(h) }
+    c.appendChild(act)
+  }
+
+  // A trade that ends while its card is closed is said wherever the person is (ctx.notify), once.
+  // The trades ended before the page looked are not said again.
+  function endedIds () { return ctx.engine.records().filter((r) => r.ticket && ENDED.includes(r.state)).map((r) => r.id) }
+  function seenEnds () { S.ended = new Set(endedIds()) }
+  function noteEnds () {
+    if (!S.ended) { seenEnds(); return }
+    for (const r of ctx.engine.records()) {
+      if (!r.ticket || !ENDED.includes(r.state) || S.ended.has(r.id)) continue
+      S.ended.add(r.id)
+      if ((S.card && S.card.id === r.id) || !ctx.notify) continue
+      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: (ctx.links ? ctx.links(r) : [])[0] || null })
     }
   }
 
@@ -361,6 +438,7 @@ export function mountUserComposer (ctx) {
     if (!openRecs.length) return
     if (S.busy) { S.timer = setTimeout(follow, ctx.followMs || 4000); return }
     try { await ctx.engine.resume() } catch (e) { console.warn('[user composer] resume:', e && e.message) }
+    // Painted whether the tab is shown or not: an ending is said wherever the person is.
     paintTrades()
     // A purchase paid with BTC that waits for its asset to be final is followed every few seconds
     // however long it waits: its BTC is paid the moment the asset is, and the person watches it.

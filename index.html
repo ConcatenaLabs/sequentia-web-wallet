@@ -88,8 +88,25 @@
   .ucomp .uc-flip{padding:2px 14px;font-size:18px;line-height:1.2;border-radius:999px}
   .ucomp .uc-ticket .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
   .ucomp .uc-note.err{color:var(--bad,#c33)}
-  .ucomp .uc-trade{display:flex;justify-content:space-between;gap:12px}
+  /* Your trades: under the button, a panel of its own, outlined while a trade is open */
+  .ucomp .uc-trades:not(:empty){border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--panel2);margin-top:4px}
+  .ucomp .uc-trades.uc-has-open{border-color:var(--amber)}
+  .ucomp .uc-trades .lbl{font-size:13px;font-weight:700;color:var(--txt)}
+  .ucomp .uc-trade{display:flex;justify-content:space-between;gap:12px;width:100%;background:transparent;border:none;border-top:1px solid var(--line);border-radius:0;padding:8px 0;color:var(--txt);text-align:left;cursor:pointer;font-size:14px}
+  .ucomp .uc-trade:hover .k{color:var(--amber)}
+  .ucomp .uc-trade .k{color:var(--txt)}
+  .ucomp .uc-trade .uc-state{font-weight:700}
+  .ucomp .uc-trade[data-state="settled"] .uc-state{color:var(--green)}
+  .ucomp .uc-trade[data-state="returned"] .uc-state,.ucomp .uc-trade[data-state="failed"] .uc-state{color:var(--dim)}
+  .ucomp .uc-trade:not([data-state="settled"]):not([data-state="returned"]):not([data-state="failed"]) .uc-state{color:var(--amber)}
   .ucomp .uc-group{margin-top:6px}
+  /* a trade's card (user-composer.js) */
+  .uc-card .uc-mark .spin{margin:0}
+  .uc-card .uc-mark.uc-back{background:var(--panel2);border-color:var(--line);color:var(--dim)}
+  .uc-card .uc-cost{margin:6px 0 2px}
+  .uc-card .uc-card-state{font-weight:700;color:var(--amber)}
+  .uc-card [data-state="settled"] .uc-card-state{color:var(--green)}
+  .uc-card [data-state="returned"] .uc-card-state,.uc-card [data-state="failed"] .uc-card-state{color:var(--dim)}
   /* a pair's market (market-view.js), in both modes' Trade tab */
   .mv{display:flex;flex-direction:column;gap:8px;border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel2)}
   .mv-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
@@ -4477,6 +4494,11 @@ function initUserComposer(){
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
     // The chosen pair's market, from the relay's one trade log (market-view.js).
     market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> displayPair(a, b) },
+    // A trade's transaction on Sequentia (an order taken with the wallet's own coins), in the
+    // explorer. A trade that pays and is paid off the chains has none to link.
+    links: (r)=> r && /^[0-9a-f]{64}$/i.test(String(r.txid||'')) ? [{ chain:'Sequentia', href:'/explorer/tx/'+r.txid, text: r.txid.slice(0,12)+'…'+r.txid.slice(-8) }] : [],
+    notify: (text, o)=> toast(text, o && o.link ? { href:o.link.href, label:o.link.text } : null, { sticky: !!(o && o.sticky) }),
+    openHistory: ()=> tab('history'),
   });
   // The pairs and the chain are read once; the composer draws when they are in.
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
