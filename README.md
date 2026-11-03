@@ -525,7 +525,8 @@ now, held or not, and starts on the first of those, then what trades against it,
 by search. Review shows three lines
 before anything is signed: what you pay, what you receive, and the fees ("Fees 192 XLEAF, included
 above"), each fee in the asset it is paid in, the price not counted as one. **Trade** confirms
-it; the trade then reads **Sent**, and **Settled** once it is final, or **Returned: nothing
+it and opens a card that follows the trade, with a link to the explorer for any transaction it
+made on a chain, and a notice when it ends if the card was closed; the trade reads **Sent**, and **Settled** once it is final, or **Returned: nothing
 traded.** when it could not go through, with nothing to do either way. A take that first paid the
 wallet a coin of exactly its price has spent that payment's small fees even when it is returned;
 the return says so ("Fees of … were paid"), and those fees come back to the wallet at that coin's

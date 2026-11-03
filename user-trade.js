@@ -167,6 +167,19 @@ export const USER_WORDS = Object.freeze({
   recent: 'Your trades',
   openTrades: 'Open',
   pastTrades: 'Past',
+  // The card over the page once a trade is sent, which follows it until it ends; and the notice the
+  // page gives, wherever the person is, when a trade ends with the card closed.
+  cardSent: 'Trade sent',
+  cardSettled: 'Trade complete',
+  cardReturned: 'Trade returned',
+  cardState: 'Status',
+  markDone: '✓',
+  markBack: '↩',
+  done: 'Done',
+  viewHistory: 'View in history',
+  // A transaction a trade made on a chain, opened in that chain's explorer.
+  txOn: (chain) => `Transaction on ${chain}`,
+  ended: (what, word) => `${what}: ${word}`,
 })
 
 function btcBlocks (n) { return Number(n) === 1 ? 'a Bitcoin block' : `${Number(n) || 2} Bitcoin blocks` }

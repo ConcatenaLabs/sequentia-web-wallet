@@ -303,8 +303,15 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
-- **Trade** returns the screen at once: the trade shows under **Open** as "Sending…" while its
-  step is taken, and goes on there whether the person stays, leaves or closes the wallet. What
+- **Trade** returns the screen at once: a card over it says **Trade sent**, with what is paid,
+  what is received, the fees and the trade's status, which it follows until the trade ends
+  (**Trade complete** or **Trade returned**); **Done** closes it and **View in history** opens
+  History. A transaction the trade made on a chain is linked in that chain's explorer ("Transaction
+  on Sequentia", "Transaction on Bitcoin"); a trade settled without one shows no link. Closed, the
+  trade shows under **Open** as "Sending…" while its step is taken, and goes on there whether the
+  person stays, leaves or closes the wallet; a row opens its card again. A trade that ends while
+  its card is closed is said once wherever the person is, as "<what is paid> → <what is
+  received>: <status>". What
   was entered, and a price being asked for, is kept when the wallet goes to the background, is
   locked or is reopened.
 - Statuses, the same in Your trades, in History and on every surface: "Sending…", **Sent**,
@@ -373,8 +380,8 @@ screen. The words are in `MARKET_WORDS` (`market-view.js`).
 - When a pair has little history, it says so and shows what there is: "No trades yet", or "No
   trades in the last 24 hours · Last trade <price> <quote>, <time> ago" (the last price stands,
   with no 24-hour change), or, on a chart range with no trade in it, "No trades in this range".
-- Below the button, **Your trades**, in two groups: **Open** (trades still settling, with their
-  status) and **Past**.
+- Below the button and above the market, **Your trades**, in two groups: **Open** (trades still
+  settling, with their status) and **Past**.
 - Every figure comes from SeqDEX's relay, whose one trade log per market holds every trade
   however it settled, so the market reads the same in every wallet and on SeqDEX. Default mode
   never says how a trade settled; developer mode adds a **Rail** column to the recent trades and
