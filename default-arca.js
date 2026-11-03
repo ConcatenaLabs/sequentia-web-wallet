@@ -68,6 +68,7 @@ export const DEFAULT_WORDS = Object.freeze({
   // A receive code of a wallet elsewhere whose invoice is not used (asset-lightning.js): above the
   // page's limit, or when the way to that wallet cannot carry the payment now.
   byAddressAbove: (limit) => `A payment of more than ${limit} USD to this wallet goes to the address.`,
+  byAddressLarge: (usd) => `A payment of ${usd} USD or more goes to the address.`,
   byAddressNoWay: 'This can’t arrive in seconds right now, so it goes to the address.',
   // A payment to a wallet elsewhere, in seconds: held until that wallet takes it; refused or come
   // back, it is offered to the address.
