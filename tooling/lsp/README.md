@@ -218,10 +218,18 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 Every coin it receives is refreshed in the operator's next round once it has rested
 `settle_seconds`, so what it trades settles as the takers' coins do.
 
-It keeps at most `max_coins` live coins of an asset (32 by default, or per asset): past that it
-boards no more of the asset, and merges its smallest coins in the operator's next round, 64 at most
-a pass. The library reads every coin it holds before each command, so a maker holding thousands of
-coins answers each command in minutes, and its firm offers lapse.
+A coin of a round is refreshed again only when it has to be, since each such refresh keeps the
+operator's capital out until the lowest node the coin leaves comes back: the operator fronts the
+new coin meanwhile, and that counts against the asset's in-flight cap. It keeps about `max_coins`
+live coins of an asset (32 by default, or per asset). Past that it merges coins in the operator's
+next round, 64 at most a pass: boards first, since merging one fronts nothing (the operator's
+forfeit of a board pays it back at once), then coins of a round of at most `coin_size`, down to
+three quarters of the cap. A merge's own coin is larger, and is not merged again at every coin that
+comes in. At twice the cap it boards no more of the asset and merges its smallest coins of all, as
+few as bring it back under.
+
+The library reads every coin it holds before each command, so a maker holding thousands of coins
+answers each command in minutes, and its firm offers lapse.
 
 The library answers one command at a time, so a taker's firm offer waits behind whatever the
 maker's own upkeep is running. Quotes are served from the last reading and never wait: before its first reading, just after it starts, it quotes nothing. A firm

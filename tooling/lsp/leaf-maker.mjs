@@ -75,7 +75,12 @@
 //                                                for every asset, or { "<asset hex>": "atoms", …,
 //                                                "default": "atoms" }
 //     "coin_size": "2000000",                    optional: boards in coins of at most this many atoms,
-//                                                one a pass, so several takers are served at once
+//                                                one a pass, so several takers are served at once;
+//                                                a coin of a round larger than this is merged only
+//                                                once twice `max_coins` are live
+//     "max_coins": 32,                           optional, one figure or one an asset: past it, coins
+//                                                are merged (boards and small coins first), and at
+//                                                twice it boards stop
 //     "exit_delay_units": 36,                    optional; the operator's default otherwise
 //     "rest": { … },                             optional: orders resting in the tree, a ladder a
 //                                                pair, listed on SeqDEX's relay (leaf-maker-rest.mjs
@@ -95,6 +100,8 @@
 // `settle_seconds`, so what it trades settles as the takers' coins do; on its first pass after a
 // start, every coin it already holds; and at once, all of them, when an offer is refused because
 // it would hold more out of round than the operator's bond covers, or than its instant budget.
+// A coin of a round is refreshed again only when it is merged (past `max_coins`): every refresh of
+// a coin of a round keeps the operator's capital out until the node it leaves comes back.
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -112,16 +119,27 @@ export const MAX_COINS = 32
 // The most coins of an asset merged in one pass: four participations of 16.
 export const MERGE_PER_PASS = 64
 
-// The coins of `asset` to merge so that at most `cap` live ones are left: the smallest live coins it
-// boarded or took from a round (a coin it received is refreshed by itself, as are those in
-// `exclude`), enough to bring the count to `cap`, MERGE_PER_PASS at most; none when under the cap.
-export function coinsToMerge (coins, asset, cap, exclude = []) {
+// The coins of `asset` to merge once more than `cap` are live, in one participation, MERGE_PER_PASS
+// at most. A coin it received is left out (its own settling refreshes it), as are those in `exclude`.
+// Every coin of a round given up keeps the operator's capital out until its lowest node comes back,
+// while a board costs it nothing (its forfeit pays the operator back at once). So, under twice the
+// cap: boards first, then coins of a round of at most `small` atoms (the maker's coin size), down to
+// MERGE_TO of the cap. A merge's own coin is larger than that and is not merged again, which would
+// front the whole of it at every coin that comes in. At twice the cap, the smallest coins of all,
+// as few as bring the count back under it. None when fewer than two qualify.
+export const MERGE_TO = 0.75
+export function coinsToMerge (coins, asset, cap, exclude = [], small = null) {
   const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live')
   if (live.length <= cap) return []
   const b = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
-  return live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id))
-    .sort((x, y) => (b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
-    .slice(0, Math.min(MERGE_PER_PASS, live.length - cap + 1)).map((c) => c.leaf_id)
+  const full = live.length >= 2 * cap
+  const limit = small != null && !full ? b(small) : null
+  const pool = live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id) && (c.kind === 'board' || limit == null || b(c.value) <= limit))
+    .sort((x, y) => ((x.kind === 'board') !== (y.kind === 'board') ? (x.kind === 'board' ? -1 : 1)
+      : b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
+  const target = full ? 2 * cap - Math.max(1, Math.floor(cap / 4)) : Math.floor(cap * MERGE_TO)
+  const n = Math.min(MERGE_PER_PASS, live.length - target + 1, pool.length)
+  return n < 2 ? [] : pool.slice(0, n).map((c) => c.leaf_id)
 }
 
 // The library's refusal of a payment that would leave the wallet holding more out of round than the
@@ -470,7 +488,8 @@ async function main () {
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
       // another asset the maker holds on the chain that the node takes (the wallet rule; never a
       // fallback to one privileged asset).
-      // Its live coins of each asset: past `max_coins` it boards no more, and merges the rest.
+      // Its live coins of each asset: past `max_coins` it merges (coinsToMerge), and at twice that
+      // it boards no more.
       const counted = new Map()
       try { for (const c of (await cmd('coins')) || []) if (c && c.state === 'live') counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
       const cap = (a) => Number(perAsset(cfg.max_coins, a, String(MAX_COINS)))
@@ -485,7 +504,7 @@ async function main () {
           const coin = perAsset(cfg.coin_size, a, null)
           if (coin && amount > big(coin)) amount = big(coin)
           if (amount < big((gives.find((x) => x.give === a) || {}).min_give || 1)) continue
-          if ((counted.get(a) || 0) >= cap(a)) continue
+          if ((counted.get(a) || 0) >= 2 * cap(a)) continue
           const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
           let done = false, why = null
           for (const fee of feeAssets) {
@@ -520,12 +539,12 @@ async function main () {
           outOfRoundFull = false
         } catch (e) { log('settle:', e.message) }
       }
-      // More live coins of an asset than `max_coins`: the smallest are merged in the operator's
-      // next round, MERGE_PER_PASS at most a pass (the library gives up 16 a participation), so
-      // every command it makes reads a store of bounded size.
+      // More live coins of an asset than `max_coins`: boards and the smallest coins are merged in
+      // the operator's next round (coinsToMerge), MERGE_PER_PASS at most a pass (the library gives
+      // up 16 a participation), so every command it makes reads a store of bounded size.
       for (const [a, n] of counted) {
         if (n <= cap(a)) continue
-        const merge = coinsToMerge(coins, a, cap(a), due)
+        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null))
         if (merge.length < 2) continue
         try {
           const q = await cmd('quote', { leaves: merge })
