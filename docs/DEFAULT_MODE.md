@@ -158,10 +158,24 @@ modes (`asset-picker.js`):
   is the faucet's own sentence ("This wallet has already received its <TICKER> from the faucet.
   The faucet pays each asset once per wallet. To get more, trade for it in the wallet."), with
   no second try at the address.
+- **Your payment name**, under the code: a name of the wallet's own at the site's domain
+  (`name@sequentiatestnet.com`), which another wallet pays in an amount it chooses, a Lightning
+  wallet included (it is a Lightning address, LNURL-pay, `lnaddr.js`). Without a name the card
+  reads "Choose a name other wallets can pay you at, in any amount they choose." and one button,
+  **Choose a name**, which opens a field ending in "@sequentiatestnet.com" with **Save** and
+  **Cancel**. With one it shows the name, "Other wallets can pay you at this name, in any amount
+  they choose, while this wallet is open.", **Copy** and **Remove name**. A name is 3 to 32
+  lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to 32 characters: lowercase
+  letters, digits, - and _." and "That name is taken. Choose another.". The name is held by a key
+  of the wallet's phrase, so a wallet restored from the phrase shows it again. While the wallet is
+  open it makes the invoice a payer asks for, on the Bitcoin ark, and gives a Sequentia wallet a
+  new receive code; a payer of a wallet that is not open is told "The recipient's wallet is
+  offline. Try again when it is open." Developer mode calls it **Lightning address** and says how
+  it works. A wallet with no phrase has no name.
 
 ## Send
 
-- The field is **Recipient**, with the hint "a receive code, an address or an invoice". Next to
+- The field is **Recipient**, with the hint "a receive code, a payment name, an address or an invoice". Next to
   the asset is its one figure, "balance <amount>".
 - The network fee line shows only for a payment made on the chain from the wallet's own coins.
   A receive code is paid in seconds, and a payment out of what the wallet holds for instant
@@ -173,6 +187,14 @@ modes (`asset-picker.js`):
   now, so it goes to the address. It arrives after a Bitcoin block." (for BTC; for an asset, "It
   arrives after the next block, in about a minute."). Anything that is not a code goes the way it
   always has. The wallet chooses; nothing asks the person.
+- A payment name (`name@domain`) is paid as what it stands for. A name at the site's own domain
+  is paid at the receive code its wallet gives at that moment, any asset, as any code is; a name
+  at another domain (a Lightning address of another wallet) takes BTC only, and is paid at the
+  invoice that service makes for the amount, which must be for BTC and for exactly that amount.
+  Refusals: "No wallet goes by that name.", "The recipient's wallet is offline. Try again when it
+  is open.", "This address takes BTC only.", "Enter an amount.", "This address takes between
+  <least> and <most> BTC.", and "The address could not be reached. Check your connection and try
+  again."
 - An asset sent to a receive code of a wallet of another operator (its `sequentia` part names
   another operator) goes over Lightning when the code carries an invoice in that asset for
   exactly the amount sent (the row takes the asset and amount from it when its amount is

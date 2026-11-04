@@ -124,6 +124,7 @@ import { buildInboundStats } from './inbound-stats.mjs';
 import { fileURLToPath } from 'node:url';
 import { zeroconfConfigLines, zeroconfRunning, roomFeeLabel, roomFeePaid } from './zeroconf.mjs';
 import { readNodeHistory, cleanNote, NOTE_STORE } from './node-history.mjs';
+import { makeLnaddr } from './lnaddr.mjs';
 
 function reqEnv(name) {
   const v = process.env[name];
@@ -4313,8 +4314,22 @@ async function estimateBtcFeeSatPerVb(targetBlocks) {
 let _anchorTip = { at: 0, body: null };
 const ANCHOR_TIP_TTL_MS = 3000;
 
+// Payment names (lnaddr.mjs): `name@LNADDR_DOMAIN`, paid over LNURL-pay by any Lightning wallet
+// and by receive code by a Sequentia wallet. Public, before the token check: a payer's wallet holds
+// no token, and everything a wallet tells it is signed by the name's key. LNADDR=0 turns it off.
+const lnaddrDomain = process.env.LNADDR_DOMAIN || 'sequentiatestnet.com';
+const lnaddr = process.env.LNADDR === '0' ? null : makeLnaddr({
+  domain: lnaddrDomain,
+  base: process.env.LNADDR_BASE || `https://${lnaddrDomain}/lsp`,
+  storePath: process.env.LNADDR_STORE || (CFG.provDir ? path.join(CFG.provDir, 'lnaddr-names.json') : ''),
+  minSat: Number(process.env.LNADDR_MIN_SAT || 1),
+  maxSat: process.env.LNADDR_MAX_SAT ? Number(process.env.LNADDR_MAX_SAT) : null,
+  log: (...a) => console.log(...a),
+});
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (lnaddr) { try { if (await lnaddr.handle(req, res, url)) return; } catch (e) { console.log('[lnaddr]', e && e.message); if (!res.headersSent) return send(res, 500, { ok: false, error: 'payment name service failed' }); return; } }
   if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, service: 'seqln-lsp' });
   // GET /anchor            -> the Sequentia tip's CURRENT Bitcoin-anchor height.
   // GET /anchor?block=<hash> -> the Bitcoin-anchor height of THAT specific block.
