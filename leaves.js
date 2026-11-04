@@ -665,6 +665,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
     emit('codeUsed', { owner: kept.owner })
   }
   const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
+  // What the sync's catch-up with the phrase's other wallets changed (the library runs one at most
+  // every ten minutes): coins they made taken in, coins of this store they gave up dropped.
+  const caughtUp = (c) => {
+    if (!c || typeof c !== 'object') return
+    if (c.error) { log('[leaves] catch up: ' + c.error); return }
+    const took = (c.restored || []).length, gone = (c.given_elsewhere || []).length
+    if (took || gone) log(`[leaves] caught up: ${took} coin(s) taken in, ${gone} given up by another wallet of the phrase`)
+  }
 
   // Opens the leaf wallet: in developer mode always (the tab shows the join form when
   // this wallet has joined none), in user mode when it has joined an operator, whose coins it
@@ -758,7 +766,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try {
       const v = await run('sync')
       log(`[leaves] sync at open: ${now() - tSync} ms`)
-      arrivals(v && v.mailbox)
+      arrivals(v && v.mailbox); caughtUp(v && v.caught_up)
       S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
     try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
@@ -1045,7 +1053,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         S.busy = true; render()
         try {
           const v = await run('sync')
-          arrivals(v && v.mailbox)
+          arrivals(v && v.mailbox); caughtUp(v && v.caught_up)
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
         try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
@@ -1067,7 +1075,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try {
           const v = await run('sync')
           S.heldFor = null
-          arrivals(v && v.mailbox)
+          arrivals(v && v.mailbox); caughtUp(v && v.caught_up)
           S.lastSync = { at: now(), value: v, auto: false }
           await careIfDue()
           return v
@@ -1139,7 +1147,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const until = now() + RELEASE_WAIT_MS
     for (;;) {
       while (yieldToPerson && S.asked && now() < until) await sleep(500)
-      try { const v = await run('sync'); arrivals(v && v.mailbox); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
+      try { const v = await run('sync'); arrivals(v && v.mailbox); caughtUp(v && v.caught_up); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
       let cs = null
       try { cs = await run('coins'); S.coins = cs || [] } catch {}
       if (cs && releaseDone(cs, coins)) return

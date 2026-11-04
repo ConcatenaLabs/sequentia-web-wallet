@@ -243,6 +243,27 @@ test("a store made before another device boarded takes in the phrase's coins fro
   ark.close()
 })
 
+test('a board another browser made and never registered is found on the chain at open', async () => {
+  let held = '0'
+  const { w, asked } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: held, total: held }),
+    // Nothing in the mailbox; the phrase's own funding of a board is on the chain.
+    catch_up: () => {
+      held = '399456'
+      return { recovered: [], recovered_sat: '0', spent_elsewhere: [], failed: [], complete: true,
+        boards: [{ funding: 'cd'.repeat(32) + ':0', amount: '399756', vtxo: 'ef'.repeat(32) + ':0', outcome: 'adopted' }] }
+    },
+  })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }),
+    decode: decodeBolt11 })
+  await ark.open()
+  for (let i = 0; i < 20 && ark.figures().spendable === 0n; i++) await new Promise((r) => setTimeout(r, 5))
+  assert.equal(ark.figures().spendable, 399456n, 'the board is held once the wallet has looked')
+  assert.ok(asked.some((x) => x.command === 'catch_up'))
+  ark.close()
+})
+
 test('a wallet whose package has no catch_up opens as before', async () => {
   const { w } = standIn({ info: () => INFO, balance: () => ({ spendable: '7', total: '7' }) })
   const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
