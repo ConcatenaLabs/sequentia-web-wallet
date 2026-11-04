@@ -86,7 +86,7 @@ test('the page holds the wallet to the limits', () => {
   assert.match(html, /if\(window\.SEQ_ARK_LIMITS === undefined\) window\.SEQ_ARK_LIMITS = \{ btc: \{ board: 1000, hold: 2000, direct: 1000 \}, asset: \{ board: 5000, hold: 7500, direct: 1000 \} \};/)
   // BTC is boarded within the limit (a trade that asks for more gets it).
   assert.match(html, /let cap = arkRoom\('BTC'\);\r?\n  if\(cap != null && _btcArkWanted > cap\) cap = _btcArkWanted;\r?\n  if\(cap != null && cap <= 0n\) return;/)
-  assert.match(html, /btcArk\.board\(\{ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, broadcast: btcBroadcastHex, cap \}\)/)
+  assert.match(html, /btcArk\.board\(\{ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, cap,\s+broadcast: async \(hex\)=>\{ const t = await btcBroadcastHex\(hex\);/)
   // Each asset too, by the leaf library.
   assert.match(html, /boardRoom: \(hex\)=> arkRoom\(hex\),/)
   assert.match(leaves, /if \(room != null && room < c0\.min\) continue\r?\n      const c = room != null && room < c0\.onchain \? \{ \.\.\.c0, onchain: room \} : c0/)

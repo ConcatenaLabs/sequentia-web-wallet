@@ -1,7 +1,7 @@
 // lightning-to-ark.js: the move of a wallet's own Lightning balances to the Ark, as Ambra makes it.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { amountToMove, withinAllowance, allowanceAtoms, channelLockedIn, payingNode, lightningLegs, minLeaves,
+import { amountToMove, withinAllowance, allowanceAtoms, channelLockedIn, payingNode, lightningLegs, minLeaves, btcChannelPart,
   receivesUnderWay, movingOf, channelPart, closeVerdict, isLimitRefusal, mountLightningToArk, MIN_MOVE_SATS,
   RETRY_MS, LIMIT_WAIT_MS, SIGNER_UNVALUED_ATOMS } from './lightning-to-ark.js'
 import { DEFAULT_WORDS } from './default-arca.js'
@@ -347,3 +347,49 @@ test('what a close pays is held from the moment its channel leaves the list, and
   txs.add('dd'.repeat(32))
   assert.equal(W.m.channelPart(USDX, 0n), 0n, 'the wallet holds the transaction: not twice')
 })
+
+test('BTC channel part: the move counts here until the ark holds it, then only what stays', () => {
+  // On its way, the ark not holding it: what the channels held, whatever the read.
+  assert.equal(btcChannelPart(101000n, { moving: 98990n, from: 101000n }), 101000n)
+  assert.equal(btcChannelPart(1500n, { moving: 98990n, from: 101000n }), 101000n)
+  // The ark holds it: a read from before the payment counts only what stays, a fresh read itself.
+  assert.equal(btcChannelPart(101000n, { moving: 98990n, from: 101000n, landed: true }), 2010n)
+  assert.equal(btcChannelPart(1500n, { moving: 98990n, from: 101000n, landed: true }), 1500n)
+  // No move: the read.
+  assert.equal(btcChannelPart(7n, {}), 7n)
+})
+
+test('BTC: the figure never counts a move twice, whether the ark or the channel read is first', async () => {
+  // The ark can claim the payment before the follow sees it paid; the service's channel read lags.
+  let claimable = 0n
+  const W = page()
+  W.deps.ark.claimable = () => claimable
+  const seen = []
+  W.payImpl = async () => {
+    seen.push(W.m.channelPart('BTC', 101000n))   // left, the ark not holding it yet
+    claimable = 98990n
+    seen.push(W.m.channelPart('BTC', 101000n))   // the ark counts it: the stale read counts what stays
+    return { paid: true }
+  }
+  await W.m.tick()
+  assert.deepEqual(seen, [101000n, 2010n])
+  claimable = 0n
+  // Landed, the read still from before: what stays; then a fresh read is the figure, and ends the hold.
+  assert.equal(W.m.channelPart('BTC', 101000n), 2010n)
+  assert.equal(W.m.channelPart('BTC', 1500n), 1500n)
+  assert.equal(W.m.channelPart('BTC', 101000n), 101000n)
+})
+
+test('BTC: the emptied channel is closed only on a read taken after the move, never on the old balance', async () => {
+  let refreshes = 0
+  const W = page({ afterPay: (w) => { if (++refreshes >= 3) w.channels = [btcCh({ spendable_units: 500, balance_units: 1500 }), usdxCh()] } })
+  await W.m.tick()
+  assert.equal(W.closes.length, 1)
+  assert.equal(W.closes[0].channel.balance_units, 1500)
+  // A read that never catches up: nothing is closed, and the reason is given.
+  const V = page()
+  await V.m.tick()
+  assert.equal(V.closes.length, 0)
+  assert.ok(V.logs.some((l) => /not read since the move yet/.test(l)), V.logs.join('\n'))
+})
+
