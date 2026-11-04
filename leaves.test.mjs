@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, channelArrivals, payableChannels, codeNamesChannels, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -209,7 +209,7 @@ test('a joined wallet in user mode runs care when it opens, with the kit\'s scan
     claimScan: () => 47, onChange: () => { changes++ }, onEvent: (n, d) => events.push([n, d]), tickMs: 3_600_000 }, null, null)
   await api.start()
   const care = runs.filter((r) => Array.isArray(r) && r[0] === 'care')
-  assert.deepEqual(care, [['care', { scan: 47 }]])
+  assert.deepEqual(care, [['care', { channels: true, scan: 47 }]])
   // The claim taken up: the balance read again, and the page told.
   assert.ok(runs.lastIndexOf('balance') > runs.findIndex((r) => Array.isArray(r)), 'balance re-read after care')
   assert.ok(changes >= 2)
@@ -219,8 +219,8 @@ test('a joined wallet in user mode runs care when it opens, with the kit\'s scan
 
 test('care plans every leaf of a round: its arguments', () => {
   // The library's own planning reach: a leaf stays free to trade until its refresh nears.
-  assert.deepEqual(careArgs(), {})
-  assert.deepEqual(careArgs(21), { scan: 21 })
+  assert.deepEqual(careArgs(), { channels: true })
+  assert.deepEqual(careArgs(21), { channels: true, scan: 21 })
 })
 
 test('a release is done once no coin it gave up is still live or in its round', () => {
@@ -498,4 +498,66 @@ test('default mode: the leaf wallet is handed keys up to the page\'s receive ind
   await new Promise((r) => setTimeout(r, 2500))
   assert.equal(taken, 30)
   } finally { api.stop && api.stop() }
+})
+
+test('channels: what a read brought in, what a code names, and when a kept code is made again', () => {
+  const ch = (o) => ({ leaf_id: 'l1', asset: 'a', coin_state: 'live', final: true, credit: '100', ...o })
+  assert.deepEqual(channelArrivals([ch()], [ch({ credit: '250' })]), [{ leaf_id: 'l1', asset: 'a', atoms: 150n }])
+  assert.deepEqual(channelArrivals([ch()], [ch()]), [])
+  assert.deepEqual(channelArrivals([ch()], [{ leaf_id: 'l1', error: 'unreachable' }]), [])
+  assert.deepEqual(payableChannels([ch(), ch({ leaf_id: 'l2', asset: 'b', final: false }), ch({ leaf_id: 'l3', asset: 'c', coin_state: 'given' })]), { a: 'l1' })
+  assert.equal(codeNamesChannels({ channels: { a: 'l1' } }, [ch()]), true)
+  assert.equal(codeNamesChannels({}, [ch()]), false, 'a code made before the channel opened')
+  assert.equal(codeNamesChannels({ channels: { a: 'l1' } }, []), false, 'a code naming a channel since closed')
+  assert.equal(codeNamesChannels({}, []), true)
+})
+
+test('user mode: a payment into a channel is read within a poll, the balance read again and the page told; out of view, not as often', async () => {
+  const mount = (visible) => {
+    const store = memStore()
+    store.setItem(JOINED_KEY + '.t', '1')
+    const runs = []
+    let credit = 0
+    const ch = () => [{ leaf_id: 'c1', asset: 'a', coin_state: 'live', final: true, credit: String(credit), balance: '1000' }]
+    const w = fakeWorker((m) => {
+      if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+      if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+      runs.push(m.args.command)
+      const c = m.args.command
+      const result = c === 'channels' || c === 'channel_sync' ? ch()
+        : c === 'schedule' ? { now: 1, due: false, next_sync_at: null } : c === 'balance' ? { arca: {} } : []
+      return { id: m.id, ok: true, value: { result, start: {} } }
+    })
+    const events = []
+    const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => Date.now(),
+      pinned: () => ({ server: 'https://op', node_url: 'https://node', operator: 'ee'.repeat(32) }), onEvent: (n, d) => events.push([n, d]),
+      tickMs: 3_600_000, channelPollMs: 50, visible: () => visible }, null, null)
+    return { api, runs, events, pay: (n) => { credit += n } }
+  }
+  const seen = mount(true)
+  await seen.api.start()
+  seen.pay(250)
+  await new Promise((r) => setTimeout(r, 400))
+  const arrived = seen.events.find((e) => e[0] === 'leafArrived')
+  assert.deepEqual(arrived, ['leafArrived', { leaf_id: 'c1', asset: 'a', value: '250', kind: 'channel' }])
+  const i = seen.runs.indexOf('channel_sync')
+  assert.ok(i >= 0 && seen.runs.indexOf('balance', i) > i, 'the balance read again after the read that found the credit')
+  seen.api.stop()
+  const hidden = mount(false)
+  await hidden.api.start()
+  hidden.pay(250)
+  await new Promise((r) => setTimeout(r, 400))
+  assert.equal(hidden.runs.filter((c) => c === 'channel_sync').length, 0, 'out of view, no read within the poll of a page in view')
+  hidden.api.stop()
+  // Held while a person reviews a payment: no read until the hold ends.
+  const held = mount(true)
+  await held.api.start()
+  held.api.holdReads(10_000)
+  const before = held.runs.filter((c) => c === 'channel_sync').length
+  await new Promise((r) => setTimeout(r, 300))
+  assert.equal(held.runs.filter((c) => c === 'channel_sync').length, before, 'no read while held')
+  held.api.holdReads(0)
+  await new Promise((r) => setTimeout(r, 300))
+  assert.ok(held.runs.filter((c) => c === 'channel_sync').length > before, 'the reads go on once the hold ends')
+  held.api.stop()
 })

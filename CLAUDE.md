@@ -112,7 +112,13 @@ a person's way: the pass that syncs at open, care, boards and the mailbox read (
 `watchMailbox`) wait for twenty quiet seconds after the page opens or a person asks anything (a
 trade's quote asks the library several times); the bond's watch, which holds the worker for most
 of a minute, runs at most hourly after two quiet minutes; and the Trade tab follows a trade older
-than two minutes every half minute, and never while a price is asked. A wallet that joined an operator keeps its leaf wallet syncing
+than two minutes every half minute, and never while a price is asked. The one exception is the channel read (`watchChannels`): with a
+live channel leaf, the page reads its channels every 300 ms while it is in view (five seconds out
+of view), skipping only while another command runs, so a payment into a channel is in the
+receiver's figure within a second; a person's command waits at most one such read. `care` runs
+with `channels`, which opens a channel leaf by itself in each asset the operator makes them of, and
+a receive code names the wallet's payable channels (`codeNamesChannels` makes a kept code again
+when they change), so the library's `send` pays over a channel whenever both sides hold one. A wallet that joined an operator keeps its leaf wallet syncing
 in either mode; user mode shows nothing of leaves and the page API refuses every leaf method
 there, but leaves count in each asset's figure and the headline. Each asset's figure counts
 on-chain, leaves, Lightning and, for tSEQ, what is staked (`stakedAtoms` in `index.html`), in
