@@ -208,6 +208,30 @@ export function commandArgs (args, first) {
   return first ? { ...(args || {}), recheck: 'coins' } : (args || {})
 }
 
+// The forfeits of every round the operator holds for them, handed over ahead of the queue on a
+// timer of their own (`forfeit_seconds`): the operator broadcasts a round built without a sweep
+// only once every participation in it has handed its forfeits over, and drops it, voiding the
+// maker's refresh and holding back everyone else in it, when they have not come within its window
+// (`info.fills.forfeit_window_seconds`, ten minutes). The upkeep's pass (a sync, the resting desk,
+// the boards) can run longer than that. One pass at a time; a library without the command
+// (`no command`) is passed over in silence. -> a function to run on the timer.
+export const FORFEIT_SECONDS = 30
+export function forfeitPass (cmd, log) {
+  let running = false
+  return async () => {
+    if (running) return null
+    running = true
+    try {
+      const r = await cmd('hand_over_forfeits', {}, true)
+      for (const h of (r && r.held) || []) if (h && (h.refused || h.error)) log('forfeits:', h.participation, h.refused || h.error)
+      return r
+    } catch (e) {
+      if (!/no command/.test(String(e && e.message))) log('forfeits:', e && e.message)
+      return null
+    } finally { running = false }
+  }
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
@@ -648,6 +672,7 @@ async function main () {
   srv.listen(Number(port), host || '127.0.0.1', () => log(`leaf maker listening on ${host}:${srv.address().port}`))
   tick()
   setInterval(tick, (cfg.sync_seconds ?? 20) * 1000)
+  setInterval(forfeitPass(cmd, log), (cfg.forfeit_seconds ?? FORFEIT_SECONDS) * 1000)
   const stop = () => { log('stopping'); srv.close(); lib.stop(); process.exit(0) }
   process.on('SIGTERM', stop); process.on('SIGINT', stop)
 }

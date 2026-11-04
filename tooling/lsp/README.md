@@ -244,6 +244,13 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 Every coin it receives is refreshed in the operator's next round once it has rested
 `settle_seconds`, so what it trades settles as the takers' coins do.
 
+Every `forfeit_seconds` (30 by default) it hands over the forfeits of each of its refreshes whose
+round the operator holds for them (the library's `hand_over_forfeits`), ahead of everything else it
+has queued. The operator broadcasts a round of batches without a sweep only once every
+participation in it has handed its forfeits over, and drops it when they have not come within its
+window (ten minutes), voiding the refresh and keeping everyone else in that round waiting; the
+maker's own pass of a sync, its resting desk and its boards can take longer than that.
+
 A coin of a round is refreshed again only when it has to be, since each such refresh keeps the
 operator's capital out until the lowest node the coin leaves comes back: the operator fronts the
 new coin meanwhile, and that counts against the asset's in-flight cap. It keeps about `max_coins`
@@ -290,7 +297,7 @@ pool, fee, service, founder, drip) is refused at start.
   "operator": { "server": "https://host/arca", "node_url": "http://127.0.0.1:18891/", "node_user": "user", "node_password_file": "/var/lib/leaf-maker/node-password" },
   "pairs": [ { "give": "<asset id>", "want": "<asset id>", "rate_num": "1", "rate_den": "1", "min_give": "10000" } ],
   "fee_margin": "2000", "board_keep": "100000",
-  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "max_coins": 32,
+  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "forfeit_seconds": 30, "max_coins": 32,
   "instant_budget": "0.1"
 }
 ```
