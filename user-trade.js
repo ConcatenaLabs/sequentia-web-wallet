@@ -141,6 +141,26 @@ export const USER_WORDS = Object.freeze({
   about: 'about',
   // Review, while the sources are asked for terms they hold to: the amount shown is the estimate.
   pricing: 'Getting the exact price…',
+  // The steps of a trade with BTC, in the order they happen, for the progress shown while it runs
+  // (tradeSteps). `a` names the asset traded for BTC.
+  stepsTitle: 'Your trade, step by step',
+  pricingTitle: 'Getting your price',
+  closeProgress: 'Close',
+  closeHint: 'Closing this stops nothing: the trade goes on, and Your trades follows it.',
+  stepReadyBtc: 'Getting ready to receive your BTC',
+  stepFirm: 'Asking for a firm price (this can take up to a minute)',
+  stepCheck: 'Checking the price and the fees',
+  stepPriced: 'Price ready: check it and confirm',
+  stepSendAsset: (a) => `Sending your ${a}`,
+  stepWaitBtc: 'Waiting for your BTC',
+  stepReadyAsset: (a) => `Getting ready to receive your ${a}`,
+  stepWaitOther: (a) => `Waiting for the other side to send your ${a}`,
+  stepFinal: (a) => `Waiting for your ${a} to be confirmed on the network`,
+  stepSendBtc: 'Sending your BTC',
+  stepTakeAsset: (a) => `Receiving your ${a}`,
+  stepFinish: 'Finishing the trade',
+  stepDone: 'Done',
+  stepBack: (a) => `Nothing was traded: your ${a} is back`,
   // BTC held at the wallet's address, which a trade cannot pay from until the wallet has moved it
   // where trades pay BTC from (the Bitcoin ark): a move confirmed by `blocks` Bitcoin blocks (no
   // time: Bitcoin's blocks keep none).
@@ -198,6 +218,34 @@ export function heldAlready (r) {
 // What the list of trades says of one: Sent, then Settled; a trade waiting on the other side or on
 // its settling says so, with the minutes it has waited once it has waited one. The same words in the
 // Trade tab's Open trades, in History and on every other surface: none of them promises a time.
+// The steps of a trade with BTC (source 'btc-gateway'), in the order they happen: before it is
+// confirmed (`quote`, the step the price is at: 'invoice', 'firm', 'check' or 'priced'), or the
+// trade's record `r` after. `name(asset)` names an asset. -> [{ key, text, state }], each state
+// 'done', 'now' or 'todo'; null for a trade of another kind. A trade that came back ends at one
+// step that says so.
+export function tradeSteps ({ r = null, quote = null, payAsset, receiveAsset, name = (a) => a }) {
+  const W = USER_WORDS
+  const sell = (r ? r.dir : (receiveAsset === 'BTC' ? 'sell' : 'buy')) === 'sell'
+  const asset = name(sell ? (r ? r.ticket.payAsset : payAsset) : (r ? r.ticket.receiveAsset : receiveAsset))
+  const keys = sell
+    ? [['invoice', W.stepReadyBtc], ['firm', W.stepFirm], ['check', W.stepCheck], ['priced', W.stepPriced],
+        ['send', W.stepSendAsset(asset)], ['wait-btc', W.stepWaitBtc], ['finish', W.stepFinish], ['done', W.stepDone]]
+    : [['firm', W.stepFirm], ['check', W.stepCheck], ['priced', W.stepPriced], ['ready', W.stepReadyAsset(asset)],
+        ['wait-other', W.stepWaitOther(asset)], ['final', W.stepFinal(asset)], ['send-btc', W.stepSendBtc],
+        ['take', W.stepTakeAsset(asset)], ['finish', W.stepFinish], ['done', W.stepDone]]
+  let at
+  if (!r) at = quote || keys[0][0]
+  else if (r.state === 'returned' || r.state === 'failed') {
+    return [{ key: 'back', text: W.stepBack(name(r.ticket.payAsset)), state: 'done' }]
+  } else if (r.state === 'settled') at = 'done'
+  else if (sell) at = r.state === 'confirming' ? 'send' : r.btcPaid ? 'finish' : 'wait-btc'
+  else if (r.state === 'confirming') at = 'ready'
+  else if (r.state === 'waiting') at = r.receiveState && r.receiveState !== 'waiting' ? 'final' : 'wait-other'
+  else at = !r.preimage ? 'send-btc' : r.receiveState !== 'received' ? 'take' : 'finish'
+  const i = keys.findIndex(([k]) => k === at)
+  return keys.map(([key, text], j) => ({ key, text, state: j < i || at === 'done' ? 'done' : j === i ? 'now' : 'todo' }))
+}
+
 export function tradeStateWord (r, now = Date.now()) {
   const W = USER_WORDS
   if (r.state === 'settled') return W.settled
@@ -288,8 +336,9 @@ export const QUOTE_FIRM_MS = 8000
 const QUOTE_FIRM_MIN_MS = 3000
 // When the BTC desk is the only source a trade can take (buying or selling BTC), its firm terms
 // (an offer and a Lightning invoice) are waited for this long, not QUOTE_FIRM_MS: there is no
-// other answer to take instead, and a late one was a refusal for nothing.
-export const BTC_ONLY_FIRM_MS = 20000
+// other answer to take instead, and a late one was a refusal for nothing. Seen live: the desk's
+// firm terms took 17 to 41 seconds, and a wait of 20 refused half the trades.
+export const BTC_ONLY_FIRM_MS = 60000
 // How long a refresh asked to get coins ready for a resting order is waited on before it is asked
 // again: its round, and the round's block being certified.
 export const READYING_MS = 10 * 60_000
@@ -441,6 +490,8 @@ export function createEngine (deps) {
     return a && a.fundable != null ? big(a.fundable) : null
   }
 
+  // The step of the price being made, for the person's progress (tradeSteps), set by quote.
+  let quoteStep = null
   // Firm terms of one entry for `pay` atoms, priced by the library. -> a candidate or null.
   async function firm (entry, payAsset, receiveAsset, pay, have, until = Date.now() + firmMs) {
     planSingleStep(entry.source, { payAsset, receiveAsset, caps: entry.source === 'covenant-round' ? { leaf_take: true } : undefined })
@@ -449,7 +500,7 @@ export function createEngine (deps) {
     // not hold.
     const size = sizeEntry(entry, pay < have ? pay : have)
     if (!size) return null
-    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size)
+    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep)
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size)
     if (entry.source === 'onchain-fill') return firmOnchain(entry, payAsset, receiveAsset, pay, have)
     if (entry.source === 'covenant-round') {
@@ -809,8 +860,9 @@ export function createEngine (deps) {
     try { return await (deps.leaves && deps.leaves.hold ? deps.leaves.hold(() => f(...a)) : f(...a)) } finally { asked-- }
   }
 
-  async function quote ({ payAsset, receiveAsset, amount }) {
+  async function quote ({ payAsset, receiveAsset, amount, onStep = null }) {
     const started = Date.now()
+    quoteStep = onStep
     tooOldFrom = null
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }

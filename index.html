@@ -102,6 +102,20 @@
   .ucomp .uc-group{margin-top:6px}
   /* a trade's card (user-composer.js) */
   .uc-card .uc-mark .spin{margin:0}
+  .uc-value{min-height:16px;margin-top:4px;font-size:12px;color:var(--dim)}
+  .uc-progress{max-width:460px}
+  .uc-bar{height:6px;border-radius:3px;background:#ffffff1a;margin:12px 0 10px;overflow:hidden}
+  .uc-bar-fill{height:100%;background:var(--amber2);transition:width .4s}
+  .uc-steps{list-style:none;margin:0;padding:0}
+  .uc-step{display:flex;gap:8px;align-items:center;padding:4px 0;font-size:14px}
+  .uc-step::before{content:'';width:13px;flex:0 0 13px}
+  .uc-step-done{color:var(--dim)}
+  .uc-step-done::before{content:'¹3';color:var(--green,#3fb950)}
+  .uc-step-now{font-weight:600}
+  .uc-step-now::before{display:none}
+  .uc-step-now .spin{margin:0}
+  .uc-step-todo{color:#ffffff55}
+  .uc-steps-title{margin-top:14px}
   .uc-card .uc-mark.uc-back{background:var(--panel2);border-color:var(--line);color:var(--dim)}
   .uc-card .uc-cost{margin:6px 0 2px}
   .uc-card .uc-card-state{font-weight:700;color:var(--amber)}
