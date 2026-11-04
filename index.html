@@ -868,6 +868,20 @@
           <button class="ghost hide" id="btnRecvMode">Show address</button>
           <button class="ghost dev-only" id="btnXpub">Show xpub</button>
         </div>
+        <div id="nameBox" class="hide" style="margin-top:18px">
+          <label class="lbl" id="nameLbl">Your payment name</label>
+          <p class="sub" id="nameTip" style="margin:0 0 8px"></p>
+          <div class="mono hide" id="nameAddr"></div>
+          <div class="recv-amt-row hide" id="nameForm"><input id="nameInput" class="mono" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" style="flex:1 1 auto;min-width:0"><span class="sub" id="nameDomain" style="align-self:center;white-space:nowrap"></span></div>
+          <div class="row" style="margin-top:8px">
+            <button id="btnNameChoose">Choose a name</button>
+            <button class="hide" id="btnNameSave">Save</button>
+            <button class="ghost hide" id="btnNameCancel">Cancel</button>
+            <button class="hide" id="btnNameCopy">Copy</button>
+            <button class="ghost hide" id="btnNameRemove">Remove name</button>
+          </div>
+          <div class="status" id="nameStatus" style="margin-top:6px"></div>
+        </div>
         <div class="rec hide dev-only" id="xpubReveal">
           <label class="lbl">Account key</label>
           <select id="xpubForm" style="margin-bottom:8px">
@@ -1677,6 +1691,8 @@
   window.SEQ_LSP_URL               = 'https://sequentiatestnet.com/lsp';
   window.SEQ_LSP_TOKEN             = 'b5b1-d848ec96d29c01d2ff1db6cf';
   window.SEQ_LSP_WS_ASSET          = 'wss://sequentiatestnet.com/lsp-ws-asset';
+  // Payment names (lnaddr.js): `name@<this domain>`, served by the service at SEQ_LSP_URL.
+  window.SEQ_LNADDR_DOMAIN         = 'sequentiatestnet.com';
   window.SEQ_LSP_HOST_PUBKEY_ASSET = '0295374d947dc7e27382a83b2034a10b3d51b6f2fdf7e7da490893e3995141523b';
   window.SEQ_LSP_WS_BTC            = 'wss://sequentiatestnet.com/lsp-ws-btc';
   window.SEQ_LSP_HOST_PUBKEY_BTC   = '020a749af93e2a5a4d67ad28585cec31b55a146969eb77ca3d076eb59ff111ed51';
@@ -1743,6 +1759,7 @@ import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
+import { mountLnAddress, nameKey, parseLnAddress, resolveLnAddress, nameProblem, NAME_WORDS } from './lnaddr.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
 import { displayPair } from './swap.js';
 import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, resetCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
@@ -1769,7 +1786,7 @@ import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './light
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
-import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress } from './ark-limits.js';
+import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
 import { isStaleTipError } from './reorg.js';
@@ -4137,7 +4154,97 @@ function initBtcArk(){
   });
   btcArk.open().then(()=> btcArkBoardSoon()).catch((e)=> console.warn('[btc ark] open:', e?.message??e));
   initLnToArk();
+  try{ initLnAddress(); }catch(e){ console.warn('[lnaddr] init failed:', e?.message??e); }
 }
+// The wallet's payment name (lnaddr.js): `name@SEQ_LNADDR_DOMAIN`, which a Lightning wallet pays in
+// an amount it chooses and a Sequentia wallet pays in any asset. While the page is open it answers
+// the service's requests: an invoice of the Bitcoin ark for the amount a payer chose, or a new
+// receive code. Its key is the phrase's own, so a wallet with no phrase has no name.
+let lnAddr = null, _nameKey = null, _nameEditing = false, _nameBusy = false;
+const LNADDR_MIN_SAT = 1000n, LNADDR_MAX_SAT = 1_000_000n;
+function lnaddrDomain(){ return String(window.SEQ_LNADDR_DOMAIN || '').toLowerCase(); }
+function initLnAddress(){
+  if(lnAddr || !lnaddrDomain() || !window.SEQ_LSP_URL || !bip39Phrase()) return;
+  lnAddr = mountLnAddress({
+    base: window.SEQ_LSP_URL, domain: lnaddrDomain(),
+    key: ()=>{ const p=bip39Phrase(); if(!p) return null; if(!_nameKey || _nameKey.phrase!==p) _nameKey={ phrase:p, k:nameKey(p) }; return _nameKey.k; },
+    invoice: async (msat)=>{
+      const inv = await btcArk.invoice(msat/1000n, 'Payment to '+lnAddr.address());
+      watchNameInvoice(inv);
+      return inv.invoice;
+    },
+    code: async ()=>{
+      const address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential());
+      let ark=null, sequentia=null;
+      try{ if(btcArk && btcArk.isOpen()) ark=(await btcArk.run('address')).address; }catch{}
+      try{ if(leavesApi && leavesApi.isOpen()) sequentia=(await leavesApi.command('receive', {})).request; }catch{}
+      return buildPayCode({ address, ark: ark||undefined, sequentia: sequentia||undefined });
+    },
+    // What a payer may send: from LNADDR_MIN_SAT up to the ark's largest coin, and under what goes
+    // to the address straight away (ark-limits.js), never above LNADDR_MAX_SAT.
+    limits: ()=>{
+      if(!btcArk || !btcArk.isOpen()) return null;
+      let max = LNADDR_MAX_SAT;
+      const i = btcArk.info(); if(i && i.max_vtxo_sat != null && BigInt(i.max_vtxo_sat) < max) max = BigInt(i.max_vtxo_sat);
+      const l = arkLimitsOf('BTC'), d = directUsd(l) != null ? usdAtoms(directUsd(l), l.price, 8) : null;
+      if(d != null && d - 1n < max) max = d - 1n;
+      return max >= LNADDR_MIN_SAT ? { min_sat: LNADDR_MIN_SAT, max_sat: max } : null;
+    },
+    store: { get: (k)=> localStorage.getItem('swk.'+k+'.'+walletTag()), set: (k, v)=> v == null ? localStorage.removeItem('swk.'+k+'.'+walletTag()) : localStorage.setItem('swk.'+k+'.'+walletTag(), v) },
+    onChange: ()=>{ try{ renderNameBox(); }catch{} },
+    log: (...a)=> console.log(...a),
+  });
+  lnAddr.recover().then(()=>{ lnAddr.start(); try{ renderNameBox(); }catch{} });
+}
+// A payment to the name is claimed as soon as the server holds it, as Receive's own invoice is.
+function watchNameInvoice(inv){
+  (async()=>{
+    while(Date.now()/1000 < Number(inv.expires_at)){
+      await new Promise(ok=> setTimeout(ok, 3000));
+      let r=null; try{ r = await btcArk.received(inv.payment_hash); }catch{}
+      if(r && r.state==='paid'){ try{ renderBalance(); }catch{} return; }
+    }
+  })();
+}
+function renderNameBox(){
+  const box=$('nameBox'); if(!box) return;
+  if(!lnAddr){ box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  const dev=devMode(), name=lnAddr.name();
+  $('nameLbl').textContent = dev ? NAME_WORDS.devLabel : NAME_WORDS.label;
+  $('nameTip').textContent = name ? (dev ? NAME_WORDS.devTip : NAME_WORDS.tip) : NAME_WORDS.none;
+  $('nameAddr').textContent = name ? lnAddr.address() : '';
+  $('nameAddr').classList.toggle('hide', !name || _nameEditing);
+  $('nameForm').classList.toggle('hide', !_nameEditing);
+  $('nameDomain').textContent = '@'+lnaddrDomain();
+  $('nameInput').placeholder = NAME_WORDS.hint;
+  show('btnNameChoose', !name && !_nameEditing);
+  show('btnNameSave', _nameEditing); show('btnNameCancel', _nameEditing);
+  show('btnNameCopy', !!name && !_nameEditing); show('btnNameRemove', !!name && !_nameEditing);
+  $('btnNameChoose').textContent=NAME_WORDS.choose; $('btnNameCancel').textContent=NAME_WORDS.cancel;
+  $('btnNameCopy').textContent=NAME_WORDS.copy;
+  if(!_nameBusy){ $('btnNameSave').textContent=NAME_WORDS.save; $('btnNameRemove').textContent=NAME_WORDS.remove; }
+}
+$('btnNameChoose').onclick=()=>{ _nameEditing=true; $('nameStatus').textContent=''; renderNameBox(); try{ $('nameInput').focus(); }catch{} };
+$('btnNameCancel').onclick=()=>{ _nameEditing=false; $('nameStatus').textContent=''; renderNameBox(); };
+$('nameInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter') $('btnNameSave').click(); });
+$('btnNameSave').onclick=async()=>{
+  if(_nameBusy) return;
+  const st=$('nameStatus'), want=$('nameInput').value.trim().toLowerCase();
+  const p=nameProblem(want); if(p){ st.className='status err'; st.textContent=p; return; }
+  _nameBusy=true; $('btnNameSave').textContent=NAME_WORDS.saving; st.textContent='';
+  try{ await lnAddr.register(want); _nameEditing=false; st.className='status'; st.textContent=''; }
+  catch(e){ st.className='status err'; st.textContent=e?.message??String(e); }
+  finally{ _nameBusy=false; renderNameBox(); }
+};
+$('btnNameCopy').onclick=()=> copyToClipboard(lnAddr && lnAddr.address(), $('btnNameCopy'));
+$('btnNameRemove').onclick=async()=>{
+  if(_nameBusy) return;
+  const st=$('nameStatus');
+  _nameBusy=true; $('btnNameRemove').textContent=NAME_WORDS.removing; st.textContent='';
+  try{ await lnAddr.release(); }catch(e){ st.className='status err'; st.textContent=e?.message??String(e); }
+  finally{ _nameBusy=false; renderNameBox(); }
+};
 // BTC on the Bitcoin ark, in BTC's one figure: the wallet's own answer once it is open, until then
 // the last one it gave this wallet, kept per wallet so a reload opens on it (display only).
 function btcArkKeptKey(){ return 'swk.btcArk.total.'+walletTag(); }
@@ -7636,6 +7743,7 @@ function renderReceiveCode(){
   try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
 }
 function renderReceive(){
+  try{ renderNameBox(); }catch(e){ console.warn('[lnaddr] render:', e?.message??e); }
   const codeOn = !devMode() && !!leavesApi && leavesApi.isOpen();
   // Default mode shows the one receive code only; the address is developer mode's.
   $('btnRecvMode').classList.toggle('hide', true);
@@ -8228,7 +8336,7 @@ function addRecipientRow(){
   const r=el('div','rec');
   r.innerHTML = `<button class="x" title="remove">✕</button>
     <label class="lbl">Recipient</label>
-    <div class="addr-row"><input class="mono raddr" placeholder="a receive code, an address or an invoice"><button type="button" class="ghost scanbtn" title="Scan a QR code">⊡ Scan</button></div>
+    <div class="addr-row"><input class="mono raddr" placeholder="a receive code, a payment name, an address or an invoice"><button type="button" class="ghost scanbtn" title="Scan a QR code">⊡ Scan</button></div>
     <label class="lbl" style="margin-top:10px">Asset</label><select class="rasset" style="width:100%"></select>
     <div class="status err rwarn"></div>
     <label class="lbl" style="margin-top:10px">Amount</label>
@@ -8250,7 +8358,7 @@ function addRecipientRow(){
   // Restricted (OpenAMP) sends go to a recipient AID, not a tb1/tsqb1 address — relabel the field.
   const raddr=r.querySelector('.raddr');
   const updAddrPh=()=>{ if(isOampAsset(rsel.value)){ r.querySelector('.addr-row').previousElementSibling.textContent='Recipient AID'; raddr.placeholder='recipient OpenAMP account id'; }
-    else { r.querySelector('.addr-row').previousElementSibling.textContent='Recipient'; raddr.placeholder='a receive code, an address or an invoice'; } };
+    else { r.querySelector('.addr-row').previousElementSibling.textContent='Recipient'; raddr.placeholder='a receive code, a payment name, an address or an invoice'; } };
   updAddrPh();
   const warn=r.querySelector('.rwarn');
   r._checkAddr=()=>{ warn.textContent=recipientProblem(raddr.value.trim(), rsel.value)||''; };
@@ -9152,6 +9260,15 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     btn.textContent='Preparing…';
     await new Promise(r=>setTimeout(r,16));   // one frame, so 'Preparing…' is painted before the build runs
     const rows=collectRows();
+    // A payment name (lnaddr.js): one of SEQ_LNADDR_DOMAIN is paid at the receive code its wallet
+    // gives now, any asset; another service's is paid in BTC at the invoice it makes for the amount.
+    for(const r of rows){
+      if(!parseLnAddress(r.addr)) continue;
+      let atoms=null; try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{}
+      const x = await resolveLnAddress({ text: r.addr, asset: r.asset, msat: r.asset==='BTC' && atoms>0n ? atoms*1000n : null,
+        domain: lnaddrDomain(), base: window.SEQ_LSP_URL, decode: decodeBolt11 });
+      r.addr = x.code || x.invoice;
+    }
     // A receive code (pay-code.js) is paid the way that fits what is sent: an asset at its
     // Sequentia part when the tree takes it, BTC at its Ark part when the Bitcoin ark pays it,
     // and anything else at its address.
