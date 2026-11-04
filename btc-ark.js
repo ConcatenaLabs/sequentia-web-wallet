@@ -166,10 +166,10 @@ function bareRoute (s, decode) {
 
 // One figure from the wallet's balance: everything it holds in the ark, spendable or on its way.
 export function arkFigures (b) {
-  if (!b) return { total: 0n, spendable: 0n, arriving: 0n }
+  if (!b) return { total: 0n, spendable: 0n, arriving: 0n, claimable: 0n }
   const spendable = big(b.spendable)
   const arriving = big(b.pending_board) + big(b.claimable_lightning_receive) + big(b.pending_in_round)
-  return { total: big(b.total), spendable, arriving }
+  return { total: big(b.total), spendable, arriving, claimable: big(b.claimable_lightning_receive) }
 }
 
 // How a payment of `sats` is split between where it is paid from first (`firstCap`, the most it

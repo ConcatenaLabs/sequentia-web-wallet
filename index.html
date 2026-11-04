@@ -2624,6 +2624,7 @@ async function btcScan(){
   // BIP44-style gap scan: keep scanning GAP-wide batches until a whole batch shows no
   // activity, so change addresses that drifted past index GAP are still found — a fixed
   // 0..GAP window would make such change invisible and unspendable.
+  const t0=Date.now();
   let bal=0n; const used=new Set(); let chgMax=-1, start=0, scanned=GAP;
   for(let guard=0; guard<64; guard++){
     const jobs=[];
@@ -2640,7 +2641,7 @@ async function btcScan(){
     if(!anyUsed) break;
   }
   btcBalance = bal; btcUsed = used; btcChangeNext = chgMax+1; btcScanLimit = scanned;
-  _btcScanAt = Date.now();
+  _btcScanAt = Date.now(); _btcScanStartAt = t0;
 }
 
 // gather spendable utxos across the full scanned range (same window as btcScan, plus any
@@ -4111,6 +4112,15 @@ function userBtcLightning(){
 // BTC is always in BTC's one figure; default mode also sends from it, boards what arrives at the
 // address, and trades from it. Developer mode keeps BTC's own paths.
 let btcArk = null, _btcSentAt = 0, _btcArkBoardAt = 0;
+// What a board just put on the network takes from the address: the ark counts it as arriving at
+// once, the address's figure only once a scan that began after the broadcast has run. Until then
+// the address's figure leaves it out, so the board is counted once.
+let _btcBoardHold = null, _btcDrainLeft = 0n, _btcScanStartAt = 0;
+function btcOnchainShown(bal){
+  const h=_btcBoardHold; if(!h) return bal;
+  if(_btcScanStartAt > h.at || Date.now()-h.at > 10*60_000){ _btcBoardHold=null; return bal; }
+  return bal > h.sats ? bal - h.sats : 0n;
+}
 function initBtcArk(){
   if(btcArk) return;
   const config = arkConfig(window.SEQ_BTC_ARK);
@@ -4191,7 +4201,8 @@ function initLnToArk(){
     connect: (kind)=> lnConnectLeg(kind),
     pay: async (p)=>{ const r = await lnApi.nodePay(p); if(!(r && r.paid)) throw new Error((r && r.error) || 'the payment did not complete'); return r; },
     payStatus: (p)=> seqlnNodePayStatus(p),
-    ark: { isOpen: ()=> !!btcArk && btcArk.isOpen(), invoice: (sats, d)=> btcArk.invoice(sats, d), received: (h)=> btcArk.received(h), refresh: ()=> btcArk.refresh() },
+    ark: { isOpen: ()=> !!btcArk && btcArk.isOpen(), invoice: (sats, d)=> btcArk.invoice(sats, d), received: (h)=> btcArk.received(h), refresh: ()=> btcArk.refresh(),
+      claimable: ()=> btcArk && btcArk.isOpen() ? btcArk.figures().claimable : null },
     leaves: { isOpen: ()=> !!leavesApi && leavesApi.isOpen(), info: ()=> leavesApi.info(), coins: ()=> leavesApi.coins() || [],
       run: (c, a)=> leavesApi.own(c, a), refresh: ()=> leavesApi.refreshSoon() },
     allowance: async (kind)=> allowanceAtoms(window.SEQ_LN_PAYMENT_LIMITS || { reference: null }, kind, lnSignerRate(kind)),
@@ -4292,7 +4303,8 @@ async function btcDrainUnsigned(address, sats){
   const psbt = tx.toPSBT(0);
   const keys=[], seen=new Set(); for(const u of sel){ const k=[...u.priv].join(','); if(!seen.has(k)){ seen.add(k); keys.push(u.priv); } }
   return { psbtHex: Array.from(psbt, b=> b.toString(16).padStart(2,'0')).join(''), txid: tx.id,
-    finish: ()=>{ for(const k of keys) tx.sign(k); tx.finalize(); if(changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, changeIndex+1); return { hex: tx.hex }; } };
+    finish: ()=>{ for(const k of keys) tx.sign(k); tx.finalize(); if(changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, changeIndex+1);
+      _btcDrainLeft = inSum - (changeIndex!=null ? change : 0n); return { hex: tx.hex }; } };
 }
 async function btcBroadcastHex(hex){
   const r = await fetch(`${T4_API}/tx`, { method:'POST', body:hex });
@@ -4321,7 +4333,8 @@ function btcArkBoardSoon(asked){
   if(cap != null && _btcArkWanted > cap) cap = _btcArkWanted;
   if(cap != null && cap <= 0n) return;
   _btcArkBoardAt = Date.now();
-  btcArk.board({ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, broadcast: btcBroadcastHex, cap })
+  btcArk.board({ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, cap,
+      broadcast: async (hex)=>{ const t = await btcBroadcastHex(hex); _btcBoardHold = { sats: _btcDrainLeft, at: Date.now() }; return t; } })
     .then((r)=>{ if(r){ const a = BigInt(r.amount || 0); _btcArkWanted = _btcArkWanted > a ? _btcArkWanted - a : 0n; sync().catch(()=>{}); } })
     .catch((e)=> console.warn('[btc ark] board:', e?.message??e));
 }
@@ -6088,7 +6101,7 @@ function initLnSendReceive(){
 async function lnWalletCloseDestination(leg){
   if(leg.chain==='btc'){
     const p = btc.p2wpkh(btcNode(false, unifiedNextUnused()).publicKey, btc.TEST_NETWORK);
-    return { address: p.address, scriptHex: hexOfBytes(p.output) };
+    return { address: p.address, scriptHex: hexOfBytes(p.script) };
   }
   return withWollet(async () => {
     const a = wollet.address(undefined).address();
@@ -7042,7 +7055,7 @@ function renderBalance(){
   queueMicrotask(refreshComposerHeld);
   try{ populateFeeAssets(); populateIssueFeeAssets(); fillReissuePick(); }catch{}   // keep the fee and reissue pickers in sync as balances load
   let live = {}; try{ live = balObj(); }catch{}   // wollet.balance() can throw before the first scan
-  let b = live, btcBal = btcBalance;
+  let b = live, btcBal = btcOnchainShown(btcBalance);
   // Before this session's first sync an unscanned wollet can report an empty or all-zero balance
   // map: never treat that as authoritative. Show the snapshot of the last completed sync instead,
   // dated on the status line (saveSnapshot keeps it, after every sync that completes).
@@ -7701,7 +7714,7 @@ function walletAssetRow(v, text){
 function assetFigure(v){
   if(String(v).startsWith('oamp:')) return (oampBalances[String(v).slice(5)]?.atoms) || 0n;
   let n = 0n;
-  try{ n += v==='BTC' ? (btcBalance || 0n) : BigInt(balObj()[v] || 0); }catch{}
+  try{ n += v==='BTC' ? btcOnchainShown(btcBalance || 0n) : BigInt(balObj()[v] || 0); }catch{}
   try{ if(v!=='BTC' && leavesApi) n += leavesApi.leafAtoms(v) || 0n; }catch{}
   try{ if(v==='BTC') n += btcArkAtoms(); }catch{}
   try{ n += lnBalanceFor(v) || 0n; }catch{}

@@ -44,8 +44,10 @@ test('a destination names its route', () => {
 
 test('one figure: what the ark holds, spendable or on its way', () => {
   const f = arkFigures({ spendable: '9765', pending_board: '99670', claimable_lightning_receive: '0', pending_in_round: '10', total: '109445' })
-  assert.deepEqual(f, { total: 109445n, spendable: 9765n, arriving: 99680n })
-  assert.deepEqual(arkFigures(null), { total: 0n, spendable: 0n, arriving: 0n })
+  assert.deepEqual(f, { total: 109445n, spendable: 9765n, arriving: 99680n, claimable: 0n })
+  assert.deepEqual(arkFigures(null), { total: 0n, spendable: 0n, arriving: 0n, claimable: 0n })
+  // A Lightning payment the ark can claim is in its figure, and said apart.
+  assert.equal(arkFigures({ claimable_lightning_receive: '290484', total: '290484' }).claimable, 290484n)
 })
 
 test('a board leaves the funding fee and the ark fee, and keeps to the ark bounds', () => {

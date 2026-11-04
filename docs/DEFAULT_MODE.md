@@ -79,8 +79,9 @@ In practice:
   Bitcoin ark, every other asset into the operator's tree, claimed at the next round. Nothing is
   asked. A move is paid only from a channel that is open for payments, within the day's
   Lightning payment limit when the wallet sets one (nine tenths of it, the rest on a later day),
-  and never while the person is using the wallet. It stays in the figure while it moves, and the
-  line under the figure reads **"Moving <amount> <TICKER> so it can be sent in seconds."** A
+  and never while the person is using the wallet. It stays in the figure while it moves, counted
+  once, whether the channel or its new place reports it first; nothing under the figure says it
+  moves (developer mode reads **"Moving <amount> <TICKER> so it can be sent in seconds."**). A
   payment refused before it left moves nothing and is tried again later. A channel the move
   emptied is closed to the wallet's address when that is cheap and safe, and what it held stays
   in the figure on its way back; otherwise it stays, and developer mode says why under its Lightning part.
@@ -240,12 +241,12 @@ BTC is held on a Bitcoin ark: native bitcoin, never pegged, in a wallet of the s
 part of BTC's one figure. Its address there is part of the receive code. The words are in
 `BTC_WORDS` (`btc-ark.js`).
 
-- BTC that arrives at the address and is confirmed moves there by itself; until it can be spent
-  it is "<amount> BTC arriving" under the figure.
+- BTC that arrives at the address and is confirmed moves there by itself, counted once in the
+  figure while it moves (developer mode shows "<amount> BTC arriving" until it can be spent).
 - BTC a wallet holds where it cannot be sent in seconds (its own Lightning channel, in a wallet
   made before BTC was held this way) moves there by itself too, and stays spendable where it is
-  until it has. While it moves, the line under the figure reads "Moving <amount> BTC so it can
-  be sent in seconds." (`lightning-to-ark.js`; the same move for assets is under Balance).
+  until it has. Its channel, once emptied, is closed to the wallet's own address
+  (`lightning-to-ark.js`; the same move for assets is under Balance).
 - The wallet keeps what it holds there current by itself, and arranges each time it is open for
   that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
   was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it
