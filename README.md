@@ -60,7 +60,8 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   own Lightning channel is held to the largest coin as well. A
   browser holding the phrase learns from the ark's server, at each open and every five minutes,
   what the phrase's other wallets did (`catch_up`): the coins they boarded or received, and those
-  of its own they spent. Each coin's renewal is scheduled with the ark's server whenever the page
+  of its own they spent; a board whose browser lost its data before the board was registered is
+  found on the chain from the phrase alone and taken in. Each coin's renewal is scheduled with the ark's server whenever the page
   is open (`schedule_refreshes`): the server runs it by itself shortly before the coin's expiry,
   with the page closed, and the renewed coin is taken in at the next open. Renewals are made in
   groups that each fit in the server's largest coin; a coin larger than the server takes now
