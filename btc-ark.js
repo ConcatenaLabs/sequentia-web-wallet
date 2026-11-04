@@ -130,7 +130,21 @@ export function arkConfig (cfg) {
   if (typeof server !== 'string' || !/^https?:\/\//.test(server)) return null
   if (typeof esplora !== 'string' || !/^https?:\/\//.test(esplora)) return null
   if (!['testnet4', 'signet', 'regtest', 'bitcoin'].includes(network)) return null
-  return { server: server.replace(/\/+$/, ''), esplora: esplora.replace(/\/+$/, ''), network }
+  // `towers`: the Bitcoin ark watchtowers the wallet may deposit its coins with (their base URLs);
+  // `tower_deposits`: whether it does. Off unless set: the wallet still asks the plan, so a coin a
+  // tower already holds is never given a scheduled renewal too (towerPass).
+  const towers = Array.isArray(cfg.towers) ? cfg.towers.filter((u) => typeof u === 'string' && /^https?:\/\//.test(u)).map((u) => u.replace(/\/+$/, '')) : []
+  return { server: server.replace(/\/+$/, ''), esplora: esplora.replace(/\/+$/, ''), network, towers, towerDeposits: cfg.tower_deposits === true }
+}
+
+// The coins `schedule_refreshes` must leave out after a tower pass: those a tower holds a deposit
+// for (`covered`), and those whose deposit a tower accepted in this pass (`accepted`, coin ids).
+// A coin the plan meant for a deposit that no tower took is renewed as any other: a coin gets
+// either a tower or a scheduled renewal, never both, and never neither.
+export function towerExcept (plan, accepted = []) {
+  const ids = new Set(accepted)
+  for (const c of (plan && plan.covered) || []) if (c && c.vtxo) ids.add(String(c.vtxo))
+  return [...ids]
 }
 
 // Where a BTC payment to `text` goes: 'invoice' (a Bitcoin Lightning invoice), 'ark' (an Ark
@@ -215,9 +229,10 @@ export function boardAmount (utxos, info, boardFee, feerate = BOARD_FEERATE, cap
 //   onChange()              called when the balance changes
 //   log(...)
 //   fmt(sats)               formats a BTC amount for exitNote() (fmtBtc by default)
-//   store                   { get(key), set(key, value) }: where the cost of a leaving coin is kept
-//                           across reloads (none by default)
-export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = () => {}, log = () => {}, now = () => Date.now(), fmt = fmtBtc, store = null }) {
+//   store                   { get(key), set(key, value) }: where the cost of a leaving coin and the
+//                           deposits the towers hold are kept across reloads (none by default)
+//   fetch                   for the towers (the global fetch by default)
+export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = () => {}, log = () => {}, now = () => Date.now(), fmt = fmtBtc, store = null, fetch: fetchFn = (...a) => fetch(...a) }) {
   let worker = null, seq = 0, opened = null, isOpen = false, figures = arkFigures(null), info = null, timer = null, read = false
   const waiting = new Map()
 
@@ -264,7 +279,8 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   function renewDue () {
     if (!isOpen || renewing) return renewing || Promise.resolve(null)
     const t0 = now()
-    renewing = run('schedule_refreshes', {}, PAY_TIMEOUT_MS)
+    renewing = towerPass()
+      .then((except) => run('schedule_refreshes', { except }, PAY_TIMEOUT_MS))
       .then((s) => {
         const n = ((s && s.scheduled) || []).reduce((k, r) => k + ((r.vtxos && r.vtxos.length) || 0), 0)
         if (n) log('[btc ark] renewal scheduled for', n, 'coin(s), heights', s.scheduled.map((r) => r.height).join(','))
@@ -275,6 +291,52 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
       .catch((e) => { log('[btc ark] renewing coins near their expiry:', e && e.message); return null })
       .finally(() => { renewing = null })
     return renewing
+  }
+
+  // Bitcoin ark watchtowers, before renewals are scheduled: the library's plan (`tower_plan`) says
+  // which deposits to send, which to take back (a coin spent, or one left to its renewal), and which
+  // coins a tower covers. Deposits are sent only when the config turns them on; withdrawals always,
+  // so a deposit made once never outlives its coin. -> the coins to leave out of the renewals.
+  const TOWERS_KEY = 'btcArk.towers'
+  let lastPlan = null
+  function keptDeposits () { try { const v = JSON.parse((store && store.get(TOWERS_KEY)) || '[]'); return Array.isArray(v) ? v : [] } catch { return [] } }
+  function keepDeposits (l) { try { if (store) store.set(TOWERS_KEY, l.length ? JSON.stringify(l) : null) } catch {} }
+  async function towerPass () {
+    let kept = keptDeposits()
+    try {
+      const on = !!(config && config.towerDeposits)
+      const towers = []
+      if (on) {
+        for (const url of config.towers || []) {
+          try { const r = await fetchFn(url + '/v1/info'); if (r.ok) towers.push({ url, info: await r.json() }) } catch (e) { log('[btc ark] tower', url, e && e.message) }
+        }
+      }
+      const plan = await run('tower_plan', { towers, deposited: kept }, PAY_TIMEOUT_MS)
+      lastPlan = plan
+      log('[btc ark] tower plan:', (plan.covered || []).length, 'covered,', (plan.uncovered || []).length, 'not covered,', (plan.not_worth || []).length, 'not worth it,', on ? 'deposits on' : 'deposits off')
+      const accepted = []
+      if (on) {
+        for (const d of plan.deposit || []) {
+          try {
+            const r = await fetchFn(d.tower + '/v1/deposit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(d.body) })
+            if (r.ok) { accepted.push(String(d.vtxo)); kept.push({ tower: d.tower, vtxo: d.vtxo, claim_txid: d.claim_txid }) } else log('[btc ark] tower', d.tower, 'refused a deposit:', r.status)
+          } catch (e) { log('[btc ark] tower', d.tower, e && e.message) }
+        }
+      }
+      for (const w of plan.withdraw || []) {
+        try {
+          const r = await fetchFn(w.tower + '/v1/withdraw', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(w.body) })
+          if (r.ok || r.status === 404) kept = kept.filter((k) => !(k.tower === w.tower && k.vtxo === w.vtxo))
+        } catch (e) { log('[btc ark] tower', w.tower, e && e.message) }
+      }
+      keepDeposits(kept)
+      return towerExcept(plan, accepted)
+    } catch (e) {
+      // No plan (a library without towers, or the wallet busy): the coins a tower may hold are left
+      // out all the same.
+      log('[btc ark] tower plan:', e && e.message)
+      return [...new Set(kept.map((k) => String(k.vtxo)))]
+    }
   }
 
   // A coin leaves the Ark alone only by the wallet's one rule (`exit_auto`): when the Ark refused
@@ -519,6 +581,8 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   return {
     open, isOpen: () => isOpen, read: () => isOpen && read, refresh, renewDue, figures: () => figures, info: () => info,
     route: (to) => routeOf(to, decode), quote, max, send, payOutcome, board, invoice, received, lightning, run,
+    // The last Bitcoin ark watchtower plan (covered, uncovered, not worth it), for developer mode.
+    towerPlan: () => lastPlan,
     // Leaving the Ark alone: what default mode says (exitNote), whether the wallet keeps what arrives
     // at its address out of the Ark meanwhile (exitHolds), and developer mode's own steps.
     exitCheck, exitNote: () => exitNote && exitNote.text, exitHolds: () => exitHolds,

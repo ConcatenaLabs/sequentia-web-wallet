@@ -77,8 +77,11 @@ to spare; else the code's address, and the review says why. It has no DOM
 their own code: give them the same rule.
 
 `btc-ark/pkg/` is tracked too: Bark's wallet for Bitcoin arks, built from arca's `bark-wasm/` by
-`tooling/build-btc-ark.sh <arca checkout>` (paths remapped the same way), run inside
-`btc-ark/worker.js`. It holds default mode's BTC on the Bitcoin ark named by `SEQ_BTC_ARK`: native
+`tooling/build-btc-ark.sh <arca checkout>` (paths remapped the same way; arca's CI keeps no
+artifact of it), with `btc-ark/pkg/BUILT_FROM` naming the commit, run inside
+`btc-ark/worker.js`. Before it schedules the server's renewals it asks the library's Bitcoin ark
+watchtower plan (`tower_plan`), so a coin a tower holds is never also given a renewal; it deposits
+coins with the towers `SEQ_BTC_ARK.towers` names only when `tower_deposits` is true. It holds default mode's BTC on the Bitcoin ark named by `SEQ_BTC_ARK`: native
 bitcoin, never pegged, from the page's own phrase under Bark's key path. `btc-ark.js` names the
 route (an invoice, an Ark address, a Bitcoin address) and shows the wallet's answers; every fee,
 coin and refusal is the wallet's. A board is cosigned by the ark's server before the page signs
