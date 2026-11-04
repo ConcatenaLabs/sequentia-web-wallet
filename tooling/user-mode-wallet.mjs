@@ -8,7 +8,10 @@
 //   node tooling/user-mode-wallet.mjs --dir DIR --port PORT --config CONFIG.json
 //
 // CONFIG: { operator: {server, node_url, node_user, node_password}, makers: [url], relay: url,
-//           pairs_file: path, genesis, exit_delay_units?, btc_rpc?, onchain? }
+//           pairs_file: path, genesis, exit_delay_units?, btc_rpc?, onchain?, upkeep? }
+// upkeep (on unless false) keeps the wallet as the page keeps one in user mode (wallet-upkeep.mjs):
+// a sync every minute and what it received given up in the next round every two, between trades.
+// The drill and the drive turn it off: they count every coin a trade moves.
 // btc_rpc names the socket of the wallet's Bitcoin Lightning node, for BTC trades (cln-rpc.mjs).
 // onchain { esplora, policy_asset } gives it on-chain coins of its own, as the page has, for
 // covenant orders taken on the chain (user-mode-onchain-node.mjs); its balance then counts them.
@@ -18,6 +21,7 @@
 //       POST /quote {pay, receive, amount}; POST /trade {pay, receive, amount} (quote, then confirm
 //       the ticket) -> { ok, ticket, record } | { ok: false, why }; POST /advance -> the open trades
 //       moved on; POST /run {command, args} (setup only: address, board_quote, board, sync);
+//       GET /upkeep -> when the upkeep last synced and refreshed, and what it answered;
 //       GET /onchain-address -> its on-chain address, for funding.
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
@@ -27,6 +31,7 @@ import { createEngine } from '../user-trade.js'
 import { relayBook, relayFills, lwkFrom } from './user-mode-stack.mjs'
 import { clnRpc, clnBitcoinWallet } from './cln-rpc.mjs'
 import { nodeOnchain } from './user-mode-onchain-node.mjs'
+import { createUpkeep } from './wallet-upkeep.mjs'
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
 const dir = arg('--dir'), port = Number(arg('--port')), cfg = JSON.parse(readFileSync(arg('--config'), 'utf8'))
@@ -51,6 +56,7 @@ const fetchJson = async (url, init) => {
   if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status))
   return j
 }
+const log = (...a) => console.log(new Date().toISOString(), ...a)
 const book = relayBook(cfg.relay)
 // The node's fee exchange rates, read with the operator's node credentials.
 const nodeRpc = async (method, params) => {
@@ -63,7 +69,7 @@ const onchain = cfg.onchain ? await nodeOnchain({ lwk: await lwkFrom(), mnemonic
 const engine = createEngine({
   leaves: w, fetchJson, makers: () => cfg.makers || [], relayBook: (pay, receive) => book(pay, receive), relayFills: relayFills(cfg.relay),
   admitted: () => ({ pairs: JSON.parse(readFileSync(cfg.pairs_file, 'utf8')), genesis: cfg.genesis }),
-  store, tag: () => 'drill', log: (...a) => console.log(new Date().toISOString(), ...a),
+  store, tag: () => 'drill', log,
   btc: cfg.btc_rpc ? clnBitcoinWallet(clnRpc(cfg.btc_rpc)) : null,
   onchain,
 })
@@ -83,6 +89,11 @@ function liveBalance () {
 
 let busy = Promise.resolve()
 const serial = (f) => { const p = busy.then(f, f); busy = p.catch(() => {}); return p }
+
+// The upkeep (wallet-upkeep.mjs), between trades, unless CONFIG turns it off.
+const upkeep = createUpkeep({ command: (name, args) => w.command(name, args), log })
+const upkeepOn = cfg.upkeep !== false
+if (upkeepOn) setInterval(() => { serial(upkeep.tick).catch(() => {}) }, 15_000)
 const send = (res, code, v) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? String(x) : x))) }
 const body = (req) => new Promise((ok) => { const p = []; req.on('data', (d) => p.push(d)); req.on('end', () => { try { ok(JSON.parse(Buffer.concat(p).toString() || '{}')) } catch { ok({}) } }) })
 
@@ -90,6 +101,7 @@ createServer(async (req, res) => {
   const p = new URL(req.url, 'http://x').pathname
   try {
     if (p === '/health') return send(res, 200, { ok: true, pid: process.pid })
+    if (p === '/upkeep') return send(res, 200, { on: upkeepOn, ...upkeep.state })
     if (p === '/records') return send(res, 200, engine.records())
     if (p === '/onchain-address') return send(res, onchain ? 200 : 404, onchain ? { address: onchain.address() } : { error: 'no on-chain coins in this wallet' })
     if (p === '/balance') {
