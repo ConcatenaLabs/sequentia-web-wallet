@@ -77,6 +77,12 @@
 //     "rest": { … },                             optional: orders resting in the tree, a ladder a
 //                                                pair, listed on SeqDEX's relay (leaf-maker-rest.mjs
 //                                                says how)
+//     "instant_budget": "0.1",                  optional: the share of the operator's bond, at its
+//                                                node's rate, the maker holds out of round at most
+//                                                ("off" for none; default 0.1, a tenth). The lower of
+//                                                it and the share the operator suggests is taken;
+//                                                quotes are cut to the room left, and past it the
+//                                                maker says it takes the rest after its next round
 //     "report": { "relay": "http://…" },        optional: where its trades are reported (else the
 //                                                resting desk's relay); trade-report.mjs says how
 //     "btc": { … } }                             optional: BTC for an asset and an asset for BTC in
@@ -85,7 +91,7 @@
 // Every coin the maker receives is refreshed in the operator's next round once it has rested
 // `settle_seconds`, so what it trades settles as the takers' coins do; on its first pass after a
 // start, every coin it already holds; and at once, all of them, when an offer is refused because
-// it would hold more out of round than the operator's bond covers.
+// it would hold more out of round than the operator's bond covers, or than its instant budget.
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -116,8 +122,47 @@ export function coinsToMerge (coins, asset, cap, exclude = []) {
 }
 
 // The library's refusal of a payment that would leave the wallet holding more out of round than the
-// operator's bond covers.
-export const OUT_OF_ROUND_FULL = /would hold out of round .* more than the bond/
+// operator's bond covers, or than its instant budget (a share of the bond).
+export const OUT_OF_ROUND_FULL = /would hold out of round .* (more than the bond|past its instant budget)/
+
+// The share of the operator's bond the maker holds out of round at most, unless its configuration
+// names another ("off" for none): a tenth, so that a double-sign of what the maker holds at once
+// costs the operator ten times what it could take from it.
+export const DEFAULT_INSTANT_BUDGET = '0.1'
+
+// The room left in the maker's instant budget, in atoms of each asset its node prices, from the
+// library's `bond` answer: null when no budget is set or the bond does not stand (then the
+// library's own refusals are the only bound).
+export function budgetRoom (bond) {
+  const b = bond && bond.instant_budget
+  if (!b || !b.room_atoms || typeof b.room_atoms !== 'object') return null
+  const m = new Map()
+  for (const [a, v] of Object.entries(b.room_atoms)) m.set(a, big(v))
+  return m
+}
+
+// Quotes cut to the room left: a quote whose most wanted (max_give at its rate, rounded up) is
+// more than the room in the asset it wants is cut to what the room buys and marked
+// `after_next_round`; one cut below its least is left out, and its pair is named in `later`
+// instead, so a taker can say the rest comes after the maker's next round.
+export function capQuotes (quotes, room) {
+  if (!room) return { quotes, later: [] }
+  const out = [], later = []
+  for (const q of quotes || []) {
+    const r = room.get(q.want_asset)
+    const num = big(q.rate_num), den = big(q.rate_den)
+    if (r == null || num <= 0n || den <= 0n) { out.push(q); continue }
+    const max = big(q.max_give)
+    if (ceilDiv(max * num, den) <= r) { out.push(q); continue }
+    const fit = (r * den) / num
+    if (fit < big(q.min_give || 1)) {
+      if (!later.some((x) => x.give_asset === q.give_asset && x.want_asset === q.want_asset)) later.push({ give_asset: q.give_asset, want_asset: q.want_asset })
+      continue
+    }
+    out.push({ ...q, max_give: String(fit), after_next_round: true })
+  }
+  return { quotes: out, later }
+}
 
 // The received coins (`kind` transfer, live) to refresh now: each one rested `restMs` since `seen`
 // first noted it at `now`; every one when `all` (an offer was refused for what the maker holds out
@@ -302,6 +347,13 @@ async function main () {
   }
   const address = await cmd('address')
   log(`leaf maker ${cfg.wallet}: operator ${info.operator}, chain ${info.genesis_hash}, on-chain address ${address.address}`)
+  // Its instant budget, in the library: what it takes out of round at once, a share of the bond.
+  try { log('instant budget:', JSON.stringify(await cmd('instant_budget', { share: String(cfg.instant_budget ?? DEFAULT_INSTANT_BUDGET) }))) } catch (e) { log('instant budget:', e.message) }
+  // The room left in it, read with the bond on every pass of the upkeep (null: no bound to cut by).
+  let room = null
+  const readRoom = async (first = false) => {
+    try { room = budgetRoom(await cmd('bond', {}, first)) } catch (e) { log('bond:', e.message) }
+  }
 
   // Rates from the price feed, read every minute; a rate older than ten minutes is not quoted.
   const rates = new Map()
@@ -388,6 +440,7 @@ async function main () {
     {
       try { await cmd('sync') } catch (e) { log('sync:', e.message) }
       try { await spendable() } catch (e) { log('holdings:', e.message) }
+      await readRoom()
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
       if (rester) { try { await rester.tick() } catch (e) { log('rest:', e.message) } }
       if (reporter && reporter.pending().length) { try { await reporter.flush() } catch (e) { log('report:', e.message) } }
@@ -482,8 +535,11 @@ async function main () {
         // nothing, at once: a taker asks the other sources rather than waiting on this one.
         if (!holdings) { if (!firstReading) firstReading = spendable(true).catch(() => {}).finally(() => { firstReading = null }); return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [] }) }
         const sp = holdings.sp
+        // In-tree quotes are cut to the room left in its instant budget; a pair cut to nothing is
+        // named in `after_next_round`.
+        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), room)
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
-          quotes: [...quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])] })
+          quotes: [...cut.quotes, ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])], ...(cut.later.length ? { after_next_round: cut.later } : {}) })
       }
       if (req.method === 'GET' && p.startsWith('/v1/swap/')) { const id = p.slice('/v1/swap/'.length); return send(res, 200, { swap: id, state: await swapState(id, true) }) }
       if (desk && req.method === 'GET' && p.startsWith('/v1/btc/')) { const r = await desk.route('GET', p, {}); if (r) return send(res, r[0], r[1]) }
@@ -506,6 +562,11 @@ async function main () {
         if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
         const pair = sl.pair
         const want = w.want
+        // More than the room left in its instant budget: the rest after its next round.
+        if (room && room.has(pair.want) && want > room.get(pair.want)) {
+          return send(res, 409, { error: 'the maker takes this much after its next round', after_next_round: true,
+            quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), room).quotes.pop() || null })
+        }
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
@@ -537,8 +598,9 @@ async function main () {
       return send(res, 404, { error: 'no such path' })
     } catch (e) {
       log('refused', p, e.message)
-      if (OUT_OF_ROUND_FULL.test(e.message || '')) { outOfRoundFull = true; setImmediate(tick) }
-      return send(res, 409, { error: e.message, kind: e.kind || null })
+      const full = OUT_OF_ROUND_FULL.test(e.message || '')
+      if (full) { outOfRoundFull = true; readRoom(true).catch(() => {}); setImmediate(tick) }
+      return send(res, 409, { error: e.message, kind: e.kind || null, ...(full ? { after_next_round: true } : {}) })
     }
   })
   const [host, port] = String(cfg.listen).split(':')

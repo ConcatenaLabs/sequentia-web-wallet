@@ -576,3 +576,21 @@ test('engine: a small free coin beside a planned one frees the planned coin, nev
   assert.equal(r.why, 'part-ready')
   assert.equal(freed.length, 1)
 })
+
+test('engine: a maker that takes more only after its next round: the shortfall says so, and so does a pair cut to nothing', async () => {
+  const s = standIn()
+  // The maker's quote cut to the room in its instant budget.
+  const cut = [{ give_asset: Y, want_asset: X, rate_num: '4', rate_den: '3', max_give: '300000', min_give: '10000', after_next_round: true }]
+  const fetchJson = async (url, init) => url.endsWith('/v1/quotes') ? { quotes: cut } : s.fetchJson(url, init)
+  const eng = createEngine({ leaves: s.lib, fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => 0 })
+  const a = await eng.estimate({ payAsset: X, receiveAsset: Y, receive: '1000000' })
+  assert.deepEqual([a.ok, a.receive, a.short], [true, '300000', { pay: '400000', receive: '300000', soon: true }])
+  const b = await eng.estimate({ payAsset: X, receiveAsset: Y, receive: '300000' })
+  assert.equal(b.short, null, 'within the room: nothing to say')
+  // Its room spent: no quote for the pair, which it names.
+  const none = async (url, init) => url.endsWith('/v1/quotes') ? { quotes: [], after_next_round: [{ give_asset: Y, want_asset: X }] } : s.fetchJson(url, init)
+  const eng2 = createEngine({ leaves: s.lib, fetchJson: none, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => 0 })
+  assert.equal((await eng2.estimate({ payAsset: X, receiveAsset: Y, pay: '400000' })).why, 'soon')
+  assert.equal(USER_WORDS.bookUpToSoon('300,000 YT'), 'The book can fill up to 300,000 YT now, and more in a few minutes.')
+  assert.deepEqual(forbiddenIn(USER_WORDS.bookUpToSoon('1 YT') + ' ' + USER_WORDS.notOfferedSoon('YT', 'XT')), [])
+})
