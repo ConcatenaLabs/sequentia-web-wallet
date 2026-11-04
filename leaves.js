@@ -84,7 +84,8 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen } from './default-arca.js'
+import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen,
+  homeCoins, unreachableOf, homeQuote as quoteHome, homeTake, homeUnderWay as underWay } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
   title: 'Mode',
@@ -105,6 +106,7 @@ export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
+export const HOME_KEY = 'swk.leaves.home'            // + '.' + tag: the coins a person sent home, and when
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
 
@@ -506,6 +508,15 @@ export function faucetRequestBody (request, label) {
 const HELD = new Set(['pending', 'live', 'offered', 'sending', 'given', 'forfeited', 'exiting'])
 export function heldCoins (coins) { return (coins || []).filter((c) => HELD.has(c.state)) }
 
+// A list of the library's answer, or none: a part the library could not read comes as `{ error }`
+// in its list's place (a sync with the operator gone answers `participations` so), never a list.
+export function listOf (v) { return Array.isArray(v) ? v : [] }
+// That part's refusal, in the library's words, or null.
+export function partError (v) {
+  if (!v || Array.isArray(v) || typeof v !== 'object' || v.error == null) return null
+  return typeof v.error === 'string' ? v.error : String(v.error.message || JSON.stringify(v.error))
+}
+
 // Whether something is moving that sync must follow now, whatever the schedule says:
 // a coin pending, being sent, held for an in-tree swap (the other wallet completes it,
 // and only a sync reads what it pays this one), given to a participation, under a
@@ -711,7 +722,18 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { ctx.store.removeItem(key) } catch {}
     emit('codeUsed', { owner: kept.owner })
   }
-  const arrivals = (mb) => { for (const c of ((mb && mb.accepted) || [])) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
+  // Every sync's answer: what arrived, what the catch-up changed, and whether the operator answered.
+  const synced = (v) => { arrivals(v && v.mailbox); caughtUp(v && v.caught_up); noteUnreachable(unreachableOf(v, 'sync')) }
+  function noteUnreachable (u) {
+    if (u === undefined) return
+    const was = !!S.unreachable
+    S.unreachable = u ? { ...u, since: (S.unreachable && S.unreachable.since) || now() } : null
+    if (was !== !!u) {
+      log(u ? '[leaves] the operator cannot be reached: ' + u.why : '[leaves] the operator answers again')
+      if (ctx.onChange) try { ctx.onChange() } catch {}
+    }
+  }
+  const arrivals = (mb) => { for (const c of listOf(mb && mb.accepted)) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
   // What the sync's catch-up with the phrase's other wallets changed (the library runs one at most
   // every ten minutes): coins they made taken in, coins of this store they gave up dropped.
   const caughtUp = (c) => {
@@ -743,6 +765,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         let pw = null; try { pw = ctx.store.getItem(NODE_PASSWORD_KEY) } catch {}
         await S.client.open(m, pw || undefined)
         S.info = await run('info')
+        noteUnreachable(unreachableOf(S.info, 'info'))
         // A wallet joined by itself is opened only under the key the page pins.
         if (auto && !joinedOperator(ctx.store, tag())) checkPinned(S.info && S.info.operator, auto, 'the wallet')
         setJoined(ctx.store, tag())
@@ -853,7 +876,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try {
       const v = await run('sync')
       log(`[leaves] sync at open: ${now() - tSync} ms`)
-      arrivals(v && v.mailbox); caughtUp(v && v.caught_up)
+      synced(v)
       S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
     try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
@@ -1142,7 +1165,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         S.busy = true; render()
         try {
           const v = await run('sync')
-          arrivals(v && v.mailbox); caughtUp(v && v.caught_up)
+          synced(v)
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
         try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
@@ -1164,7 +1187,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try {
           const v = await run('sync')
           S.heldFor = null
-          arrivals(v && v.mailbox); caughtUp(v && v.caught_up)
+          synced(v)
           S.lastSync = { at: now(), value: v, auto: false }
           await careIfDue()
           return v
@@ -1236,7 +1259,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const until = now() + RELEASE_WAIT_MS
     for (;;) {
       while (yieldToPerson && S.asked && now() < until) await sleep(500)
-      try { const v = await run('sync'); arrivals(v && v.mailbox); caughtUp(v && v.caught_up); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
+      try { const v = await run('sync'); synced(v); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
       let cs = null
       try { cs = await run('coins'); S.coins = cs || [] } catch {}
       if (cs && releaseDone(cs, coins)) return
@@ -1266,7 +1289,23 @@ export function mountLeaves (ctx, root, settingsRoot) {
       c.appendChild(el('div', 'status', `${S.releasing.command}: the unplanned leaves fall short, so ${S.releasing.coins.length} planned leaf(s) (${S.releasing.coins.map(short).join(', ')}) are given up in the next round for leaves no plan names; the payment is asked again once that round is final.`))
       root.appendChild(c)
     }
-    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderChannels(); renderBond(); renderSupply(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
+    if (S.unreachable) {
+      const c = card('The operator cannot be reached'); c.id = 'leafUnreachable'
+      c.appendChild(el('div', 'warn', S.unreachable.note || S.unreachable.why))
+      c.appendChild(el('div', 'sub', `Since ${new Date(S.unreachable.since).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}. Each leaf below still goes home from this wallet's record and the chain alone: its Exit drill asks nothing of the operator.`))
+      root.appendChild(c)
+    }
+    // Each panel on its own: one that cannot be drawn says so in its place, and never hides the
+    // leaves and their exit drill below it.
+    const panels = [['Balances per rail', renderRails], ['Board', renderBoard], ['Receive', renderReceive], ['Send', renderSend],
+      ['Leaves and their dates', renderCoins], ['Exit drill', renderDrill], ['Sync and schedule', renderSync], ['Kept by itself', renderCare],
+      ['Channels', renderChannels], ['Bond', renderBond], ['Supply', renderSupply], ['Participations', renderParticipations], ['Refusals', renderRefusals]]
+    for (const [name, draw] of panels) {
+      try { draw() } catch (e) {
+        log(`[leaves] the ${name} panel: ${(e && e.stack) || e}`)
+        const c = card(name); c.appendChild(errBox({ message: 'This panel could not be drawn: ' + ((e && e.message) || e) })); root.appendChild(c)
+      }
+    }
   }
 
   function renderJoin () {
@@ -1485,7 +1524,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     c.appendChild(kv('Due now', s.due ? 'yes' : 'no'))
     if (s.why) c.appendChild(kv('Why', s.why))
     if (S.nextAsk) c.appendChild(kv('This page asks again', new Date(S.nextAsk).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')))
-    for (const rq of s.receive_requests || []) {
+    for (const rq of listOf(s.receive_requests)) {
       c.appendChild(kv('Receive request ' + short(rq.owner || ''), `${rq.state}; handed out ${when(rq.asked_at, s.now)}; ${rq.state === 'lapsed' ? 'lapsed ' + when(rq.lapsed_at, s.now) : 'lapses ' + when(rq.lapses_at, s.now)}`))
     }
     const b = button('Sync now', () => syncNow()); b.id = 'btnLeafSync'; b.disabled = S.busy
@@ -1496,13 +1535,18 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (ls.error) c.appendChild(errBox(ls.error))
       else {
         const v = ls.value || {}
-        const mb = v.mailbox || {}
+        const mb = (v.mailbox && typeof v.mailbox === 'object') ? v.mailbox : {}
         const sum = el('div', 'leaf-sync-summary')
-        sum.appendChild(el('div', null, `Mailbox: ${(mb.accepted || []).length} accepted, ${(mb.refused || []).length} refused, ${(mb.waiting || []).length} waiting`))
-        for (const a of mb.accepted || []) sum.appendChild(el('div', 'sub', `accepted ${short(a.leaf_id)}: ${amt(a.asset, a.value)}, ${a.state}${a.note ? '; ' + a.note : ''}`))
-        for (const a of mb.refused || []) sum.appendChild(el('div', 'sub leaf-refusal', `refused: ${a.reason || JSON.stringify(a)}`))
-        for (const p of v.participations || []) sum.appendChild(el('div', 'sub', `participation ${short(p.participation)}: ${p.state}${p.note ? '; ' + p.note : ''}`))
-        for (const e of v.exits || []) sum.appendChild(el('div', 'sub', `exit ${short(e.leaf_id)}: ${e.state}${e.next ? '; ' + e.next : ''}${e.error ? '; ' + e.error : ''}`))
+        if (v.unreachable) sum.appendChild(el('div', 'warn leaf-unreachable', `The operator could not be reached: ${v.unreachable.why || ''}`))
+        sum.appendChild(el('div', null, `Mailbox: ${listOf(mb.accepted).length} accepted, ${listOf(mb.refused).length} refused, ${listOf(mb.waiting).length} waiting`))
+        for (const a of listOf(mb.accepted)) sum.appendChild(el('div', 'sub', `accepted ${short(a.leaf_id)}: ${amt(a.asset, a.value)}, ${a.state}${a.note ? '; ' + a.note : ''}`))
+        for (const a of listOf(mb.refused)) sum.appendChild(el('div', 'sub leaf-refusal', `refused: ${a.reason || JSON.stringify(a)}`))
+        for (const p of listOf(v.participations)) sum.appendChild(el('div', 'sub', `participation ${short(p.participation)}: ${p.state}${p.note ? '; ' + p.note : ''}`))
+        for (const e of listOf(v.exits)) sum.appendChild(el('div', 'sub', `exit ${short(e.leaf_id)}: ${e.state}${e.next ? '; ' + e.next : ''}${e.error ? '; ' + e.error : ''}`))
+        // A part the library could not read, said in its words rather than left out.
+        for (const k of ['mailbox', 'participations', 'exits', 'forfeits', 'boards', 'transfers', 'refresh', 'held', 'lightning', 'offboards', 'owed', 'deposits', 'reboards', 'orders', 'resting', 'plans']) {
+          const err = partError(v[k]); if (err) sum.appendChild(el('div', 'sub leaf-refusal', `${k}: ${err}`))
+        }
         c.appendChild(sum)
         const pre = el('pre', 'mono leaf-result'); pre.textContent = JSON.stringify(v, null, 1)
         const d = el('details'); d.appendChild(el('summary', 'sub', 'What sync answered')); d.appendChild(pre); c.appendChild(d)
@@ -1939,7 +1983,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   async function changeMode (m) {
     setWalletMode(ctx.store, tag(), m)
     if (ctx.onModeChange) try { ctx.onModeChange(m) } catch {}
-    if (m === 'developer') { try { await start() } catch (e) { S.error = { what: 'open', e } } }
+    if (m === 'developer') { try { await start() } catch (e) { log('[leaves] open: ' + ((e && e.stack) || e)); S.error = { what: 'open', e } } }
     else watchMailbox()
     render()
   }
@@ -1983,10 +2027,31 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return out
   }
 
+  // ---- every coin home, from the wallet's record and the chain alone ----
+  // What default mode offers while the operator cannot be reached (and developer mode's exit drill
+  // does a coin at a time): default-arca.js's homeQuote and homeTake, on this wallet's library.
+  // Nothing here asks the operator, and nothing is decided here: which coin can go, its path, its
+  // fees and its claim are the library's. What this page sent, and when, is kept for its words.
+  const homeKept = () => { try { return JSON.parse(ctx.store.getItem(tagged(HOME_KEY, tag())) || '{}') || {} } catch { return {} } }
+  const keepHome = (m) => { try { ctx.store.setItem(tagged(HOME_KEY, tag()), JSON.stringify(m)) } catch {} }
+  const homeQuote = () => quoteHome(run, S.coins, listOf(S.channels).map((c) => c && c.leaf_id))
+  async function takeHome (q) {
+    const r = await homeTake(run, q, { now, log })
+    keepHome({ ...homeKept(), ...r.kept })
+    schedule()
+    return r
+  }
+  function homeUnderWay () {
+    const kept = homeKept()
+    const r = underWay(S.coins, kept, !!S.unreachable)
+    if (S.coins && S.coins.length && Object.keys(r.kept).length !== Object.keys(kept).length) keepHome(r.kept)
+    return r.list
+  }
+
   const api = {
     state: S,
     render,
-    start: async () => { try { await start() } catch (e) { S.error = { what: 'open', e }; render() } },
+    start: async () => { try { await start() } catch (e) { log('[leaves] open: ' + ((e && e.stack) || e)); S.error = { what: 'open', e }; render() } },
     // Leaf atoms of an asset, for the Balance tab's rows and headline total.
     mode: () => walletMode(ctx.store, tag()),
     setMode: (m) => changeMode(m),
@@ -2018,6 +2083,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (ctx.onChange) try { ctx.onChange() } catch {}
     },
     syncNow,
+    // ---- every coin home (default mode's "Take my coins home") ----
+    // While the operator cannot be reached, as the library last said: the coins that could go home
+    // ({ leaf_id, asset, value }) and since when; else null.
+    homeOffer: () => {
+      if (!S.open || !S.unreachable) return null
+      const coins = homeCoins(S.coins).map((c) => ({ leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? '') }))
+      return coins.length ? { coins, since: S.unreachable.since } : null
+    },
+    // Each coin's exit, quoted: { quotes: [{ coin, quote }], channels: [coin], refused: [{ coin, error }] }.
+    homeQuote: () => asking(async () => { while (S.busy) await sleep(50); return act('home_quote', () => homeQuote()) }),
+    // Broadcasts what homeQuote quoted, each on the fees it showed: { started, refused }.
+    takeHome: (q) => asking(async () => { while (S.busy) await sleep(50); return act('home', () => takeHome(q)) }),
+    homeUnderWay,
     // ---- default mode (default-arca.js) ----
     // What of an asset is arriving (held, not yet spendable), in atoms.
     arriving: (hex) => arrivingAtoms(shown(), hex) + expecting(hex),

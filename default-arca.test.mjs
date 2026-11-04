@@ -182,3 +182,33 @@ test('the page names the other operators\' watchtowers, and nothing else', () =>
   assert.deepEqual(defaultWatchtowers({}), [])
   assert.equal(defaultWatchtowers({ watchtowers: Array(12).fill('https://t') }).length, 8)
 })
+
+test('taking every coin home: what it moves and what the holder pays, by asset, from the quotes', async () => {
+  const { homeSummary, homeOnWay, homeHours } = await import('./default-arca.js')
+  const A = 'aa'.repeat(32); const B = 'bb'.repeat(32)
+  const q = {
+    quotes: [
+      { coin: { leaf_id: '1', asset: A, value: '1000' }, quote: { exit_delay_seconds: 130000, steps: [{ fee: [{ asset: A, amount: '192' }], paid_by: 'its own reserve' }, { fee: [{ asset: B, amount: '7' }], paid_by: 'a fee coin of the wallet\'s' }], claim: { fee: [{ asset: A, amount: '88' }] } } },
+      { coin: { leaf_id: '2', asset: A, value: '500' }, quote: { exit_delay_seconds: 1000, steps: [], claim: { error: 'not yet' } } },
+    ],
+    channels: [{ leaf_id: 'c', asset: B, value: '40' }],
+    refused: [{ coin: { leaf_id: '3', asset: A, value: '9' }, error: new Error('no') }],
+  }
+  const s = homeSummary(q)
+  assert.equal(s.count, 3)
+  assert.equal(s.delaySeconds, 130000)
+  const a = s.assets.find((x) => x.asset === A)
+  assert.equal(a.atoms, 1500n)
+  assert.deepEqual(a.fees, [{ asset: B, atoms: 7n }, { asset: A, atoms: 88n }], 'a step its reserve pays costs the holder nothing')
+  assert.deepEqual(s.assets.find((x) => x.asset === B), { asset: B, atoms: 40n, fees: [] })
+  assert.deepEqual(s.refused, [{ asset: A, atoms: 9n }])
+  assert.equal(homeSummary(null).count, 0)
+  assert.equal(homeHours(130000), 37)
+  assert.equal(homeHours(0), 0)
+  const now = 10_000_000
+  assert.deepEqual(homeOnWay([{ asset: A, value: '10', at: now - 3600_000, delay: 7200 }, { asset: A, value: '5', at: now, delay: null }], now), [{ asset: A, atoms: 15n, hours: 1 }])
+  for (const w of [DEFAULT_WORDS.homeWhen(37), DEFAULT_WORDS.homeWhen(0), DEFAULT_WORDS.homeOnWay('1', 'USDX', 3), DEFAULT_WORDS.homeOnWay('1', 'USDX', 0),
+    DEFAULT_WORDS.homeAsset('1', 'USDX', '0.1 USDX'), DEFAULT_WORDS.homeNotNow('1', 'USDX'), DEFAULT_WORDS.homeLine, DEFAULT_WORDS.homeNothing]) {
+    assert.deepEqual(forbiddenIn(w), [], w)
+  }
+})

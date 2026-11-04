@@ -1781,7 +1781,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
@@ -7391,6 +7391,7 @@ function renderBalance(){
     if(anyPriced && pricesStale()){ const n=el('div','bal-total-note stale', 'rates may be stale · '+(_pricesTs==null?'feed not reached':'updated '+_ageStr(Date.now()-_pricesTs)+' ago')); card.appendChild(n); }
   }
   try{ updateRateStaleBadge(); }catch{}
+  try{ renderHomeCard(list); }catch(e){ console.warn('[home] card:', e?.message ?? e); }
 
   // BTC (parent chain) leads only because it is the other chain, not a privileged unit.
   rowFull({ ticker:'BTC', refKey:'BTC', precision:8, onchainAtoms:btcBal, kind:'BTC',
@@ -8422,6 +8423,66 @@ function buildSendPset(rows, fee){
 }
 
 // ---------- review + broadcast (shared) ----------
+// When the service that holds the wallet's coins for instant payments does not answer, the coins
+// still go home, from what the wallet holds and the chain alone (leaves.js homeOffer): one card
+// above the list, in both modes, with one button, and a line for each asset on its way home. Its
+// words are default mode's (docs/DEFAULT_MODE.md, "When the service does not answer").
+function renderHomeCard(list){
+  let box=$('homeCard');
+  if(!box){ box=el('div','card home-card'); box.id='homeCard'; list.parentNode.insertBefore(box, list); }
+  box.innerHTML='';
+  let offer=null, way=[];
+  try{ offer = leavesApi && leavesApi.homeOffer ? leavesApi.homeOffer() : null; }catch{}
+  try{ way = leavesApi && leavesApi.homeUnderWay ? homeOnWay(leavesApi.homeUnderWay(), Date.now()) : []; }catch{}
+  if(!offer && !way.length){ box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  for(const w of way){ const m=assetMeta(w.asset); box.appendChild(el('div','sub home-onway', DEFAULT_WORDS.homeOnWay(fmtAmount(w.atoms, m.precision||0), m.ticker, w.hours))); }
+  if(offer){
+    box.appendChild(el('p','home-line', DEFAULT_WORDS.homeLine));
+    const b=el('button','primary', DEFAULT_WORDS.homeButton); b.id='btnTakeHome'; b.onclick=()=>takeHomeDialog();
+    const r=el('div','row'); r.style.marginTop='8px'; r.appendChild(b); box.appendChild(r);
+  }
+}
+async function takeHomeDialog(){
+  const amt=(h, a)=>{ const m=assetMeta(h); return fmtAmount(a, m.precision||0)+' '+m.ticker; };
+  const m=el('div','modal'); const c=el('div','card'); m.appendChild(c); document.body.appendChild(m);
+  c.appendChild(el('label','lbl', DEFAULT_WORDS.homeTitle));
+  const body=el('div','home-review'); c.appendChild(body);
+  const st=el('div','status'); st.innerHTML='<span class="spin"></span>'+esc(DEFAULT_WORDS.homeQuoting); c.appendChild(st);
+  const act=el('div','row'); act.style.marginTop='16px';
+  const ok=el('button','primary', DEFAULT_WORDS.homeConfirm); ok.id='btnTakeHomeConfirm'; ok.disabled=true;
+  const no=el('button','ghost','Cancel'); no.onclick=()=>m.remove();
+  act.appendChild(ok); act.appendChild(no); c.appendChild(act);
+  let q=null;
+  try{ q=await leavesApi.homeQuote(); }catch(e){ console.warn('[home] quote:', e?.message ?? e); }
+  const sum=q ? homeSummary(q) : { assets: [], refused: [], count: 0, delaySeconds: 0 };
+  st.className='status'; st.textContent='';
+  for(const a of sum.assets){
+    const fees=a.fees.filter(f=> f.atoms > 0n).map(f=> amt(f.asset, f.atoms)).join(' + ');
+    const mm=assetMeta(a.asset);
+    body.appendChild(el('div','kv-line home-asset', DEFAULT_WORDS.homeAsset(fmtAmount(a.atoms, mm.precision||0), mm.ticker, fees)));
+  }
+  if(sum.count) body.appendChild(el('p','sub', DEFAULT_WORDS.homeWhen(homeHours(sum.delaySeconds))));
+  for(const r of sum.refused){ const mm=assetMeta(r.asset); body.appendChild(el('p','sub', DEFAULT_WORDS.homeNotNow(fmtAmount(r.atoms, mm.precision||0), mm.ticker))); }
+  for(const r of (q && q.refused) || []) console.warn('[home] not now:', r.coin.leaf_id, r.error?.message ?? r.error);
+  if(!sum.count){ st.className='status err'; st.textContent=DEFAULT_WORDS.homeNothing; return; }
+  ok.disabled=false;
+  ok.onclick=async()=>{
+    ok.disabled=true; no.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>'+esc(DEFAULT_WORDS.homeWorking);
+    let r=null; try{ r=await leavesApi.takeHome(q); }catch(e){ console.warn('[home] take:', e?.message ?? e); }
+    no.disabled=false; no.textContent='Done'; ok.classList.add('hide');
+    const gone=new Map(), back=new Map();
+    for(const s of (r && r.started) || []) gone.set(s.coin.asset, (gone.get(s.coin.asset)||0n) + BigInt(s.coin.value));
+    for(const s of (r && r.refused) || []){ back.set(s.coin.asset, (back.get(s.coin.asset)||0n) + BigInt(s.coin.value)); console.warn('[home] refused:', s.coin.leaf_id, s.error?.message ?? s.error); }
+    body.innerHTML='';
+    const hours=homeHours(sum.delaySeconds);
+    for(const [h, a] of gone){ const mm=assetMeta(h); body.appendChild(el('div','sub home-onway', DEFAULT_WORDS.homeOnWay(fmtAmount(a, mm.precision||0), mm.ticker, hours))); }
+    for(const [h, a] of back){ const mm=assetMeta(h); body.appendChild(el('div','sub', DEFAULT_WORDS.homeNotNow(fmtAmount(a, mm.precision||0), mm.ticker))); }
+    st.className = gone.size ? 'status ok' : 'status err'; st.textContent = gone.size ? '' : DEFAULT_WORDS.homeNothing;
+    try{ renderBalance(); }catch{}
+  };
+}
+
 function modalRows(rows){
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl', rows.title));

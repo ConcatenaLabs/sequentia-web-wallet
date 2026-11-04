@@ -96,6 +96,31 @@ In practice:
   still trades, and is still found by a picker's search; it only leaves the list and the pickers'
   first rows. Hiding is kept for each wallet.
 
+## When the service does not answer
+
+The coins a wallet holds for instant payments rest with a service. If that service stops
+answering, the coins are still the wallet's, and the wallet can take them home to its own
+address from what it holds and the chain alone, without the service.
+
+- While the service does not answer, Balance shows one card above the list: "The service that
+  holds your coins for instant payments is not answering. Your coins are still yours: wait for
+  it to come back, or take them home to your own address now." and one button, **Take my coins
+  home**. The figures stay as they are. The card goes once the service answers again.
+- The button opens a review, **"Take your coins home?"**, with one line for each asset:
+  "<amount> <TICKER>, network fees about <fee> <TICKER>", the fees being what the holder pays,
+  in the asset taken home, then "They reach your own
+  address in about <hours> hours, and cannot be sent until then. Open this wallet again after
+  that to finish." A coin that cannot go now says "<amount> <TICKER> cannot be taken home right
+  now. Nothing of it was sent: try again later." The button is **Take them home**.
+- Once sent, each asset reads "<amount> <TICKER> on its way to your own address: it arrives in
+  about <hours> hours, once this wallet is open.", in the review and on the card, until it has
+  arrived; it stays in the figure meanwhile. Where the wallet no longer knows when it was sent
+  (another browser sent it), the line is "<amount> <TICKER> on its way to your own address."
+- When nothing can go, the review says "None of your coins can be taken home right now. Nothing
+  was sent: try again later."
+- Developer mode keeps its own way: Leaves names the operator as unreachable and lists every leaf
+  with its Exit drill, one leaf at a time, each step and fee shown before it is broadcast.
+
 ## Asset pickers
 
 Every place a person chooses an asset, on every surface (Trade's You pay and You receive, Send's
