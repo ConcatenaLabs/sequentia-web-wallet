@@ -174,7 +174,7 @@ async function main () {
   const rDir = join(out, 'rester'); mkdirSync(rDir, { recursive: true })
   const rCfg = join(rDir, 'config.json')
   writeFileSync(rCfg, JSON.stringify({ operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
-    makers: [], relay: relay.url, genesis: st.genesis_hash, pairs_file: join(out, 'pairs-used.json'), exit_delay_units: 1 }), { mode: 0o600 })
+    makers: [], relay: relay.url, genesis: st.genesis_hash, pairs_file: join(out, 'pairs-used.json'), exit_delay_units: 1, upkeep: false }), { mode: 0o600 })
   const rPort = await freePort()
   const rProc = spawn(process.execPath, [join(here, 'user-mode-wallet.mjs'), '--dir', rDir, '--port', String(rPort), '--config', rCfg], { stdio: ['ignore', 'pipe', 'pipe'] })
   children.push(rProc)

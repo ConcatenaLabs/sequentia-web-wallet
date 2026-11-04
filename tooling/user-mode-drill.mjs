@@ -213,7 +213,7 @@ async function regtestStack () {
   // The operator fronts every coin a round refreshes from its own: give it enough to start.
   await H.c('/fund_server', { asset: X, amount: 200000000 }); await H.c('/fund_server', { asset: Y, amount: 200000000 }); await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
-    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits, ...(ONCHAIN ? { onchain: await onchainConfig(st) } : {}) }
+    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits, upkeep: false, ...(ONCHAIN ? { onchain: await onchainConfig(st) } : {}) }
   const btcRpcs = BTC ? st.btc_lightning.wallets : null
   // Each wallet holds ten coins of 3,000,000 of each asset, as a wallet funded a little at a time
   // does: what a trade leaves as change, and must settle in the next round, is then small.
@@ -362,7 +362,7 @@ async function everyPairStack (file) {
   for (const a of A) await H.c('/fund_server', { asset: a.id, amount: atomsOf(a.id, 5000) })
   await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
-    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits, ...(ONCHAIN ? { onchain: await onchainConfig(st) } : {}) }
+    makers: [maker.url], relay: relay.url, genesis: st.genesis_hash, exit_delay_units: exitUnits, upkeep: false, ...(ONCHAIN ? { onchain: await onchainConfig(st) } : {}) }
   // Each wallet holds five coins of $100 of each asset.
   const COINS = 5
   const coinList = A.map((a) => ({ asset: a.id, coin: atomsOf(a.id, 100) }))
@@ -445,7 +445,7 @@ async function testnetStack (file) {
   const X = c.assets.x.id, Y = c.assets.y.id
   const pw = readFileSync(c.operator.node_password_file, 'utf8').trim()
   const walletConfig = { operator: { server: c.operator.server, node_url: c.operator.node_url, node_user: c.operator.node_user, node_password: pw },
-    makers: c.makers, relay: c.relay, genesis: c.genesis }
+    makers: c.makers, relay: c.relay, genesis: c.genesis, upkeep: false }
   let restarts = 0
   async function fund (wallets) {
     // Each wallet asks the live maker, which pays it in the tree from its own leaves.

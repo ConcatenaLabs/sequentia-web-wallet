@@ -865,7 +865,7 @@ install):
 node --test
 ```
 
-This runs every `*.test.mjs` file, at the root and under `tooling/lsp/`. Most register
+This runs every `*.test.mjs` file, at the root and under `tooling/`. Most register
 `node:test` cases. The rest are standalone scripts with their own `check()` harness, which
 `node --test` runs as one test each, among them `seqln.test.mjs`, `xcourier.test.mjs`,
 `xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the
@@ -983,6 +983,15 @@ the wallet kit as the page does (`tooling/user-mode-onchain-node.mjs`, needing a
 `Network.regtestWithGenesis` in `LWK_PKG`), and the last wallet holds coins on the chain only, as a
 new wallet does: covenant orders are then also taken on the chain (`onchain-fill`). In every mode
 a pair is admitted with the sources that settled at least one of its trades.
+
+`tooling/user-mode-wallet.mjs` run on its own is a headless wallet that trades through the
+composer's engine over HTTP, as the testnet's volume wallets do. Left running, it keeps itself as
+the page keeps a wallet in user mode (`tooling/wallet-upkeep.mjs`): it syncs every minute, which
+refreshes at once a coin the operator names as all that holds a lowest node back (the change of
+the wallet's own payment among them), and gives up what it received out of round in the
+operator's next round every two minutes, each between trades, so the operator's fronted value
+comes back. `GET /upkeep` says when each last ran and what it answered. `"upkeep": false` in its
+configuration turns this off, as the drill and the drive do: they count every coin a trade moves.
 
 `node tooling/user-mode-btc-drive.mjs <evidence-dir>` drives user mode's BTC trades in headless
 Chromium against the same harness started with `ARCA_OPERATOR_LIGHTNING=1` and
