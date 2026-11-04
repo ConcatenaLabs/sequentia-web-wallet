@@ -298,7 +298,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   receive") exchanges them: each asset takes the other's place and the amount typed goes with its
   asset, so 100 USDX typed under You pay is 100 USDX under You receive. When the book cannot fill
   what is typed: "The book can fill up to <amount> <TICKER> now." (never for what the price's
-  rounding leaves, less than one atom of what is received). Review then shows the exact amounts
+  rounding leaves, less than one atom of what is received); when a maker takes more only once
+  what it received is settled (the share of the operator's bond it holds unsettled at once is
+  spent for now): "The book can fill up to <amount> <TICKER> now, and more in a few minutes.", or,
+  with nothing to fill until then, "<TICKER> for <TICKER> can be traded again in a few minutes." Review then shows the exact amounts
   and fees: what is paid can be a few atoms below what was typed, when the price leaves a
   remainder too small to buy anything, and that remainder stays in the wallet. Until Review, the
   amount that follows the price is an estimate and reads as one: "about" beside it. While Review

@@ -98,6 +98,10 @@ export const USER_WORDS = Object.freeze({
   balance: (x) => `balance ${x}`,
   // What the book can fill now, when less than asked: said beside the amounts as they are typed.
   bookUpTo: (x) => `The book can fill up to ${x} now.`,
+  // The same, when a maker takes more only after its coins are next settled, a few minutes on.
+  bookUpToSoon: (x) => `The book can fill up to ${x} now, and more in a few minutes.`,
+  // Nothing to fill now for that reason alone.
+  notOfferedSoon: (get, pay) => `${get} for ${pay} can be traded again in a few minutes.`,
   review: 'Review',
   confirm: 'Trade',
   cancel: 'Cancel',
@@ -408,10 +412,14 @@ export function createEngine (deps) {
       const got = await Promise.all((deps.makers ? deps.makers() : []).map(async (m) => {
         try {
           const q = await deps.fetchJson(m + '/v1/quotes')
-          return makerEntries(m, q.quotes, { payAsset, receiveAsset }).filter((e) => sources.includes(e.source))
+          const es = makerEntries(m, q.quotes, { payAsset, receiveAsset }).filter((e) => sources.includes(e.source))
+          // A pair the maker takes more of only after its next round, its quotes cut to nothing.
+          if ((q.after_next_round || []).some((x) => x && x.give_asset === receiveAsset && x.want_asset === payAsset)) es.soon = true
+          return es
+
         } catch (e) { log('[user trade] maker', m, 'did not answer:', e && e.message); return [] }
       }))
-      for (const g of got) out.push(...g)
+      for (const g of got) { out.push(...g); if (g.soon) out.soon = true }
     }
     const onchain = sources.includes('onchain-fill') && deps.onchain
     const wantBook = (sources.includes('covenant-round') || sources.includes('leaf-resting') || onchain) && deps.relayBook
@@ -443,7 +451,9 @@ export function createEngine (deps) {
         }
       } catch (e) { log('[user trade] the book did not answer:', e && e.message) }
     }
-    return out.filter((e) => nearFeed(e, payAsset, receiveAsset))
+    const near = out.filter((e) => nearFeed(e, payAsset, receiveAsset))
+    if (out.soon) near.soon = true
+    return near
   }
 
   // Whether an entry's price is within reach of the price feed's: an entry giving more than twice,
@@ -563,7 +573,7 @@ export function createEngine (deps) {
         catch (e) {
           log('[user trade] maker firm:', e.message)
           // The maker holds less than its quote now (its last trade spent some): ask for half.
-          if (/does not hold that much/.test(String(e.message))) {
+          if (/does not hold that much|after its next round/.test(String(e.message))) {
             give = give / 2n
             if (give < entry.minReceive) return null
             continue
@@ -759,8 +769,9 @@ export function createEngine (deps) {
   // best single-step source for paying `pay`, or the least paid to receive `receive`. No maker is
   // asked for firm terms (a firm offer holds the maker's coins); Review does that, fees and all.
   // The book's entries are read once every few seconds per pair.
-  // -> { ok: true, pay, receive, short: { pay, receive } | null (the most one source fills now) }
-  //  | { ok: false, why: 'not-listed'|'not-offered'|'too-small' }
+  // -> { ok: true, pay, receive, short: { pay, receive, soon? } | null (the most one source fills
+  //       now; `soon` when a maker takes more after its next round) }
+  //  | { ok: false, why: 'not-listed'|'not-offered'|'soon'|'too-small' }
   const estimates = new Map()
   async function estimate ({ payAsset, receiveAsset, pay, receive }) {
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
@@ -773,11 +784,13 @@ export function createEngine (deps) {
       estimates.set(key, c)
     }
     const es = c.es.filter((e) => (e.source !== 'btc-gateway' || deps.btc) && big(e.maxReceive) > 0n)
-    if (!es.length) return { ok: false, why: 'not-offered' }
+    // A maker that takes more only after its next round (its instant budget is spent for now).
+    const soon = !!c.es.soon || es.some((e) => e.soon)
+    if (!es.length) return { ok: false, why: soon ? 'soon' : 'not-offered' }
     const cdiv = (a, b) => (a + b - 1n) / b
     let most = null
     for (const e of es) { const r = big(e.maxReceive); if (!most || r > most.receive) most = { receive: r, pay: cdiv(r * e.rateNum, e.rateDen) } }
-    const out = (p, r, short) => ({ ok: true, pay: String(p), receive: String(r), short: short ? { pay: String(most.pay), receive: String(most.receive) } : null })
+    const out = (p, r, short) => ({ ok: true, pay: String(p), receive: String(r), short: short ? { pay: String(most.pay), receive: String(most.receive), ...(soon ? { soon: true } : {}) } : null })
     if (pay != null) {
       const A = big(pay)
       if (A <= 0n) return { ok: false, why: 'too-small' }

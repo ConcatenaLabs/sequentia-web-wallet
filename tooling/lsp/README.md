@@ -256,9 +256,26 @@ pool, fee, service, founder, drip) is refused at start.
   "operator": { "server": "https://host/arca", "node_url": "http://127.0.0.1:18891/", "node_user": "user", "node_password_file": "/var/lib/leaf-maker/node-password" },
   "pairs": [ { "give": "<asset id>", "want": "<asset id>", "rate_num": "1", "rate_den": "1", "min_give": "10000" } ],
   "fee_margin": "2000", "board_keep": "100000",
-  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "max_coins": 32
+  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "max_coins": 32,
+  "instant_budget": "0.1"
 }
 ```
+
+### Its instant budget
+
+What the maker receives in a swap rests on an out-of-round lineage until its next round refreshes
+it, and a double-sign by the operator could take it, together with every other counterparty's.
+So the maker holds unrefreshed at most a share of the operator's bond (`instant_budget`, default
+`"0.1"`, a tenth; `"off"` for none), which it sets in its leaf library at start (`arca
+instant-budget`; the arca CLI README). The library values the bond at the maker's node's rate for
+the bond's asset, so a lower price lowers the budget at once, and takes the lower of this share
+and the one the operator suggests in `info.bond`. On every pass the maker reads the room left
+(`bond`'s `instant_budget.room_atoms`) and cuts its in-tree quotes to it: a cut quote carries
+`after_next_round: true`, and a pair cut to nothing is named in the answer's `after_next_round`
+list. A firm offer past the room is answered 409 "the maker takes this much after its next round"
+(`after_next_round: true`), as is the library's own refusal past the budget, which also has the
+maker refresh every coin it received at once. A wallet then says the rest can be traded in a few
+minutes.
 
 ### Its trades in the market's trade log (`trade-report.mjs`)
 

@@ -131,14 +131,15 @@ export function mountUserComposer (ctx) {
     const e = await ctx.engine.estimate({ payAsset: S.pay, receiveAsset: S.get, ...(S.fixed === 'pay' ? { pay: String(atoms) } : { receive: String(atoms) }) })
     if (seq !== S.estSeq || S.ticket) return
     if (!e.ok) {
-      S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall : USER_WORDS.notOffered(name(S.get), name(S.pay))
+      S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall
+        : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       if (other && doc.activeElement !== other) other.value = ''
       paintNote(); return
     }
     const fill = S.fixed === 'pay' ? ctx.fmtAtoms(big(e.receive), prec(S.get)) : ctx.fmtAtoms(big(e.pay), prec(S.pay))
     if (other && doc.activeElement !== other) other.value = fill
     if (S.fixed === 'pay') S.recv = fill; else S.amount = fill
-    S.note = e.short ? USER_WORDS.bookUpTo(amt(S.get, e.short.receive)) : ''
+    S.note = e.short ? (e.short.soon ? USER_WORDS.bookUpToSoon : USER_WORDS.bookUpTo)(amt(S.get, e.short.receive)) : ''
     paintNote()
     paintAbout()
   }
