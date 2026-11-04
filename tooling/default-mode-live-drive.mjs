@@ -20,6 +20,10 @@
 //   node tooling/default-mode-live-drive.mjs <work-dir> <step> <name> [args…]
 //     [--base http://127.0.0.1:8791/wallet/]
 //
+// The faucet pays each asset once per wallet; with the faucet token (tooling/cdp-page.mjs,
+// ~/.config/sequentia/faucet-exempt.token) the drive's requests are our own tooling's and are
+// paid every time.
+//
 // Each step writes screenshots and timings to <work-dir>/evidence, and every check to its log.
 // Profiles are kept under <work-dir>/profiles/<name>, so a wallet carries from step to step; the
 // phrases are kept out of the evidence directory.

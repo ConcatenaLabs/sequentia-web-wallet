@@ -3,7 +3,7 @@
 //
 // Needs a Chromium: CHROMIUM=/path/to/chrome, or one of the usual places.
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 
@@ -12,6 +12,18 @@ export function chromium () {
     join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome')]
   return c.find((p) => p && existsSync(p))
 }
+
+// The testnet faucet pays each asset once per wallet, and never refuses our own tooling: a request
+// that carries the token the box keeps for it, as `X-Faucet-Exempt`, is neither checked nor
+// recorded (sequentia-faucet, "Once per wallet"). A drive reads it from FAUCET_EXEMPT_TOKEN_FILE,
+// else ~/.config/sequentia/faucet-exempt.token, and adds it to its pages' requests to the live
+// site's /faucet (FAUCET_ORIGIN, https://sequentiatestnet.com unless set) and to nothing else.
+// Without it a drive asks the faucet as any tester does.
+export function faucetToken (env = process.env) {
+  const f = env.FAUCET_EXEMPT_TOKEN_FILE || join(homedir(), '.config/sequentia/faucet-exempt.token')
+  try { const t = readFileSync(f, 'utf8').trim(); return t.length >= 32 ? t : null } catch { return null }
+}
+const FAUCET_ORIGIN = process.env.FAUCET_ORIGIN || 'https://sequentiatestnet.com'
 
 export class Page {
   constructor (bin = chromium(), { profile } = {}) {
@@ -59,6 +71,12 @@ export class Page {
     this.ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data)
       if (m.id && this.pending.has(m.id)) { this.pending.get(m.id)(m); this.pending.delete(m.id) }
+      if (m.method === 'Fetch.requestPaused') {
+        const q = m.params
+        const headers = Object.entries(q.request.headers || {}).filter(([k]) => k.toLowerCase() !== 'x-faucet-exempt').map(([name, value]) => ({ name, value }))
+        if (this.faucetToken && q.request.url.startsWith(FAUCET_ORIGIN + '/faucet')) headers.push({ name: 'X-Faucet-Exempt', value: this.faucetToken })
+        this.send('Fetch.continueRequest', { requestId: q.requestId, headers }).catch(() => {})
+      }
       if (m.method === 'Runtime.exceptionThrown') this.errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text)
       if (m.method === 'Runtime.consoleAPICalled') {
         const text = m.params.args.map((a) => a.value ?? a.description).join(' ')
@@ -67,6 +85,8 @@ export class Page {
       }
     }
     await this.send('Runtime.enable'); await this.send('Page.enable')
+    this.faucetToken = faucetToken()
+    if (this.faucetToken) await this.send('Fetch.enable', { patterns: [{ urlPattern: FAUCET_ORIGIN + '/faucet*', requestStage: 'Request' }] })
   }
 
   send (method, params = {}) {
