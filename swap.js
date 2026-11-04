@@ -5337,7 +5337,7 @@ async function bridgedSteps(){
     // for it to lapse, then reveal P and take the asset while our dead hold collects nothing).
     if (!(Number(b.hold_expiry_secs) > 0)){ b.state = 'failed'; b.detail = 'This trade could not be placed right now - try again shortly.'; saveBridge(); return; }
     if (L.connectBtcNode){ const prov = await L.connectBtcNode(); if (!(prov && prov.connected)) throw new Error('This trade could not be placed right now - try again shortly.'); }
-    if (L.channelInbound){ try { await L.channelInbound({ node_key: b.btc_node_key, amount: Number(b.btc_amount) }); } catch {} }
+    if (L.channelInbound){ try { await L.channelInbound({ node_key: b.btc_node_key, asset: 'BTC', amount: Number(b.btc_amount) }); } catch {} }
     const inv = await L.nodeInvoice({ node_key: b.btc_node_key, amount: Number(b.btc_amount), payment_hash: b.hash_h, expiry: Math.ceil(Number(b.hold_expiry_secs)) });
     if (!(inv && inv.node_id)) throw new Error('This trade could not be placed right now - try again shortly.');
     b.recv_node_id = inv.node_id; saveBridge();
@@ -6203,7 +6203,7 @@ async function driveSubswap(rec){
         },
         mintHold: async ({ hashH, preimage, msat, expirySecs }) => {
           const sats = Math.ceil(Number(msat) / 1000);
-          try { if (L.channelInbound) await L.channelInbound({ node_key, amount: sats }); } catch {}
+          try { if (L.channelInbound) await L.channelInbound({ node_key, asset: 'BTC', amount: sats }); } catch {}
           // Pass P so the node can mint a PLAIN bolt11 that auto-settles on payment (RunMakerSubmarine needs
           // Bolt11 != ''); the settle-with-P loop remains the HODL fallback if the node returns no bolt11.
           const inv = await L.nodeInvoice({ node_key, amount: sats, payment_hash: hashH, preimage, expiry: expirySecs });

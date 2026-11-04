@@ -21,6 +21,22 @@ export function hostedNodeAsset(rec) {
   return HEX64.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
 }
 
+// What a request for room to receive (POST /channel/inbound, GET /channel/inbound/quote) is for:
+// 'BTC', the asset it names as given (an id or an alias, resolved by the caller), or null. A request
+// that names no asset is for what the node it names holds: room on a Bitcoin node is BTC, room on a
+// Sequentia node is that node's asset. The node key already says which chain the room is on, and a
+// wallet asking for room on its Bitcoin node may leave the asset out; refusing that ("asset must be
+// BTC or a Sequentia asset id") left the node with no room, so a maker paying it BTC found no route
+// and cancelled its hold (WIRE_TEMPORARY_NODE_FAILURE at the taker).
+export function inboundRequestAsset(asset, rec) {
+  const a = String(asset ?? '').trim();
+  if (/^btc$/i.test(a)) return 'BTC';
+  if (a) return a;
+  if (!rec) return null;
+  if ((rec.chain || 'seq') === 'btc') return 'BTC';
+  return hostedNodeAsset(rec);
+}
+
 // The asset an invoice is paid in: what the node's `decode` reports, else what the invoice's own `a`
 // field reads (a node that predates the field reports none). null for a Bitcoin invoice.
 export function invoiceAsset(decoded, bolt11) {

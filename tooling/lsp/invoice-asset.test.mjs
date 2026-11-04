@@ -1,7 +1,7 @@
 // invoice-asset.mjs: which invoices a hosted node may pay, and what its own invoices name.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { payAssetVerdict, hostedInvoiceArgs, hostedNodeAsset, invoiceAsset, payFailureReason } from './invoice-asset.mjs';
+import { payAssetVerdict, hostedInvoiceArgs, hostedNodeAsset, invoiceAsset, payFailureReason, inboundRequestAsset } from './invoice-asset.mjs';
 
 const GOLD = 'd024f89a8119d84ecf31fcabc87bc94e2b7d7966bc47dfb76b6237e75f2defdb';
 const SILV = 'ab'.repeat(32);
@@ -47,4 +47,18 @@ test('a payee whose invoice offers no way in cannot receive yet; other misses ar
   assert.equal(payFailureReason({ decoded: { routes: [[{ pubkey: '02cd' }]] }, error: unreachable }), 'no_route');
   assert.equal(payFailureReason({ decoded: {}, error: 'failed: WIRE_UNKNOWN_NEXT_PEER' }), 'no_route');
   assert.equal(payFailureReason({ decoded: {}, error: 'pay: Ran out of routes to try' }), null);
+});
+
+test('room to receive that names no asset is for what the named node holds', () => {
+  // A Bitcoin node: BTC (the case a wallet's pure-Lightning sell for BTC sends).
+  assert.equal(inboundRequestAsset(undefined, btcNode), 'BTC');
+  assert.equal(inboundRequestAsset('', btcNode), 'BTC');
+  // A Sequentia node: its own asset.
+  assert.equal(inboundRequestAsset(undefined, goldNode), GOLD);
+  // A named asset is kept as given, BTC in any case.
+  assert.equal(inboundRequestAsset('btc', goldNode), 'BTC');
+  assert.equal(inboundRequestAsset('GOLD', btcNode), 'GOLD');
+  assert.equal(inboundRequestAsset(SILV, null), SILV);
+  // Nothing named, no node known: nothing to sell.
+  assert.equal(inboundRequestAsset(undefined, null), null);
 });
