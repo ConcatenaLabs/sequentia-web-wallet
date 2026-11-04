@@ -4,7 +4,8 @@
 // machine with nothing else in between:
 //
 //   /operator/…  -> the operator's server (its /v1/ calls)
-//   /node        -> the node's JSON-RPC (the wallet's chain source)
+//   /node        -> the node's JSON-RPC (the wallet's chain source), with the harness node's
+//                   credential when the wallet names none
 //   /seqob/…     -> an order-book relay (seqobd), when --seqob names one
 //   /api/…       -> an esplora HTTP API, when --esplora names one
 //   /prices      -> a price feed read from a JSON file, when --prices names one
@@ -53,9 +54,13 @@ function body (req) {
   })
 }
 
-async function proxy (req, res, target) {
+async function proxy (req, res, target, auth) {
   const headers = {}
   for (const h of ['content-type', 'authorization']) if (req.headers[h]) headers[h] = req.headers[h]
+  // A wallet that names no node credential (default mode's, as on the public page, whose proxy
+  // adds its own; it may send an empty one) is given the harness node's.
+  const named = headers.authorization && Buffer.from(headers.authorization.replace(/^Basic\s+/i, ''), 'base64').toString() !== ':'
+  if (auth && !named) headers.authorization = auth
   const b = req.method === 'GET' ? undefined : await body(req)
   try {
     const r = await fetch(target, { method: req.method, headers, body: b })
@@ -89,7 +94,7 @@ const srv = createServer(async (req, res) => {
     }
     if (p === '/node' || p === '/node/') {
       const s = await state()
-      return proxy(req, res, s.node_url)
+      return proxy(req, res, s.node_url, s.node_user ? 'Basic ' + Buffer.from(`${s.node_user}:${s.node_password}`).toString('base64') : null)
     }
   } catch (e) {
     res.writeHead(502); res.end(String(e.message)); return

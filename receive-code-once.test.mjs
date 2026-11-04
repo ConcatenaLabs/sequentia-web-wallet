@@ -90,7 +90,7 @@ test('a code paid while Receive is open is replaced at the next read', async () 
   api.stop()
 })
 
-test('Receive draws a new code when the library says the shown one was used', () => {
+test('Receive draws a new code when the library says the shown one was used, or the channels it names changed', () => {
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
-  assert.match(html, /onEvent: \(name, data\)=>\{ if\(name==='codeUsed'\)\{ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch\+\+; try\{ renderReceive\(\); \}catch\{\} \}/)
+  assert.match(html, /onEvent: \(name, data\)=>\{ if\(name==='codeUsed' \|\| name==='channelsChanged'\)\{ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch\+\+; try\{ renderReceive\(\); \}catch\{\} \}/)
 })

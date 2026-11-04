@@ -2755,11 +2755,14 @@ async function treeSendReview(r, onDone){
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
+  // The wallet's own channel reads wait while the review is open, so Send never waits for one.
+  try{ leavesApi.holdReads(120_000); }catch{}
+  { const no=m.querySelector('button.ghost'); if(no){ const was=no.onclick; no.onclick=(e)=>{ try{ leavesApi.holdReads(0); }catch{} return was && was.call(no, e); }; } }
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
     const t0=performance.now();
     try{
-      await leavesApi.payCode(r.addr.trim(), atoms, r.asset);
+      await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
       console.log('[tree send] paid in', ms, 'ms');
@@ -3938,13 +3941,15 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='codeUsed'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='codeUsed' || name==='channelsChanged'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{ const j=await askFaucetFor(body); try{ markFaucet(); }catch{} return j; },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
     // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
+    // A page out of view reads its channels less often (leaves.js watchChannels).
+    visible: ()=> typeof document==='undefined' || document.visibilityState!=='hidden',
     claimsEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CLAIMS_MS)) || undefined,
     // Default mode joins the page's operator by itself (default-arca.js), once its server shows the pinned key.
     pinned: ()=> (typeof window!=='undefined') ? window.SEQ_ARCA : null,
@@ -3954,6 +3959,8 @@ function initLeaves(){
     onOpen: ()=>{ try{ renderBalance(); }catch{} try{ renderReceive(); }catch{} },
     onBoarded: ()=>{ setTimeout(()=>{ try{ sync(); }catch{} }, 1500); },
   }, $('leavesRoot'), $('devModeRoot'));
+  // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
+  if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
   show('tabLeaves', devMode());
   applyModeClass();
   leavesApi.start();
