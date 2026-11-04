@@ -2,7 +2,7 @@
 // against a stand-in worker that answers as the wallet does.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { arkConfig, routeOf, destination, arkFigures, boardAmount, mountBtcArk, BOARD_MARGIN_SATS, BTC_WORDS, exitNoteOf, fmtBtc } from './btc-ark.js'
+import { arkConfig, routeOf, destination, arkFigures, boardAmount, mountBtcArk, BOARD_MARGIN_SATS, BTC_WORDS, exitNoteOf, fmtBtc, towerExcept } from './btc-ark.js'
 import { decodeBolt11 } from './bolt11.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -22,7 +22,11 @@ test("default mode's BTC words say none of the words default mode never says", (
 
 test('the page names its ark or none', () => {
   assert.deepEqual(arkConfig({ server: 'https://x.test/', esplora: 'https://x.test/testnet4/api', network: 'testnet4' }),
-    { server: 'https://x.test', esplora: 'https://x.test/testnet4/api', network: 'testnet4' })
+    { server: 'https://x.test', esplora: 'https://x.test/testnet4/api', network: 'testnet4', towers: [], towerDeposits: false })
+  // Towers named, deposits only when turned on.
+  const c = arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4', towers: ['https://s/btc-watchtower/', 'nope'], tower_deposits: 'yes' })
+  assert.deepEqual([c.towers, c.towerDeposits], [['https://s/btc-watchtower'], false])
+  assert.equal(arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4', tower_deposits: true }).towerDeposits, true)
   assert.equal(arkConfig(null), null)
   assert.equal(arkConfig({ server: 'x', esplora: 'https://e', network: 'testnet4' }), null)
   assert.equal(arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet3' }), null)
@@ -363,3 +367,53 @@ test('the wallet asks its one rule at open and holds what arrives at the address
   await ark.exitCheck()
   assert.equal(asked.filter((x) => x.command === 'exit_auto').length, n)
 })
+
+// A coin gets either a tower or a renewal the server runs, never both (a scheduled renewal cannot be
+// cancelled with the ark) and never neither: the plan comes first, and the renewals leave out only
+// the coins a tower holds.
+test('towers: the plan before the renewals; deposits only when turned on; never both, never neither', async () => {
+  assert.deepEqual(towerExcept({ covered: [{ vtxo: 'a' }], no_refresh: ['a', 'b'] }, ['c']).sort(), ['a', 'c'])
+  const run = async (cfg, plan, towerAnswers = {}) => {
+    const store = new Map()
+    const posts = []
+    const { w, asked } = standIn({
+      info: () => INFO, balance: () => ({ spendable: '1000', total: '1000' }),
+      catch_up: () => ({ recovered: [], recovered_sat: '0', spent_elsewhere: [], failed: [], complete: true }),
+      tower_plan: (a) => { if (plan instanceof Error) throw plan; return plan(a) },
+      schedule_refreshes: () => ({ scheduled: [] }), refresh: () => ({ refreshed: 0 }),
+    })
+    const fetch = async (url, o = {}) => {
+      if (url.endsWith('/v1/info')) return { ok: true, json: async () => ({ kind: 'bitcoin-ark-watchtower' }) }
+      posts.push({ url, body: JSON.parse(o.body) })
+      const code = towerAnswers[url] ?? 200
+      return { ok: code === 200, status: code }
+    }
+    const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', decode: decodeBolt11, fetch,
+      config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4', towers: ['https://t'], ...cfg }),
+      store: { get: (k) => store.get(k) ?? null, set: (k, v) => v == null ? store.delete(k) : store.set(k, v) } })
+    await ark.open(); await ark.renewDue()
+    for (let i = 0; i < 40 && !asked.some((x) => x.command === 'refresh'); i++) await new Promise((r) => setTimeout(r, 5))
+    ark.close()
+    const order = asked.filter((x) => x.command).map((x) => x.command)
+    const sched = asked.filter((x) => x.command === 'schedule_refreshes').map((x) => x.args.except)
+    return { order, sched, posts, store, plans: asked.filter((x) => x.command === 'tower_plan').map((x) => x.args) }
+  }
+  const plan = () => ({ deposit: [{ tower: 'https://t', vtxo: 'b', claim_txid: 'c1', body: { vtxo: 'B' } }], withdraw: [], covered: [], no_refresh: ['b'] })
+  // Off (the default): the plan is asked with no tower, nothing is sent, and every coin is renewed.
+  const off = await run({}, (a) => { assert.deepEqual(a.towers, []); return { deposit: [], withdraw: [], covered: [], no_refresh: [] } })
+  assert.ok(off.order.indexOf('tower_plan') < off.order.indexOf('schedule_refreshes'), off.order.join(','))
+  assert.deepEqual(off.sched[0], [])
+  assert.equal(off.posts.length, 0)
+  // On: the deposit is sent; a coin the tower took is left out of the renewals and kept.
+  const on = await run({ tower_deposits: true }, plan)
+  assert.deepEqual(on.posts, [{ url: 'https://t/v1/deposit', body: { vtxo: 'B' } }])
+  assert.deepEqual(on.sched[0], ['b'])
+  assert.deepEqual(JSON.parse(on.store.get('btcArk.towers')), [{ tower: 'https://t', vtxo: 'b', claim_txid: 'c1' }])
+  // A deposit the tower refused: the coin is renewed as any other (never neither).
+  const refused = await run({ tower_deposits: true }, plan, { 'https://t/v1/deposit': 503 })
+  assert.deepEqual(refused.sched[0], [])
+  // A plan that fails leaves out the coins a tower holds, and nothing else.
+  const failed = await run({}, new Error('busy'))
+  assert.deepEqual(failed.sched[0], [])
+})
+

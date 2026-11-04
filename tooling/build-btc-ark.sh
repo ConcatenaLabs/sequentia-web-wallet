@@ -35,4 +35,5 @@ for p in "$HOME" "$src" "$cargo_home"; do
 done
 mkdir -p "$ext/btc-ark/pkg"
 cp pkg/bark_wasm.js pkg/bark_wasm.d.ts pkg/bark_wasm_bg.wasm "$ext/btc-ark/pkg/"
+git -C "$src" rev-parse HEAD > "$ext/btc-ark/pkg/BUILT_FROM"
 echo "built from $(git -C "$src" rev-parse --short=8 HEAD): bark_wasm_bg.wasm $(wc -c < pkg/bark_wasm_bg.wasm) bytes, sha256 $(sha256sum pkg/bark_wasm_bg.wasm | cut -c1-16)…, no build-machine path"

@@ -767,7 +767,7 @@ works normally without the restricted rows.
 | `noble-ciphers.js` | Vendored `@noble/ciphers` (MIT): AES-256-GCM for the end-to-end swap encryption. |
 | `jsqr.js` | Vendored jsQR: QR decoding for the scanner. |
 | `tooling/lsp/` | The hosted-SeqLN LSP backend service and provisioning/harness scripts, with [its own README](tooling/lsp/README.md), and the live leaf maker (`leaf-maker.mjs`) user mode trades with. Four of its modules (`settlement-router.mjs`, `unified-book.mjs`, `single-step-book.mjs`, `bridge-driver.mjs`) are also imported by the browser. |
-| `tooling/build-btc-ark.sh` | Builds `btc-ark/pkg` from an arca checkout's `bark-wasm/`, every build-machine path remapped. |
+| `tooling/build-btc-ark.sh` | Builds `btc-ark/pkg` from an arca checkout's `bark-wasm/`, every build-machine path remapped, and names the commit in `btc-ark/pkg/BUILT_FROM`. |
 | `tooling/vesting-live-check.mjs` | Reads a wallet's vesting lines on the public page and checks that Send refuses what has not vested, in headless Chromium; read only. |
 | `tooling/fetch-leaf-wallet.sh` | Puts the arca CI build of the leaf wallet for one master commit into `leaves/pkg`, exactly, with its `BUILT_FROM` and `SHA256SUMS`: what every release commits. |
 | `tooling/build-leaf-wallet.sh` | Builds `leaves/pkg` from a local arca checkout's `wallet-wasm/`, every build-machine path remapped: for trying an unmerged arca change, never committed. |

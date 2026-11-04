@@ -1702,6 +1702,10 @@
     server:  location.origin,
     esplora: location.origin + '/testnet4/api',
     network: 'testnet4',
+    // The Bitcoin ark watchtower this site runs; the wallet deposits its coins there only once
+    // tower_deposits is true.
+    towers: [location.origin + '/btc-watchtower'],
+    tower_deposits: false,
   };
   // The most a payment of an asset to a wallet of another operator goes over Lightning for, in
   // USD (asset-lightning.js): above it, or when the way cannot carry it, it goes to the receive
