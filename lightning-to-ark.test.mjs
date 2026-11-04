@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { amountToMove, withinAllowance, allowanceAtoms, channelLockedIn, payingNode, lightningLegs, minLeaves, btcChannelPart,
   receivesUnderWay, movingOf, channelPart, closeVerdict, isLimitRefusal, mountLightningToArk, MIN_MOVE_SATS,
-  RETRY_MS, LIMIT_WAIT_MS, SIGNER_UNVALUED_ATOMS } from './lightning-to-ark.js'
+  RETRY_MS, LIMIT_WAIT_MS, SIGNER_UNVALUED_ATOMS, withinArk } from './lightning-to-ark.js'
 import { DEFAULT_WORDS } from './default-arca.js'
 import { USER_MODE_FORBIDDEN_WORDS } from './user-trade.js'
 
@@ -103,6 +103,8 @@ function page (o = {}) {
     dev: false, busy: false, paid: [], closes: [], logs: [], changes: 0, received: 'paid', payState: 'none',
     payImpl: o.payImpl || (async () => ({ paid: true })),
     receives: {}, coins: [],
+    // The Bitcoin ark's server, as its info says: Second's mainnet figures.
+    arkInfo: o.arkInfo === undefined ? { max_vtxo_sat: '10000000', min_board_sat: '50000', required_board_confirmations: 2 } : o.arkInfo,
   }
   const deps = {
     dev: () => W.dev, personBusy: () => W.busy, channels: () => W.channels, kindOf,
@@ -116,7 +118,7 @@ function page (o = {}) {
       return r
     },
     payStatus: async () => ({ state: W.payState }),
-    ark: { isOpen: () => true, invoice: async (sats) => ({ invoice: 'lntb' + sats, payment_hash: 'hb' + sats, expires_at: t / 1000 + 600 }), received: async () => ({ state: W.received }), refresh: async () => {} },
+    ark: { isOpen: () => true, invoice: async (sats) => ({ invoice: 'lntb' + sats, payment_hash: 'hb' + sats, expires_at: t / 1000 + 600 }), received: async () => ({ state: W.received }), refresh: async () => {}, info: () => W.arkInfo },
     leaves: {
       isOpen: () => true, info: () => info, coins: () => W.coins, refresh: () => {},
       run: async (cmd, args) => {
@@ -150,6 +152,34 @@ test('BTC: the channel pays an invoice of the wallet\'s own ark, and the figure 
   assert.ok(W.m.ownHashes().has('hb98990'))
   // Not looked at again before RETRY_MS.
   await W.m.tick(); assert.equal(W.paid.length, 1)
+})
+
+test('BTC: a move is held to the largest coin the ark\'s server publishes, the rest moving on a later pass', async () => {
+  assert.equal(withinArk(98990n, { max_vtxo_sat: '10000000' }), 98990n)
+  assert.equal(withinArk(30_000_000n, { max_vtxo_sat: '10000000' }), 10_000_000n)
+  assert.equal(withinArk(30_000_000n, { max_vtxo_sat: null }), 30_000_000n)   // a server that names no largest
+  assert.equal(withinArk(30_000_000n, null), null)                            // not read yet: nothing on a guess
+  assert.equal(withinArk(null, { max_vtxo_sat: '10000000' }), null)
+  // A channel holding 0.3 BTC moves 0.1 BTC now; once that landed, the channel is not closed.
+  const W = page({ channels: [btcCh({ spendable_units: 30_000_000, balance_units: 30_300_000 })] })
+  await W.m.tick()
+  assert.equal(W.paid.length, 1)
+  assert.equal(W.paid[0].bolt11, 'lntb10000000')
+  assert.equal(W.closes.length, 0)
+  // The next pass moves the next 0.1 BTC.
+  W.channels = [btcCh({ spendable_units: 20_000_000, balance_units: 20_200_000 })]
+  W.advance(RETRY_MS + 1); await W.m.tick()
+  assert.equal(W.paid[1].bolt11, 'lntb10000000')
+})
+
+test('BTC: nothing moves before the ark\'s server has said its limits', async () => {
+  const W = page({ arkInfo: null })
+  await W.m.tick()
+  assert.equal(W.paid.length, 0)
+  assert.ok(W.logs.some((l) => /waiting for the ark to say its limits/.test(l)))
+  W.arkInfo = { max_vtxo_sat: '10000000', min_board_sat: '50000' }
+  await W.m.tick()
+  assert.equal(W.paid.length, 1)
 })
 
 test('BTC: a refused payment moves nothing, and is tried again later', async () => {

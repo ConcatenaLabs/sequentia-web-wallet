@@ -51,13 +51,21 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   block height a day ahead when the explorer gives no median time)
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
 - BTC on a Bitcoin ark in default mode: native bitcoin held in Bark's wallet of the same phrase
-  on the ark the page names (Second's server on testnet4), paid in seconds between wallets,
-  over Lightning to any invoice and out to any Bitcoin address, and the BTC side of trades. A
+  on the ark the page names (the testnet's own Bark server on testnet4), paid in seconds between
+  wallets, over Lightning to any invoice and out to any Bitcoin address, and the BTC side of
+  trades. Every limit of the ark is its server's own, read from its `info` at each open and each
+  sync, never written into the page: a board carries at most the server's largest coin
+  (`max_vtxo_sat`, the rest waiting at the address for later boards) and is not made below its
+  least board (`min_board_sat`) or before the server has answered, and a move from the wallet's
+  own Lightning channel is held to the largest coin as well. A
   browser holding the phrase learns from the ark's server, at each open and every five minutes,
   what the phrase's other wallets did (`catch_up`): the coins they boarded or received, and those
   of its own they spent. Each coin's renewal is scheduled with the ark's server whenever the page
   is open (`schedule_refreshes`): the server runs it by itself shortly before the coin's expiry,
-  with the page closed, and the renewed coin is taken in at the next open. When the ark's server
+  with the page closed, and the renewed coin is taken in at the next open. Renewals are made in
+  groups that each fit in the server's largest coin; a coin larger than the server takes now
+  (made before it lowered its limit) is offboarded with the server to the page's own Bitcoin
+  address instead, and boarded again from there. When the ark's server
   refuses the wallet or stops answering and a coin worth its exit is within a day of expiry, the
   wallet takes it to the chain without the server (`exit_auto`): Bark broadcasts the coin's
   pre-signed exit, pays each step's fee from the page's own Bitcoin address and claims the coin to

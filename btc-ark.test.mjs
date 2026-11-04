@@ -2,7 +2,7 @@
 // against a stand-in worker that answers as the wallet does.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { arkConfig, routeOf, destination, arkFigures, boardAmount, mountBtcArk, BOARD_MARGIN_SATS, BTC_WORDS, exitNoteOf, fmtBtc, towerExcept } from './btc-ark.js'
+import { arkConfig, routeOf, destination, arkFigures, boardAmount, mountBtcArk, BOARD_MARGIN_SATS, BOARD_FEERATE, BTC_WORDS, exitNoteOf, fmtBtc, towerExcept } from './btc-ark.js'
 import { decodeBolt11 } from './bolt11.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -66,6 +66,25 @@ test('a board leaves the funding fee and the ark fee, and keeps to the ark bound
   assert.ok(boardAmount([{ value: Number(least), confirmed: true }], info, 330n))
   // More than one coin may hold: the most the ark takes.
   assert.equal(boardAmount([{ value: 9000000, confirmed: true }], info, 330n).amount, 5000000n)
+})
+
+test('a board keeps to the bounds the ark\'s server publishes, never to a guess: Second\'s mainnet figures', () => {
+  // ark.second.tech's GetArkInfo: largest coin 10,000,000 sat, least board 50,000 sat, no board fee.
+  const info = { min_board_sat: '50000', max_vtxo_sat: '10000000', required_board_confirmations: 2 }
+  // A board above the largest is cut to it; the rest stays at the address (change).
+  assert.equal(boardAmount([{ value: 30_000_000, confirmed: true }], info, 0n).amount, 10_000_000n)
+  // So is one from many coins, holding more than the largest in all.
+  assert.equal(boardAmount([{ value: 6_000_000, confirmed: true }, { value: 6_000_000, confirmed: true }], info, 0n).amount, 10_000_000n)
+  // Below the least board (and the margin over it), no board is attempted: 40,000 and 50,500 sat.
+  assert.equal(boardAmount([{ value: 40_000, confirmed: true }], info, 0n), null)
+  assert.equal(boardAmount([{ value: 50_500, confirmed: true }], info, 0n), null)
+  assert.equal(boardAmount([{ value: 51_244, confirmed: true }], info, 0n).amount, 51_000n)
+  // The page's own cap below the largest still holds.
+  assert.equal(boardAmount([{ value: 30_000_000, confirmed: true }], info, 0n, BOARD_FEERATE, 2_000_000n).amount, 2_000_000n)
+  // Before the server's info is read, nothing is boarded.
+  assert.equal(boardAmount([{ value: 30_000_000, confirmed: true }], null, 0n), null)
+  // A server that names no largest coin: everything less the fee.
+  assert.equal(boardAmount([{ value: 30_000_000, confirmed: true }], { min_board_sat: '50000', max_vtxo_sat: null }, 0n).amount, 29_999_756n)
 })
 
 // A stand-in worker: answers 'open' and each command from `answers`, recording what it was asked.
