@@ -22,7 +22,7 @@ test('BTC comes from the faucet too, to the receive code, at its ark address whe
   assert.match(body, /if\(asset==='BTC'\)\{ try\{ await requestFaucetBtc\(\); \}/)
   const j = html.indexOf('async function requestFaucetBtc('); const btc = html.slice(j, html.indexOf('\n}', j))
   assert.match(btc, /buildPayCode\(\{ address, ark: ark\|\|undefined \}\)/)
-  assert.match(btc, /body:JSON\.stringify\(\{address:code,asset:'BTC'\}\)/)
+  assert.match(btc, /askFaucetFor\(\{address:code,asset:'BTC'\}\)/)
   assert.match(btc, /DEFAULT_WORDS\.faucetReceived\(what\)/)
   assert.match(btc, /BTC_WORDS\.sentBlock\(j\.amount\)\.replace\(\/\^Sent\/, 'The faucet sent'\)/)
 })

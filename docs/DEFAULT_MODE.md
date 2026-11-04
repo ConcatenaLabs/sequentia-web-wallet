@@ -153,7 +153,11 @@ modes (`asset-picker.js`):
   instead, in the same click. Its first button is **BTC**: the faucet pays the code's address on
   the Bitcoin ark, and the line reads "Received <amount> BTC." once it is there; while the wallet
   holds no BTC that way yet, it pays the address, and the line reads "The faucet sent <amount>
-  BTC. It arrives after a Bitcoin block."
+  BTC. It arrives after a Bitcoin block." The faucet pays each asset once per wallet: the card says so, a
+  button whose asset the wallet has received reads "<TICKER> received" and is off, and a refusal
+  is the faucet's own sentence ("This wallet has already received its <TICKER> from the faucet.
+  The faucet pays each asset once per wallet. To get more, trade for it in the wallet."), with
+  no second try at the address.
 
 ## Send
 

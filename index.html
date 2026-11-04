@@ -816,7 +816,7 @@
       </div>
       <div class="card">
         <label class="lbl">Testnet faucet</label>
-        <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to your wallet. Network fees are payable in any asset you hold, all on equal footing.</p>
+        <p class="sub" style="margin:0 0 12px">Get free testnet assets to try out the wallet, sent straight to your wallet. Network fees are payable in any asset you hold, all on equal footing. The faucet pays each asset once per wallet; once your wallet has an asset from it, trade for more of it in the wallet.</p>
         <div class="row" id="faucetBtns">
           <button data-faucet="BTC">BTC</button>
           <button data-faucet="USDX">USDX</button>
@@ -1767,6 +1767,7 @@ import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendRep
 import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
+import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
@@ -3496,6 +3497,7 @@ function tab(name){
     closeMore(); }
   if($('btnGear')) $('btnGear').classList.toggle('active', name==='settings');
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
+  if(name==='balance'){ try{ paintFaucet(); }catch{} }
   if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='sign' && !keySignStarted){ keySignStarted=true; $('keySignIndex').value = addrIndex ?? 0; renderKeySign(); }
   if(name==='history') renderHistory();
@@ -3921,12 +3923,7 @@ function initLeaves(){
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(name==='codeUsed'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
-    askFaucet: async (body)=>{
-      const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      const j=await r.json().catch(()=>({}));
-      if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
-      return j;
-    },
+    askFaucet: async (body)=>{ const j=await askFaucetFor(body); try{ markFaucet(); }catch{} return j; },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
     // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
@@ -9029,20 +9026,60 @@ $('btnDoImport').onclick=async()=>{ try{ const f=$('importPhrase'); const m=f.va
 
 $('btnSync').onclick=sync;
 let _faucetWatch=null;   // the wait for the last faucet payment to reach the wallet
+// The faucet pays each asset once per wallet (faucet-wallet.js): every request carries the wallet's
+// id, from the scriptPubKey of its first receive address, and the card marks what it has received.
+let _faucetId=null;      // [walletTag, id]
+async function faucetWallet(){
+  const tag=walletTag();
+  if(_faucetId && _faucetId[0]===tag) return _faucetId[1];
+  const id=await faucetWalletId(wollet.address(0).address().scriptPubkey().bytes());
+  _faucetId=[tag, id];
+  return id;
+}
+let _faucetClaimed=new Set();
+function markFaucet(){
+  if(!_faucetId || _faucetId[0]!==walletTag()) _faucetClaimed=new Set();   // another wallet: read again
+  for(const b of document.querySelectorAll('#faucetBtns button')){
+    const label=faucetLabel(b.dataset.faucet);
+    const got=_faucetClaimed.has(label);
+    b.textContent=got ? FAUCET_WORDS.received(label) : label;
+    b.dataset.received=got ? '1' : '';
+    b.disabled=got;
+  }
+}
+async function paintFaucet(){
+  if(!wollet) return;
+  try{
+    const got=await faucetClaimed(fetch, '/faucet', await faucetWallet());
+    if(got){ _faucetClaimed=got; markFaucet(); }
+  }catch(e){ console.warn('[faucet] what this wallet has received:', e?.message??e); }
+}
+// A faucet answer: its JSON, or an error that says whether the wallet already has the asset.
+async function askFaucetFor(body){
+  const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...body, wallet:await faucetWallet()})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){
+    const e=new Error(j.error||('HTTP '+r.status));
+    if(faucetAlreadyPaid(r.status, j)){ e.alreadyPaid=true; _faucetClaimed.add(j.asset); }
+    throw e;
+  }
+  _faucetClaimed.add(j.asset);
+  return j;
+}
 async function requestFaucet(asset){
   const btns=[...document.querySelectorAll('#faucetBtns button')];
   btns.forEach(b=>b.disabled=true);
   $('faucetStatus').className='status'; $('faucetStatus').innerHTML='<span class="spin"></span>Requesting from the faucet…';
-  if(asset==='BTC'){ try{ await requestFaucetBtc(); }finally{ btns.forEach(b=>b.disabled=false); } return; }
+  if(asset==='BTC'){ try{ await requestFaucetBtc(); }finally{ markFaucet(); } return; }
   // Default mode, coins in the tree: the faucet pays the wallet's receive code, which arrives in
   // seconds; should it refuse that, the address, as before.
   if(!devMode() && leavesApi && leavesApi.isOpen()){
     try{
       const code=await leavesApi.receiveCode();
       const body=asset?{request:code.text,asset}:{request:code.text};
-      const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      const j=await r.json().catch(()=>({}));
-      if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+      let j;
+      try{ j=await askFaucetFor(body); }
+      catch(e){ if(e.alreadyPaid){ $('faucetStatus').className='status err'; $('faucetStatus').textContent=e.message; markFaucet(); return; } throw e; }
       _recvCode=null;
       const what=`${Number(j.amount).toLocaleString()} ${j.asset}`;
       // In the balance at once, as arriving, until the wallet has taken it in.
@@ -9051,7 +9088,7 @@ async function requestFaucet(asset){
       await leavesApi.syncNow();
       $('faucetStatus').textContent=DEFAULT_WORDS.faucetReceived(what);
       renderBalance(); renderReceive();
-      btns.forEach(b=>b.disabled=false);
+      markFaucet();
       return;
     }catch(e){ console.warn('[faucet] to the receive code:', e?.message??e, '; to the address instead'); }
   }
@@ -9060,9 +9097,7 @@ async function requestFaucet(asset){
     // spends + change stay non-confidential). The confidential (tsqb1) form is opt-in.
     const addr=wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential().toString();
     const body=asset?{address:addr,asset}:{address:addr};
-    const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    const j=await askFaucetFor(body);
     $('faucetStatus').className='status ok';
     const say=(lead, tail)=>{ const fs=$('faucetStatus'); fs.textContent=lead;
       fs.appendChild(txLink('/explorer/tx/'+j.txid, String(j.txid).slice(0,16)+'…'));
@@ -9079,8 +9114,8 @@ async function requestFaucet(asset){
       if(seen){ clearInterval(_faucetWatch); say(`Received ${what} ✓ · `, ' · it is in your balance.'); }
       else if(Date.now()>until) clearInterval(_faucetWatch);
     }, 3000);
-  }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent='Faucet error: '+(e?.message??e); }
-  finally{ btns.forEach(b=>b.disabled=false); }
+  }catch(e){ $('faucetStatus').className='status err'; $('faucetStatus').textContent=e.alreadyPaid ? e.message : 'Faucet error: '+(e?.message??e); }
+  finally{ markFaucet(); }
 }
 // BTC from the faucet (testnet4): it pays the wallet's receive code, at its address on the Bitcoin
 // ark when the wallet holds BTC there (in seconds), else at the address (after a Bitcoin block).
@@ -9091,9 +9126,7 @@ async function requestFaucetBtc(){
     let ark=null;
     if(btcArk && btcArk.isOpen()){ try{ ark=(await btcArk.run('address')).address; }catch(e){ console.warn('[faucet] ark address:', e?.message??e); } }
     const code=buildPayCode({ address, ark: ark||undefined });
-    const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:code,asset:'BTC'})});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    const j=await askFaucetFor({address:code,asset:'BTC'});
     const what=`${j.amount} BTC`;
     fs.className='status ok';
     if(j.ark){
@@ -9105,7 +9138,7 @@ async function requestFaucetBtc(){
       fs.textContent=BTC_WORDS.sentBlock(j.amount).replace(/^Sent/, 'The faucet sent');
       setTimeout(sync, 8000);
     }
-  }catch(e){ fs.className='status err'; fs.textContent='Faucet error: '+(e?.message??e); }
+  }catch(e){ fs.className='status err'; fs.textContent=e.alreadyPaid ? e.message : 'Faucet error: '+(e?.message??e); }
 }
 document.querySelectorAll('#faucetBtns button').forEach(b=>{ b.onclick=()=>requestFaucet(b.dataset.faucet); });
 $('btnAddRec').onclick=addRecipientRow;

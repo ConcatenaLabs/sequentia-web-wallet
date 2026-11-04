@@ -109,11 +109,14 @@ Open **https://sequentiatestnet.com/wallet/** in a modern desktop or mobile brow
 (WebAssembly and `localStorage` required; the live QR camera additionally needs a secure
 context, which the live site is). Create a new wallet or restore one from a 12-word phrase.
 
-Get testnet funds from the **Issuance** tab: one-click faucet buttons for BTC (testnet4), tSEQ
+Get testnet funds from the **Balance** tab: one-click faucet buttons for BTC (testnet4), tSEQ
 and the demo assets USDX, EURX, GOLD, SILVR, OILX (the faucet at
 https://sequentiatestnet.com/faucet pays the wallet's receive code; BTC lands on the Bitcoin ark,
 where the wallet holds it, in seconds). The line under the buttons says when the coins have reached
-the wallet.
+the wallet. The faucet pays each asset once per wallet: a button whose asset the wallet has
+received reads "<TICKER> received" and is off, and more of that asset comes from trading for it.
+The wallet names itself to the faucet by its id (`faucet-wallet.js`), the same for one phrase in
+every Sequentia wallet.
 
 The tabs: Balance, Send, Receive, Swap and History in the top row; Mix, Issuance, Stake, Sign,
 Help and Report a problem under **More**; Settings behind the gear in the header. On a phone the same tabs are a bar
@@ -179,7 +182,7 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   pays it what was promised before signing its own inputs. A BTC lane, when the coordinator
   opens one, pegs the BTC into SBTC (pegged bitcoin) for the round and back out
   afterwards. Without a reachable coordinator the tab shows a status line and no lanes.
-- **Issuance**: faucet, issue a new asset (amount, 0 to 8 decimal places, and whether more can be
+- **Issuance**: issue a new asset (amount, 0 to 8 decimal places, and whether more can be
   issued later, which gives the wallet one reissuance token), reissue an asset whose token the
   wallet holds or burn any asset, and label unknown assets. The name, ticker and decimal places
   typed at issuance label the asset in this wallet, and its token shows in the balance marked as
@@ -766,6 +769,7 @@ works normally without the restricted rows.
 | `btc-ark.js` | BTC on the Bitcoin ark: the route of a BTC payment (an invoice, an Ark address, a Bitcoin address), the board of confirmed BTC from the page's own key, the composer's `deps.btc` on the ark, and the exit without the ark's server (Bark's unilateral exit, fees paid from the page's own Bitcoin coins, claimed to its address) with what default mode says about it. No DOM. |
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
 | `asset-lightning.js` | Default mode's rule for an asset sent to a receive code of another operator: over Lightning (the code's invoice in the asset, within the limit in USD, the operator able to carry it, its lock within the operator's window), or the code's address and why. No DOM. |
+| `faucet-wallet.js` | The wallet's id for the testnet faucet (sha256 of a tag and the scriptPubKey of its first receive address, the same in Ambra browser and Ambra mobile), the read of the assets it has already received, and the words of the faucet card. |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |
