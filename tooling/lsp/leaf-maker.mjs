@@ -37,6 +37,9 @@
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --held ASSET (atoms it holds in leaves)
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --pay FILE   (pays the receive
 //            requests in FILE from its leaves, in the tree; for a drill's wallets)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --receive ASSET ATOMS   (a receive
+//            request for at most ATOMS of ASSET, cut to its instant budget's room; another
+//            maker's --pay then moves those coins to it in the tree)
 // The one-shot modes open the maker's store: stop its service first.
 //
 // The configuration (JSON) names the maker's own wallet and nothing else's:
@@ -316,6 +319,25 @@ async function main () {
     const st = ((await cmd('balance')).arca || {})[process.argv[hi + 1]] || {}
     console.log(String(Object.values(st).reduce((n, v) => n + big(v), 0n)))
     process.exit(0)
+  }
+  // --receive ASSET ATOMS: a receive request for at most ATOMS of ASSET into the maker's leaves,
+  // cut to the room its instant budget leaves, so a payment to it is not refused for holding too
+  // much out of round; prints { request, atoms } (request null and atoms "0" when there is no room
+  // until its next round, error when the library refuses) and exits. How the box moves a maker's
+  // coins to another maker in the tree: this on the receiver, then --pay on the payer.
+  const ri = process.argv.indexOf('--receive')
+  if (ri > 0) {
+    const [asset, want] = process.argv.slice(ri + 1, ri + 3)
+    if (!/^[0-9a-f]{64}$/.test(asset || '') || !(big(want) > 0n)) { console.error('usage: --receive <asset hex> <atoms>'); process.exit(2) }
+    try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+    let atoms = big(want)
+    try { const room = budgetRoom(await cmd('bond', {})); if (room && room.has(asset) && room.get(asset) < atoms) atoms = room.get(asset) } catch (e) { log('bond:', e.message) }
+    if (atoms <= 0n) { console.log(JSON.stringify({ request: null, atoms: '0' })); process.exit(0) }
+    try {
+      const r = await cmd('receive', { asset, amount: String(atoms) })
+      console.log(JSON.stringify({ request: r.request, atoms: String(atoms) }))
+      process.exit(0)
+    } catch (e) { console.log(JSON.stringify({ request: null, atoms: '0', error: e.message })); process.exit(3) }
   }
   // --pay FILE: pays each receive request in FILE (one a line) from the maker's leaves, out of
   // round, in the tree, then exits: how a drill's wallets are funded from the maker.
