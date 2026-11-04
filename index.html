@@ -4206,6 +4206,7 @@ function initLnToArk(){
     pay: async (p)=>{ const r = await lnApi.nodePay(p); if(!(r && r.paid)) throw new Error((r && r.error) || 'the payment did not complete'); return r; },
     payStatus: (p)=> seqlnNodePayStatus(p),
     ark: { isOpen: ()=> !!btcArk && btcArk.isOpen(), invoice: (sats, d)=> btcArk.invoice(sats, d), received: (h)=> btcArk.received(h), refresh: ()=> btcArk.refresh(),
+      info: ()=> btcArk && btcArk.isOpen() ? btcArk.info() : null,
       claimable: ()=> btcArk && btcArk.isOpen() ? btcArk.figures().claimable : null },
     leaves: { isOpen: ()=> !!leavesApi && leavesApi.isOpen(), info: ()=> leavesApi.info(), coins: ()=> leavesApi.coins() || [],
       run: (c, a)=> leavesApi.own(c, a), refresh: ()=> leavesApi.refreshSoon() },
@@ -4542,6 +4543,8 @@ function initUserComposer(){
     session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
     knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor,
     isHidden: isAssetHidden, refValue: refValueStr,
+    // The confirmations the Bitcoin ark's server waits for before a board's BTC can be traded.
+    btcMoveBlocks: ()=> (btcArk && btcArk.info() && Number(btcArk.info().required_board_confirmations)) || null,
     admittedReceives: (pay)=> admittedReceives(servedPairs(_userPairs, leavesApi ? leavesApi.supervisedAssets() : []), _genesis, pay),
     // The chosen pair's market, from the relay's one trade log (market-view.js).
     market: { relay: ()=> seqob.seqobBase(), pairOf: (a, b)=> displayPair(a, b) },

@@ -242,15 +242,19 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 `BTC_WORDS` (`btc-ark.js`).
 
 - BTC that arrives at the address and is confirmed moves there by itself, counted once in the
-  figure while it moves (developer mode shows "<amount> BTC arriving" until it can be spent).
+  figure while it moves (developer mode shows "<amount> BTC arriving" until it can be spent). Each
+  move keeps to the limits the ark's server publishes, never to figures of the page's own: at
+  most its largest coin, the rest waiting at the address for the next move, and none below its
+  least or before the server has said them.
 - BTC a wallet holds where it cannot be sent in seconds (its own Lightning channel, in a wallet
-  made before BTC was held this way) moves there by itself too, and stays spendable where it is
-  until it has. Its channel, once emptied, is closed to the wallet's own address
+  made before BTC was held this way) moves there by itself too, at most the ark's largest coin at
+  a time, and stays spendable where it is until it has. Its channel, once emptied, is closed to the wallet's own address
   (`lightning-to-ark.js`; the same move for assets is under Balance).
 - The wallet keeps what it holds there current by itself, and arranges each time it is open for
   that to go on while it is closed. Nothing is shown or asked. BTC kept current while the wallet
   was closed is "<amount> BTC arriving" for the moment it takes the wallet to take it in when it
-  opens.
+  opens. A coin larger than the service takes now moves to the wallet's own Bitcoin address
+  instead of being renewed, and back in from there, with nothing shown.
 - When the service holding BTC for instant payments refuses to renew it or stops answering, and
   BTC there would need renewing within a day, the wallet moves it to its own Bitcoin address by
   itself, paying the Bitcoin network fees from that address. Only BTC worth more than the move
