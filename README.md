@@ -572,6 +572,11 @@ in the middle of a trade:
   routing fee capped at the one the ticket shows. A sale for more BTC than the node has room to
   receive, or a purchase with more than it can pay, is not offered.
 
+The coins a trade brings are yours to use at once, before their round settles them. A coin you
+pay on before then (the next trade often does) leaves nothing of that trade to settle: the trade
+reads Settled once a round that took the coin is released, or at once when the coin was paid on
+out of round. A round that will not run, or one the library no longer lists, is asked for again.
+
 Of the trades that can fill the amount you pay, it takes the one that gives you the most, then
 the one with the fewest parties left to act. A trade whose coin is yours only after Bitcoin
 blocks (a take paid in the operator's round, or a fill on the chain) is taken over one that hands
