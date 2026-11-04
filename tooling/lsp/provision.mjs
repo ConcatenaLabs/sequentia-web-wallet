@@ -133,6 +133,44 @@ export function shouldClearNode({ lightningdAges = [], hasOrphanProxy = false, g
   return hasOrphanProxy;
 }
 
+// Where the hosted nodes run. Under systemd, a service's processes all sit in its control group,
+// and stopping or restarting the service stops every one of them, `detached` or not: that is what
+// took every hosted node and relay down with each LSP restart. So when the LSP runs as a systemd
+// service with the right to make units (root), each lightningd and each relay is started in a
+// transient scope of its own (`systemd-run --scope`) in one slice, `seqln-hosted.slice`: it
+// outlives the LSP, and the LSP finds it again at its next start (the boot re-attach in
+// lsp-server.mjs). Anywhere else (a test, a laptop, a box without systemd) they are plain detached
+// children, as they always were. LSP_NODE_SCOPE=1 or 0 overrides the choice; LSP_NODE_SLICE names
+// another slice.
+export function scopePlan({ env = process.env, uid = (typeof process.getuid === 'function' ? process.getuid() : -1),
+  exists = fs.existsSync, probe = null } = {}) {
+  const slice = env.LSP_NODE_SLICE || 'seqln-hosted.slice';
+  const bin = ['/usr/bin/systemd-run', '/bin/systemd-run'].find((p) => exists(p)) || null;
+  const want = env.LSP_NODE_SCOPE;
+  if (want === '0') return { scope: false, why: 'LSP_NODE_SCOPE=0' };
+  if (!bin) return { scope: false, why: 'no systemd-run on this machine' };
+  if (want !== '1') {
+    if (uid !== 0) return { scope: false, why: 'not root' };
+    if (!env.INVOCATION_ID || !exists('/run/systemd/system')) return { scope: false, why: 'not run by systemd' };
+  }
+  // Asked once, at start: a machine where the scope cannot be made gets plain children rather
+  // than nodes that never start.
+  const ok = probe ? probe(bin, slice) : (() => {
+    try { execFileSync(bin, ['--scope', '--quiet', '--collect', `--slice=${slice}`, '--', 'true'], { timeout: 15000, stdio: 'ignore' }); return true; }
+    catch { return false; }
+  })();
+  if (!ok) return { scope: false, why: 'systemd-run --scope failed here' };
+  return { scope: true, bin, slice };
+}
+
+// The command that starts `cmd args` as a hosted process under `plan`: in a scope of its own in the
+// slice, or as itself. systemd-run --scope execs the command once the scope exists, so the pid
+// spawned is the command's own.
+export function hostedCommand(plan, cmd, args, what) {
+  if (!plan || !plan.scope) return { cmd, args };
+  return { cmd: plan.bin, args: ['--scope', '--quiet', '--collect', `--slice=${plan.slice}`, `--description=${what}`, '--', cmd, ...args] };
+}
+
 // A provisioning context, built once from the LSP env.
 export function makeProvisioner(opts) {
   const CFG = {
@@ -165,6 +203,9 @@ export function makeProvisioner(opts) {
   };
   fs.mkdirSync(CFG.dir, { recursive: true });
   const REG = path.join(CFG.dir, 'registry.json');
+  const SCOPE = opts.scopePlan || scopePlan();
+  console.log(SCOPE.scope ? `[prov] hosted nodes run in scopes of their own in ${SCOPE.slice}: an LSP restart leaves them running`
+    : `[prov] hosted nodes run as detached children of the LSP (${SCOPE.why})`);
 
   // Boot debounce (idempotency): bootNode spawns a lightningd + a ws relay, so two
   // near-simultaneous provision calls for the SAME down node (e.g. the wallet AND the
@@ -444,14 +485,15 @@ export function makeProvisioner(opts) {
       SEQLN_SIGNER_PEER_PUBKEY: (deviceTransportPubkey || rec.deviceTransportPubkey),
     };
     const lnLog = fs.openSync(path.join(rec.dir, 'boot.out'), 'a');
-    const ld = spawn(CFG.lightningd,
-      // --database-upgrade=true is REQUIRED: the seqln binary carries an irreversible
-      // 285->286 DB migration (the robustness/watchtower schema). Without it, a prov
-      // node whose DB predates the migration refuses to boot ("Refusing to irreversibly
-      // upgrade db"), exits immediately, and the device just sees "target closed" — i.e.
-      // the user's hosted Lightning silently never comes up after a binary cutover.
+    // --database-upgrade=true is REQUIRED: the seqln binary carries an irreversible
+    // 285->286 DB migration (the robustness/watchtower schema). Without it, a prov
+    // node whose DB predates the migration refuses to boot ("Refusing to irreversibly
+    // upgrade db"), exits immediately, and the device just sees "target closed" — i.e.
+    // the user's hosted Lightning silently never comes up after a binary cutover.
+    const ldCmd = hostedCommand(SCOPE, CFG.lightningd,
       [`--lightning-dir=${rec.dir}`, `--network=${rec.network}`, '--developer', '--database-upgrade=true'],
-      { env, detached: true, stdio: ['ignore', lnLog, lnLog] });
+      `hosted Lightning node ${path.basename(rec.dir)}`);
+    const ld = spawn(ldCmd.cmd, ldCmd.args, { env, detached: true, stdio: ['ignore', lnLog, lnLog] });
     ld.unref();
     // The relay: ws front -> the proxy's Noise responder. --tcp-retry-ms rides out the
     // gap before lightningd execs the proxy (which binds the responder at startup).
@@ -461,9 +503,10 @@ export function makeProvisioner(opts) {
     let relayPid = (rec.pids && rec.pids.relay) || null;
     if (!relayRunning(readProcTable(), rec.wsPort)) {
       const relayLog = fs.openSync(path.join(rec.dir, 'relay.out'), 'a');
-      const rl = spawn(CFG.node,
+      const rlCmd = hostedCommand(SCOPE, CFG.node,
         [CFG.wsRelay, '--ws-port', String(rec.wsPort), '--tcp', `127.0.0.1:${rec.signerPort}`, '--tcp-retry-ms', '120000'],
-        { detached: true, stdio: ['ignore', relayLog, relayLog] });
+        `ws relay of hosted Lightning node ${path.basename(rec.dir)}`);
+      const rl = spawn(rlCmd.cmd, rlCmd.args, { detached: true, stdio: ['ignore', relayLog, relayLog] });
       rl.unref();
       relayPid = rl.pid;
     }
