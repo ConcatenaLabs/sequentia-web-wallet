@@ -27,6 +27,9 @@
 //   settle wallet <name> settles every coin it holds in the tree that is not a leaf of a round (kind batch)
 //          (developer mode's Settle now: the quote, then Sign and hand over), and stays open until
 //          each is a live leaf of a round, up to 30 minutes; written to <work>/<name>.coins.json
+//   home   wallet <name> takes every coin it holds in the tree home in default mode: with the operator
+//          unreachable, Balance's Take my coins home, the review, then Take them home; what each
+//          said and every transaction broadcast, written to <work>/<name>.home.json
 //   exit   wallet <name> takes every coin it holds in the tree home in developer mode's exit
 //          drill: for each, the quote (what it broadcasts and its fees), then Broadcast on these
 //          fees, and what the run did, all written to <work>/<name>.exit.json. With the page
@@ -454,6 +457,44 @@ async function main () {
       await shot(page, `${name}-exit.png`)
     }
     note('console: ' + page.console.filter((l) => /leaves|exit|operator|server|refus/i.test(l)).slice(-10).join(' | '))
+    await page.stop()
+  } else if (step === 'home') {
+    // Default mode's own way home: with the operator unreachable (the page served by
+    // tooling/live-proxy.mjs --refuse /arca), Balance shows one card and Take my coins home; the
+    // review, then Take them home. What each said, and every transaction the library broadcast (its
+    // `[leaves] home:` lines), are written to <work>/<name>.home.json.
+    const page = await openWallet(name)
+    await page.eval("(()=>{ const c=document.querySelector('#modeUser'); if(c && !c.checked){ c.checked=true; c.dispatchEvent(new Event('change')) } return true })()")
+    await tab(page, 'balance')
+    const t = Date.now()
+    const card = await page.waitFor("(()=>{ const b=document.querySelector('#btnTakeHome'); return b && b.offsetParent !== null ? document.querySelector('#homeCard').innerText : false })()", 900000)
+    note(`the card shows ${secs(Date.now() - t)} after open: ${card.replace(/\n+/g, ' | ')}`)
+    const words = forbiddenIn(card)
+    check('the card says none of leaf, round, operator, tree, exit…', !words.length, words)
+    await shot(page, `${name}-home-1-card.png`)
+    await click(page, '#btnTakeHome')
+    const review = await page.waitFor("(()=>{ const m=document.querySelector('.modal'); if(!m) return false; const ok=document.querySelector('#btnTakeHomeConfirm'); const st=m.querySelector('.status'); return (ok && !ok.disabled) || (st && /err/.test(st.className)) ? m.innerText : false })()", 900000)
+    note('review: ' + review.replace(/\n+/g, ' | '))
+    check('the review says none of the words default mode never says', !forbiddenIn(review).length, forbiddenIn(review))
+    await shot(page, `${name}-home-2-review.png`)
+    const out = { card, review }
+    if (await page.eval("!!(document.querySelector('#btnTakeHomeConfirm') && !document.querySelector('#btnTakeHomeConfirm').disabled)")) {
+      const t2 = Date.now()
+      await click(page, '#btnTakeHomeConfirm')
+      out.result = await page.waitFor("(()=>{ const m=document.querySelector('.modal'); const ok=document.querySelector('#btnTakeHomeConfirm'); return m && ok && ok.classList.contains('hide') ? m.innerText : false })()", 1800000)
+      note(`result in ${secs(Date.now() - t2)}: ${out.result.replace(/\n+/g, ' | ')}`)
+      check('every coin is on its way home', /on its way to your own address/.test(out.result) && !/cannot be taken home/.test(out.result), out.result.replace(/\n+/g, ' | '))
+      await shot(page, `${name}-home-3-sent.png`)
+      await click(page, '.modal button.ghost')
+      await sleep(3000)
+      out.after = await page.eval("document.querySelector('#homeCard') ? document.querySelector('#homeCard').innerText : ''")
+      note('card after: ' + out.after.replace(/\n+/g, ' | '))
+      await shot(page, `${name}-home-4-balance.png`)
+    } else check('the review offers to take the coins home', false, review)
+    out.broadcast = page.console.filter((l) => /\[leaves\] home:/.test(l))
+    for (const l of out.broadcast) note(l)
+    writeFileSync(join(work, name + '.home.json'), JSON.stringify(out, null, 1))
+    note('console: ' + page.console.filter((l) => /leaves|home|operator|refus/i.test(l)).slice(-10).join(' | '))
     await page.stop()
   } else if (step === 'show') {
     const page = await openWallet(name)

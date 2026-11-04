@@ -576,3 +576,135 @@ test('user mode: a payment into a channel is read within a poll, the balance rea
   alone.api.stop()
   skew = 0
 })
+
+// A node enough for the panels: children, text, data and attributes.
+function fakeNode (tag, cls, text) {
+  const n = { tag, className: cls || '', children: [], dataset: {}, style: {}, textContent: text == null ? '' : String(text), disabled: false }
+  n.appendChild = (c) => { n.children.push(c); return c }
+  n.insertBefore = (c) => { n.children.push(c); return c }
+  n.addEventListener = () => {}
+  n.setAttribute = () => {}
+  Object.defineProperty(n, 'innerHTML', { set () { n.children = []; n.textContent = '' }, get () { return '' } })
+  Object.defineProperty(n, 'innerText', { get () { return textOf(n) } })
+  return n
+}
+function textOf (n) { return [n.textContent, ...n.children.map(textOf)].filter(Boolean).join('\n') }
+function findId (n, id) { if (n.id === id) return n; for (const c of n.children) { const f = findId(c, id); if (f) return f } return null }
+
+// The library with the operator gone: every local read answers, `sync` answers with the parts it
+// could not read as `{ error }` in their lists' place and says `unreachable`, `info` says it too.
+function goneWorker (runs, coins) {
+  return fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    runs.push([c, m.args.args])
+    const gone = 'the server is unreachable (POST /v1/witness: connection refused)'
+    if (c === 'set_default_watchtowers') return { id: m.id, ok: false, error: { kind: 'unreachable', message: gone } }
+    const result = c === 'info' ? { operator: 'k', server_info: { unreachable: gone } }
+      : c === 'sync' ? { witness: { error: gone }, mailbox: { error: gone }, participations: { error: gone }, transfers: { error: gone }, exits: [], forfeits: [],
+        unreachable: { why: gone, note: 'the operator cannot be reached now' }, schedule: { now: 1 } }
+      : c === 'coins' ? coins
+      : c === 'schedule' ? { now: 1, due: false, next_sync_at: null, receive_requests: [] }
+      : c === 'balance' ? { arca: { [X]: { live: '30' } } }
+      : c === 'exit_quote' ? { leaf_id: m.args.args.leaf_id, asset: X, value: '10', fee_asset: X, exit_delay_seconds: 130000,
+        steps: [{ vsize: 280, fee: [{ asset: X, amount: '192' }], paid_by: 'its own reserve' }, { vsize: 300, fee: [{ asset: X, amount: '5' }], paid_by: 'a fee coin of the wallet\'s' }],
+        unroll: { [X]: '197' }, claim: { vsize: 200, fee: [{ asset: X, amount: '88' }], pays: '9999912' } }
+      : c === 'exit' ? { state: 'unrolling', broadcast: [{ txid: 'tx-' + m.args.args.leaf_id, vsize: 280, fee: [{ asset: X, amount: '192' }] }] }
+      : c === 'channels' ? [{ leaf_id: 'ch1', asset: X }]
+      : c === 'channel_exit' ? { state: 'closing', broadcast: [{ txid: 'tx-ch1' }] }
+      : c === 'care' ? { claims: [], planned: [], cancelled: [] } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+}
+
+test('with the operator gone, developer mode still lists every leaf with its exit drill', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  setWalletMode(store, 't', 'developer')
+  const runs = []
+  const coins = [{ leaf_id: 'a1', state: 'live', kind: 'batch', asset: X, value: '10' }, { leaf_id: 'a2', state: 'forfeited', kind: 'transfer', asset: X, value: '10' }]
+  const root = fakeNode('div')
+  const logs = []
+  const api = mountLeaves({ makeWorker: () => goneWorker(runs, coins), store, walletTag: () => 't', mnemonic: () => 'abandon', el: fakeNode, now: () => 1_000_000,
+    assetMeta: () => ({ ticker: 'XX', precision: 0 }), fmtAtoms: (a) => String(a), btcOnchain: () => 0n, lnFor: () => 0n, log: (l) => logs.push(l), tickMs: 3_600_000 }, root, null)
+  await api.start()
+  assert.equal(api.state.error, null, 'the panel opened: ' + (api.state.error && api.state.error.e.message))
+  assert.ok(api.isOpen())
+  const list = findId(root, 'leafCoins')
+  assert.ok(list, 'the leaves are listed')
+  assert.match(list.innerText, /a1/)
+  assert.ok(findId(root, 'leafUnreachable'), 'the outage is said')
+  assert.ok(findId(root, 'leafSync'), 'the sync panel draws an answer whose lists came as errors')
+  assert.match(findId(root, 'leafSync').innerText, /participations: the server is unreachable/)
+  assert.ok(!logs.some((l) => /panel:/.test(l)), logs.join('\n'))
+  api.stop()
+})
+
+test('with the operator gone, every coin goes home: quoted, then broadcast on the fees shown', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const runs = []
+  const coins = [{ leaf_id: 'a1', state: 'live', asset: X, value: '10' }, { leaf_id: 'a2', state: 'live', asset: X, value: '10' },
+    { leaf_id: 'ch1', state: 'live', asset: X, value: '10' }, { leaf_id: 'gone', state: 'exiting', asset: X, value: '10' }, { leaf_id: 'old', state: 'spent', asset: X, value: '10' }]
+  let changes = 0
+  const api = mountLeaves({ makeWorker: () => goneWorker(runs, coins), store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1_000_000,
+    onChange: () => { changes++ }, tickMs: 3_600_000 }, null, null)
+  assert.equal(api.homeOffer(), null, 'nothing before the wallet opens')
+  await api.start()
+  const offer = api.homeOffer()
+  assert.deepEqual(offer.coins.map((c) => c.leaf_id), ['a1', 'a2', 'ch1'], 'every coin held but the one already on its way')
+  const q = await api.homeQuote()
+  assert.deepEqual(q.quotes.map((x) => x.coin.leaf_id), ['a1', 'a2'])
+  assert.deepEqual(q.channels.map((c) => c.leaf_id), ['ch1'])
+  const r = await api.takeHome(q)
+  assert.equal(r.started.length, 3)
+  assert.equal(r.refused.length, 0)
+  const exits = runs.filter(([c]) => c === 'exit').map(([, a]) => a)
+  assert.deepEqual(exits[0], { leaf_id: 'a1', shown: { [X]: '197' }, fee_asset: X }, 'broadcast only on the fees the quote showed')
+  assert.deepEqual(runs.filter(([c]) => c === 'channel_exit').map(([, a]) => a), [{ leaf_id: 'ch1' }])
+  assert.ok(!runs.some(([c]) => ['participate', 'send', 'refresh_received'].includes(c)), 'nothing asks the operator for anything')
+  // On its way: what the library holds as exiting (a coin a watchtower took out aside), with the
+  // delay of what this page sent.
+  coins.splice(0, coins.length, { leaf_id: 'a1', state: 'exiting', asset: X, value: '10' }, { leaf_id: 'a2', state: 'exiting', asset: X, value: '10' },
+    { leaf_id: 'ch1', state: 'exiting', asset: X, value: '10' }, { leaf_id: 'gone', state: 'exiting', asset: X, value: '10' }, { leaf_id: 'safe', state: 'exiting', kept_safe: true, asset: X, value: '10' })
+  await api.syncNow()
+  const way = api.homeUnderWay()
+  assert.deepEqual(way.map((h) => [h.leaf_id, h.delay]), [['a1', 130000], ['a2', 130000], ['ch1', null], ['gone', null]])
+  assert.ok(changes > 0)
+  api.stop()
+})
+
+test('a coin whose shared steps another coin already took out goes on its lower fees, never on higher ones', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const runs = []
+  const quotes = { a1: 0, a2: 0, a3: 0 }
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command; const a = m.args.args || {}
+    runs.push([c, a])
+    if (c === 'exit_quote') {
+      quotes[a.leaf_id]++
+      const fee = quotes[a.leaf_id] === 1 ? '197' : a.leaf_id === 'a2' ? '36' : '500'
+      return { id: m.id, ok: true, value: { result: { asset: X, value: '10', fee_asset: X, exit_delay_seconds: 100, steps: [], unroll: { [X]: fee }, claim: {} }, start: {} } }
+    }
+    if (c === 'exit') {
+      if (a.leaf_id !== 'a1' && a.shown[X] === '197') return { id: m.id, ok: false, error: { kind: 'refused', message: `refused: the exit's fees changed since they were shown; they are now {"${X}":"36"}` } }
+      return { id: m.id, ok: true, value: { result: { state: 'unrolling', broadcast: [] }, start: {} } }
+    }
+    const result = c === 'info' ? { server_info: { unreachable: 'gone' } } : c === 'sync' ? { unreachable: { why: 'gone' } }
+      : c === 'coins' ? ['a1', 'a2', 'a3'].map((l) => ({ leaf_id: l, state: 'live', asset: X, value: '10' }))
+      : c === 'schedule' ? { now: 1 } : c === 'balance' ? {} : c === 'care' ? {} : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  const r = await api.takeHome(await api.homeQuote())
+  assert.deepEqual(r.started.map((s) => s.coin.leaf_id), ['a1', 'a2'])
+  assert.deepEqual(r.refused.map((s) => s.coin.leaf_id), ['a3'], 'a new quote above what was shown is not taken')
+  assert.deepEqual(runs.filter(([c, a]) => c === 'exit' && a.leaf_id === 'a2').map(([, a]) => a.shown[X]), ['197', '36'])
+  assert.ok(!runs.some(([c, a]) => c === 'exit' && a.leaf_id === 'a3' && a.shown[X] === '500'))
+  api.stop()
+})

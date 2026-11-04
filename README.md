@@ -262,7 +262,10 @@ In user mode the wallet holds its Sequentia assets in the tree of the operator t
 (`window.SEQ_ARCA`, its key pinned) without a step: a new or restored wallet joins it by itself
 once the operator's server shows the pinned key (a restored phrase finds the coins it holds
 there), and one that cannot (the server unreachable, or showing another key) works as it would
-without and tries again every two minutes. **Receive** gives one receive code, a BIP321 payment request
+without and tries again every two minutes. If the operator stops answering, the coins are still
+the wallet's: Balance says so in plain words and offers **Take my coins home**, which sends every
+coin to the wallet's own address from what the wallet holds and the chain alone, its fees shown
+first (docs/DEFAULT_MODE.md, "When the service does not answer"). **Receive** gives one receive code, a BIP321 payment request
 (`BITCOIN:<ADDRESS>?ark=<ARK ADDRESS>&sequentia=<SQR1…>`, `pay-code.js`, upper case and with
 the receive request in a short form so it scans at a glance): another wallet like this one pays
 an asset at its single-use Sequentia receive request and BTC at its Bitcoin ark address, both in
@@ -355,7 +358,8 @@ must answer CORS. The tab then has:
   fee is the one shown. The participation is then followed by the page's own sync until it is
   released and the new leaf is held. **Exit drill** takes one leaf on-chain from its record
   alone, without the operator: each run shows what it broadcast, with every fee, and what comes
-  next; run it again until the claim is final.
+  next; run it again until the claim is final. While the operator cannot be reached, the tab says
+  so above the panels, and every leaf and its Exit drill stay listed.
 - **Kept by itself: claims and refresh plans**: what the wallet last did by itself (below),
   every refresh plan with its leaf, its steps and until when it covers the leaf, with
   **Cancel**, and **Release** for a planned leaf (the leaf given up in the next round for a leaf
