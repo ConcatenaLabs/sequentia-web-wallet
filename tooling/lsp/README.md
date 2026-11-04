@@ -98,6 +98,23 @@ inbound-liquidity paths; `lsp-server.mjs` is the reference for those. A provisio
 hold-invoice plugin from `SEQLN_HOLDINVOICE_PLUGIN` (default
 `/root/sequentia/seqln/contrib/holdinvoice-seq/holdinvoice.py`).
 
+### Restarts leave the hosted nodes running
+
+Each provisioned node's `lightningd` and its ws relay run apart from the LSP, so an LSP restart or
+deploy stops neither: the wallets' Lightning stays up, and a swap in flight keeps its node. At its
+next start the LSP re-attaches to every node in the registry that answers (`[lsp] boot re-attach:
+N/M hosted node(s) already running`).
+
+Under systemd that takes more than a detached child, since stopping a service stops every
+process in its control group. When the LSP runs as a systemd service as root, each node and each
+relay therefore starts in a transient scope of its own in `seqln-hosted.slice`
+(`systemd-run --scope`); `systemd-cgls seqln-hosted.slice` lists them. Anywhere else they are
+plain detached children. The start log says which (`[prov] hosted nodes run in scopes of their
+own …` or `… as detached children of the LSP (why)`). `LSP_NODE_SCOPE=1` or `0` overrides the
+choice and `LSP_NODE_SLICE` names another slice. The testnet's unit is `lsp-b5b1.service` in
+sequentia-testnet-ops (`lsp/`). Its own work (seqob-cli runs, node commands) stays in its control
+group and stops with it, so a restarted LSP never races an old run of the same swap.
+
 The service assumes the rest of the hosted backend is already up:
 
 1. **seqobd** relay (`seqobd -listen :9955`).
