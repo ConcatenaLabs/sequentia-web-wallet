@@ -63,6 +63,8 @@
 //   now()               optional clock, ms
 //   tickMs              optional: how often the schedule is read (default 60 s)
 
+import { CHANNEL_POLL_MS, arrivals as channelArrivals } from './instant-pay.js'
+
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 export const MODE_WORDS = Object.freeze({
@@ -92,9 +94,11 @@ export const RELEASE_POLL_MS = 15_000
 export const RELEASE_WAIT_MS = 3 * 3600_000
 export const RELEASE_TRIES = 3
 
-// The arguments `care` runs with: the page's claim scan, and every leaf of a round planned.
+// The arguments `care` runs with: the page's claim scan, every leaf of a round planned, and
+// the wallet's channels cared for (each read and its credit folded, and one opened in each
+// asset the operator makes channels of, from half of the wallet's leaves of it).
 export function careArgs (scan) {
-  const a = { plan_within: PLAN_EVERY_ROUND_LEAF }
+  const a = { plan_within: PLAN_EVERY_ROUND_LEAF, channels: true }
   if (scan) a.scan = scan
   return a
 }
@@ -447,7 +451,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const sleep = ctx.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const S = { client: null, open: false, busy: false, balance: null, coins: [], participations: [], schedule: null,
     refusals: [], last: null, drill: null, quote: null, timer: null, showHistory: false, error: null, info: null, form: {},
-    careAt: null, lastCare: null, plans: null, claims: null, distributions: null }
+    careAt: null, lastCare: null, plans: null, claims: null, distributions: null, channels: [], channelTimer: null }
   // What is typed into a form survives a re-render (sync re-renders the panels by itself).
   const bind = (node) => {
     if (S.form[node.id] != null) node.value = S.form[node.id]
@@ -510,6 +514,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open) return
     const [b, c, p, s, r] = [await run('balance'), await run('coins'), await run('participations'), await run('schedule'), await run('refusals')]
     S.balance = b; S.coins = c || []; S.participations = p || []; S.schedule = s; S.refusals = r || []
+    // The channels, as the wallet holds them (asking nothing): the instant way to pay.
+    try { S.channels = (await run('channels')) || [] } catch { S.channels = [] }
     // The plans are shown in developer mode only; reading them asks nothing of the operator.
     if (dev()) { try { const pl = await run('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
     if (ctx.onChange) try { ctx.onChange() } catch {}
@@ -549,6 +555,36 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
     try { await careIfDue() } finally { S.busy = false }
     schedule()
+    pollChannels()
+  }
+
+  // ---- channels: a payment into one is shown at once ----
+  // While the page is open and visible, the wallet reads its channels from the operator
+  // every CHANNEL_POLL_MS (a read asks nothing of the chain beyond the command's start),
+  // and when one was paid it reads the balance again, so the asset's figure moves at once.
+  const visible = () => { try { return ctx.visible ? ctx.visible() : !(typeof document !== 'undefined' && document.hidden) } catch { return true } }
+  async function readChannels () {
+    const before = S.channels || []
+    const after = await run('channel_sync')
+    S.channels = Array.isArray(after) ? after.map((c) => ({ ...(before.find((b) => b.leaf_id === c.leaf_id) || {}), ...c })) : before
+    const came = channelArrivals(before, S.channels)
+    if (came.length) {
+      try { S.balance = await run('balance') } catch {}
+      for (const a of came) emit('leafArrived', { leaf_id: a.leaf_id, asset: a.asset, value: String(a.atoms), kind: 'channel' })
+      if (ctx.onChange) try { ctx.onChange() } catch {}
+      render()
+    }
+    return came
+  }
+  function pollChannels () {
+    clearTimeout(S.channelTimer)
+    if (!S.open || S.stopped) return
+    S.channelTimer = setTimeout(async () => {
+      const live = (S.channels || []).some((c) => c && c.coin_state === 'live')
+      if (live && !S.busy && visible()) { try { await readChannels() } catch {} }
+      pollChannels()
+    }, ctx.channelPollMs || CHANNEL_POLL_MS)
+    if (S.channelTimer && typeof S.channelTimer.unref === 'function') S.channelTimer.unref()
   }
 
   // ---- what the wallet does by itself: claims taken up, plans kept ----
@@ -560,7 +596,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
       const v = await run('care', careArgs(claimScan()))
       S.lastCare = { at: now(), value: v }
       const sum = careSummary(v)
-      if (sum.taken || sum.planned || sum.cancelled || sum.refreshing) await reload()
+      const ch = (v && v.channels) || {}
+      const chMoved = ((ch.folded || []).length + (ch.opened || []).filter((o) => o && o.participation).length) > 0
+      if (sum.taken || sum.planned || sum.cancelled || sum.refreshing || chMoved) await reload()
       for (const c of (v && v.claims) || []) if (c && c.taken_up && !c.error) emit('leafArrived', { leaf_id: c.leaf_id, value: String(c.value ?? ''), kind: 'claim' })
     } catch (e) { S.lastCare = { at: now(), error: e } }
     await watchBond()
@@ -680,7 +718,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       c.appendChild(el('div', 'status', `${S.releasing.command}: the unplanned leaves fall short, so ${S.releasing.coins.length} planned leaf(s) (${S.releasing.coins.map(short).join(', ')}) are given up in the next round for leaves no plan names; the payment is asked again once that round is final.`))
       root.appendChild(c)
     }
-    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderBond(); renderSupply(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
+    renderRails(); renderBoard(); renderReceive(); renderSend(); renderSync(); renderCare(); renderChannels(); renderBond(); renderSupply(); renderCoins(); renderDrill(); renderParticipations(); renderRefusals()
   }
 
   function renderJoin () {
@@ -870,13 +908,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function renderSend () {
     const c = card('Send to a receive request')
     c.id = 'leafSend'
-    c.appendChild(el('p', 'sub', 'Pays a receive request out of round: coins of the asset, those furthest from their exit date first, each into a checkpoint, then the reassignment into the receiver\'s leaf and the change. No asset is a default.'))
-    const t = el('textarea', 'mono'); t.id = 'leafSendRequest'; t.rows = 3; field(c, 'Receive request', bind(t))
+    c.appendChild(el('p', 'sub', 'Pays a receive request or a payment code. By a channel: when the text names the receiver\'s channel in the asset and this wallet\'s channel there can pay it, at once and with no round. By a leaf: out of round, coins of the asset, those furthest from their exit date first, each into a checkpoint, then the reassignment into the receiver\'s leaf and the change. Either way, when the route is left to the wallet. No asset is a default.'))
+    const t = el('textarea', 'mono'); t.id = 'leafSendRequest'; t.rows = 3; field(c, 'Receive request or payment code', bind(t))
     const assets = [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a)
     field(c, 'Asset', assetSelect('leafSendAsset', assets, 'the request\'s'))
     const a = el('input'); a.id = 'leafSendAmount'; field(c, 'Amount, in atoms', bind(a))
+    const rt = el('select'); rt.id = 'leafSendRoute'
+    for (const [v, l] of [['any', 'Either way'], ['channel', 'By a channel'], ['leaf', 'By a leaf']]) { const o = el('option', null, l); o.value = v; rt.appendChild(o) }
+    field(c, 'Route', bind(rt))
     const b = button('Send', () => {
-      const args = { request: val('leafSendRequest'), amount: val('leafSendAmount') || null, asset: val('leafSendAsset') || null }
+      const args = { request: val('leafSendRequest'), amount: val('leafSendAmount') || null, asset: val('leafSendAsset') || null, route: val('leafSendRoute') || 'any' }
       act('send', () => paying('send', args)).catch(() => {})
     }, 'primary')
     b.id = 'btnLeafSend'; b.disabled = S.busy
@@ -982,7 +1023,66 @@ export function mountLeaves (ctx, root, settingsRoot) {
     root.appendChild(c)
   }
 
-  // Developer mode's view of the operator's bond: its asset, value and state, and the watch.
+  // Developer mode's channels: each with its state, both sides, its credit and the note,
+  // and Read, Fold, Close into a round (Settle now's quote, then the round) and Exit (the
+  // channel's own exit, one step a run); Open, the payment code, and a payment by hand.
+  function renderChannels () {
+    const c = card('Channels')
+    c.id = 'leafChannels'
+    c.appendChild(el('p', 'sub', 'A channel leaf holds a balance for this wallet and one for the operator. A payment from it into another wallet\'s channel of the same operator is final for the receiver at once, with no round between: the operator signs the receiver a credit note, enforceable on the chain without anyone\'s help, against capacity already in the receiver\'s leaf. The payer relies on the operator for that one request: the operator could co-sign the payer\'s new state and keep the receiver\'s note back. Care opens a channel in each asset the operator makes channels of, half of the wallet\'s leaves of it in it, folds the credit it was paid, and closes it into a round near its expiry; an exit takes it home on the chain alone.'))
+    const list = S.channels || []
+    if (!list.length) c.appendChild(el('div', 'muted', 'No channels.'))
+    for (const ch of list) {
+      const d = el('div', 'leaf-channel'); d.dataset.leaf = ch.leaf_id; d.dataset.state = ch.coin_state || ''
+      const st = ch.state || {}
+      d.appendChild(el('div', null, `${tick(ch.asset)} channel ${short(ch.leaf_id)} · ${ch.coin_state || '?'}${ch.final ? ', final' : ', not final'}${ch.pending ? ' · a state sent, not answered' : ''}`))
+      d.appendChild(kv('This wallet\'s side', amt(ch.asset, ch.balance)))
+      d.appendChild(kv('The operator\'s side', amt(ch.asset, ch.operator_side)))
+      d.appendChild(kv('State', `${st.number ?? 0}: this wallet ${st.owner ?? '?'}, operator ${st.operator ?? '?'}, folded ${st.folded ?? 0}`))
+      d.appendChild(kv('Credit (notes)', `${ch.credit ?? 0}, of which not folded ${ch.credit_not_folded ?? 0}`))
+      const r = el('div', 'row'); r.style.marginTop = '6px'
+      const b1 = button('Read', async () => { try { await act('channel_sync', () => run('channel_sync', { leaf_id: ch.leaf_id })) } catch {} }, 'ghost')
+      const b2 = button('Fold', async () => { try { await act('channel_fold', () => run('channel_fold', { leaf_id: ch.leaf_id })) } catch {} }, 'ghost')
+      const b3 = button('Close into a round', () => settle([ch.leaf_id]), 'ghost')
+      const b4 = button('Exit', async () => { try { S.channelExit = { leaf: ch.leaf_id, value: await act('channel_exit', () => run('channel_exit', { leaf_id: ch.leaf_id })) } } catch {} }, 'danger')
+      b1.dataset.action = 'read'; b2.dataset.action = 'fold'; b3.dataset.action = 'close'; b4.dataset.action = 'exit'
+      b2.disabled = S.busy || !(BigInt(ch.credit_not_folded || 0) > 0n) || ch.coin_state !== 'live'
+      b3.disabled = S.busy || ch.coin_state !== 'live'
+      b4.disabled = S.busy || !['live', 'exiting', 'given', 'pending'].includes(ch.coin_state)
+      b1.disabled = S.busy
+      for (const b of [b1, b2, b3, b4]) r.appendChild(b)
+      d.appendChild(r)
+      if (S.channelExit && S.channelExit.leaf === ch.leaf_id) {
+        const v = S.channelExit.value || {}
+        const x = el('div', 'sub'); x.id = 'leafChannelExit'
+        x.textContent = `exit: ${v.state}${(v.steps || []).length ? ' · broadcast ' + v.steps.map((s2) => `${s2.what} ${short(s2.txid)} ${s2.vsize} vB`).join(', ') : ''}${v.next ? ' · next: ' + v.next : ''}${v.error ? ' · ' + v.error : ''}`
+        d.appendChild(x)
+      }
+      c.appendChild(d)
+    }
+    const r = el('div', 'row'); r.style.marginTop = '10px'
+    const code = button('Payment code', async () => { try { S.channelCodeText = (await act('channel_code', () => run('channel_code'))).code } catch {} }, 'ghost'); code.id = 'btnLeafChannelCode'
+    code.disabled = S.busy; r.appendChild(code)
+    c.appendChild(r)
+    if (S.channelCodeText) { const t = el('textarea', 'mono'); t.id = 'leafChannelCode'; t.rows = 3; t.readOnly = true; t.value = S.channelCodeText; c.appendChild(t) }
+    // Open by hand: the coins of one asset, the operator\'s side, what is kept beside it.
+    const f = (id, label, ph) => { const dd = el('div', 'field'); dd.appendChild(el('label', 'lbl', label)); const i = el('input'); i.id = id; i.placeholder = ph || ''; bind(i); dd.appendChild(i); c.appendChild(dd); return i }
+    f('leafChOpenLeaves', 'Open: the leaves to give up (comma separated; every live leaf of one asset when empty)', '')
+    f('leafChOpenCapacity', 'The operator\'s side, in atoms', 'at most what the operator publishes')
+    f('leafChOpenKeep', 'Kept in a plain leaf beside it, in atoms (optional)', '')
+    const r2 = el('div', 'row')
+    const open = button('Open in the next round', async () => {
+      const args = { capacity: val('leafChOpenCapacity') }
+      const ls = val('leafChOpenLeaves'); if (ls) args.leaves = ls.split(',').map((x) => x.trim()).filter(Boolean)
+      if (val('leafChOpenKeep')) args.keep = val('leafChOpenKeep')
+      try { await act('channel_open', () => run('channel_open', args)) } catch {}
+      schedule()
+    })
+    open.id = 'btnLeafChannelOpen'; open.disabled = S.busy; r2.appendChild(open); c.appendChild(r2)
+    root.appendChild(c)
+  }
+
+  // Developer mode\'s view of the operator\'s bond: its asset, value and state, and the watch.
   function renderBond () {
     const c = card('The operator\'s bond')
     c.id = 'leafBond'
@@ -1318,7 +1418,23 @@ export function mountLeaves (ctx, root, settingsRoot) {
     leafAtoms: (hex) => { const b = leafBalances(S.balance).get(hex); return b ? b.leaves : 0n },
     leafAssets: () => [...leafBalances(S.balance).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a),
     syncNow,
-    stop: () => clearTimeout(S.timer),
+    // The wallet's channels as it holds them (the library's `channels`), and a payment
+    // code naming those that can be paid now, with `address` for a payment on the chain.
+    channels: () => S.channels || [],
+    channelCode: async (address) => {
+      if (!S.open) return null
+      if (!(S.channels || []).some((c) => c && c.coin_state === 'live' && c.final)) return null
+      try { return await run('channel_code', address ? { address } : {}) } catch { return null }
+    },
+    // A payment to a code over the channels (instant-pay.js says when): the library's
+    // answer, or its refusal. The payer's channel read again after it.
+    payInstant: async (code, asset, amount) => {
+      if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' })
+      try { return await run('send', { request: code, asset, amount: String(amount), route: 'channel' }) } finally {
+        try { S.channels = (await run('channels')) || []; S.balance = await run('balance'); if (ctx.onChange) ctx.onChange() } catch {}
+      }
+    },
+    stop: () => { S.stopped = true; clearTimeout(S.timer); clearTimeout(S.channelTimer) },
   }
   render()
   return api

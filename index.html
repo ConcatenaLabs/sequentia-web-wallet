@@ -792,6 +792,12 @@
           </div>
         </div>
       </div>
+      <div class="card hide" id="recvInstantCard">
+        <label class="lbl">From another Sequentia wallet</label>
+        <p class="sub" style="margin:0 0 10px">Give this text instead of your address to someone paying from a Sequentia wallet: their payment arrives at once. It also works as your address.</p>
+        <div class="mono" id="recvInstant" style="word-break:break-all;font-size:11px">—</div>
+        <div class="row" style="margin-top:12px"><button id="btnCopyInstant">Copy</button></div>
+      </div>
       <div class="card hide" id="lnRecvCard">
         <label class="lbl">⚡ Receive over Lightning</label>
         <p class="sub" style="margin:0 0 10px">Make an invoice to be paid over Lightning. Keep this page open until it is paid: the wallet signs for it here.</p>
@@ -1597,6 +1603,7 @@ import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
+import { readCode, instantRoute, fallsBack } from './instant-pay.js';
 import { mountLeafRail } from './leaf-rail.js';
 import { mountUserComposer } from './user-composer.js';
 import { createEngine as createUserTrade } from './user-trade.js';
@@ -3417,9 +3424,13 @@ function initLeaves(){
     btcOnchain: ()=> btcBalance || 0n,
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
-    onChange: ()=>{ try{ renderBalance(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{
+      if(pageApi) pageApi.leafEvent(name, data);
+      // A payment into a channel: shown as received, at once, in either mode.
+      if(name==='leafArrived' && data && data.kind==='channel' && data.asset){ try{ const mm=assetMeta(data.asset); toast('Received '+fmtAtoms(BigInt(data.value), mm.precision)+' '+mm.ticker); }catch{} }
+    },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{
       const r=await fetch('/faucet',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -3432,6 +3443,8 @@ function initLeaves(){
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
   }, $('leavesRoot'), $('devModeRoot'));
+  // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
+  if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
   show('tabLeaves', devMode());
   applyModeClass();
   leavesApi.start();
@@ -5769,6 +5782,16 @@ async function _syncImpl(){
 }
 function balObj(){ return wollet.balance().toJSON(); }   // {assetHex: "atomsStr"}
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
+// What this wallet's channels hold of an asset, live and final: what a payment code is paid
+// from at once.
+function instantAtoms(hex){
+  try{ if(!leavesApi || !leavesApi.isOpen()) return 0n;
+    return leavesApi.channels().filter(c=>c && c.asset===hex && c.coin_state==='live' && c.final).reduce((t,c)=>t+BigInt(c.balance||0), 0n); }catch{ return 0n; }
+}
+function instantAssets(){
+  try{ if(!leavesApi || !leavesApi.isOpen()) return [];
+    return [...new Set(leavesApi.channels().filter(c=>c && c.coin_state==='live' && c.final && BigInt(c.balance||0)>0n).map(c=>c.asset))]; }catch{ return []; }
+}
 function availableFor(hex){ if(hex==='BTC') return (typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n;
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
   const b=balObj(); return b[hex]||0n; }
@@ -6221,6 +6244,16 @@ function renderReceive(){
     ? 'Blinded address (tsqb1…): what it receives on Sequentia has its amount and asset hidden on the chain. BTC always arrives at your usual tb1 address.'
     : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.';
   renderOampReceive();
+  renderInstantReceive(a.toString());
+}
+// The payment code (instant-pay.js): shown once the wallet holds a channel that can be paid
+// now, naming the address above for a payment on the chain instead.
+async function renderInstantReceive(addr){
+  const card=$('recvInstantCard'); if(!card) return;
+  let code=null;
+  try{ if(leavesApi && leavesApi.isOpen() && !showConf){ const v=await leavesApi.channelCode(addr); code=v && v.code; } }catch{}
+  card.classList.toggle('hide', !code);
+  $('recvInstant').textContent=code||'—';
 }
 // Restricted-asset (OpenAMP) receive panel: show the wallet's AID plus the enclave deposit address
 // for a chosen restricted asset. Only visible once an AID is registered and assets exist.
@@ -6264,6 +6297,8 @@ function ownedOptions(sel){
   add('BTC');   // parent-chain Bitcoin testnet4 — the first-class default pick (principle 2), routed through the BTC layer, not lwk
   add(POLICY_HEX);   // tSEQ: one asset among equals, no longer the privileged default (principle 3)
   for(const h of Object.keys(b)) if(h!==POLICY_HEX) add(h);
+  // An asset held in a channel only: paid at once to a payment code (instant-pay.js).
+  for(const h of instantAssets()) if(h!==POLICY_HEX && !(h in b)) add(h);
   // Restricted (OpenAMP) assets the AID holds — routed through the enclave transfer API, not lwk.
   for(const id of Object.keys(oampBalances)) if((oampBalances[id]?.atoms||0n)>0n) add('oamp:'+id);
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;   // keep the user's choice
@@ -6664,7 +6699,8 @@ function addRecipientRow(){
     if(!hex){ availLine.textContent=''; return; }
     const prec = hex==='BTC' ? 8 : (assetMeta(hex).precision||0);
     const tk = hex==='BTC' ? 'BTC' : assetMeta(hex).ticker;
-    availLine.textContent = 'Available: ' + fmtAtoms(availableFor(hex), prec) + ' ' + tk; };
+    const inst = hex==='BTC' ? 0n : instantAtoms(hex);
+    availLine.textContent = 'Available: ' + fmtAtoms(availableFor(hex), prec) + ' ' + tk + (inst>0n ? ', and '+fmtAtoms(inst, prec)+' '+tk+' that pays another Sequentia wallet at once' : ''); };
   // Restricted (OpenAMP) sends go to a recipient AID, not a tb1/tsqb1 address — relabel the field.
   const raddr=r.querySelector('.raddr');
   const updAddrPh=()=>{ if(isOampAsset(rsel.value)){ r.querySelector('.addr-row').previousElementSibling.textContent='Recipient AID'; raddr.placeholder='recipient OpenAMP account id'; }
@@ -6692,7 +6728,10 @@ function collectRows(){
     // Preserve the ⇄ reference-input details so the review can show "typed X REF -> sending Y TICKER".
     const ref = (amtInput && amtInput._refMode && (amtInput.value||'').trim())
       ? { typed:(amtInput.value||'').trim(), ccy:(amtInput._refCcy||REF) } : null;
-    out.push({addr, amtS, asset, ref});
+    // A payment code (instant-pay.js) pays at once when it can, and otherwise its address.
+    const code=readCode(addr);
+    if(code) out.push({addr: String(code.address||''), amtS, asset, ref, code, codeText: addr});
+    else out.push({addr, amtS, asset, ref});
   }
   return out;
 }
@@ -6724,6 +6763,36 @@ function buildSendPset(rows, fee){
 }
 
 // ---------- review + broadcast (shared) ----------
+// The review of a payment that arrives at once (instant-pay.js): true when it was made or
+// stands, false when it could not be made this way and nothing stands, so the caller pays
+// the code's address on the chain instead, with its own review.
+function instantReview(r, atoms, reset){
+  return new Promise((resolve)=>{
+    const m0=assetMeta(r.asset), ref=refValueStr(r.asset, atoms);
+    const kv=[['Network','Sequentia testnet'], ['To', 'another Sequentia wallet'+(r.addr ? ' ('+r.addr.slice(0,10)+'…'+r.addr.slice(-6)+')' : '')],
+      ['Amount', fmtAtoms(atoms, m0.precision)+' '+m0.ticker+(ref ? '  ('+ref+')' : '')], ['Arrives', 'at once'], ['Network fee', 'none']];
+    const {m, ok, st}=modalRows({title:'Confirm payment', kv});
+    m.querySelector('.ghost').onclick=()=>{ m.remove(); resolve(true); };
+    ok.onclick=async()=>{
+      ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>Sending…';
+      try{
+        await leavesApi.payInstant(r.codeText, r.asset, atoms);
+        const c=m.querySelector('.card'); c.innerHTML='';
+        const head=el('div','sent-head'); head.appendChild(el('div','sent-check','✓'));
+        const ht=el('div'); ht.appendChild(el('div','sent-title','Sent')); ht.appendChild(el('div','sub','Payment')); head.appendChild(ht); c.appendChild(head);
+        for(const [k,v] of kv){ if(k==='Network') continue; const d=el('div','kv'); d.appendChild(el('span','k',k)); d.appendChild(el('span','v',v)); c.appendChild(d); }
+        const state=el('div','sent-state ok'); state.id='instantState'; state.textContent='Settled'; c.appendChild(state);
+        const done=el('button','primary','Done'); done.onclick=()=>m.remove(); c.appendChild(done);
+        reset(); try{ renderBalance(); }catch{}
+        resolve(true);
+      }catch(e){
+        if(fallsBack(e)){ m.remove(); resolve(false); return; }
+        st.className='status'; st.textContent='Sent. It completes when the service answers; the wallet asks again by itself.';
+        reset(); resolve(true);
+      }
+    };
+  });
+}
 function modalRows(rows){
   const m=el('div','modal'); const c=el('div','card');
   c.appendChild(el('label','lbl', rows.title));
@@ -7450,6 +7519,17 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       });
       return;
     }
+    // A payment code: at once when this wallet can (instant-pay.js), otherwise to its address.
+    if(rows.some(r=>r.code)){
+      const r=rows[0];
+      if(rows.length===1 && r.asset!=='BTC'){
+        const atoms=parseAtoms(r.amtS, sendPrecision(r.asset));
+        if(atoms<=0n) throw new Error('amount must be greater than zero');
+        const plan=leavesApi && leavesApi.isOpen() ? instantRoute(r.code, r.asset, atoms, leavesApi.channels()) : { instant:false };
+        if(plan.instant && await instantReview(r, atoms, reset)) return;
+      }
+      for(const x of rows) if(x.code && !x.addr) throw new Error('This payment cannot be made at once, and the text names no address to pay instead.');
+    }
     for(const r of rows){ const p=recipientProblem(r.addr, r.asset); if(p) throw new Error(p); }
     const btcRows=rows.filter(r=>r.asset==='BTC');
     if(btcRows.length && btcRows.length!==rows.length)
@@ -7474,6 +7554,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
   finally{ btn.disabled=false; btn.textContent=label; } };
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
+$('btnCopyInstant').onclick=()=>copyToClipboard($('recvInstant').textContent, $('btnCopyInstant'));
 $('btnNewAddr').onclick=()=>{ addrIndex=(addrIndex??0)+1; renderReceive(); };
 $('btnConf').onclick=()=>{ showConf=!showConf; renderReceive(); };
 $('btnXpub').onclick=()=>{ showXpub=!showXpub; renderReceive(); };

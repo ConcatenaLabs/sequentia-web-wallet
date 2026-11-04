@@ -209,7 +209,7 @@ test('a joined wallet in user mode runs care when it opens, with the kit\'s scan
     claimScan: () => 47, onChange: () => { changes++ }, onEvent: (n, d) => events.push([n, d]), tickMs: 3_600_000 }, null, null)
   await api.start()
   const care = runs.filter((r) => Array.isArray(r) && r[0] === 'care')
-  assert.deepEqual(care, [['care', { plan_within: PLAN_EVERY_ROUND_LEAF, scan: 47 }]])
+  assert.deepEqual(care, [['care', { plan_within: PLAN_EVERY_ROUND_LEAF, channels: true, scan: 47 }]])
   // The claim taken up: the balance read again, and the page told.
   assert.ok(runs.lastIndexOf('balance') > runs.findIndex((r) => Array.isArray(r)), 'balance re-read after care')
   assert.ok(changes >= 2)
@@ -219,8 +219,8 @@ test('a joined wallet in user mode runs care when it opens, with the kit\'s scan
 
 test('care plans every leaf of a round: its arguments', () => {
   assert.equal(PLAN_EVERY_ROUND_LEAF, 4294967295)
-  assert.deepEqual(careArgs(), { plan_within: 4294967295 })
-  assert.deepEqual(careArgs(21), { plan_within: 4294967295, scan: 21 })
+  assert.deepEqual(careArgs(), { plan_within: 4294967295, channels: true })
+  assert.deepEqual(careArgs(21), { plan_within: 4294967295, channels: true, scan: 21 })
 })
 
 test('a release is done once no coin it gave up is still live or in its round', () => {
