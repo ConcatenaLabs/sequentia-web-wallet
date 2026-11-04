@@ -118,7 +118,7 @@ import { adoptableChannel } from './channel-adopt.mjs';
 import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-funding.mjs';
 import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted, roomAlreadyThere } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
-import { payAssetVerdict, hostedInvoiceArgs, payFailureReason } from './invoice-asset.mjs';
+import { payAssetVerdict, hostedInvoiceArgs, payFailureReason, inboundRequestAsset } from './invoice-asset.mjs';
 import { withPaymentHash } from './hold-bolt11.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
 import { fileURLToPath } from 'node:url';
@@ -5195,8 +5195,11 @@ const server = http.createServer(async (req, res) => {
     // in whatever is being bought -- native BTC or any LSP-supported asset, charged in its own units.
     //   GET /channel/inbound/quote?asset=<id|BTC>&amount=<units>
     if (req.method === 'GET' && url.pathname === '/channel/inbound/quote') {
-      const rawAsset = url.searchParams.get('asset') || '';
-      const isBtc = !rawAsset || /^btc$/i.test(rawAsset);
+      // No asset named: the room is for what the named node holds (inboundRequestAsset), and BTC
+      // when no node is named either.
+      const qNodeKey = url.searchParams.get('node_key') || '';
+      const rawAsset = inboundRequestAsset(url.searchParams.get('asset'), (PROV && qNodeKey) ? PROV.getByKey(qNodeKey) : null) || 'BTC';
+      const isBtc = rawAsset === 'BTC';
       const assetId = isBtc ? 'BTC' : resolveAsset(rawAsset);
       if (!isBtc && !assetId) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
       const months = parseMonths(url.searchParams.get('months'), CFG.inboundMonths, CFG.inboundDefaultMonths);
@@ -5247,9 +5250,10 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body) return send(res, 400, { ok: false, error: 'bad json body' });
       // 'BTC' is room to receive bitcoin, from the testnet4 LP (inboundLp); anything else names a
-      // Sequentia asset.
-      const isBtc = /^btc$/i.test(String(body.asset || ''));
-      const assetId = isBtc ? 'BTC' : resolveAsset(body.asset);
+      // Sequentia asset. A request naming no asset is for what its node holds (inboundRequestAsset).
+      const want = inboundRequestAsset(body.asset, (PROV && body.node_key) ? PROV.getByKey(body.node_key) : null);
+      const isBtc = want === 'BTC';
+      const assetId = isBtc ? 'BTC' : resolveAsset(want);
       if (!assetId || (!isBtc && assetId === CFG.btcx)) return send(res, 400, { ok: false, error: 'asset must be BTC or a Sequentia asset id' });
       if (isBtc && !CFG.inboundBtcLpRpc) return send(res, 400, { ok: false, error: 'room to receive BTC is not sold on this LSP' });
       const amount = Number(body.amount || 0);

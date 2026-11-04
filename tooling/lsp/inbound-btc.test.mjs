@@ -57,12 +57,15 @@ test('the BTC channel is opened without an asset, toward a BTC node only, and an
 
 test('the purchase takes BTC, priced in sat, and refuses it where it is not sold', () => {
   const post = between("url.pathname === '/channel/inbound')", "url.pathname === '/channel/close'");
-  assert.match(post, /const isBtc = \/\^btc\$\/i\.test\(String\(body\.asset \|\| ''\)\);/);
-  assert.match(post, /const assetId = isBtc \? 'BTC' : resolveAsset\(body\.asset\);/);
+  // No asset named: the room is for what the named node holds, so a Bitcoin node's is BTC.
+  assert.match(post, /const want = inboundRequestAsset\(body\.asset, \(PROV && body\.node_key\) \? PROV\.getByKey\(body\.node_key\) : null\);/);
+  assert.match(post, /const isBtc = want === 'BTC';/);
+  assert.match(post, /const assetId = isBtc \? 'BTC' : resolveAsset\(want\);/);
   assert.match(post, /if \(isBtc && !CFG\.inboundBtcLpRpc\) return send\(res, 400,/);
   assert.match(post, /const lim = isBtc \? \{\} : await inboundLimitsFor\(assetId\);/);
   assert.match(post, /quoteInboundFee\(amount, \{ isBtc, assetId, months, \.\.\.lim \}\)/);
   const quote = between("url.pathname === '/channel/inbound/quote'", "url.pathname === '/channel/inbound')");
+  assert.match(quote, /const rawAsset = inboundRequestAsset\(url\.searchParams\.get\('asset'\), \(PROV && qNodeKey\) \? PROV\.getByKey\(qNodeKey\) : null\) \|\| 'BTC';/);
   assert.match(quote, /const assetId = isBtc \? 'BTC' : resolveAsset\(rawAsset\);/);
   assert.match(src, /btc_room: !!\(CFG\.inboundBtcLpRpc && CFG\.channelPeerBtcProvisioned\),/);
 });
