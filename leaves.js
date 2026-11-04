@@ -162,10 +162,13 @@ export function careArgs (scan) {
 }
 
 // How often an open page in user mode reads its channels from the operator while it is in
-// view: a payment into one is in the asset's figure within this and the read's own time. Out of
-// view (another tab, a minimised window) it reads them every CHANNEL_POLL_HIDDEN_MS.
+// view and was used, opened or paid within CHANNEL_FAST_FOR_MS: a payment into one is in the
+// asset's figure within this and the read's own time. Otherwise (out of view, or left alone) it
+// reads them every CHANNEL_POLL_IDLE_MS. Each read runs the library's witness, which the
+// operator hands out at a bounded rate, so only wallets in use read fast.
 export const CHANNEL_POLL_MS = 300
-export const CHANNEL_POLL_HIDDEN_MS = 5000
+export const CHANNEL_POLL_IDLE_MS = 5000
+export const CHANNEL_FAST_FOR_MS = 3 * 60_000
 
 const bigOf = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -781,11 +784,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // ---- user mode: a payment into a channel shows at once ----
   // While the page is open in user mode and the wallet holds a live channel, it reads its
-  // channels from the operator every CHANNEL_POLL_MS while the page is in view (one short
-  // command), never while another command of the wallet runs; a channel that was paid reads
+  // channels from the operator every CHANNEL_POLL_MS while the page is in view and in use (one
+  // short command; channelPollMs), never while another command of the wallet runs; a channel that was paid reads
   // the balance again, so the asset's figure moves at once. A person's command waits at most
   // one such read, and none while the page holds the reads (`holdReads`, while a person reviews
   // a payment the wallet is about to make).
+  function channelPollMs () {
+    const used = Math.max(S.lastAsked || 0, S.openedAt || 0, S.channelIn || 0)
+    if ((ctx.visible && !ctx.visible()) || now() - used > CHANNEL_FAST_FOR_MS) return CHANNEL_POLL_IDLE_MS
+    return ctx.channelPollMs || CHANNEL_POLL_MS
+  }
   function watchChannels () {
     clearTimeout(S.chanTimer)
     if (!S.open || dev() || !pinned() || S.stopped) return
@@ -799,6 +807,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           if (Array.isArray(after)) S.channels = after.map((c) => ({ ...(before.find((x) => x.leaf_id === c.leaf_id) || {}), ...c }))
           const came = channelArrivals(before, S.channels)
           if (came.length) {
+            S.channelIn = now()
             try { S.balance = await run('balance') } catch {}
             // The code shown was paid: a new one shows, as after any payment to it.
             try { ctx.store.removeItem(tagged(CODE_KEY, tag())) } catch {}
@@ -808,7 +817,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         } catch {} finally { S.busy = false }
       }
       watchChannels()
-    }, (ctx.visible && !ctx.visible()) ? CHANNEL_POLL_HIDDEN_MS : (ctx.channelPollMs || CHANNEL_POLL_MS))
+    }, channelPollMs())
     if (S.chanTimer && typeof S.chanTimer.unref === 'function') S.chanTimer.unref()
   }
 
