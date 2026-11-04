@@ -165,6 +165,10 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       put(rec)
       const r = await run('lightning_pay', { invoice: o.invoice, asset: choice.btc.quote.asset, max_fee_ppm: maxFeePpm, shown: choice.btc.quote })
       rec.change = r.change || null
+      // The change coin by its id: the payment's transfer makes the payment's leaf, then the change.
+      // Named, it is followed even once the wallet pays on it, which the next trade often does.
+      const outs = r.transfer && Array.isArray(r.transfer.outputs) ? r.transfer.outputs : []
+      if (rec.settleTargets.length === 1 && big(r.change) > 0n && typeof outs[1] === 'string' && outs[1]) rec.settleTargets = [{ ...rec.settleTargets[0], leaf_id: outs[1] }]
       rec.state = 'sent'; rec.sentAt = now()
       put(rec)
       post(rec.maker + '/v1/btc/paid', { swap: rec.swap }).catch(() => {})

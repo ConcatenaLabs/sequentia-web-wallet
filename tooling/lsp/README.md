@@ -112,7 +112,7 @@ relay therefore starts in a transient scope of its own in `seqln-hosted.slice`
 plain detached children. The start log says which (`[prov] hosted nodes run in scopes of their
 own …` or `… as detached children of the LSP (why)`). `LSP_NODE_SCOPE=1` or `0` overrides the
 choice and `LSP_NODE_SLICE` names another slice. The testnet's unit is `lsp-b5b1.service` in
-sequentia-testnet-ops (`lsp/`). Its own work (seqob-cli runs, node commands) stays in its control
+sequentia-testnet-ops (`systemd/lsp-b5b1.service`). Its own work (seqob-cli runs, node commands) stays in its control
 group and stops with it, so a restarted LSP never races an old run of the same swap.
 
 The service assumes the rest of the hosted backend is already up:

@@ -353,3 +353,61 @@ test('buying with BTC: a claimed coin paid on out of round leaves nothing to set
   assert.equal(r.state, 'settled')
   assert.ok(!s.calls.includes('participate'))
 })
+
+// The trade after a purchase or a sale often pays at once on what the trade brought (sequentia-
+// testnet-ops#98: the check's next trade spent the claimed coin and the sale's change 41 s after
+// the claim). The settle is done all the same, and a trade must never wait on it forever.
+test('buying with BTC: a settle round released after the next trade paid on its new leaf is settled', async () => {
+  const s = claimedThen(() => {})
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  assert.ok(r.settle, 'the claimed coin goes into the next round')
+  s.parts.forEach((p) => { p.state = 'released'; p.new_leaves = [{ state: 'spent' }] })
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled', 'released, its new leaf already paid on by the next trade: settled')
+})
+
+test('buying with BTC: a settle participation the library no longer lists is asked again, and a coin paid on meanwhile settles it', async () => {
+  const s = claimedThen(() => {})
+  const eng = await bought(s)
+  let r = await eng.advance(eng.records()[0])
+  assert.ok(r.settle)
+  s.parts = []
+  const c = s.coins.find((x) => x.leaf_id === 'r1'); c.state = 'spent'; c.spent_by = 'transfer ' + 'ab'.repeat(32)
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.settle, null, 'a participation the library does not list is not waited on')
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+})
+
+async function sold (s) {
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
+  assert.ok(q.ok, q.why)
+  await eng.confirm(q.choice, q.ticket)
+  s.invoices[H].status = 'paid'
+  await eng.advance(eng.records()[0])
+  s.pays[H].state = 'paid'
+  return eng
+}
+
+test('selling for BTC: the change is named by its id, and settled once the next trade has paid on it', async () => {
+  const s = standIn()
+  const inner = s.lib.command
+  s.lib.command = (cmd, a) => { const r = inner(cmd, a); return cmd === 'lightning_pay' ? { ...r, transfer: { transfer_id: 't1', outputs: ['htlc1', 'chg'] } } : r }
+  const eng = await sold(s)
+  assert.equal(eng.records()[0].settleTargets[0].leaf_id, 'chg', 'the change coin named by the payment\'s transfer')
+  const c = s.coins.find((x) => x.leaf_id === 'chg'); c.state = 'spent'; c.spent_by = 'transfer ' + 'ab'.repeat(32)
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled', 'the change paid on by the next trade leaves nothing to settle')
+  assert.ok(!s.calls.includes('participate'))
+})
+
+test('selling for BTC: from a library that names no change coin, change paid on by the next trade settles the sale', async () => {
+  const s = standIn()
+  const eng = await sold(s)
+  assert.equal(eng.records()[0].settleTargets[0].leaf_id, undefined)
+  const c = s.coins.find((x) => x.leaf_id === 'chg'); c.state = 'spent'; c.spent_by = 'transfer ' + 'ab'.repeat(32)
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled')
+})
