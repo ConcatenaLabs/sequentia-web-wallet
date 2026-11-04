@@ -233,7 +233,8 @@ pays a receive code of the same operator and chain in the tree, and everything e
 always has; an address the chain's coins cannot cover is paid out of the tree in the operator's
 next settlement (the library's `offboard`), its fee and arrival shown first. The open page reads
 the wallet's mailbox every few seconds, so a payment to its receive code shows as soon as the
-library has taken it. The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
+library has taken it. Where the operator makes channel leaves, a payment between two such
+wallets arrives at once instead (below, Payments that arrive at once). The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
 coins. User mode carries no developer vocabulary: the xpub,
 the Settings backend card, the staker key, the order book's unblinded/blinded switch (shown in
 user mode only while the blinded book is chosen), a payment's preimage and the Lightning
@@ -271,7 +272,17 @@ must answer CORS. The tab then has:
   serves (its published list, then any other asset held in leaves). A payment arrives in the
   mailbox, which sync reads. On the testnet, **Ask the testnet faucet to pay it** sends the
   request to the faucet, which pays it as a leaf out of round, and the page syncs.
-- **Send to a receive request**: pays it out of round, in the asset named.
+- **Send to a receive request**: pays a receive request (or a channel code), in the asset named,
+  by the route chosen: **By a channel** (the wallet's channel in the asset into the receiver's,
+  at once), **By a leaf** (out of round, into the request's leaf), or **Either way**, which
+  takes the channel when both hold one and the receiver's can take the amount.
+- **Channels**: every channel leaf with its state, this wallet's side and the operator's, the
+  credit notes it was paid and what of them is not folded yet, with **Read**, **Fold**, **Close
+  into a round** (Settle now's quote, then the round: a plain leaf of the wallet's side) and
+  **Exit** (the channel taken home on the chain alone, one step a run: its path unrolled, its
+  latest state published, its settle after the exit delay, its credit claimed, its side swept
+  home). **Payment code** shows the library's channel code, which a payer's `send` pays at
+  once, and **Open in the next round** opens one by hand. The card states what a channel payment relies on (below).
 - **Sync and schedule**: the chain's median time, when the schedule next asks for a sync and
   why, and every unpaid receive request with when it lapses. It syncs once when the leaf wallet
   opens, whatever the schedule says, so a wallet back from an absence takes up what happened
@@ -322,6 +333,38 @@ round is final and the new leaves are held, and asks again. The person waits one
 nothing else; developer mode shows a "Paying through the next round" card while it waits. A
 release costs the refresh fee the asset's schedule asks then (none in the leaf's free window).
 User mode shows none of this: a claim taken up is counted in its asset's one figure.
+
+#### Payments that arrive at once
+
+Where the operator makes channel leaves of an asset, `care` (run with `channels`) opens one by
+itself in each such asset the wallet holds leaves of. In the next round, half of what those
+leaves hold goes into a channel leaf with the operator's capacity on its side, and the other half
+into a plain leaf beside it, so payments and trades from leaves go on as before. Leaves a plan
+names, resting orders and leaves of a supervised asset stay out of it, and so do leaves too small
+to split into two of the operator's smallest. `care` also reads each channel, folds the credit it
+was paid into its balance, and closes it into a round once its expiry is within ten days; a later
+`care` opens a new one.
+
+The receive code's Sequentia request then names the wallet's channels that can be paid now
+(`channels`, by asset), and the page makes a new code whenever that set changes. A payer
+whose wallet holds a channel in the asset, its round final, holding the amount, pays over it:
+the library's `send` routes it, and the payment is final for the receiver at once, with no round
+between, against capacity already in the receiver's leaf. Otherwise, or when the receiver's
+channel cannot take the amount, `send` pays the request's leaf as before. A payment whose answer
+never came stands and is not paid another way: the library sends it again at its next read of
+the channel. Default mode shows none of this: the review and the result are those of any
+payment to a receive code.
+
+While the page is open in user mode and holds a live channel, it reads its channels from the
+operator about twice a second, never while the wallet is busy or just after a person asked it
+something, so a payment into one shows in the asset's figure at once; a wallet that was closed
+takes it up when it opens. Each asset's figure counts a channel's side and the credit it was paid
+as far as the chain would pay it (the library's `balance`).
+
+A channel payment relies on the operator for its one request: the operator could co-sign the
+payer's new state and keep the receiver's note back. Developer mode's Channels card says so. A
+channel coin's exit is the channel's own (its latest state, settle and credit claim), whether the
+Exit button runs it or the wallet takes the coin home by itself.
 
 #### The operator's bond
 
