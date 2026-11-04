@@ -113,9 +113,11 @@ a person's way: the pass that syncs at open, care, boards and the mailbox read (
 trade's quote asks the library several times); the bond's watch, which holds the worker for most
 of a minute, runs at most hourly after two quiet minutes; and the Trade tab follows a trade older
 than two minutes every half minute, and never while a price is asked. The one exception is the channel read (`watchChannels`): with a
-live channel leaf, the page reads its channels every 300 ms while it is in view (five seconds out
-of view), skipping only while another command runs, so a payment into a channel is in the
-receiver's figure within a second; a person's command waits at most one such read. `care` runs
+live channel leaf, the page reads its channels every 300 ms while it is in view and was used,
+opened or paid within three minutes (five seconds otherwise: each read runs the library's witness,
+which the operator rate-limits), skipping only while another command runs, so a payment into a
+wallet in use is in the receiver's figure within a second; a person's command waits at most one
+such read, and none while a send review holds them (`holdReads`). `care` runs
 with `channels`, which opens a channel leaf by itself in each asset the operator makes them of, and
 a receive code names the wallet's payable channels (`codeNamesChannels` makes a kept code again
 when they change), so the library's `send` pays over a channel whenever both sides hold one. A wallet that joined an operator keeps its leaf wallet syncing

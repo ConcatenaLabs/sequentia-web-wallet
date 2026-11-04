@@ -416,10 +416,13 @@ the channel. Default mode shows none of this: the review and the result are thos
 payment to a receive code.
 
 While the page is open in user mode and holds a live channel, it reads its channels from the
-operator every 300 ms while the page is in view and every five seconds while it is not, never
-while another command of the wallet runs, so a payment into one shows in the asset's figure
-within a second of the payer's Send; a wallet that was closed takes it up when it opens. A
-person's command waits for at most one such read. Each asset's figure counts a channel's side and the credit it was paid
+operator every 300 ms while the page is in view and the wallet was used, opened or paid within
+the last three minutes, and every five seconds otherwise, never while another command of the
+wallet runs. A payment into a wallet in use therefore shows in the asset's figure within a second
+of the payer's Send, and one into a wallet left alone within a few seconds; a wallet that was
+closed takes it up when it opens. A person's command waits for at most one such read. Each read
+runs the library's witness, which the operator hands out at a bounded rate, which is why only a
+wallet in use reads fast. Each asset's figure counts a channel's side and the credit it was paid
 as far as the chain would pay it (the library's `balance`).
 
 A channel payment relies on the operator for its one request: the operator could co-sign the

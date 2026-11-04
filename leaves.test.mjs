@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, channelArrivals, payableChannels, codeNamesChannels, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -512,7 +512,10 @@ test('channels: what a read brought in, what a code names, and when a kept code 
   assert.equal(codeNamesChannels({}, []), true)
 })
 
-test('user mode: a payment into a channel is read within a poll, the balance read again and the page told; out of view, not as often', async () => {
+test('user mode: a payment into a channel is read within a poll, the balance read again and the page told; out of view or left alone, not as often', async (t) => {
+  let skew = 0
+  const apis = []
+  t.after(() => { for (const a of apis) a.stop() })
   const mount = (visible) => {
     const store = memStore()
     store.setItem(JOINED_KEY + '.t', '1')
@@ -529,9 +532,10 @@ test('user mode: a payment into a channel is read within a poll, the balance rea
       return { id: m.id, ok: true, value: { result, start: {} } }
     })
     const events = []
-    const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => Date.now(),
+    const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => Date.now() + skew,
       pinned: () => ({ server: 'https://op', node_url: 'https://node', operator: 'ee'.repeat(32) }), onEvent: (n, d) => events.push([n, d]),
       tickMs: 3_600_000, channelPollMs: 50, visible: () => visible }, null, null)
+    apis.push(api)
     return { api, runs, events, pay: (n) => { credit += n } }
   }
   const seen = mount(true)
@@ -560,4 +564,15 @@ test('user mode: a payment into a channel is read within a poll, the balance rea
   await new Promise((r) => setTimeout(r, 300))
   assert.ok(held.runs.filter((c) => c === 'channel_sync').length > before, 'the reads go on once the hold ends')
   held.api.stop()
+  // Left alone for longer than CHANNEL_FAST_FOR_MS: read as out of view, until the wallet is used.
+  const alone = mount(true)
+  await alone.api.start()
+  await new Promise((r) => setTimeout(r, 200))
+  skew = CHANNEL_FAST_FOR_MS + 1000
+  await new Promise((r) => setTimeout(r, 200))
+  const was = alone.runs.filter((c) => c === 'channel_sync').length
+  await new Promise((r) => setTimeout(r, 400))
+  assert.equal(alone.runs.filter((c) => c === 'channel_sync').length, was, 'a wallet left alone reads its channels at the slow pace')
+  alone.api.stop()
+  skew = 0
 })

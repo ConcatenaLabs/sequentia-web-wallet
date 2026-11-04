@@ -314,8 +314,13 @@ async function main () {
   const idle = (w) => w.page.waitFor("!document.querySelector('.leaf-busy')", 300000)
   await toDev(A)
   await A.shot('channels-developer-mode')
-  await A.eval("document.querySelector('#leafChannels .leaf-channel[data-state=live] [data-action=close]').click()")
-  await A.page.waitFor("document.querySelector('#btnLeafSettleConfirm')", 120000)
+  // The card's buttons are disabled while the wallet runs a command of its own: asked again until
+  // the quote shows.
+  for (let i = 0; i < 6; i++) {
+    await idle(A)
+    await A.eval("document.querySelector('#leafChannels .leaf-channel[data-state=live] [data-action=close]').click()")
+    if (await A.page.waitFor("document.querySelector('#btnLeafSettleConfirm')", 20000).then(() => true, () => false)) break
+  }
   await A.click('#btnLeafSettleConfirm')
   await idle(A)
   const r2 = await ctl('/round')
