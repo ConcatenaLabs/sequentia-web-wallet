@@ -95,6 +95,7 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/prices` | index.html | per-asset USD prices for reference-currency display |
 | `/feerates` | index.html | the node's fee-asset acceptance set (`getfeeexchangerates`): `{"bitcoin"\|ticker\|hex: rate}`, tSEQ keyed `"bitcoin"` |
 | `/faucet` | index.html | POST, testnet funds to the wallet's receive code (user mode, with the leaf wallet open) or its current address |
+| `/faucet/claimed` | index.html (`faucet-wallet.js`) | GET, the assets this wallet (`?wallet=<id>`) has already received from the faucet, which pays each asset once per wallet |
 | `/registry/index.minimal.json` | index.html | asset-metadata index (override: `window.SEQ_REGISTRY_URL`) |
 | `/seqob` + `/seqob/v1/ws` | seqob.js, xcourier.js | order-book relay REST + the swap courier WebSocket |
 | `/anchor/<blockhash>`, `/anchorstatus` | xmaker.js | anchor height / certification for the maker's reveal gate |
