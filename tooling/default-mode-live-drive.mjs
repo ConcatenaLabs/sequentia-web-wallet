@@ -7,7 +7,9 @@
 //          mode never says), and Receive gives a receive code; the faucet pays it, and the asset
 //          shows in the balance; its phrase is written to <work>/<name>.phrase
 //   send   wallet <name> pays wallet <to>'s receive code in the tree; the time from the click to
-//          the receiver's balance showing it
+//          the receiver's balance showing it. `send <name> @<file> <ticker> <amount>` pays the
+//          code written in <file> instead (another wallet's: the arca client's `arca:` request,
+//          Ambra's code), with no receiver page to watch
 //   trade  wallet <name> trades in the Trade tab (default mode's composer): pay, receive, amount
 //   show   wallet <name>'s balance figures and headline, written to <work>/<name>.totals.json
 //   invoice  wallet <name> makes a BTC invoice on Receive for <sats>, writes it to
@@ -16,6 +18,20 @@
 //          selling something for BTC does: Send opens with it filled in, and the drive presses Pay
 //          (`--paste` pastes it into Pay an invoice instead, for a page without the link)
 //   restore  the phrase of <name> opened in a fresh profile; its figures compared with <name>'s
+//   codes  wallet <name> hands out <n> fresh receive codes, written to <work>/<name>.codes, one a
+//          line
+//   sendmany  wallet <name> pays <amount> <ticker> to every code in each <file> given, one row of
+//          Send each, in one payment: `sendmany A USDX 10 B.codes C.codes`
+//   coins  wallet <name>'s coins in the tree as developer mode lists them (state, kind, asset,
+//          value, dates), written to <work>/<name>.coins.json
+//   settle wallet <name> settles every coin it holds in the tree that is not a leaf of a round (kind batch)
+//          (developer mode's Settle now: the quote, then Sign and hand over), and stays open until
+//          each is a live leaf of a round, up to 30 minutes; written to <work>/<name>.coins.json
+//   exit   wallet <name> takes every coin it holds in the tree home in developer mode's exit
+//          drill: for each, the quote (what it broadcasts and its fees), then Broadcast on these
+//          fees, and what the run did, all written to <work>/<name>.exit.json. With the page
+//          served by tooling/live-proxy.mjs --refuse /arca it runs with the operator gone. A coin
+//          already exiting has no drill button: opening the wallet syncs it on to its claim
 //
 //   node tooling/default-mode-live-drive.mjs <work-dir> <step> <name> [args…]
 //     [--base http://127.0.0.1:8791/wallet/]
@@ -36,6 +52,9 @@ import { forbiddenIn } from '../user-trade.js'
 const argv = process.argv.slice(2)
 const flag = (n, d) => { const i = argv.indexOf(n); if (i < 0) return d; const v = argv[i + 1]; argv.splice(i, 2); return v }
 const base = flag('--base', 'http://127.0.0.1:8791/wallet/')
+// `--to-base <url>`: `send`'s receiver opens at this page instead of --base, a wallet kept on
+// another origin (one served by tooling/live-proxy.mjs, paid from the public page).
+const toBase = flag('--to-base', null)
 // `pay --paste`: the invoice is pasted into Pay an invoice instead of handed over by the link, for
 // a page that predates the link.
 const paste = argv.includes('--paste'); if (paste) argv.splice(argv.indexOf('--paste'), 1)
@@ -52,7 +71,7 @@ const secs = (ms) => (ms / 1000).toFixed(1) + ' s'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const pages = []
-async function openWallet (who, { fresh = false, phrase = null } = {}) {
+async function openWallet (who, { fresh = false, phrase = null, at = base } = {}) {
   const profile = join(work, 'profiles', who)
   const page = new Page(chromium(), { profile })
   pages.push(page)
@@ -66,7 +85,7 @@ async function openWallet (who, { fresh = false, phrase = null } = {}) {
   await page.send('Page.addScriptToEvaluateOnNewDocument', { source: `window.SEQ_LEAVES_TICK_MS=8000;
     // Served from this machine, the hosted-node service is reached through the same origin, as on the public page.
     if (location.hostname === '127.0.0.1') Object.defineProperty(window, 'SEQ_LSP_URL', { value: location.origin + '/lsp', writable: false, configurable: false })` })
-  await page.go(base)
+  await page.go(at)
   // A wallet of an earlier step reopens from its phrase: a browser stopped by the drive may not
   // have written its storage to disk.
   if (!phrase && !fresh && existsSync(join(work, who + '.phrase'))) phrase = readFileSync(join(work, who + '.phrase'), 'utf8').trim()
@@ -77,7 +96,7 @@ async function openWallet (who, { fresh = false, phrase = null } = {}) {
     if (shown === 'welcome') {
       await page.eval(`localStorage.setItem('swk.sequentia.mnemonic', ${JSON.stringify(phrase)})`)
       await page.go('about:blank'); await sleep(1500)
-      await page.go(base)
+      await page.go(at)
     }
   } else if (fresh) {
     await page.waitFor("document.querySelector('#btnCreate') && document.querySelector('#btnCreate').offsetParent !== null", 300000)
@@ -102,6 +121,8 @@ const balances = (page) => page.eval(`(()=>{ const out={}; for(const r of docume
   out._headline=(document.querySelector('#totalVal')||document.querySelector('.hero .big')||{}).textContent||''; return out })()`)
 
 async function waitJoined (page, ms = 240000) {
+  // Default mode's receive code: a wallet a developer-mode step left there is put back first.
+  await page.eval("(()=>{ const u=document.querySelector('#modeUser'); if(u && !u.checked){ u.checked=true; u.dispatchEvent(new Event('change')) } return true })()").catch(() => {})
   await tab(page, 'receive')
   return page.waitFor("(()=>{ const a=document.querySelector('#addr'); return a && a.classList.contains('recv-code') && /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(a.textContent) ? a.textContent : false })()", ms)
 }
@@ -117,6 +138,28 @@ async function faucet (page, asset) {
   check(`the balance shows ${asset}`, !!bal[asset] && /[1-9]/.test(bal[asset].total), bal[asset])
   await shot(page, `${name}-faucet-${asset}.png`)
 }
+
+// Developer mode's Leaves tab, its coin list shown.
+async function devLeaves (page) {
+  await page.eval("(()=>{ const c=document.querySelector('#modeDeveloper'); if(!c) throw new Error('no #modeDeveloper'); c.checked=true; c.dispatchEvent(new Event('change')); return true })()")
+  await page.waitFor("document.querySelector('#tabLeaves') && !document.querySelector('#tabLeaves').classList.contains('hide')", 60000)
+  await click(page, '#tabLeaves')
+  await page.waitFor("document.querySelector('#leafCoins')", 300000)
+  // The list fills once the wallet has read its store and synced: the same answer twice, 10 s
+  // apart, with a sync behind it.
+  let last = null
+  for (let i = 0; i < 30; i++) {
+    await sleep(10000)
+    const now = await page.eval("[...document.querySelectorAll('#leafCoins .leaf-coin')].map(d=>d.dataset.leaf+d.dataset.state).join() + '|' + /Last sync: /.test(document.querySelector('#leavesRoot').innerText)")
+    if (now === last && now.endsWith('|true')) break
+    last = now
+  }
+}
+
+// The coins developer mode lists, held or not, with whether each has its Exit drill button.
+const listCoins = (page) => page.eval(`[...document.querySelectorAll('#leafCoins .leaf-coin')].map((d)=>({ leaf: d.dataset.leaf, state: d.dataset.state,
+  kind: d.dataset.kind, asset: d.dataset.asset, value: d.dataset.value, exit_by: d.dataset.exitBy || null,
+  button: !!d.querySelector('button[data-action="exit"]:not([disabled])') }))`)
 
 async function main () {
   if (step === 'faucet') {
@@ -143,18 +186,25 @@ async function main () {
   } else if (step === 'send') {
     // node … send A B GOLD 1: A pays B's receive code; B's page is open throughout.
     const [to, ticker, amount] = rest
-    const pb = await openWallet(to)
-    const old = await waitJoined(pb)
-    // A fresh code for this payment: the one shown may be paid already by an earlier run.
-    if (rest[3] !== 'same' && rest[3] !== 'address') {
-      await click(pb, '#btnNewAddr')
-      await pb.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(t) && t!==${JSON.stringify(old)} })()`, 300000)
+    const external = to.startsWith('@')
+    let pb = null; let code; let before = { total: '0' }
+    if (external) {
+      code = readFileSync(to.slice(1), 'utf8').trim()
+      note('paying the code in ' + to.slice(1) + ': ' + code.slice(0, 24) + '…')
+    } else {
+      pb = await openWallet(to, { at: toBase || base })
+      const old = await waitJoined(pb)
+      // A fresh code for this payment: the one shown may be paid already by an earlier run.
+      if (rest[3] !== 'same' && rest[3] !== 'address') {
+        await click(pb, '#btnNewAddr')
+        await pb.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(t) && t!==${JSON.stringify(old)} })()`, 300000)
+      }
+      code = await pb.eval("document.querySelector('#addr').textContent")
+      // `address`: pay the address the code carries, as a sender outside the tree would be given.
+      if (rest[3] === 'address') { code = decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]); note('paying the address ' + code) }
+      await tab(pb, 'balance')
+      before = (await balances(pb))[ticker] || { total: '0' }
     }
-    let code = await pb.eval("document.querySelector('#addr').textContent")
-    // `address`: pay the address the code carries, as a sender outside the tree would be given.
-    if (rest[3] === 'address') { code = decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]); note('paying the address ' + code) }
-    await tab(pb, 'balance')
-    const before = (await balances(pb))[ticker] || { total: '0' }
     const pa = await openWallet(name)
     await waitJoined(pa)
     await tab(pa, 'send')
@@ -171,6 +221,7 @@ async function main () {
     const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 2400000).catch(async (e) => { note('still: ' + await pa.eval("document.querySelector('.modal .status')?.textContent||''") + ' console: ' + pa.console.slice(-8).join(' | ')); throw e })
     check('the sender says it is sent', /^Sent/.test(done), `${done} (${secs(Date.now() - tClick)} from the click)`)
     await shot(pa, `${name}-send-done.png`)
+    if (external || !/^Sent/.test(done)) { note('console A: ' + pa.console.filter((l) => /tree send|leaves|board/i.test(l)).slice(-6).join(' | ')); return }
     const seen = await pb.waitFor(`(async()=>{ const r=[...document.querySelectorAll('.bt-row')].find(r=>r.querySelector('.tk')?.textContent.trim()===${JSON.stringify(ticker)}); const t=r?(r.querySelector('.bt-t')?.innerText||''):''; return t && t!==${JSON.stringify(before.total)} ? t : false })()`, 600000).catch(() => null)
     check(`${to} shows the ${ticker}`, !!seen, `${seen} ${secs(Date.now() - tClick)} after the click (it showed ${JSON.stringify(before.total)} before)`)
     await shot(pb, `${to}-after-send.png`)
@@ -292,6 +343,117 @@ async function main () {
     }
     check('the invoice is paid from the BTC balance', /^Paid/.test(said), `${said} (${secs(Date.now() - tP)} from the click)`)
     await shot(page, `${name}-pay-2-paid.png`)
+    await page.stop()
+  } else if (step === 'codes') {
+    const page = await openWallet(name)
+    let last = await waitJoined(page)
+    const codes = []
+    for (let i = 0; i < Number(rest[0] || 1); i++) {
+      await click(page, '#btnNewAddr')
+      last = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(t) && t!==${JSON.stringify(last)} ? t : false })()`, 300000)
+      codes.push(last)
+    }
+    writeFileSync(join(work, name + '.codes'), codes.join('\n') + '\n')
+    note(`${codes.length} code(s) written to ${name}.codes`)
+    await page.stop()
+  } else if (step === 'sendmany') {
+    const [ticker, amount, ...files] = rest
+    const codes = files.flatMap((f) => readFileSync(f, 'utf8').split('\n').map((x) => x.trim()).filter(Boolean))
+    const pa = await openWallet(name)
+    await waitJoined(pa)
+    await tab(pa, 'send')
+    await pa.waitFor(`[...document.querySelectorAll('#recipients .rec .rasset option')].some(o=>o.textContent.trim().split(/\\s/)[0]===${JSON.stringify(ticker)})`, 180000)
+    for (let i = 1; i < codes.length; i++) await click(pa, '#btnAddRec')
+    const rows = await pa.eval(`(()=>{ const codes=${JSON.stringify(codes)}; const rs=[...document.querySelectorAll('#recipients .rec')];
+      rs.forEach((r, i) => { r.querySelector('.raddr').value=codes[i]; r.querySelector('.raddr').dispatchEvent(new Event('input'));
+        const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); if(!o) throw new Error('no ${ticker}'); s.value=o.value; s.dispatchEvent(new Event('change'));
+        r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')) }); return rs.length })()`)
+    note(`${rows} row(s) filled for ${codes.length} code(s)`)
+    await click(pa, '#btnReview')
+    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e ? 'ERR '+e : false })()", 300000)
+    check('the review', !title.startsWith('ERR'), title.replace(/\n+/g, ' | ').slice(0, 600))
+    if (!title.startsWith('ERR')) {
+      const tClick = Date.now()
+      await pa.eval("document.querySelector('.modal button.primary').click()")
+      const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 2400000)
+      check('the sender says it is sent', /^Sent/.test(done), `${done} (${secs(Date.now() - tClick)} from the click)`)
+      await sleep(30000)
+    }
+    await shot(pa, `${name}-sendmany.png`)
+    note('console A: ' + pa.console.filter((l) => /tree send|leaves/i.test(l)).slice(-6).join(' | '))
+    await pa.stop()
+  } else if (step === 'settle') {
+    const page = await openWallet(name)
+    await devLeaves(page)
+    let coins = await listCoins(page)
+    note(`${coins.length} coin(s): ` + coins.map((c) => `${c.leaf.slice(0, 12)} ${c.state} ${c.kind} ${c.value}`).join('; '))
+    for (const c of coins.filter((c) => c.kind !== 'batch' && c.state === 'live')) {
+      const btn = `.leaf-coin[data-leaf="${c.leaf}"] button[data-action="settle"]`
+      const ok = await page.waitFor(`(()=>{ const b=document.querySelector(${JSON.stringify(btn)}); return b ? (b.disabled ? false : 'ok') : 'gone' })()`, 300000).catch(() => 'still disabled')
+      if (ok !== 'ok') { note(`coin ${c.leaf.slice(0, 12)}: no Settle now (${ok})`); continue }
+      note(`coin ${c.leaf.slice(0, 12)}: Settle now`)
+      await click(page, btn)
+      const q = await page.waitFor("(()=>{ const q=document.querySelector('#leafQuote'); return q ? q.innerText : false })()", 300000).catch(() => null)
+      if (!q) { check(`coin ${c.leaf.slice(0, 12)}: a settle quote`, false); continue }
+      await click(page, '#btnLeafSettleConfirm')
+      await page.waitFor("!document.querySelector('#leafQuote')", 300000).catch(() => null)
+      note(`coin ${c.leaf.slice(0, 12)}: settle quoted (${q.replace(/\n+/g, ' | ').slice(0, 200)}) and handed over`)
+      await sleep(2000)
+    }
+    // Done once the wallet holds as many live leaves of a round as it held coins before, and
+    // nothing is in flight.
+    const want = coins.filter((c) => !['spent', 'exited', 'lost', 'forfeited', 'given'].includes(c.state)).length
+    const t = Date.now()
+    while (Date.now() - t < 1800000) {
+      coins = await listCoins(page)
+      const gone = (c) => ['spent', 'exited', 'lost', 'forfeited'].includes(c.state)
+      const leaves = coins.filter((c) => c.kind === 'batch' && c.state === 'live').length
+      if (leaves >= want && coins.every((c) => gone(c) || (c.kind === 'batch' && c.state === 'live'))) break
+      await sleep(10000)
+    }
+    note(`after ${secs(Date.now() - t)}: ` + coins.map((c) => `${c.leaf.slice(0, 12)} ${c.state} ${c.kind} ${c.value}`).join('; '))
+    const held = coins.filter((c) => !['spent', 'exited', 'lost', 'forfeited'].includes(c.state))
+    check(`every coin held is a live leaf of a round, ${want} of them`, held.length >= want && held.every((c) => c.kind === 'batch' && c.state === 'live'), `${held.length} held`)
+    writeFileSync(join(work, name + '.coins.json'), JSON.stringify({ at: new Date().toISOString(), coins }, null, 1))
+    await page.stop()
+  } else if (step === 'coins' || step === 'exit') {
+    const page = await openWallet(name)
+    await devLeaves(page)
+    const coins = await listCoins(page)
+    note(`${coins.length} coin(s): ` + coins.map((c) => `${c.leaf.slice(0, 12)} ${c.state} ${c.kind} ${c.value}`).join('; '))
+    if (step === 'coins') {
+      writeFileSync(join(work, name + '.coins.json'), JSON.stringify({ at: new Date().toISOString(), coins }, null, 1))
+    } else {
+      const runs = []
+      for (const c of coins.filter((c) => c.button)) {
+        const t = Date.now()
+        const before = await page.eval("document.querySelectorAll('#leafDrill .leaf-drill-run').length")
+        const btn = `.leaf-coin[data-leaf="${c.leaf}"] button[data-action="exit"]`
+        if (!(await page.waitFor(`(()=>{ const b=document.querySelector(${JSON.stringify(btn)}); return b ? (b.disabled ? false : 'ok') : 'gone' })()`, 600000).then((v) => v === 'ok'))) {
+          runs.push({ leaf: c.leaf, result: 'no drill button any more', at: new Date().toISOString() }); continue
+        }
+        await click(page, btn)
+        const quote = await page.waitFor(`(()=>{ const d=document.querySelector('#leafDrill'); if(!d || !d.textContent.includes(${JSON.stringify(c.leaf)})) return false;
+          const q=document.querySelector('#leafExitQuote'); if(q) return q.innerText;
+          const r=d.querySelectorAll('.leaf-drill-run'); return r.length > ${before} ? 'ERR ' + r[r.length-1].innerText : false })()`, 600000)
+        let result
+        if (quote.startsWith('ERR ')) { result = quote } else {
+          const n = await page.eval("document.querySelectorAll('#leafDrill .leaf-drill-run').length")
+          await page.waitFor("document.querySelector('#btnLeafExitConfirm') && !document.querySelector('#btnLeafExitConfirm').disabled", 600000)
+          await click(page, '#btnLeafExitConfirm')
+          result = await page.waitFor(`(()=>{ const r=document.querySelectorAll('#leafDrill .leaf-drill-run'); return r.length > ${n} ? r[r.length-1].innerText : false })()`, 900000)
+        }
+        const run = { leaf: c.leaf, asset: c.asset, value: c.value, state_before: c.state, quote, result, seconds: (Date.now() - t) / 1000, at: new Date().toISOString() }
+        runs.push(run)
+        check(`coin ${c.leaf.slice(0, 12)} (${c.value}): the exit ran`, !/refused|^ERR/i.test(result), `${result.replace(/\n+/g, ' | ')} (${secs(Date.now() - t)})`)
+        writeFileSync(join(work, name + '.exit.json'), JSON.stringify({ runs }, null, 1))
+      }
+      const after = await listCoins(page)
+      note(`after: ` + after.map((c) => `${c.leaf.slice(0, 12)} ${c.state}`).join('; '))
+      writeFileSync(join(work, name + '.exit.json'), JSON.stringify({ runs, after }, null, 1))
+      await shot(page, `${name}-exit.png`)
+    }
+    note('console: ' + page.console.filter((l) => /leaves|exit|operator|server|refus/i.test(l)).slice(-10).join(' | '))
     await page.stop()
   } else if (step === 'show') {
     const page = await openWallet(name)

@@ -28,9 +28,25 @@ const arg = (name, dflt) => { const i = process.argv.indexOf(name); return i > 0
 const port = Number(arg('--port', '8791'))
 const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '')
 // --log: one line per forwarded call (method, path, status, time, and the JSON-RPC method).
+//
+// --refuse <path prefix> (repeatable): a call whose path starts with the prefix gets no answer:
+// its connection is closed unanswered, as a server that is gone closes it. `--refuse /arca`
+// stands for the page's operator gone while the node, the page and everything else still
+// answer, for an exit drill (default-mode-live-drive.mjs `exit`). Each refused call prints one
+// line. --refuse-status 502 answers such a call with that status instead, as a front server does
+// when the service behind it is down.
+//
+// --cors: every answer allows any origin, and a preflight is answered here, so a wallet on
+// another origin (a browser extension joined to http://127.0.0.1:<port>/arca with the node at
+// /node-rpc) reaches the testnet through this proxy, and through its --refuse.
 const logCalls = process.argv.includes('--log')
 const seqobMarket = (arg('--seqob-market', '') || '').replace(/\/+$/, '')
 const dex = arg('--dex', '') ? resolve(arg('--dex', '')) : null
+const cors = process.argv.includes('--cors')
+const refuseStatus = Number(arg('--refuse-status', '0'))
+const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'access-control-allow-headers': 'content-type, authorization' }
+const refused = process.argv.flatMap((a, i) => a === '--refuse' && process.argv[i + 1] ? [process.argv[i + 1]] : [])
 const MARKET_DATA = /^\/seqob\/v1\/(trades(\/.*)?|market\/[^/]+\/[^/]+\/(trades|candles|ticker))$/
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
@@ -54,6 +70,13 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
   if (url.pathname === '/wallet') { res.writeHead(302, { location: '/wallet/' }); res.end(); return }
   if (dex && url.pathname === '/dex') { res.writeHead(302, { location: '/dex/' }); res.end(); return }
+  if (refused.some((p) => url.pathname === p || url.pathname.startsWith(p.replace(/\/+$/, '') + '/'))) {
+    console.log(`${new Date().toISOString()} refused ${req.method} ${url.pathname}`)
+    if (refuseStatus) { res.writeHead(refuseStatus, { 'content-type': 'text/plain', ...(cors ? CORS : {}) }); res.end('Bad Gateway'); return }
+    req.socket.destroy()
+    return
+  }
+  if (cors && req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return }
   const f = local(url.pathname)
   if (f) {
     res.writeHead(200, { 'content-type': types[extname(f)] || 'application/octet-stream', 'cache-control': 'no-store' })
@@ -74,7 +97,7 @@ const server = createServer(async (req, res) => {
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: 'manual' })
     const out = {}
     r.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'alt-svc', 'strict-transport-security'].includes(k)) out[k] = v })
-    res.writeHead(r.status, out)
+    res.writeHead(r.status, cors ? { ...out, ...CORS } : out)
     res.end(Buffer.from(await r.arrayBuffer()))
     if (logCalls) {
       let m = ''; try { const j = JSON.parse(Buffer.concat(chunks).toString()); m = Array.isArray(j) ? j.map((x) => x.method).join(',') : (j.method || '') + (j.method === 'getblockhash' ? ' ' + JSON.stringify(j.params) : '') } catch {}
@@ -85,4 +108,5 @@ const server = createServer(async (req, res) => {
     try { if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }); res.end('live-proxy: ' + (e && e.message)) } catch {}
   }
 })
-server.listen(port, '127.0.0.1', () => console.log(`serving http://127.0.0.1:${server.address().port}/wallet/`))
+server.listen(port, '127.0.0.1', () => console.log(`serving http://127.0.0.1:${server.address().port}/wallet/` +
+  (refused.length ? `, refusing ${refused.join(', ')}` : '')))
