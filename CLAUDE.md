@@ -59,8 +59,9 @@ protocol: developer mode speaks of leaves, rounds and the operator.
 `lightning-to-ark.js` is default mode's move of what a wallet's own hosted Lightning channels
 hold (a wallet made before default mode held its coins in the Ark): the BTC channel pays an
 invoice of the wallet's own Bitcoin ark, each asset channel a `lightning_receive` of its leaf
-wallet, only from a channel locked in, within the page's Lightning payment limit and, for BTC,
-the ark server's largest coin, never in developer mode or while a person uses the wallet; the
+wallet, only from a channel locked in, within the page's Lightning payment limit, for an asset
+the operator's published limit on one payment over Lightning, and for BTC the ark server's largest
+coin, never in developer mode or while a person uses the wallet; the
 figure holds it under "Moving …" meanwhile, and an emptied channel is closed to the wallet's
 address when cheap and safe. It has no DOM
 (`lightning-to-ark.test.mjs`); `index.html`'s `initLnToArk` gives it the page, and the extension

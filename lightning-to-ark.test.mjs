@@ -120,7 +120,7 @@ function page (o = {}) {
     payStatus: async () => ({ state: W.payState }),
     ark: { isOpen: () => true, invoice: async (sats) => ({ invoice: 'lntb' + sats, payment_hash: 'hb' + sats, expires_at: t / 1000 + 600 }), received: async () => ({ state: W.received }), refresh: async () => {}, info: () => W.arkInfo },
     leaves: {
-      isOpen: () => true, info: () => info, coins: () => W.coins, refresh: () => {},
+      isOpen: () => true, info: () => o.info || info, coins: () => W.coins, refresh: () => {},
       run: async (cmd, args) => {
         if (cmd === 'lightning_receives') return W.receives
         if (cmd === 'lightning_receive_quote') { if (o.quoteRefuses) throw new Error(o.quoteRefuses); return { value: args.amount } }
@@ -249,6 +249,24 @@ test('assets: the channel pays the leaf wallet\'s Lightning receive; moving unti
   assert.equal(W.m.moving(USDX), null)
   assert.equal(W.closes.length, 1)
   assert.equal(W.closes[0].channel.short_channel_id, '2x1x0')
+})
+
+test('assets: a move is held to the most the operator takes in one payment over Lightning', async () => {
+  const limited = (receive) => ({ server_info: { assets: [{ asset: USDX, min_leaf: '2700301', lightning: { state: 'up', receives: true, max_payment: { send: '1', receive } } }] } })
+  const W = page({ channels: [usdxCh()], info: limited('1000000000') })
+  await W.m.tickAssets()
+  assert.equal(W.paid.length, 1)
+  assert.deepEqual(W.paid[0], { node_key: 'seq:usdx:bb', bolt11: 'lnsq1000000000' })
+  assert.equal(W.m.moving(USDX), 1_000_000_000n)
+  // A limit under the smallest leaf moves nothing.
+  const W2 = page({ channels: [usdxCh()], info: limited('2000000') })
+  await W2.m.tickAssets()
+  assert.equal(W2.paid.length, 0)
+  assert.ok(W2.logs.some((l) => /takes at most 2000000 in one payment over Lightning now/.test(l)))
+  // No limit published: the whole move, as before.
+  const W3 = page({ channels: [usdxCh()] })
+  await W3.m.tickAssets()
+  assert.deepEqual(W3.paid[0], { node_key: 'seq:usdx:bb', bolt11: 'lnsq' + (5_000_000_000n - 50_000_000n - 10n) })
 })
 
 test('assets: a payment refused before it left gives its receive up', async () => {
