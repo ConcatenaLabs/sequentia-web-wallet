@@ -1673,7 +1673,7 @@
         <details id="faq-limits-ln"><summary>Why does a large payment go on chain instead of over Lightning?</summary>
           <p>A payment between the Ark and another wallet over Lightning goes through the operator's channels. Every user's payments to and from other operators share them, and so do the bitcoin legs of swaps.</p>
           <p>One large payment can drain an asset's channels on one side. Until the operator rebalances them (at a cost), or payments start flowing back, every swap and every Lightning payment in that asset would fail over to the chain, for everybody.</p>
-          <p>So a single payment over Lightning may use at most 10% of what the operator's channels can carry in that asset and direction: what they can send for a payment you make, what they can receive for one you get. The operator publishes those figures, and the wallet reads them from what it already holds, so nothing waits on them when you pay. When they are not known, the limit is 1,500 USD a payment.</p>
+          <p>So the operator limits a single payment over Lightning, for each asset and direction, and publishes the limit: by default at most 10% of what its channels can carry (what they can send for a payment you make, what they can receive for one you get), less what it keeps for swaps. The operator refuses a payment above it, whichever wallet sends it. The wallet reads the limit from what it already holds, so nothing waits on it when you pay. When the operator publishes none, the limit is 1,500 USD a payment.</p>
           <p>Above it, the payment goes on chain: from your on-chain balance first, then from the Ark. When you receive, your receive code then carries no invoice for that amount, and the payer's wallet pays your address.</p>
         </details>
         <details id="faq-limits-btc"><summary>How much BTC does the wallet keep in the Bitcoin ark, and why?</summary>
@@ -1775,12 +1775,11 @@
   // The most a payment of an asset to a wallet of another operator goes over Lightning for, in
   // USD (asset-lightning.js): above it, or when the way cannot carry it, it goes to the receive
   // code's address on the chain. null: no limit.
-  // Payments over Lightning are held to the operator's capacity, not to a figure in USD: one may use
-  // at most this share of what its node can send or receive in that asset (asset-lightning.js).
+  // Payments over Lightning are held to the limit the operator publishes for one payment over its
+  // node, per asset and direction (asset-lightning.js lnMaxPayment), not to a figure in USD.
   if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = null;
-  if(window.SEQ_LN_CAPACITY_SHARE === undefined) window.SEQ_LN_CAPACITY_SHARE = 0.10;
-  // When the operator's capacity is not known (the library not open yet, an operator that does not
-  // publish it), one payment over Lightning is held to this much in USD instead: the same figure
+  // When the operator's limit is not known (the library not open yet, an operator that does not
+  // publish one), one payment over Lightning is held to this much in USD instead: the same figure
   // as the largest payment the Bitcoin ark takes. Never no limit at all.
   if(window.SEQ_LN_FALLBACK_USD === undefined) window.SEQ_LN_FALLBACK_USD = 1500;
   // What default mode keeps in the Bitcoin ark, in USD (ark-limits.js): it rests at 1500, refilled
@@ -1841,7 +1840,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
-import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnCapacityShare, lnCapacity, fitsCapacity } from './asset-lightning.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
@@ -4413,20 +4412,21 @@ function arkRoom(kind){
   if(o.limitUsd != null && !(o.price > 0) && (kind==='BTC' || !Object.keys(PRICES).length)) return 0n;
   return boardRoom(o);
 }
-// Whether one payment of `atoms` of `kind` fits the operator's Lightning capacity in direction `dir`
-// ('out' paid from the wallet, 'in' received into it), at the page's share: one payment never
-// drains the channels every user and every swap shares (asset-lightning.js fitsCapacity).
-// It reads the operator's info the library already holds (no request when paying); when that
-// says nothing of the capacity, the payment is held to window.SEQ_LN_FALLBACK_USD instead.
-function lnCapacityKnown(kind, dir){
+// Whether one payment of `atoms` of `kind` fits the operator's limit on one payment over Lightning
+// in direction `dir` ('out' paid from the wallet, 'in' received into it): the operator publishes it
+// and refuses a payment above it, since one payment would otherwise drain the channels every user
+// and every swap shares (asset-lightning.js lnMaxPayment). It reads the operator's info the library
+// already holds (no request when paying); when that publishes no limit, the payment is held to
+// window.SEQ_LN_FALLBACK_USD instead.
+function lnMaxKnown(kind, dir){
   let info = null; try{ info = leavesApi && leavesApi.isOpen() ? leavesApi.info() : null; }catch{}
-  return info ? lnCapacity(info, kind, dir) : null;
+  return info ? lnMaxPayment(info, kind, dir) : null;
 }
 function lnFits(kind, dir, atoms){
   if(atoms == null) return true;
-  const cap = lnCapacityKnown(kind, dir);
-  if(cap == null) return lnFallbackFits(kind, atoms);
-  return fitsCapacity(atoms, cap, lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE));
+  const max = lnMaxKnown(kind, dir);
+  if(max == null) return lnFallbackFits(kind, atoms);
+  return fitsMax(atoms, max);
 }
 // The fallback: worth no more than SEQ_LN_FALLBACK_USD. An asset the feed does not value is not held.
 function lnFallbackFits(kind, atoms){
@@ -7805,11 +7805,10 @@ function payCodeRoute(text, asset, atoms){
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
   if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
   if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
-    // The page's limit in USD, or the fallback when the operator's capacity in the asset is not known.
-    const limitUsd = lnCapacityKnown(asset, 'out') == null ? lightningLimitUsd(window.SEQ_LN_FALLBACK_USD) : lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
+    // The page's limit in USD, or the fallback when the operator publishes no limit in the asset.
+    const limitUsd = lnMaxKnown(asset, 'out') == null ? lightningLimitUsd(window.SEQ_LN_FALLBACK_USD) : lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
     const r = assetLightningRoute({ invoice: c.lightning, asset, atoms, precision: assetMeta(asset).precision||0,
-      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000,
-      capacityShare: lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE) });
+      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000 });
     const passed = _lnPassedOver.has(String(c.lightning).toLowerCase());
     if(r.route === 'lightning' && !passed) return { dest: r.invoice, byAddress: false, lightning: true, address: c.address || null };
     const why = passed ? DEFAULT_WORDS.byAddressNoWay : LN_ADDRESS_WHY[r.why] ? LN_ADDRESS_WHY[r.why](limitUsd) : null;

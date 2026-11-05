@@ -3,8 +3,8 @@
 // against the public testnet, through the page this checkout serves (tooling/live-proxy.mjs): the
 // Bitcoin ark held to its band (a board back up to `board` below a quarter of it, a move down to
 // `board` at `hold`, a payment of `direct` or more to the address), BTC to an address paid from the
-// address first, and a payment over Lightning held to a share of the operator's capacity, with the
-// fallback in USD when the capacity is not known (live-proxy.mjs --strip-capacity).
+// address first, and a payment over Lightning held to the limit the operator publishes, with the
+// fallback in USD when it publishes none (live-proxy.mjs --strip-capacity).
 //
 //   new    <name>                         a new wallet; it joins by itself; phrase kept in <work>
 //   faucet <name> <ticker>…               the faucet pays each, from the Balance tab's buttons
@@ -14,8 +14,8 @@
 //                                         it carries an invoice; written to <work>/<name>.code
 //   foreign <name> <ticker> <amount>      a code as a wallet of another operator gives it: this
 //                                         wallet's address and an invoice of its operator for the
-//                                         amount, asked of the library directly (no share of the
-//                                         capacity applies to it), and no `sequentia` part; written
+//                                         amount, asked of the library directly (the page's
+//                                         checks do not apply to it), and no `sequentia` part; written
 //                                         to <work>/<name>.foreign
 //   invoice <name> <BTC amount>           Receive's invoice card: what it says, and the invoice if any
 //   payinv <name> <invoice|@file>        Pay an invoice with a bare invoice: pressed (it pays at once)
@@ -26,10 +26,9 @@
 //
 //   node tooling/limits-live-drive.mjs <work-dir> <step> <name> [args…]
 //     [--base http://127.0.0.1:8791/wallet/] [--limits '{"btc":{"board":15,"hold":30,"direct":15}}']
-//     [--share 0.1] [--fallback 1500] [--no-ark]
+//     [--fallback 1500] [--no-ark]
 //
-// --limits, --share and --fallback set window.SEQ_ARK_LIMITS, SEQ_LN_CAPACITY_SHARE and
-// SEQ_LN_FALLBACK_USD before the page runs. `new` keeps them for the wallet (<work>/<name>.limits.json),
+// --limits and --fallback set window.SEQ_ARK_LIMITS and SEQ_LN_FALLBACK_USD before the page runs. `new` keeps them for the wallet (<work>/<name>.limits.json),
 // and every later step of that wallet runs with them unless it names others: a wallet whose figures
 // changed between steps would move coins by the other figures.
 //
@@ -46,7 +45,7 @@ import { readPayCode, buildPayCode } from '../pay-code.js'
 const argv = process.argv.slice(2)
 const flag = (n, d) => { const i = argv.indexOf(n); if (i < 0) return d; const v = argv[i + 1]; argv.splice(i, 2); return v }
 const base = flag('--base', 'http://127.0.0.1:8791/wallet/')
-const limitsArg = flag('--limits', null), shareArg = flag('--share', null), fallbackArg = flag('--fallback', null)
+const limitsArg = flag('--limits', null), fallbackArg = flag('--fallback', null)
 // --no-ark: the page runs without the Bitcoin ark (SEQ_BTC_ARK = null), so BTC stays on the chain:
 // the faucet then pays the wallet's address, which is how a drive wallet gets BTC on the chain.
 const noArk = argv.includes('--no-ark'); if (noArk) argv.splice(argv.indexOf('--no-ark'), 1)
@@ -65,7 +64,6 @@ const keptFile = join(work, name + '.limits.json')
 const kept = existsSync(keptFile) ? JSON.parse(readFileSync(keptFile, 'utf8')) : {}
 const figures = {
   limits: limitsArg ? JSON.parse(limitsArg) : kept.limits,
-  share: shareArg != null ? Number(shareArg) : kept.share,
   fallback: fallbackArg != null ? Number(fallbackArg) : kept.fallback,
 }
 if (step === 'new') writeFileSync(keptFile, JSON.stringify(figures))
@@ -88,7 +86,6 @@ async function openWallet ({ fresh = false } = {}) {
   const set = [
     'window.SEQ_LEAVES_TICK_MS=8000', 'window.SEQ_TEST_HOOKS=true',
     figures.limits ? `window.SEQ_ARK_LIMITS=${JSON.stringify(figures.limits)}` : '',
-    figures.share != null ? `window.SEQ_LN_CAPACITY_SHARE=${JSON.stringify(figures.share)}` : '',
     figures.fallback != null ? `window.SEQ_LN_FALLBACK_USD=${JSON.stringify(figures.fallback)}` : '',
     noArk ? 'window.SEQ_BTC_ARK=null' : '',
     "if (location.hostname === '127.0.0.1') Object.defineProperty(window, 'SEQ_LSP_URL', { value: location.origin + '/lsp', writable: false, configurable: false })",
