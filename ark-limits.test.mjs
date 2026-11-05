@@ -128,3 +128,22 @@ test('the FAQ explains the limits with the figures the wallet uses', () => {
   assert.ok(faq.includes('by default at most 10% of what its channels can carry'), 'its default')
   assert.ok(faq.includes('the limit is 1,500 USD a payment'), 'the fallback')
 })
+
+// #530: the move down sized for its fee; #523: it waits for a person and backs off after a refusal.
+import { moveOutSats, moveRetryMs, moveWaits, MOVE_RETRY_MAX_MS } from './ark-limits.js'
+test('the move down leaves the ark at its resting level, its fee taken into account (#530)', () => {
+  // BX1's live case: 46,371 held, resting level 18,650, the move's fee 7,601 (27,721 moved, 11,049 left).
+  const over = 46_371n - 18_650n
+  assert.equal(over, 27_721n, 'what was moved before: the ark then rested 7,601 below its level')
+  const sats = moveOutSats(over, 7_601n, 1_000_000n)
+  assert.equal(46_371n - sats - 7_601n, 18_650n)
+  assert.equal(moveOutSats(over, 7_601n, 10_000n), 10_000n, 'at most what the ark can send there')
+  assert.equal(moveOutSats(5_000n, 7_601n), 0n, 'nothing when the fee is more than what is above the level')
+})
+test('the move down waits while a person pays, and backs off after each refusal (#523)', () => {
+  const now = 1_000_000
+  assert.equal(moveWaits({ reviewing: true, personAt: 0, now }), true)
+  assert.equal(moveWaits({ personAt: now - 30_000, now }), true, 'a payment half a minute ago')
+  assert.equal(moveWaits({ personAt: now - 61_000, now }), false)
+  assert.deepEqual([0, 1, 2, 3, 6, 9].map(moveRetryMs), [0, 120_000, 240_000, 480_000, 3_600_000, MOVE_RETRY_MAX_MS])
+})

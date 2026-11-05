@@ -38,6 +38,9 @@ const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '
 // --refuse-while <file>: the --refuse prefixes are refused only while that file exists, so a drive
 // takes the operator away and brings it back mid-session (touch the file, then remove it), as a
 // restart of the operator does.
+// --refuse-grpc '<code>:<message>': a refused gRPC-web call (the Bitcoin ark's server) is answered
+// as that server refuses one, in trailers only (`grpc-status`, `grpc-message`), e.g.
+// '3:bad user input: fee rate too low: provided = 7500, minimum = 25000'.
 //
 // --strip-capacity: the operator's info (/arca/v1/info) is passed on without the capacity of its
 // Lightning nodes or its limit on one payment over them (each node's `spendable`, `receivable`,
@@ -68,6 +71,7 @@ const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods
   'access-control-allow-headers': 'content-type, authorization' }
 const refused = process.argv.flatMap((a, i) => a === '--refuse' && process.argv[i + 1] ? [process.argv[i + 1]] : [])
 const refuseWhile = arg('--refuse-while', '')
+const refuseGrpc = arg('--refuse-grpc', '')
 const MARKET_DATA = /^\/seqob\/v1\/(trades(\/.*)?|market\/[^/]+\/[^/]+\/(trades|candles|ticker))$/
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
@@ -93,6 +97,12 @@ const server = createServer(async (req, res) => {
   if (dex && url.pathname === '/dex') { res.writeHead(302, { location: '/dex/' }); res.end(); return }
   if ((!refuseWhile || existsSync(refuseWhile)) && refused.some((p) => url.pathname === p || url.pathname.startsWith(p.replace(/\/+$/, '') + '/'))) {
     console.log(`${new Date().toISOString()} refused ${req.method} ${url.pathname}`)
+    if (refuseGrpc && /grpc/.test(String(req.headers['content-type'] || ''))) {
+      const i = refuseGrpc.indexOf(':')
+      res.writeHead(200, { 'content-type': 'application/grpc-web+proto', 'grpc-status': refuseGrpc.slice(0, i), 'grpc-message': encodeURIComponent(refuseGrpc.slice(i + 1)),
+        'access-control-expose-headers': 'grpc-status, grpc-message', ...(cors ? CORS : {}) })
+      res.end(); return
+    }
     if (refuseStatus) { res.writeHead(refuseStatus, { 'content-type': 'text/plain', ...(cors ? CORS : {}) }); res.end('Bad Gateway'); return }
     req.socket.destroy()
     return

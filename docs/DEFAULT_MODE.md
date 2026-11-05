@@ -299,7 +299,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 - What the ark holds is kept within a band in USD (`ark-limits.js`, `SEQ_ARK_LIMITS`): it rests at
   1,500 USD, and once it holds 3,000 USD everything above 1,500 moves to the wallet's own address
-  in one move. A payment of 1,500 USD or more is paid to the address, never into the ark: a payer
+  in one move, sized for its own fee so the ark then rests at 1,500, and counted in the figure
+  throughout: the figure moves only by that fee. That move waits while a person
+  reviews or makes a BTC payment and for a minute after, and one the ark's server refuses is tried
+  again later each time (two minutes, then four, up to an hour). A payment of 1,500 USD or more is paid to the address, never into the ark: a payer
   using this wallet sends it there, and a receive code for such an amount carries neither an
   invoice nor the ark's address, nor does Receive's invoice card make one (below).
 - BTC that arrives at the address and is confirmed moves into the ark by itself only while the
@@ -341,13 +344,20 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   address, "It arrives after a Bitcoin block."), and the button **Send**. When it is done: "Sent
   <amount> BTC (<seconds> s)." or "Sent <amount> BTC. It arrives after a Bitcoin block." With too
   little held this way, an address is paid as before; a code or an invoice is refused with "You
-  can send up to <amount> BTC this way now."
+  can send up to <amount> BTC this way now." A payment the Bitcoin ark's server refuses is said in
+  the wallet's words, never the server's: "Nothing was sent: this payment could not go out just
+  now. Try again in a few minutes.", or, while the wallet's address holds BTC, "Nothing was sent:
+  this payment could not go out just now. Your Bitcoin address holds <amount> BTC: a payment to an
+  address of up to that goes from there." The faucet's BTC refused that way reads "The faucet could
+  not send BTC just now. Try again in a few minutes."
 - **Pay an invoice**: "Paste an invoice to pay it with your BTC." Then "Paid ✓ <amount> BTC · fee
   <fee> BTC." once the other side has taken it. While they hold it without taking it yet, "On its
   way: waiting for the other side to accept it."; if they never do, "Not paid: the payment came
   back, and the BTC is in your balance again." An invoice for anything else is refused with "This invoice asks for <TICKER>. Only
   invoices for BTC are paid here."; one larger than what is held this way with "You can pay up to
-  <amount> BTC this way now."
+  <amount> BTC this way now."; one above the most one payment may move out in seconds (the
+  operator's published limit) with "This invoice is more than can be paid in seconds now. Ask for a
+  receive code or a Bitcoin address instead, and pay that from Send."
 - **A pay link**: a page that sells something for BTC hands its invoice over with
   `…/wallet/#pay?invoice=<invoice>`. The wallet opens on Send with the invoice in **Pay an
   invoice**, checked as if pasted, and nothing is paid until the person presses **Pay invoice**.
@@ -602,7 +612,8 @@ and at the top of Help. The words are in `REPORT_WORDS` (`problem-report.js`).
 None of these words appear on any screen in default mode, in the wallet's own text: rail,
 round, leaf, operator, tree, board, covenant, expiry, atom, sat, forfeit, checkpoint,
 reassignment, exit, unroll, anchor, channel, node, room, relay, maker, hash, preimage, HTLC,
-submarine, LSP, bridge, gateway, on-chain, Lightning, claim, distribution, lapse, locktime. Nor do these controls: a choice of rail, a
+submarine, LSP, bridge, gateway, on-chain, Lightning, claim, distribution, lapse, locktime, parent
+chain, input, vB. Nor do these controls: a choice of rail, a
 move between rails, a receive request form, an exit drill, contract internals, a fee-rate field,
 or a "native asset" label. A refusal the wallet passes on from another service is said in
 these words too, never in the service's own.
