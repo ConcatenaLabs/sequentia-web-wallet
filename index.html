@@ -1730,6 +1730,10 @@
   // at most this share of what its node can send or receive in that asset (asset-lightning.js).
   if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = null;
   if(window.SEQ_LN_CAPACITY_SHARE === undefined) window.SEQ_LN_CAPACITY_SHARE = 0.10;
+  // When the operator's capacity is not known (the library not open yet, an operator that does not
+  // publish it), one payment over Lightning is held to this much in USD instead: the same figure
+  // as the largest payment the Bitcoin ark takes. Never no limit at all.
+  if(window.SEQ_LN_FALLBACK_USD === undefined) window.SEQ_LN_FALLBACK_USD = 1500;
   // What default mode keeps in the Bitcoin ark, in USD (ark-limits.js): it rests at 1500, refilled
   // from the wallet's own address only below a quarter of it; payments received take it up to
   // 3000, and then all above 1500 moves to the address in one move. One payment of 1500 or more
@@ -4358,10 +4362,24 @@ function arkRoom(kind){
 // Whether one payment of `atoms` of `kind` fits the operator's Lightning capacity in direction `dir`
 // ('out' paid from the wallet, 'in' received into it), at the page's share: one payment never
 // drains the channels every user and every swap shares (asset-lightning.js fitsCapacity).
+// It reads the operator's info the library already holds (no request when paying); when that
+// says nothing of the capacity, the payment is held to window.SEQ_LN_FALLBACK_USD instead.
+function lnCapacityKnown(kind, dir){
+  let info = null; try{ info = leavesApi && leavesApi.isOpen() ? leavesApi.info() : null; }catch{}
+  return info ? lnCapacity(info, kind, dir) : null;
+}
 function lnFits(kind, dir, atoms){
   if(atoms == null) return true;
-  let info = null; try{ info = leavesApi && leavesApi.isOpen() ? leavesApi.info() : null; }catch{}
-  return fitsCapacity(atoms, info ? lnCapacity(info, kind, dir) : null, lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE));
+  const cap = lnCapacityKnown(kind, dir);
+  if(cap == null) return lnFallbackFits(kind, atoms);
+  return fitsCapacity(atoms, cap, lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE));
+}
+// The fallback: worth no more than SEQ_LN_FALLBACK_USD. An asset the feed does not value is not held.
+function lnFallbackFits(kind, atoms){
+  const usd = Number(window.SEQ_LN_FALLBACK_USD);
+  if(!(usd > 0)) return true;
+  const at = usdAtoms(usd, priceFor(priceTicker(kind)), kind==='BTC' ? 8 : (assetMeta(kind).precision||0));
+  return at == null || BigInt(atoms) <= at;
 }
 // Whether one payment of `atoms` of `kind` goes to the address, not the Ark (ark-limits.js), and
 // the sentence the review says it with. -> the sentence, or null. Default mode only.
@@ -7727,7 +7745,8 @@ function payCodeRoute(text, asset, atoms){
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
   if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
   if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
-    const limitUsd = lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
+    // The page's limit in USD, or the fallback when the operator's capacity in the asset is not known.
+    const limitUsd = lnCapacityKnown(asset, 'out') == null ? lightningLimitUsd(window.SEQ_LN_FALLBACK_USD) : lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
     const r = assetLightningRoute({ invoice: c.lightning, asset, atoms, precision: assetMeta(asset).precision||0,
       usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000,
       capacityShare: lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE) });

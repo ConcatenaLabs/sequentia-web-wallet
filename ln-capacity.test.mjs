@@ -57,6 +57,12 @@ test('the page holds every Lightning payment to the capacity, both ways', () => 
   // An asset to another operator: the rule's capacity check, at the page's share.
   assert.match(html, /capacityShare: lnCapacityShare\(window\.SEQ_LN_CAPACITY_SHARE\) \}\);/)
   assert.match(html, /capacity: \(\)=> DEFAULT_WORDS\.byAddressNoWay,/)
+  // The capacity not known: a fallback in USD, never no limit.
+  assert.match(html, /if\(window\.SEQ_LN_FALLBACK_USD === undefined\) window\.SEQ_LN_FALLBACK_USD = 1500;/)
+  assert.match(html, /if\(cap == null\) return lnFallbackFits\(kind, atoms\);/)
+  assert.match(html, /const limitUsd = lnCapacityKnown\(asset, 'out'\) == null \? lightningLimitUsd\(window\.SEQ_LN_FALLBACK_USD\) : lightningLimitUsd\(window\.SEQ_ASSET_LN_MAX_USD\);/)
+  // No request when paying: the info the library already holds.
+  assert.match(html, /function lnCapacityKnown\(kind, dir\)\{\r?\n  let info = null; try\{ info = leavesApi && leavesApi\.isOpen\(\) \? leavesApi\.info\(\) : null; \}catch\{\}/)
   // Receive makes an invoice only for an amount the channels can take in.
   assert.match(html, /const can = atoms>0n && !large && lnFits\(asset, 'in', atoms\) && /)
 })
