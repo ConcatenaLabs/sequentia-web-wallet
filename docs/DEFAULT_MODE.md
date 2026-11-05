@@ -223,9 +223,10 @@ modes (`asset-picker.js`):
 - An asset sent to a receive code of a wallet of another operator (its `sequentia` part names
   another operator) goes over Lightning when the code carries an invoice in that asset for
   exactly the amount sent (the row takes the asset and amount from it when its amount is
-  empty), the payment uses no more than a share of what the operator's node in the asset can
-  send (`SEQ_LN_CAPACITY_SHARE`, 10%: its channels are shared by every user and by the swaps, and
-  one large payment would drain them), the operator's node in the asset is up, and the invoice's final lock fits the operator's window for a payment with a hop
+  empty), the payment is within the limit the operator publishes for one payment out over its
+  node in the asset (`max_payment`, by default a tenth of what the node can send less what it
+  keeps for swaps: its channels are shared by every user and by the swaps, and one large payment
+  would drain them; 1,500 USD when the operator publishes none), the operator's node in the asset is up, and the invoice's final lock fits the operator's window for a payment with a hop
   to spare (`asset-lightning.js`). The review is the tree's: **Send <amount> <TICKER>?**, "It
   arrives in seconds.", a "Fee" line when there is one. Once sent it reads "On its way: it
   arrives once the other wallet takes it." until the other wallet takes it, then "Sent <amount>
@@ -328,7 +329,7 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   seconds." Then "Invoice ready. Share it to receive <amount> BTC." and, when paid, "Received ✓
   <amount> BTC." It makes no invoice the receive code would not carry: for 1,500 USD or more it
   says "A payment of 1,500 USD or more goes to the address. Give the receive code instead: it is
-  paid there.", and for more than a tenth of what the operator's channels can take in now, "This
+  paid there.", and for more than the operator's published limit on one payment received, "This
   can’t arrive in seconds right now. Give the receive code instead: it is paid at the address."
 - Send, one BTC recipient: a receive code, an invoice or an address. The review is titled
   **Send <amount> BTC?** with To, Fee ("No fees" when none) and "It arrives in seconds." (for an

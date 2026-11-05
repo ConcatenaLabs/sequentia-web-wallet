@@ -12,8 +12,8 @@
 //           bond behind what it co-signs.
 // BTC: 1500, 3000, 1500. The ark normally holds between 1500 and 3000, at most ~4500 until the
 // next move down. Receiving there never stops below `direct`.
-// Payments in and out over Lightning are held to the operator's capacity instead
-// (asset-lightning.js fitsCapacity), on both chains.
+// Payments in and out over Lightning are held to the limit the operator publishes instead
+// (asset-lightning.js lnMaxPayment), on both chains.
 //
 // The page sets them (window.SEQ_ARK_LIMITS, the shape of ARK_LIMITS: any figure left out keeps
 // its default, null for no limit). An asset the price feed does not value cannot be held to a

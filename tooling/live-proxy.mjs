@@ -37,8 +37,9 @@ const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '
 // when the service behind it is down.
 //
 // --strip-capacity: the operator's info (/arca/v1/info) is passed on without the capacity of its
-// Lightning nodes (each node's `spendable` and `receivable`), as an operator that does not publish
-// it answers: how the page's fallback for an unknown capacity (SEQ_LN_FALLBACK_USD) is seen live.
+// Lightning nodes or its limit on one payment over them (each node's `spendable`, `receivable`,
+// `max_payment` and `payment_limit`), as an operator that publishes none answers: how the page's
+// fallback for an unknown limit (SEQ_LN_FALLBACK_USD) is seen live.
 //
 // --cors: every answer allows any origin, and a preflight is answered here, so a wallet on
 // another origin (a browser extension joined to http://127.0.0.1:<port>/arca with the node at
@@ -53,7 +54,7 @@ function withoutCapacity (buf) {
   try {
     const j = JSON.parse(buf.toString())
     const si = j.server_info || j
-    const strip = (n) => { if (n && typeof n === 'object') { delete n.spendable; delete n.receivable } }
+    const strip = (n) => { if (n && typeof n === 'object') { delete n.spendable; delete n.receivable; delete n.max_payment; delete n.payment_limit } }
     for (const a of si.assets || []) strip(a && a.lightning)
     strip(si.lightning && si.lightning.bitcoin && si.lightning.bitcoin.node)
     return Buffer.from(JSON.stringify(j))

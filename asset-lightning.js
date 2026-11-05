@@ -26,39 +26,29 @@
 import { decodeBolt11 } from './bolt11.js'
 
 // The most a payment to another operator's wallet goes over Lightning for, in USD, unless the page
-// names another. The page names none (null) and holds payments to the operator's capacity instead.
+// names another. The page names none (null) and holds payments to the operator's published limit
+// instead (lnMaxPayment).
 export const DEFAULT_LIMIT_USD = 1000
 
-// The share of the operator's live Lightning capacity, in an asset and a direction, one payment may
-// use: its channels are shared by every user's payments and by the BTC legs of swaps, and one large
-// payment would drain them for everyone until they are rebalanced. Above it, the payment goes on
-// the chain. The page may name another (window.SEQ_LN_CAPACITY_SHARE).
-export const CAPACITY_SHARE = 0.10
-
-// The page's share (`share`, window.SEQ_LN_CAPACITY_SHARE): a number above 0 and at most 1, null for
-// none, CAPACITY_SHARE when unset or not such a number.
-export function lnCapacityShare (share) {
-  if (share === null) return null
-  const n = Number(share)
-  return share !== undefined && share !== '' && Number.isFinite(n) && n > 0 && n <= 1 ? n : CAPACITY_SHARE
-}
-
-// Whether a payment of `atoms` fits `share` of `capacity` (the operator's node's `spendable` for a
-// payment out, `receivable` for a payment in, as its `info` publishes them). A capacity or share
-// that is not known holds nothing back.
-export function fitsCapacity (atoms, capacity, share) {
-  if (share == null || capacity == null) return true
-  return big(atoms) * 10_000n <= big(capacity) * BigInt(Math.round(Number(share) * 10_000))
-}
-
-// The operator's node for `kind` ('BTC', its Bitcoin gateway, or an asset) in its `info`, and its
-// capacity in direction `dir` ('out': spendable, 'in': receivable), or null when it publishes none.
-export function lnCapacity (info, kind, dir) {
+// The operator's limit on one payment over its node for `kind` ('BTC', its Bitcoin gateway, or an
+// asset) in direction `dir` ('out': a payment the wallet makes, 'in': one it receives), in atoms, as
+// its `info` publishes it (`max_payment`: `send`, `receive`), or null when it publishes none. Its
+// channels are shared by every user's payments and by the BTC legs of swaps, so the operator holds
+// one payment to a share of what they carry, less what it keeps for swaps, and refuses a payment
+// above it. A node that is down publishes 0. The limit is the operator's: the wallet holds none of
+// its own, and pays on the chain above it.
+export function lnMaxPayment (info, kind, dir) {
   const si = info && (info.server_info || info)
   const node = kind === 'BTC' ? si && si.lightning && si.lightning.bitcoin && si.lightning.bitcoin.node : operatorLeg(info, kind).node
-  if (!node || node.state !== 'up') return null
-  const v = dir === 'in' ? node.receivable : node.spendable
-  return v == null ? null : big(v)
+  const v = node && node.max_payment && node.max_payment[dir === 'in' ? 'receive' : 'send']
+  if (v == null || !/^\d+$/.test(String(v))) return null
+  return big(v)
+}
+
+// Whether a payment of `atoms` fits the operator's limit `max` (lnMaxPayment). A limit that is not
+// published holds nothing back here: the page then applies its fallback.
+export function fitsMax (atoms, max) {
+  return max == null || big(atoms) <= big(max)
 }
 
 // What one forwarding hop adds to a payment's lock, in blocks, as the rule counts it: well above
@@ -139,9 +129,9 @@ export function operatorLeg (info, asset) {
 // `why` is one of: 'none' (no invoice in the asset, or no operator: nothing to say, the address is
 // simply the way), 'amount' (the code asks another amount), 'expired', 'limit' (worth more than the
 // limit), 'unpriced', 'unavailable' (the operator's node in the asset is down or missing), 'liquidity'
-// (the operator cannot carry that much now), 'capacity' (more than `capacityShare` of what it can
-// carry: fitsCapacity), 'lock' (the invoice's lock does not fit the window).
-export function assetLightningRoute ({ invoice, asset, atoms, precision, usd, limitUsd, info, nowSeconds, capacityShare = null }) {
+// (the operator cannot carry that much now), 'capacity' (more than the operator takes in one payment:
+// its published limit, lnMaxPayment), 'lock' (the invoice's lock does not fit the window).
+export function assetLightningRoute ({ invoice, asset, atoms, precision, usd, limitUsd, info, nowSeconds }) {
   if (!invoice || !info) return { route: 'address', why: 'none' }
   const d = decodeBolt11(String(invoice).toLowerCase())
   if (!d || !d.ok || d.chain !== 'seq' || !d.asset || d.asset !== asset) return { route: 'address', why: 'none' }
@@ -156,7 +146,7 @@ export function assetLightningRoute ({ invoice, asset, atoms, precision, usd, li
   const leg = operatorLeg(info, asset)
   if (leg.supervised || !leg.node || leg.node.state !== 'up') return { route: 'address', why: 'unavailable' }
   if (leg.node.spendable != null && big(leg.node.spendable) < big(atoms)) return { route: 'address', why: 'liquidity' }
-  if (!fitsCapacity(atoms, leg.node.spendable, capacityShare)) return { route: 'address', why: 'capacity' }
+  if (!fitsMax(atoms, lnMaxPayment(info, asset, 'out'))) return { route: 'address', why: 'capacity' }
   if (!lockFits(d.minFinalCltv, leg.blockSeconds, leg.timeoutSeconds).fits) return { route: 'address', why: 'lock' }
   return { route: 'lightning', invoice: String(invoice).toLowerCase() }
 }
