@@ -146,6 +146,33 @@ export function coinsToMerge (coins, asset, cap, exclude = [], small = null) {
 // operator's bond covers, or than its instant budget (a share of the bond).
 export const OUT_OF_ROUND_FULL = /would hold out of round .* (more than the bond|past its instant budget)/
 
+// The assets the operator takes on no more refreshes of now: its info shows as much of the asset in
+// flight as its cap (`in_flight` at or past `in_flight_cap`), so a refresh of it waits until earlier
+// ones come back. A coin of such an asset that the maker received out of round stays out of round
+// all that time and counts against its instant budget, and past the budget the maker takes nothing
+// in any pair. So the maker takes none of these assets in (no quote and no firm offer that wants
+// one), and keeps giving them and trading every other pair. The same rule holds for every asset.
+export function cappedAssets (info) {
+  const out = new Set()
+  const si = (info && info.server_info) || info || {}
+  for (const a of si.assets || []) {
+    if (!a || typeof a.asset !== 'string' || a.in_flight_cap == null) continue
+    let used, cap
+    try { used = BigInt(a.in_flight ?? 0); cap = BigInt(a.in_flight_cap) } catch { continue }
+    if (used >= cap) out.add(a.asset)
+  }
+  return out
+}
+// The quotes and the pairs named for after the next round, less those that want a capped asset.
+export function withoutCapped (quotes, later, capped) {
+  if (!capped || !capped.size) return { quotes, later }
+  return { quotes: (quotes || []).filter((q) => !capped.has(q.want_asset)), later: (later || []).filter((x) => !capped.has(x.want_asset)) }
+}
+// The refusal of a firm offer that wants a capped asset (`name`: its ticker, or its id).
+export function cappedRefusal (name) {
+  return `the maker takes no ${name} now: the operator is refreshing as much ${name} as it takes on at once, so ${name} received now would wait out of round and hold the maker's other pairs back`
+}
+
 // The share of the operator's bond the maker holds out of round at most, unless its configuration
 // names another ("off" for none): a tenth, so that a double-sign of what the maker holds at once
 // costs the operator ten times what it could take from it.
@@ -456,6 +483,22 @@ async function main () {
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payment_hash: hash }), signal: AbortSignal.timeout(5000) })
     return r.ok ? r.json() : null
   }
+  // The assets the operator takes no more refreshes of (cappedAssets), read from its info every
+  // minute straight from it: no library command, so the read never waits behind the upkeep.
+  let capped = new Set()
+  const tickerOf = (a) => (cfg.prices && cfg.prices.assets && cfg.prices.assets[a] && cfg.prices.assets[a].ticker) || a
+  const readCaps = async () => {
+    try {
+      const r = await fetch(String(op.server).replace(/\/+$/, '') + '/v1/info', { signal: AbortSignal.timeout(15000) })
+      if (!r.ok) throw new Error('the operator answered HTTP ' + r.status)
+      const next = cappedAssets(await r.json())
+      const was = [...capped].sort().join(), now = [...next].sort().join()
+      if (was !== now) log(next.size ? 'takes in none of ' + [...next].map(tickerOf).join(', ') + ': the operator refreshes no more of it now' : 'takes in every asset again')
+      capped = next
+    } catch (e) { log('caps:', e.message) }
+  }
+  await readCaps()
+  setInterval(readCaps, 60000)
   const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
   if (desk) setInterval(() => { desk.stepNow().catch((e) => log('btc:', e.message)) }, Number(cfg.btc.step_seconds ?? 2) * 1000)
   if (desk) log('the BTC desk is open')
@@ -602,15 +645,20 @@ async function main () {
         const sp = holdings.sp
         // In-tree quotes are cut to the room left in its instant budget; a pair cut to nothing is
         // named in `after_next_round`.
+        // And none that wants an asset the operator refreshes no more of now.
         const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), room)
+        const kept = withoutCapped([...cut.quotes, ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])], cut.later, capped)
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
-          quotes: [...cut.quotes, ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])], ...(cut.later.length ? { after_next_round: cut.later } : {}) })
+          quotes: kept.quotes, ...(kept.later.length ? { after_next_round: kept.later } : {}) })
       }
       if (req.method === 'GET' && p.startsWith('/v1/swap/')) { const id = p.slice('/v1/swap/'.length); return send(res, 200, { swap: id, state: await swapState(id, true) }) }
       if (desk && req.method === 'GET' && p.startsWith('/v1/btc/')) { const r = await desk.route('GET', p, {}); if (r) return send(res, r[0], r[1]) }
       if (req.method !== 'POST') return send(res, 404, { error: 'no such path' })
       const b = await body(req)
       if (!b) return send(res, 400, { error: 'the body is not JSON' })
+      if (p === '/v1/firm' || p === '/v1/btc/firm') {
+        if (b.want_asset && capped.has(b.want_asset)) return send(res, 409, { error: cappedRefusal(tickerOf(b.want_asset)), capped: true })
+      }
       if (desk && p.startsWith('/v1/btc/')) {
         const r = await desk.route('POST', p, b, firmHoldings, cfg.fee_margin || 0)
         if (r) { if (p === '/v1/btc/paid') tick(); return send(res, r[0], r[1]) }
