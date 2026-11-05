@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
-import { makeNoteStore, channelFate, noteFor, openRequest, makeOpenGuard, outpointOf } from './lnupgrade.js';
+import { makeNoteStore, channelFate, noteFor, openRequest, makeOpenGuard, outpointOf, forgottenChannels } from './lnupgrade.js';
 
 const GOLD = '3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1';
 const LABEL = 'seq:' + GOLD + ':02' + 'ab'.repeat(32);
@@ -18,11 +18,16 @@ function memStorage() {
   return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)) };
 }
 
-test('a channel is closed only when the node reports it on chain or no longer lists it', () => {
+test('a channel is closed only when the node reports it on chain, or forgot it and its close is in a block', () => {
   const node = nodeWith([[A, 'ONCHAIN'], [B, 'CHANNELD_NORMAL']]);
   assert.equal(channelFate(A, node), 'closed');
-  assert.equal(channelFate(C, node), 'closed');            // the node no longer lists it
   assert.equal(channelFate(B, node), 'open');
+  // The node no longer lists C: what the chain shows decides, and nothing is said without it.
+  assert.deepEqual(forgottenChannels([A, B, C], node), [C]);
+  assert.equal(channelFate(C, node), 'unknown');
+  assert.equal(channelFate(C, { ...node, fundings: { [outpointOf(C)]: 'confirmed' } }), 'closed');
+  assert.equal(channelFate(C, { ...node, fundings: { [outpointOf(C)]: 'unspent' } }), 'stuck');
+  assert.deepEqual(forgottenChannels([A, C], null), []);
   assert.equal(channelFate(A, nodeWith([[A, 'AWAITING_UNILATERAL']])), 'closing');
   assert.equal(channelFate(A, nodeWith([[A, 'FUNDING_SPEND_SEEN']])), 'closing');
   assert.equal(channelFate(A, nodeWith([[A, 'CLOSINGD_COMPLETE']])), 'stuck');
@@ -35,11 +40,12 @@ test('a channel is closed only when the node reports it on chain or no longer li
 
 test('the note describes each old channel as the node reports it, and says nothing while the node is silent', () => {
   const n = noteFor({ label: LABEL, ticker: 'GOLD', channels: [A, B, C],
-    node: nodeWith([[A, 'ONCHAIN'], [B, 'CLOSINGD_COMPLETE']], 3_000_000_000), amountText: '0.03' });
+    node: { ...nodeWith([[A, 'ONCHAIN'], [B, 'CLOSINGD_COMPLETE']], 3_000_000_000), fundings: { [outpointOf(C)]: 'confirmed' } },
+    amountText: '0.03' });
   assert.deepEqual(n.paragraphs, [
     'Your 3 GOLD Lightning channels from before the Lightning service\'s upgrade are not carried over: your device signs no step of them.',
     '2 of them are closed.',
-    'One of them has a close that was agreed before the upgrade and never reached the chain; its balance stays in it.',
+    'One of them has a close that never reached the chain; its balance stays in it.',
     '0.03 GOLD is on chain at your GOLD Lightning node\'s own address, not in a channel. Your device moves it only to your node\'s own addresses or into a channel.',
   ]);
   assert.equal(n.canOpen, true);
