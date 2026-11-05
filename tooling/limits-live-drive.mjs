@@ -20,13 +20,22 @@
 //   invoice <name> <BTC amount>           Receive's invoice card: what it says, and the invoice if any
 //   payinv <name> <invoice|@file>        Pay an invoice with a bare invoice: pressed (it pays at once)
 //   read   <name> <kind>                  the leaf library's own records of that kind (diagnosis)
+//   recvdown <name> <file>                Receive while the operator goes away and comes back: the
+//                                         page runs behind live-proxy.mjs `--refuse /arca
+//                                         --refuse-while <file>`; the drive makes the file, asks
+//                                         for a new code, and removes the file after a minute:
+//                                         what Receive shows every two seconds
 //   pay    <name> <code|@file> <ticker> <amount> [send]
 //                                         Send's review for that payment (what it says, where it
 //                                         goes); with `send`, pressed, and what it said after
 //
 //   node tooling/limits-live-drive.mjs <work-dir> <step> <name> [args…]
 //     [--base http://127.0.0.1:8791/wallet/] [--limits '{"btc":{"board":15,"hold":30,"direct":15}}']
-//     [--fallback 1500] [--no-ark]
+//     [--fallback 1500] [--no-ark] [--refuse-file <file>]
+//
+// --refuse-file: `pay … send` makes the file just before Send is pressed and removes it once the
+// review answers, so a proxy run with `--refuse-while <file>` refuses that payment's requests (the
+// Bitcoin ark's server refusing it).
 //
 // --limits and --fallback set window.SEQ_ARK_LIMITS and SEQ_LN_FALLBACK_USD before the page runs. `new` keeps them for the wallet (<work>/<name>.limits.json),
 // and every later step of that wallet runs with them unless it names others: a wallet whose figures
@@ -36,7 +45,7 @@
 // (window.__btcHeld) while the page stays in default mode. Coins come from the testnet faucet only
 // (its token, tooling/cdp-page.mjs). Each step appends to <work>/evidence/limits.log and writes
 // <work>/evidence/<name>-<step>-<n>.json with what the page said and every POST it made.
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, unlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Page, chromium } from './cdp-page.mjs'
 import { forbiddenIn } from '../user-trade.js'
@@ -49,6 +58,7 @@ const limitsArg = flag('--limits', null), fallbackArg = flag('--fallback', null)
 // --no-ark: the page runs without the Bitcoin ark (SEQ_BTC_ARK = null), so BTC stays on the chain:
 // the faucet then pays the wallet's address, which is how a drive wallet gets BTC on the chain.
 const noArk = argv.includes('--no-ark'); if (noArk) argv.splice(argv.indexOf('--no-ark'), 1)
+const refuseFile = flag('--refuse-file', null)
 const [workArg, step, name, ...rest] = argv
 if (!workArg || !step || !name) { console.error('usage: limits-live-drive.mjs <work-dir> <step> <name> [args…]'); process.exit(2) }
 const work = resolve(workArg)
@@ -272,9 +282,12 @@ async function main () {
     await shot(page, `${name}-pay-${ticker}-${amount}-review.png`)
     if (go === 'send' && !/^ERR/.test(review)) {
       const t = Date.now()
+      if (refuseFile) { writeFileSync(refuseFile, ''); note('refusing through ' + refuseFile) }
       await page.eval("document.querySelector('.modal button.primary').click()")
       const done = await page.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; if(t && !/Sending|Moving|Paying|Waiting/i.test(t)) return t; const m=document.querySelector('.modal'); return m ? false : 'the review closed' })()", 900000).catch((e) => 'still: ' + e.message.slice(-200))
+      if (refuseFile) { try { unlinkSync(refuseFile) } catch {} }
       record.said.push({ after: done, seconds: (Date.now() - t) / 1000 })
+      record.afterWords = forbiddenIn(done)
       note(`after Send (${((Date.now() - t) / 1000).toFixed(1)} s): ${done.replace(/\n+/g, ' | ')}`)
       // A second sentence (a payment that came back, an offer of the address) is read too.
       const modal = await page.eval("document.querySelector('.modal')?.innerText || ''")
@@ -317,6 +330,32 @@ async function main () {
     note('Pay an invoice says: ' + said.replace(/\n+/g, ' | '))
     await shot(page, `${name}-payinv.png`)
     await page.eval("(()=>{ const b=[...document.querySelectorAll('.modal button')].find(b=>/Cancel/.test(b.textContent)); if(b) b.click(); return true })()").catch(() => {})
+    await page.stop()
+  } else if (step === 'recvdown') {
+    const file = rest[0]
+    if (!file) throw new Error('usage: recvdown <name> <file>')
+    const page = await openWallet()
+    await waitJoined(page)
+    const shows = () => page.eval("(()=>{ const a=document.querySelector('#addr'); const t=(a&&a.textContent||'').trim(); return /^bitcoin:/i.test(t) && a.classList.contains('recv-code') ? 'code' : /^tb1/i.test(t) ? 'address' : 'wait: '+t.slice(0,60) })()")
+    let last = ''
+    const watch = async (ms, until = () => false) => {
+      const end = Date.now() + ms
+      while (Date.now() < end) {
+        const now = await shows()
+        if (now !== last) { note('Receive shows ' + now); record.said.push({ t: new Date().toISOString(), shows: now }); last = now }
+        if (until(now)) return now
+        await sleep(2000)
+      }
+      return last
+    }
+    await watch(4000)
+    writeFileSync(file, ''); note('the operator goes away (' + file + ')')
+    await click(page, '#btnNewAddr')
+    await watch(60000)
+    unlinkSync(file); note('the operator is back')
+    const end = await watch(180000, (n) => n === 'code')
+    note('after the operator came back: ' + end)
+    await shot(page, `${name}-recvdown.png`)
     await page.stop()
   } else if (step === 'read') {
     // What the leaf library holds for this wallet: `read <name> <own-kind>` (lightning_receives,

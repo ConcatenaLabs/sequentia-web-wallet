@@ -35,6 +35,9 @@ const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '
 // answer, for an exit drill (default-mode-live-drive.mjs `exit`). Each refused call prints one
 // line. --refuse-status 502 answers such a call with that status instead, as a front server does
 // when the service behind it is down.
+// --refuse-while <file>: the --refuse prefixes are refused only while that file exists, so a drive
+// takes the operator away and brings it back mid-session (touch the file, then remove it), as a
+// restart of the operator does.
 //
 // --strip-capacity: the operator's info (/arca/v1/info) is passed on without the capacity of its
 // Lightning nodes or its limit on one payment over them (each node's `spendable`, `receivable`,
@@ -64,6 +67,7 @@ const refuseStatus = Number(arg('--refuse-status', '0'))
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'access-control-allow-headers': 'content-type, authorization' }
 const refused = process.argv.flatMap((a, i) => a === '--refuse' && process.argv[i + 1] ? [process.argv[i + 1]] : [])
+const refuseWhile = arg('--refuse-while', '')
 const MARKET_DATA = /^\/seqob\/v1\/(trades(\/.*)?|market\/[^/]+\/[^/]+\/(trades|candles|ticker))$/
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm',
   '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' }
@@ -87,7 +91,7 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
   if (url.pathname === '/wallet') { res.writeHead(302, { location: '/wallet/' }); res.end(); return }
   if (dex && url.pathname === '/dex') { res.writeHead(302, { location: '/dex/' }); res.end(); return }
-  if (refused.some((p) => url.pathname === p || url.pathname.startsWith(p.replace(/\/+$/, '') + '/'))) {
+  if ((!refuseWhile || existsSync(refuseWhile)) && refused.some((p) => url.pathname === p || url.pathname.startsWith(p.replace(/\/+$/, '') + '/'))) {
     console.log(`${new Date().toISOString()} refused ${req.method} ${url.pathname}`)
     if (refuseStatus) { res.writeHead(refuseStatus, { 'content-type': 'text/plain', ...(cors ? CORS : {}) }); res.end('Bad Gateway'); return }
     req.socket.destroy()

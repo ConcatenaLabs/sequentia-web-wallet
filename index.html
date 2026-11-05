@@ -1836,7 +1836,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
@@ -7719,7 +7719,22 @@ function renderXpubForm(){
 // operator and the faucet pay in seconds; "Show address" gives the address, for BTC and for any
 // sender that asks for one. Developer mode, and a wallet not in the tree, show the address.
 let showAddrDefault = false, _recvCode = null, _recvCodeAsk = null, _recvCodeAsked = false;
-function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen() && !showAddrDefault && !showConf; }
+// A code the operator did not give is asked again (receiveCodeRetry, #521): the address shows
+// meanwhile only after the first tries, and the code returns once the operator answers.
+let _recvCodeFails = 0, _recvCodeRetry = null;
+function receiveCodeMode(){ return !devMode() && !!leavesApi && leavesApi.isOpen() && !showAddrDefault && !showConf && !(!_recvCode && receiveCodeRetry(_recvCodeFails).address); }
+function askReceiveCode(){
+  if(_recvCodeAsk || _recvCode || devMode() || !leavesApi || !leavesApi.isOpen()) return;
+  _recvCodeAsk = leavesApi.receiveCode({ quick: !_recvCodeAsked })
+    .then(c=>{ _recvCode = c; _recvCodeAsked = true; _recvCodeFails = 0; })
+    .catch(e=>{
+      _recvCodeFails++;
+      const r = receiveCodeRetry(_recvCodeFails);
+      console.warn('[receive code]', e?.message??e, '- asked again in', r.waitMs / 1000, 's');
+      clearTimeout(_recvCodeRetry); _recvCodeRetry = setTimeout(()=>{ _recvCodeRetry = null; askReceiveCode(); }, r.waitMs);
+    })
+    .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
+}
 // The one receive code: the wallet's address, its Bitcoin ark address and its Sequentia receive
 // request in one payment request (pay-code.js). -> the code, or the bare request while the ark
 // has not answered (the code is drawn again once it has).
@@ -7846,9 +7861,7 @@ function renderReceiveCode(){
   $('addr').classList.add('recv-code');
   if(!_recvCode){
     $('addr').textContent = DEFAULT_WORDS.receiveWait; $('qr').removeAttribute('src');
-    if(!_recvCodeAsk) _recvCodeAsk = leavesApi.receiveCode({ quick: !_recvCodeAsked })
-      .then(c=>{ _recvCode = c; _recvCodeAsked = true; }).catch(e=>{ console.warn('[receive code]', e?.message??e); showAddrDefault = true; })
-      .finally(()=>{ _recvCodeAsk = null; renderReceive(); });
+    if(!_recvCodeRetry) askReceiveCode();
     return;
   }
   // The amount, and what it is in: BTC, or an asset the operator receives in over Lightning.
