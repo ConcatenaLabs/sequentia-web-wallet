@@ -1829,7 +1829,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
 import { seqlnInboundSettle } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
-import { noteFor, openRequest, makeOpenGuard } from './lnupgrade.js';
+import { noteFor, openRequest, makeOpenGuard, forgottenChannels, outpointOf } from './lnupgrade.js';
 import { creditLines } from './lncredit.js';
 import { signMessage, verifyAddress } from './signmessage.js';
 import { accountDescriptors } from './descriptor.js';
@@ -5137,15 +5137,35 @@ async function sendNodeCoinsHome(label){
   try{ renderUpgradeNote(); renderBalance(); }catch{}
   return true;
 }
+// What the chain shows of a funding output: 'confirmed' (spent in a block), 'unspent', or null
+// when it cannot be read. A channel the node forgot is called closed only on 'confirmed'.
+async function fundingOnChain(label, txid, vout){
+  const api = /^btc(:|$)/i.test(label) ? T4_API : ESPLORA;
+  try{
+    const os = await fetch(`${api}/tx/${txid}/outspend/${vout}`).then(r=>r.ok?r.json():null);
+    if(!os) return null;
+    if(os.spent !== true) return 'unspent';
+    return os.status && os.status.confirmed === true ? 'confirmed' : null;
+  }catch{ return null; }
+}
 let _lnNoteFetch = false;
 async function refreshNodeNotes(){
   if(_lnNoteFetch) return;
   _lnNoteFetch = true;
   try{
-    for(const label of Object.keys(predatingChannels())){
+    const old = predatingChannels();
+    for(const label of Object.keys(old)){
       const c = _lnNodeInfo[label];
       if(c && Date.now() - c.at < 20000) continue;
-      try{ _lnNodeInfo[label] = { at: Date.now(), info: await seqlnNodeOnchain(label) }; }catch{}
+      try{
+        const info = await seqlnNodeOnchain(label);
+        // The node no longer lists these: ask the chain whether their close is in a block.
+        for(const ch of forgottenChannels(old[label], info)){
+          const seen = await fundingOnChain(label, ch.fundingTxid, ch.fundingOutnum);
+          if(seen) (info.fundings = info.fundings || {})[outpointOf(ch)] = seen;
+        }
+        _lnNodeInfo[label] = { at: Date.now(), info };
+      }catch{}
     }
   } finally { _lnNoteFetch = false; }
   try{ renderUpgradeNote(); }catch{}
