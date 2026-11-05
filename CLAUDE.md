@@ -4,8 +4,8 @@ A non-custodial dual-chain browser wallet for Sequentia testnet and Bitcoin test
 phrase, the same `tb1...` address on both chains.
 
 **It is a static page with no build step.** `index.html` loads vanilla ES modules directly. There
-is no `package.json`, no bundler, no framework, no CI, and no runtime dependency that is not a
-vendored single file. Keep it that way — that constraint is deliberate and is what makes the
+is no `package.json`, no bundler, no framework, and no runtime dependency that is not a vendored
+single file. Keep it that way — that constraint is deliberate and is what makes the
 wallet auditable by reading it.
 
 Node and consensus conventions live in the
@@ -36,6 +36,10 @@ node --test                     # the node:test suites
 The tests are the `*.test.mjs` files at the root and under `tooling/lsp/`, and `node --test` runs
 every one of them. Some are **standalone scripts** with their own `check()` harness: `node --test`
 runs each as one test, and each also runs on its own (`node covenant-byteorder.test.mjs`).
+GitHub Actions runs `node --test` on Node 22 for every pull request and every push to `main`
+(`.github/workflows/unit-tests.yml`), with nothing built: `pkg/` is absent there, so a test that
+needs it, the live testnet, a node binary or a browser must skip itself when they are missing,
+saying why, rather than fail.
 
 Anything importing `swap.js` from Node needs a `localStorage` shim installed before the import;
 `swap.js` reads it at module load. Existing tests show the idiom.
