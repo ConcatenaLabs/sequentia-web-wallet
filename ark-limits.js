@@ -1,22 +1,31 @@
-// How much default mode keeps where it pays in seconds (the Ark: Bitcoin's for BTC, Sequentia's
-// for each asset), in USD. Three figures per kind:
-//   board   what the wallet moves there by itself from its own address: BTC or an asset that
-//           lands on the chain goes in until the Ark holds this much of it;
-//   hold    where payments received there take it: once the Ark holds this much, everything
-//           above `board` moves out to the wallet's own address in one move, so the Ark is back
-//           at `board` and has room again. A wallet holds between `board` and `hold` there.
+// How much default mode keeps where it pays in seconds, in USD. Only the Bitcoin ark is held to
+// figures: its VTXOs can be swept at expiry and leave only when its server has BTC to spare, both
+// out of our hands. Sequentia's Ark has no sweep, its operator's capital comes back within a round,
+// and a double-spend of an unrefreshed VTXO is covered by the operator's bond: no figures there.
+// Three figures:
+//   board   the resting level: the wallet moves BTC there from its own address, in one move back
+//           up to it, only once the ark holds less than a quarter of it (REFILL_BELOW);
+//   hold    the ceiling: once the ark holds this much, everything above `board` moves out to the
+//           wallet's own address in one move, so it is back at `board`;
 //   direct  one payment of this much or more is paid to the address straight away, never to
-//           the Ark: a large payment would only be moved out again.
-// BTC: 1000, 2000, 1000. Each asset: 5000, 7500, 1000.
-// Receiving there never stops: a receive code keeps its instant part whatever the Ark holds.
+//           the ark: a large payment would only be moved out again, and the ark's server has no
+//           bond behind what it co-signs.
+// BTC: 1500, 3000, 1500. The ark normally holds between 1500 and 3000, at most ~4500 until the
+// next move down. Receiving there never stops below `direct`.
+// Payments in and out over Lightning are held to the operator's capacity instead
+// (asset-lightning.js fitsCapacity), on both chains.
 //
 // The page sets them (window.SEQ_ARK_LIMITS, the shape of ARK_LIMITS: any figure left out keeps
 // its default, null for no limit). An asset the price feed does not value cannot be held to a
 // figure in USD: it is boarded and kept as before.
 export const ARK_LIMITS = Object.freeze({
-  btc: Object.freeze({ board: 1000, hold: 2000, direct: 1000 }),
-  asset: Object.freeze({ board: 5000, hold: 7500, direct: 1000 }),
+  btc: Object.freeze({ board: 1500, hold: 3000, direct: 1500 }),
+  asset: Object.freeze({ board: null, hold: null, direct: null }),
 })
+
+// The wallet moves BTC into the ark only once it holds less than this share of `board`: one move
+// back up to `board` every ~three quarters of it spent, never a board after each payment.
+export const REFILL_BELOW = 0.25
 
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
@@ -47,12 +56,14 @@ export function usdAtoms (usd, price, precision) {
   return (cents * 10n ** BigInt(precision || 0) * 10_000n) / micro
 }
 
-// How much more of a kind the wallet moves into the Ark by itself, holding `held` atoms there
-// already. -> atoms (0n at the limit), or null for no limit (none set, or the kind unpriced).
-export function boardRoom ({ held, limitUsd, price, precision }) {
+// How much the wallet moves into the Ark by itself now, holding `held` atoms there: nothing
+// while it holds `refill` of the limit or more, else the rest up to the limit, in one move.
+// -> atoms (0n when nothing moves), or null for no limit (none set, or the kind unpriced).
+export function boardRoom ({ held, limitUsd, price, precision, refill = REFILL_BELOW }) {
   if (limitUsd == null) return null
   const cap = usdAtoms(limitUsd, price, precision)
   if (cap == null) return null
+  if (big(held) * 10_000n >= cap * BigInt(Math.round(refill * 10_000))) return 0n
   const left = cap - big(held)
   return left > 0n ? left : 0n
 }

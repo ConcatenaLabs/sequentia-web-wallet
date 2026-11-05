@@ -1651,6 +1651,55 @@
           <p>BTC is different: a swap that pays you BTC over Lightning makes the room it needs, whatever your BTC channels look like, and with none at all. The review shows what the room costs. When you confirm, the service opens it before anything is traded, and the swap settles at once, with no Bitcoin block to wait for. The fee is then paid over Lightning from the BTC you received. If the trade does not go through, the room stays yours, and its fee is owed to the service and paid with your next purchase of room to receive.</p>
           <p>The same goes for paying: each side of a swap offers only the rails where you hold the asset, and picks the only one by itself when there is one.</p>
         </details>
+        <label class="lbl" style="margin-top:14px">Payment limits</label>
+        <details id="faq-limits-why"><summary>Why does the wallet limit some payments and balances?</summary>
+          <p>Each limit follows a risk that exists on that chain, and none goes further. The wallet keeps what it can in an Ark (Sequentia's for assets, the Bitcoin ark for BTC), where payments arrive in seconds and cost nothing. It holds something back only where an Ark could cost you or the other users something:</p>
+          <ul>
+            <li><b>Sequentia's Ark:</b> no limit on what you hold, or on payments inside it.</li>
+            <li><b>Payments over Lightning, on both chains:</b> each may use at most a share of what the operator's channels can carry.</li>
+            <li><b>The Bitcoin ark:</b> a ceiling on what stays there, and on a single payment taken there.</li>
+          </ul>
+          <p>Anything above a limit goes on chain by itself. You don't choose anything: the review says how the payment goes, what it costs and how soon it arrives.</p>
+        </details>
+        <details id="faq-limits-seq"><summary>Why is there no limit on Sequentia assets in the Ark?</summary>
+          <p>None of the reasons for one applies there:</p>
+          <ul>
+            <li><b>No sweep.</b> A VTXO in Sequentia's Ark never expires. If a wallet stays away for 28 days, the operator brings its VTXO on chain under the holder's own key, and nobody else's.</li>
+            <li><b>Leaving is never held up for long.</b> Once a VTXO is spent in a confirmed batch, the covenant lets its holder free the old VTXO's share of the previous batch, so the operator gets that capital back at once instead of waiting for the old batch to expire. A move to an address waits for the next round, about a minute.</li>
+            <li><b>A double-spend is covered.</b> A VTXO received out of round relies on the operator until its next refresh, about a minute. In that window the operator could sign a second spend of it. Two such signatures are public proof that burns the operator's bond (10,000,000 tSEQ, about 1.75M USD at launch price), far more than it could gain. Once refreshed, the VTXO sits in a covenant-enforced batch the operator's key cannot sign away.</li>
+          </ul>
+          <p>What does carry a limit is a payment leaving or entering the Ark over Lightning (next question).</p>
+        </details>
+        <details id="faq-limits-ln"><summary>Why does a large payment go on chain instead of over Lightning?</summary>
+          <p>A payment between the Ark and another wallet over Lightning goes through the operator's channels. Every user's payments to and from other operators share them, and so do the bitcoin legs of swaps.</p>
+          <p>One large payment can drain an asset's channels on one side. Until the operator rebalances them (at a cost), or payments start flowing back, every swap and every Lightning payment in that asset would fail over to the chain, for everybody.</p>
+          <p>So a single payment over Lightning may use at most 10% of what the operator's channels can carry in that asset and direction: what they can send for a payment you make, what they can receive for one you get. The operator publishes those figures, and the wallet reads them from what it already holds, so nothing waits on them when you pay. When they are not known, the limit is 1,500 USD a payment.</p>
+          <p>Above it, the payment goes on chain: from your on-chain balance first, then from the Ark. When you receive, your receive code then carries no invoice for that amount, and the payer's wallet pays your address.</p>
+        </details>
+        <details id="faq-limits-btc"><summary>How much BTC does the wallet keep in the Bitcoin ark, and why?</summary>
+          <p>The Bitcoin ark runs on a server we don't control, on mainnet Second's. Its VTXOs carry two risks that weigh on the whole balance kept there, not on single payments:</p>
+          <ul>
+            <li><b>Getting out depends on the server.</b> Every BTC the server puts into a batch stays locked until that batch expires, up to about 14 days for a new one. A move to an address is paid from the server's free BTC. When there isn't enough, the move waits for the next batches to expire. That can be minutes or hours, since batches expire all the time and the oldest may be a day or less away. It can also be days, if the server's BTC sits in recent batches and it adds none. BTC already at your address moves at once.</li>
+            <li><b>The sweep.</b> A VTXO expires with its batch: up to about 14 days away, and a day or less if you received it out of round from an old batch, since it keeps that batch's expiry. After that the server can take the whole batch back. It happens only if three things go wrong together: your wallet stays closed past the expiry, the server's delegated renewal doesn't run, and neither of our two watchtowers brings your VTXOs on chain in time. And the watchtowers only help if your VTXOs were deposited with them, at least one is up, and it has BTC to pay fees that are bearable at that moment.</li>
+          </ul>
+          <p>The risk is small, but it would fall on everything you keep there, so the wallet keeps the balance bounded and goes on chain as rarely as it can:</p>
+          <ul>
+            <li><b>Receiving stays instant.</b> Any payment under 1,500 USD lands in the ark, whatever you hold there. A single payment of 1,500 USD or more goes straight to your address. That costs nothing extra, and it also bounds what the server could sign twice, since there is no bond behind the Bitcoin ark.</li>
+            <li><b>One move down, not many.</b> When the ark reaches 3,000 USD, the wallet moves everything above 1,500 to your address in a single move: one on-chain move for every 1,500 USD or so received, never one per payment.</li>
+            <li><b>Paying.</b> Payments to receive codes and over Lightning come from the ark: instant and free. Payments to an address come from your on-chain BTC first, so nothing has to leave the ark; the ark pays only what your address lacks.</li>
+            <li><b>Refilling.</b> The wallet moves BTC from your address into the ark only when the ark drops under 375 USD, and then in one move back up to 1,500.</li>
+          </ul>
+          <p>Normally between 1,500 and 3,000 USD sits in the Bitcoin ark. At most about 4,500 does, and only until the next move down.</p>
+        </details>
+        <details id="faq-limits-why-not-balance"><summary>Why not simply cap every balance?</summary>
+          <p>Because a cap costs something too:</p>
+          <ul>
+            <li>Every move out of an Ark down to a cap is a payment on chain, with a fee, and it draws the operator's capital.</li>
+            <li>A cap would also limit instant payments and swaps to whatever stays in the Ark.</li>
+            <li>The cost of bringing a VTXO on chain by yourself is the same whatever it holds, so a smaller balance doesn't make that cheaper.</li>
+          </ul>
+          <p>So the wallet caps only where a balance itself is at risk, in the Bitcoin ark, and elsewhere limits single payments only where they would harm others: over Lightning.</p>
+        </details>
       </div>
     </section>
     <section data-panel="settings" class="hide">
@@ -1726,12 +1775,19 @@
   // The most a payment of an asset to a wallet of another operator goes over Lightning for, in
   // USD (asset-lightning.js): above it, or when the way cannot carry it, it goes to the receive
   // code's address on the chain. null: no limit.
-  if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = 1000;
-  // What default mode keeps in the Ark, in USD (ark-limits.js): BTC up to 1000 moved there from
-  // the wallet's own address; payments received take it to 2000, and then all above 1000 moves
-  // to the address. Each asset 5000 and 7500. One payment of 1000 or more goes to the address
-  // straight away. A figure set to null has no limit.
-  if(window.SEQ_ARK_LIMITS === undefined) window.SEQ_ARK_LIMITS = { btc: { board: 1000, hold: 2000, direct: 1000 }, asset: { board: 5000, hold: 7500, direct: 1000 } };
+  // Payments over Lightning are held to the operator's capacity, not to a figure in USD: one may use
+  // at most this share of what its node can send or receive in that asset (asset-lightning.js).
+  if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = null;
+  if(window.SEQ_LN_CAPACITY_SHARE === undefined) window.SEQ_LN_CAPACITY_SHARE = 0.10;
+  // When the operator's capacity is not known (the library not open yet, an operator that does not
+  // publish it), one payment over Lightning is held to this much in USD instead: the same figure
+  // as the largest payment the Bitcoin ark takes. Never no limit at all.
+  if(window.SEQ_LN_FALLBACK_USD === undefined) window.SEQ_LN_FALLBACK_USD = 1500;
+  // What default mode keeps in the Bitcoin ark, in USD (ark-limits.js): it rests at 1500, refilled
+  // from the wallet's own address only below a quarter of it; payments received take it up to
+  // 3000, and then all above 1500 moves to the address in one move. One payment of 1500 or more
+  // goes to the address straight away. Sequentia's Ark has no figures. Null: no limit.
+  if(window.SEQ_ARK_LIMITS === undefined) window.SEQ_ARK_LIMITS = { btc: { board: 1500, hold: 3000, direct: 1500 }, asset: { board: null, hold: null, direct: null } };
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1785,7 +1841,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
-import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnCapacityShare, lnCapacity, fitsCapacity } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
@@ -4351,6 +4407,28 @@ function arkRoom(kind){
   const l = arkLimitsOf(kind), o = { held: arkHeld(kind), limitUsd: l.board, price: l.price, precision: l.precision };
   if(o.limitUsd != null && !(o.price > 0) && (kind==='BTC' || !Object.keys(PRICES).length)) return 0n;
   return boardRoom(o);
+}
+// Whether one payment of `atoms` of `kind` fits the operator's Lightning capacity in direction `dir`
+// ('out' paid from the wallet, 'in' received into it), at the page's share: one payment never
+// drains the channels every user and every swap shares (asset-lightning.js fitsCapacity).
+// It reads the operator's info the library already holds (no request when paying); when that
+// says nothing of the capacity, the payment is held to window.SEQ_LN_FALLBACK_USD instead.
+function lnCapacityKnown(kind, dir){
+  let info = null; try{ info = leavesApi && leavesApi.isOpen() ? leavesApi.info() : null; }catch{}
+  return info ? lnCapacity(info, kind, dir) : null;
+}
+function lnFits(kind, dir, atoms){
+  if(atoms == null) return true;
+  const cap = lnCapacityKnown(kind, dir);
+  if(cap == null) return lnFallbackFits(kind, atoms);
+  return fitsCapacity(atoms, cap, lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE));
+}
+// The fallback: worth no more than SEQ_LN_FALLBACK_USD. An asset the feed does not value is not held.
+function lnFallbackFits(kind, atoms){
+  const usd = Number(window.SEQ_LN_FALLBACK_USD);
+  if(!(usd > 0)) return true;
+  const at = usdAtoms(usd, priceFor(priceTicker(kind)), kind==='BTC' ? 8 : (assetMeta(kind).precision||0));
+  return at == null || BigInt(atoms) <= at;
 }
 // Whether one payment of `atoms` of `kind` goes to the address, not the Ark (ark-limits.js), and
 // the sentence the review says it with. -> the sentence, or null. Default mode only.
@@ -7638,7 +7716,8 @@ function payCodeText(){
   const asset = recvAsset(), atoms = recvAmountAtoms(), key = asset + ':' + atoms;
   // An amount that goes to the address straight away (ark-limits.js) carries no invoice.
   const large = atoms>0n && !!arkDirectWhy(asset, atoms);
-  const can = atoms>0n && !large && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
+  // Nor does an amount the operator's channels cannot take in without draining them.
+  const can = atoms>0n && !large && lnFits(asset, 'in', atoms) && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
   const mine = (inv)=> inv && inv.asset===asset && inv.atoms===atoms;
   if(can && !mine(_recvInv) && !_recvInvAsk && _recvInvFailed!==key){
     const ask = asset==='BTC' ? btcArk.invoice(atoms, 'Receive')
@@ -7683,6 +7762,7 @@ function watchRecvInvoice(inv){
 const LN_ADDRESS_WHY = {
   limit: (limit)=> DEFAULT_WORDS.byAddressAbove(limit.toLocaleString(undefined, { maximumFractionDigits: 2 })),
   liquidity: ()=> DEFAULT_WORDS.byAddressNoWay,
+  capacity: ()=> DEFAULT_WORDS.byAddressNoWay,
   unavailable: ()=> DEFAULT_WORDS.byAddressNoWay,
   lock: ()=> DEFAULT_WORDS.byAddressNoWay,
   unpriced: ()=> DEFAULT_WORDS.byAddressNoWay,
@@ -7707,15 +7787,18 @@ function payCodeRoute(text, asset, atoms){
   if(c.address && !isOampAsset(asset)){ const why = arkDirectWhy(asset, atoms); if(why) return { dest: c.address, byAddress: true, why }; }
   if(asset === 'BTC'){
     if(c.ark && btcArkPays()) return { dest: text, byAddress: false };
-    if(c.lightning && btcArkRoutes()) return { dest: c.lightning, byAddress: false };
+    if(c.lightning && btcArkRoutes() && lnFits('BTC', 'out', atoms)) return { dest: c.lightning, byAddress: false };
+    if(c.lightning && btcArkRoutes() && c.address) return { dest: c.address, byAddress: true, why: DEFAULT_WORDS.byAddressNoWay };
     return { dest: c.address || text, byAddress: !!c.address };
   }
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
   if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
   if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
-    const limitUsd = lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
+    // The page's limit in USD, or the fallback when the operator's capacity in the asset is not known.
+    const limitUsd = lnCapacityKnown(asset, 'out') == null ? lightningLimitUsd(window.SEQ_LN_FALLBACK_USD) : lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
     const r = assetLightningRoute({ invoice: c.lightning, asset, atoms, precision: assetMeta(asset).precision||0,
-      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000 });
+      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000,
+      capacityShare: lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE) });
     const passed = _lnPassedOver.has(String(c.lightning).toLowerCase());
     if(r.route === 'lightning' && !passed) return { dest: r.invoice, byAddress: false, lightning: true, address: c.address || null };
     const why = passed ? DEFAULT_WORDS.byAddressNoWay : LN_ADDRESS_WHY[r.why] ? LN_ADDRESS_WHY[r.why](limitUsd) : null;

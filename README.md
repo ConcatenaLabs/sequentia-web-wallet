@@ -284,8 +284,8 @@ receive codes. Coins that land at the wallet's address on the chain are boarded 
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
 pays a receive code of the same operator and chain in the tree; an asset to a receive code of
 another operator over Lightning when the code carries an invoice in it for the amount and the
-payment is worth no more than `SEQ_ASSET_LN_MAX_USD` (1,000 USD unless the page names another;
-`asset-lightning.js`), else at the code's address on the chain; a payment name of this site at
+payment uses no more than `SEQ_LN_CAPACITY_SHARE` (10%) of what the operator's node can send in it
+(`asset-lightning.js`), else at the code's address on the chain; a payment name of this site at
 the receive code its wallet gives, and one of another service in BTC at the invoice it makes for
 the amount; and everything else as it always has; an address the chain's coins cannot cover is paid out of the tree in the operator's
 next settlement (the library's `offboard`), its fee and arrival shown first. The open page reads

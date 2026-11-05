@@ -1,26 +1,26 @@
-// What default mode keeps in the Ark, in USD: BTC up to 1000 moved there from the wallet's own
-// address; payments received take it to 2000, and then all above 1000 moves to the address, so
-// the Ark holds between 1000 and 1999. One payment of 1000 or more goes to the address straight
-// away. Each asset 5000 and 7500, back to 5000 at 7500; 1000 or more to the address straight away
-// there too (02/11/2026, reworked 03/11/2026).
+// What default mode keeps in the Bitcoin ark, in USD: it rests at 1500, refilled from the wallet's
+// own address only below a quarter of it; payments received take it up to 3000, and then all above
+// 1500 moves to the address in one move. One payment of 1500 or more goes to the address straight
+// away. Sequentia's Ark has no figures (02/11/2026, reworked 03/11 and 05/11/2026).
 //
 //   node --test ark-limits.test.mjs
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
-import { ARK_LIMITS, arkLimits, usdAtoms, boardRoom, moveOutAtoms, directUsd, goesToAddress } from './ark-limits.js'
+import { ARK_LIMITS, arkLimits, usdAtoms, boardRoom, moveOutAtoms, directUsd, goesToAddress, REFILL_BELOW } from './ark-limits.js'
 import { DEFAULT_WORDS } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 import { boardAmount } from './btc-ark.js'
 
-test('the limits: 1000, 2000 and 1000 USD of BTC; 5000, 7500 and 1000 of each asset', () => {
-  const all = { btc: { board: 1000, hold: 2000, direct: 1000 }, asset: { board: 5000, hold: 7500, direct: 1000 } }
+test('the limits: 1500, 3000 and 1500 USD of BTC; none for Sequentia\'s assets', () => {
+  const all = { btc: { board: 1500, hold: 3000, direct: 1500 }, asset: { board: null, hold: null, direct: null } }
   assert.deepEqual(ARK_LIMITS, all)
   assert.deepEqual(arkLimits(undefined), all)
-  assert.deepEqual(arkLimits({ btc: { board: 300 } }).btc, { board: 300, hold: 2000, direct: 1000 }, 'a figure left out keeps its default')
-  assert.deepEqual(arkLimits({ asset: { board: null, hold: null, direct: null } }).asset, { board: null, hold: null, direct: null }, 'null: no limit')
-  assert.deepEqual(arkLimits({ btc: { board: 'x', hold: -1 } }).btc, { board: 1000, hold: 2000, direct: 1000 }, 'a figure that is not one keeps its default')
-  assert.deepEqual(arkLimits({ asset: { board: 8000, hold: 6000 } }).asset, { board: 8000, hold: 8000, direct: 1000 }, 'hold is never under board')
+  assert.equal(REFILL_BELOW, 0.25)
+  assert.deepEqual(arkLimits({ btc: { board: 300 } }).btc, { board: 300, hold: 3000, direct: 1500 }, 'a figure left out keeps its default')
+  assert.deepEqual(arkLimits({ btc: { board: null, hold: null, direct: null } }).btc, { board: null, hold: null, direct: null }, 'null: no limit')
+  assert.deepEqual(arkLimits({ btc: { board: 'x', hold: -1 } }).btc, { board: 1500, hold: 3000, direct: 1500 }, 'a figure that is not one keeps its default')
+  assert.deepEqual(arkLimits({ btc: { board: 8000, hold: 6000 } }).btc, { board: 8000, hold: 8000, direct: 1500 }, 'hold is never under board')
 })
 
 test('USD in atoms', () => {
@@ -31,43 +31,35 @@ test('USD in atoms', () => {
   assert.equal(usdAtoms(1000, undefined, 8), null)
 })
 
-test('the wallet moves into the Ark up to the board limit', () => {
-  const btc = (held, which) => ({ held, limitUsd: ARK_LIMITS.btc[which], price: 100_000, precision: 8 })
-  assert.equal(boardRoom(btc(0n, 'board')), 1_000_000n, 'an empty Ark takes 1000 USD of the address\'s BTC')
-  assert.equal(boardRoom(btc(400_000n, 'board')), 600_000n)
-  assert.equal(boardRoom(btc(1_500_000n, 'board')), 0n, 'past 1000 USD nothing more is moved in')
-  assert.equal(boardRoom({ held: 0n, limitUsd: null, price: 1, precision: 2 }), null, 'no limit')
-  assert.equal(boardRoom({ held: 0n, limitUsd: 5000, price: null, precision: 2 }), null, 'an unpriced asset has no limit')
-  const usdx = (held) => ({ held, limitUsd: ARK_LIMITS.asset.board, price: 1, precision: 2 })
-  assert.equal(boardRoom(usdx(0n)), 500_000n)
-  assert.equal(boardRoom(usdx(499_999n)), 1n)
+test('the wallet refills the ark only below a quarter of its resting level, in one move', () => {
+  const btc = (held) => ({ held, limitUsd: ARK_LIMITS.btc.board, price: 100_000, precision: 8 })
+  assert.equal(boardRoom(btc(0n)), 1_500_000n, 'an empty ark takes 1500 USD of the address\'s BTC')
+  assert.equal(boardRoom(btc(374_000n)), 1_126_000n, 'under 375 USD: back up to 1500 in one move')
+  assert.equal(boardRoom(btc(375_000n)), 0n, 'from 375 USD on, nothing is moved in')
+  assert.equal(boardRoom(btc(1_000_000n)), 0n)
+  assert.equal(boardRoom(btc(2_000_000n)), 0n)
+  assert.equal(boardRoom({ held: 0n, limitUsd: ARK_LIMITS.asset.board, price: 1, precision: 2 }), null, 'Sequentia: no limit')
+  assert.equal(boardRoom({ held: 0n, limitUsd: 5000, price: null, precision: 2 }), null, 'an unpriced kind has no limit')
 })
 
-test('at the hold limit everything above the board limit moves out, in one move', () => {
-  const btc = (held) => ({ held, board: 1000, hold: 2000, price: 100_000, precision: 8 })
-  assert.equal(moveOutAtoms(btc(1_999_999n)), 0n, 'under 2000 USD it all stays')
-  assert.equal(moveOutAtoms(btc(2_000_000n)), 1_000_000n, 'at 2000 USD, 1000 moves: the Ark is back at 1000')
-  assert.equal(moveOutAtoms(btc(2_700_000n)), 1_700_000n, 'all above 1000, never less than 1000')
-  const usdx = (held) => ({ held, ...ARK_LIMITS.asset, price: 1, precision: 2 })
-  assert.equal(moveOutAtoms(usdx(749_999n)), 0n)
-  assert.equal(moveOutAtoms(usdx(750_000n)), 250_000n, 'an asset: 7500 held, 2500 moves, back to 5000')
-  assert.equal(moveOutAtoms({ held: 9n ** 20n, board: null, hold: 7500, price: 1, precision: 2 }), 0n)
-  assert.equal(moveOutAtoms({ held: 9n ** 20n, board: 5000, hold: 7500, price: null, precision: 2 }), 0n, 'no price, no move')
+test('at the ceiling everything above the resting level moves out, in one move', () => {
+  const btc = (held) => ({ held, ...ARK_LIMITS.btc, price: 100_000, precision: 8 })
+  assert.equal(moveOutAtoms(btc(2_999_999n)), 0n, 'under 3000 USD it all stays')
+  assert.equal(moveOutAtoms(btc(3_000_000n)), 1_500_000n, 'at 3000 USD, 1500 moves: the ark is back at 1500')
+  assert.equal(moveOutAtoms(btc(4_400_000n)), 2_900_000n, 'all above 1500, in one move')
+  assert.equal(moveOutAtoms({ held: 9n ** 20n, ...ARK_LIMITS.asset, price: 1, precision: 2 }), 0n, 'Sequentia: nothing moves out')
+  assert.equal(moveOutAtoms({ held: 9n ** 20n, board: 1500, hold: 3000, price: null, precision: 8 }), 0n, 'no price, no move')
 })
 
-test('one payment of 1000 USD or more goes to the address straight away, on both chains', () => {
-  assert.equal(directUsd(ARK_LIMITS.btc), 1000)
-  assert.equal(directUsd(ARK_LIMITS.asset), 1000)
-  assert.equal(directUsd({ direct: null }), null)
+test('one BTC payment of 1500 USD or more goes to the address straight away; none on Sequentia', () => {
+  assert.equal(directUsd(ARK_LIMITS.btc), 1500)
+  assert.equal(directUsd(ARK_LIMITS.asset), null)
   const btc = (atoms) => ({ atoms, ...ARK_LIMITS.btc, price: 100_000, precision: 8 })
-  assert.equal(goesToAddress(btc(999_999n)), false, 'under 1000 USD: the Ark')
-  assert.equal(goesToAddress(btc(1_000_000n)), true, '1000 USD: the address')
-  const usdx = (atoms) => ({ atoms, ...ARK_LIMITS.asset, price: 1, precision: 2 })
-  assert.equal(goesToAddress(usdx(99_999n)), false)
-  assert.equal(goesToAddress(usdx(100_000n)), true, '1000 USDX: the address')
-  assert.equal(goesToAddress({ atoms: 9n ** 20n, ...ARK_LIMITS.asset, price: null, precision: 2 }), false, 'unpriced: never')
-  const w = DEFAULT_WORDS.byAddressLarge('1,000')
-  assert.equal(w, 'A payment of 1,000 USD or more goes to the address.')
+  assert.equal(goesToAddress(btc(1_499_999n)), false, 'under 1500 USD: the ark')
+  assert.equal(goesToAddress(btc(1_500_000n)), true, '1500 USD: the address')
+  assert.equal(goesToAddress({ atoms: 9n ** 20n, ...ARK_LIMITS.asset, price: 1, precision: 2 }), false, 'Sequentia: never')
+  const w = DEFAULT_WORDS.byAddressLarge('1,500')
+  assert.equal(w, 'A payment of 1,500 USD or more goes to the address.')
   assert.deepEqual(forbiddenIn(w), [])
 })
 
@@ -83,7 +75,7 @@ const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
 const leaves = readFileSync(new URL('./leaves.js', import.meta.url), 'utf8')
 
 test('the page holds the wallet to the limits', () => {
-  assert.match(html, /if\(window\.SEQ_ARK_LIMITS === undefined\) window\.SEQ_ARK_LIMITS = \{ btc: \{ board: 1000, hold: 2000, direct: 1000 \}, asset: \{ board: 5000, hold: 7500, direct: 1000 \} \};/)
+  assert.match(html, /if\(window\.SEQ_ARK_LIMITS === undefined\) window\.SEQ_ARK_LIMITS = \{ btc: \{ board: 1500, hold: 3000, direct: 1500 \}, asset: \{ board: null, hold: null, direct: null \} \};/)
   // BTC is boarded within the limit (a trade that asks for more gets it).
   assert.match(html, /let cap = arkRoom\('BTC'\);\r?\n  if\(cap != null && _btcArkWanted > cap\) cap = _btcArkWanted;\r?\n  if\(cap != null && cap <= 0n\) return;/)
   assert.match(html, /btcArk\.board\(\{ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, cap,\s+broadcast: async \(hex\)=>\{ const t = await btcBroadcastHex\(hex\);/)
@@ -98,7 +90,7 @@ test('Receive keeps its instant part; the hold limit moves the rest out; a large
   assert.match(html, /lightning: inv \? inv\.invoice : undefined, ark: _recvArk \|\| undefined, sequentia: _recvCode\.text \}\);/)
   assert.ok(!/btcRoom/.test(html), 'Receive never drops the Ark part')
   // An amount that goes to the address carries no invoice.
-  assert.match(html, /const large = atoms>0n && !!arkDirectWhy\(asset, atoms\);\r?\n  const can = atoms>0n && !large && /)
+  assert.match(html, /const large = atoms>0n && !!arkDirectWhy\(asset, atoms\);\r?\n(?:  \/\/[^\n]*\n)?  const can = atoms>0n && !large && /)
   // The payer sends one payment of the difference or more to the code's address.
   const r = html.slice(html.indexOf('function payCodeRoute('), html.indexOf('function payCodeDestination('))
   assert.match(r, /if\(c\.address && !isOampAsset\(asset\)\)\{ const why = arkDirectWhy\(asset, atoms\); if\(why\) return \{ dest: c\.address, byAddress: true, why \}; \}/)
@@ -114,4 +106,18 @@ test('Receive keeps its instant part; the hold limit moves the rest out; a large
   assert.match(tick, /if\(isOampAsset\(h\) \|\| under\.some\(o=>o\.asset===h\)\) continue;/, 'one move at a time per asset')
   assert.match(tick, /await leavesApi\.offboard\(\{ asset: h, amount: String\(atoms\), address, shown: q \}\)/)
   assert.match(html, /setInterval\(\(\)=>\{ arkHoldTick\(\)\.catch\(\(\)=>\{\}\); \}, 30_000\);/)
+})
+
+test('the FAQ explains the limits with the figures the wallet uses', () => {
+  for (const id of ['faq-limits-why', 'faq-limits-seq', 'faq-limits-ln', 'faq-limits-btc', 'faq-limits-why-not-balance']) {
+    assert.match(html, new RegExp(`<details id="${id}">`), id)
+  }
+  const faq = html.slice(html.indexOf('<details id="faq-limits-why">'), html.indexOf('<section data-panel="settings"'))
+  const usd = (n) => n.toLocaleString('en-US')
+  const { board, hold, direct } = ARK_LIMITS.btc
+  assert.ok(faq.includes(`under ${usd(direct)} USD lands in the ark`), 'D')
+  assert.ok(faq.includes(`When the ark reaches ${usd(hold)} USD, the wallet moves everything above ${usd(board)}`), 'H and L')
+  assert.ok(faq.includes(`drops under ${usd(board * REFILL_BELOW)} USD`), 'the refill')
+  assert.ok(faq.includes('at most 10% of what the operator'), 'the Lightning share')
+  assert.ok(faq.includes('the limit is 1,500 USD a payment'), 'the fallback')
 })

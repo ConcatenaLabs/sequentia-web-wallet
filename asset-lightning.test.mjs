@@ -149,7 +149,8 @@ test('the words are plain, and the page wires the rule into Send and Receive', (
   for (const w of [DEFAULT_WORDS.byAddressAbove('1,000'), DEFAULT_WORDS.byAddressNoWay, DEFAULT_WORDS.lnOnItsWay, DEFAULT_WORDS.lnNotThrough,
     DEFAULT_WORDS.lnCameBack, DEFAULT_WORDS.toAddress, DEFAULT_WORDS.amountHint]) assert.deepEqual(forbiddenIn(w), [], w)
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
-  assert.match(html, /window\.SEQ_ASSET_LN_MAX_USD === undefined\) window\.SEQ_ASSET_LN_MAX_USD = 1000;/)
+  assert.match(html, /window\.SEQ_ASSET_LN_MAX_USD === undefined\) window\.SEQ_ASSET_LN_MAX_USD = null;/)
+  assert.match(html, /window\.SEQ_LN_CAPACITY_SHARE === undefined\) window\.SEQ_LN_CAPACITY_SHARE = 0\.10;/)
   assert.match(html, /const d = payCodeRoute\(r\.addr, r\.asset, atoms\);/)
   assert.match(html, /if\(await assetLightningReview\(r, reset, again\)\) return;/)
   assert.match(html, /leavesApi\.command\('lightning_pay', \{ invoice: r\.addr, asset: r\.asset, shown: q \}\)/)
