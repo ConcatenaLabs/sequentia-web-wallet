@@ -1726,12 +1726,15 @@
   // The most a payment of an asset to a wallet of another operator goes over Lightning for, in
   // USD (asset-lightning.js): above it, or when the way cannot carry it, it goes to the receive
   // code's address on the chain. null: no limit.
-  if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = 1000;
-  // What default mode keeps in the Ark, in USD (ark-limits.js): BTC up to 1000 moved there from
-  // the wallet's own address; payments received take it to 2000, and then all above 1000 moves
-  // to the address. Each asset 5000 and 7500. One payment of 1000 or more goes to the address
-  // straight away. A figure set to null has no limit.
-  if(window.SEQ_ARK_LIMITS === undefined) window.SEQ_ARK_LIMITS = { btc: { board: 1000, hold: 2000, direct: 1000 }, asset: { board: 5000, hold: 7500, direct: 1000 } };
+  // Payments over Lightning are held to the operator's capacity, not to a figure in USD: one may use
+  // at most this share of what its node can send or receive in that asset (asset-lightning.js).
+  if(window.SEQ_ASSET_LN_MAX_USD === undefined) window.SEQ_ASSET_LN_MAX_USD = null;
+  if(window.SEQ_LN_CAPACITY_SHARE === undefined) window.SEQ_LN_CAPACITY_SHARE = 0.10;
+  // What default mode keeps in the Bitcoin ark, in USD (ark-limits.js): it rests at 1500, refilled
+  // from the wallet's own address only below a quarter of it; payments received take it up to
+  // 3000, and then all above 1500 moves to the address in one move. One payment of 1500 or more
+  // goes to the address straight away. Sequentia's Ark has no figures. Null: no limit.
+  if(window.SEQ_ARK_LIMITS === undefined) window.SEQ_ARK_LIMITS = { btc: { board: 1500, hold: 3000, direct: 1500 }, asset: { board: null, hold: null, direct: null } };
 </script>
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
@@ -1785,7 +1788,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
-import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal } from './asset-lightning.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnCapacityShare, lnCapacity, fitsCapacity } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
@@ -4351,6 +4354,14 @@ function arkRoom(kind){
   const l = arkLimitsOf(kind), o = { held: arkHeld(kind), limitUsd: l.board, price: l.price, precision: l.precision };
   if(o.limitUsd != null && !(o.price > 0) && (kind==='BTC' || !Object.keys(PRICES).length)) return 0n;
   return boardRoom(o);
+}
+// Whether one payment of `atoms` of `kind` fits the operator's Lightning capacity in direction `dir`
+// ('out' paid from the wallet, 'in' received into it), at the page's share: one payment never
+// drains the channels every user and every swap shares (asset-lightning.js fitsCapacity).
+function lnFits(kind, dir, atoms){
+  if(atoms == null) return true;
+  let info = null; try{ info = leavesApi && leavesApi.isOpen() ? leavesApi.info() : null; }catch{}
+  return fitsCapacity(atoms, info ? lnCapacity(info, kind, dir) : null, lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE));
 }
 // Whether one payment of `atoms` of `kind` goes to the address, not the Ark (ark-limits.js), and
 // the sentence the review says it with. -> the sentence, or null. Default mode only.
@@ -7638,7 +7649,8 @@ function payCodeText(){
   const asset = recvAsset(), atoms = recvAmountAtoms(), key = asset + ':' + atoms;
   // An amount that goes to the address straight away (ark-limits.js) carries no invoice.
   const large = atoms>0n && !!arkDirectWhy(asset, atoms);
-  const can = atoms>0n && !large && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
+  // Nor does an amount the operator's channels cannot take in without draining them.
+  const can = atoms>0n && !large && lnFits(asset, 'in', atoms) && (asset==='BTC' ? btcArkRoutes() : recvAssetChoices().includes(asset));
   const mine = (inv)=> inv && inv.asset===asset && inv.atoms===atoms;
   if(can && !mine(_recvInv) && !_recvInvAsk && _recvInvFailed!==key){
     const ask = asset==='BTC' ? btcArk.invoice(atoms, 'Receive')
@@ -7683,6 +7695,7 @@ function watchRecvInvoice(inv){
 const LN_ADDRESS_WHY = {
   limit: (limit)=> DEFAULT_WORDS.byAddressAbove(limit.toLocaleString(undefined, { maximumFractionDigits: 2 })),
   liquidity: ()=> DEFAULT_WORDS.byAddressNoWay,
+  capacity: ()=> DEFAULT_WORDS.byAddressNoWay,
   unavailable: ()=> DEFAULT_WORDS.byAddressNoWay,
   lock: ()=> DEFAULT_WORDS.byAddressNoWay,
   unpriced: ()=> DEFAULT_WORDS.byAddressNoWay,
@@ -7707,7 +7720,8 @@ function payCodeRoute(text, asset, atoms){
   if(c.address && !isOampAsset(asset)){ const why = arkDirectWhy(asset, atoms); if(why) return { dest: c.address, byAddress: true, why }; }
   if(asset === 'BTC'){
     if(c.ark && btcArkPays()) return { dest: text, byAddress: false };
-    if(c.lightning && btcArkRoutes()) return { dest: c.lightning, byAddress: false };
+    if(c.lightning && btcArkRoutes() && lnFits('BTC', 'out', atoms)) return { dest: c.lightning, byAddress: false };
+    if(c.lightning && btcArkRoutes() && c.address) return { dest: c.address, byAddress: true, why: DEFAULT_WORDS.byAddressNoWay };
     return { dest: c.address || text, byAddress: !!c.address };
   }
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
@@ -7715,7 +7729,8 @@ function payCodeRoute(text, asset, atoms){
   if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
     const limitUsd = lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
     const r = assetLightningRoute({ invoice: c.lightning, asset, atoms, precision: assetMeta(asset).precision||0,
-      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000 });
+      usd: priceFor(priceTicker(asset)), limitUsd, info: leavesApi.info(), nowSeconds: Date.now()/1000,
+      capacityShare: lnCapacityShare(window.SEQ_LN_CAPACITY_SHARE) });
     const passed = _lnPassedOver.has(String(c.lightning).toLowerCase());
     if(r.route === 'lightning' && !passed) return { dest: r.invoice, byAddress: false, lightning: true, address: c.address || null };
     const why = passed ? DEFAULT_WORDS.byAddressNoWay : LN_ADDRESS_WHY[r.why] ? LN_ADDRESS_WHY[r.why](limitUsd) : null;

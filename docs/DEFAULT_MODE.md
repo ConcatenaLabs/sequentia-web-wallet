@@ -223,10 +223,9 @@ modes (`asset-picker.js`):
 - An asset sent to a receive code of a wallet of another operator (its `sequentia` part names
   another operator) goes over Lightning when the code carries an invoice in that asset for
   exactly the amount sent (the row takes the asset and amount from it when its amount is
-  empty), the payment is worth no more than the page's limit in USD (`SEQ_ASSET_LN_MAX_USD`,
-  1,000 unless the page names another; never a number of units, since one unit of one asset can
-  be worth thousands of another), the operator's node in the asset is up with as much to spend
-  as the amount, and the invoice's final lock fits the operator's window for a payment with a hop
+  empty), the payment uses no more than a share of what the operator's node in the asset can
+  send (`SEQ_LN_CAPACITY_SHARE`, 10%: its channels are shared by every user and by the swaps, and
+  one large payment would drain them), the operator's node in the asset is up, and the invoice's final lock fits the operator's window for a payment with a hop
   to spare (`asset-lightning.js`). The review is the tree's: **Send <amount> <TICKER>?**, "It
   arrives in seconds.", a "Fee" line when there is one. Once sent it reads "On its way: it
   arrives once the other wallet takes it." until the other wallet takes it, then "Sent <amount>

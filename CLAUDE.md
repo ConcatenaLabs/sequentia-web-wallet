@@ -71,7 +71,8 @@ copies it into its `vendor/` with its own host: change it here first. Ambra mobi
 operator: over Lightning, out of the tree (`lightning_pay_quote`, then `lightning_pay` with the
 quote as `shown`), when the code carries an invoice in the asset for the amount (a receive code
 with an amount in an asset carries one, from the leaf library's `lightning_receive`), the payment
-is worth no more than `window.SEQ_ASSET_LN_MAX_USD` (USD, never units of the asset), the
+uses no more than `window.SEQ_LN_CAPACITY_SHARE` (10%) of what the operator's node in the asset
+can send (`window.SEQ_ASSET_LN_MAX_USD` adds a limit in USD, none by default), the
 operator's node can carry it and the invoice's final lock fits the operator's window with a hop
 to spare; else the code's address, and the review says why. It has no DOM
 (`asset-lightning.test.mjs`). Ambra mobile and the browser extension route receive codes in
