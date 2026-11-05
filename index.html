@@ -1841,14 +1841,14 @@ import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './light
 import { buildPayCode, readPayCode } from './pay-code.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
-import { arkLimits, boardRoom, moveOutAtoms, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
+import { arkLimits, boardRoom, moveOutAtoms, moveOutSats, moveRetryMs, moveWaits, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
 import { isStaleTipError } from './reorg.js';
 import { makeSiteOrders } from './site-orders.js';
 import { mountUserComposer } from './user-composer.js';
 import { attachChooser, PICKER_WORDS } from './asset-picker.js';
-import { mountBtcArk, arkConfig, BTC_WORDS, splitPay } from './btc-ark.js';
+import { mountBtcArk, arkConfig, BTC_WORDS, splitPay, heldBesideBoard, boardSeen, arkRefused } from './btc-ark.js';
 import { dueNow, markRaised, raiseRate, btcChildPlan, SPEED_WORDS } from './speed-up.js';
 import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
 import { noteArrival, noteSent, instantLog, instantRows } from './instant-history.js';
@@ -2702,21 +2702,35 @@ async function btcScan(){
   // activity, so change addresses that drifted past index GAP are still found — a fixed
   // 0..GAP window would make such change invisible and unspendable.
   const t0=Date.now();
-  let bal=0n; const used=new Set(); let chgMax=-1, start=0, scanned=GAP;
+  let bal=0n; const used=new Set(); let chgMax=-1, start=0, scanned=GAP; const byAddr=new Map();
   for(let guard=0; guard<64; guard++){
     const jobs=[];
     for(let i=start;i<start+GAP;i++){ jobs.push(['e',i,btcAddr(false,i)]); jobs.push(['i',i,btcAddr(true,i)]); }
-    const res = await Promise.all(jobs.map(([t,i,a])=>btcAddrInfo(a).then(d=>({t,i,d}))));
+    const res = await Promise.all(jobs.map(([t,i,a])=>btcAddrInfo(a).then(d=>({t,i,a,d}))));
     let anyUsed=false;
     for(const r of res){ if(!r.d) continue;
       const cs=r.d.chain_stats||{}, ms=r.d.mempool_stats||{};
-      bal += BigInt((cs.funded_txo_sum||0)-(cs.spent_txo_sum||0)+(ms.funded_txo_sum||0)-(ms.spent_txo_sum||0));
+      const held = BigInt((cs.funded_txo_sum||0)-(cs.spent_txo_sum||0)+(ms.funded_txo_sum||0)-(ms.spent_txo_sum||0));
+      bal += held; byAddr.set(r.a, held);
       const tc=(cs.tx_count||0)+(ms.tx_count||0);
       if(tc>0){ anyUsed=true; if(r.t==='e') used.add(r.i); else if(r.i>chgMax) chgMax=r.i; }
     }
     start += GAP; scanned = start;
     if(!anyUsed) break;
   }
+  // A board on its way: the addresses it touched are figured from their own coin lists, which
+  // count it once whether this read has seen it yet or not (heldBesideBoard, #533).
+  const h=_btcBoardHold;
+  if(h && t0 > h.at){
+    const lists=new Map(await Promise.all([...h.addrs].map(async a=>[a, await fetch(`${T4_API}/address/${a}/utxo`).then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })])).catch(()=>[]));
+    if(lists.size === h.addrs.size){
+      for(const [a, us] of lists) bal += heldBesideBoard(us, h, a) - (byAddr.get(a) ?? 0n);
+      if(boardSeen(lists, h) && Date.now()-h.at > 120_000) _btcBoardHold=null;
+    } else bal = bal > h.sats ? bal - h.sats : 0n;
+  }
+  // The move down's output, once a read lists it at its address, is in `bal`: the hold ends.
+  const o=_btcOutHold;
+  if(o && t0 > o.at){ try{ const us=await fetch(`${T4_API}/address/${o.address}/utxo`).then(r=>r.ok?r.json():null); if(Array.isArray(us) && us.some(u=>u.txid===o.txid) && (byAddr.get(o.address) ?? 0n) >= o.sats) _btcOutHold=null; }catch{} }
   btcBalance = bal; btcUsed = used; btcChangeNext = chgMax+1; btcScanLimit = scanned;
   _btcScanAt = Date.now(); _btcScanStartAt = t0;
 }
@@ -2730,9 +2744,11 @@ async function btcGatherUtxos(){
   const lists = await Promise.all(jobs.map(async([internal,i])=>{
     const node=btcNode(internal,i); const p=btc.p2wpkh(node.publicKey, btc.TEST_NETWORK);
     const us=await fetch(`${T4_API}/address/${p.address}/utxo`).then(r=>r.json()).catch(()=>[]);
-    return us.map(u=>({txid:u.txid, vout:u.vout, value:BigInt(u.value), script:p.script, priv:node.privateKey, confirmed:!!(u.status && u.status.confirmed)}));
+    return us.map(u=>({txid:u.txid, vout:u.vout, value:BigInt(u.value), address:p.address, script:p.script, priv:node.privateKey, confirmed:!!(u.status && u.status.confirmed)}));
   }));
-  return lists.flat();
+  // A board just sent spends its coins even where the read has not seen it yet.
+  const h=_btcBoardHold;
+  return lists.flat().filter(u=> !h || !h.inputs.has(u.txid+':'+u.vout));
 }
 
 // vbytes of one output to `address`: value (8), script length (1) and the script itself. A P2WPKH
@@ -2926,7 +2942,9 @@ async function offboardReview(r, onDone){
 }
 
 async function btcReviewBroadcast(outputs, onDone, satPerVb, note = []){
+  btcPersonNow();
   const built = await btcBuildTx(outputs, satPerVb > 0 ? satPerVb : btcFeeRate());
+  if(!devMode()) return btcReviewDefault(outputs, built, onDone, note);
   const kv=[...note, ['Network', '⚠ Bitcoin testnet4 (parent chain): sending BTC, not a Sequentia asset']];
   for(const o of outputs) kv.push(['→ '+o.address, fmtAtoms(o.amount,8)+' BTC']);
   kv.push(['Network fee', `${fmtAtoms(built.fee,8)} BTC · ${built.inputs} input${built.inputs>1?'s':''}, ${built.vsize} vB`]);
@@ -2947,6 +2965,31 @@ async function btcReviewBroadcast(outputs, onDone, satPerVb, note = []){
       showSent(m, { title:'Bitcoin (testnet4) payment', kv, txid:txt, explorer:'/testnet4/tx/', statusUrl:T4_API+'/tx/', historyAt:'btcHistList' });
       if(onDone) onDone(txt); await sync();
     }catch(e){ st.className='status err'; st.textContent='Failed: '+prettyErr(e); ok.disabled=false; }
+  };
+}
+
+// Default mode's review of a BTC payment the page pays from its own address (#532): the same sheet
+// as a payment from the Bitcoin ark (btcArkSendReview), in BTC_WORDS: what is sent, to whom, the
+// fee, and that it arrives after a Bitcoin block. No network, inputs or size.
+function btcReviewDefault(outputs, built, onDone, note = []){
+  const sum = outputs.reduce((s,o)=>s+o.amount, 0n), what = fmtAtoms(sum, 8);
+  const kv = outputs.map(o=> [BTC_WORDS.to, o.address.slice(0, 14) + '…' + (outputs.length > 1 ? ' · ' + fmtAtoms(o.amount, 8) + ' BTC' : '')]);
+  kv.push([BTC_WORDS.fee, fmtAtoms(built.fee, 8) + ' BTC']);
+  kv.push(...(note.length ? note : [['', BTC_WORDS.arrivesBlock]]));
+  const {m, ok, st} = modalRows({ title: BTC_WORDS.review(what), kv });
+  ok.textContent = BTC_WORDS.send;
+  ok.onclick = async()=>{
+    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + esc(BTC_WORDS.sending);
+    let txid;
+    try{ txid = await btcBroadcastHex(built.hex); }
+    catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.failed(prettyErr(e)); ok.disabled = false; return; }
+    if(built.changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, built.changeIndex+1);
+    _btcSentAt = Date.now();   // no board races this payment's coins (btcArkBoardSoon)
+    { let gone=built.fee; for(const o of outputs) if(!isOwnBtcAddress(o.address)) gone+=o.amount;
+      noteBtcSent(txid, -gone); renderBtcHistory().catch(()=>{}); }
+    ok.classList.add('hide'); { const no = m.querySelector('button.ghost'); if(no) no.textContent = 'Close'; }
+    st.className = 'status ok'; st.textContent = BTC_WORDS.sentBlock(what);
+    if(onDone) onDone(txid); renderBalance(); sync().catch(()=>{});
   };
 }
 
@@ -4198,12 +4241,21 @@ function userBtcLightning(){
 // address, and trades from it. Developer mode keeps BTC's own paths.
 let btcArk = null, _btcSentAt = 0, _btcArkBoardAt = 0;
 // What a board just put on the network takes from the address: the ark counts it as arriving at
-// once, the address's figure only once a scan that began after the broadcast has run. Until then
-// the address's figure leaves it out, so the board is counted once.
-let _btcBoardHold = null, _btcDrainLeft = 0n, _btcScanStartAt = 0;
+// once, while a read of the address can lag the broadcast. The hold names the board's inputs and
+// change: until a scan that began after the broadcast has run, the address's figure leaves out what
+// the board took (`sats`); from then on the scan figures the board's addresses from their coin
+// lists (btcScan, heldBesideBoard), until those lists show the board whole. Counted once (#533).
+let _btcBoardHold = null, _btcDrainLeft = null, _btcScanStartAt = 0;
+// The move down sends BTC from the ark to the wallet's address: the ark stops counting it at once,
+// the address only once a read lists the move's output. Until then it is counted as at the
+// address, so the figure moves only by the move's fee.
+let _btcOutHold = null;
 function btcOnchainShown(bal){
+  // The move down's BTC is on its way to the address: counted there until a scan lists it.
+  const o=_btcOutHold; if(o){ if(Date.now()-o.at > 10*60_000) _btcOutHold=null; else bal += o.sats; }
   const h=_btcBoardHold; if(!h) return bal;
-  if(_btcScanStartAt > h.at || Date.now()-h.at > 10*60_000){ _btcBoardHold=null; return bal; }
+  if(Date.now()-h.at > 10*60_000){ _btcBoardHold=null; return bal; }
+  if(_btcScanStartAt > h.at) return bal;
   return bal > h.sats ? bal - h.sats : 0n;
 }
 function initBtcArk(){
@@ -4445,22 +4497,36 @@ function arkDirectWhy(kind, atoms){
 // Once the Ark holds the 'hold' limit, everything above 'board' moves out to the wallet's own
 // address, one move at a time per kind, never in developer mode (whose rails are the person's),
 // never while one such move is under way.
-let _arkOutBusy = false, _arkOutAt = 0;
+// The BTC move waits while a person reviews or makes a BTC payment and for a minute after
+// (moveWaits, #523), and after a refusal it is tried again later each time (moveRetryMs).
+let _arkOutBusy = false, _arkOutAt = 0, _btcPersonAt = 0, _btcOutFails = 0, _btcOutNextAt = 0;
 const ARK_OUT_EVERY_MS = 2 * 60_000;
+function btcPersonNow(){ _btcPersonAt = Date.now(); }
 async function arkHoldTick(force){
   if(_arkOutBusy || devMode() || !wollet) return;
   if(!force && Date.now() - _arkOutAt < ARK_OUT_EVERY_MS) return;
   _arkOutBusy = true; _arkOutAt = Date.now();
   try{
-    if(btcArkRoutes()){
+    const reviewing = typeof document!=='undefined' && !!document.querySelector('.modal');
+    if(btcArkRoutes() && Date.now() >= _btcOutNextAt && !moveWaits({ reviewing, personAt: Math.max(_btcPersonAt, _btcSentAt||0) })){
       const over = moveOutAtoms({ held: arkHeld('BTC'), ...arkLimitsOf('BTC') });
       if(over > 0n){
         const to = btcAddr(false, unifiedNextUnused());
-        const max = (await btcArk.max(to)) || 0n, sats = over < max ? over : max;
-        if(sats > 0n){
-          const r = await btcArk.send(to, sats);
-          console.log('[ark limit] moved', String(sats), 'sat of BTC to the wallet\'s address', r && r.txid);
-          try{ renderBalance(); }catch{}
+        try{
+          // Sized for the move's own fee, so the ark rests at its level, not that fee below (#530).
+          const q = await btcArk.quote(to, over);
+          const sats = moveOutSats(over, q && q.fee != null ? q.fee : 0n, (await btcArk.max(to)) || 0n);
+          // A person who began a payment meanwhile goes first.
+          if(sats > 0n && !moveWaits({ reviewing: !!document.querySelector('.modal'), personAt: Math.max(_btcPersonAt, _btcSentAt||0) })){
+            const r = await btcArk.send(to, sats);
+            if(r && r.txid) _btcOutHold = { txid: r.txid, address: to, sats: BigInt(sats), at: Date.now() };
+            console.log('[ark limit] moved', String(sats), 'sat of BTC to the wallet\'s address', r && r.txid);
+            _btcOutFails = 0; _btcOutNextAt = 0;
+            try{ renderBalance(); }catch{}
+          }
+        }catch(e){
+          _btcOutFails++; _btcOutNextAt = Date.now() + moveRetryMs(_btcOutFails);
+          console.warn('[ark limit] moving BTC out:', e?.message??e, '- tried again in', Math.round(moveRetryMs(_btcOutFails)/60000), 'min');
         }
       }
     }
@@ -4486,6 +4552,17 @@ async function arkHoldTick(force){
 // What the ark holds is spent from Send in both modes: developer mode shows it as a place of its
 // own, but BTC there is still the wallet's to send.
 function btcArkPays(){ return !!btcArk && btcArk.isOpen(); }
+// Why a BTC payment from the ark did not go: in default mode a refusal of the ark's server is one
+// plain sentence (#522), offering the address when it holds BTC; developer mode keeps the text.
+function btcFailText(e, { invoice = false } = {}){
+  const m = e?.message ?? String(e);
+  if(!devMode() && arkRefused(m)){
+    console.warn('[btc ark] refused:', m);
+    const chain = btcOnchainShown(btcBalance || 0n);
+    return !invoice && chain > 0n ? BTC_WORDS.refusedChain(fmtAtoms(chain, 8)) : BTC_WORDS.refusedLater;
+  }
+  return BTC_WORDS.failed(prettyErr(e));
+}
 // The page's confirmed coins, drained to one output (the board's funding), unsigned: the ark's
 // server cosigns the board first, then finish() signs it with the page's key.
 async function btcDrainUnsigned(address, sats){
@@ -4503,7 +4580,11 @@ async function btcDrainUnsigned(address, sats){
   const keys=[], seen=new Set(); for(const u of sel){ const k=[...u.priv].join(','); if(!seen.has(k)){ seen.add(k); keys.push(u.priv); } }
   return { psbtHex: Array.from(psbt, b=> b.toString(16).padStart(2,'0')).join(''), txid: tx.id,
     finish: ()=>{ for(const k of keys) tx.sign(k); tx.finalize(); if(changeIndex!=null) btcChangeNext = Math.max(btcChangeNext, changeIndex+1);
-      _btcDrainLeft = inSum - (changeIndex!=null ? change : 0n); return { hex: tx.hex }; } };
+      const addrs = new Set(sel.map(u=> u.address)), chAddr = changeIndex!=null ? btcAddr(true, changeIndex) : null;
+      if(chAddr) addrs.add(chAddr);
+      _btcDrainLeft = { sats: inSum - (changeIndex!=null ? change : 0n), inputs: new Set(sel.map(u=> u.txid+':'+u.vout)), addrs,
+        change: chAddr ? { txid: tx.id, vout: 1, value: change, address: chAddr } : null };
+      return { hex: tx.hex }; } };
 }
 async function btcBroadcastHex(hex){
   const r = await fetch(`${T4_API}/tx`, { method:'POST', body:hex });
@@ -4533,7 +4614,7 @@ function btcArkBoardSoon(asked){
   if(cap != null && cap <= 0n) return;
   _btcArkBoardAt = Date.now();
   btcArk.board({ utxos: btcGatherUtxos, buildUnsigned: btcDrainUnsigned, cap,
-      broadcast: async (hex)=>{ const t = await btcBroadcastHex(hex); _btcBoardHold = { sats: _btcDrainLeft, at: Date.now() }; return t; } })
+      broadcast: async (hex)=>{ const t = await btcBroadcastHex(hex); if(_btcDrainLeft) _btcBoardHold = { ..._btcDrainLeft, at: Date.now() }; return t; } })
     .then((r)=>{ if(r){ const a = BigInt(r.amount || 0); _btcArkWanted = _btcArkWanted > a ? _btcArkWanted - a : 0n; sync().catch(()=>{}); } })
     .catch((e)=> console.warn('[btc ark] board:', e?.message??e));
 }
@@ -4553,6 +4634,7 @@ async function btcChainMax(address, satPerVb){
 // alone, the two pay it together (btcSplitReview).
 // -> false when the page's own path pays it all (btcReviewBroadcast).
 async function btcArkSendReview(r, onDone, satPerVb = 0){
+  btcPersonNow();
   const route = btcArk.route(r.addr);
   const sats = route === 'invoice' ? null : parseAtoms(r.amtS, 8);
   if(route !== 'invoice' && !(sats > 0n)) throw new Error('amount must be greater than zero');
@@ -4597,7 +4679,7 @@ async function btcArkSendReview(r, onDone, satPerVb = 0){
       st.className = 'status ok';
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       st.textContent = route === 'chain' ? BTC_WORDS.sentBlock(what) : BTC_WORDS.sent(what, secs);
-    }catch(e){ st.className = 'status err'; st.textContent = 'Failed: ' + prettyErr(e); ok.disabled = false; }
+    }catch(e){ st.className = 'status err'; st.textContent = btcFailText(e, { invoice: route === 'invoice' }); ok.disabled = false; }
   };
   return true;
 }
@@ -4625,7 +4707,7 @@ async function btcSplitReview(r, { chainAddr, chain, ark, arkTo, satPerVb }, onD
   ok.onclick = async()=>{
     ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.sending;
     try{ await btcArk.send(arkTo, ark); }
-    catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.failed(prettyErr(e)); ok.disabled = false; return; }
+    catch(e){ st.className = 'status err'; st.textContent = btcFailText(e); ok.disabled = false; return; }
     ok.classList.add('hide'); { const no = m.querySelector('button.ghost'); if(no) no.textContent = 'Close'; }
     try{
       await btcBroadcastHex(built.hex);
@@ -6265,18 +6347,21 @@ function initLnSendReceive(){
     if (btcArkRoutes()){
       const k = lnInvoiceKind(bolt11);
       if (k !== 'BTC'){ st.className = 'status err'; st.textContent = k ? BTC_WORDS.notBtc(k) : 'This invoice cannot be paid now.'; return; }
+      btcPersonNow();
       let q = null; try { q = await btcArk.quote(bolt11); } catch {}
       if (!q || q.short){ st.className = 'status err'; st.textContent = q && q.short ? BTC_WORDS.payUpTo(fmtAtoms(btcArk.figures().spendable, 8)) : 'This invoice cannot be paid now.'; return; }
+      // One payment out is held to the operator's published limit, as a receive code's is (#525).
+      if (!lnFits('BTC', 'out', q.sats)){ st.className = 'status err'; st.textContent = BTC_WORDS.payTooLarge; return; }
       sendBtn.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>' + BTC_WORDS.paying;
       const t0 = performance.now();
       try {
-        const res = await btcArk.send(bolt11);
+        const res = await btcArk.send(bolt11); btcPersonNow();
         console.log('[btc ark] invoice', res.state, 'in', Math.round(performance.now() - t0), 'ms');
         $('lnSendBolt11').value = ''; try { renderBalance(); } catch {}
         const paidText = ()=> BTC_WORDS.paid(fmtAtoms(q.sats, 8), fmtAtoms(q.fee, 8));
         if (res.state !== 'complete' && res.hash) arkPayFollow(st, res.hash, paidText);
         else { st.className = 'status ok'; st.textContent = paidText(); }
-      } catch(e){ st.className = 'status err'; st.textContent = BTC_WORDS.failed(prettyErr(e)); }
+      } catch(e){ st.className = 'status err'; st.textContent = btcFailText(e, { invoice: true }); }
       finally { sendBtn.disabled = false; }
       return;
     }
@@ -9440,7 +9525,7 @@ async function requestFaucetBtc(){
       fs.textContent=BTC_WORDS.sentBlock(j.amount).replace(/^Sent/, 'The faucet sent');
       setTimeout(sync, 8000);
     }
-  }catch(e){ fs.className='status err'; fs.textContent=e.alreadyPaid ? e.message : 'Faucet error: '+(e?.message??e); }
+  }catch(e){ fs.className='status err'; fs.textContent=e.alreadyPaid ? e.message : (!devMode() && arkRefused(e?.message) ? BTC_WORDS.faucetLater : 'Faucet error: '+(e?.message??e)); }
 }
 document.querySelectorAll('#faucetBtns button').forEach(b=>{ b.onclick=()=>requestFaucet(b.dataset.faucet); });
 $('btnAddRec').onclick=addRecipientRow;

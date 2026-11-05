@@ -457,3 +457,44 @@ test('towers: the plan before the renewals; deposits only when turned on; never 
   assert.deepEqual(failed.sched[0], [])
 })
 
+
+// #522: a refusal of the ark's server is said in default mode's words, never the server's.
+import { arkRefused } from './btc-ark.js'
+test("the ark's server refusing is recognised, and its sentences say none of the words default mode never says", () => {
+  const live = `An error occurred while communicating with the server: code: 'Client specified an invalid argument', message: "bad user input: fee rate too low: provided = 7500, minimum = 25000"`
+  assert.equal(arkRefused(live), true)
+  assert.equal(arkRefused('An error occurred: ' + live), true, 'as the faucet passes it on')
+  assert.equal(arkRefused('not enough here'), false)
+  assert.equal(arkRefused('the payment failed'), false)
+  for (const t of [BTC_WORDS.refusedLater, BTC_WORDS.refusedChain('0.0002'), BTC_WORDS.faucetLater, BTC_WORDS.payTooLarge]) {
+    assert.deepEqual(forbiddenIn(t), [], t)
+    assert.ok(!/server|grpc|fee rate|code:/i.test(t), t)
+  }
+})
+
+// #376, seen live in WF1: the payee held the payment past the call's time, and the page said
+// "Nothing was sent: the wallet did not answer in time" while the coins were out, then back.
+test('a payment whose call times out is followed by its hash, not said unsent', async () => {
+  let status = 'pending', payErr = 'the wallet did not answer in time'
+  const { w } = standIn({
+    info: () => INFO,
+    balance: () => ({ spendable: '50000', total: '50000' }),
+    pay_fee: () => ({ fee: '77', max_route_delay: 218 }),
+    pay: () => { throw new Error(payErr) },
+    pay_status: (a) => ({ state: status, hash: a.hash }),
+  })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
+  await ark.open()
+  const held = await ark.send(LNTB)
+  assert.equal(held.state, 'pending', 'on its way, not "nothing was sent"')
+  assert.match(held.hash, /^[0-9a-f]{64}$/)
+  status = 'failed'
+  payErr = 'connection reset'
+  assert.equal((await ark.send(LNTB)).state, 'pending', 'gone out and failed back: followed, and payOutcome says it came back')
+  assert.equal((await ark.payOutcome(held.hash, { everyMs: 1 })).state, 'came-back')
+  // A refusal (not a timeout) whose hash the wallet never recorded stands as it is.
+  status = 'none'
+  payErr = 'bad user input: requested expiry is too low'
+  await assert.rejects(ark.send(LNTB), /expiry is too low/, 'never sent: the error stands')
+  ark.close()
+})

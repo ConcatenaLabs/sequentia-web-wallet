@@ -328,6 +328,13 @@ async function main () {
     const said = await page.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m && m.innerText.trim()) return m.innerText; const s=document.querySelector('#lnSendStatus'); const t=(s&&s.textContent||'').trim(); return t && !/…$/.test(t) ? 'STATUS '+t : false })()", 300000).catch(async () => 'still: ' + await page.eval("document.querySelector('#lnSendStatus')?.textContent || ''"))
     record.said.push({ invoice: inv.slice(0, 30) + '…', said })
     note('Pay an invoice says: ' + said.replace(/\n+/g, ' | '))
+    // A payment the payee holds reads "On its way…" until they take it or it comes back: followed
+    // for up to ten minutes.
+    if (/On its way/.test(said)) {
+      const end = await page.waitFor("(()=>{ const t=(document.querySelector('#lnSendStatus')?.textContent||'').trim(); return t && !/On its way/.test(t) ? t : false })()", 600000).catch(() => 'still on its way after 10 min')
+      record.said.push({ then: end })
+      note('then: ' + end)
+    }
     await shot(page, `${name}-payinv.png`)
     await page.eval("(()=>{ const b=[...document.querySelectorAll('.modal button')].find(b=>/Cancel/.test(b.textContent)); if(b) b.click(); return true })()").catch(() => {})
     await page.stop()
