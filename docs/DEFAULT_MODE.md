@@ -79,7 +79,8 @@ In practice:
   Bitcoin ark, every other asset into the operator's tree, claimed at the next round. Nothing is
   asked. A move is paid only from a channel that is open for payments, within the day's
   Lightning payment limit when the wallet sets one (nine tenths of it, the rest on a later day),
-  and never while the person is using the wallet. It stays in the figure while it moves, counted
+  an asset's within the most the operator takes in one payment over Lightning (the rest on a
+  later pass), and never while the person is using the wallet. It stays in the figure while it moves, counted
   once, whether the channel or its new place reports it first; nothing under the figure says it
   moves (developer mode reads **"Moving <amount> <TICKER> so it can be sent in seconds."**). A
   payment refused before it left moves nothing and is tried again later. A channel the move
