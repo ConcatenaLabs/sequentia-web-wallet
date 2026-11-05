@@ -335,8 +335,9 @@ in the budget like any other coin, it would fill the room every other pair trade
 pass the maker weighs those coins at its node's fee exchange rates (`getfeeexchangerates`, as the
 library weighs them) and widens its own share by what they are worth over the bond's value. The
 widening stays while the maker holds at least that much of the asset out of round, since the cap
-freeing lets the refresh run only in the operator's next round; once they are refreshed the share
-goes back to `instant_budget`. Each change is logged ("held out of
+freeing lets the refresh run only in the operator's next round, and it is kept in the store
+(`held-back.json`) so a restart does not forget it; once they are refreshed the share goes back to
+`instant_budget`. Each change is logged ("held out of
 round while the operator refreshes no more of it: …"). The library still takes the lower of this
 share and the operator's suggestion, and refuses whatever the bond does not cover, so the widening
 never goes past either; an asset the node does not price widens nothing.
