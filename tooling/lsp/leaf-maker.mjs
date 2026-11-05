@@ -209,6 +209,16 @@ export function heldBack (prev, now, outOfRound) {
   }
   return out
 }
+// What is held back, kept in the store across a restart: a maker restarted after the cap freed
+// would otherwise forget coins whose refresh still waits, and go back to its base share at once.
+// `text` is the file's contents (or null); -> Map asset -> atoms. heldBackText writes one.
+export function heldBackFrom (text) {
+  try {
+    const j = JSON.parse(text || '{}')
+    return new Map(Object.entries(j).filter(([a, v]) => /^[0-9a-f]{64}$/.test(a) && /^\d+$/.test(String(v))).map(([a, v]) => [a, BigInt(v)]))
+  } catch { return new Map() }
+}
+export const heldBackText = (m) => JSON.stringify(Object.fromEntries([...m].map(([a, v]) => [a, String(v)])))
 // The share of the bond, in millionths, the maker sets as its own instant budget: its configured
 // share (`basePpm`), plus what it holds that the cap holds back (`stuck`, from heldAtCap), worth
 // `atoms * rate / 1e8` reference atoms at the node's fee exchange rates (`rates`: asset -> rate),
@@ -520,7 +530,8 @@ async function main () {
   // The room left in it, read with the bond on every pass of the upkeep (null: no bound to cut by).
   // Coins the operator's cap holds back out of round (heldAtCap) widen the maker's own share by
   // what they are worth (budgetPpm), and the share goes back once they are refreshed.
-  let room = null, lastInfo = null, heldBackLog = '', stuckPrev = new Map()
+  const heldBackFile = join(cfg.store_dir, 'held-back.json')
+  let room = null, lastInfo = null, heldBackLog = '', stuckPrev = heldBackFrom(existsSync(heldBackFile) ? readFileSync(heldBackFile, 'utf8') : null)
   const readRoom = async (first = false) => {
     let bond = null
     try { bond = await cmd('bond', {}, first); room = budgetRoom(bond) } catch (e) { log('bond:', e.message); return }
@@ -528,6 +539,7 @@ async function main () {
     if (basePpm == null || !b || !lastInfo || first) return
     try {
       const stuck = heldBack(stuckPrev, heldAtCap(bond.out_of_round, lastInfo), bond.out_of_round)
+      if (heldBackText(stuck) !== heldBackText(stuckPrev)) { try { writeFileSync(heldBackFile, heldBackText(stuck)) } catch (e) { log('held back:', e.message) } }
       stuckPrev = stuck
       const now = [...stuck].map(([a, v]) => tickerOf(a) + ' ' + v).sort().join(', ')
       const want = stuck.size ? budgetPpm(basePpm, stuck, await nodeRates(), b.bond_value) : basePpm

@@ -79,3 +79,18 @@ test('coins taken in after the cap freed are not added to what is held back', ()
   const more = heldBack(prev, new Map(), [{ asset: SEQ, value: String(5_000_000n * C) }])
   assert.deepEqual([...more], [[SEQ, 3_800_152n * C]])
 })
+
+// Live, 2026-11-05 20:01Z: the makers restarted after tSEQ fell under its cap; the held-back coin
+// was forgotten and leaf-maker-btc refused a firm at its base tenth.
+import { heldBackFrom, heldBackText } from './leaf-maker.mjs'
+test('what is held back survives a restart through the store', () => {
+  const m = new Map([[SEQ, 3_800_095n * C]])
+  const again = heldBackFrom(heldBackText(m))
+  assert.deepEqual([...again], [...m])
+  const coin = [{ asset: SEQ, value: String(3_800_095n * C) }]
+  const freed = { assets: [{ asset: SEQ, in_flight: '0', in_flight_cap: info.assets[0].in_flight_cap }] }
+  assert.equal(heldBack(again, heldAtCap(coin, freed), coin).size, 1, 'after the restart it is still held back')
+  assert.equal(heldBackFrom(null).size, 0)
+  assert.equal(heldBackFrom('not json').size, 0)
+  assert.equal(heldBackFrom('{"x":"1","' + SEQ + '":"-5"}').size, 0, 'nothing but asset ids and atom counts')
+})
