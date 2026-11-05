@@ -212,3 +212,13 @@ test('taking every coin home: what it moves and what the holder pays, by asset, 
     assert.deepEqual(forbiddenIn(w), [], w)
   }
 })
+
+// #521: a receive code the operator did not give is asked again; the address shows meanwhile only
+// after the first tries, and never for the rest of the session.
+import { receiveCodeRetry } from './default-arca.js'
+test('Receive asks again for its code with a backoff, and shows the address only while the operator stays away', () => {
+  assert.deepEqual(receiveCodeRetry(0), { waitMs: 0, address: false })
+  assert.deepEqual(receiveCodeRetry(1), { waitMs: 2000, address: false })
+  assert.deepEqual(receiveCodeRetry(2), { waitMs: 2000, address: false })
+  assert.deepEqual([3, 4, 5, 6, 7, 8, 30].map((n) => receiveCodeRetry(n)), [5000, 10000, 20000, 40000, 60000, 60000, 60000].map((w) => ({ waitMs: w, address: true })))
+})

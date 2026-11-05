@@ -157,6 +157,10 @@ modes (`asset-picker.js`):
   either case, and codes made before the short form.
 - The code shows at once from what the wallet last drew, syncing or not, and stays until it is
   paid or its request lapses; a way to pay it that opens later is added to it in place.
+- A new code the operator cannot give at that moment (a restart, a dropped connection) is asked
+  for again by itself: twice at once, under "Making your receive code…", then with a growing pause
+  of up to a minute, showing the wallet's address meanwhile so a payer can still pay. The code
+  comes back as soon as the operator answers.
 - Above the code, one optional field, empty by default: "Amount in BTC (optional)", with a menu
   beside it of what the amount is in: **BTC**, and each asset the operator receives over
   Lightning (the menu shows only when there is more than BTC; for an asset the field reads
