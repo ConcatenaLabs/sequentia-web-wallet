@@ -913,6 +913,26 @@ Missing optional backends never break the wallet; the corresponding features sim
 appear. Note that the live camera QR scanner requires https; over plain http the
 photo-upload fallback is used automatically.
 
+### Deploying
+
+The live page is this repository's `main`, served from a checkout on the testnet box. The LSP
+(`tooling/lsp/`) runs from the same checkout and imports several of the page's modules. So a merge
+to `main` must be safe live when it merges: drive the change in a browser against the live testnet
+first (`tooling/live-proxy.mjs` serves this checkout in front of it).
+
+Every deploy goes through one script in
+[sequentia-testnet-ops](https://github.com/ConcatenaLabs/sequentia-testnet-ops), run from a
+checkout of that repository:
+
+```sh
+ssh seq 'DRY=1 bash -s' < bin/deploy-web-wallet.sh      # what it would do; changes nothing
+ssh seq 'bash -s' < bin/deploy-web-wallet.sh            # deploy origin/main
+```
+
+It moves the page, restarts the LSP when a file it loads changed, applies the box's Caddyfile when
+it changed, checks what the public address serves, and prints the command that rolls back. Its
+README ("Deploying the web wallet") says the rest. Never move the box's checkout by hand.
+
 ### Running the tests
 
 The protocol modules are DOM-free and tested under plain Node (22+, no dependencies to
