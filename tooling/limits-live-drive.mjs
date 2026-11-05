@@ -195,7 +195,7 @@ async function main () {
       await tab(page, 'balance')
       await page.eval("document.querySelector('#faucetStatus') && (document.querySelector('#faucetStatus').textContent='')")
       await click(page, `#faucetBtns button[data-faucet="${tk === 'tSEQ' ? '' : tk}"]`)
-      const said = await page.waitFor("(()=>{ const t=document.querySelector('#faucetStatus')?.textContent||''; return /Received|error|refused|already|wait/i.test(t) ? t : false })()", 300000).catch((e) => 'no answer: ' + e.message.slice(0, 120))
+      const said = await page.waitFor("(()=>{ const t=document.querySelector('#faucetStatus')?.textContent||''; return /Received|faucet sent|error|refused|already|wait/i.test(t) ? t : false })()", 300000).catch((e) => 'no answer: ' + e.message.slice(0, 120))
       record.said.push({ faucet: tk, said: said.trim() })
       note(`faucet ${tk}: ${said.trim()}`)
       await sleep(2000)
