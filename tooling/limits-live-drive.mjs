@@ -59,6 +59,10 @@ const limitsArg = flag('--limits', null), fallbackArg = flag('--fallback', null)
 // the faucet then pays the wallet's address, which is how a drive wallet gets BTC on the chain.
 const noArk = argv.includes('--no-ark'); if (noArk) argv.splice(argv.indexOf('--no-ark'), 1)
 const refuseFile = flag('--refuse-file', null)
+// --trace: `pay … send` records every request the page and its workers make from the tap on Send
+// to its answer, each with when it started and how long it took (where a payment's time goes).
+const trace = argv.includes('--trace'); if (trace) argv.splice(argv.indexOf('--trace'), 1)
+const traced = []
 const [workArg, step, name, ...rest] = argv
 if (!workArg || !step || !name) { console.error('usage: limits-live-drive.mjs <work-dir> <step> <name> [args…]'); process.exit(2) }
 const work = resolve(workArg)
@@ -113,6 +117,14 @@ async function openWallet ({ fresh = false } = {}) {
     if (m.method === 'Target.attachedToTarget') {
       page.ws.send(JSON.stringify({ id: 1e6 + page.next++, sessionId: m.params.sessionId, method: 'Network.enable', params: { maxPostDataSize: 65536 } }))
       page.ws.send(JSON.stringify({ id: 1e6 + page.next++, sessionId: m.params.sessionId, method: 'Runtime.enable', params: {} }))
+    }
+    if (trace && m.method === 'Network.requestWillBeSent') {
+      const u = new URL(m.params.request.url)
+      let rpc = ''; try { const j = JSON.parse(m.params.request.postData || ''); rpc = Array.isArray(j) ? j.map((x) => x.method).join(',') : (j.method || '') } catch {}
+      traced.push({ id: m.params.requestId, at: Date.now(), method: m.params.request.method, path: u.pathname, rpc, worker: !!m.sessionId })
+    }
+    if (trace && (m.method === 'Network.loadingFinished' || m.method === 'Network.loadingFailed')) {
+      const r = traced.find((x) => x.id === m.params.requestId && x.end == null); if (r) r.end = Date.now()
     }
     if (m.method === 'Network.requestWillBeSent' && m.params.request.method === 'POST') {
       const u = new URL(m.params.request.url)
@@ -287,6 +299,11 @@ async function main () {
       const done = await page.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; if(t && !/Sending|Moving|Paying|Waiting/i.test(t)) return t; const m=document.querySelector('.modal'); return m ? false : 'the review closed' })()", 900000).catch((e) => 'still: ' + e.message.slice(-200))
       if (refuseFile) { try { unlinkSync(refuseFile) } catch {} }
       record.said.push({ after: done, seconds: (Date.now() - t) / 1000 })
+      if (trace) {
+        const span = traced.filter((r) => r.at >= t - 50).map((r) => ({ ms: r.at - t, took: r.end != null ? r.end - r.at : null, method: r.method, path: r.path, rpc: r.rpc, worker: r.worker }))
+        record.trace = span
+        for (const r of span) note(`  +${r.ms} ms ${r.took ?? '?'} ms ${r.method} ${r.path}${r.rpc ? ' ' + r.rpc : ''}${r.worker ? ' (worker)' : ''}`)
+      }
       record.afterWords = forbiddenIn(done)
       note(`after Send (${((Date.now() - t) / 1000).toFixed(1)} s): ${done.replace(/\n+/g, ' | ')}`)
       // A second sentence (a payment that came back, an offer of the address) is read too.
