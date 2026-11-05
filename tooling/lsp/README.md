@@ -244,6 +244,15 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 Every coin it receives is refreshed in the operator's next round once it has rested
 `settle_seconds`, so what it trades settles as the takers' coins do.
 
+It takes in no asset whose refreshes the operator holds back. It reads the operator's
+`/v1/info` every minute, straight from the operator rather than through the library. An asset
+showing `in_flight` at or past its `in_flight_cap` gets no quote and no firm offer (in-tree or
+at the BTC desk) that wants it, and such an offer is refused with a sentence that names the
+asset. A coin of that asset received out of round would stay out of round until the cap frees,
+and it would count against the maker's instant budget the whole time. Once the budget is full,
+the maker takes nothing in any pair. The maker keeps giving that asset and trading every other
+pair, and takes it in again once the operator's info shows it under its cap.
+
 Every `forfeit_seconds` (30 by default) it hands over the forfeits of each of its refreshes whose
 round the operator holds for them (the library's `hand_over_forfeits`), ahead of everything else it
 has queued. The operator broadcasts a round of batches without a sweep only once every
