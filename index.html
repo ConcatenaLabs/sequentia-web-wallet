@@ -4017,6 +4017,11 @@ function initLeaves(){
   }, $('leavesRoot'), $('devModeRoot'));
   // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
   if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
+  // And where BTC is held, read while the page stays in default mode (tooling/limits-live-drive.mjs).
+  if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS && !('__btcHeld' in window)) Object.defineProperty(window, '__btcHeld', { get: ()=>{
+    const f = btcArk && btcArk.isOpen() ? btcArk.figures() : null;
+    return { onchain: String(btcBalance||0n), ark: f ? String(f.total) : null, arkSpendable: f ? String(f.spendable) : null, arkArriving: f ? String(f.arriving) : null };
+  } });
   show('tabLeaves', devMode());
   applyModeClass();
   leavesApi.start();
@@ -6147,6 +6152,11 @@ function initLnSendReceive(){
     out.textContent = ''; $('lnRecvCopy').classList.add('hide');
     if (!(amt > 0)){ st.className = 'status err'; st.textContent = 'Enter an amount.'; return; }
     if (btcArkRoutes()){
+      // The receive code's rule holds here too: no invoice for an amount that goes to the address
+      // (ark-limits.js), nor for more than the operator's channels may take in at once.
+      const large = arkDirectWhy('BTC', BigInt(amt));
+      if (large){ st.className = 'status err'; st.textContent = large + ' ' + DEFAULT_WORDS.giveCode; return; }
+      if (!lnFits('BTC', 'in', BigInt(amt))){ st.className = 'status err'; st.textContent = DEFAULT_WORDS.invoiceNoWay; return; }
       recvBtn.disabled = true;
       try { await btcArkReceive(amt, st, out); }
       catch(e){ st.className = 'status err'; st.textContent = 'Could not create the invoice: ' + prettyErr(e); }
@@ -7728,8 +7738,9 @@ function payCodeText(){
   let address = null; try{ address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential()); }catch{}
   if(!address) return _recvCode.text;
   const inv = can && mine(_recvInv) ? _recvInv : null;
+  // Nor the ark's address: a wallet that is not this one would pay it there.
   return buildPayCode({ address, amount: asset==='BTC' && atoms>0n ? fmtAtoms(atoms, 8).replace(/[^0-9.]/g, '') : undefined,
-    lightning: inv ? inv.invoice : undefined, ark: _recvArk || undefined, sequentia: _recvCode.text });
+    lightning: inv ? inv.invoice : undefined, ark: large ? undefined : (_recvArk || undefined), sequentia: _recvCode.text });
 }
 // The code's invoice is claimed as soon as it is paid; the code then shows a new one. An asset's
 // is the leaf library's receive: once a payment is held for it the wallet syncs, which claims the

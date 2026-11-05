@@ -36,6 +36,10 @@ const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '
 // line. --refuse-status 502 answers such a call with that status instead, as a front server does
 // when the service behind it is down.
 //
+// --strip-capacity: the operator's info (/arca/v1/info) is passed on without the capacity of its
+// Lightning nodes (each node's `spendable` and `receivable`), as an operator that does not publish
+// it answers: how the page's fallback for an unknown capacity (SEQ_LN_FALLBACK_USD) is seen live.
+//
 // --cors: every answer allows any origin, and a preflight is answered here, so a wallet on
 // another origin (a browser extension joined to http://127.0.0.1:<port>/arca with the node at
 // /node-rpc) reaches the testnet through this proxy, and through its --refuse.
@@ -43,6 +47,18 @@ const logCalls = process.argv.includes('--log')
 const seqobMarket = (arg('--seqob-market', '') || '').replace(/\/+$/, '')
 const dex = arg('--dex', '') ? resolve(arg('--dex', '')) : null
 const cors = process.argv.includes('--cors')
+const stripCapacity = process.argv.includes('--strip-capacity')
+// The info with no node's capacity in it; anything that is not that JSON passes as it came.
+function withoutCapacity (buf) {
+  try {
+    const j = JSON.parse(buf.toString())
+    const si = j.server_info || j
+    const strip = (n) => { if (n && typeof n === 'object') { delete n.spendable; delete n.receivable } }
+    for (const a of si.assets || []) strip(a && a.lightning)
+    strip(si.lightning && si.lightning.bitcoin && si.lightning.bitcoin.node)
+    return Buffer.from(JSON.stringify(j))
+  } catch { return buf }
+}
 const refuseStatus = Number(arg('--refuse-status', '0'))
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'access-control-allow-headers': 'content-type, authorization' }
@@ -98,7 +114,8 @@ const server = createServer(async (req, res) => {
     const out = {}
     r.headers.forEach((v, k) => { if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'alt-svc', 'strict-transport-security'].includes(k)) out[k] = v })
     res.writeHead(r.status, cors ? { ...out, ...CORS } : out)
-    res.end(Buffer.from(await r.arrayBuffer()))
+    const body = Buffer.from(await r.arrayBuffer())
+    res.end(stripCapacity && r.ok && /^\/arca\/v1\/info$/.test(url.pathname) ? withoutCapacity(body) : body)
     if (logCalls) {
       let m = ''; try { const j = JSON.parse(Buffer.concat(chunks).toString()); m = Array.isArray(j) ? j.map((x) => x.method).join(',') : (j.method || '') + (j.method === 'getblockhash' ? ' ' + JSON.stringify(j.params) : '') } catch {}
       console.log(`${new Date().toISOString()} ${req.method} ${url.pathname} ${r.status} ${Date.now() - t0}ms ${m}`.slice(0, 300))
@@ -109,4 +126,4 @@ const server = createServer(async (req, res) => {
   }
 })
 server.listen(port, '127.0.0.1', () => console.log(`serving http://127.0.0.1:${server.address().port}/wallet/` +
-  (refused.length ? `, refusing ${refused.join(', ')}` : '')))
+  (refused.length ? `, refusing ${refused.join(', ')}` : '') + (stripCapacity ? ', the operator\'s capacity left out' : '')))

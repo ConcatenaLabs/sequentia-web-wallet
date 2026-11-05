@@ -87,8 +87,14 @@ test('the page holds the wallet to the limits', () => {
 })
 
 test('Receive keeps its instant part; the hold limit moves the rest out; a large payment goes to the address', () => {
-  assert.match(html, /lightning: inv \? inv\.invoice : undefined, ark: _recvArk \|\| undefined, sequentia: _recvCode\.text \}\);/)
-  assert.ok(!/btcRoom/.test(html), 'Receive never drops the Ark part')
+  // Below `direct` the code keeps its Ark part; at `direct` or more it carries the address alone, so
+  // a wallet that is not this one pays the address too.
+  assert.match(html, /lightning: inv \? inv\.invoice : undefined, ark: large \? undefined : \(_recvArk \|\| undefined\), sequentia: _recvCode\.text \}\);/)
+  assert.ok(!/btcRoom/.test(html), 'Receive never drops the Ark part for a smaller amount')
+  // Receive's invoice card holds to the same two rules as the code.
+  const card = html.slice(html.indexOf('if (btcArkRoutes()){\n      // The receive code'), html.indexOf('try { await btcArkReceive(amt, st, out); }'))
+  assert.match(card, /const large = arkDirectWhy\('BTC', BigInt\(amt\)\);\n      if \(large\)\{ [^\n]*DEFAULT_WORDS\.giveCode; return; \}/)
+  assert.match(card, /if \(!lnFits\('BTC', 'in', BigInt\(amt\)\)\)\{ [^\n]*DEFAULT_WORDS\.invoiceNoWay; return; \}/)
   // An amount that goes to the address carries no invoice.
   assert.match(html, /const large = atoms>0n && !!arkDirectWhy\(asset, atoms\);\r?\n(?:  \/\/[^\n]*\n)?  const can = atoms>0n && !large && /)
   // The payer sends one payment of the difference or more to the code's address.
