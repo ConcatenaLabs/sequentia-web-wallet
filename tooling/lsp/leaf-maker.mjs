@@ -113,6 +113,13 @@ import { restDesk } from './leaf-maker-rest.mjs'
 import { tradeReporter, makerRelayKey } from './trade-report.mjs'
 import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-maker-ladder.mjs'
 
+// The maker is the only store of its phrase: its sync leaves out the catch-up between stores of one
+// phrase, which finds nothing here and reads every coin ever served to its mailbox to find that out.
+// It reads the coins it holds only (`held`), not the thousands it traded away. A library without
+// either argument ignores it and does as before.
+export const SYNC_ARGS = Object.freeze({ catch_up: false })
+export const HELD_COINS = Object.freeze({ held: true })
+
 // The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
 // for its offers at once, few enough that the library reads its store quickly before each command.
 export const MAX_COINS = 32
@@ -453,7 +460,7 @@ async function main () {
   // --held ASSET: what the maker holds of an asset in leaves (every state), after a sync; exits.
   const hi = process.argv.indexOf('--held')
   if (hi > 0) {
-    try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+    try { await cmd('sync', SYNC_ARGS) } catch (e) { log('sync:', e.message) }
     const st = ((await cmd('balance')).arca || {})[process.argv[hi + 1]] || {}
     console.log(String(Object.values(st).reduce((n, v) => n + big(v), 0n)))
     process.exit(0)
@@ -467,7 +474,7 @@ async function main () {
   if (ri > 0) {
     const [asset, want] = process.argv.slice(ri + 1, ri + 3)
     if (!/^[0-9a-f]{64}$/.test(asset || '') || !(big(want) > 0n)) { console.error('usage: --receive <asset hex> <atoms>'); process.exit(2) }
-    try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+    try { await cmd('sync', SYNC_ARGS) } catch (e) { log('sync:', e.message) }
     let atoms = big(want)
     try { const room = budgetRoom(await cmd('bond', {})); if (room && room.has(asset) && room.get(asset) < atoms) atoms = room.get(asset) } catch (e) { log('bond:', e.message) }
     if (atoms <= 0n) { console.log(JSON.stringify({ request: null, atoms: '0' })); process.exit(0) }
@@ -481,7 +488,7 @@ async function main () {
   // round, in the tree, then exits: how a drill's wallets are funded from the maker.
   const pi = process.argv.indexOf('--pay')
   if (pi > 0) {
-    await cmd('sync')
+    await cmd('sync', SYNC_ARGS)
     const out = []
     for (const req of readFileSync(process.argv[pi + 1], 'utf8').split('\n').map((x) => x.trim()).filter(Boolean)) {
       try { const r = await cmd('send', { request: req }); out.push({ ok: true, sent: r.sent || r.value || null }) } catch (e) { out.push({ ok: false, error: e.message }) }
@@ -500,7 +507,7 @@ async function main () {
     const j = await r.json().catch(() => ({}))
     if (!r.ok) { console.log(JSON.stringify({ ok: false, status: r.status, error: j.error || null })); process.exit(3) }
     await pause(3000)
-    const mb = (await cmd('sync')).mailbox || {}
+    const mb = (await cmd('sync', SYNC_ARGS)).mailbox || {}
     const got = (mb.accepted || []).filter((x) => x.asset === asset).reduce((n, x) => n + big(x.value), 0n)
     console.log(JSON.stringify({ ok: true, paid: j.leaf && j.leaf.atoms ? String(j.leaf.atoms) : null, received: String(got) }))
     process.exit(0)
@@ -624,7 +631,7 @@ async function main () {
   // resting orders a pass can hold the library for minutes, and a quote that waited on it was
   // no quote at all.
   const spendable = async (first = false) => {
-    const sp = spendableFrom(await cmd('coins', {}, first), await cmd('plans', {}, first).catch(() => ({ plans: [] })))
+    const sp = spendableFrom(await cmd('coins', HELD_COINS, first), await cmd('plans', {}, first).catch(() => ({ plans: [] })))
     holdings = { sp, at: Date.now() }
     return sp
   }
@@ -652,7 +659,7 @@ async function main () {
   }
   async function tickOnce () {
     {
-      try { await cmd('sync') } catch (e) { log('sync:', e.message) }
+      try { await cmd('sync', SYNC_ARGS) } catch (e) { log('sync:', e.message) }
       try { await spendable() } catch (e) { log('holdings:', e.message) }
       await readRoom()
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
@@ -665,7 +672,7 @@ async function main () {
       // Its live coins of each asset: past `max_coins` it merges (coinsToMerge), and at twice that
       // it boards no more.
       const counted = new Map()
-      try { for (const c of (await cmd('coins')) || []) if (c && c.state === 'live') counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
+      try { for (const c of (await cmd('coins', HELD_COINS)) || []) if (c && c.state === 'live') counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
       const cap = (a) => Number(perAsset(cfg.max_coins, a, String(MAX_COINS)))
       try {
         const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}
@@ -700,7 +707,7 @@ async function main () {
       }
       // Coins it received, once rested, are refreshed in the operator's next round; all of them at
       // once when an offer was refused for what the maker holds out of round.
-      const coins = (await cmd('coins')) || []
+      const coins = (await cmd('coins', HELD_COINS)) || []
       const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull, first: firstPass })
       firstPass = false
       if (due.length) {
@@ -771,6 +778,7 @@ async function main () {
         if (r) { if (p === '/v1/btc/paid') tick(); return send(res, r[0], r[1]) }
       }
       if (p === '/v1/firm') {
+        const asked = Date.now()
         const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
         if (!pair0) return send(res, 404, { error: 'the maker quotes no such pair' })
         const give = big(b.give)
@@ -791,7 +799,8 @@ async function main () {
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
         spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
-        log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8))
+        log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8),
+          'in', Date.now() - asked, 'ms')
         return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
       }
       if (p === '/v1/accept') {

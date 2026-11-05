@@ -631,8 +631,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   // ---- talking to the library ----
-  // One action at a time: a click while sync runs waits for it rather than being lost.
-  async function act (what, f) {
+  // One action at a time: a click while sync runs waits for it rather than being lost. What the
+  // action changed is read again before it answers; with `answerFirst` (a payment a person waits
+  // on), it answers as soon as the library has, and the read follows (reloadAfter).
+  async function act (what, f, { answerFirst = false } = {}) {
     S.queued = (S.queued || 0) + 1
     if (S.busy) render()
     while (S.busy) await new Promise((r) => setTimeout(r, 100))
@@ -646,10 +648,25 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.error = { what, e }
       throw e
     } finally {
-      try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
+      if (answerFirst) reloadAfter()
+      else { try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } }
       S.busy = false
       render()
     }
+  }
+
+  // The wallet read again after an action, once nothing else runs: a command asked meanwhile (the
+  // next step of what a person asked) goes first, and the read waits for the next free moment.
+  function reloadAfter (ms = 0) {
+    S.reloadDue = true
+    clearTimeout(S.reloadTimer)
+    S.reloadTimer = setTimeout(async () => {
+      if (!S.reloadDue || !S.open) return
+      if (S.busy || S.queued || S.asked) { reloadAfter(200); return }
+      S.busy = true
+      try { await reload({ yieldTo: () => S.queued > 0 || S.asked > 0 }); S.reloadError = null } catch (e) { S.reloadError = e } finally { S.busy = false; render() }
+    }, ms)
+    if (S.reloadTimer && typeof S.reloadTimer.unref === 'function') S.reloadTimer.unref()
   }
 
   async function run (command, args) {
@@ -661,20 +678,32 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return v.result
   }
 
-  async function reload () {
+  // What the wallet holds, read again: commands that only read, one after another, each answering
+  // from the look at the chain the first made (shared_view), so the whole read costs the node one
+  // request rather than one a command. With `yieldTo`, a read stops between two commands when it
+  // says so (someone asked the wallet for something), and is read again after (reloadAfter).
+  async function reload ({ yieldTo = null } = {}) {
     if (!S.open) return
     const t = now()
-    const [b, c, p, s, r] = [await run('balance'), await run('coins'), await run('participations'), await run('schedule'), await run('refusals')]
-    S.balance = b; S.coins = c || []; S.participations = p || []; S.refusals = r || []
-    readSchedule(s, t)
+    S.reloadDue = false
+    const read = (cmd) => run(cmd, { shared_view: true })
+    const gaveWay = () => { if (yieldTo && yieldTo()) { reloadAfter(200); return true } return false }
+    const b = await read('balance')
+    S.balance = b
     try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
+    if (ctx.onChange) try { ctx.onChange() } catch {}
+    if (gaveWay()) return
+    const [c, p, s, r] = [await read('coins'), await read('participations'), await read('schedule'), await read('refusals')]
+    S.coins = c || []; S.participations = p || []; S.refusals = r || []
+    readSchedule(s, t)
+    if (gaveWay()) return
     // The channels, as the wallet holds them (asking nothing). When those a payer can pay
     // change, the page's receive code is made again, to name them.
     const was = JSON.stringify(payableChannels(S.channels))
-    try { S.channels = (await run('channels')) || [] } catch { S.channels = [] }
+    try { S.channels = (await read('channels')) || [] } catch { S.channels = [] }
     if (JSON.stringify(payableChannels(S.channels)) !== was) emit('channelsChanged', { channels: payableChannels(S.channels) })
     // The plans are shown in developer mode only; reading them asks nothing of the operator.
-    if (dev()) { try { const pl = await run('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
+    if (dev()) { try { const pl = await read('plans'); S.plans = (pl && pl.plans) || [] } catch { S.plans = null } }
     if (ctx.onChange) try { ctx.onChange() } catch {}
   }
 
@@ -853,7 +882,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     S.mailTimer = setTimeout(async () => {
       // Not while a person waits on the wallet, nor between the steps of what they asked (a
       // trade's quote asks the library several times, with the network in between).
-      if (S.open && !dev() && !S.busy && !S.asked && now() - (S.lastAsked || 0) > MAILBOX_QUIET_MS) {
+      if (S.open && !dev() && !S.busy && !S.asked && !reviewing() && now() - (S.lastAsked || 0) > MAILBOX_QUIET_MS) {
         S.busy = true
         const t0 = now()
         try {
@@ -918,6 +947,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     } catch (e) { S.restored = { error: e.message }; log('[leaves] restore: ' + e.message) }
   }
 
+  // A person reviewing a payment the wallet is about to make (`holdReads`): the wallet's own upkeep
+  // (a sync, the mailbox read, care) does not start meanwhile, so Send never waits for one.
+  const reviewing = () => now() < (S.holdUntil || 0)
+
   // ---- what a person asks for comes first ----
   // A command of the page API or a payment of the composer, waiting or running, counts
   // here. The wallet's own upkeep (care, and the bond's watch, whose first run may read
@@ -939,7 +972,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   async function upkeep () {
     if (!S.open) return
     await new Promise((r) => setTimeout(r, 0))   // the page paints what it holds first
-    if (S.busy || S.asked) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
+    if (S.busy || S.asked || reviewing()) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
     // In user mode on the page's operator, upkeep also leaves room between the steps of what a
     // person asked (a trade's quote asks the library several times, with the network between).
     if (!dev() && pinned()) { const quiet = Math.min(now() - (S.lastAsked || 0), now() - (S.openedAt || 0)); if (quiet < MAILBOX_QUIET_MS) { S.upkeepLater = true; upkeepSoon(MAILBOX_QUIET_MS - quiet + 500); return } }
@@ -1152,7 +1185,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (!S.open) return
     // A person waiting on the wallet (a trade's quote, a payment) comes first: a sync started
     // between the steps of what they asked held the next step for its whole length.
-    if (S.busy || S.asked) { S.timer = setTimeout(autoSync, S.asked ? 2000 : 5000); return }
+    if (S.busy || S.asked || reviewing()) { S.timer = setTimeout(autoSync, S.asked || reviewing() ? 2000 : 5000); return }
     try {
       const t = now()
       const s = await run('schedule')
@@ -2132,7 +2165,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       return asking(async () => {
         while (S.busy) await sleep(50)
         const t1 = now()
-        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset })).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
+        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset }), { answerFirst: true }).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
         log(`[leaves] send: waited ${t1 - t0} ms for the wallet, paid in ${now() - t1} ms`)
         if (ctx.onChange) try { ctx.onChange() } catch {}
         return v
