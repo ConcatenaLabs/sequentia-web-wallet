@@ -291,11 +291,17 @@ BTC is held on a Bitcoin ark: native bitcoin, never pegged, in a wallet of the s
 part of BTC's one figure. Its address there is part of the receive code. The words are in
 `BTC_WORDS` (`btc-ark.js`).
 
-- BTC that arrives at the address and is confirmed moves there by itself, counted once in the
-  figure while it moves (developer mode shows "<amount> BTC arriving" until it can be spent). Each
-  move keeps to the limits the ark's server publishes, never to figures of the page's own: at
-  most its largest coin, the rest waiting at the address for the next move, and none below its
-  least or before the server has said them.
+- What the ark holds is kept within a band in USD (`ark-limits.js`, `SEQ_ARK_LIMITS`): it rests at
+  1,500 USD, and once it holds 3,000 USD everything above 1,500 moves to the wallet's own address
+  in one move. A payment of 1,500 USD or more is paid to the address, never into the ark: a payer
+  using this wallet sends it there, and a receive code for such an amount carries neither an
+  invoice nor the ark's address, nor does Receive's invoice card make one (below).
+- BTC that arrives at the address and is confirmed moves into the ark by itself only while the
+  ark holds less than a quarter of the resting level, in one move back up to it; the rest stays at
+  the address, in the same BTC figure and sendable as ever. It is counted once in the figure while
+  it moves (developer mode shows "<amount> BTC arriving" until it can be spent). Each move also
+  keeps to the limits the ark's server publishes: at most its largest coin, the rest waiting at
+  the address for the next move, and none below its least or before the server has said them.
 - BTC a wallet holds where it cannot be sent in seconds (its own Lightning channel, in a wallet
   made before BTC was held this way) moves there by itself too, at most the ark's largest coin at
   a time, and stays spendable where it is until it has. Its channel, once emptied, is closed to the wallet's own address
@@ -320,7 +326,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   Bitcoin ark's part of BTC, which prices each coin and refuses one not worth its exit.
 - **Receive BTC with an invoice**: "Make an invoice for BTC. Once it is paid, the BTC is yours in
   seconds." Then "Invoice ready. Share it to receive <amount> BTC." and, when paid, "Received ✓
-  <amount> BTC."
+  <amount> BTC." It makes no invoice the receive code would not carry: for 1,500 USD or more it
+  says "A payment of 1,500 USD or more goes to the address. Give the receive code instead: it is
+  paid there.", and for more than a tenth of what the operator's channels can take in now, "This
+  can’t arrive in seconds right now. Give the receive code instead: it is paid at the address."
 - Send, one BTC recipient: a receive code, an invoice or an address. The review is titled
   **Send <amount> BTC?** with To, Fee ("No fees" when none) and "It arrives in seconds." (for an
   address, "It arrives after a Bitcoin block."), and the button **Send**. When it is done: "Sent
