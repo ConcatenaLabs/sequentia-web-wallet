@@ -173,6 +173,49 @@ export function cappedRefusal (name) {
   return `the maker takes no ${name} now: the operator is refreshing as much ${name} as it takes on at once, so ${name} received now would wait out of round and hold the maker's other pairs back`
 }
 
+// What the maker holds out of round that the operator's cap holds back (web wallet #502): of each
+// asset it holds out of round (`outOfRound`, the library's `bond` answer: [{ asset, value }]), all
+// of it when refreshing it would take what the operator has in flight of the asset past its cap.
+// Those coins wait out of round until earlier refreshes come back, whatever the maker does. ->
+// Map asset -> atoms.
+export function heldAtCap (outOfRound, info) {
+  const si = (info && info.server_info) || info || {}
+  const caps = new Map()
+  for (const a of si.assets || []) {
+    if (!a || typeof a.asset !== 'string' || a.in_flight_cap == null) continue
+    try { caps.set(a.asset, { used: BigInt(a.in_flight ?? 0), cap: BigInt(a.in_flight_cap) }) } catch {}
+  }
+  const out = new Map()
+  for (const h of outOfRound || []) {
+    const c = h && caps.get(h.asset)
+    const v = big(h && h.value)
+    if (c && v > 0n && c.used + v > c.cap) out.set(h.asset, v)
+  }
+  return out
+}
+// The share of the bond, in millionths, the maker sets as its own instant budget: its configured
+// share (`basePpm`), plus what it holds that the cap holds back (`stuck`, from heldAtCap), worth
+// `atoms * rate / 1e8` reference atoms at the node's fee exchange rates (`rates`: asset -> rate),
+// over the bond's value (`bondValue`, reference atoms). So coins of one asset the operator cannot
+// refresh now take none of the room the maker's other pairs trade in: they stop only that asset's
+// own intake, which cappedAssets already stops. The library still takes the lower of this and the
+// operator's suggestion, and refuses whatever the bond does not cover. An asset the node does not
+// price adds nothing: no room is made for what cannot be weighed. Never past the whole bond.
+export function budgetPpm (basePpm, stuck, rates, bondValue) {
+  const bond = big(bondValue)
+  if (!stuck || !stuck.size || bond <= 0n) return basePpm
+  let worth = 0n
+  for (const [a, v] of stuck) {
+    const r = rates && rates.get(a)
+    if (r == null || big(r) <= 0n) continue
+    worth += (v * big(r)) / 100_000_000n
+  }
+  const extra = Number((worth * 1_000_000n + bond - 1n) / bond)
+  return Math.min(1_000_000, basePpm + extra)
+}
+// A share in millionths as the library's `instant_budget` takes it ("0.1").
+export const shareText = (ppm) => String(ppm / 1_000_000)
+
 // The share of the operator's bond the maker holds out of round at most, unless its configuration
 // names another ("off" for none): a tenth, so that a double-sign of what the maker holds at once
 // costs the operator ten times what it could take from it.
@@ -439,11 +482,45 @@ async function main () {
   const address = await cmd('address')
   log(`leaf maker ${cfg.wallet}: operator ${info.operator}, chain ${info.genesis_hash}, on-chain address ${address.address}`)
   // Its instant budget, in the library: what it takes out of round at once, a share of the bond.
-  try { log('instant budget:', JSON.stringify(await cmd('instant_budget', { share: String(cfg.instant_budget ?? DEFAULT_INSTANT_BUDGET) }))) } catch (e) { log('instant budget:', e.message) }
+  let ownPpm = null
+  try { const b = await cmd('instant_budget', { share: String(cfg.instant_budget ?? DEFAULT_INSTANT_BUDGET) }); ownPpm = b.instant_budget_ppm ?? null; log('instant budget:', JSON.stringify(b)) } catch (e) { log('instant budget:', e.message) }
+  const basePpm = ownPpm
+  // The node's fee exchange rates, as the library reads them (getfeeexchangerates, labels through
+  // dumpassetlabels): what the maker weighs coins the cap holds back with.
+  const nodeCall = async (method) => {
+    const r = await fetch(op.node_url, { method: 'POST', signal: AbortSignal.timeout(15000),
+      headers: { 'content-type': 'application/json', authorization: 'Basic ' + Buffer.from(`${op.node_user || ''}:${nodePassword}`).toString('base64') },
+      body: JSON.stringify({ jsonrpc: '1.0', id: 'leaf-maker', method, params: [] }) })
+    const j = await r.json().catch(() => null)
+    if (!r.ok || !j || j.error) throw new Error(`${method}: ${(j && j.error && j.error.message) || 'HTTP ' + r.status}`)
+    return j.result
+  }
+  const nodeRates = async () => {
+    const [rates, labels] = await Promise.all([nodeCall('getfeeexchangerates'), nodeCall('dumpassetlabels')])
+    const m = new Map()
+    for (const [k, v] of Object.entries(rates || {})) m.set((labels && labels[k]) || k, v)
+    return m
+  }
   // The room left in it, read with the bond on every pass of the upkeep (null: no bound to cut by).
-  let room = null
+  // Coins the operator's cap holds back out of round (heldAtCap) widen the maker's own share by
+  // what they are worth (budgetPpm), and the share goes back once they are refreshed.
+  let room = null, lastInfo = null, heldBack = ''
   const readRoom = async (first = false) => {
-    try { room = budgetRoom(await cmd('bond', {}, first)) } catch (e) { log('bond:', e.message) }
+    let bond = null
+    try { bond = await cmd('bond', {}, first); room = budgetRoom(bond) } catch (e) { log('bond:', e.message); return }
+    const b = bond && bond.instant_budget
+    if (basePpm == null || !b || !lastInfo || first) return
+    try {
+      const stuck = heldAtCap(bond.out_of_round, lastInfo)
+      const now = [...stuck].map(([a, v]) => tickerOf(a) + ' ' + v).sort().join(', ')
+      const want = stuck.size ? budgetPpm(basePpm, stuck, await nodeRates(), b.bond_value) : basePpm
+      if (now !== heldBack) { log(now ? 'held out of round while the operator refreshes no more of it: ' + now + '; its own budget share goes to ' + want + ' millionths, so its other pairs keep their room' : 'nothing held back at the cap: its own budget share is ' + basePpm + ' millionths again'); heldBack = now }
+      if (want !== ownPpm) {
+        const r = await cmd('instant_budget', { share: shareText(want) })
+        ownPpm = r.instant_budget_ppm ?? want
+        room = budgetRoom(await cmd('bond', {}))
+      }
+    } catch (e) { log('budget:', e.message) }
   }
 
   // Rates from the price feed, read every minute; a rate older than ten minutes is not quoted.
@@ -491,7 +568,8 @@ async function main () {
     try {
       const r = await fetch(String(op.server).replace(/\/+$/, '') + '/v1/info', { signal: AbortSignal.timeout(15000) })
       if (!r.ok) throw new Error('the operator answered HTTP ' + r.status)
-      const next = cappedAssets(await r.json())
+      lastInfo = await r.json()
+      const next = cappedAssets(lastInfo)
       const was = [...capped].sort().join(), now = [...next].sort().join()
       if (was !== now) log(next.size ? 'takes in none of ' + [...next].map(tickerOf).join(', ') + ': the operator refreshes no more of it now' : 'takes in every asset again')
       capped = next
