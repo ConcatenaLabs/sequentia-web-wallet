@@ -333,8 +333,10 @@ amount past the asset's cap (`in_flight` plus what it holds of it, over `in_flig
 `/v1/info`) waits out of round until earlier refreshes come back, whatever the maker does. Counted
 in the budget like any other coin, it would fill the room every other pair trades in. So on each
 pass the maker weighs those coins at its node's fee exchange rates (`getfeeexchangerates`, as the
-library weighs them) and widens its own share by what they are worth over the bond's value; once
-they are refreshed the share goes back to `instant_budget`. Each change is logged ("held out of
+library weighs them) and widens its own share by what they are worth over the bond's value. The
+widening stays while the maker holds at least that much of the asset out of round, since the cap
+freeing lets the refresh run only in the operator's next round; once they are refreshed the share
+goes back to `instant_budget`. Each change is logged ("held out of
 round while the operator refreshes no more of it: …"). The library still takes the lower of this
 share and the operator's suggestion, and refuses whatever the bond does not cover, so the widening
 never goes past either; an asset the node does not price widens nothing.
