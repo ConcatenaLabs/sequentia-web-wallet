@@ -4017,6 +4017,11 @@ function initLeaves(){
   }, $('leavesRoot'), $('devModeRoot'));
   // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
   if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
+  // And where BTC is held, read while the page stays in default mode (tooling/limits-live-drive.mjs).
+  if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS && !('__btcHeld' in window)) Object.defineProperty(window, '__btcHeld', { get: ()=>{
+    const f = btcArk && btcArk.isOpen() ? btcArk.figures() : null;
+    return { onchain: String(btcBalance||0n), ark: f ? String(f.total) : null, arkSpendable: f ? String(f.spendable) : null, arkArriving: f ? String(f.arriving) : null };
+  } });
   show('tabLeaves', devMode());
   applyModeClass();
   leavesApi.start();
