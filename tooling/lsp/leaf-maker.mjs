@@ -193,6 +193,22 @@ export function heldAtCap (outOfRound, info) {
   }
   return out
 }
+// What stays held back (`prev`, the last pass's heldAtCap or heldBack) beside what the cap holds
+// back now (`now`): an asset the cap held back stays so while the maker still holds at least as
+// much of it out of round (`outOfRound`), counted at what was held back. The cap freeing lets its refresh run, but only in the
+// operator's next round: until the coins are refreshed they still fill the budget, and dropping
+// the widening as soon as the cap frees deferred every other pair for that round. -> Map.
+export function heldBack (prev, now, outOfRound) {
+  const out = new Map(now || [])
+  const held = new Map((outOfRound || []).map((h) => [h && h.asset, big(h && h.value)]))
+  for (const [a, v] of prev || []) {
+    if (out.has(a)) continue
+    const h = held.get(a) || 0n
+    // At most what was held back: coins taken in since count against the budget as any others.
+    if (h > 0n && h >= v) out.set(a, v)
+  }
+  return out
+}
 // The share of the bond, in millionths, the maker sets as its own instant budget: its configured
 // share (`basePpm`), plus what it holds that the cap holds back (`stuck`, from heldAtCap), worth
 // `atoms * rate / 1e8` reference atoms at the node's fee exchange rates (`rates`: asset -> rate),
@@ -504,17 +520,18 @@ async function main () {
   // The room left in it, read with the bond on every pass of the upkeep (null: no bound to cut by).
   // Coins the operator's cap holds back out of round (heldAtCap) widen the maker's own share by
   // what they are worth (budgetPpm), and the share goes back once they are refreshed.
-  let room = null, lastInfo = null, heldBack = ''
+  let room = null, lastInfo = null, heldBackLog = '', stuckPrev = new Map()
   const readRoom = async (first = false) => {
     let bond = null
     try { bond = await cmd('bond', {}, first); room = budgetRoom(bond) } catch (e) { log('bond:', e.message); return }
     const b = bond && bond.instant_budget
     if (basePpm == null || !b || !lastInfo || first) return
     try {
-      const stuck = heldAtCap(bond.out_of_round, lastInfo)
+      const stuck = heldBack(stuckPrev, heldAtCap(bond.out_of_round, lastInfo), bond.out_of_round)
+      stuckPrev = stuck
       const now = [...stuck].map(([a, v]) => tickerOf(a) + ' ' + v).sort().join(', ')
       const want = stuck.size ? budgetPpm(basePpm, stuck, await nodeRates(), b.bond_value) : basePpm
-      if (now !== heldBack) { log(now ? 'held out of round while the operator refreshes no more of it: ' + now + '; its own budget share goes to ' + want + ' millionths, so its other pairs keep their room' : 'nothing held back at the cap: its own budget share is ' + basePpm + ' millionths again'); heldBack = now }
+      if (now !== heldBackLog) { log(now ? 'held out of round while the operator refreshes no more of it, or until its refresh runs: ' + now + '; its own budget share goes to ' + want + ' millionths, so its other pairs keep their room' : 'nothing held back at the cap: its own budget share is ' + basePpm + ' millionths again'); heldBackLog = now }
       if (want !== ownPpm) {
         const r = await cmd('instant_budget', { share: shareText(want) })
         ownPpm = r.instant_budget_ppm ?? want

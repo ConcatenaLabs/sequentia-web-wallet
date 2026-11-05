@@ -58,3 +58,24 @@ test('nothing held back, an unpriced asset, or no bond: the configured share', (
   assert.equal(budgetPpm(100_000, new Map([[SEQ, C]]), rates, 0n), 100_000)
   assert.equal(budgetPpm(900_000, new Map([[SEQ, 43_000_000n * C]]), rates, bondValue), 1_000_000, 'never past the whole bond')
 })
+
+// Live, 2026-11-05 19:45Z: tSEQ fell under its cap, the widening went at once, and while the coin's
+// refresh still waited for the next round its 3.8M tSEQ filled the tenth: 30 pairs deferred.
+import { heldBack } from './leaf-maker.mjs'
+test('what the cap held back stays held back until it is refreshed, not until the cap frees', () => {
+  const coin = [{ asset: SEQ, value: String(3_800_152n * C) }]
+  const prev = heldAtCap(coin, info)                         // at the cap: held back
+  assert.equal(prev.size, 1)
+  const freed = { assets: [{ asset: SEQ, in_flight: String(38_240_000n * C), in_flight_cap: info.assets[0].in_flight_cap }] }
+  assert.equal(heldAtCap(coin, freed).size, 0, 'the cap freed: heldAtCap alone lets go (the gap)')
+  const still = heldBack(prev, heldAtCap(coin, freed), coin)
+  assert.deepEqual([...still], [[SEQ, 3_800_152n * C]], 'still out of round: still held back')
+  assert.equal(heldBack(still, new Map(), []).size, 0, 'refreshed: let go')
+  assert.equal(heldBack(still, new Map(), [{ asset: SEQ, value: String(100n * C) }]).size, 0, 'mostly refreshed: let go')
+  assert.equal(heldBack(new Map(), new Map(), coin).size, 0, 'never held back: nothing')
+})
+test('coins taken in after the cap freed are not added to what is held back', () => {
+  const prev = new Map([[SEQ, 3_800_152n * C]])
+  const more = heldBack(prev, new Map(), [{ asset: SEQ, value: String(5_000_000n * C) }])
+  assert.deepEqual([...more], [[SEQ, 3_800_152n * C]])
+})
