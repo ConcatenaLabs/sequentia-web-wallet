@@ -31,7 +31,7 @@
 //
 //   node tooling/limits-live-drive.mjs <work-dir> <step> <name> [args…]
 //     [--base http://127.0.0.1:8791/wallet/] [--limits '{"btc":{"board":15,"hold":30,"direct":15}}']
-//     [--fallback 1500] [--no-ark] [--refuse-file <file>]
+//     [--fallback 1500] [--no-ark] [--refuse-file <file>] [--trace] [--repeat N] [--repeat-gap ms] [--think ms]
 //
 // --refuse-file: `pay … send` makes the file just before Send is pressed and removes it once the
 // review answers, so a proxy run with `--refuse-while <file>` refuses that payment's requests (the
@@ -63,6 +63,14 @@ const refuseFile = flag('--refuse-file', null)
 // to its answer, each with when it started and how long it took (where a payment's time goes).
 const trace = argv.includes('--trace'); if (trace) argv.splice(argv.indexOf('--trace'), 1)
 const traced = []
+// --repeat N: `pay … send` makes N payments in one opening of the page, each once the one before
+// said what became of it, --repeat-gap ms apart (1000 unless named): the first after opening, the
+// rest warm.
+const repeat = Math.max(1, Number(flag('--repeat', '1')) || 1)
+const repeatGapMs = Number(flag('--repeat-gap', '1000')) || 0
+// --think ms: `pay … send` presses Send that long after the review shows (0 unless named), as a person
+// reads it first.
+const thinkMs = Number(flag('--think', '0')) || 0
 const [workArg, step, name, ...rest] = argv
 if (!workArg || !step || !name) { console.error('usage: limits-live-drive.mjs <work-dir> <step> <name> [args…]'); process.exit(2) }
 const work = resolve(workArg)
@@ -281,40 +289,50 @@ async function main () {
     if (ticker === 'BTC') await arkOpen(page).catch(() => {})
     await snap(page, 'before')
     await tab(page, 'send')
-    await page.waitFor(`[...document.querySelectorAll('#recipients .rec .rasset option')].some(o=>o.textContent.trim().split(/\\s/)[0]===${JSON.stringify(ticker)})`, 300000)
-    await page.eval(`(()=>{ const r=document.querySelector('#recipients .rec'); r.querySelector('.raddr').value=${JSON.stringify(code)}; r.querySelector('.raddr').dispatchEvent(new Event('input'));
-      const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\\s/)[0]===${JSON.stringify(ticker)}); s.value=o.value; s.dispatchEvent(new Event('change'));
-      r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
-    await sleep(1500)
-    await click(page, '#btnReview')
-    const review = await page.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m && m.innerText.trim()) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e ? 'ERR '+e : false })()", 180000)
-    record.said.push({ review })
-    record.reviewWords = forbiddenIn(review)
-    note('review: ' + review.replace(/\n+/g, ' | '))
-    await shot(page, `${name}-pay-${ticker}-${amount}-review.png`)
-    if (go === 'send' && !/^ERR/.test(review)) {
+    // `--repeat N`: N payments in one opening, each after the one before said what became of it (the
+    // first after opening, the rest warm).
+    for (let k = 1; k <= repeat; k++) {
+      if (k > 1) {
+        await page.eval("(()=>{ const b=[...document.querySelectorAll('.modal button')].find(b=>/^Close$/.test(b.textContent.trim())); if(b) b.click(); return true })()").catch(() => {})
+        await page.waitFor("!document.querySelector('.modal')", 30000).catch(() => {})
+        await sleep(repeatGapMs)
+      }
+      await page.waitFor(`[...document.querySelectorAll('#recipients .rec .rasset option')].some(o=>o.textContent.trim().split(/\\s/)[0]===${JSON.stringify(ticker)})`, 300000)
+      await page.eval(`(()=>{ const r=document.querySelector('#recipients .rec'); r.querySelector('.raddr').value=${JSON.stringify(code)}; r.querySelector('.raddr').dispatchEvent(new Event('input'));
+        const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\\s/)[0]===${JSON.stringify(ticker)}); s.value=o.value; s.dispatchEvent(new Event('change'));
+        r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
+      await sleep(1500)
+      await click(page, '#btnReview')
+      const review = await page.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m && m.innerText.trim()) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e ? 'ERR '+e : false })()", 180000)
+      record.said.push({ review })
+      record.reviewWords = forbiddenIn(review)
+      note('review: ' + review.replace(/\n+/g, ' | '))
+      if (k === 1) await shot(page, `${name}-pay-${ticker}-${amount}-review.png`)
+      if (go !== 'send' || /^ERR/.test(review)) {
+        await page.eval("(()=>{ const b=[...document.querySelectorAll('.modal button')].find(b=>/Cancel/.test(b.textContent)); if(b) b.click(); return true })()").catch(() => {})
+        break
+      }
+      if (thinkMs) await sleep(thinkMs)
       const t = Date.now()
       if (refuseFile) { writeFileSync(refuseFile, ''); note('refusing through ' + refuseFile) }
       await page.eval("document.querySelector('.modal button.primary').click()")
       const done = await page.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; if(t && !/Sending|Moving|Paying|Waiting/i.test(t)) return t; const m=document.querySelector('.modal'); return m ? false : 'the review closed' })()", 900000).catch((e) => 'still: ' + e.message.slice(-200))
       if (refuseFile) { try { unlinkSync(refuseFile) } catch {} }
-      record.said.push({ after: done, seconds: (Date.now() - t) / 1000 })
+      record.said.push({ after: done, seconds: (Date.now() - t) / 1000, payment: k })
       if (trace) {
-        const span = traced.filter((r) => r.at >= t - 50).map((r) => ({ ms: r.at - t, took: r.end != null ? r.end - r.at : null, method: r.method, path: r.path, rpc: r.rpc, worker: r.worker }))
-        record.trace = span
+        const span = traced.filter((r) => r.at >= t - 50 && (r.at <= Date.now())).map((r) => ({ ms: r.at - t, took: r.end != null ? r.end - r.at : null, method: r.method, path: r.path, rpc: r.rpc, worker: r.worker }))
+        record.trace = (record.trace || []).concat([{ payment: k }], span)
         for (const r of span) note(`  +${r.ms} ms ${r.took ?? '?'} ms ${r.method} ${r.path}${r.rpc ? ' ' + r.rpc : ''}${r.worker ? ' (worker)' : ''}`)
+        traced.length = 0
       }
       record.afterWords = forbiddenIn(done)
-      note(`after Send (${((Date.now() - t) / 1000).toFixed(1)} s): ${done.replace(/\n+/g, ' | ')}`)
+      note(`payment ${k}: after Send (${((Date.now() - t) / 1000).toFixed(1)} s): ${done.replace(/\n+/g, ' | ')}`)
       // A second sentence (a payment that came back, an offer of the address) is read too.
       const modal = await page.eval("document.querySelector('.modal')?.innerText || ''")
       if (modal) record.said.push({ modal })
-      await shot(page, `${name}-pay-${ticker}-${amount}-after.png`)
-      await sleep(20000)
-      await snap(page, 'after')
-    } else {
-      await page.eval("(()=>{ const b=[...document.querySelectorAll('.modal button')].find(b=>/Cancel/.test(b.textContent)); if(b) b.click(); return true })()").catch(() => {})
+      if (k === repeat) await shot(page, `${name}-pay-${ticker}-${amount}-after.png`)
     }
+    if (go === 'send') { await sleep(20000); await snap(page, 'after') }
     await page.stop()
   } else if (step === 'invoice') {
     // Receive's invoice card for BTC: `invoice <name> <BTC amount>`; what it says, and the invoice

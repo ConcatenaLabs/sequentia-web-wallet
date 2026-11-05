@@ -271,8 +271,11 @@ three quarters of the cap. A merge's own coin is larger, and is not merged again
 comes in. At twice the cap it boards no more of the asset and merges its smallest coins of all, as
 few as bring it back under.
 
-The library reads every coin it holds before each command, so a maker holding thousands of coins
-answers each command in minutes, and its firm offers lapse.
+The library reads what each command needs, by state: the coins the maker traded away and the
+participations it completed, thousands after a few days of trading, are not read again. The
+maker asks for the coins it holds (`coins` with `held`), and its sync leaves out the catch-up
+between stores of one phrase (`catch_up: false`): it is the only store of its phrase, and the
+catch-up would read every coin ever served to its mailbox to find that out.
 
 The library answers one command at a time, so a taker's firm offer waits behind whatever the
 maker's own upkeep is running. Quotes are served from the last reading and never wait: before its first reading, just after it starts, it quotes nothing. A firm
@@ -290,6 +293,8 @@ five seconds is logged (`slow <command> <ms> ms {detail}`), which names what a s
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the
 milliseconds each part of that re-check took, and for a sync what each of its steps cost.
+Each firm offer it makes is logged with the time from the request to the answer
+(`firm <swap> gives … for … in <ms> ms`), so its firm offers' latency is read from the journal.
 
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json --init   # once: draws its phrase
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json
