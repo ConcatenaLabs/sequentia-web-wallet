@@ -249,9 +249,10 @@ It takes in no asset whose refreshes the operator holds back. It reads the opera
 showing `in_flight` at or past its `in_flight_cap` gets no quote and no firm offer (in-tree or
 at the BTC desk) that wants it, and such an offer is refused with a sentence that names the
 asset. A coin of that asset received out of round would stay out of round until the cap frees,
-and it would count against the maker's instant budget the whole time. Once the budget is full,
-the maker takes nothing in any pair. The maker keeps giving that asset and trading every other
-pair, and takes it in again once the operator's info shows it under its cap.
+and it would count against the maker's instant budget the whole time. The maker keeps giving that
+asset and trading every other pair, and takes it in again once the operator's info shows it under
+its cap. Coins it already holds out of round when an asset reaches its cap are counted aside (see
+"Its instant budget"), so they stop only that asset's own pairs.
 
 Every `forfeit_seconds` (30 by default) it hands over the forfeits of each of its refreshes whose
 round the operator holds for them (the library's `hand_over_forfeits`), ahead of everything else it
@@ -326,6 +327,17 @@ list. A firm offer past the room is answered 409 "the maker takes this much afte
 (`after_next_round: true`), as is the library's own refusal past the budget, which also has the
 maker refresh every coin it received at once. A wallet then says the rest can be traded in a few
 minutes.
+
+What the maker holds out of round of an asset whose refresh would take the operator's in-flight
+amount past the asset's cap (`in_flight` plus what it holds of it, over `in_flight_cap`, in
+`/v1/info`) waits out of round until earlier refreshes come back, whatever the maker does. Counted
+in the budget like any other coin, it would fill the room every other pair trades in. So on each
+pass the maker weighs those coins at its node's fee exchange rates (`getfeeexchangerates`, as the
+library weighs them) and widens its own share by what they are worth over the bond's value; once
+they are refreshed the share goes back to `instant_budget`. Each change is logged ("held out of
+round while the operator refreshes no more of it: …"). The library still takes the lower of this
+share and the operator's suggestion, and refuses whatever the bond does not cover, so the widening
+never goes past either; an asset the node does not price widens nothing.
 
 ### Its trades in the market's trade log (`trade-report.mjs`)
 
