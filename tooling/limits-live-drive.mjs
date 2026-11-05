@@ -73,8 +73,12 @@ record.figures = figures
 
 const MOVES = /\[ark limit\]|\[btc ark\]|board|offboard|\[receive code\]|lightning|route|\[leaves\] (pay|send)/i
 
+// Every browser this run opened, stopped at the end whatever happened: a step that fails must not
+// leave its Chromium running.
+const opened = []
 async function openWallet ({ fresh = false } = {}) {
   const page = new Page(chromium(), { profile: join(work, 'profiles', name) })
+  opened.push(page)
   await page.open()
   note('browser pid ' + page.proc.pid)
   try {
@@ -333,4 +337,7 @@ async function main () {
   } else throw new Error('no step ' + step)
 }
 
-main().then(() => { save(); process.exit(0) }, (e) => { note('FAILED: ' + (e && e.stack || e)); try { save() } catch {} process.exit(1) })
+const stopAll = () => Promise.all(opened.map((p) => p.stop().catch(() => {})))
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopAll().finally(() => process.exit(130)) })
+main().then(async () => { save(); await stopAll(); process.exit(0) },
+  async (e) => { note('FAILED: ' + (e && e.stack || e)); try { save() } catch {} await stopAll(); process.exit(1) })
