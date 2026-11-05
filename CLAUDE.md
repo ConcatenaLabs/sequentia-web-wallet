@@ -341,6 +341,13 @@ both against code.
 - Development happens on `main`, which is the remote default.
 - **Deployment is pull-only.** The server pulls this repo from GitHub and builds there. Never edit
   source on the server and never copy source or binaries onto it.
+- **`main` is deployed continuously, so a merge must be safe live when it merges.** Drive the change
+  in a browser against the live testnet before merging (`tooling/live-proxy.mjs`). Every deploy
+  goes through sequentia-testnet-ops `bin/deploy-web-wallet.sh`
+  (`ssh seq 'bash -s' < bin/deploy-web-wallet.sh`, `DRY=1` first). It moves the page, restarts
+  the LSP when a file the LSP loads changed (the LSP imports the page's own modules: a change to
+  `user-trade.js` or `default-arca.js` reaches it), and applies the Caddyfile. Never move the box's
+  checkout by hand: the page would run ahead of the LSP behind it. See README "Deploying".
 - `git log` and `git blame` before 2026-06-21 are LWK's Rust history, not this wallet's — the repo
   was split out of SWK and kept its history.
 
