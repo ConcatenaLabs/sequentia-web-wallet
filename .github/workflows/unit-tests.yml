@@ -1,0 +1,22 @@
+# The unit tests (every *.test.mjs, `node --test`) on every pull request and on main, on the
+# Node the box runs. Nothing is built: pkg/ (the kit's wasm, untracked) is absent here, so the
+# tests that need it skip themselves, as do those that need the live testnet or a browser
+# (README, "Run and test").
+name: unit tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  node-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --version
+      - run: node --test
