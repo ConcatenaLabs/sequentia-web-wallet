@@ -107,3 +107,17 @@ test('Receive keeps its instant part; the hold limit moves the rest out; a large
   assert.match(tick, /await leavesApi\.offboard\(\{ asset: h, amount: String\(atoms\), address, shown: q \}\)/)
   assert.match(html, /setInterval\(\(\)=>\{ arkHoldTick\(\)\.catch\(\(\)=>\{\}\); \}, 30_000\);/)
 })
+
+test('the FAQ explains the limits with the figures the wallet uses', () => {
+  for (const id of ['faq-limits-why', 'faq-limits-seq', 'faq-limits-ln', 'faq-limits-btc', 'faq-limits-why-not-balance']) {
+    assert.match(html, new RegExp(`<details id="${id}">`), id)
+  }
+  const faq = html.slice(html.indexOf('<details id="faq-limits-why">'), html.indexOf('<section data-panel="settings"'))
+  const usd = (n) => n.toLocaleString('en-US')
+  const { board, hold, direct } = ARK_LIMITS.btc
+  assert.ok(faq.includes(`under ${usd(direct)} USD lands in the ark`), 'D')
+  assert.ok(faq.includes(`When the ark reaches ${usd(hold)} USD, the wallet moves everything above ${usd(board)}`), 'H and L')
+  assert.ok(faq.includes(`drops under ${usd(board * REFILL_BELOW)} USD`), 'the refill')
+  assert.ok(faq.includes('at most 10% of what the operator'), 'the Lightning share')
+  assert.ok(faq.includes('the limit is 1,500 USD a payment'), 'the fallback')
+})
