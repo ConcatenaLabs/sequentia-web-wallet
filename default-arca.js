@@ -316,12 +316,16 @@ export function receiveCodeRetry (failures) {
 }
 
 // How a payment of `amount` atoms of an asset to an address is made: on the chain when the
-// wallet's coins there cover it (as it always was), else out of the tree when the tree's
-// spendable coins cover it, else not at all.
-export function addressRoute (amount, onchain, treeSpendable) {
+// wallet's coins there cover it with its network fee (`feeMargin`, what the fee may take of the
+// same asset, which default mode pays it in), else out of the tree when the tree's spendable
+// coins cover it, else on the chain when its coins there cover the amount alone (the fee may
+// still fit), else not at all. Coins on the chain a few atoms short of amount and fee never
+// refuse a payment the tree could make.
+export function addressRoute (amount, onchain, treeSpendable, feeMargin = 0n) {
   const a = big(amount)
-  if (a <= big(onchain)) return 'chain'
+  if (a + big(feeMargin) <= big(onchain)) return 'chain'
   if (a <= big(treeSpendable)) return 'tree'
+  if (a <= big(onchain)) return 'chain'
   return null
 }
 

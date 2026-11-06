@@ -9825,7 +9825,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     { const want=new Map(); for(const r of rows) if(r.asset!=='BTC' && !isOampAsset(r.asset)){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
       for(const [h, a] of want){
         const tree = leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n) : 0n;
-        if(addressRoute(a, availableFor(h), tree) !== 'tree') continue;
+        // The fee's margin in the asset itself, which default mode pays it in; none when the node
+        // prices no fee in it (the chain's coins then pay none of it).
+        let margin=0n; try{ margin=feeMarginAtoms(h); }catch{}
+        if(addressRoute(a, availableFor(h), tree, margin) !== 'tree') continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
         await offboardReview(rows[0], reset);
         return;
