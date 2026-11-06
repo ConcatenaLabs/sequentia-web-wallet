@@ -25,3 +25,26 @@ test('the upkeep syncs without its deposits, which run next as their own command
   assert.deepEqual(SYNC_ARGS, { catch_up: false }, 'one-off syncs deposit as before')
   assert.equal(SLOW_MS, 2000)
 })
+
+test('the upkeep runs its deposits after its sync, even when the sync fails', async () => {
+  const { upkeepSync, UPKEEP_SYNC_ARGS } = await import('./leaf-maker.mjs')
+  for (const syncFails of [false, true]) {
+    const asked = [], logged = []
+    const cmd = async (name, args) => { asked.push([name, args]); if (name === 'sync' && syncFails) throw new Error('the node') }
+    await upkeepSync(cmd, (...a) => logged.push(a.join(' ')))
+    assert.deepEqual(asked, [['sync', UPKEEP_SYNC_ARGS], ['deposits', undefined]])
+    assert.deepEqual(logged, syncFails ? ['sync: the node'] : [])
+  }
+  // An older library without the command: nothing logged.
+  const logged = []
+  await upkeepSync(async (name) => { if (name === 'deposits') throw new Error('no command deposits') }, (...a) => logged.push(a.join(' ')))
+  assert.deepEqual(logged, [])
+})
+
+test('the upkeep pass starts with upkeepSync', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
+  const pass = src.slice(src.indexOf('async function tickOnce ()'))
+  assert.ok(pass.length < src.length, 'tickOnce is there')
+  assert.match(pass.slice(0, 400), /\n\s+await upkeepSync\(cmd, log\)\n/, 'the pass syncs and deposits first')
+})
