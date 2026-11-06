@@ -10,7 +10,8 @@
 //   RB_DEBUG=1 prints each step of send and code, and any screen read over five seconds.
 import * as u from './adb-ui.mjs'
 
-const APP = 'io.sequentia.ambra'
+// The app's id: the released app, or AMBRA_APP for a test build installed beside it under its own id.
+const APP = process.env.AMBRA_APP || 'io.sequentia.ambra'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const TABS = ['Balance', 'Send', 'Receive', 'Swap', 'History', 'More']
 const D = process.env.RB_DEBUG ? (s) => console.error(new Date().toISOString(), s) : () => {}
