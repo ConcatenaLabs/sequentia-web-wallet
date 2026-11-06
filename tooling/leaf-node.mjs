@@ -229,13 +229,13 @@ export function nextJob (queue, now, holdUntil = 0) {
 // goes ahead of every queued command that is not first. `hold(ms)` keeps every command that is
 // not first queued for that long, so one a person is about to ask for (a firm offer after a
 // quote) finds the library free rather than behind the program's own upkeep; a command already
-// running still ends first. `onSlow(name, ms, detail)` is told of each command that took over five
-// seconds; `onTime(name, ms, waited)` of every command, with how long it ran and how long it waited
+// running still ends first. `onSlow(name, ms, detail)` is told of each command that took over
+// `slowMs` (five seconds unless named); `onTime(name, ms, waited)` of every command, with how long it ran and how long it waited
 // in the queue before it started.
 //   const lib = await leafLibraryThread(storeRoot)
 //   const w = await lib.open(mnemonic, nodePassword)   // or create(mnemonic, config)
 //   await w.command('sync')
-export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = null } = {}) {
+export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = null, slowMs = 5000 } = {}) {
   const { Worker: W } = await import('node:worker_threads')
   const worker = new W(new URL(import.meta.url), { workerData: { leafThread: storeRoot } })
   const queue = []
@@ -243,7 +243,7 @@ export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = nu
   let next = 1, busy = false, holdUntil = 0, timer = null
   worker.on('message', (m) => {
     const p = waiting.get(m.id); waiting.delete(m.id); busy = false
-    if (p && onSlow && Date.now() - p.started > 5000) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
+    if (p && onSlow && Date.now() - p.started > slowMs) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
     if (p && onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued) } catch {} }
     if (p) { if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) } }
     pump()

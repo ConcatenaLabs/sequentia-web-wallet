@@ -18,3 +18,10 @@ test('a period sums up every command, then starts again', () => {
   assert.deepEqual(Object.keys(v), ['board', 'coins'])
   assert.equal(t.line(), null, 'the next period starts empty')
 })
+
+test('the upkeep syncs without its deposits, which run next as their own command', async () => {
+  const { UPKEEP_SYNC_ARGS, SYNC_ARGS, SLOW_MS } = await import('./leaf-maker.mjs')
+  assert.deepEqual(UPKEEP_SYNC_ARGS, { catch_up: false, deposits: false })
+  assert.deepEqual(SYNC_ARGS, { catch_up: false }, 'one-off syncs deposit as before')
+  assert.equal(SLOW_MS, 2000)
+})

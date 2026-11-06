@@ -294,10 +294,12 @@ feed's mid has moved to within `rest.guard_bps` of. A level cancelled to be repr
 again at what its coin came back with (its value less the cancel's fee, when that is within a
 thousandth of the level), so the library rests it from that coin alone and the operator fronts no
 change beside the order. Every command slower than
-five seconds is logged (`slow <command> <ms> ms {detail}`), which names what a slow firm offer
+`slow_ms` (2,000 by default) is logged (`slow <command> <ms> ms {detail}`), which names what a slow firm offer
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the
-milliseconds each part of that re-check took, and for a sync what each of its steps cost. A part
+milliseconds each part of that re-check took, and for a sync what each of its steps cost. The
+upkeep's sync leaves the watchtowers' deposits and withdrawals to a command of their own run right
+after it (`deposits`), so a firm offer waits for one of the two at most. A part
 or step that asked the node more than fifty reads one at a time names them by method (`alone`), a
 command says how long it waited for the operator's answers (`operator_ms`), and a sync step over
 a second says it too, by call (`operator_calls`, `[count, ms]`).
