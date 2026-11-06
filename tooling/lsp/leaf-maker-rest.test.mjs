@@ -2,7 +2,7 @@
 // repriced, and the relay offer that lists it.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { restSizes, restTerms, offPrice, restOffer } from './leaf-maker-rest.mjs'
+import { restSizes, restTerms, offPrice, restOffer, restSize } from './leaf-maker-rest.mjs'
 
 test('a resting ladder: level k is first × growth^k atoms of what is given', () => {
   assert.deepEqual(restSizes({ ladder: { levels: 4, growth: 1.4, first: '300000' } }, null), [300000n, 420000n, 587999n, 823199n])
@@ -50,4 +50,12 @@ test('a level is not rested through the book\'s best bid', async () => {
   assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 0.99, 10), false)   // over the bid by 101 bps
   assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 0.9995, 10), true)  // within 10 bps
   assert.equal(crossesBook({ rate_num: '1000', rate_den: '1000' }, 1.2, 10), true)     // under the bid
+})
+
+test('a level is rested at its cancelled coin\'s value only within a thousandth of its size', () => {
+  assert.equal(restSize(1_000_000n, 999_000n), 999_000n)
+  assert.equal(restSize(1_000_000n, 998_999n), 1_000_000n, 'more than a thousandth short: the full size')
+  assert.equal(restSize(1_000_000n, 1_000_001n), 1_000_000n, 'never more than the level')
+  assert.equal(restSize(1_000_000n, ''), 1_000_000n)
+  assert.equal(restSize('28625282061', String(28625282061 - 2368)), 28625282061n - 2368n)
 })
