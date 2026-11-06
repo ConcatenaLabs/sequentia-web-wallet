@@ -281,9 +281,12 @@ address not shown before, within the twenty past the last one paid that a restor
 confidential address alone, saying what stays public. The address alone
 is shown in developer mode. Under the code the wallet can choose a **payment name**,
 `name@sequentiatestnet.com` (`lnaddr.js`), held by a key of its phrase: a Lightning address that
-any Lightning wallet pays in an amount it chooses, the open page making the Bitcoin ark invoice
-for it, and that a Sequentia wallet pays in any asset at a new receive code the page gives. A
-payer of a wallet that is not open is told it is offline. The
+any Lightning wallet pays in an amount it chooses while the page is open (it makes the Bitcoin ark
+invoice), and that a Sequentia wallet pays in any asset, open or closed, at one of the receive codes
+the page leaves signed with the name service (`name-stock.js`: each at its own address within what
+a restore reads, each handed out once). A wallet with a name shows the name as its QR code, with
+**Show full code** beside it; the payer's wallet checks each code's signature against the name's
+key before paying. The
 testnet faucet pays the receive code, or the address when it does not pay that asset into
 receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
@@ -837,8 +840,9 @@ works normally without the restricted rows.
 | `problem-report.js` | Report a problem: the recent-error log, the scrubbing, the phrase guard, the report as sent to Emissio's intake, and its words (`REPORT_WORDS`). |
 | `asset-lightning.js` | Default mode's rule for an asset sent to a receive code of another operator: over Lightning (the code's invoice in the asset, within the limit in USD, the operator able to carry it, its lock within the operator's window), or the code's address and why. No DOM. |
 | `faucet-wallet.js` | The wallet's id for the testnet faucet (sha256 of a tag and the scriptPubKey of its first receive address, the same in Ambra browser and Ambra mobile), the read of the assets it has already received, and the words of the faucet card. |
-| `lnaddr.js` | The payment name (`name@SEQ_LNADDR_DOMAIN`, a Lightning address): the name rules, its key from the phrase and the signed messages, the page's held link with the service that answers invoice and receive-code requests, and Send's resolver of `name@domain`. Its service is `tooling/lsp/lnaddr.mjs`. No DOM. |
+| `lnaddr.js` | The payment name (`name@SEQ_LNADDR_DOMAIN`, a Lightning address): the name rules, its key from the phrase and the signed messages, the page's held link with the service that answers invoice requests and keeps the stock of signed receive codes topped up, the code signatures, and Send's resolver of `name@domain`, which checks a code's signature and the key the payer paid the name at before. Its service is `tooling/lsp/lnaddr.mjs`. No DOM. |
 | `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`), the Sequentia receive request (`sequentia=`) and an invoice or a payment name's LNURL-pay (`lightning=`). Chooses nothing. |
+| `name-stock.js` | The stock of signed receive codes a wallet leaves with its payment name: which addresses they use (inside the window New code cycles through, so a restore finds every payment), what a top-up makes and takes back, and the QR text of a name. No DOM. |
 | `receive-index.js` | Which address Receive shows: New code's next index, and the one kept across a reload, within what a restore from the phrase finds. No DOM. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |

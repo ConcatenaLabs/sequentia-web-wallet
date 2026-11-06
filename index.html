@@ -868,11 +868,13 @@
         <div id="recvAmtRow" class="recv-amt-row hide"><input id="recvAmt" class="mono" inputmode="decimal" style="flex:1 1 auto;min-width:0"><select id="recvAsset" style="flex:0 0 auto;width:auto"></select></div>
         <img class="qr" id="qr" alt="address QR">
         <div class="mono" id="addr" style="margin-top:12px">—</div>
+        <p class="sub hide" id="recvNamePublic" style="margin:6px 0 0"></p>
         <div class="row" style="margin-top:12px">
           <button id="btnCopy">Copy</button>
           <button id="btnNewAddr">New address</button>
           <button class="ghost" id="btnConf">Show blinded address</button>
           <button class="ghost hide" id="btnRecvMode">Show address</button>
+          <button class="ghost hide" id="btnRecvFull">Show full code</button>
           <button class="ghost dev-only" id="btnXpub">Show xpub</button>
         </div>
         <div id="recvConfRow" class="hide" style="margin-top:14px">
@@ -1826,7 +1828,7 @@ import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
-import { mountLnAddress, nameKey, parseLnAddress, resolveLnAddress, nameProblem, NAME_WORDS } from './lnaddr.js';
+import { mountLnAddress, nameKey, parseLnAddress, resolveLnAddress, nameProblem, nameQrText, NAME_WORDS } from './lnaddr.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
 import { displayPair } from './swap.js';
 import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, resetCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
@@ -1975,7 +1977,7 @@ const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href
 
 let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false, showXpub = false;
 // Default mode's Confidential switch on Receive (off each time Receive opens; renderReceive).
-let _codeConf = false;
+let _codeConf = false, _showFull = false;
 let companionClient;   // the sync's second client: scans the covenant companion beside the primary wallet (see _syncImpl)
 let broadcastClient;   // broadcasts a reviewed send without waiting for a scan to free the shared client (see reviewBroadcast)
 let keySignStarted = false;   // the Sign tab opens on the address the Receive tab is showing, once
@@ -3622,7 +3624,7 @@ function renderRoomStepper(host){
 }
 function tab(name){
   // Receive's Confidential switch is a choice for one payment: it is off again once Receive is left.
-  if(name!=='receive') _codeConf=false;
+  if(name!=='receive'){ _codeConf=false; _showFull=false; }
   // The open tab is kept for the browser tab's session: a reload opens on it again.
   try{ sessionStorage.setItem('swk.tab', name); }catch{}
   document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
@@ -4358,6 +4360,12 @@ function initBtcArk(){
 let lnAddr = null, _nameKey = null, _nameEditing = false, _nameBusy = false;
 const LNADDR_MIN_SAT = 1000n, LNADDR_MAX_SAT = 1_000_000n;
 function lnaddrDomain(){ return String(window.SEQ_LNADDR_DOMAIN || '').toLowerCase(); }
+// The key each payment name was first paid at, per wallet: a code under another key is refused.
+function namePins(){
+  const k='swk.lnaddr.pins.'+walletTag();
+  const all=()=>{ try{ return JSON.parse(localStorage.getItem(k)||'{}')||{}; }catch{ return {}; } };
+  return { get: (a)=> all()[a] || null, set: (a, p)=>{ try{ const m=all(); m[a]=p; localStorage.setItem(k, JSON.stringify(m)); }catch{} } };
+}
 function initLnAddress(){
   if(lnAddr || !lnaddrDomain() || !window.SEQ_LSP_URL || !bip39Phrase()) return;
   lnAddr = mountLnAddress({
@@ -4368,13 +4376,20 @@ function initLnAddress(){
       watchNameInvoice(inv);
       return inv.invoice;
     },
-    code: async ()=>{
-      const address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential());
+    code: async ()=>{ throw new Error('the stock makes codes'); },
+    // The stock of signed codes left with the service (name-stock.js): each at an address of its
+    // own within what a restore reads, with a new Sequentia part and ark address. None is made while
+    // the wallet can't hold coins with the operator yet: such a code could not be paid in seconds.
+    stockCode: async (index)=>{
+      if(!wollet || !leavesApi || !leavesApi.isOpen()) return null;
+      const address = String(wollet.address(index).address().toUnconfidential());
       let ark=null, sequentia=null;
       try{ if(btcArk && btcArk.isOpen()) ark=(await btcArk.run('address')).address; }catch{}
-      try{ if(leavesApi && leavesApi.isOpen()) sequentia=(await leavesApi.command('receive', {})).request; }catch{}
-      return buildPayCode({ address, ark: ark||undefined, sequentia: sequentia||undefined });
+      try{ sequentia=(await leavesApi.command('receive', {})).request; }catch{ return null; }
+      return buildPayCode({ address, ark: ark||undefined, sequentia });
     },
+    nextUnused: ()=>{ try{ return unifiedNextUnused(); }catch{ return 0; } },
+    shownIndex: ()=> addrIndex,
     // What a payer may send: from LNADDR_MIN_SAT up to the ark's largest coin, and under what goes
     // to the address straight away (ark-limits.js), never above LNADDR_MAX_SAT.
     limits: ()=>{
@@ -8048,9 +8063,18 @@ function renderConfidentialCode(){
   $('addr').textContent = code || DEFAULT_WORDS.receiveWait;
   try{ if(!code) throw 0; $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
 }
+// The amount, and what it is in: BTC, or an asset the operator receives in over Lightning.
+function paintRecvAmount(){
+  const sel=$('recvAsset'), choices=recvAssetChoices(), was=sel.value||'BTC';
+  if(sel._choices!==choices.join()){
+    sel.innerHTML=''; for(const h of choices){ const o=document.createElement('option'); o.value=h; o.textContent= h==='BTC' ? 'BTC' : assetMeta(h).ticker; sel.appendChild(o); }
+    sel.value = choices.includes(was) ? was : 'BTC'; sel._choices=choices.join(); }
+  sel.classList.toggle('hide', choices.length<2);
+  $('recvAmt').placeholder = sel.value==='BTC' ? BTC_WORDS.amountHint : DEFAULT_WORDS.amountHint;
+}
 function renderReceiveCode(){
   $('recvLbl').textContent = DEFAULT_WORDS.codeLabel;
-  $('recvTip').textContent = DEFAULT_WORDS.receiveTip;
+  $('recvTip').textContent = _showFull && lnAddr && lnAddr.name() ? NAME_WORDS.fullTip : DEFAULT_WORDS.receiveTip;
   $('btnNewAddr').textContent = DEFAULT_WORDS.newCode;
   $('btnCopy').textContent = DEFAULT_WORDS.copyCode;
   $('btnConf').classList.add('hide');
@@ -8062,20 +8086,41 @@ function renderReceiveCode(){
     if(!_recvCodeRetry) askReceiveCode();
     return;
   }
-  // The amount, and what it is in: BTC, or an asset the operator receives in over Lightning.
   $('recvAmtRow').classList.remove('hide');
-  { const sel=$('recvAsset'), choices=recvAssetChoices(), was=sel.value||'BTC';
-    if(sel._choices!==choices.join()){
-      sel.innerHTML=''; for(const h of choices){ const o=document.createElement('option'); o.value=h; o.textContent= h==='BTC' ? 'BTC' : assetMeta(h).ticker; sel.appendChild(o); }
-      sel.value = choices.includes(was) ? was : 'BTC'; sel._choices=choices.join(); }
-    sel.classList.toggle('hide', choices.length<2);
-    $('recvAmt').placeholder = sel.value==='BTC' ? BTC_WORDS.amountHint : DEFAULT_WORDS.amountHint; }
+  paintRecvAmount();
   const code = payCodeText();
   $('addr').textContent = code;
   try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
 }
+// Default mode with a payment name: the picture is the name (name-stock.js's nameQrText), which a
+// payer's wallet looks up for a new full code of this wallet's. An amount typed, Confidential, or
+// "Show full code" give the full code instead, as without a name.
+function nameViewOn(){
+  return !devMode() && !!lnAddr && !!lnAddr.name() && !_codeConf && !_showFull && recvAmountAtoms()===0n;
+}
+function renderNameView(){
+  const name = lnAddr.address();
+  $('recvLbl').textContent = NAME_WORDS.label;
+  $('recvTip').textContent = NAME_WORDS.qrTip;
+  $('addr').classList.remove('recv-code');
+  $('addr').textContent = name;
+  $('recvNamePublic').textContent = NAME_WORDS.public; show('recvNamePublic', true);
+  $('btnCopy').textContent = NAME_WORDS.copyName;
+  show('btnNewAddr', false); $('btnConf').classList.add('hide');
+  $('btnRecvFull').textContent = NAME_WORDS.showFull; show('btnRecvFull', true);
+  // An amount turns it into the full code with an invoice: the field stays while the code can carry one.
+  $('recvAmtRow').classList.toggle('hide', !receiveCodeMode());
+  if(receiveCodeMode()) paintRecvAmount();
+  paintConfSwitch(true);
+  try{ $('qr').src = stringToQr(nameQrText(name)); }catch{ $('qr').removeAttribute('src'); }
+}
 function renderReceive(){
   try{ renderNameBox(); }catch(e){ console.warn('[lnaddr] render:', e?.message??e); }
+  show('recvNamePublic', false); show('btnNewAddr', true);
+  // With a name, the full code can be shown, and the name again from it.
+  const named = !devMode() && !!lnAddr && !!lnAddr.name() && !_codeConf && recvAmountAtoms()===0n;
+  show('btnRecvFull', named && _showFull); $('btnRecvFull').textContent = NAME_WORDS.showName;
+  if(nameViewOn()){ renderNameView(); renderOampReceive(); return; }
   const codeOn = !devMode() && !!leavesApi && leavesApi.isOpen();
   // Default mode shows the one receive code only; the address is developer mode's.
   $('btnRecvMode').classList.toggle('hide', true);
@@ -8391,6 +8436,9 @@ async function openScanner(addrInput, amtInput){
       if(code.amount && amtInput && !amtInput._refMode){ amtInput.value=code.amount; amtInput.dispatchEvent(new Event('input')); }
       return;
     }
+    // A payment name, in any spelling a QR code carries it (bare, lightning:, BIP353's ₿).
+    const nm=parseLnAddress(s);
+    if(nm){ cleanup(); addrInput.value=nm.name+'@'+nm.domain; addrInput.dispatchEvent(new Event('input')); return; }
     if(s.includes(':')) s=s.slice(s.indexOf(':')+1);                 // drop any URI scheme (mirror the mobile wallet)
     if(/^LN[A-Z0-9]+$/.test(s)) s=s.toLowerCase();                   // a Lightning invoice QR is upper case; the invoice is the same
     let amt=null; const q=s.indexOf('?');
@@ -9667,7 +9715,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       if(!parseLnAddress(r.addr)) continue;
       let atoms=null; try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{}
       const x = await resolveLnAddress({ text: r.addr, asset: r.asset, msat: r.asset==='BTC' && atoms>0n ? atoms*1000n : null,
-        domain: lnaddrDomain(), base: window.SEQ_LSP_URL, decode: decodeBolt11 });
+        domain: lnaddrDomain(), base: window.SEQ_LSP_URL, decode: decodeBolt11, pins: namePins() });
       r.addr = x.code || x.invoice;
     }
     // A receive code (pay-code.js) is paid the way that fits what is sent: an asset at its
@@ -9777,6 +9825,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
   finally{ btn.disabled=false; btn.textContent=label; } };
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
+$('btnRecvFull').onclick=()=>{ _showFull=!_showFull; renderReceive(); };
 // New code (New address in developer mode) moves to an address not shown before, within what a
 // restore from the phrase finds (receive-index.js); the code's other parts are made new with it.
 $('btnNewAddr').onclick=()=>{
