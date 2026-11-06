@@ -40,6 +40,8 @@
 //          a key of the service's own, and pays the address of the stocked code at the highest index
 //          on the chain; B opens again, its stock fills up again, and its figures are written for
 //          `restore` (<work>/evidence/B.totals.json)
+//   namescreen  wallet <name>'s Receive with its payment name, screenshots of the one card and the
+//          full code; `namescreen <name> words` takes the wallet's word name first
 //   coins  wallet <name>'s coins in the tree as developer mode lists them (state, kind, asset,
 //          value, dates), written to <work>/<name>.coins.json
 //   settle wallet <name> settles every coin it holds in the tree that is not a leaf of a round (kind batch)
@@ -81,6 +83,10 @@ const nameArg = flag('--name', null)
 // `name`: the local name service's directory and the file that makes it forge a lookup.
 const lnaddrDir = flag('--lnaddr-dir', null)
 const forgeFile = flag('--forge', null)
+// `name` against the testnet's own name service (no --lnaddr-dir): the stock is read from it with
+// the named wallet's own key (`--lsp`), and the named wallet opens at `--name-base` (the public page).
+const lspBase = flag('--lsp', 'https://sequentiatestnet.com/lsp')
+const nameBase = flag('--name-base', null)
 // `pay --paste`: the invoice is pasted into Pay an invoice instead of handed over by the link, for
 // a page that predates the link.
 const paste = argv.includes('--paste'); if (paste) argv.splice(argv.indexOf('--paste'), 1)
@@ -650,16 +656,29 @@ async function main () {
     await page.stop()
   } else if (step === 'name') {
     const [payer, ticker = 'USDX'] = rest
-    if (!lnaddrDir || !forgeFile) throw new Error('name needs --lnaddr-dir and --forge (tooling/live-proxy.mjs --lnaddr, --lnaddr-forge)')
+    if (!forgeFile) throw new Error('name needs --forge (tooling/live-proxy.mjs --lnaddr-forge), and --lnaddr-dir for a local name service')
     const { readPayCode } = await import('../pay-code.js')
     const { NAME_WORDS } = await import('../lnaddr.js')
     const { STOCK_SIZE } = await import('../name-stock.js')
     const { RECEIVE_GAP } = await import('../receive-index.js')
     const store = () => { try { return JSON.parse(readFileSync(join(lnaddrDir, 'lnaddr-names.json'), 'utf8')).names || {} } catch { return {} } }
-    const held = (n) => ((store()[n] || {}).stock || [])
-    const waitStock = async (n, want, ms) => { const t = Date.now(); while (Date.now() - t < ms) { if (held(n).length >= want) return held(n).length; await sleep(2000) } return held(n).length }
+    // The stock the service holds: from the local store, or asked of the service itself with the
+    // named wallet's key (an empty stock message answers the ids it holds).
+    const { nameKey, signWith, signedDigest } = await import('../lnaddr.js')
+    const bKey = nameKey(readFileSync(join(work, name + '.phrase'), 'utf8').trim())
+    let liveHeld = []
+    const askHeld = async (n) => {
+      const t = Math.floor(Date.now() / 1000)
+      const r = await fetch(lspBase + '/lnaddr/-/stock', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: n, ts: t, add: [], drop: [], sig: signWith(bKey.priv, signedDigest('stock', 'sequentiatestnet.com', n, t, '', '')) }) }).then((x) => x.json()).catch(() => ({}))
+      liveHeld = (r.held || []).map((id) => ({ id }))
+      return liveHeld
+    }
+    const held = (n) => lnaddrDir ? ((store()[n] || {}).stock || []) : liveHeld
+    const heldNow = async (n) => lnaddrDir ? held(n) : askHeld(n)
+    const waitStock = async (n, want, ms) => { const t = Date.now(); while (Date.now() - t < ms) { if ((await heldNow(n)).length >= want) return held(n).length; await sleep(2000) } return held(n).length }
     // 1. B: the name, its QR, its stock.
-    const pb = await openWallet(name)
+    const pb = await openWallet(name, nameBase ? { at: nameBase } : {})
     await waitJoined(pb)
     await tab(pb, 'balance'); await tab(pb, 'receive')
     let named = await pb.waitFor("document.querySelector('#nameBox') && !document.querySelector('#nameBox').classList.contains('hide') ? (document.querySelector('#nameAddr').textContent || 'none') : false", 120000)
@@ -685,10 +704,13 @@ async function main () {
     const mine = await pb.eval(`(()=>{ const k=Object.keys(localStorage).find(k=>k.startsWith('swk.lnaddr.stock.')); return k ? JSON.parse(localStorage.getItem(k)) : null })()`)
     const idx = Object.values((mine && mine.mine) || {}).map((c) => c.index).sort((a, b) => a - b)
     const nextUnused = await pb.eval('(()=>{ try{ return unifiedNextUnused() }catch{ return null } })()').catch(() => null)
-    check('every stocked code is at an address inside the twenty a restore reads past the last one paid', idx.length >= STOCK_SIZE && idx.every((i) => i >= 0 && i < (nextUnused ?? 0) + RECEIVE_GAP), { indices: idx, nextUnused })
+    // The page does not publish its first unused index: without it, the stock must at least fit in
+    // one window of the gap (name-stock.test.mjs proves the window itself).
+    check('every stocked code is at an address inside the twenty a restore reads past the last one paid', idx.length >= STOCK_SIZE &&
+      (nextUnused != null ? idx.every((i) => i >= 0 && i < nextUnused + RECEIVE_GAP) : idx[idx.length - 1] - idx[0] < RECEIVE_GAP), { indices: idx, nextUnused })
     // The code at the highest index: its address is paid on the chain later.
     const top = Object.entries((mine && mine.mine) || {}).sort((a, b) => b[1].index - a[1].index)[0]
-    const topCode = (held(n).find((c) => c.id === (top && top[0])) || {}).code
+    const topCode = lnaddrDir ? (held(n).find((c) => c.id === (top && top[0])) || {}).code : null
     const topAddr = topCode ? readPayCode(topCode).address : null
     note(`highest stocked index ${top && top[1].index}: ${topAddr}`)
     await click(pb, '#btnRecvFull'); await sleep(800)
@@ -705,7 +727,7 @@ async function main () {
       await pa.eval(`(()=>{ document.querySelector('#sendErr').textContent=''; const r=document.querySelector('#recipients .rec'); r.querySelector('.raddr').value=${JSON.stringify(dest)}; r.querySelector('.raddr').dispatchEvent(new Event('input'));
         const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); s.value=o.value; s.dispatchEvent(new Event('change'));
         r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
-      const before = held(n).length
+      const before = (await heldNow(n)).length
       await click(pa, '#btnReview')
       const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving /.test(e) ? 'ERR '+e : false })()", 600000)
       if (/^ERR /.test(title)) return { refused: title.slice(4), before }
@@ -721,7 +743,8 @@ async function main () {
     for (const k of [1, 2]) {
       const r = await send(named, '1', `pay${k}`)
       check(`A pays ${named} (${k}) while B is closed`, !!r.done && /^Sent/.test(r.done) && /in seconds/.test(r.title), r.refused || `${r.done.trim().slice(0, 60)} (${secs(r.ms)} from the click)`)
-      check(`  it took one code from the stock`, held(n).length === r.before - 1, `${r.before} -> ${held(n).length}`)
+      const after = (await heldNow(n)).length
+      check(`  it took one code from the stock`, after === r.before - 1, `${r.before} -> ${after}`)
     }
     // 3. A service broken into: the address swapped, then a key of its own.
     writeFileSync(forgeFile, 'address\n')
@@ -737,11 +760,12 @@ async function main () {
     if (topAddr) {
       r = await send(topAddr, '1', 'address')
       check(`A pays the address of the highest stocked code (${topAddr}) on the chain`, !!r.done && /^Sent/.test(r.done), r.refused || r.done)
-    } else check('the highest stocked code\'s address was read', false)
+    } else if (lnaddrDir) check('the highest stocked code\'s address was read', false)
+    else note('the testnet\'s service: the stocked codes are not read here, so no payment on the chain')
     await pa.stop(); pages.splice(pages.indexOf(pa), 1)
     // 5. B opens again: its stock fills up again, and it shows what it was paid.
-    const left = held(n).length
-    const pb2 = await openWallet(name)
+    const left = (await heldNow(n)).length
+    const pb2 = await openWallet(name, nameBase ? { at: nameBase } : {})
     await waitJoined(pb2)
     const t2 = Date.now()
     const again = await waitStock(n, STOCK_SIZE, 600000)
@@ -758,11 +782,27 @@ async function main () {
   } else if (step === 'namescreen') {
     // node … namescreen B: wallet B's Receive with its payment name, as the owner sees it: the name
     // view (said once), Show full code, and back. Screenshots only, and the checks that go with them.
+    // `namescreen B words`: the wallet takes its word name first (Get a name, or Use a word name
+    // instead), and the picture must hold it in lower case while the name reads with capitals.
     const page = await openWallet(name)
     await waitJoined(page)
     await tab(page, 'balance'); await tab(page, 'receive')
+    if (rest[0] === 'words') {
+      await page.waitFor("document.querySelector('#nameBox') && !document.querySelector('#nameBox').classList.contains('hide')", 120000)
+      const btn = await page.eval("(()=>{ for (const id of ['btnNameGet','btnNameWords']) { const b=document.querySelector('#'+id); if (b && b.offsetParent!==null) { b.click(); return id } } return null })()")
+      note('word name: ' + (btn || 'held already'))
+      if (btn) await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return /^[A-Z][a-z]+[A-Z]/.test(t) ? t : false })()", 120000).catch(() => null)
+    }
     const named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return t && document.querySelector('#addr').textContent===t ? t : false })()", 120000).catch(() => null)
     check('Receive shows the name', !!named, named)
+    if (rest[0] === 'words') {
+      check('a word name, each word with its capital', /^([A-Z][a-z]{2,4}){2,3}@/.test(named || ''), named)
+      const q = await page.eval(`(async()=>{ const img=document.querySelector('#qr'); if(!img.complete) await new Promise(r=>img.onload=r);
+        const c=document.createElement('canvas'); const k=Math.max(1, Math.ceil(600/img.naturalWidth)); c.width=img.naturalWidth*k+80; c.height=img.naturalHeight*k+80; const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height); x.imageSmoothingEnabled=false; x.drawImage(img,40,40,img.naturalWidth*k,img.naturalHeight*k);
+        const d=x.getImageData(0,0,c.width,c.height); const r=window.jsQR(d.data,d.width,d.height); return r ? r.data : null })()`)
+      check('the QR code holds it in lower case', !!named && q === named.toLowerCase(), q)
+      writeFileSync(join(work, name + '.name'), (named || '').toLowerCase() + '\n')
+    }
     const once = await page.eval("[...document.querySelectorAll('section[data-panel=\"receive\"] *')].filter(e=>e.children.length===0 && e.offsetParent!==null && e.textContent.trim()===document.querySelector('#addr').textContent).length")
     check('the name is said once', once === 1, once)
     check('Remove name is a quiet link at the foot', await page.eval("document.querySelector('#btnNameRemove').classList.contains('quiet') && document.querySelector('#btnNameRemove').offsetParent!==null"))

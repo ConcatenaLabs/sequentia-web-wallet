@@ -52,7 +52,8 @@ const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '
 // instead of the testnet's, its names and stocks kept in <dir>: `/lsp/lnaddr/…` and
 // `/.well-known/lnurlp/…`, and the page is served with SEQ_LSP_URL pointing at this proxy (whose
 // other `/lsp/…` calls go on to the testnet). How a change to the name service is seen with the
-// page before either is deployed. --lnaddr-forge <file>: while that file exists, a payer's lookup
+// page before either is deployed. --lnaddr-forge <file> (with --lnaddr, or alone against the
+// testnet's own name service): while that file exists, a payer's lookup
 // (`GET /lsp/lnaddr/<name>`) is answered with the code's address swapped for another, the
 // signature kept, as a service broken into would hand out an address of its own; with `key` in the
 // file, the code is instead signed by a key of the proxy's own, published as the name's key.
@@ -125,6 +126,11 @@ const server = createServer(async (req, res) => {
     return
   }
   if (cors && req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return }
+  // --lnaddr-forge without --lnaddr: a lookup at the testnet's own name service is tampered with on
+  // its way back, as a service broken into would answer it.
+  if (!lnaddr && lnaddrForge && req.method === 'GET' && /^\/lsp\/lnaddr\/[^/-][^/]*$/.test(url.pathname) && existsSync(lnaddrForge)) {
+    return forged(req, res, new URL(url.pathname.replace(/^\/lsp/, '') + url.search, 'http://x'))
+  }
   if (lnaddr && (url.pathname.startsWith('/lsp/lnaddr/') || url.pathname.startsWith('/.well-known/lnurlp/'))) {
     // With --cors, the wallet's own calls (register, stock, wait) are answered to any origin too.
     if (cors) { const wh = res.writeHead.bind(res); res.writeHead = (st, h = {}) => wh(st, { ...h, ...CORS }) }
@@ -173,8 +179,13 @@ async function forged (req, res, inner) {
   const { signCode } = await import('../lnaddr.js')
   const { schnorr } = await import('../btc.js')
   const cap = { status: 0, body: null }
-  const fake = { writeHead (st) { cap.status = st }, end (b) { cap.body = b }, on () {}, headersSent: false }
-  await lnaddr.handle(req, fake, inner)
+  if (lnaddr) {
+    const fake = { writeHead (st) { cap.status = st }, end (b) { cap.body = b }, on () {}, headersSent: false }
+    await lnaddr.handle(req, fake, inner)
+  } else {
+    const r = await fetch(origin + '/lsp' + inner.pathname, { headers: { accept: 'application/json' } })
+    cap.status = r.status; cap.body = await r.text()
+  }
   let j = null; try { j = JSON.parse(String(cap.body)) } catch {}
   if (j && j.code) {
     const c = readPayCode(j.code)

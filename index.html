@@ -889,7 +889,9 @@
           <div class="mono hide" id="nameAddr"></div>
           <div class="recv-amt-row hide" id="nameForm"><input id="nameInput" class="mono" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" style="flex:1 1 auto;min-width:0"><span class="sub" id="nameDomain" style="align-self:center;white-space:nowrap"></span></div>
           <div class="row" style="margin-top:8px">
-            <button id="btnNameChoose">Choose a name</button>
+            <button class="primary" id="btnNameGet">Get a name</button>
+            <button class="quiet" id="btnNameChoose">Choose your own</button>
+            <button class="quiet hide" id="btnNameWords">Use a word name instead</button>
             <button class="hide" id="btnNameSave">Save</button>
             <button class="ghost hide" id="btnNameCancel">Cancel</button>
             <button class="hide" id="btnNameCopy">Copy</button>
@@ -4426,7 +4428,7 @@ function renderNameBox(){
   const dev=devMode(), name=lnAddr.name();
   $('nameLbl').textContent = dev ? NAME_WORDS.devLabel : NAME_WORDS.label;
   $('nameTip').textContent = name ? (dev ? NAME_WORDS.devTip : NAME_WORDS.tip) : NAME_WORDS.none;
-  $('nameAddr').textContent = name ? lnAddr.address() : '';
+  $('nameAddr').textContent = name ? lnAddr.display() : '';
   // Receive above shows the name already, with its line: here only Remove name, a quiet link at the
   // foot of the one card.
   const above = !!name && nameViewOn();
@@ -4439,13 +4441,28 @@ function renderNameBox(){
   $('nameForm').classList.toggle('hide', !_nameEditing);
   $('nameDomain').textContent = '@'+lnaddrDomain();
   $('nameInput').placeholder = NAME_WORDS.hint;
-  show('btnNameChoose', !name && !_nameEditing);
+  show('btnNameGet', !name && !_nameEditing); show('btnNameChoose', !name && !_nameEditing);
+  // A name that is not one of this wallet's word names can become one with one tap.
+  show('btnNameWords', !!name && !_nameEditing && !lnAddr.isWordName());
+  $('btnNameWords').textContent=NAME_WORDS.useWords;
+  if(!_nameBusy) $('btnNameGet').textContent=NAME_WORDS.getName;
   show('btnNameSave', _nameEditing); show('btnNameCancel', _nameEditing);
   show('btnNameCopy', !!name && !_nameEditing && !above); show('btnNameRemove', !!name && !_nameEditing);
   $('btnNameChoose').textContent=NAME_WORDS.choose; $('btnNameCancel').textContent=NAME_WORDS.cancel;
   $('btnNameCopy').textContent=NAME_WORDS.copy;
   if(!_nameBusy){ $('btnNameSave').textContent=NAME_WORDS.save; $('btnNameRemove').textContent=NAME_WORDS.remove; }
 }
+// Get a name: the wallet's own word name (word-name.js), registered in one tap; the same for a
+// wallet that holds a name of another kind.
+async function claimWordName(btn){
+  if(_nameBusy) return;
+  const st=$('nameStatus'); _nameBusy=true; btn.textContent=NAME_WORDS.getting; st.textContent='';
+  try{ await lnAddr.claimWordName(); _nameEditing=false; st.className='status'; }
+  catch(e){ st.className='status err'; st.textContent=e?.message??String(e); }
+  finally{ _nameBusy=false; renderNameBox(); try{ renderReceive(); }catch{} }
+}
+$('btnNameGet').onclick=()=> claimWordName($('btnNameGet'));
+$('btnNameWords').onclick=()=> claimWordName($('btnNameWords'));
 $('btnNameChoose').onclick=()=>{ _nameEditing=true; $('nameStatus').textContent=''; renderNameBox(); try{ $('nameInput').focus(); }catch{} };
 $('btnNameCancel').onclick=()=>{ _nameEditing=false; $('nameStatus').textContent=''; renderNameBox(); };
 $('nameInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter') $('btnNameSave').click(); });
@@ -8109,11 +8126,12 @@ function nameViewOn(){
   return !devMode() && !!lnAddr && !!lnAddr.name() && !_codeConf && !_showFull && recvAmountAtoms()===0n;
 }
 function renderNameView(){
-  const name = lnAddr.address();
+  const name = lnAddr.address();          // the name itself, lower case: the QR code and Copy
+  const shown = lnAddr.display() || name;  // with capitals for a word name: what the person reads
   $('recvLbl').textContent = NAME_WORDS.label;
   $('recvTip').textContent = NAME_WORDS.qrTip;
   $('addr').classList.remove('recv-code');
-  $('addr').textContent = name;
+  $('addr').textContent = shown;
   $('recvNamePublic').textContent = NAME_WORDS.public; show('recvNamePublic', true);
   $('btnCopy').textContent = NAME_WORDS.copyName;
   show('btnNewAddr', false); $('btnConf').classList.add('hide');
@@ -9940,7 +9958,8 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
   }catch(e){ $('sendErr').textContent=plainErr(e); }
   finally{ btn.disabled=false; btn.textContent=label; } };
 
-$('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
+// With the name shown, Copy gives the name in lower case, as the QR code holds it.
+$('btnCopy').onclick=()=>copyToClipboard(nameViewOn() ? nameQrText(lnAddr.address()) : $('addr').textContent, $('btnCopy'));
 $('btnRecvFull').onclick=()=>{ _showFull=!_showFull; renderReceive(); };
 // New code (New address in developer mode) moves to an address not shown before, within what a
 // restore from the phrase finds (receive-index.js); the code's other parts are made new with it.
