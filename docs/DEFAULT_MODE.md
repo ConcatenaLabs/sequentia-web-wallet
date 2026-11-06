@@ -307,7 +307,8 @@ modes (`asset-picker.js`):
     When the chain holds too little, the wallet first moves coins out to its own address, in an
     amount that does not give the payment away: all it holds of the asset there, or the smallest
     power of ten above what the payment needs (at least one whole unit), whichever is smaller
-    (never less than the operator's smallest coin of the asset). It says "Moving <amount>
+    (never less than the operator's smallest coin of the asset; of what the library can move now,
+    when part of what is held cannot be, such as a channel's balance). It says "Moving <amount>
     <TICKER> out of the Ark so it can be sent confidentially. They are ready in a few minutes.
     Keep this page open." and the review opens once they are there, in about three minutes: one
     settlement of the operator's and its payout on the chain, and no confirmation more. A move
