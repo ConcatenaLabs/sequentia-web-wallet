@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { feeMarginAtoms, bucketAtoms, confidentialPlan, ownShare } from './confidential-pay.js'
+import { feeMarginAtoms, bucketAtoms, confidentialPlan, ownShare, liveFromRefusal } from './confidential-pay.js'
 
 const U = 100000000n // one unit of an asset of 8 decimals
 const M = 4000n // the fee margin at a rate of 1e8
@@ -54,4 +54,13 @@ test('on the chain the amount cannot be worked out: two outputs share what the i
   assert.ok(own > 0n && c >= 0n)
   const visible = inputs - f - c // all anyone reading the chain learns: payment + own
   for (const guess of [1n, U / 2n, U, 5n * U, visible - 1n]) assert.ok(guess > 0n && guess < visible)
+})
+
+test('what can be moved now, by the library\'s own refusal of a larger move', () => {
+  const msg = "refused: the wallet's live coins of asset 2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de hold 399999981 and an offboard of 799999961 and its fee need 800000049 (refresh 0, offboard 88), with any change at least the operator's smallest leaf of 1000000: board or receive more, or pay less"
+  assert.equal(liveFromRefusal(msg), 399999981n - 88n)
+  assert.equal(liveFromRefusal("the wallet's live coins of asset ab hold 0 and an offboard of 5 and its fee need 93 (refresh 0, offboard 88)"), 0n)
+  assert.equal(liveFromRefusal('the operator is unreachable'), null)
+  // Planned again on what can move: 4 USDX of 8 held, the rest in a channel.
+  assert.deepEqual(confidentialPlan({ amount: U, margin: M, onchain: 0n, instant: liveFromRefusal(msg), minLeaf: 1000000n }), { move: 399999893n, hides: true })
 })

@@ -1852,7 +1852,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
-import { confidentialPlan, ownShare, feeMarginAtoms as confidentialMargin } from './confidential-pay.js';
+import { confidentialPlan, ownShare, liveFromRefusal, feeMarginAtoms as confidentialMargin } from './confidential-pay.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, moveOutSats, moveRetryMs, moveWaits, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
@@ -8741,7 +8741,27 @@ async function confidentialReview(r, reset){
   if(a<=0n) throw new Error('amount must be greater than zero');
   let margin; try{ margin=confidentialMargin(feeRateFor(h)); }catch{ throw new Error(DEFAULT_WORDS.addressShort); }
   let least=0n; try{ least = leavesApi && leavesApi.minLeaf ? leavesApi.minLeaf(h) : 0n; }catch{}
-  const plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h), minLeaf:least, precision:prec });
+  // What is held for instant payments is read once the wallet has opened: wait for that, saying so.
+  if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
+    const st=$('sendErr'); st.className='status'; st.textContent=DEFAULT_WORDS.waitOpening;
+    const until=Date.now()+OPEN_WAIT_MS;
+    while(!leavesApi.isOpen() && Date.now()<until) await new Promise(r=>setTimeout(r, 1000));
+    st.textContent='';
+  }
+  let plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h), minLeaf:least, precision:prec });
+  // Short only by what is still arriving: said so, rather than that the wallet holds too little.
+  if(plan.short){ let all=0n; try{ all = leavesApi && !devMode() ? (leavesApi.leafAtoms(h)||0n) : 0n; }catch{}
+    if(availableFor(h)+all >= a+margin) throw new Error(DEFAULT_WORDS.stillArriving(m.ticker)); }
+  // Part of what is held for instant payments may not be movable now (a channel's balance, a coin
+  // not final yet): the library says how much is, and the plan is made on that.
+  if(plan.move>0n && leavesApi && leavesApi.isOpen()){
+    try{ await leavesApi.offboardQuote({ asset:h, amount:String(plan.move), address: wollet.address(undefined).address().toUnconfidential().toString() }); }
+    catch(e){
+      const live=liveFromRefusal(e?.message??e);
+      if(live!=null){ console.warn('[send] what can move now:', String(live)); plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:live, minLeaf:least, precision:prec });
+        if(plan.short) throw new Error(DEFAULT_WORDS.notMoved); }
+    }
+  }
   if(plan.short) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(plan.short, prec), m.ticker));
   if(plan.move>0n){
     const st=$('sendErr'); st.className='status';
