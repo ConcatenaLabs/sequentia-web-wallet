@@ -118,6 +118,11 @@ import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-mak
 // It reads the coins it holds only (`held`), not the thousands it traded away. A library without
 // either argument ignores it and does as before.
 export const SYNC_ARGS = Object.freeze({ catch_up: false })
+// The upkeep's sync leaves the watchtowers' step out and runs it next as a command of its own
+// (`deposits`): a firm offer or an acceptance, which goes ahead of the upkeep's queue, then waits
+// for one of the two at most, not for both. A library without the argument deposits in its sync,
+// and refuses the command (`no command`), which the upkeep passes over in silence.
+export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
 export const HELD_COINS = Object.freeze({ held: true })
 
 // The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
@@ -321,10 +326,12 @@ export function commandArgs (args, first) {
 
 // Every library command's time, summed up once a period (`times_seconds`, ten minutes) in one
 // line: `times {"<command>": {n, p50, p95, max, waited_max}, ...}` in milliseconds, where `waited`
-// is its time in the queue before it ran. What says how fast the maker answers below the five
-// seconds a `slow` line needs. -> { add(name, ms, waited), line() }: line() answers the period's
+// is its time in the queue before it ran. What says how fast the maker answers below the time
+// a `slow` line needs. -> { add(name, ms, waited), line() }: line() answers the period's
 // summary and starts the next, or null when no command ran.
 export const TIMES_SECONDS = 600
+// A command slower than this (`slow_ms`) is logged with what it cost (`slow <command> <ms> ms {…}`).
+export const SLOW_MS = 2000
 export function commandTimes () {
   let by = new Map()
   const at = (v, q) => v[Math.min(v.length - 1, Math.max(0, Math.ceil(v.length * q) - 1))]
@@ -479,10 +486,11 @@ async function main () {
   const nodePassword = op.node_password_file ? readFileSync(op.node_password_file, 'utf8').trim() : (op.node_password || '')
   // The library on a thread of its own: the maker answers HTTP while a long command runs, and a
   // taker's acceptance or a firm offer goes ahead of the maker's own upkeep.
-  // A command slower than five seconds is logged by name: the upkeep's long ones are what a
+  // A command slower than `slow_ms` (two seconds) is logged by name: the upkeep's long ones are what a
   // firm offer waits behind.
   const times = commandTimes()
   const lib = await leafLibraryThread(cfg.store_dir, {
+    slowMs: Number(cfg.slow_ms ?? SLOW_MS),
     onSlow: (name, ms, detail) => log('slow', name, ms, 'ms', detail ? JSON.stringify(detail) : ''),
     onTime: (name, ms, waited) => times.add(name, ms, waited),
   })
@@ -699,7 +707,8 @@ async function main () {
   }
   async function tickOnce () {
     {
-      try { await cmd('sync', SYNC_ARGS) } catch (e) { log('sync:', e.message) }
+      try { await cmd('sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
+      try { await cmd('deposits') } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
       try { await spendable() } catch (e) { log('holdings:', e.message) }
       await readRoom()
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
