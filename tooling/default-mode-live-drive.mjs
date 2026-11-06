@@ -40,6 +40,8 @@
 //          a key of the service's own, and pays the address of the stocked code at the highest index
 //          on the chain; B opens again, its stock fills up again, and its figures are written for
 //          `restore` (<work>/evidence/B.totals.json)
+//   namescreen  wallet <name>'s Receive with its payment name, screenshots of the one card and the
+//          full code; `namescreen <name> words` takes the wallet's word name first
 //   coins  wallet <name>'s coins in the tree as developer mode lists them (state, kind, asset,
 //          value, dates), written to <work>/<name>.coins.json
 //   settle wallet <name> settles every coin it holds in the tree that is not a leaf of a round (kind batch)
@@ -758,11 +760,27 @@ async function main () {
   } else if (step === 'namescreen') {
     // node … namescreen B: wallet B's Receive with its payment name, as the owner sees it: the name
     // view (said once), Show full code, and back. Screenshots only, and the checks that go with them.
+    // `namescreen B words`: the wallet takes its word name first (Get a name, or Use a word name
+    // instead), and the picture must hold it in lower case while the name reads with capitals.
     const page = await openWallet(name)
     await waitJoined(page)
     await tab(page, 'balance'); await tab(page, 'receive')
+    if (rest[0] === 'words') {
+      await page.waitFor("document.querySelector('#nameBox') && !document.querySelector('#nameBox').classList.contains('hide')", 120000)
+      const btn = await page.eval("(()=>{ for (const id of ['btnNameGet','btnNameWords']) { const b=document.querySelector('#'+id); if (b && b.offsetParent!==null) { b.click(); return id } } return null })()")
+      note('word name: ' + (btn || 'held already'))
+      if (btn) await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return /^[A-Z][a-z]+[A-Z]/.test(t) ? t : false })()", 120000).catch(() => null)
+    }
     const named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return t && document.querySelector('#addr').textContent===t ? t : false })()", 120000).catch(() => null)
     check('Receive shows the name', !!named, named)
+    if (rest[0] === 'words') {
+      check('a word name, each word with its capital', /^([A-Z][a-z]{2,4}){2,3}@/.test(named || ''), named)
+      const q = await page.eval(`(async()=>{ const img=document.querySelector('#qr'); if(!img.complete) await new Promise(r=>img.onload=r);
+        const c=document.createElement('canvas'); const k=Math.max(1, Math.ceil(600/img.naturalWidth)); c.width=img.naturalWidth*k+80; c.height=img.naturalHeight*k+80; const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height); x.imageSmoothingEnabled=false; x.drawImage(img,40,40,img.naturalWidth*k,img.naturalHeight*k);
+        const d=x.getImageData(0,0,c.width,c.height); const r=window.jsQR(d.data,d.width,d.height); return r ? r.data : null })()`)
+      check('the QR code holds it in lower case', !!named && q === named.toLowerCase(), q)
+      writeFileSync(join(work, name + '.name'), (named || '').toLowerCase() + '\n')
+    }
     const once = await page.eval("[...document.querySelectorAll('section[data-panel=\"receive\"] *')].filter(e=>e.children.length===0 && e.offsetParent!==null && e.textContent.trim()===document.querySelector('#addr').textContent).length")
     check('the name is said once', once === 1, once)
     check('Remove name is a quiet link at the foot', await page.eval("document.querySelector('#btnNameRemove').classList.contains('quiet') && document.querySelector('#btnNameRemove').offsetParent!==null"))

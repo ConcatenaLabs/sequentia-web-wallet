@@ -214,6 +214,6 @@ test('the payer checks the signature, keeps the key it paid, and drops a spent o
 });
 
 test('the new words name no protocol', () => {
-  for (const k of ['qrTip', 'public', 'copyName', 'copiedName', 'showFull', 'showName', 'fullTip', 'unsigned', 'changed', 'busy'])
+  for (const k of ['qrTip', 'public', 'copyName', 'copiedName', 'showFull', 'showName', 'fullTip', 'unsigned', 'changed', 'busy', 'getName', 'getting', 'useWords', 'noWordName', 'choose', 'none'])
     assert.deepEqual(forbiddenIn(NAME_WORDS[k]), [], k);
 });

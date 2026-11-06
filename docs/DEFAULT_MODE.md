@@ -146,7 +146,8 @@ modes (`asset-picker.js`):
 
 - **With a payment name** (below), Receive shows the name: the card's label is **Your payment
   name**, the QR code holds `name@sequentiatestnet.com` in lower case and nothing else, and the
-  name is written under it. Under the label: "Any asset, any amount, a new receive code of yours
+  name is written under it (a word name with a capital for each word, `AmberFalcon@…`); **Copy
+  name** copies it in lower case, as the QR code holds it. Under the label: "Any asset, any amount, a new receive code of yours
   for each payer. A Sequentia wallet can pay this name while this wallet is closed; other wallets,
   while it is open." Under the name: "Anyone who has your name can look it up and get a receive
   code of yours." Buttons: **Copy name** and **Show full code**; there is no New code, since every
@@ -248,9 +249,18 @@ modes (`asset-picker.js`):
 - **Your payment name**, under the code or the name: a name of the wallet's own at the site's domain
   (`name@sequentiatestnet.com`), which another wallet pays in an amount it chooses, a Lightning
   wallet included (it is a Lightning address, LNURL-pay, `lnaddr.js`). Without a name the card
-  reads "Choose a name other wallets can pay you at, in any amount they choose." and one button,
-  **Choose a name**, which opens a field ending in "@sequentiatestnet.com" with **Save** and
-  **Cancel**. With one it shows the name, "Other wallets can pay you at this name, in any amount
+  reads "Get a name other wallets can pay you at, in any amount they choose." with **Get a name**,
+  and **Choose your own** as a quiet link. **Get a name** gives the wallet its word name in one
+  tap (`word-name.js`): two words from a list, written together and shown with a capital for each
+  word (`AmberFalcon@sequentiatestnet.com`), derived from the key that holds the name, so a wallet
+  restored from its phrase gets the same name back. A third word is added only when the two-word
+  name is taken; never more. The QR code, Copy and every payer's lookup use the name in lower case
+  (`amberfalcon@sequentiatestnet.com`), since some wallets refuse capitals in a name; lookups ignore
+  case, so a name typed with capitals pays the same wallet. Names are unique as the joined lower-case
+  string. The words are the EFF short wordlist less every BIP39 word, so no word of a recovery phrase
+  is ever part of a public name. **Choose your own** opens a field ending in "@sequentiatestnet.com"
+  with **Save** and **Cancel**. A wallet holding a name of its own choosing sees **Use a word name
+  instead**, a quiet link that swaps it for its word name in one tap. With one it shows the name, "Other wallets can pay you at this name, in any amount
   they choose. A Sequentia wallet can pay it while this wallet is closed; other wallets, while it is
   open.", **Copy** and **Remove name**. A name is 3 to 32
   lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to 32 characters: lowercase
