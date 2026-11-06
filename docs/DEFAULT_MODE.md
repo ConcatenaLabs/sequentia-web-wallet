@@ -170,9 +170,31 @@ modes (`asset-picker.js`):
   asset of the operator's node (`lightning=`, the leaf library's `lightning_receive`), which a
   wallet of another operator pays in seconds; `amount=` is left out, since it counts BTC. Either
   invoice is claimed while the wallet is open, and a new one is made with the code. Without an
-  amount the code carries no invoice.
+  amount, a wallet with a payment name (below) carries that name in the code instead, as its
+  LNURL-pay (`lightning=LNURL1…`, the LUD-01 form of `https://<domain>/.well-known/lnurlp/<name>`),
+  which any Lightning wallet pays in an amount it chooses; a wallet without a name carries no
+  Lightning part. Readers take an LNURL in `lightning=` as the name it is, never as an invoice, so
+  a Sequentia wallet pays such a code at its other parts as it pays any code.
 - Buttons: **Copy receive code** (confirmation: "Receive code copied") and **New code**. The
   address alone is shown in developer mode.
+- **New code** moves the code to an address it has not shown, with a new receive request, ark
+  address and invoice. It starts from the first address neither chain has seen paid and goes
+  through the twenty after it, then begins again from the first: a wallet restored from its phrase
+  reads twenty addresses past the last one paid, so a payment to any code it ever showed is found.
+  The address shown is kept, so a reload shows the same code while it is unpaid; once it is paid,
+  the next code moves past it. Developer mode's **New address** follows the same rule
+  (`receive-index.js`).
+- **Confidential**, a switch under the buttons, off whenever Receive is opened: "Hides the asset
+  and amount of a payment from everyone but you and the payer." On, the code is the wallet's
+  confidential address alone (`tsqb1…`, as Sequentia wallets read any address), with no amount
+  field and no other part, and the line under the card reads "Any Sequentia asset, any amount,
+  paid to your confidential address."; under the switch: "Everyone can still see that a payment
+  was made. A payment that arrives in seconds is never confidential, so this one arrives after the
+  next block, in about a minute. BTC is never confidential: to receive BTC, turn this off." A
+  payment in seconds is never confidential because the operator publishes every leaf of a round
+  with its asset and value; BTC has no confidential form on Bitcoin. New code moves it to a new
+  address as it does the code. The same switch shows under the address while the wallet cannot
+  hold coins with the operator. Developer mode keeps its own address view.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server
   shows another key than the one pinned), the address is shown instead and nothing is said about
   why. The wallet tries again on its own, and once it can, the code takes the address's place on
@@ -257,6 +279,11 @@ modes (`asset-picker.js`):
     minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
     line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
     The sentence above is for when even that cannot be made.
+    A confidential address (`tsqb1…`, a confidential receive code) is paid on the chain, blinded,
+    since what is held for instant payments is never confidential: the amount and a margin for
+    its fee are moved to the wallet's own address first, saying "Moving <amount> <TICKER> out of
+    the Ark so it can be sent confidentially. They are ready in a few minutes. Keep this page
+    open.", and the payment is reviewed and made from there as any payment on the chain.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
