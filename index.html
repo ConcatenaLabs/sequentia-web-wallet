@@ -4058,7 +4058,7 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='codeUsed' || name==='channelsChanged'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='codeUsed' || name==='channelsChanged'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} try{ faucetArrived(data); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{ const j=await askFaucetFor(body); try{ markFaucet(); }catch{} return j; },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
@@ -9569,11 +9569,21 @@ async function askFaucetFor(body){
   const j=await r.json().catch(()=>({}));
   if(!r.ok){
     const e=new Error(j.error||('HTTP '+r.status));
+    e.status=r.status; e.reason=j.reason||null;
     if(faucetAlreadyPaid(r.status, j)){ e.alreadyPaid=true; _faucetClaimed.add(j.asset); }
     throw e;
   }
   _faucetClaimed.add(j.asset);
   return j;
+}
+// The faucet's coin the wallet had not taken in when the line last spoke: the line says Received
+// once it arrives (leafArrived), whichever read takes it in.
+let _faucetWaiting=null;
+function faucetArrived(data){
+  const w=_faucetWaiting;
+  if(!w || String(data&&data.asset||'').toLowerCase()!==w.hex) return;
+  _faucetWaiting=null;
+  const fs=$('faucetStatus'); if(fs){ fs.className='status ok'; fs.textContent=DEFAULT_WORDS.faucetReceived(w.what); }
 }
 async function requestFaucet(asset){
   const btns=[...document.querySelectorAll('#faucetBtns button')];
@@ -9581,21 +9591,34 @@ async function requestFaucet(asset){
   $('faucetStatus').className='status'; $('faucetStatus').innerHTML='<span class="spin"></span>Requesting from the faucet…';
   if(asset==='BTC'){ try{ await requestFaucetBtc(); }finally{ markFaucet(); } return; }
   // Default mode, coins in the tree: the faucet pays the wallet's receive code, which arrives in
-  // seconds; should it refuse that, the address, as before.
+  // seconds: the coin is in the wallet's mailbox once the faucet answers, and one mailbox read takes
+  // it in (never a whole sync). The code shown before is used at once; should the faucet refuse it
+  // (paid or lapsed meanwhile), a new one is asked for once. A faucet that is busy says so and is
+  // not asked for the address instead; any other refusal is, in the same click, as before.
   if(!devMode() && leavesApi && leavesApi.isOpen()){
     try{
-      const code=await leavesApi.receiveCode();
-      const body=asset?{request:code.text,asset}:{request:code.text};
-      let j;
-      try{ j=await askFaucetFor(body); }
-      catch(e){ if(e.alreadyPaid){ $('faucetStatus').className='status err'; $('faucetStatus').textContent=e.message; markFaucet(); return; } throw e; }
-      _recvCode=null;
+      const asked=Date.now();
+      let code, j, quick=true;
+      for(;;){
+        code=await leavesApi.receiveCode({quick});
+        try{ j=await askFaucetFor(asset?{request:code.text,asset}:{request:code.text}); break; }
+        catch(e){
+          if(e.alreadyPaid || e.reason==='busy'){ $('faucetStatus').className='status err'; $('faucetStatus').textContent=e.message; markFaucet(); return; }
+          if(quick && e.status===400){ leavesApi.forgetCode(code.owner); quick=false; continue; }
+          throw e;
+        }
+      }
+      leavesApi.forgetCode(code.owner); _recvCode=null;
       const what=`${Number(j.amount).toLocaleString()} ${j.asset}`;
+      const hex=String((j.leaf&&j.leaf.asset)||'').toLowerCase();
       // In the balance at once, as arriving, until the wallet has taken it in.
-      try{ if(j.leaf) leavesApi.expect(String(j.leaf.asset||'').toLowerCase(), j.leaf.atoms); }catch{}
+      try{ if(j.leaf) leavesApi.expect(hex, j.leaf.atoms, 10*60*1000); }catch{}
       $('faucetStatus').className='status ok'; $('faucetStatus').textContent=`Sent ${what} · arriving…`;
-      await leavesApi.syncNow();
-      $('faucetStatus').textContent=DEFAULT_WORDS.faucetReceived(what);
+      _faucetWaiting=null;
+      const got=await leavesApi.takeIn({ asset: hex, since: asked });
+      if(got) $('faucetStatus').textContent=DEFAULT_WORDS.faucetReceived(what);
+      else { $('faucetStatus').textContent=DEFAULT_WORDS.faucetOnItsWay(what); _faucetWaiting={ hex, what }; }
+      console.info(`[faucet] ${j.asset} to the receive code: ${got ? 'received' : 'still on its way'} ${((Date.now()-asked)/1000).toFixed(1)} s after the click`);
       renderBalance(); renderReceive();
       markFaucet();
       return;
