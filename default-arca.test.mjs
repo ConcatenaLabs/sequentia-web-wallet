@@ -121,6 +121,11 @@ test('an address is paid on the chain while the chain covers it, else out of the
   assert.equal(addressRoute(5n, 4n, 5n), 'tree')
   assert.equal(addressRoute(5n, 4n, 4n), null)
   assert.equal(addressRoute(5n, 0n, 0n), null)
+  // web wallet #572: the chain's coins cover the amount but not its fee, the tree covers it.
+  assert.equal(addressRoute(100n, 101n, 1000n, 3n), 'tree')
+  assert.equal(addressRoute(100n, 103n, 1000n, 3n), 'chain')
+  // Neither covers amount and fee: the chain is tried, as before.
+  assert.equal(addressRoute(100n, 101n, 50n, 3n), 'chain')
 })
 
 test('the arrival time is the operator\'s interval in whole minutes, or none', () => {

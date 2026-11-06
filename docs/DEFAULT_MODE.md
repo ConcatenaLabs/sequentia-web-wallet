@@ -273,8 +273,8 @@ modes (`asset-picker.js`):
   - "Part of this <TICKER> is still arriving: try again in a moment."
   - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
   - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
-    invoice." When the wallet's coins on the chain don't cover a payment to an address, it is
-    paid out of what the wallet holds for instant payments: the review is titled
+    invoice." When the wallet's coins on the chain don't cover a payment to an address with its
+    network fee, it is paid out of what the wallet holds for instant payments: the review is titled
     **Send <amount> <TICKER>?**, with "It arrives in a few minutes." (or "in about <N>
     minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
     line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
