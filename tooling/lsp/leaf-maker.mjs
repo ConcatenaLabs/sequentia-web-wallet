@@ -123,6 +123,12 @@ export const SYNC_ARGS = Object.freeze({ catch_up: false })
 // for one of the two at most, not for both. A library without the argument deposits in its sync,
 // and refuses the command (`no command`), which the upkeep passes over in silence.
 export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
+// The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS); each failure
+// logged, a library without the deposits command passed over in silence.
+export async function upkeepSync (cmd, log) {
+  try { await cmd('sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
+  try { await cmd('deposits') } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
+}
 export const HELD_COINS = Object.freeze({ held: true })
 
 // The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
@@ -707,8 +713,7 @@ async function main () {
   }
   async function tickOnce () {
     {
-      try { await cmd('sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
-      try { await cmd('deposits') } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
+      await upkeepSync(cmd, log)
       try { await spendable() } catch (e) { log('holdings:', e.message) }
       await readRoom()
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
