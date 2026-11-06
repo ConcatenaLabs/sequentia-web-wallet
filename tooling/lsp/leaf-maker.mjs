@@ -311,6 +311,33 @@ export function commandArgs (args, first) {
   return first ? { ...(args || {}), recheck: 'coins' } : (args || {})
 }
 
+// Every library command's time, summed up once a period (`times_seconds`, ten minutes) in one
+// line: `times {"<command>": {n, p50, p95, max, waited_max}, ...}` in milliseconds, where `waited`
+// is its time in the queue before it ran. What says how fast the maker answers below the five
+// seconds a `slow` line needs. -> { add(name, ms, waited), line() }: line() answers the period's
+// summary and starts the next, or null when no command ran.
+export const TIMES_SECONDS = 600
+export function commandTimes () {
+  let by = new Map()
+  const at = (v, q) => v[Math.min(v.length - 1, Math.max(0, Math.ceil(v.length * q) - 1))]
+  return {
+    add (name, ms, waited = 0) {
+      const e = by.get(name) || { ms: [], waited: 0 }
+      e.ms.push(ms); e.waited = Math.max(e.waited, waited); by.set(name, e)
+    },
+    line () {
+      if (!by.size) return null
+      const out = {}
+      for (const [name, e] of [...by].sort(([x], [y]) => (x < y ? -1 : 1))) {
+        const v = e.ms.slice().sort((x, y) => x - y)
+        out[name] = { n: v.length, p50: at(v, 0.5), p95: at(v, 0.95), max: v[v.length - 1], waited_max: e.waited }
+      }
+      by = new Map()
+      return 'times ' + JSON.stringify(out)
+    },
+  }
+}
+
 // The forfeits of every round the operator holds for them, handed over ahead of the queue on a
 // timer of their own (`forfeit_seconds`): the operator broadcasts a round built without a sweep
 // only once every participation in it has handed its forfeits over, and drops it, voiding the
@@ -446,7 +473,12 @@ async function main () {
   // taker's acceptance or a firm offer goes ahead of the maker's own upkeep.
   // A command slower than five seconds is logged by name: the upkeep's long ones are what a
   // firm offer waits behind.
-  const lib = await leafLibraryThread(cfg.store_dir, { onSlow: (name, ms, detail) => log('slow', name, ms, 'ms', detail ? JSON.stringify(detail) : '') })
+  const times = commandTimes()
+  const lib = await leafLibraryThread(cfg.store_dir, {
+    onSlow: (name, ms, detail) => log('slow', name, ms, 'ms', detail ? JSON.stringify(detail) : ''),
+    onTime: (name, ms, waited) => times.add(name, ms, waited),
+  })
+  setInterval(() => { const l = times.line(); if (l) log(l) }, (cfg.times_seconds ?? TIMES_SECONDS) * 1000).unref()
   const w = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, nodePassword) : await lib.create(mnemonic, {
     server: op.server, node_url: op.node_url, node_user: op.node_user, node_password: nodePassword,
     ...(cfg.exit_delay_units ? { exit_delay_units: cfg.exit_delay_units } : {}),

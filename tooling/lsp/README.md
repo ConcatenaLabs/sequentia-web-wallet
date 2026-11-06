@@ -292,9 +292,15 @@ feed's mid has moved to within `rest.guard_bps` of. Every command slower than
 five seconds is logged (`slow <command> <ms> ms {detail}`), which names what a slow firm offer
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the
-milliseconds each part of that re-check took, and for a sync what each of its steps cost.
+milliseconds each part of that re-check took, and for a sync what each of its steps cost. A part
+or step that asked the node more than fifty reads one at a time names them by method (`alone`), a
+command says how long it waited for the operator's answers (`operator_ms`), and a sync step over
+a second says it too, by call (`operator_calls`, `[count, ms]`).
 Each firm offer it makes is logged with the time from the request to the answer
 (`firm <swap> gives … for … in <ms> ms`), so its firm offers' latency is read from the journal.
+Every ten minutes (`times_seconds`) one line sums up every command it ran in that time, fast or
+slow: `times {"<command>": {"n", "p50", "p95", "max", "waited_max"}}`, in milliseconds, where
+`waited_max` is the longest a command of that name waited in the queue before it ran.
 
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json --init   # once: draws its phrase
     node tooling/lsp/leaf-maker.mjs --config /etc/leaf-maker/maker.json
