@@ -184,8 +184,9 @@ modes (`asset-picker.js`):
   The address shown is kept, so a reload shows the same code while it is unpaid; once it is paid,
   the next code moves past it. Developer mode's **New address** follows the same rule
   (`receive-index.js`).
-- **Confidential**, a switch under the buttons, off whenever Receive is opened: "Hides the asset
-  and amount of a payment from everyone but you and the payer." On, the code is the wallet's
+- **Confidential**, a switch under the buttons, off whenever Receive is opened: "Asks the payer
+  to hide the amount, and the asset where it can, from everyone but you and them." It asks: what
+  is hidden is made by the payer's wallet (a Concatena wallet pays it as under Send, below). On, the code is the wallet's
   confidential address alone (`tsqb1…`, as Sequentia wallets read any address), with no amount
   field and no other part, and the line under the card reads "Any Sequentia asset, any amount,
   paid to your confidential address."; under the switch: "Everyone can still see that a payment
@@ -285,14 +286,6 @@ modes (`asset-picker.js`):
     minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
     line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
     The sentence above is for when even that cannot be made.
-    A confidential address (`tsqb1…`, a confidential receive code) is paid on the chain, blinded,
-    since what is held for instant payments is never confidential: the amount and a margin for
-    its fee are moved to the wallet's own address first, saying "Moving <amount> <TICKER> out of
-    the Ark so it can be sent confidentially. They are ready in a few minutes. Keep this page
-    open.", and the payment is reviewed and made from there as any payment on the chain.
-    The review of any payment to a confidential address says "This payment’s amount and asset
-    can still be worked out by anyone reading the chain.": its inputs and its change are in the
-    clear, so its amount and asset follow from them.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
@@ -304,13 +297,44 @@ modes (`asset-picker.js`):
   - "This wallet is out of date for this: update it, then try again. Nothing was taken." when
     the operator declines a payment or a settlement because the wallet needs updating.
 
+- A confidential address (`tsqb1…`, a confidential receive code), paid on its own, is paid on the
+  chain so that its amount is hidden (`confidential-pay.js`). A blinded output alone hides
+  nothing when every other value is in the clear, so the payment comes with a second blinded
+  output, to the wallet's own confidential address, which takes what the inputs hold beyond the
+  payment and its fee; anyone reading the chain learns only the two together, and the wallet's
+  share stays in its balance as a confidential coin.
+  - What is held for instant payments is never confidential, and is paid out only in the clear.
+    When the chain holds too little, the wallet first moves coins out to its own address, in an
+    amount that does not give the payment away: all it holds of the asset there, or the smallest
+    power of ten above what the payment needs (at least one whole unit), whichever is smaller
+    (never less than the operator's smallest coin of the asset). It says "Moving <amount>
+    <TICKER> out of the Ark so it can be sent confidentially. They are ready in a few minutes.
+    Keep this page open." and the review opens once they are there, in about three minutes: one
+    settlement of the operator's and its payout on the chain, and no confirmation more. A move
+    already under way is waited for, never asked twice, so Review pressed again (the browser
+    extension's popup closed and opened again) goes on waiting for it. When the move cannot be
+    made, one of the sentences under "Stake, pools and Mix" says why and nothing moves; a coin
+    just received that cannot be paid out yet says "Part of this <TICKER> is still arriving: try
+    again in a moment."
+  - The asset is hidden only among the assets of the inputs. When the wallet holds a confidential
+    coin of another asset (not the Sequence token, which may be staked), it is spent to the
+    wallet's own confidential address in the same transaction, and the review says "Anyone
+    reading the chain can see that a payment was made, but not its asset or amount."; otherwise
+    "Anyone reading the chain can see that this payment is <TICKER>, but not how much."
+  - When what the wallet holds leaves too little beside the payment to hide it (its fee margin
+    or less), the payment is still offered, and the review says "This payment’s amount and asset
+    can still be worked out by anyone reading the chain." So does the review of a payment with a
+    confidential address among several recipients, which is built as any other.
+  - BTC is never confidential: a `tsqb1…` address takes Sequentia assets only.
+
 ## Stake, pools and Mix
 
 - A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain, and
   default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
   Ark to its own address by itself (never less than the operator's smallest coin of the asset),
   and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
-  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"). Once it
+  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"; Ambra
+  mobile says "Keep this screen open."). Once it
   has arrived the usual review opens; nothing is signed before it.
 - When the operator cannot pay that much on the chain now (its published `fundable`, against
   the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be

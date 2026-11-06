@@ -293,7 +293,10 @@ payment is within the limit the operator publishes for one payment out over its 
 (`max_payment`; 1,500 USD when it publishes none, `SEQ_LN_FALLBACK_USD`) (`asset-lightning.js`), else at the code's address on the chain; a payment name of this site at
 the receive code its wallet gives, and one of another service in BTC at the invoice it makes for
 the amount; and everything else as it always has; an address the chain's coins cannot cover is paid out of the tree in the operator's
-next settlement (the library's `offboard`), its fee and arrival shown first. The open page reads
+next settlement (the library's `offboard`), its fee and arrival shown first. A confidential
+address is paid on the chain with a second blinded output to the wallet's own confidential
+address beside the payment, so its amount is hidden, after moving a round amount out of the Ark
+when the chain holds too little (`confidential-pay.js`, docs/DEFAULT_MODE.md). The open page reads
 the wallet's mailbox every few seconds, so a payment to its receive code shows as soon as the
 library has taken it. Where the operator makes channel leaves, a payment between two such
 wallets arrives at once instead (below, Payments that arrive at once). The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
