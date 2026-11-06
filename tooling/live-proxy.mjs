@@ -22,6 +22,7 @@ import { createServer } from 'node:http'
 import { readFileSync, existsSync, statSync } from 'node:fs'
 import { join, extname, dirname, resolve, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdirSync } from 'node:fs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const arg = (name, dflt) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : dflt }
@@ -47,6 +48,15 @@ const origin = arg('--origin', 'https://sequentiatestnet.com').replace(/\/+$/, '
 // `max_payment` and `payment_limit`), as an operator that publishes none answers: how the page's
 // fallback for an unknown limit (SEQ_LN_FALLBACK_USD) is seen live.
 //
+// --lnaddr <dir>: the payment name service (tooling/lsp/lnaddr.mjs) of this checkout answers here
+// instead of the testnet's, its names and stocks kept in <dir>: `/lsp/lnaddr/…` and
+// `/.well-known/lnurlp/…`, and the page is served with SEQ_LSP_URL pointing at this proxy (whose
+// other `/lsp/…` calls go on to the testnet). How a change to the name service is seen with the
+// page before either is deployed. --lnaddr-forge <file>: while that file exists, a payer's lookup
+// (`GET /lsp/lnaddr/<name>`) is answered with the code's address swapped for another, the
+// signature kept, as a service broken into would hand out an address of its own; with `key` in the
+// file, the code is instead signed by a key of the proxy's own, published as the name's key.
+//
 // --cors: every answer allows any origin, and a preflight is answered here, so a wallet on
 // another origin (a browser extension joined to http://127.0.0.1:<port>/arca with the node at
 // /node-rpc) reaches the testnet through this proxy, and through its --refuse.
@@ -66,6 +76,13 @@ function withoutCapacity (buf) {
     return Buffer.from(JSON.stringify(j))
   } catch { return buf }
 }
+const lnaddrDir = arg('--lnaddr', '') ? resolve(arg('--lnaddr', '')) : null
+const lnaddrForge = arg('--lnaddr-forge', '')
+let lnaddr = null
+const LSP_LINE = /window\.SEQ_LSP_URL\s*=\s*'[^']*';/
+// The forger's own key and address (none of anyone's wallets).
+const FORGED_ADDRESS = 'tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7'
+const FORGER_KEY = Uint8Array.from({ length: 32 }, (_, i) => i + 1)
 const refuseStatus = Number(arg('--refuse-status', '0'))
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'access-control-allow-headers': 'content-type, authorization' }
@@ -108,10 +125,20 @@ const server = createServer(async (req, res) => {
     return
   }
   if (cors && req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return }
+  if (lnaddr && (url.pathname.startsWith('/lsp/lnaddr/') || url.pathname.startsWith('/.well-known/lnurlp/'))) {
+    // With --cors, the wallet's own calls (register, stock, wait) are answered to any origin too.
+    if (cors) { const wh = res.writeHead.bind(res); res.writeHead = (st, h = {}) => wh(st, { ...h, ...CORS }) }
+    const inner = new URL(url.pathname.replace(/^\/lsp/, '') + url.search, 'http://x')
+    const m = /^\/lnaddr\/([^/-][^/]*)$/.exec(inner.pathname)
+    if (m && req.method === 'GET' && lnaddrForge && existsSync(lnaddrForge)) return forged(req, res, inner)
+    if (await lnaddr.handle(req, res, inner)) return
+  }
   const f = local(url.pathname)
   if (f) {
     res.writeHead(200, { 'content-type': types[extname(f)] || 'application/octet-stream', 'cache-control': 'no-store' })
-    res.end(readFileSync(f))
+    let body = readFileSync(f)
+    if (lnaddr && f === join(root, 'index.html')) body = body.toString().replace(LSP_LINE, `window.SEQ_LSP_URL = 'http://127.0.0.1:${port}/lsp';`)
+    res.end(body)
     return
   }
   try {
@@ -140,5 +167,35 @@ const server = createServer(async (req, res) => {
     try { if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' }); res.end('live-proxy: ' + (e && e.message)) } catch {}
   }
 })
-server.listen(port, '127.0.0.1', () => console.log(`serving http://127.0.0.1:${server.address().port}/wallet/` +
+// A lookup answered as a service broken into would answer it (--lnaddr-forge).
+async function forged (req, res, inner) {
+  const { readPayCode, buildPayCode } = await import('../pay-code.js')
+  const { signCode } = await import('../lnaddr.js')
+  const { schnorr } = await import('../btc.js')
+  const cap = { status: 0, body: null }
+  const fake = { writeHead (st) { cap.status = st }, end (b) { cap.body = b }, on () {}, headersSent: false }
+  await lnaddr.handle(req, fake, inner)
+  let j = null; try { j = JSON.parse(String(cap.body)) } catch {}
+  if (j && j.code) {
+    const c = readPayCode(j.code)
+    const theirs = buildPayCode({ address: FORGED_ADDRESS, ark: c.ark || undefined, sequentia: c.sequentia || undefined })
+    if (String(readFileSync(lnaddrForge)).includes('key')) {
+      const name = decodeURIComponent(inner.pathname.split('/').pop()).toLowerCase()
+      Object.assign(j, signCode(FORGER_KEY, 'sequentiatestnet.com', name, theirs), { pubkey: Buffer.from(schnorr.getPublicKey(FORGER_KEY)).toString('hex') })
+    } else j.code = theirs
+    console.log(`${new Date().toISOString()} forged ${inner.pathname}`)
+  }
+  const out = JSON.stringify(j)
+  res.writeHead(cap.status || 200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(out)
+}
+
+server.listen(port, '127.0.0.1', async () => {
+  if (lnaddrDir) {
+    mkdirSync(lnaddrDir, { recursive: true })
+    const { makeLnaddr } = await import('./lsp/lnaddr.mjs')
+    const p = server.address().port
+    lnaddr = makeLnaddr({ domain: 'sequentiatestnet.com', base: `http://127.0.0.1:${p}/lsp`, storePath: join(lnaddrDir, 'lnaddr-names.json'),
+      netBurst: 200, netEveryMs: 500, log: (...a) => console.log(...a) })
+  }
+}).on('listening', () => console.log(`serving http://127.0.0.1:${server.address().port}/wallet/` +
   (refused.length ? `, refusing ${refused.join(', ')}` : '') + (stripCapacity ? ', the operator\'s capacity left out' : '')))

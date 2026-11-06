@@ -179,9 +179,13 @@ Root is flat: production modules and tests sit side by side.
   Lightning address (LNURL-pay). The name is held by a BIP340 key of the phrase (`NAME_KEY_PATH`),
   and every message to the service is signed over `signedDigest` (action, domain, name, request),
   so the service only relays what the wallet signed and checks an invoice's amount before a payer
-  sees it. While the page is open it keeps one held request (`wait`) with the service and answers
-  with an invoice of the Bitcoin ark or a new receive code. Send resolves a name before routing
-  (`resolveLnAddress`): ours to its receive code, another service's to its invoice, BTC only.
+  sees it. While the page is open it keeps one held request (`wait`) with the service, answers
+  with an invoice of the Bitcoin ark, and tops up the stock of signed receive codes it leaves
+  there (`name-stock.js`: every address inside the window `receive-index.js` keeps, so a restore
+  finds every payment). Send resolves a name before routing (`resolveLnAddress`): ours to a signed
+  code, refused unless it verifies against the name's key and the key the payer kept from paying the
+  name before (`namePins` in `index.html`); another service's to its invoice, BTC only. Default
+  mode's Receive shows the name as the QR code (`nameQrText`) when the wallet has one.
 - `instant-history.js` — History's rows for what is paid and received in seconds and for the Trade
   tab's trades: a per-wallet log the page writes as payments happen (`leafArrived`, `payCode`,
   `offboard`), merged with the composer's own trade records, never copied from them.
