@@ -27,8 +27,15 @@ export const METHODS = ['getCapabilities', 'getWalletMode', 'getLeafBalances', '
 export const EVENTS = ['modeChanged', 'leafArrived', 'leafSyncDue']
 export const PROVIDER = 'sequentia-web-wallet'
 // What a site of this origin may ask over the channel (docs/PAGE_API.md).
-export const SITE_METHODS = ['getCapabilities', 'getWalletMode', 'connect', 'getAccounts', 'getBalances', 'placeOrder', 'getOrders', 'cancelOrder']
-const siteName = (page) => (/\/dex\//.test(page) ? 'SeqDEX' : 'This site')
+export const SITE_METHODS = ['getCapabilities', 'getWalletMode', 'connect', 'getAccounts', 'getBalances', 'placeOrder', 'getOrders', 'cancelOrder', 'signMessage']
+// The sites of this origin, named in the dialogs by the path they are served at.
+const SITE_NAMES = [[/\/dex\//, 'SeqDEX'], [/\/emissio\//, 'Emissio']]
+const siteName = (page) => (SITE_NAMES.find(([re]) => re.test(page)) || [null, 'This site'])[1]
+// What a message to sign may hold: one line of text a person can read whole in the dialog. Control
+// characters, line breaks and the marks that reorder text are refused, so what is shown is what is
+// signed.
+export const MESSAGE_MAX = 1000
+const MESSAGE_BAD = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -43,7 +50,9 @@ const HEX64 = /^[0-9a-f]{64}$/
 //   channel     a BroadcastChannel-like; optional (made from win)
 //   site        what a site of this origin may reach once its owner connects it; optional:
 //               { unlocked() -> bool, account() -> { network, address }, balances() -> getBalances'
-//               answer, orders (site-orders.js makeSiteOrders), attention() (bring this page forward) }
+//               answer, orders (site-orders.js makeSiteOrders), attention() (bring this page forward),
+//               signMessage(message) -> { address, signature } (the Sign tab's signature, by the key
+//               of the address account() names) }
 export function mountPageApi (ctx) {
   const { leaves } = ctx
   const listeners = new Map()
@@ -236,7 +245,7 @@ export function mountPageApi (ctx) {
     const isConnected = () => connected.has(pageKey)
     switch (method) {
       case 'getCapabilities':
-        return { provider: PROVIDER, methods: SITE_METHODS, events: ['accountsChanged', 'modeChanged'], features: ['orders', 'balances-total', ...ORDER_FEATURES] }
+        return { provider: PROVIDER, methods: SITE_METHODS, events: ['accountsChanged', 'modeChanged'], features: ['orders', 'balances-total', 'sign-message', ...ORDER_FEATURES] }
       case 'getWalletMode':
         return { mode: leaves.mode() }
       case 'getAccounts':
@@ -250,6 +259,23 @@ export function mountPageApi (ctx) {
           connected.add(pageKey)
           return site.account()
         })
+      case 'signMessage': {
+        // Its own dialog is the approval, so it needs no connection first: it shows the site, the
+        // exact message and the address, and a signed message proves control of the address and
+        // nothing else (the "Bitcoin Signed Message" hash is no transaction's).
+        const message = params.message
+        if (typeof message !== 'string' || !message.trim()) throw new Error('message is required')
+        if (message.length > MESSAGE_MAX || MESSAGE_BAD.test(message)) throw new Error('message must be one line of text of at most ' + MESSAGE_MAX + ' characters')
+        if (!site.unlocked()) throw new Error('the wallet is locked; unlock it in its own page first')
+        if (typeof site.signMessage !== 'function') throw new Error('this wallet page does not sign messages')
+        return oneAtATime(async () => {
+          site.attention && site.attention()
+          const name = siteName(pageKey)
+          await approved({ title: 'Sign a message for ' + name + '?', text: 'This proves the wallet is yours. It moves no coins.',
+            rows: [['Site', pageKey], ['Message', message], ['Signed by', site.account().address]] })
+          return await site.signMessage(message)
+        })
+      }
     }
     if (!isConnected()) throw new Error('this site is not connected; call connect first')
     if (!site.unlocked()) throw new Error('the wallet is locked; unlock it in its own page first')

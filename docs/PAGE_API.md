@@ -114,12 +114,23 @@ answers and refusals:
 | `placeOrder({ type, base, quote, side, amount, price?, post_only?, rest?, min_fill?, take_back_after? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |
 | `getOrders()` | silent | `{ orders, trades }` |
 | `cancelOrder({ order })` | this page's dialog | `{ order, txid }` |
+| `signMessage({ message })` | this page's dialog: "Sign a message for Emissio?" | `{ address, signature }`: the Sign tab's signature ("Bitcoin Signed Message", base64), by the key of the shared `tb1` address |
 
 A connection lasts while the wallet page is open, for the site's page (its address without the
-query). Until then every method but the first three refuses with
+query). Until then every method but the first three and `signMessage` refuses with
 `this site is not connected; call connect first`; a declined dialog refuses with
 `the user rejected the request`. One dialog shows at a time, and the page asks the browser to bring
 it forward.
+
+`signMessage` needs no connection: its dialog is the approval, and shows the site, the exact
+message and the address that signs it, under "This proves the wallet is yours. It moves no
+coins." A message is one line of text of at most 1,000 characters; one with a line break, a
+control character or a mark that reorders text is refused with `message must be one line of text
+of at most 1000 characters`, so the dialog always shows the whole of what is signed. The
+signature is over the "Bitcoin Signed Message" hash of the text, which is no transaction's
+signature hash, so it proves control of the address and authorises nothing else. Signing
+connects nothing: `getAccounts` still answers `[]` until `connect`. `signMessage` is a method of the provider protocol (the browser extension's `doc/PROVIDER.md`),
+and these are its rules in every wallet that serves it.
 
 `placeOrder` settles as the Trade tab does (`site-orders.js`): a market order is one trade of the
 user composer's engine, priced and settled from the wallet's leaves or on-chain coins; a limit

@@ -4088,6 +4088,14 @@ function siteDeps(){
   return {
     unlocked: ()=> !!wollet,
     account: ()=>{ const a = wollet.address(addrIndex == null ? undefined : addrIndex).address(); return { network: 'sequentia-testnet', address: (a.toUnconfidential ? a.toUnconfidential() : a).toString() }; },
+    // The Sign tab's signature ("Bitcoin Signed Message"), by the key of the address account() names.
+    signMessage: async (message)=>{
+      if(!btcRoot) throw new Error('the wallet is locked; unlock it in its own page first');
+      const r = wollet.address(addrIndex == null ? undefined : addrIndex), i = r.index();
+      const a = r.address(), address = (a.toUnconfidential ? a.toUnconfidential() : a).toString();
+      if(btcAddr(false, i) !== address) throw new Error('this wallet cannot sign for its address');
+      return { address, signature: signMessage(btcNode(false, i).privateKey, message) };
+    },
     balances: async ()=>{
       initUserComposer();
       const leaves = {};

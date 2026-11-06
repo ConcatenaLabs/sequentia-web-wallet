@@ -578,6 +578,16 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   sell, For, Price, Smallest part filled, Fees, What is left can be taken back from, Asked by),
   and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
   request".
+- A site that only needs to know the wallet is yours (Emissio, to link a wallet to an account)
+  asks it to sign a message instead, with no connection: **Connect your web wallet** on the site
+  (**Connect your wallet** where it offers more than one), then in the wallet **Sign a message for
+  <site>?**, "This proves the wallet is yours. It moves no coins.", the rows Site, Message (the
+  exact text) and Signed by (the wallet's address), and **Approve** or **Reject**. The site says,
+  while it waits, "Approve in your wallet."; when the web wallet is not open, it opens it and
+  says "Your web wallet is opening in a new tab. Unlock it there, then press Connect again.";
+  when the person rejects, "You declined in the wallet. Nothing was linked."; and when the wallet
+  is locked, "Unlock your wallet, then press Connect again." The site keeps the Sign tab's way
+  beside the button, for a wallet that is not in this browser.
 
 ## Report a problem
 

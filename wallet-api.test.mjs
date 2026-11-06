@@ -166,3 +166,44 @@ test('a site over the channel: connects and trades only with the owner’s appro
   assert.equal(a.result.trade, 't1'); assert.deepEqual(orders.confirmed, ['q1'])
   assert.equal(shown.length, 4)
 })
+
+// A site asks the wallet to sign a message: its own dialog shows the site, the exact message and
+// the address, with no connection needed first; what cannot be shown whole is refused.
+test('a site over the channel: signMessage behind its own dialog, and only a readable line', async () => {
+  const L = fakeLeaves({ mode: 'user' })
+  const posted = []
+  const ch = { postMessage: (m) => posted.push(m), onmessage: null }
+  const shown = []
+  let approve = true, unlocked = true
+  const signed = []
+  const site = { unlocked: () => unlocked, account: () => ({ network: 'sequentia-testnet', address: 'tb1qx' }),
+    signMessage: async (m) => { signed.push(m); return { address: 'tb1qx', signature: 'SIG' } } }
+  mountPageApi({ leaves: L, assetMeta: () => ({}), fmtAtoms: String, confirm: async (d) => { shown.push(d); return approve }, channel: ch, site })
+  const ask = async (msg) => { const n = posted.length; ch.onmessage({ data: msg }); for (let i = 0; i < 50 && posted.length === n; i++) await new Promise((r) => setTimeout(r, 1)); return posted[posted.length - 1] }
+  ch.onmessage({ data: { type: 'hello', from: 's2' } })
+  const W = posted.pop().wallet
+  const page = 'https://sequentiatestnet.com/emissio/tasks/link-web-wallet'
+  const sign = (id, message) => ask({ type: 'request', id, from: 's2', wallet: W, page, method: 'signMessage', params: { message } })
+  let a = await ask({ type: 'request', id: 1, from: 's2', wallet: W, page, method: 'getCapabilities' })
+  assert.ok(a.result.methods.includes('signMessage')); assert.ok(a.result.features.includes('sign-message'))
+  for (const bad of ['', '   ', 'two\nlines', 'tab\there', 'a‮b', 'x'.repeat(1001), 42]) {
+    a = await sign(2, bad)
+    assert.equal(a.ok, false, JSON.stringify(bad)); assert.match(a.error, /message/)
+  }
+  assert.equal(shown.length, 0)
+  approve = false
+  a = await sign(3, 'Emissio 0123456789')
+  assert.equal(a.error, 'the user rejected the request'); assert.deepEqual(signed, [])
+  assert.equal(shown[0].title, 'Sign a message for Emissio?')
+  assert.equal(shown[0].text, 'This proves the wallet is yours. It moves no coins.')
+  assert.deepEqual(shown[0].rows, [['Site', page], ['Message', 'Emissio 0123456789'], ['Signed by', 'tb1qx']])
+  approve = true
+  a = await sign(4, 'Emissio 0123456789')
+  assert.deepEqual(a.result, { address: 'tb1qx', signature: 'SIG' }); assert.deepEqual(signed, ['Emissio 0123456789'])
+  // Signing connects nothing: the site still sees no account and no balances.
+  a = await ask({ type: 'request', id: 5, from: 's2', wallet: W, page, method: 'getAccounts' })
+  assert.deepEqual(a.result, { accounts: [] })
+  unlocked = false
+  a = await sign(6, 'Emissio 0123456789')
+  assert.match(a.error, /locked/); assert.equal(shown.length, 2)
+})
