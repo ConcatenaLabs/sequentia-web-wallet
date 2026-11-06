@@ -578,6 +578,11 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   sell, For, Price, Smallest part filled, Fees, What is left can be taken back from, Asked by),
   and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
   request".
+- A site that fills an address field from the wallet (Compages) offers **Use my Sequentia wallet**
+  beside the field and connects as above ("Connect Compages?"); the wallet's address fills the
+  field, for Sequentia assets and BTC alike. When the web wallet is not open, the site opens it
+  and says "Your web wallet is opening in a new tab. Unlock it there, then press the button
+  again."; a rejection reads "You declined in the wallet. Nothing was filled."
 - A site that only needs to know the wallet is yours (Emissio, to link a wallet to an account)
   asks it to sign a message instead, with no connection: **Connect your web wallet** on the site
   (**Connect your wallet** where it offers more than one), then in the wallet **Sign a message for

@@ -29,7 +29,7 @@ export const PROVIDER = 'sequentia-web-wallet'
 // What a site of this origin may ask over the channel (docs/PAGE_API.md).
 export const SITE_METHODS = ['getCapabilities', 'getWalletMode', 'connect', 'getAccounts', 'getBalances', 'placeOrder', 'getOrders', 'cancelOrder', 'signMessage']
 // The sites of this origin, named in the dialogs by the path they are served at.
-const SITE_NAMES = [[/\/dex\//, 'SeqDEX'], [/\/emissio\//, 'Emissio']]
+const SITE_NAMES = [[/\/dex\//, 'SeqDEX'], [/\/emissio\//, 'Emissio'], [/\/bridge\//, 'Compages']]
 const siteName = (page) => (SITE_NAMES.find(([re]) => re.test(page)) || [null, 'This site'])[1]
 // What a message to sign may hold: one line of text a person can read whole in the dialog. Control
 // characters, line breaks and the marks that reorder text are refused, so what is shown is what is
