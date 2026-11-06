@@ -588,6 +588,17 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   when the person rejects, "You declined in the wallet. Nothing was linked."; and when the wallet
   is locked, "Unlock your wallet, then press Connect again." The site keeps the Sign tab's way
   beside the button, for a wallet that is not in this browser.
+- A site that builds its own transactions (Pignus, for loans) connects the same way ("Connect
+  Pignus?", "Pignus wants to see your address and balances, and to ask you to sign what you
+  borrow, lend and repay there. Each transaction is shown here for you to approve."). Each
+  transaction then shows **Sign a transaction for <site>?**, "<site> built this transaction. This
+  is what it does to your wallet; approve it only if it is what you asked for there.", the rows
+  **You pay**, **You receive**, **Network fee** and **Asked by**, and **Approve** or **Reject**.
+  When it needs coins on the chain that the wallet holds in the Ark, it first asks **Get coins
+  ready for <site>?**, "<site> needs coins on the chain for what you asked there. The wallet moves
+  them to your own address; they stay yours, and only the fee for the move is paid.", with
+  **Moves**, **Fee for the move** and **Asked by**; once approved, the wallet says "Moving
+  <amount> <TICKER> out of the Ark so it can be used on <site>." while it waits, as Stake does.
 
 ## Report a problem
 

@@ -18,6 +18,7 @@
 
 import { readRequest, planSend, leafBalancesAnswer } from './leaf-request.js'
 import { ORDER_FEATURES } from './site-orders.js'
+import { describeTransparent } from './pset-bytes.js'
 
 export const CHANNEL = 'sequentia-wallet'
 export const NOT_DEVELOPER = 'leaves are a developer-mode rail: turn developer mode on in the wallet’s Settings'
@@ -28,9 +29,37 @@ export const EVENTS = ['modeChanged', 'leafArrived', 'leafSyncDue']
 export const PROVIDER = 'sequentia-web-wallet'
 // What a site of this origin may ask over the channel (docs/PAGE_API.md).
 export const SITE_METHODS = ['getCapabilities', 'getWalletMode', 'connect', 'getAccounts', 'getBalances', 'placeOrder', 'getOrders', 'cancelOrder', 'signMessage']
-// The sites of this origin, named in the dialogs by the path they are served at.
-const SITE_NAMES = [[/\/dex\//, 'SeqDEX'], [/\/emissio\//, 'Emissio']]
-const siteName = (page) => (SITE_NAMES.find(([re]) => re.test(page)) || [null, 'This site'])[1]
+// What a site that builds its own transactions may also ask (a lending site: Pignus), served by a
+// wallet page that can sign them: its network, its address and coins on the chain, a transaction
+// the site composed signed behind this page's dialog, the broadcast, and coins moved onto the
+// chain for such a transaction.
+export const PSET_METHODS = ['getNetwork', 'getAddress', 'getUtxos', 'signPset', 'broadcast', 'prepareCoins']
+// The sites of this origin, named in the dialogs by the path they are served at, with what their
+// connection is for.
+const SITE_NAMES = [
+  [/\/dex\//, 'SeqDEX', 'to ask you to trade. Each trade is shown here for you to approve.'],
+  [/\/emissio\//, 'Emissio', 'to ask you to trade. Each trade is shown here for you to approve.'],
+  [/\/lending\//, 'Pignus', 'to ask you to sign what you borrow, lend and repay there. Each transaction is shown here for you to approve.'],
+]
+const siteEntry = (page) => SITE_NAMES.find(([re]) => re.test(page)) || [null, 'This site', 'to ask you to approve what you do there. Each request is shown here for you to approve.']
+const siteName = (page) => siteEntry(page)[1]
+// The words of a site's transaction in this page's dialog (docs/DEFAULT_MODE.md, Connect).
+export const PSET_WORDS = Object.freeze({
+  title: (name) => 'Sign a transaction for ' + name + '?',
+  text: (name) => name + ' built this transaction. This is what it does to your wallet; approve it only if it is what you asked for there.',
+  youPay: 'You pay',
+  youReceive: 'You receive',
+  fee: 'Network fee',
+  feeNotYours: ', paid by the transaction, not from your coins',
+  askedBy: 'Asked by',
+  nothingOfYours: 'this wallet holds none of the inputs in that transaction',
+  unreadable: 'this wallet cannot read that transaction, so it signs nothing',
+  blinded: 'that transaction spends a confidential coin of this wallet; a site’s transaction spends coins in the clear only',
+  moveTitle: (name) => 'Get coins ready for ' + name + '?',
+  moveText: (name) => name + ' needs coins on the chain for what you asked there. The wallet moves them to your own address; they stay yours, and only the fee for the move is paid.',
+  move: 'Moves',
+  moveFee: 'Fee for the move',
+})
 // What a message to sign may hold: one line of text a person can read whole in the dialog. Control
 // characters, line breaks and the marks that reorder text are refused, so what is shown is what is
 // signed.
@@ -244,10 +273,16 @@ export function mountPageApi (ctx) {
     const pageKey = page.replace(/[?#].*$/, '')
     const isConnected = () => connected.has(pageKey)
     switch (method) {
-      case 'getCapabilities':
-        return { provider: PROVIDER, methods: SITE_METHODS, events: ['accountsChanged', 'modeChanged'], features: ['orders', 'balances-total', 'sign-message', ...ORDER_FEATURES] }
+      case 'getCapabilities': {
+        const psets = typeof site.signPset === 'function'
+        return { provider: PROVIDER, methods: psets ? [...SITE_METHODS, ...PSET_METHODS] : SITE_METHODS, events: ['accountsChanged', 'modeChanged'],
+          features: ['orders', 'balances-total', 'sign-message', ...(psets ? ['pset-site-built', 'prepare-coins'] : []), ...ORDER_FEATURES] }
+      }
       case 'getWalletMode':
         return { mode: leaves.mode() }
+      case 'getNetwork':
+        if (typeof site.network !== 'function') break
+        return site.network()
       case 'getAccounts':
         return { accounts: isConnected() && site.unlocked() ? [site.account()] : [] }
       case 'connect':
@@ -255,7 +290,7 @@ export function mountPageApi (ctx) {
         if (isConnected()) return site.account()
         return oneAtATime(async () => {
           site.attention && site.attention()
-          await approved({ title: 'Connect ' + siteName(pageKey) + '?', text: siteName(pageKey) + ' wants to see your address and balances, and to ask you to trade. Each trade is shown here for you to approve.', rows: [['Site', pageKey]] })
+          await approved({ title: 'Connect ' + siteName(pageKey) + '?', text: siteName(pageKey) + ' wants to see your address and balances, and ' + siteEntry(pageKey)[2], rows: [['Site', pageKey]] })
           connected.add(pageKey)
           return site.account()
         })
@@ -299,9 +334,92 @@ export function mountPageApi (ctx) {
           if (!(await confirm(q.display))) throw new Error('the user rejected the request')
           return await site.orders.confirmCancel(q.id)
         })
-      default:
-        throw new Error('unknown method: ' + method)
     }
+    if (typeof site.signPset !== 'function') throw new Error('unknown method: ' + method)
+    switch (method) {
+      case 'getAddress':
+        return await site.address()
+      case 'getUtxos': {
+        const a = params.asset == null || params.asset === '' ? null : String(params.asset).toLowerCase()
+        if (a !== null && !HEX64.test(a)) throw new Error('asset must be a 64-hex asset id')
+        const utxos = await site.utxos()
+        return { utxos: a ? utxos.filter((u) => u.asset === a) : utxos }
+      }
+      case 'signPset': {
+        const pset = String(params.pset ?? '')
+        if (!pset) throw new Error('pset is required')
+        return oneAtATime(async () => {
+          const d = readPset(pset)
+          site.attention && site.attention()
+          const name = siteName(pageKey)
+          await approved({ title: PSET_WORDS.title(name), text: PSET_WORDS.text(name), rows: psetRows(d, pageKey) })
+          return { pset: await site.signPset(pset) }
+        })
+      }
+      case 'broadcast': {
+        if (params.chain === 'bitcoin') throw new Error('this wallet page broadcasts Sequentia transactions only')
+        const pset = params.pset == null ? null : String(params.pset)
+        const hex = params.hex == null ? null : String(params.hex)
+        if (!pset && !(hex && /^[0-9a-fA-F]+$/.test(hex))) throw new Error('pset or hex is required')
+        return await site.broadcast(pset ? { pset } : { hex })
+      }
+      case 'prepareCoins': {
+        const coins = readCoins(params.coins)
+        return oneAtATime(async () => {
+          const short = await site.shortOnChain(coins)
+          if (!short.length) return { moved: [] }
+          site.attention && site.attention()
+          const name = siteName(pageKey)
+          await approved({ title: PSET_WORDS.moveTitle(name), text: PSET_WORDS.moveText(name),
+            rows: [...short.flatMap((c) => [[PSET_WORDS.move, plain(c.atoms, c.asset)], ...(c.fee ? [[PSET_WORDS.moveFee, plain(c.fee.atoms, c.fee.asset)]] : [])]), [PSET_WORDS.askedBy, pageKey]] })
+          await site.prepareCoins(coins, name)
+          return { moved: short.map((c) => ({ asset: c.asset, amount: String(c.atoms) })) }
+        })
+      }
+    }
+    throw new Error('unknown method: ' + method)
+  }
+
+  // An amount as default mode writes it: the asset's own decimals and its ticker, never atoms.
+  function plain (atoms, hex) {
+    let m = {}; try { m = ctx.assetMeta(hex) || {} } catch {}
+    const t = m.ticker && m.ticker !== '?' ? m.ticker : String(hex).slice(0, 12) + '…'
+    return ctx.fmtAtoms(BigInt(atoms), m.precision ?? 8) + ' ' + t
+  }
+  // What a site's transaction does to this wallet: read from its bytes once the wallet's own key
+  // origins are on it (the site cannot know them), so a covenant's transparent transaction reads.
+  function readPset (b64) {
+    let t
+    try { t = describeTransparent(ctx.site.detailed(b64)) } catch { throw new Error(PSET_WORDS.unreadable) }
+    if (t.inputs.some((i) => i.mine && i.blinded)) throw new Error(PSET_WORDS.blinded)
+    if (!t.inputs.some((i) => i.mine)) throw new Error(PSET_WORDS.nothingOfYours)
+    if (t.outputs.some((o) => o.atoms == null || o.asset == null)) throw new Error(PSET_WORDS.unreadable)
+    return t
+  }
+  // You pay and You receive are what moves between this wallet and others; the fee is its own row,
+  // taken out of what you pay when your coins pay it.
+  function psetRows (t, pageKey) {
+    const rows = []
+    const d = { ...t.deltas }
+    const fee = t.fee != null && t.feeAsset ? t.fee : null
+    const yoursPaysFee = fee != null && (d[t.feeAsset] || 0n) <= -fee
+    if (yoursPaysFee) d[t.feeAsset] += fee
+    const deltas = Object.entries(d).filter(([, v]) => v !== 0n)
+    for (const [h, v] of deltas) if (v < 0n) rows.push([PSET_WORDS.youPay, plain(-v, h)])
+    for (const [h, v] of deltas) if (v > 0n) rows.push([PSET_WORDS.youReceive, plain(v, h)])
+    if (fee != null) rows.push([PSET_WORDS.fee, plain(fee, t.feeAsset) + (yoursPaysFee ? '' : PSET_WORDS.feeNotYours)])
+    rows.push([PSET_WORDS.askedBy, pageKey])
+    return rows
+  }
+  function readCoins (coins) {
+    if (!Array.isArray(coins) || !coins.length) throw new Error('coins must be a list of { asset, amount }')
+    return coins.map((c) => {
+      const asset = String((c && c.asset) || '').toLowerCase()
+      if (!HEX64.test(asset)) throw new Error('asset must be a 64-hex asset id')
+      const s = String((c && c.amount) ?? '')
+      if (!/^\d+$/.test(s) || BigInt(s) <= 0n) throw new Error('amount must be a positive number of atoms')
+      return { asset, atoms: BigInt(s) }
+    })
   }
 
   return {
