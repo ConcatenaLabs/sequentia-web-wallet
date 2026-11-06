@@ -126,8 +126,16 @@ export const MAX_COINS = 32
 // The most coins of an asset merged in one pass: four participations of 16.
 export const MERGE_PER_PASS = 64
 
+// Whether a coin is one of the maker's resting orders (an `order-3` leaf, or an `order-2` one from
+// before it). Its order rests in the tree until a taker fills it or the resting desk cancels it; a
+// refresh of it cancels the order, which the desk then rests again from another coin, and the
+// operator fronts that coin anew. So a resting order is neither merged nor counted among the coins
+// the maker keeps (`max_coins`).
+export const isOrderCoin = (c) => !!c && typeof c.template === 'string' && c.template.startsWith('order-')
+
 // The coins of `asset` to merge once more than `cap` are live, in one participation, MERGE_PER_PASS
-// at most. A coin it received is left out (its own settling refreshes it), as are those in `exclude`.
+// at most. A coin it received is left out (its own settling refreshes it), as are those in `exclude`
+// and its resting orders (isOrderCoin), which count for nothing towards the cap.
 // Every coin of a round given up keeps the operator's capital out until its lowest node comes back,
 // while a board costs it nothing (its forfeit pays the operator back at once). So, under twice the
 // cap: boards first, then coins of a round of at most `small` atoms (the maker's coin size), down to
@@ -136,7 +144,7 @@ export const MERGE_PER_PASS = 64
 // as few as bring the count back under it. None when fewer than two qualify.
 export const MERGE_TO = 0.75
 export function coinsToMerge (coins, asset, cap, exclude = [], small = null) {
-  const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live')
+  const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live' && !isOrderCoin(c))
   if (live.length <= cap) return []
   const b = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
   const full = live.length >= 2 * cap
@@ -701,10 +709,10 @@ async function main () {
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
       // another asset the maker holds on the chain that the node takes (the wallet rule; never a
       // fallback to one privileged asset).
-      // Its live coins of each asset: past `max_coins` it merges (coinsToMerge), and at twice that
-      // it boards no more.
+      // Its live coins of each asset, its resting orders left out: past `max_coins` it merges
+      // (coinsToMerge), and at twice that it boards no more.
       const counted = new Map()
-      try { for (const c of (await cmd('coins', HELD_COINS)) || []) if (c && c.state === 'live') counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
+      try { for (const c of (await cmd('coins', HELD_COINS)) || []) if (c && c.state === 'live' && !isOrderCoin(c)) counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
       const cap = (a) => Number(perAsset(cfg.max_coins, a, String(MAX_COINS)))
       try {
         const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}

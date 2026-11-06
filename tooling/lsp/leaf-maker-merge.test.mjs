@@ -5,9 +5,31 @@
 //   node --test tooling/lsp/leaf-maker-merge.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { coinsToMerge, MAX_COINS, MERGE_PER_PASS, MERGE_TO } from './leaf-maker.mjs'
+import { coinsToMerge, isOrderCoin, MAX_COINS, MERGE_PER_PASS, MERGE_TO } from './leaf-maker.mjs'
 
 const coin = (id, value, kind = 'batch', asset = 'a', state = 'live') => ({ leaf_id: id, asset, value: String(value), kind, state })
+const order = (id, value, asset = 'a') => ({ ...coin(id, value, 'batch', asset), template: 'order-3' })
+
+// Seen live: the maker held 18 resting orders of tSEQ beside its other coins, so it counted more than
+// its cap and merged the smallest coins of a round, which were its orders. Each merge cancelled them,
+// the resting desk rested every one again from its largest coin, and the operator fronted that coin
+// whole at every level: about 31M tSEQ of change an hour for 2M of orders.
+test('resting orders are neither merged nor counted towards the cap', () => {
+  assert.ok(isOrderCoin(order('o', 1)) && isOrderCoin({ template: 'order-2' }))
+  assert.ok(!isOrderCoin(coin('c', 1)) && !isOrderCoin({ template: 'vtxo-1' }) && !isOrderCoin(null))
+  const orders = Array.from({ length: 18 }, (_, k) => order('o' + k, 4_837_672_668_351 + k))
+  const others = Array.from({ length: 24 }, (_, k) => coin('c' + k, 300_000_000_000_000 + k))
+  // 42 live coins, 18 of them orders: 24 counted, under the cap of 32, so nothing is merged.
+  assert.deepEqual(coinsToMerge([...orders, ...others], 'a', MAX_COINS, [], '2000000000000000'), [])
+  // Over the cap without them, the merge takes other coins and never an order, small as they are.
+  const more = Array.from({ length: 12 }, (_, k) => coin('m' + k, 1_000_000_000_000 + k))
+  const m = coinsToMerge([...orders, ...others, ...more], 'a', MAX_COINS, [], '2000000000000000')
+  assert.ok(m.length >= 2 && m.every((id) => !id.startsWith('o')), JSON.stringify(m))
+  assert.equal(m.length, 36 - Math.floor(MAX_COINS * MERGE_TO) + 1)
+  // At twice the cap, where the smallest coins of all are merged, still never an order.
+  const flood = Array.from({ length: 2 * MAX_COINS }, (_, k) => coin('f' + k, 10_000_000 + k))
+  assert.ok(coinsToMerge([...orders, ...flood], 'a', MAX_COINS).every((id) => id.startsWith('f')))
+})
 
 test('under the cap nothing is merged; over it boards first, then the smallest, down to three quarters of the cap', () => {
   const few = Array.from({ length: MAX_COINS }, (_, k) => coin('c' + k, 100 + k))
