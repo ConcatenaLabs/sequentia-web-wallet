@@ -23,11 +23,13 @@ const unescape = (s) => s.replace(/&#10;/g, '\n').replace(/&quot;/g, '"').replac
 // and whether it takes taps or text.
 export async function screen () {
   let xml = ''
+  const t0 = Date.now()
   for (let i = 0; i < 4 && !xml.includes('<hierarchy'); i++) {
     // A screen that is still moving can make the dump fail ("could not get idle state").
     await shell('uiautomator dump /sdcard/rb-ui.xml >/dev/null 2>&1; cat /sdcard/rb-ui.xml').then((x) => { xml = x }).catch(() => {})
     if (!xml.includes('<hierarchy')) await sleep(700)
   }
+  if (process.env.RB_DEBUG && Date.now() - t0 > 5000) console.error('screen took', Date.now() - t0, 'ms', xml.includes('<hierarchy') ? '' : 'and failed')
   const nodes = []
   for (const m of xml.matchAll(/<node ([^>]*?)\/?>/g)) {
     const a = Object.fromEntries([...m[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((x) => [x[1], x[2]]))
@@ -89,14 +91,18 @@ export async function type (s) {
     await shell(`input text '${part}'`)
   }
 }
-// Empties the focused field: to its end, then deletes until the focused field reads empty.
-export async function clearField () {
-  await shell('input keyevent KEYCODE_MOVE_END')
-  for (let i = 0; i < 8; i++) {
-    const f = (await screen()).find((n) => n.edit && n.focused)
-    if (!f || !f.say) return
-    await shell('input keyevent ' + Array(Math.min(f.say.length + 5, 150)).fill('KEYCODE_DEL').join(' '))
+// Empties a text field: tapped, to its end, then deleted until the field at its place reads
+// empty. The screen does not always say which field has focus, so the field is named by its node.
+export async function clearField (node) {
+  const at = (ns) => node ? ns.filter((n) => n.edit).sort((a, b) => Math.abs(a.y - node.y) - Math.abs(b.y - node.y))[0] : ns.find((n) => n.edit && n.focused)
+  for (let i = 0; i < 10; i++) {
+    const f = at(await screen())
+    if (!f || !f.say) return true
+    if (node) await tapNode(f)
+    await shell('input keyevent KEYCODE_MOVE_END')
+    await shell('input keyevent ' + Array(Math.min(f.say.length + 5, 200)).fill('KEYCODE_DEL').join(' '))
   }
+  throw new Error('a field would not empty')
 }
 // Waits until no passing note ("… copied") lies over the tabs.
 export async function noSnack (ms = 8000) {

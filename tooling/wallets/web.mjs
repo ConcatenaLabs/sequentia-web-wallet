@@ -85,7 +85,7 @@ export class WebWallet {
     if (review.startsWith('ERR')) return { refused: flat.slice(4) }
     const t = Date.now()
     await pressPrimary(p)
-    const status = await p.waitFor(LAST_STATUS, 1800000).catch(() => 'no answer in 30 min')
+    const status = await p.waitFor(LAST_STATUS, 600000).catch(() => 'no answer in 10 min')
     const seconds = (Date.now() - t) / 1000
     await p.eval("(()=>{ const m=document.querySelector('.modal'); const c=m && [...m.querySelectorAll('button')].find(b=>/close|done|ok/i.test(b.textContent)); if(c) c.click(); else if(m) m.remove(); return true })()").catch(() => {})
     return { review: flat, status: status.replace(/\s+/g, ' ').trim(), seconds, clickedAt: t }

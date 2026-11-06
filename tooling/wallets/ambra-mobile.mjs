@@ -7,11 +7,13 @@
 // Recipient field, whose text the screen gives, and cleared again.
 //
 //   node tooling/wallets/ambra-mobile.mjs <call> [args…]   one call, its answer printed (for trying a step)
+//   RB_DEBUG=1 prints each step of send and code, and any screen read over five seconds.
 import * as u from './adb-ui.mjs'
 
 const APP = 'io.sequentia.ambra'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const TABS = ['Balance', 'Send', 'Receive', 'Swap', 'History', 'More']
+const D = process.env.RB_DEBUG ? (s) => console.error(new Date().toISOString(), s) : () => {}
 const num = (s) => { const m = String(s).replace(/,/g, '').match(/[0-9]+(\.[0-9]+)?/); return m ? Number(m[0]) : 0 }
 
 export class AmbraMobile {
@@ -63,7 +65,7 @@ export class AmbraMobile {
   }
 
   async code ({ fresh = true } = {}) {
-    await this.tab('Receive')
+    await this.tab('Receive'); D('on Receive')
     await u.waitFor('Copy receive code', 120000, { clickable: true })
     if (fresh) { await u.tap('New code'); await sleep(3000) }
     await u.waitFor('Copy receive code', 120000, { clickable: true })
@@ -74,15 +76,15 @@ export class AmbraMobile {
   // What the clipboard holds, read from Send's Recipient field once pasted there; the field is
   // left empty.
   async pasted () {
-    await this.tab('Send')
+    await this.tab('Send'); D('on Send to paste')
     const field = await this.recipientField()
     await u.tapNode(field); await sleep(300)
-    await u.clearField()
+    await u.clearField(field)
     await u.shell(`input swipe ${field.x} ${field.y} ${field.x} ${field.y} 900`); await sleep(1200)
-    await u.tap('Paste', 10000); await sleep(1200)
+    D('long-pressed'); await u.tap('Paste', 10000); await sleep(1200); D('pasted')
     const f2 = await this.recipientField()
     const text = f2.say
-    await u.tapNode(f2); await u.clearField(); await u.shell('input keyevent 111')
+    await u.clearField(f2); await u.shell('input keyevent 111')
     return text
   }
   async recipientField () {
@@ -148,23 +150,25 @@ export class AmbraMobile {
   async send (to, tk, amount) {
     await this.tab('Send')
     await u.waitFor('Review & send', 60000, { clickable: true })
-    await this.pickAsset(tk)
+    await this.pickAsset(tk); D('asset picked')
     const edits = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)
-    await u.tapAt(edits[0].x, edits[0].y); await u.clearField(); await u.type(to); await sleep(500)
+    await u.clearField(edits[0]); await u.tapNode(edits[0]); await u.type(to); await sleep(500); D('recipient typed')
     const e2 = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)
-    await u.tapAt(e2[1].x, e2[1].y); await u.clearField(); await u.type(String(amount)); await u.shell('input keyevent 111'); await sleep(800)
-    await u.tap('Review & send')
+    await u.clearField(e2[1]); await u.tapNode(e2[1]); await u.type(String(amount)); await u.shell('input keyevent 111'); await sleep(800); D('amount typed')
+    await u.tap('Review & send'); D('review pressed')
     // The review sheet, or a refusal under the form.
     const r = await u.waitAny([/^Send .*\?/, 'Cancel', /try again|can't|cannot|not enough|still arriving|Enter |isn't|is not|No wallet/i], 120000)
+    D('review answered: ' + r.i + ' ' + r.node.say.slice(0, 60))
     const ns = await u.screen()
     const text = u.textOf(ns)
     const sendBtn = ns.find((n) => n.clickable && n.say === 'Send' && n.y < 2100)
     if (!sendBtn) return { refused: text.replace(/\n/g, ' ').replace(/Balance Send Receive Swap History More$/, '').slice(0, 400) }
     const review = ns.filter((n) => n.y < sendBtn.y + 200 && n.y > 300 && n.say && !n.edit).map((n) => n.say).join(' | ')
     const t = Date.now()
+    D('send pressed at ' + sendBtn.y)
     await u.tapNode(sendBtn)
     let status = null
-    while (Date.now() - t < 1800000) {
+    while (Date.now() - t < 600000) {
       const s = await u.screen()
       const n = s.find((n) => /^(Sent |Not sent|Nothing was sent|This couldn't|Failed|Paid)/.test(n.say))
       if (n) { status = n.say; break }
@@ -173,7 +177,7 @@ export class AmbraMobile {
     const seconds = (Date.now() - t) / 1000
     const close = (await u.screen()).find((n) => n.clickable && /^(Close|Done|OK)$/.test(n.say))
     if (close) await u.tapNode(close)
-    return { review: review.replace(/\s+/g, ' '), status: (status || 'no answer in 30 min').replace(/\s+/g, ' '), seconds, clickedAt: t }
+    return { review: review.replace(/\s+/g, ' '), status: (status || 'no answer in 10 min').replace(/\s+/g, ' '), seconds, clickedAt: t }
   }
 
   // Swap's two sides set to pay and get, through their pickers as a person sets them.
@@ -234,7 +238,7 @@ export class AmbraMobile {
     await this.sides(pay, get)
     const pf = await u.scrollTo(/^You pay: /, 3)
     const f = (await u.screen()).filter((n) => n.edit && Math.abs(n.y - pf.y) < 40)[0]
-    await u.tapAt(Math.max(f.x, 700), f.y); await u.clearField(); await u.type(String(amount)); await u.shell('input keyevent 111'); await sleep(1500)
+    await u.clearField(f); await u.tapAt(Math.max(f.x, 700), f.y); await u.type(String(amount)); await u.shell('input keyevent 111'); await sleep(1500)
     const before = new Set((await this.tradeRows()).map((r) => r.say))
     const rv = await u.scrollTo('Review', 4)
     if (!rv) throw new Error('no Review on Swap')

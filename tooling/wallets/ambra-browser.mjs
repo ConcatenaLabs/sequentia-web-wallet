@@ -82,7 +82,7 @@ export class AmbraBrowser {
     if (review.startsWith('ERR')) return { refused: flat.slice(4) }
     const t = Date.now()
     await pressPrimary(p)
-    const status = await p.waitFor(LAST_STATUS, 1800000).catch(() => 'no answer in 30 min')
+    const status = await p.waitFor(LAST_STATUS, 600000).catch(() => 'no answer in 10 min')
     const seconds = (Date.now() - t) / 1000
     await p.eval(CLOSE_MODALS).catch(() => {})
     return { review: flat, status: status.replace(/\s+/g, ' ').trim(), seconds, clickedAt: t }

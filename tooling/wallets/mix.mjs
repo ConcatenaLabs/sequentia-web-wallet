@@ -138,18 +138,25 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say 
     const got = {}
     const needs = (o) => o.op === 'payment' ? [o.from, o.to] : [o.wallet]
     // A wallet taken for one step of a watch (a figure read), between operations.
+    // A watch waiting for its read goes before any new operation on that wallet; a receiver under
+    // an address watch takes no second payment to an address until the first has shown.
+    const wanted = new Map(); const watched = new Set()
     const lock = async (names, fn) => {
-      while (names.some((w) => busy.has(w))) await sleep(1000)
-      names.forEach((w) => busy.add(w))
+      names.forEach((w) => wanted.set(w, (wanted.get(w) || 0) + 1))
+      try {
+        while (names.some((w) => busy.has(w))) await sleep(500)
+        names.forEach((w) => busy.add(w))
+      } finally { names.forEach((w) => wanted.set(w, wanted.get(w) - 1)) }
       try { return await fn() } finally { names.forEach((w) => busy.delete(w)) }
     }
-    const take = () => { const i = todo.findIndex((o) => needs(o).every((w) => !busy.has(w))); return i < 0 ? null : todo.splice(i, 1)[0] }
+    const free = (o) => needs(o).every((w) => !busy.has(w) && !wanted.get(w)) && !(o.how === 'address' && watched.has(o.to))
+    const take = () => { const i = todo.findIndex(free); return i < 0 ? null : todo.splice(i, 1)[0] }
     const worker = async () => {
       while (todo.length && n < ops) {
         const o = take()
         if (!o) { await sleep(1000); continue }
         needs(o).forEach((w) => busy.add(w))
-        try { await run(o, byName, record, (step) => appendFileSync(join(work, 'steps.log'), `${new Date().toISOString()} [${o.id}] ${step}\n`), (p) => watches.push(p), got, lock) } catch (e) {
+        try { await run(o, byName, record, (step) => appendFileSync(join(work, 'steps.log'), `${new Date().toISOString()} [${o.id}] ${step}\n`), (p) => watches.push(p), got, lock, watched) } catch (e) {
           record({ id: o.id, op: o.op === 'payment' ? 'payment' : o.op, wallet: o.wallet, from: o.from, to: o.to, how: o.how, asset: o.asset, outcome: 'failed', said: 'drive: ' + String(e.message).slice(0, 300), seconds: 0, drive_error: true })
         } finally { needs(o).forEach((w) => busy.delete(w)) }
       }
@@ -176,7 +183,7 @@ const fmt = (x) => String(Number(x.toPrecision(4)))
 // that never answers fails its operation as the drive's, instead of holding its wallets for good.
 const bounded = (trace) => (label, p, ms = 1500000) => { trace(label); let t; return Promise.race([p, new Promise((_, no) => { t = setTimeout(() => no(new Error(label + ' gave no answer in ' + ms / 1000 + ' s')), ms) })]).finally(() => clearTimeout(t)) }
 
-async function run (o, W, record, trace, later, got, lock) {
+async function run (o, W, record, trace, later, got, lock, watched) {
   const S = bounded(trace)
   if (o.op === 'faucet') {
     const w = W[o.wallet]
@@ -252,9 +259,12 @@ async function run (o, W, record, trace, later, got, lock) {
   const sent = /^(Sent|Paid)/.test(s.status)
   record({ ...base, op: 'payment', outcome: sent ? 'settled' : /try again|nothing was sent|not sent|came back|couldn't/i.test(s.status) ? 'refused' : 'failed',
     said: s.review.slice(0, 200) + ' → ' + s.status, stated: s.review.match(/It arrives[^.]*\./)?.[0] || null, seconds: s.seconds, bound, within: sent && bound ? s.seconds <= bound : null })
-  if (!sent) { if (o.how === 'closed') await to.open(); record({ ...base, op: 'receive', kind: kindOf(to), outcome: /came back|nothing/i.test(s.status) ? 'refused' : 'failed', said: 'the payer said: ' + s.status, seconds: 0 }); return }
+  // A payer that never answered may still have paid: its receiver is watched as for a sent one.
+  const silent = /^no answer/.test(s.status)
+  if (!sent && !silent) { if (o.how === 'closed') await to.open(); record({ ...base, op: 'receive', kind: kindOf(to), outcome: /came back|nothing/i.test(s.status) ? 'refused' : 'failed', said: 'the payer said: ' + s.status, seconds: 0 }); return }
   if (o.how === 'address') {
     const t0 = s.clickedAt
+    watched.add(o.to)
     later((async () => {
       // Arrival: the figure 0.9 or more above the lowest it has read since the payment (a sale of
       // OILX in the meantime lowers it; a purchase adds a few hundredths).
@@ -262,9 +272,10 @@ async function run (o, W, record, trace, later, got, lock) {
       while (Date.now() - t0 < 7200000) {
         const f = await lock([o.to], () => to.figure(o.asset)).catch(() => null)
         if (f != null) { low = Math.min(low, f); if (f - low >= 0.9) { seen = f; break } }
-        await sleep(45000)
+        await sleep(30000)
       }
       const secs = (Date.now() - t0) / 1000
+      watched.delete(o.to)
       record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (lowest since the payment ${low}, was ${before})` : `${o.to} never showed it in two hours (was ${before})`,
         seconds: secs, bound, within: seen != null && bound ? secs <= bound : false })
     })())
@@ -276,14 +287,15 @@ async function run (o, W, record, trace, later, got, lock) {
   // and the line says what came.
   const want = before + Number(amount) * (o.asset === 'BTC' ? 0.5 : 1) - 1e-9
   let seen = null
-  while (Date.now() - t0 < 3600000) {
+  // A payer that never answered is watched for 20 minutes, a sent payment for an hour.
+  while (Date.now() - t0 < (silent ? 1200000 : 3600000)) {
     const f = await S('figure ' + o.to, to.figure(o.asset))
     if (f >= want) { seen = f; break }
     await sleep(o.how === 'address' ? 10000 : 1500)
   }
   const secs = (Date.now() - t0) / 1000
   const rb = o.how === 'closed' ? 60 : bound
-  record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (was ${before}: +${Number((seen - before).toPrecision(8))} of ${amount})${opened != null ? `; opened ${opened}s, closed ${((t0 - closedAt) / 1000).toFixed(0)}s before, its process ${closedHow}` : ''}` : `${o.to} never showed it in an hour (was ${before})`,
+  record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (was ${before}: +${Number((seen - before).toPrecision(8))} of ${amount})${opened != null ? `; opened ${opened}s, closed ${((t0 - closedAt) / 1000).toFixed(0)}s before, its process ${closedHow}` : ''}` : `${o.to} never showed it in ${silent ? '20 minutes' : 'an hour'} (was ${before})`,
     seconds: secs, bound: rb, within: seen != null && rb ? secs <= rb : (seen != null ? null : false) })
 }
 
