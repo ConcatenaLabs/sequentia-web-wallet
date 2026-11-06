@@ -15,6 +15,13 @@
 //                 taking longer than usual", so 10 min is its bound (B is not used: give "-").
 //                 The lane moves on a minute after Received; the drive's `trades` step then
 //                 follows every trade of the wallet to Settled or Returned.
+//   lane `mix`    node tooling/reliability-drive.mjs <work-dir> mix web:<name> browser:<name>
+//                   mobile:<name> --ops 500 --ext <unpacked Ambra browser> [--phrases <dir>] [--seed 1]
+//                 every wallet at once, Ambra browser and Ambra mobile beside the web wallet, in a
+//                 tester's mix of trades, payments (code, invoice, address, into a closed phone),
+//                 receives and the faucet: tooling/wallets/mix.mjs says what each is held to. The
+//                 phrases are read from (and a new wallet's written to, mode 600) --phrases,
+//                 <work-dir> by default; Ambra mobile is the app installed on the one device adb sees.
 //
 // Each operation is a line of <work-dir>/reliability-<lane>.jsonl: what was asked, what the wallet
 // said at each step, the outcome (settled, returned, refused, failed), the seconds it took and the
@@ -32,10 +39,11 @@ const base = flag('--base', 'https://sequentiatestnet.com/wallet/')
 const OPS = Number(flag('--ops', '250'))
 const ASSET = flag('--asset', 'USDX'); const PAY = flag('--pay', '2')
 const GET = flag('--get', 'GOLD'); const TRADE = flag('--trade', '2')
+const EXT = flag('--ext', null); const PHRASES = flag('--phrases', null); const SEED = Number(flag('--seed', '1'))
 const [workArg, lane, A, B] = argv
-if (!workArg || !lane || !A) { console.error('usage: reliability-drive.mjs <work-dir> <pay|trade> <A> <B|->'); process.exit(2) }
+if (!workArg || !lane || (!A && lane !== 'summary')) { console.error('usage: reliability-drive.mjs <work-dir> <pay|trade> <A> <B|->'); process.exit(2) }
 const work = resolve(workArg)
-mkdirSync(join(work, 'evidence'), { recursive: true })
+if (lane !== 'summary') mkdirSync(join(work, 'evidence'), { recursive: true })
 const out = join(work, `reliability-${lane}.jsonl`)
 const say = (s) => console.log(`[${new Date().toISOString()}] ${lane}: ${s}`)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -153,6 +161,18 @@ async function trade (n, page, pay, get, amount) {
 }
 
 async function main () {
+  if (lane === 'summary') {
+    // node tooling/reliability-drive.mjs <work-dir> summary [mix]: the verdict of a run's lines.
+    const { summarize } = await import('./wallets/mix.mjs')
+    const lines = readFileSync(join(work, `reliability-${A || 'mix'}.jsonl`), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    console.log(JSON.stringify(summarize(lines), null, 1))
+    return
+  }
+  if (lane === 'mix') {
+    const { runMix } = await import('./wallets/mix.mjs')
+    if (argv.slice(2).some((s) => s.startsWith('browser:')) && !EXT) throw new Error('Ambra browser needs --ext <its unpacked directory>')
+    return runMix({ work, specs: argv.slice(2), ops: OPS, ext: EXT ? resolve(EXT) : null, base, phrases: PHRASES ? resolve(PHRASES) : work, seed: SEED, say })
+  }
   let n = existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).length : 0
   say(`starting at operation ${n + 1} of ${OPS}`)
   if (lane === 'pay') {

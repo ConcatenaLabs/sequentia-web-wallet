@@ -26,16 +26,21 @@ export function faucetToken (env = process.env) {
 const FAUCET_ORIGIN = process.env.FAUCET_ORIGIN || 'https://sequentiatestnet.com'
 
 export class Page {
-  constructor (bin = chromium(), { profile } = {}) {
+  // `ext`: an unpacked extension's directory, loaded in this browser (Ambra browser beside the
+  // page, for drives that use both); without it extensions are off.
+  constructor (bin = chromium(), { profile, ext } = {}) {
     if (!bin) throw new Error('no Chromium found: set CHROMIUM')
     this.dir = profile ? null : mkdtempSync(join(tmpdir(), 'wallet-drive-'))
     this.profile = profile || join(this.dir, 'profile')
-    this.bin = bin
+    this.bin = bin; this.ext = ext
     this.next = 1; this.pending = new Map(); this.errors = []; this.console = []
   }
 
   async open () {
-    this.proc = spawn(this.bin, ['--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--disable-extensions',
+    const exts = this.ext ? ['--disable-extensions-except=' + this.ext, '--load-extension=' + this.ext] : ['--disable-extensions']
+    this.proc = spawn(this.bin, ['--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', ...exts,
+      // A wallet in a tab behind another keeps its timers: no throttling of background pages.
+      '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
       '--window-size=1280,1800', '--remote-debugging-port=0', '--user-data-dir=' + this.profile, 'about:blank'],
     { stdio: ['ignore', 'ignore', 'pipe'] })
     const wsUrl = await new Promise((ok, no) => {
@@ -65,6 +70,23 @@ export class Page {
     return p
   }
 
+  // A target of this browser that is not a page (an extension's service worker), driven like one:
+  // eval, and the faucet token on its requests. `pick(target)` chooses it; waits up to `ms`.
+  async target (pick, ms = 60000) {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      const t = (await (await fetch(`http://127.0.0.1:${this.port}/json/list`)).json()).find(pick)
+      if (t) {
+        const p = new Page(this.bin, { profile: this.profile })
+        p.port = this.port; p.tabOf = this; p.targetId = null; p.url = t.url
+        await p.attach(t.webSocketDebuggerUrl)
+        return p
+      }
+      await new Promise((r) => setTimeout(r, 500))
+    }
+    throw new Error('no such target in ' + ms + ' ms')
+  }
+
   async attach (wsUrl) {
     this.ws = new WebSocket(wsUrl)
     await new Promise((ok, no) => { this.ws.onopen = ok; this.ws.onerror = no })
@@ -84,7 +106,9 @@ export class Page {
         if (m.params.type === 'error') this.errors.push(text)
       }
     }
-    await this.send('Runtime.enable'); await this.send('Page.enable')
+    await this.send('Runtime.enable')
+    // A worker (an extension's service worker) has no Page domain.
+    await this.send('Page.enable').catch(() => {})
     this.faucetToken = faucetToken()
     if (this.faucetToken) await this.send('Fetch.enable', { patterns: [{ urlPattern: FAUCET_ORIGIN + '/faucet*', requestStage: 'Request' }] })
   }
@@ -122,7 +146,7 @@ export class Page {
 
   // Ends Chromium and waits for it to exit, so its profile can be removed after.
   async stop () {
-    if (this.tabOf) { try { await fetch(`http://127.0.0.1:${this.port}/json/close/${this.targetId}`) } catch {} try { this.ws?.close() } catch {} return }
+    if (this.tabOf) { if (this.targetId) try { await fetch(`http://127.0.0.1:${this.port}/json/close/${this.targetId}`) } catch {} try { this.ws?.close() } catch {} return }
     try { this.ws?.close() } catch {}
     const p = this.proc
     if (!p || p.exitCode !== null || p.signalCode !== null) return
