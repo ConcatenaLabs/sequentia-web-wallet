@@ -4429,7 +4429,7 @@ function renderNameBox(){
   // Receive above shows the name already, with its line: here only Remove name, a quiet link at the
   // foot of the one card.
   const above = !!name && nameViewOn();
-  $('nameLbl').classList.toggle('hide', above);
+  $('nameLbl').style.display = above ? 'none' : '';      // label.lbl's display outranks .hide
   $('nameTip').classList.toggle('hide', above);
   $('nameAddr').classList.toggle('hide', !name || _nameEditing || above);
   $('btnNameRemove').classList.toggle('quiet', above);

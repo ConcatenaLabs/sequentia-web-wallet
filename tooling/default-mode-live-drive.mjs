@@ -755,6 +755,24 @@ async function main () {
     writeFileSync(join(ev, name + '.totals.json'), JSON.stringify(figs, null, 2))
     await shot(pb2, `${name}-name-3-balance.png`)
     note('console B: ' + pb2.console.filter((l) => /lnaddr|leaves|board/i.test(l)).slice(-8).join(' | '))
+  } else if (step === 'namescreen') {
+    // node … namescreen B: wallet B's Receive with its payment name, as the owner sees it: the name
+    // view (said once), Show full code, and back. Screenshots only, and the checks that go with them.
+    const page = await openWallet(name)
+    await waitJoined(page)
+    await tab(page, 'balance'); await tab(page, 'receive')
+    const named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return t && document.querySelector('#addr').textContent===t ? t : false })()", 120000).catch(() => null)
+    check('Receive shows the name', !!named, named)
+    const once = await page.eval("[...document.querySelectorAll('section[data-panel=\"receive\"] *')].filter(e=>e.children.length===0 && e.offsetParent!==null && e.textContent.trim()===document.querySelector('#addr').textContent).length")
+    check('the name is said once', once === 1, once)
+    check('Remove name is a quiet link at the foot', await page.eval("document.querySelector('#btnNameRemove').classList.contains('quiet') && document.querySelector('#btnNameRemove').offsetParent!==null"))
+    const w = forbiddenIn(await visibleText(page)).filter((x) => !['on-chain', 'lightning', 'channel', 'channels'].includes(x))
+    check('none of the words default mode never says', !w.length, w)
+    await shot(page, `${name}-namescreen-1-name.png`)
+    await click(page, '#btnRecvFull'); await sleep(1000)
+    await shot(page, `${name}-namescreen-2-full-code.png`)
+    await click(page, '#btnRecvFull'); await sleep(500)
+    await page.stop()
   } else if (step === 'show') {
     const page = await openWallet(name)
     const tOpen = Date.now()
