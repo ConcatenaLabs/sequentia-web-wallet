@@ -80,6 +80,9 @@
 //                       so the coins the board spent are not counted twice)
 //   onchainQuiet()      optional: true while the page's own on-chain payment may still be
 //                       spending coins (the leaf wallet then boards nothing)
+//   holdsTx(txid)       optional: whether the page's own reading of the chain holds a transaction
+//                       (true, false, or undefined when it cannot tell): a board's coins come off
+//                       that reading exactly until it holds the board (onchainLessBoards)
 
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
@@ -1112,7 +1115,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }
           // Until the page's reading of the chain shows the board's coins spent, they are taken off
           // it: the board's leaf counts as arriving from now (onchainLessBoards).
-          if (v.spent) keepBoard(c.asset, boardSpent(c.onchain, v.spent, now()))
+          if (v.spent) keepBoard(c.asset, boardSpent(c.onchain, v.spent, now(), v.txid))
           emit('leafArrived', { asset: c.asset, value: String(c.onchain), kind: 'board' })
         }
         else refused.set(c.asset, String(c.onchain))
@@ -2248,6 +2251,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // The operator's smallest leaf of an asset, in atoms (an output below it is refused), or 0n.
     minLeaf: (hex) => { const a = ((S.info && S.info.server_info && S.info.server_info.assets) || []).find((x) => x && x.asset === hex); return a ? big(a.min_leaf) : 0n },
     roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
+    // The chain's block interval the operator follows, in seconds, or null.
+    blockSeconds: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.block_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
@@ -2258,7 +2263,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     onchainLessBoards: (hex, atoms) => {
       const all = boardsKept()
       if (!all[hex]) return big(atoms)
-      const r = onchainLessBoards(all[hex], atoms, now())
+      const r = onchainLessBoards(all[hex], atoms, now(), ctx.holdsTx)
       if (r.seen) keepBoard(hex, null)
       return r.atoms
     },

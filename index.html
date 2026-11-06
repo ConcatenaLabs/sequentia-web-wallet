@@ -1853,7 +1853,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, offboardOutcome, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2945,7 +2945,7 @@ async function offboardReview(r, onDone){
   catch(e){ console.warn('[offboard] quote:', e?.message??e); throw new Error(DEFAULT_WORDS.addressShort); }
   const amt = fmtAtoms(atoms, m0.precision||0);
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
-  const minutes = arrivalMinutes(leavesApi.roundInterval());
+  const minutes = arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
@@ -2953,10 +2953,12 @@ async function offboardReview(r, onDone){
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
     try{
       const v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q });
-      const mins = arrivalMinutes(v && v.round_within_seconds) || minutes;
-      try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true }); }catch{}
-      console.log('[offboard]', v && v.offboard, v && v.state);
-      st.className='status ok'; st.textContent = DEFAULT_WORDS.sentLater(amt, m0.ticker, mins);
+      // The same payment asked again while the first is on its way is that first one: nothing more
+      // is sent, nothing more is written down, and the person is told so (offboardOutcome).
+      const out = offboardOutcome(v, amt, m0.ticker, minutes, leavesApi.blockSeconds());
+      if(out.sent) try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true }); }catch{}
+      console.log('[offboard]', v && v.offboard, v && v.state, out.sent ? '' : 'already on its way');
+      st.className='status ok'; st.textContent = out.text;
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
       if(onDone) onDone(); renderBalance();
     }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
@@ -4081,6 +4083,8 @@ function initLeaves(){
     onchainQuiet: ()=> _ownTxRing.some(t=> Date.now() - t.at < BOARD_QUIET_MS) || Date.now() < _keepOnChainUntil,
     onOpen: ()=>{ try{ renderBalance(); }catch{} try{ renderReceive(); }catch{} },
     onBoarded: ()=>{ setTimeout(()=>{ try{ sync(); }catch{} }, 1500); },
+    // Whether this page's reading of the chain holds a transaction (a board the leaf wallet made).
+    holdsTx: (txid)=>{ if(!_scannedOnce) return undefined; try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return undefined; } },
   }, $('leavesRoot'), $('devModeRoot'));
   // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
   if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
@@ -11453,7 +11457,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   for(const m of missing){ const can = instantAtoms(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
   const address = wollet.address(undefined).address().toUnconfidential().toString();
   _keepOnChainUntil = Date.now() + MOVE_WAIT_MS + KEEP_ON_CHAIN_MS;
-  let minutes = arrivalMinutes(leavesApi.roundInterval());
+  let minutes = arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
   const what = (missing.length ? missing : all).map(m=>amountWords(m.hex, m.atoms)).join(' and ');
   // A round pays the whole coin a move gives (what is moved and its change) out of the operator's
   // wallet: when that is more than the operator can fund now, nothing is asked, so no coin waits.
@@ -11474,7 +11478,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
     for(const [i, m] of missing.entries()){
       const q = quotes[i];
       const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, shown: q });
-      minutes = arrivalMinutes(v && v.round_within_seconds) || minutes;
+      minutes = arrivalMinutes(v && v.round_within_seconds, leavesApi.blockSeconds()) || minutes;
       try{ noteSent(localStorage, walletTag(), { asset: m.hex, atoms: m.atoms, fee: q && q.fee ? { asset: m.hex, atoms: BigInt(q.fee.amount||0) } : null, later: true }); }catch{}
     }
   }catch(e){ console.warn('[on chain] moving out of the Ark:', e?.message??e); _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; throw new Error(DEFAULT_WORDS.notMoved); }

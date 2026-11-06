@@ -43,6 +43,10 @@ In practice:
   person sees. What cannot be spent yet is said only when they try to send it ("still
   arriving"). Developer mode shows those parts under the figure as
   **"<amount> <TICKER> arriving"** (and moving, redone, kept safe).
+- A coin paid to the wallet's address is in the figure from the moment the wallet's reading of
+  the chain holds it, and stays there while the wallet moves it into the Ark by itself: the
+  coins a move spends come off the address's part only until that reading holds the move, and a
+  coin that arrived meanwhile is never taken for one of them.
 - What the wallet holds that cannot move before a date, such as tokens bought in a sale that
   vests, is part of the figure and appears under it as **"<amount> <TICKER> vests on <date>"**,
   the date in words: "100 ORNG vests on 3 November 2026". One line for each date. An asset held
@@ -331,10 +335,17 @@ modes (`asset-picker.js`):
   - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
     invoice." When the wallet's coins on the chain don't cover a payment to an address with its
     network fee, it is paid out of what the wallet holds for instant payments: the review is titled
-    **Send <amount> <TICKER>?**, with "It arrives in a few minutes." (or "in about <N>
-    minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
-    line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
-    The sentence above is for when even that cannot be made.
+    **Send <amount> <TICKER>?**, with "It arrives within <N> minutes." and a "Fee <amount>
+    <TICKER>" line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives within <N>
+    minutes." <N> is the most the whole way to the other wallet's figure takes, never the
+    operator's settlement alone: the interval between its settlements, four blocks (the
+    settlement's, the operator's payment to the address, and the paying wallet handing over its
+    part between them) and four minutes for the wallets to read the chain, rounded up to five
+    minutes: ten on the testnet. The same amount of the same asset to the same address, asked
+    again while the first is still on its way, is that first payment: nothing more is sent, and
+    the wallet says "<amount> <TICKER> to this address is already on its way, so nothing more was
+    sent. It arrives within <N> minutes. To pay the same again, send once it has arrived." The
+    sentence above is for when even that cannot be made.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
@@ -358,9 +369,10 @@ modes (`asset-picker.js`):
     power of ten above what the payment needs (at least one whole unit), whichever is smaller
     (never less than the operator's smallest coin of the asset; of what the library can move now,
     when part of what is held cannot be, such as a channel's balance). It says "Moving <amount>
-    <TICKER> out of the Ark so it can be sent confidentially. They are ready in a few minutes.
-    Keep this page open." and the review opens once they are there, in about three minutes: one
-    settlement of the operator's and its payout on the chain, and no confirmation more. A move
+    <TICKER> out of the Ark so it can be sent confidentially. They are ready within <N> minutes.
+    Keep this page open." (<N> as for a payment to an address, above) and the review opens once
+    they are there, usually in about three minutes: one settlement of the operator's and its
+    payout on the chain, and no confirmation more. A move
     already under way is waited for, never asked twice, so Review pressed again (the browser
     extension's popup closed and opened again) goes on waiting for it. When the move cannot be
     made, one of the sentences under "Stake, pools and Mix" says why and nothing moves; a coin
@@ -383,7 +395,7 @@ modes (`asset-picker.js`):
   default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
   Ark to its own address by itself (never less than the operator's smallest coin of the asset),
   and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
-  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"; Ambra
+  are ready within <N> minutes. Keep this page open." ("used to join the pool", "mixed"; Ambra
   mobile says "Keep this screen open."). Once it
   has arrived the usual review opens; nothing is signed before it.
 - When the operator cannot pay that much on the chain now (its published `fundable`, against

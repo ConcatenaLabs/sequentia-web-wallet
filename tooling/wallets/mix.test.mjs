@@ -10,6 +10,7 @@ test('each stated time is the bound its operation is held to', () => {
   assert.equal(boundOf('It arrives after the next block, in about a minute.'), 180)
   assert.equal(boundOf('Sent 500000 EURX. It will appear on Balance once it confirms (about a minute).'), 180)
   assert.equal(boundOf('It arrives in a few minutes.'), 600)
+  assert.equal(boundOf('It arrives within 10 minutes.'), 600)
   assert.equal(boundOf('It arrives in about 8 minutes.'), 960)
   assert.equal(boundOf('It arrives after a Bitcoin block.'), 3600)
   assert.equal(boundOf('Send 1 USDX?'), null)

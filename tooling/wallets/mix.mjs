@@ -34,6 +34,7 @@ export function boundOf (said) {
   const s = String(said || '')
   if (/in seconds/i.test(s)) return 60
   if (/next block, in about a minute|about a minute/i.test(s)) return 180
+  const w = s.match(/within (\d+) minutes/i); if (w) return 60 * Number(w[1])
   const m = s.match(/in about (\d+) minutes/i); if (m) return Math.max(600, 120 * Number(m[1]))
   if (/few minutes/i.test(s)) return 600
   if (/after a Bitcoin block/i.test(s)) return 3600
