@@ -25,7 +25,9 @@
 //                          "ladder": { "levels": 8, "step_bps": 25, "growth": 1.4, "first": "5000000" } } ] }
 // A pair rests `levels` orders, level k `first` × growth^k atoms of `give`, at the feed's rate
 // (the maker's spread included) step_bps × k further from it. An order is rested only from coins
-// the maker can spend now; a level it cannot fund waits for a later pass.
+// the maker can spend now; a level it cannot fund waits for a later pass. A level cancelled to be
+// repriced is rested again at what its coin came back with (restSize), so the library rests it
+// from that coin alone and the operator fronts no change beside it.
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
@@ -53,6 +55,17 @@ export function restTerms (size, rate, stepBps, k) {
   const num = big(rate.rate_num) * BigInt(10000 + stepBps * k), den = big(rate.rate_den) * 10000n
   const want = ceilDiv(big(size) * num, den)
   return { amount: big(size), want, rate_num: want, rate_den: big(size) }
+}
+
+// The size to rest level `size` at again: the value its cancelled order's coin came back with
+// (`back`, the order's value less the cancel's fee) when that is within a thousandth of the size,
+// else the size. Resting the level at its own coin's value lets the library give up that coin and
+// nothing else; at the full size the coin falls short by the fee, and the library takes a larger
+// coin, whose change the operator fronts anew while the order rests beside it.
+export const BACK_WITHIN = 1000n
+export function restSize (size, back) {
+  const s = big(size), b = big(back)
+  return b > 0n && b <= s && b * BACK_WITHIN >= s * (BACK_WITHIN - 1n) ? b : s
 }
 
 // Whether an order rested at rate `r` (want per give) is more than `bps` off `now`.
@@ -153,6 +166,8 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
         try {
           const q = await cmd('order_cancel_resting_quote', { order: rec.order })
           await cmd('order_cancel_resting', { order: rec.order, shown: q })
+          // What its coin comes back with: the level is rested again from it, at that value.
+          if (!low) rec.back = String(((q || {}).gets || {}).amount || '')
           try { await seqob.signAndCancel(rec.offer_id, priv, now) } catch {}
           rec.done = low ? 'refilled' : 'repriced'
           log('rest', rec.slot, rec.order.slice(0, 12), low ? `holds ${served.value} of ${rec.amount}: cancelled to be rested at its whole size` : through ? 'the feed\'s mid moved through it: cancelled to be rested at the feed\'s rate' : 'cancelled to be rested at the feed\'s rate')
@@ -186,7 +201,10 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
       for (let k = 0; k < sizes.length && made < (r.max_new_per_pass ?? 6); k++) {
         const slot = `${p.give}:${p.want}#${k}`
         if (recs.some((x) => x.slot === slot && !x.done)) continue
-        const t = restTerms(sizes[k], rate, lad.stepBps, k)
+        // A level cancelled to be repriced is rested again at what its coin came back with.
+        const prior = recs.filter((x) => x.slot === slot && x.done === 'repriced' && x.back && !x.reused).pop()
+        const size = restSize(sizes[k], prior && prior.back)
+        const t = restTerms(size, rate, lad.stepBps, k)
         if (bid === null) bid = await bestBid(relay, p.give, p.want)
         if (crossesBook(t, bid, r.guard_bps)) { log('rest', slot, `not rested: its rate would cross the book's best bid ${bid}`); continue }
         if ((sp.get(p.give) || 0n) < t.amount + big(cfg.fee_margin_rest || 0)) break
@@ -197,6 +215,7 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
           const res = await cmd('order_rest', { ...args, shown: q }, true)
           recs.push({ slot, rested_by: res.order, order: null, offer_id: hex(randomBytes(16)), amount: t.amount.toString(),
             rate_num: t.rate_num.toString(), rate_den: t.rate_den.toString(), at: now })
+          if (prior) prior.reused = true
           sp.set(p.give, (sp.get(p.give) || 0n) - t.amount)
           made++
           log('rest', slot, 'rested', t.amount.toString(), 'for', t.want.toString())

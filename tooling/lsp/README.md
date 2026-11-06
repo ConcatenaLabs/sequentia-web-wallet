@@ -290,7 +290,10 @@ follows finds the library free. The upkeep leaves the library idle at least as l
 pass held it. The resting desk reads its orders eight to a command. It never rests an order at
 or within `rest.guard_bps` (10 by default) of the pair's best bid on the relay, every rail of the
 on-chain book taken together, and it cancels, to rest again at the feed's rate, an order the
-feed's mid has moved to within `rest.guard_bps` of. Every command slower than
+feed's mid has moved to within `rest.guard_bps` of. A level cancelled to be repriced is rested
+again at what its coin came back with (its value less the cancel's fee, when that is within a
+thousandth of the level), so the library rests it from that coin alone and the operator fronts no
+change beside the order. Every command slower than
 five seconds is logged (`slow <command> <ms> ms {detail}`), which names what a slow firm offer
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the
