@@ -200,9 +200,15 @@ modes (`asset-picker.js`):
   why. The wallet tries again on its own, and once it can, the code takes the address's place on
   the screen without the person leaving it.
 - **Faucet** (testnet): the faucet pays the receive code. Once it says it has sent the payment,
-  the amount is under the asset's figure as arriving, and when the wallet has it: "Received
-  <amount> <TICKER>." If the faucet refuses the code, the wallet asks it to pay the address
-  instead, in the same click. Its first button is **BTC**: the faucet pays the code's address on
+  the amount is under the asset's figure as arriving, and the wallet reads its mailbox for it at
+  once (never a whole update); when the wallet has it: "Received <amount> <TICKER>." Should the
+  wallet not have taken it in within 45 seconds (it was finishing an update), the line reads "The
+  faucet sent <amount> <TICKER>. It shows in your balance as soon as your wallet has taken it in,
+  usually within a few minutes.", and turns to "Received …" when it arrives. A faucet busy with
+  other requests says so in its own words, and the wallet does not ask it to pay the address
+  instead. If the faucet refuses the code, the wallet asks for a new code once (the one shown may
+  have been paid or have lapsed meanwhile), and then asks it to pay the address instead, in the
+  same click. Its first button is **BTC**: the faucet pays the code's address on
   the Bitcoin ark, and the line reads "Received <amount> BTC." once it is there; while the wallet
   holds no BTC that way yet, it pays the address, and the line reads "The faucet sent <amount>
   BTC. It arrives after a Bitcoin block." The faucet pays each asset once per wallet: the card says so, a
