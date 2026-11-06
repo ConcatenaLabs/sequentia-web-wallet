@@ -21,7 +21,8 @@
 //                 tester's mix of trades, payments (code, invoice, address, into a closed phone),
 //                 receives and the faucet: tooling/wallets/mix.mjs says what each is held to. The
 //                 phrases are read from (and a new wallet's written to, mode 600) --phrases,
-//                 <work-dir> by default; Ambra mobile is the app installed on the one device adb sees.
+//                 <work-dir> by default; Ambra mobile is the app installed on the one device adb sees
+//                 (AMBRA_APP=<application id> for a test build installed beside the released one).
 //
 // Each operation is a line of <work-dir>/reliability-<lane>.jsonl: what was asked, what the wallet
 // said at each step, the outcome (settled, returned, refused, failed), the seconds it took and the
