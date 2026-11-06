@@ -341,6 +341,10 @@ const FIRM_RETRY_MS = 3000
 // counts from the asking, never from Review: what the wallet itself does first (reading what it
 // can pay, behind whatever its library is busy with) is not taken out of a maker's time.
 export const QUOTE_FIRM_MS = 8000
+// How many sources are asked for firm terms at once. Each one's check runs on the wallet's library,
+// one command at a time, so every source more holds the first answer back (on a phone eight took
+// 2 to 5 s each, and none came within the window); and a maker holds its coins for each offer.
+export const FIRM_AT_ONCE = 4
 // How long, past QUOTE_FIRM_MS, the wallet's own reading of firm terms a source gave in time (the
 // library's check of an offer, of a fee) may take when no other firm terms are in hand yet: the
 // wallet's library answers one command at a time, and a sync it was running when the offer came
@@ -567,6 +571,7 @@ export function createEngine (deps) {
         let q
         try { q = await run('take_quote', { order: entry.raw._relayJson || entry.raw, amount: String(r), max_fee_ppm: MAX_FEE_PPM }) } catch (e) {
           log('[user trade] take_quote:', e.message)
+          noteLiveShort(e)
           // Short by the margins, or change below the smallest leaf: ask for less, by what is missing.
           const over = shortBy(e.message)
           if (over <= 0n || i >= 3) return null
@@ -626,6 +631,7 @@ export function createEngine (deps) {
         let t
         try { t = await run('swap_read', { offer: o.offer }) } catch (e) {
           log('[user trade] swap_read:', e.message)
+          noteLiveShort(e)
           // Paying that much would take all the wallet holds, with the margins its transactions leave
           // for their fees, or leave change below the operator's smallest leaf: ask again for less, by
           // what is missing (a site's probe sizes on all the wallet can pay).
@@ -705,7 +711,7 @@ export function createEngine (deps) {
         // hold too little: noted, so a quote that finds no other offer gets those coins ready.
         const old = /that expire no earlier than the order's coin \(median time (\d+)\) keep (\d+) past their checkpoints/.exec(String(e && e.message))
         if (old) tooOldFrom = Math.max(tooOldFrom || 0, Number(old[1]))
-        log('[user trade] order_fill_resting_quote:', e.message); return null
+        log('[user trade] order_fill_resting_quote:', e.message); noteLiveShort(e); return null
       }
       if (!q.gets || q.gets.asset !== receiveAsset || big(q.gets.amount) !== r || !q.fee || q.fee.asset !== payAsset) { log('[user trade] the resting fill is not the one asked'); return null }
       const coins = (await run('coins')) || []
@@ -888,6 +894,10 @@ export function createEngine (deps) {
   // The least expiry (median time) a resting order's coin asked of the wallet's coins in this
   // quote, when one refused them for expiring sooner; null otherwise.
   let tooOldFrom = null
+  // Whether a source's check in this quote found the wallet's coins of the asset paid not live
+  // now (held in a refresh, received and not yet settled): the trade waits on them, and is said to.
+  let liveShort = false
+  const noteLiveShort = (e) => { if (/ in live coins/.test(String(e && e.message))) liveShort = true }
   // When the wallet last asked a refresh of an asset's coins for a resting order (ms), so a quote
   // asked again while that round runs says so rather than asking again.
   const readyingSince = new Map()
@@ -941,6 +951,7 @@ export function createEngine (deps) {
   async function quote ({ payAsset, receiveAsset, amount, onStep = null }) {
     quoteStep = onStep
     tooOldFrom = null
+    liveShort = false
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
     // More than the wallet holds to spend, the rest vesting later: refused with the date from
@@ -1021,19 +1032,23 @@ export function createEngine (deps) {
       const ready = es.reduce((m, e) => (haveOf(e) > m ? haveOf(e) : m), 0n)
       return { ok: false, why: 'part-ready', ready: String(ready), soon: soonNow }
     }
-    // Firm terms of the best eight, all asked at once, within QUOTE_FIRM_MS: an entry that cannot
+    // Firm terms of the best FIRM_AT_ONCE, all asked at once, within QUOTE_FIRM_MS: an entry that cannot
     // be firmed (a resting order the wallet's coins are too old for, a maker that ran short) or
     // that has not answered by then is left out, and a late answer is let go of. When none gives
     // firm terms and there is time left, they are asked once more a moment later.
     const cands = []
-    const worth = worthFirming(ind).slice(0, 8)
+    // The next best FIRM_AT_ONCE are asked in the second round when the first gave none; with no
+    // more to ask, the first ones again a moment later.
+    const ranked = worthFirming(ind).slice(0, 2 * FIRM_AT_ONCE)
     // Wall-clock time: the person's wait (deps.now may be a test's stand-in clock).
-    const btcOnly = worth.length > 0 && worth.every(({ e }) => e.source === 'btc-gateway')
+    const btcOnly = ranked.length > 0 && ranked.every(({ e }) => e.source === 'btc-gateway')
     const window = btcOnly ? Math.max(firmMs, deps.btcOnlyFirmMs || BTC_ONLY_FIRM_MS) : firmMs
     const until = Date.now() + window
     const readMs = deps.quoteReadMs ?? QUOTE_READ_MS
     for (let round = 0; round < 2 && !cands.length; round++) {
-      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, window / 2)) break; await sleep(FIRM_RETRY_MS) }
+      const next = ranked.slice(round * FIRM_AT_ONCE, (round + 1) * FIRM_AT_ONCE)
+      const worth = next.length ? next : ranked.slice(0, FIRM_AT_ONCE)
+      if (round) { if (until - Date.now() < Math.min(FIRM_RETRY_MS + 2000, window / 2)) break; if (!next.length) await sleep(FIRM_RETRY_MS) }
       const got = await firmsBy(worth.map(({ e }) => firm(e, payAsset, receiveAsset, A, haveOf(e), until, until + readMs)), until, until + readMs)
       for (const c of got) if (c) cands.push(c)
     }
@@ -1046,6 +1061,9 @@ export function createEngine (deps) {
     if (!best && tooOldFrom != null && payAsset !== 'BTC' && await readyCoins(payAsset, tooOldFrom)) {
       return { ok: false, why: 'readying', held: String(haveLeaf), soon: soonNow }
     }
+    // Nobody gave firm terms because what the wallet holds of the asset is not live now (given up in
+    // a refresh, received and not yet settled): it is being made ready, never "nobody could confirm".
+    if (!best && liveShort && payAsset !== 'BTC') return { ok: false, why: 'freeing', held: String(haveLeaf), soon: soonNow }
     if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }

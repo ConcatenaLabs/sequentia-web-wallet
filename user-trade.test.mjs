@@ -675,3 +675,11 @@ test('engine: an offer is asked for less by the margins the last check found, so
   assert.equal(firms() - first, 1, 'the second is asked once')
   assert.ok(BigInt(q2.ticket.amountIn) <= 400000n)
 })
+
+test('engine: offers refused because the coins paid are not live now say the asset is being made ready, never "nobody could confirm" (TR1)', async () => {
+  const s = standIn()
+  const lib = { ...s.lib, command: (c, a) => { if (c === 'swap_read') throw new Error(`refused: the wallet holds 0 of asset ${X} in live coins, and paying 300000 takes 300192 with the margins its transactions leave for their fees`); return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves: lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 200, quoteReadMs: 200 })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.why, 'freeing')
+})

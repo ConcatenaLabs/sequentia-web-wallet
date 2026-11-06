@@ -469,10 +469,15 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   again while the person waits, taking the next order if that one went); "Only <amount> of your <pay> can be traded now, too little for any
   offer: the rest is on its way, ready in a minute or two. Nothing has moved.", or "… the rest is
   ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
-  most of what is held is not ready yet); "Nobody could confirm a price for this just now.
-  Nothing has moved: try again in a moment."
-- A price comes within seconds: every offer worth asking is asked at once, and one that has not
-  answered within a few seconds is left out of the price rather than waited for.
+  most of what is held is not ready yet); "Your <pay> is being made ready to trade: it is ready in
+  a minute or two. Nothing has moved." (or "… it is ready once the next Bitcoin blocks settle it.")
+  (what is held of it is given up in a refresh, or kept by a plan, and is free again after the
+  next round); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
+  moment."
+- A price comes within seconds: the best few offers are asked at once (the next few when none of
+  them answers), and one that has not answered within eight seconds of being asked is left out of
+  the price rather than waited for. What the wallet itself checks of a price it was given in time
+  is waited for, up to half a minute more, while no other price is in hand.
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
 - The open tab, the pair and the amount typed are kept for the browser tab's session: a reload
