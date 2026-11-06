@@ -275,7 +275,11 @@ few as bring it back under.
 
 The library reads what each command needs, by state: the coins the maker traded away and the
 participations it completed, thousands after a few days of trading, are not read again. The
-maker asks for the coins it holds (`coins` with `held`), and its sync leaves out the catch-up
+maker asks for the coins it holds (`coins` with `held`), each as the store holds it (`brief`: no
+dates, notes or exit fees, whose reads of the chain held the library for seconds), once a pass:
+it counts, settles and merges from that reading, and reads again only when the pass rested,
+boarded or cancelled something. It follows its open offers by their ids (`swaps` with `swaps`),
+not through every offer it ever made. Its sync leaves out the catch-up
 between stores of one phrase (`catch_up: false`): it is the only store of its phrase, and the
 catch-up would read every coin ever served to its mailbox to find that out.
 
@@ -287,7 +291,10 @@ It then asks the library for one command, the offer, which goes ahead of every q
 reading taken after either waits its turn in the upkeep. A read of `/v1/quotes` holds the
 upkeep's next commands for 90 s (at most once every three minutes), so the firm offer that
 follows finds the library free. The upkeep leaves the library idle at least as long as its last
-pass held it. The resting desk reads its orders eight to a command. It never rests an order at
+pass held it. The resting desk follows the orders it keeps resting by their ids, up to 64 a
+command, each command one read of the operator; its own orders' records come from the library's
+store (`order_resting` with `brief`), never by asking the operator after every order it ever
+rested. It never rests an order at
 or within `rest.guard_bps` (10 by default) of the pair's best bid on the relay, every rail of the
 on-chain book taken together, and it cancels, to rest again at the feed's rate, an order the
 feed's mid has moved to within `rest.guard_bps` of. A level cancelled to be repriced is rested

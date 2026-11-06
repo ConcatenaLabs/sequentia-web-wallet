@@ -228,3 +228,12 @@ test('take_back_after shorter than the operator allows becomes the earliest it n
   const S2 = makeSiteOrders({ engine: fakeEngine(), leaves: L2, assetMeta: meta, fmtAtoms, store: mem() })
   await assert.rejects(S2.quote({ type: 'limit', base: B, quote: Q, side: 'sell', amount: String(U), price: String(4200n * U) }, 'o'), new RegExp(SITE_WORDS.cannotRest))
 })
+
+test('a take whose price is no longer held when approved asks for the review again (TR1)', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  E.noEstimate = true
+  E.confirm = async () => { const e = new Error('the price is no longer held'); e.code = 'lapsed'; throw e }
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't' })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  await assert.rejects(S.confirm(q.id), (e) => e.message === SITE_WORDS.lapsed)
+})

@@ -594,3 +594,123 @@ test('engine: a maker that takes more only after its next round: the shortfall s
   assert.equal(USER_WORDS.bookUpToSoon('300,000 YT'), 'The book can fill up to 300,000 YT now, and more in a few minutes.')
   assert.deepEqual(forbiddenIn(USER_WORDS.bookUpToSoon('1 YT') + ' ' + USER_WORDS.notOfferedSoon('YT', 'XT')), [])
 })
+
+// TR1: the wallet's own library answers one command at a time, and a quote's steps on it (what it
+// can pay, its check of an offer) waited behind a sync and ate the makers' window: Ambra browser
+// priced 5 trades in 31 with the makers answering in 0.3 to 3 s.
+const slowLib = (lib, slow) => ({ ...lib, command: async (c, a) => { const ms = slow(c, a); if (ms) await new Promise((r) => setTimeout(r, ms)); return lib.command(c, a) } })
+
+test('engine: an offer that came in time is priced although the wallet\'s own check of it waits behind its library (TR1)', async () => {
+  const s = standIn()
+  const eng = createEngine({ leaves: slowLib(s.lib, (c) => (c === 'swap_read' ? 300 : 0)), fetchJson: s.fetchJson, store: s.store,
+    makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 100, quoteReadMs: 2000 })
+  const t0 = Date.now()
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  assert.ok(Date.now() - t0 >= 300, 'it waited for the check')
+})
+
+test('engine: the makers\' window counts from the asking, not from Review (TR1)', async () => {
+  const s = standIn()
+  // What the wallet can pay takes longer to read than the whole window: the maker still gets it.
+  const eng = createEngine({ leaves: slowLib(s.lib, (c) => (c === 'coins' ? 600 : 0)), fetchJson: async (u, i) => {
+    if (u.endsWith('/v1/firm')) await new Promise((r) => setTimeout(r, 80))
+    return s.fetchJson(u, i)
+  }, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 400, quoteReadMs: 0 })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+})
+
+test('engine: with firm terms in hand the quote ends at its window, and one still being checked is let go of (TR1)', async () => {
+  const s = standIn()
+  const released = []
+  const fetchJson = async (url, init) => {
+    if (url.startsWith('http://late')) {
+      if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: '1', rate_den: '1', max_give: '1000000', min_give: '10000' }] }
+      if (url.endsWith('/v1/firm')) { const b = JSON.parse(init.body); return { swap: 'late1', offer: `swap-offer:${b.give}:${b.give}:late`, give: b.give, want: b.give } }
+      if (url.endsWith('/v1/release')) { released.push(JSON.parse(init.body).swap); return {} }
+    }
+    return s.fetchJson(url, init)
+  }
+  const leaves = slowLib(s.lib, (c, a) => (c === 'swap_read' && /late$/.test(a.offer) ? 600 : 0))
+  const eng = createEngine({ leaves, fetchJson, store: s.store, makers: () => ['http://late', 'http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 150, quoteReadMs: 5000 })
+  const t0 = Date.now()
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const took = Date.now() - t0
+  assert.ok(q.ok, q.why)
+  assert.equal(q.choice.entry.maker, 'http://m')
+  assert.ok(took < 500, `ended at the window with terms in hand, not after the late check (${took} ms)`)
+  await new Promise((r) => setTimeout(r, 700))
+  assert.deepEqual(released, ['late1'], 'the late offer is released')
+})
+
+test('engine: a quote does not wait on the library to learn what the wallet can pay while its last reading is fresh (TR1)', async () => {
+  const s = standIn()
+  let slow = false
+  const eng = createEngine({ leaves: slowLib(s.lib, (c) => (slow && (c === 'coins' || c === 'plans') ? 1000 : 0)), fetchJson: s.fetchJson, store: s.store,
+    makers: () => ['http://m'], admitted: admitted(['leaf-maker']) })
+  const q1 = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q1.ok, q1.why)
+  eng.drop(q1.choice)
+  await new Promise((r) => setTimeout(r, 50))
+  slow = true
+  const t0 = Date.now()
+  const q2 = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q2.ok, q2.why)
+  assert.ok(Date.now() - t0 < 600, `priced from the last reading (${Date.now() - t0} ms)`)
+})
+
+test('engine: an offer is asked for less by the margins the last check found, so the check does not send it back (TR1)', async () => {
+  const s = standIn()
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) })
+  const firms = () => s.posts.filter(([p]) => p === 'firm').length
+  const q1 = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q1.ok, q1.why)
+  const first = firms()
+  assert.ok(first >= 2, 'the first quote learns the margins: asked again for less')
+  eng.drop(q1.choice)
+  await new Promise((r) => setTimeout(r, 60))
+  const q2 = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q2.ok, q2.why)
+  assert.equal(firms() - first, 1, 'the second is asked once')
+  assert.ok(BigInt(q2.ticket.amountIn) <= 400000n)
+})
+
+test('engine: offers refused because the coins paid are not live now say the asset is being made ready, never "nobody could confirm" (TR1)', async () => {
+  const s = standIn()
+  const lib = { ...s.lib, command: (c, a) => { if (c === 'swap_read') throw new Error(`refused: the wallet holds 0 of asset ${X} in live coins, and paying 300000 takes 300192 with the margins its transactions leave for their fees`); return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves: lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 200, quoteReadMs: 200 })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.why, 'freeing')
+})
+
+test('engine: a quote ends within its bound whatever the library is doing, says the wallet is busy, and lets a late price go (TR1)', async () => {
+  const s = standIn()
+  let gate
+  const held = new Promise((r) => { gate = r })
+  const leaves = { ...s.lib, command: async (c, a) => { if (c === 'swap_read') await held; return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 100, quoteReadMs: 60000, quoteMostMs: 400 })
+  const t0 = Date.now()
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.why, 'wallet-busy')
+  assert.ok(Date.now() - t0 < 1500, `ended at its bound (${Date.now() - t0} ms)`)
+  assert.deepEqual(forbiddenIn(USER_WORDS.walletBusy), [])
+  const before = s.posts.filter(([p]) => p === 'release').length
+  gate()
+  await new Promise((r) => setTimeout(r, 300))
+  assert.ok(s.posts.filter(([p]) => p === 'release').length > before, 'the price that came late is let go')
+})
+
+test('engine: what the wallet can pay is read from the store alone, and in full only when a coin is given up in a refresh (TR1)', async () => {
+  const s = standIn()
+  const asked = []
+  const leaves = { ...s.lib, command: (c, a) => { if (c === 'coins') asked.push(JSON.stringify(a || {})); return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) })
+  await eng.spendable()
+  assert.match(asked[0], /"brief":true/)
+  assert.equal(asked.length, 1)
+  s.coins.push({ leaf_id: 'g1', asset: X, value: '1000', state: 'given', kind: 'transfer', refresh_waiting: 'p1' })
+  await eng.spendable()
+  assert.equal(asked.length, 3, 'a given coin: read again in full')
+  assert.doesNotMatch(asked[2], /brief/)
+})

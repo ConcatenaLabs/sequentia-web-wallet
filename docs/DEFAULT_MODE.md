@@ -212,8 +212,9 @@ modes (`asset-picker.js`):
   The address shown is kept, so a reload shows the same code while it is unpaid; once it is paid,
   the next code moves past it. Developer mode's **New address** follows the same rule
   (`receive-index.js`).
-- **Confidential**, a switch under the buttons, off whenever Receive is opened: "Hides the asset
-  and amount of a payment from everyone but you and the payer." On, the code is the wallet's
+- **Confidential**, a switch under the buttons, off whenever Receive is opened: "Asks the payer
+  to hide the amount, and the asset where it can, from everyone but you and them." It asks: what
+  is hidden is made by the payer's wallet (a Concatena wallet pays it as under Send, below). On, the code is the wallet's
   confidential address alone (`tsqb1…`, as Sequentia wallets read any address), with no amount
   field and no other part, and the line under the card reads "Any Sequentia asset, any amount,
   paid to your confidential address."; under the switch: "Everyone can still see that a payment
@@ -318,17 +319,12 @@ modes (`asset-picker.js`):
   - "Part of this <TICKER> is still arriving: try again in a moment."
   - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
   - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
-    invoice." When the wallet's coins on the chain don't cover a payment to an address, it is
-    paid out of what the wallet holds for instant payments: the review is titled
+    invoice." When the wallet's coins on the chain don't cover a payment to an address with its
+    network fee, it is paid out of what the wallet holds for instant payments: the review is titled
     **Send <amount> <TICKER>?**, with "It arrives in a few minutes." (or "in about <N>
     minutes", from the operator's interval between settlements) and a "Fee <amount> <TICKER>"
     line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives in a few minutes."
     The sentence above is for when even that cannot be made.
-    A confidential address (`tsqb1…`, a confidential receive code) is paid on the chain, blinded,
-    since what is held for instant payments is never confidential: the amount and a margin for
-    its fee are moved to the wallet's own address first, saying "Moving <amount> <TICKER> out of
-    the Ark so it can be sent confidentially. They are ready in a few minutes. Keep this page
-    open.", and the payment is reviewed and made from there as any payment on the chain.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
@@ -340,13 +336,45 @@ modes (`asset-picker.js`):
   - "This wallet is out of date for this: update it, then try again. Nothing was taken." when
     the operator declines a payment or a settlement because the wallet needs updating.
 
+- A confidential address (`tsqb1…`, a confidential receive code), paid on its own, is paid on the
+  chain so that its amount is hidden (`confidential-pay.js`). A blinded output alone hides
+  nothing when every other value is in the clear, so the payment comes with a second blinded
+  output, to the wallet's own confidential address, which takes what the inputs hold beyond the
+  payment and its fee; anyone reading the chain learns only the two together, and the wallet's
+  share stays in its balance as a confidential coin.
+  - What is held for instant payments is never confidential, and is paid out only in the clear.
+    When the chain holds too little, the wallet first moves coins out to its own address, in an
+    amount that does not give the payment away: all it holds of the asset there, or the smallest
+    power of ten above what the payment needs (at least one whole unit), whichever is smaller
+    (never less than the operator's smallest coin of the asset; of what the library can move now,
+    when part of what is held cannot be, such as a channel's balance). It says "Moving <amount>
+    <TICKER> out of the Ark so it can be sent confidentially. They are ready in a few minutes.
+    Keep this page open." and the review opens once they are there, in about three minutes: one
+    settlement of the operator's and its payout on the chain, and no confirmation more. A move
+    already under way is waited for, never asked twice, so Review pressed again (the browser
+    extension's popup closed and opened again) goes on waiting for it. When the move cannot be
+    made, one of the sentences under "Stake, pools and Mix" says why and nothing moves; a coin
+    just received that cannot be paid out yet says "Part of this <TICKER> is still arriving: try
+    again in a moment."
+  - The asset is hidden only among the assets of the inputs. When the wallet holds a confidential
+    coin of another asset (not the Sequence token, which may be staked), it is spent to the
+    wallet's own confidential address in the same transaction, and the review says "Anyone
+    reading the chain can see that a payment was made, but not its asset or amount."; otherwise
+    "Anyone reading the chain can see that this payment is <TICKER>, but not how much."
+  - When what the wallet holds leaves too little beside the payment to hide it (its fee margin
+    or less), the payment is still offered, and the review says "This payment’s amount and asset
+    can still be worked out by anyone reading the chain." So does the review of a payment with a
+    confidential address among several recipients, which is built as any other.
+  - BTC is never confidential: a `tsqb1…` address takes Sequentia assets only.
+
 ## Stake, pools and Mix
 
 - A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain, and
   default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
   Ark to its own address by itself (never less than the operator's smallest coin of the asset),
   and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
-  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"). Once it
+  are ready in a few minutes. Keep this page open." ("used to join the pool", "mixed"; Ambra
+  mobile says "Keep this screen open."). Once it
   has arrived the usual review opens; nothing is signed before it.
 - When the operator cannot pay that much on the chain now (its published `fundable`, against
   the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be
@@ -456,8 +484,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   and fees: what is paid can be a few atoms below what was typed, when the price leaves a
   remainder too small to buy anything, and that remainder stays in the wallet. Until Review, the
   amount that follows the price is an estimate and reads as one: "about" beside it. While Review
-  asks for the exact price: "Getting the exact price…". If the price moves: "The price moved.
-  Here is the new one."
+  asks for the exact price: "Getting the exact price…", and once that has taken longer than the
+  sources are given to answer (eight seconds), while the wallet still checks a price it was
+  given: "Still getting the exact price: this can take up to half a minute…". If the price
+  moves: "The price moved. Here is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
@@ -506,10 +536,17 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   again while the person waits, taking the next order if that one went); "Only <amount> of your <pay> can be traded now, too little for any
   offer: the rest is on its way, ready in a minute or two. Nothing has moved.", or "… the rest is
   ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
-  most of what is held is not ready yet); "Nobody could confirm a price for this just now.
-  Nothing has moved: try again in a moment."
-- A price comes within seconds: every offer worth asking is asked at once, and one that has not
-  answered within a few seconds is left out of the price rather than waited for.
+  most of what is held is not ready yet); "Your <pay> is being made ready to trade: it is ready in
+  a minute or two. Nothing has moved." (or "… it is ready once the next Bitcoin blocks settle it.")
+  (what is held of it is given up in a refresh, or kept by a plan, and is free again after the
+  next round); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
+  moment."; "Your wallet is still finishing something it started, so it could not get a price in
+  time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
+  wallet was busy; a price that comes later is let go).
+- A price comes within seconds: the best few offers are asked at once (the next few when none of
+  them answers), and one that has not answered within eight seconds of being asked is left out of
+  the price rather than waited for. What the wallet itself checks of a price it was given in time
+  is waited for, up to half a minute more, while no other price is in hand.
 - When a trade cannot be paid or received the way the wallet chose, the wallet takes the next
   route by itself. The person is never offered a button to pick one.
 - The open tab, the pair and the amount typed are kept for the browser tab's session: a reload

@@ -117,6 +117,14 @@ export function restOffer (rec, served, op, nowUnix, marginSecs) {
   }
 }
 
+// The orders the desk follows, read a command at a time, each command one read of the operator's
+// (the library reads it a hundred orders at a time): the orders by their ids, and the desk's own as the
+// library's store holds them (`brief`), not asked of the operator. A maker rests orders all day, and
+// asking after every one it ever rested took thirty reads of the operator a command, seconds that a
+// firm offer waited behind. A library without `brief` asks after them all, as before.
+export const RESTING_PER_READ = 64
+export const restingArgs = (ids) => ({ orders: [...ids], brief: true })
+
 export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
   const r = cfg.rest
   if (!r || !(r.pairs || []).length) return null
@@ -136,17 +144,22 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
     const op = { server: info.server, operator: info.operator }
     const margin = Number(((info.server_info || {}).fills || {}).order_margin_seconds || 0)
     const now = Math.floor(Date.now() / 1000)
-    // What the library knows of the orders it rested, and what the operator says of each.
-    const mine = (await cmd('order_resting', {})).orders || []
+    // What the library's store says of the orders it rested (restingArgs: its own as stored, not
+    // asked of the operator), and what the operator says of each still followed, by its id.
+    const ids0 = recs.filter((x) => x.order && !x.done).map((x) => x.order)
+    const first = await cmd('order_resting', restingArgs(ids0.slice(0, RESTING_PER_READ)))
+    const mine = first.orders || []
+    let changed = false
     for (const rec of recs) {
       const m = mine.find((o) => o.rested_by === rec.rested_by)
       if (m && m.order && !rec.order) { rec.order = m.order }
       if (m && m.state === 'not_rested') { rec.done = 'not_rested' }
     }
     const ids = recs.filter((x) => x.order && !x.done).map((x) => x.order)
-    // Eight orders a command: each command holds the library, and a firm offer waits behind it.
-    const others = []
-    for (let i = 0; i < ids.length; i += 8) others.push(...((await cmd('order_resting', { orders: ids.slice(i, i + 8) })).others || []))
+    const others = [...(first.others || [])]
+    const asked = new Set(ids0.slice(0, RESTING_PER_READ))
+    const rest = ids.filter((id) => !asked.has(id))
+    for (let i = 0; i < rest.length; i += RESTING_PER_READ) others.push(...((await cmd('order_resting', restingArgs(rest.slice(i, i + RESTING_PER_READ)))).others || []))
     const listed = new Set()
     try { for (const o of (await seqob.fetchMyOrders(makerPub))) listed.add(o.offer_id || o.offerId) } catch {}
     const rates = liveRates()
@@ -170,6 +183,7 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
           if (!low) rec.back = String(((q || {}).gets || {}).amount || '')
           try { await seqob.signAndCancel(rec.offer_id, priv, now) } catch {}
           rec.done = low ? 'refilled' : 'repriced'
+          changed = true
           log('rest', rec.slot, rec.order.slice(0, 12), low ? `holds ${served.value} of ${rec.amount}: cancelled to be rested at its whole size` : through ? 'the feed\'s mid moved through it: cancelled to be rested at the feed\'s rate' : 'cancelled to be rested at the feed\'s rate')
         } catch (e) { log('rest cancel', rec.slot, e.message) }
         continue
@@ -218,6 +232,7 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
           if (prior) prior.reused = true
           sp.set(p.give, (sp.get(p.give) || 0n) - t.amount)
           made++
+          changed = true
           log('rest', slot, 'rested', t.amount.toString(), 'for', t.want.toString())
         } catch (e) { log('rest', slot, e.message); break }
       }
@@ -225,6 +240,7 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
     // keep the record short: what ended more than a day ago goes
     recs = recs.filter((x) => !x.done || now - (x.at || now) < 86400)
     save()
+    return changed
   }
 
   return { tick, makerPub, records: () => recs }

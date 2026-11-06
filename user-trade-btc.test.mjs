@@ -411,3 +411,16 @@ test('selling for BTC: from a library that names no change coin, change paid on 
   const r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'settled')
 })
+
+test('selling for BTC: what the payment spends changed since the ticket was shown: nothing is paid, the price is asked again (TR1)', async () => {
+  const s = standIn()
+  const inner = s.lib.command
+  s.lib.command = (cmd, a) => { if (cmd === 'lightning_pay') throw new Error('refused: the payment\'s spends changed since it was shown: it is now 200700; nothing is signed'); return inner(cmd, a) }
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
+  assert.ok(q.ok, q.why)
+  const released = s.posts.filter(([p]) => p === 'release').length
+  await assert.rejects(eng.confirm(q.choice, q.ticket), (e) => e.code === 'lapsed')
+  assert.equal(eng.records()[0].state, 'failed')
+  assert.ok(s.posts.filter(([p]) => p === 'release').length > released, 'the maker\'s offer is let go')
+})

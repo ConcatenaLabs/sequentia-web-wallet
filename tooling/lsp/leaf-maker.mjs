@@ -115,8 +115,10 @@ import { perAsset, ladderOf, slicesOf, ladderQuotes, walkWant } from './leaf-mak
 
 // The maker is the only store of its phrase: its sync leaves out the catch-up between stores of one
 // phrase, which finds nothing here and reads every coin ever served to its mailbox to find that out.
-// It reads the coins it holds only (`held`), not the thousands it traded away. A library without
-// either argument ignores it and does as before.
+// It reads the coins it holds only (`held`), not the thousands it traded away, each as the store
+// holds it (`brief`): no dates, notes or exit fees, whose reads (an exit fee of a board reads every
+// on-chain script the maker ever drew) held the library for seconds ahead of every firm offer. A
+// library without these arguments ignores them and does as before.
 export const SYNC_ARGS = Object.freeze({ catch_up: false })
 // The upkeep's sync leaves the watchtowers' step out and runs it next as a command of its own
 // (`deposits`): a firm offer or an acceptance, which goes ahead of the upkeep's queue, then waits
@@ -129,7 +131,7 @@ export async function upkeepSync (cmd, log) {
   try { await cmd('sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
   try { await cmd('deposits') } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
 }
-export const HELD_COINS = Object.freeze({ held: true })
+export const HELD_COINS = Object.freeze({ held: true, brief: true })
 
 // The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
 // for its offers at once, few enough that the library reads its store quickly before each command.
@@ -388,6 +390,16 @@ const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.a
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
 const log = (...a) => console.log(new Date().toISOString(), ...a)
+
+// The library's arguments for the state of the swaps `ids`: read by their ids (`swaps`), not every offer
+// the maker ever made, each of whose rows holds its coins' records. A library without the argument
+// answers every swap, which swapStates reads the same way.
+export const swapsArgs = (ids) => ({ swaps: [...ids] })
+// The state of each of `ids` in the library's `swaps` answer: Map id -> state (null when unknown).
+export function swapStates (answer, ids) {
+  const by = new Map((answer || []).map((s) => [s && s.swap, (s && s.state) || null]))
+  return new Map([...ids].map((id) => [id, by.get(id) ?? null]))
+}
 
 export const REFUSED_WALLETS = /(treasury|reserve|faucet|bridge|sbtc|pool|fee|service|founder|drip)/i
 
@@ -684,18 +696,24 @@ async function main () {
   // offer and completion renew, so a quote never waits on the library: with a hundred coins and
   // resting orders a pass can hold the library for minutes, and a quote that waited on it was
   // no quote at all.
-  const spendable = async (first = false) => {
-    const sp = spendableFrom(await cmd('coins', HELD_COINS, first), await cmd('plans', {}, first).catch(() => ({ plans: [] })))
-    holdings = { sp, at: Date.now() }
-    return sp
+  // Each reading keeps the coins it was made from (`holdings.coins`): the upkeep's pass reads them
+  // once and counts, settles and merges from that reading.
+  const readHoldings = async (first = false) => {
+    const coins = (await cmd('coins', HELD_COINS, first)) || []
+    const sp = spendableFrom(coins, await cmd('plans', {}, first).catch(() => ({ plans: [] })))
+    holdings = { sp, coins, at: Date.now() }
+    return holdings
   }
+  const spendable = async (first = false) => (await readHoldings(first)).sp
   let holdings = null
   let firstReading = null   // the reading a quote asked for before the first one, while it runs
   // Orders resting in the tree, a ladder a pair, listed on the relay (leaf-maker-rest.mjs).
-  const rester = await restDesk({ cfg, cmd, log, liveRates, spendable })
+  // It rests from the pass's reading (passHoldings), not one of its own.
+  let passHoldings = null
+  const rester = await restDesk({ cfg, cmd, log, liveRates, spendable: async () => new Map((passHoldings || await readHoldings()).sp) })
   if (rester) log('the resting desk is open, its listings signed by', rester.makerPub)
 
-  async function swapState (id, first = false) { return (((await cmd('swaps', {}, first)) || []).find((s) => s.swap === id) || {}).state || null }
+  async function swapState (id, first = false) { return swapStates(await cmd('swaps', swapsArgs([id]), first), [id]).get(id) }
 
   // The upkeep leaves the library free at least as long as its last pass held it, so a taker's
   // firm offer or acceptance is as likely to find it idle as busy.
@@ -714,10 +732,13 @@ async function main () {
   async function tickOnce () {
     {
       await upkeepSync(cmd, log)
-      try { await spendable() } catch (e) { log('holdings:', e.message) }
+      // The coins it holds, read once for the pass.
+      passHoldings = null
+      try { passHoldings = await readHoldings() } catch (e) { log('holdings:', e.message) }
       await readRoom()
       if (desk) { try { await desk.tick() } catch (e) { log('btc:', e.message) } }
-      if (rester) { try { await rester.tick() } catch (e) { log('rest:', e.message) } }
+      let changed = false
+      if (rester) { try { changed = !!(await rester.tick()) } catch (e) { log('rest:', e.message) } }
       if (reporter && reporter.pending().length) { try { await reporter.flush() } catch (e) { log('report:', e.message) } }
       // What it holds on the chain of an asset it gives, above what it keeps, comes into the
       // tree: a board, its fee in the asset boarded when the node takes it for fees, else in
@@ -726,7 +747,7 @@ async function main () {
       // Its live coins of each asset, its resting orders left out: past `max_coins` it merges
       // (coinsToMerge), and at twice that it boards no more.
       const counted = new Map()
-      try { for (const c of (await cmd('coins', HELD_COINS)) || []) if (c && c.state === 'live' && !isOrderCoin(c)) counted.set(c.asset, (counted.get(c.asset) || 0) + 1) } catch (e) { log('coins:', e.message) }
+      for (const c of (passHoldings && passHoldings.coins) || []) if (c && c.state === 'live' && !isOrderCoin(c)) counted.set(c.asset, (counted.get(c.asset) || 0) + 1)
       const cap = (a) => Number(perAsset(cfg.max_coins, a, String(MAX_COINS)))
       try {
         const onchain = ((await cmd('balance')) || {}).sequentia_onchain || {}
@@ -747,21 +768,30 @@ async function main () {
               const q = await cmd('board_quote', { asset: a, amount: String(amount), fee_asset: fee })
               await cmd('board', { asset: a, amount: String(amount), fee_asset: fee, shown: q.fee })
               log('boarded', String(amount), a.slice(0, 8), 'fee', JSON.stringify(q.fee))
-              done = true; break
+              done = true; changed = true; break
             } catch (e) { why = e.message; if (!/not accepted for fees/.test(e.message)) break }
           }
           if (!done && why !== lastBoardRefusal) { lastBoardRefusal = why; log('board:', why) }
         }
       } catch (e) { log('board:', e.message) }
       const t = Date.now()
-      for (const [id, f] of firm) {
-        const st = await swapState(id)
-        if (st !== 'open') { firm.delete(id); continue }
-        if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }) } catch (e) { log('cancel', id, e.message) } firm.delete(id) }
+      if (firm.size) {
+        const ids = [...firm.keys()]
+        let states = null
+        try { states = swapStates(await cmd('swaps', swapsArgs(ids)), ids) } catch (e) { log('swaps:', e.message) }
+        for (const id of states ? ids : []) {
+          const f = firm.get(id)
+          if (!f) continue
+          if (states.get(id) !== 'open') { firm.delete(id); continue }
+          if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }) } catch (e) { log('cancel', id, e.message) } firm.delete(id); changed = true }
+        }
       }
       // Coins it received, once rested, are refreshed in the operator's next round; all of them at
-      // once when an offer was refused for what the maker holds out of round.
-      const coins = (await cmd('coins', HELD_COINS)) || []
+      // once when an offer was refused for what the maker holds out of round. From the pass's
+      // reading, unless the pass rested, boarded or cancelled since, or a taker's offer or
+      // acceptance read the coins again since (each renews the holdings): the latest reading.
+      if (changed) { try { await readHoldings() } catch (e) { log('holdings:', e.message) } }
+      const coins = (holdings && holdings.coins) || []
       const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull, first: firstPass })
       firstPass = false
       if (due.length) {

@@ -78,7 +78,7 @@ test('the pop-up never holds the page', () => {
   assert.match(o, /if \(e\.key === 'Escape'\) closeProgress\(\)/, 'Escape closes it')
   assert.match(fn(src, 'function paintProgress ('), /close\.onclick = closeProgress/, 'its Close closes it')
   // It closes by itself however the price ends.
-  assert.match(fn(src, 'async function review ('), /\} finally \{ S\.busy = false; closeProgress\(\); paintTicket\(\) \}/)
+  assert.match(fn(src, 'async function review ('), /\} finally \{ clearTimeout\(longTimer\); S\.busy = false; S\.pricingLong = false; closeProgress\(\); paintTicket\(\) \}/)
   assert.match(fn(src, 'function closeProgress ('), /doc\.removeEventListener\('keydown', S\.progress\.onKey\)/)
 })
 

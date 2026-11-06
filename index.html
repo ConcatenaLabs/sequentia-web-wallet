@@ -1855,6 +1855,7 @@ import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetL
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
+import { confidentialPlan, ownShare, liveFromRefusal, feeMarginAtoms as confidentialMargin } from './confidential-pay.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, moveOutSats, moveRetryMs, moveWaits, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
@@ -8785,6 +8786,87 @@ function collectRows(){
   }
   return out;
 }
+// ---------- a confidential payment that hides its amount (confidential-pay.js) ----------
+// The payment's output and the wallet's own confidential output share what the inputs hold beyond
+// the fee, so anyone reading the chain learns only the two together. What the chain does not hold is
+// moved out of the Ark first, a round amount rather than the payment's own. A confidential coin of
+// another asset spent to the wallet's own confidential address in the same transaction hides which
+// asset was paid; without one, the review says the asset can be seen.
+async function confidentialReview(r, reset){
+  const h=r.asset, m=assetMeta(h), prec=sendPrecision(h);
+  const a=parseAtoms(r.amtS, prec);
+  if(a<=0n) throw new Error('amount must be greater than zero');
+  let margin; try{ margin=confidentialMargin(feeRateFor(h)); }catch{ throw new Error(DEFAULT_WORDS.addressShort); }
+  let least=0n; try{ least = leavesApi && leavesApi.minLeaf ? leavesApi.minLeaf(h) : 0n; }catch{}
+  // What is held for instant payments is read once the wallet has opened: wait for that, saying so.
+  if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
+    const st=$('sendErr'); st.className='status'; st.textContent=DEFAULT_WORDS.waitOpening;
+    const until=Date.now()+OPEN_WAIT_MS;
+    while(!leavesApi.isOpen() && Date.now()<until) await new Promise(r=>setTimeout(r, 1000));
+    st.textContent='';
+  }
+  let plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h), minLeaf:least, precision:prec });
+  // Short only by what is still arriving: said so, rather than that the wallet holds too little.
+  if(plan.short){ let all=0n; try{ all = leavesApi && !devMode() ? (leavesApi.leafAtoms(h)||0n) : 0n; }catch{}
+    if(availableFor(h)+all >= a+margin) throw new Error(DEFAULT_WORDS.stillArriving(m.ticker)); }
+  // Part of what is held for instant payments may not be movable now (a channel's balance, a coin
+  // not final yet): the library says how much is, and the plan is made on that.
+  if(plan.move>0n && leavesApi && leavesApi.isOpen()){
+    try{ await leavesApi.offboardQuote({ asset:h, amount:String(plan.move), address: wollet.address(undefined).address().toUnconfidential().toString() }); }
+    catch(e){
+      const live=liveFromRefusal(e?.message??e);
+      if(live!=null){ console.warn('[send] what can move now:', String(live)); plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:live, minLeaf:least, precision:prec });
+        if(plan.short) throw new Error(DEFAULT_WORDS.notMoved); }
+    }
+  }
+  if(plan.short) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(plan.short, prec), m.ticker));
+  if(plan.move>0n){
+    const st=$('sendErr'); st.className='status';
+    await ensureOnChain([{ hex:h, atoms: availableFor(h)+plan.move }], (t)=>{ st.textContent=t; }, DEFAULT_WORDS.confidentialPurpose, availableFor);
+    st.textContent='';
+  }
+  const own=ownShare({ amount:a, margin, onchain:availableFor(h) });
+  const others = own>0n ? otherConfidentialCoins(h) : [];
+  const pset=buildConfidentialPset(r.addr, h, a, own, others);
+  const said = own===0n ? DEFAULT_WORDS.confidentialSeen : others.length ? DEFAULT_WORDS.confidentialHidden : DEFAULT_WORDS.confidentialAmountHidden(m.ticker);
+  await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, h, { rows:[{ addr:r.addr, atoms:a, hex:h }], feeAssetHex:h, extra:[['', said]] });
+}
+// The wallet's confidential coins of assets other than `hex` (never the Sequence token's, which may
+// be staked): [{ outpoint, hex, atoms }].
+function otherConfidentialCoins(hex){
+  const out=[];
+  try{
+    for(const u of wollet.utxos()){
+      const sec=u.unblinded();
+      if(!sec.isExplicit || sec.isExplicit()) continue;
+      const a=sec.asset().toString();
+      if(a===hex || a===POLICY_HEX) continue;
+      out.push({ outpoint:u.outpoint(), hex:a, atoms:BigInt(sec.value()) });
+    }
+  }catch(e){ console.warn('[send] confidential coins:', e?.message??e); return []; }
+  return out;
+}
+function buildConfidentialPset(addr, h, a, own, others){
+  const id = h===POLICY_HEX ? POLICY : new AssetId(h);
+  const to=new Address(addr);
+  let b=network.txBuilder();
+  b = h===POLICY_HEX ? b.addLbtcRecipient(to, a) : b.addRecipient(to, a, id);
+  if(own>0n){
+    const me=wollet.address(undefined).address();   // the wallet's own address, confidential
+    b = h===POLICY_HEX ? b.addLbtcRecipient(me, own) : b.addRecipient(me, own, id);
+    const sums=new Map(); for(const o of others) sums.set(o.hex, (sums.get(o.hex)||0n)+o.atoms);
+    for(const [x, v] of sums) b = b.addRecipient(me, v, new AssetId(x));
+    if(others.length){
+      // Every coin of the asset paid, and those confidential coins of the others, so that they are
+      // spent in full to the wallet's own address.
+      const mine=[];
+      for(const u of wollet.utxos()){ try{ if(u.unblinded().asset().toString()===h) mine.push(u.outpoint()); }catch{} }
+      b = b.setWalletUtxos([...mine, ...others.map(o=>o.outpoint)]);
+    }
+  }
+  b = applyFee(b, h);
+  return b.finish(wollet);
+}
 function buildSendPset(rows, fee){
   let b = network.txBuilder();
   for(const r of rows){
@@ -9807,24 +9889,24 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       await treeSendReview(rows[0], reset);
       return;
     }
+    // Default mode: a payment to a confidential address (a confidential receive code) is made so
+    // that its amount is hidden (confidential-pay.js), from the chain, its coins moved out of the
+    // Ark first when the chain does not hold enough.
+    if(!devMode() && rows.length===1 && rows[0].asset!=='BTC' && isConfidentialAddress(rows[0].addr)){
+      await confidentialReview(rows[0], reset);
+      return;
+    }
     // An address the chain's coins can't cover is paid out of the tree, when the tree holds it
     // (default-arca.js addressRoute): one recipient at a time, paid in the operator's next
     // settlement; otherwise as it always was.
     { const want=new Map(); for(const r of rows) if(r.asset!=='BTC' && !isOampAsset(r.asset)){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
       for(const [h, a] of want){
         const tree = leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n) : 0n;
-        if(addressRoute(a, availableFor(h), tree) !== 'tree') continue;
+        // The fee's margin in the asset itself, which default mode pays it in; none when the node
+        // prices no fee in it (the chain's coins then pay none of it).
+        let margin=0n; try{ margin=feeMarginAtoms(h); }catch{}
+        if(addressRoute(a, availableFor(h), tree, margin) !== 'tree') continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
-        // A confidential address (a confidential receive code) is paid on the chain, blinded: what
-        // the wallet holds for instant payments is never confidential and is paid out only to a plain
-        // address, so the amount and its fee are moved to the wallet's own address first, and the
-        // payment is made from there, as for a stake.
-        if(isConfidentialAddress(rows[0].addr)){
-          const st=$('sendErr'); st.className='status';
-          await ensureOnChain([{ hex:h, atoms: a + feeMarginAtoms(h) }], (t)=>{ st.textContent=t; }, DEFAULT_WORDS.confidentialPurpose);
-          st.textContent='';
-          continue;
-        }
         await offboardReview(rows[0], reset);
         return;
       } }
@@ -9851,7 +9933,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       endBuild();
       // Structured review rows (recipient, resolved atoms, asset, ⇄ ref details) — never blind-sign.
       const reviewRows = rows.map(r=>({ addr:r.addr, atoms:parseAtoms(r.amtS, sendPrecision(r.asset)), hex:r.asset, ref:r.ref }));
-      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:byAddressNote(false)});
+      // Default mode says plainly what a payment to a confidential address does not hide (#585).
+      const seen = !devMode() && rows.some(r=>isConfidentialAddress(r.addr)) ? [['', DEFAULT_WORDS.confidentialSeen]] : [];
+      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:[...byAddressNote(false), ...seen]});
     }
   }catch(e){ $('sendErr').textContent=plainErr(e); }
   finally{ btn.disabled=false; btn.textContent=label; } };
@@ -11357,7 +11441,11 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   const quotes = [];
   for(const m of missing){
     let q; try{ q = await leavesApi.offboardQuote({ asset: m.hex, amount: String(m.atoms), address }); }
-    catch(e){ console.warn('[on chain] quote:', e?.message??e); _keepOnChainUntil = Date.now(); throw new Error(DEFAULT_WORDS.notMoved); }
+    catch(e){ console.warn('[on chain] quote:', e?.message??e); _keepOnChainUntil = Date.now();
+      // The library pays out only coins it holds final: a coin just received counts in the figure
+      // before it is, and is then still arriving for this.
+      if(/live coins of asset/.test(String(e?.message??e))) throw new Error(DEFAULT_WORDS.stillArriving(assetMeta(m.hex).ticker));
+      throw new Error(DEFAULT_WORDS.notMoved); }
     const pays = m.atoms + BigInt((q && q.change) || 0), can = await operatorFundable(m.hex);
     if(can != null && pays > can){ _keepOnChainUntil = Date.now(); console.warn('[on chain] the operator can fund', String(can), 'of', String(pays)); throw new Error(DEFAULT_WORDS.cannotMoveNow(amountWords(m.hex, m.atoms))); }
     quotes.push(q);
