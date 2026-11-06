@@ -108,7 +108,7 @@ answers and refusals:
 | --- | --- | --- |
 | `getCapabilities()` | silent | `{ provider: 'sequentia-web-wallet', methods, events, features }` |
 | `getWalletMode()` | silent | `{ mode }` |
-| `connect()` | this page's dialog: "Connect SeqDEX?" | `{ network, address }` (the shared `tb1` address) |
+| `connect()` | this page's dialog: "Connect <site>?", the site named by the path it is served at: SeqDEX (`/dex/`), Emissio (`/emissio/`), Compages (`/bridge/`), otherwise "This site" | `{ network, address }` (the shared `tb1` address) |
 | `getAccounts()` | silent | `{ accounts: [account] }`, or `[]` until connected |
 | `getBalances()` | silent | `{ assets, btc, leaves, total, arriving, spendable }` (and `by_place` in developer mode): on-chain Sequentia assets, BTC on the chain, what is held as leaves and spendable now, one figure per asset wherever it is held, what of it is arriving, and what a trade can pay from now (the composer's own figure), each in atoms |
 | `placeOrder({ type, base, quote, side, amount, price?, post_only?, rest?, min_fill?, take_back_after? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |

@@ -207,3 +207,21 @@ test('a site over the channel: signMessage behind its own dialog, and only a rea
   a = await sign(6, 'Emissio 0123456789')
   assert.match(a.error, /locked/); assert.equal(shown.length, 2)
 })
+
+// Each site of this origin is named in the wallet's dialogs by the path it is served at.
+test('a site over the channel: the dialogs name SeqDEX, Emissio and Compages by their paths', async () => {
+  const L = fakeLeaves({ mode: 'user' })
+  for (const [page, name] of [['https://sequentiatestnet.com/dex/', 'SeqDEX'], ['https://sequentiatestnet.com/emissio/tasks/', 'Emissio'],
+    ['https://sequentiatestnet.com/bridge/', 'Compages'], ['https://sequentiatestnet.com/levo/', 'This site']]) {
+    const posted = []
+    const ch = { postMessage: (m) => posted.push(m), onmessage: null }
+    const shown = []
+    mountPageApi({ leaves: L, assetMeta: () => ({}), fmtAtoms: String, confirm: async (d) => { shown.push(d); return false }, channel: ch,
+      site: { unlocked: () => true, account: () => ({ network: 'sequentia-testnet', address: 'tb1qx' }) } })
+    ch.onmessage({ data: { type: 'hello', from: 's' } })
+    const W = posted.pop().wallet
+    ch.onmessage({ data: { type: 'request', id: 1, from: 's', wallet: W, page, method: 'connect' } })
+    for (let i = 0; i < 50 && !shown.length; i++) await new Promise((r) => setTimeout(r, 1))
+    assert.equal(shown[0].title, 'Connect ' + name + '?')
+  }
+})
