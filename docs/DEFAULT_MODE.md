@@ -417,8 +417,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   and fees: what is paid can be a few atoms below what was typed, when the price leaves a
   remainder too small to buy anything, and that remainder stays in the wallet. Until Review, the
   amount that follows the price is an estimate and reads as one: "about" beside it. While Review
-  asks for the exact price: "Getting the exact price…". If the price moves: "The price moved.
-  Here is the new one."
+  asks for the exact price: "Getting the exact price…", and once that has taken longer than the
+  sources are given to answer (eight seconds), while the wallet still checks a price it was
+  given: "Still getting the exact price: this can take up to half a minute…". If the price
+  moves: "The price moved. Here is the new one."
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
