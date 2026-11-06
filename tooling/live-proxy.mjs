@@ -126,6 +126,8 @@ const server = createServer(async (req, res) => {
   }
   if (cors && req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return }
   if (lnaddr && (url.pathname.startsWith('/lsp/lnaddr/') || url.pathname.startsWith('/.well-known/lnurlp/'))) {
+    // With --cors, the wallet's own calls (register, stock, wait) are answered to any origin too.
+    if (cors) { const wh = res.writeHead.bind(res); res.writeHead = (st, h = {}) => wh(st, { ...h, ...CORS }) }
     const inner = new URL(url.pathname.replace(/^\/lsp/, '') + url.search, 'http://x')
     const m = /^\/lnaddr\/([^/-][^/]*)$/.exec(inner.pathname)
     if (m && req.method === 'GET' && lnaddrForge && existsSync(lnaddrForge)) return forged(req, res, inner)
