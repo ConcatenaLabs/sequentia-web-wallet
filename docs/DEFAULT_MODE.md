@@ -290,6 +290,9 @@ modes (`asset-picker.js`):
     its fee are moved to the wallet's own address first, saying "Moving <amount> <TICKER> out of
     the Ark so it can be sent confidentially. They are ready in a few minutes. Keep this page
     open.", and the payment is reviewed and made from there as any payment on the chain.
+    The review of any payment to a confidential address says "This payment’s amount and asset
+    can still be worked out by anyone reading the chain.": its inputs and its change are in the
+    clear, so its amount and asset follow from them.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.

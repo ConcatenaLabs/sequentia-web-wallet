@@ -9794,7 +9794,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       endBuild();
       // Structured review rows (recipient, resolved atoms, asset, ⇄ ref details) — never blind-sign.
       const reviewRows = rows.map(r=>({ addr:r.addr, atoms:parseAtoms(r.amtS, sendPrecision(r.asset)), hex:r.asset, ref:r.ref }));
-      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:byAddressNote(false)});
+      // Default mode says plainly what a payment to a confidential address does not hide (#585).
+      const seen = !devMode() && rows.some(r=>isConfidentialAddress(r.addr)) ? [['', DEFAULT_WORDS.confidentialSeen]] : [];
+      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:[...byAddressNote(false), ...seen]});
     }
   }catch(e){ $('sendErr').textContent=plainErr(e); }
   finally{ btn.disabled=false; btn.textContent=label; } };
