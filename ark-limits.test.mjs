@@ -89,7 +89,7 @@ test('the page holds the wallet to the limits', () => {
 test('Receive keeps its instant part; the hold limit moves the rest out; a large payment goes to the address', () => {
   // Below `direct` the code keeps its Ark part; at `direct` or more it carries the address alone, so
   // a wallet that is not this one pays the address too.
-  assert.match(html, /lightning: inv \? inv\.invoice : undefined, ark: large \? undefined : \(_recvArk \|\| undefined\), sequentia: _recvCode\.text \}\);/)
+  assert.match(html, /lightning: inv \? inv\.invoice : undefined, lnurl: [^\n]*\n\s*ark: large \? undefined : \(_recvArk \|\| undefined\), sequentia: _recvCode\.text \}\);/)
   assert.ok(!/btcRoom/.test(html), 'Receive never drops the Ark part for a smaller amount')
   // Receive's invoice card holds to the same two rules as the code.
   const card = html.slice(html.indexOf('if (btcArkRoutes()){\n      // The receive code'), html.indexOf('try { await btcArkReceive(amt, st, out); }'))

@@ -68,6 +68,13 @@
   body:not(.devmode) .dev-only{display:none !important}
   a{color:var(--amber2);text-decoration:none} a:hover{text-decoration:underline}
   .hide{display:none}
+  /* Receive's Confidential switch (default mode): a checkbox drawn as a switch. */
+  .recv-switch{display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;color:var(--txt)}
+  .recv-switch input{appearance:none;-webkit-appearance:none;padding:0;border:0;min-width:0;width:36px;height:20px;border-radius:10px;background:var(--line);position:relative;cursor:pointer;flex:0 0 auto;margin:0}
+  .recv-switch input::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff}
+  .recv-switch input:checked{background:var(--amber)}
+  .recv-switch input:checked::after{left:18px}
+  .recv-switch input:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
   .recv-amt-row{display:flex;gap:8px;margin:0 0 10px}
   .recv-amt-row.hide{display:none}
   /* user mode's Trade tab: the user composer only (user-composer.js) */
@@ -867,6 +874,11 @@
           <button class="ghost" id="btnConf">Show blinded address</button>
           <button class="ghost hide" id="btnRecvMode">Show address</button>
           <button class="ghost dev-only" id="btnXpub">Show xpub</button>
+        </div>
+        <div id="recvConfRow" class="hide" style="margin-top:14px">
+          <label class="recv-switch"><input type="checkbox" role="switch" id="recvConfChk"><span id="recvConfLbl">Confidential</span></label>
+          <p class="sub" id="recvConfTip" style="margin:6px 0 0"></p>
+          <p class="sub hide" id="recvConfNote" style="margin:6px 0 0"></p>
         </div>
         <div id="nameBox" class="hide" style="margin-top:18px">
           <label class="lbl" id="nameLbl">Your payment name</label>
@@ -1838,7 +1850,8 @@ import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
 import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
-import { buildPayCode, readPayCode } from './pay-code.js';
+import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
+import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, moveOutSats, moveRetryMs, moveWaits, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
@@ -1960,6 +1973,8 @@ const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h
 const txLink = (href,label)=>{ const a=el('a','aid'); a.setAttribute('href',href); a.target='_blank'; a.rel='noopener'; a.textContent=label; return a; };
 
 let network, signer, wollet, client, POLICY, addrIndex = null, showConf = false, showXpub = false;
+// Default mode's Confidential switch on Receive (off each time Receive opens; renderReceive).
+let _codeConf = false;
 let companionClient;   // the sync's second client: scans the covenant companion beside the primary wallet (see _syncImpl)
 let broadcastClient;   // broadcasts a reviewed send without waiting for a scan to free the shared client (see reviewBroadcast)
 let keySignStarted = false;   // the Sign tab opens on the address the Receive tab is showing, once
@@ -3605,6 +3620,8 @@ function renderRoomStepper(host){
   paint();
 }
 function tab(name){
+  // Receive's Confidential switch is a choice for one payment: it is off again once Receive is left.
+  if(name!=='receive') _codeConf=false;
   // The open tab is kept for the browser tab's session: a reload opens on it again.
   try{ sessionStorage.setItem('swk.tab', name); }catch{}
   document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
@@ -3909,7 +3926,8 @@ async function openWallet(phrase, kind = 'bip39'){
   const restored = await restoreWolletState();
   endRestore(restored ? 'restored' : 'nothing to restore');
   let keptTab=null; try{ keptTab=sessionStorage.getItem('swk.tab'); }catch{}
-  addrIndex=null; views('app'); show('btnGear', true); addRecipientRow(); initAppRefUI(); initSwapTab();
+  addrIndex=null; try{ addrIndex = shownReceiveIndex(keptRecvIndex(), unifiedNextUnused()); }catch{ addrIndex=null; }
+  views('app'); show('btnGear', true); addRecipientRow(); initAppRefUI(); initSwapTab();
   // Developer mode: leaves (leaves.js). Mounted with the app, so the setting can be turned
   // on at any time; the leaf wallet starts only while the mode is on. Balance is first drawn once it
   // is mounted, so the figures it last gave this wallet are in the first one.
@@ -4318,7 +4336,8 @@ function initLnAddress(){
       return max >= LNADDR_MIN_SAT ? { min_sat: LNADDR_MIN_SAT, max_sat: max } : null;
     },
     store: { get: (k)=> localStorage.getItem('swk.'+k+'.'+walletTag()), set: (k, v)=> v == null ? localStorage.removeItem('swk.'+k+'.'+walletTag()) : localStorage.setItem('swk.'+k+'.'+walletTag(), v) },
-    onChange: ()=>{ try{ renderNameBox(); }catch{} },
+    // The code carries the name while it is held: drawn again when it changes.
+    onChange: ()=>{ try{ renderReceive(); }catch{} },
     log: (...a)=> console.log(...a),
   });
   lnAddr.recover().then(()=>{ lnAddr.start(); try{ renderNameBox(); }catch{} });
@@ -7259,9 +7278,9 @@ async function _syncImpl(){
       part('OpenAMP balances', oampRefreshBalances()), part('OpenAMP user', oampRefreshUser())]);
     refreshScanCacheBase();   // no-op once a base exists; off-path (throwaway wollet, own client), never blocks this sync
     _scannedOnce = true;   // the live balance is now authoritative — stop showing the cached snapshot
-    // Cross-chain address cycling: advance the shared receive address past anything
-    // that's been used on either chain (never backward, so a manual "New address" sticks).
-    addrIndex = Math.max(addrIndex ?? 0, unifiedNextUnused());
+    // Cross-chain address cycling: advance the shared receive address past anything that's been
+    // used on either chain; one New code moved to stays while it is unused (receive-index.js).
+    addrIndex = shownReceiveIndex(addrIndex, unifiedNextUnused()); keepRecvIndex(addrIndex);
     renderBalance(); renderHistory(); renderReceive(); refreshStakes(); refreshDelegationHeld(); populateFeeAssets(); refreshRecipientAssets();
     // Default mode: coins new on the chain go into the tree by themselves (leaves.js boardArrivals).
     try{ const k=JSON.stringify(balObj(), (_, v)=> typeof v==='bigint' ? String(v) : v); if(k!==_onchainSeen){ _onchainSeen=k; if(leavesApi) leavesApi.boardSoon(); } }catch{}
@@ -7749,6 +7768,10 @@ function unifiedNextUnused(){
   const btcNext = btcUsed.size ? Math.max(...btcUsed)+1 : 0;
   return Math.max(lwkNext, btcNext);
 }
+// The index Receive shows, kept per wallet so the address a code showed is the one it shows after a
+// reload, while unused (receive-index.js).
+function keptRecvIndex(){ try{ const v=localStorage.getItem('swk.recvIndex.'+walletTag()); return v!=null && /^\d+$/.test(v) ? Number(v) : null; }catch{ return null; } }
+function keepRecvIndex(i){ try{ if(Number.isInteger(i)) localStorage.setItem('swk.recvIndex.'+walletTag(), String(i)); }catch{} }
 function currentAddress(){
   const r = wollet.address(addrIndex==null?undefined:addrIndex); addrIndex=r.index();
   const a = r.address(); return showConf ? a : a.toUnconfidential();
@@ -7866,9 +7889,13 @@ function payCodeText(){
   let address = null; try{ address = String(wollet.address(addrIndex==null?undefined:addrIndex).address().toUnconfidential()); }catch{}
   if(!address) return _recvCode.text;
   const inv = can && mine(_recvInv) ? _recvInv : null;
+  // Without an amount, the wallet's payment name, which a Lightning wallet pays in an amount it
+  // chooses (lnaddr.js): while the name is held and the Bitcoin ark can make its invoices.
+  const name = atoms===0n && lnAddr && lnAddr.name() && btcArk && btcArk.isOpen() ? lnAddr.name() : null;
   // Nor the ark's address: a wallet that is not this one would pay it there.
   return buildPayCode({ address, amount: asset==='BTC' && atoms>0n ? fmtAtoms(atoms, 8).replace(/[^0-9.]/g, '') : undefined,
-    lightning: inv ? inv.invoice : undefined, ark: large ? undefined : (_recvArk || undefined), sequentia: _recvCode.text });
+    lightning: inv ? inv.invoice : undefined, lnurl: name ? nameLnurlUrl(name, lnaddrDomain()) : undefined,
+    ark: large ? undefined : (_recvArk || undefined), sequentia: _recvCode.text });
 }
 // The code's invoice is claimed as soon as it is paid; the code then shows a new one. An asset's
 // is the leaf library's receive: once a payment is held for it the wallet syncs, which claims the
@@ -7945,6 +7972,32 @@ function payCodeRoute(text, asset, atoms){
   return { dest: c.address || text, byAddress: !!c.address };
 }
 function payCodeDestination(text, asset){ return payCodeRoute(text, asset).dest; }
+// Default mode's Confidential switch, under the code (and under the address while the code waits on
+// the operator): on, the code is the wallet's confidential address alone (confidentialCode).
+function paintConfSwitch(on){
+  $('recvConfRow').classList.toggle('hide', !on);
+  if(!on) return;
+  $('recvConfLbl').textContent = DEFAULT_WORDS.confidential;
+  $('recvConfChk').checked = _codeConf;
+  $('recvConfTip').textContent = DEFAULT_WORDS.confidentialTip;
+  $('recvConfNote').textContent = DEFAULT_WORDS.confidentialNote;
+  $('recvConfNote').classList.toggle('hide', !_codeConf);
+}
+// The confidential code: the wallet's confidential address at the index shown, in its own spelling
+// (a Sequentia wallet reads it as it reads any address). It carries no other way to pay: a payment
+// that arrives in seconds is never confidential, and BTC never is.
+function confidentialCode(){
+  try{ return String(wollet.address(addrIndex==null?undefined:addrIndex).address()); }catch{ return null; }
+}
+// Whether `text` is a confidential Sequentia address.
+function isConfidentialAddress(text){ try{ return new Address(String(text||'').trim()).isBlinded(); }catch{ return false; } }
+function renderConfidentialCode(){
+  $('recvAmtRow').classList.add('hide');
+  $('recvTip').textContent = DEFAULT_WORDS.receiveTipConf;
+  const code = confidentialCode();
+  $('addr').textContent = code || DEFAULT_WORDS.receiveWait;
+  try{ if(!code) throw 0; $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
+}
 function renderReceiveCode(){
   $('recvLbl').textContent = DEFAULT_WORDS.codeLabel;
   $('recvTip').textContent = DEFAULT_WORDS.receiveTip;
@@ -7952,6 +8005,8 @@ function renderReceiveCode(){
   $('btnCopy').textContent = DEFAULT_WORDS.copyCode;
   $('btnConf').classList.add('hide');
   $('addr').classList.add('recv-code');
+  paintConfSwitch(true);
+  if(_codeConf){ renderConfidentialCode(); return; }
   if(!_recvCode){
     $('addr').textContent = DEFAULT_WORDS.receiveWait; $('qr').removeAttribute('src');
     if(!_recvCodeRetry) askReceiveCode();
@@ -7977,7 +8032,16 @@ function renderReceive(){
   $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
   if(receiveCodeMode()){ renderReceiveCode(); renderOampReceive(); return; }
   $('recvAmtRow').classList.add('hide');
-  $('btnConf').classList.remove('hide');
+  // Default mode shows the address while the code waits on the operator, with the same switch.
+  const defaultMode = !devMode();
+  paintConfSwitch(defaultMode);
+  $('btnConf').classList.toggle('hide', defaultMode);
+  if(defaultMode && _codeConf){
+    $('addr').classList.add('recv-code');
+    $('recvLbl').textContent = DEFAULT_WORDS.codeLabel; $('btnCopy').textContent = DEFAULT_WORDS.copyCode;
+    $('btnNewAddr').textContent = DEFAULT_WORDS.newCode;
+    renderConfidentialCode(); renderOampReceive(); return;
+  }
   $('addr').classList.remove('recv-code');
   $('recvLbl').textContent = 'Receive'; $('btnCopy').textContent = 'Copy';
   $('btnNewAddr').textContent = 'New address';
@@ -9621,6 +9685,16 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
         const tree = leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n) : 0n;
         if(addressRoute(a, availableFor(h), tree) !== 'tree') continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
+        // A confidential address (a confidential receive code) is paid on the chain, blinded: what
+        // the wallet holds for instant payments is never confidential and is paid out only to a plain
+        // address, so the amount and its fee are moved to the wallet's own address first, and the
+        // payment is made from there, as for a stake.
+        if(isConfidentialAddress(rows[0].addr)){
+          const st=$('sendErr'); st.className='status';
+          await ensureOnChain([{ hex:h, atoms: a + feeMarginAtoms(h) }], (t)=>{ st.textContent=t; }, DEFAULT_WORDS.confidentialPurpose);
+          st.textContent='';
+          continue;
+        }
         await offboardReview(rows[0], reset);
         return;
       } }
@@ -9653,9 +9727,13 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
   finally{ btn.disabled=false; btn.textContent=label; } };
 
 $('btnCopy').onclick=()=>copyToClipboard($('addr').textContent, $('btnCopy'));
+// New code (New address in developer mode) moves to an address not shown before, within what a
+// restore from the phrase finds (receive-index.js); the code's other parts are made new with it.
 $('btnNewAddr').onclick=()=>{
-  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; renderReceive(); return; }
-  addrIndex=(addrIndex??0)+1; renderReceive(); };
+  try{ addrIndex = nextReceiveIndex(addrIndex, unifiedNextUnused()); keepRecvIndex(addrIndex); }catch(e){ console.warn('[receive] new address:', e?.message??e); }
+  if(receiveCodeMode()){ try{ localStorage.removeItem('swk.leaves.code.' + walletTag()); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; }
+  renderReceive(); };
+$('recvConfChk').onchange=()=>{ _codeConf=$('recvConfChk').checked; renderReceive(); };
 $('btnRecvMode').onclick=()=>{ showAddrDefault=!showAddrDefault; renderReceive(); };
 // An amount typed on Receive redraws the code (its invoice is made for the amount once typing stops).
 { let t=null; $('recvAmt').addEventListener('input', ()=>{ clearTimeout(t); t=setTimeout(()=>{ _recvInv=null; _recvInvWatch++; renderReceive(); }, 600); }); }

@@ -22,6 +22,15 @@
 //          line
 //   sendmany  wallet <name> pays <amount> <ticker> to every code in each <file> given, one row of
 //          Send each, in one payment: `sendmany A USDX 10 B.codes C.codes`
+//   receive  wallet <name>'s Receive in default mode, part by part: New code moves the code to a new
+//          address; with a payment name chosen (`am5…`, or the name given) a code without an amount
+//          carries the name's LNURL-pay, which the service answers; an amount in BTC, and in an asset
+//          the operator receives over Lightning, carries an invoice instead; the Confidential switch
+//          gives the confidential address alone, says what stays public, and is off again once
+//          Receive is left. A screenshot of each, and none of the words default mode never says.
+//          A name the wallet did not hold before is removed at the end unless `keep` follows
+//          (`receive A keep`), and one it held is removed with `release`; `--name <name>` chooses
+//          the name
 //   coins  wallet <name>'s coins in the tree as developer mode lists them (state, kind, asset,
 //          value, dates), written to <work>/<name>.coins.json
 //   settle wallet <name> settles every coin it holds in the tree that is not a leaf of a round (kind batch)
@@ -58,6 +67,8 @@ const base = flag('--base', 'http://127.0.0.1:8791/wallet/')
 // `--to-base <url>`: `send`'s receiver opens at this page instead of --base, a wallet kept on
 // another origin (one served by tooling/live-proxy.mjs, paid from the public page).
 const toBase = flag('--to-base', null)
+// `receive --name <name>`: the payment name the step chooses, when the wallet holds none.
+const nameArg = flag('--name', null)
 // `pay --paste`: the invoice is pasted into Pay an invoice instead of handed over by the link, for
 // a page that predates the link.
 const paste = argv.includes('--paste'); if (paste) argv.splice(argv.indexOf('--paste'), 1)
@@ -203,6 +214,7 @@ async function main () {
         await pb.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(t) && t!==${JSON.stringify(old)} })()`, 300000)
       }
       code = await pb.eval("document.querySelector('#addr').textContent")
+      note('the code paid carries ' + (['ark', 'sequentia', 'lightning', 'amount'].filter((k) => new RegExp('[?&]' + k + '=', 'i').test(code)).map((k) => k === 'lightning' && /[?&]lightning=LNURL1/i.test(code) ? 'lightning (a payment name)' : k).join(', ') || 'the address alone'))
       // `address`: pay the address the code carries, as a sender outside the tree would be given.
       if (rest[3] === 'address') { code = decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]); note('paying the address ' + code) }
       await tab(pb, 'balance')
@@ -216,12 +228,16 @@ async function main () {
       const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); if(!o) throw new Error('no option ${ticker}: '+[...s.options].map(o=>o.textContent).join(',')); s.value=o.value; s.dispatchEvent(new Event('change'));
       r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
     await click(pa, '#btnReview')
-    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e ? 'ERR '+e : false })()", 120000)
-    check('the review asks to send it, in plain words', /^Send .*\?/i.test(title.trim()) && !forbiddenIn(title).length, title.replace(/\n+/g, ' | '))
+    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving |cannot be moved out of the Ark yet/.test(e) ? 'ERR '+e : false })()", 1500000)
+    // A payment on the chain (an address the wallet's coins there cover, a confidential address)
+    // has the chain's own review.
+    const chainReview = /^Confirm Sequentia payment/i.test(title.trim())
+    check('the review asks to send it, in plain words', (/^Send .*\?/i.test(title.trim()) || chainReview) && !forbiddenIn(title).length, title.replace(/\n+/g, ' | '))
+    if (/^ERR/.test(title.trim())) { note('console A: ' + pa.console.slice(-8).join(' | ')); return }
     await shot(pa, `${name}-send-review.png`)
     const tClick = Date.now()
     await pa.eval("document.querySelector('.modal button.primary').click()")
-    const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 2400000).catch(async (e) => { note('still: ' + await pa.eval("document.querySelector('.modal .status')?.textContent||''") + ' console: ' + pa.console.slice(-8).join(' | ')); throw e })
+    const done = await pa.waitFor("(()=>{ if(document.querySelector('.modal .sent-title')) return 'Sent ' + (document.querySelector('.modal .kv .v.mono')?.textContent||''); const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending|Signing|Checking/.test(t) ? t : false })()", 2400000).catch(async (e) => { note('still: ' + await pa.eval("document.querySelector('.modal .status')?.textContent||''") + ' console: ' + pa.console.slice(-8).join(' | ')); throw e })
     check('the sender says it is sent', /^Sent/.test(done), `${done} (${secs(Date.now() - tClick)} from the click)`)
     await shot(pa, `${name}-send-done.png`)
     if (external || !/^Sent/.test(done)) { note('console A: ' + pa.console.filter((l) => /tree send|leaves|board/i.test(l)).slice(-6).join(' | ')); return }
@@ -378,7 +394,7 @@ async function main () {
     if (!title.startsWith('ERR')) {
       const tClick = Date.now()
       await pa.eval("document.querySelector('.modal button.primary').click()")
-      const done = await pa.waitFor("(()=>{ const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending/.test(t) ? t : false })()", 2400000)
+      const done = await pa.waitFor("(()=>{ if(document.querySelector('.modal .sent-title')) return 'Sent ' + (document.querySelector('.modal .kv .v.mono')?.textContent||''); const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending|Signing|Checking/.test(t) ? t : false })()", 2400000)
       check('the sender says it is sent', /^Sent/.test(done), `${done} (${secs(Date.now() - tClick)} from the click)`)
       await sleep(30000)
     }
@@ -495,6 +511,118 @@ async function main () {
     for (const l of out.broadcast) note(l)
     writeFileSync(join(work, name + '.home.json'), JSON.stringify(out, null, 1))
     note('console: ' + page.console.filter((l) => /leaves|home|operator|refus/i.test(l)).slice(-10).join(' | '))
+    await page.stop()
+  } else if (step === 'receive') {
+    const keep = rest[0]
+    const page = await openWallet(name)
+    await waitJoined(page)
+    const codeNow = () => page.eval("document.querySelector('#addr').textContent")
+    const isCode = "/^bitcoin:/i.test(document.querySelector('#addr').textContent)"
+    const addrOf = (c) => c.replace(/^bitcoin:/i, '').split('?')[0].toLowerCase()
+    const param = (c, k) => { const m = new RegExp('[?&]' + k + '=([^&]*)', 'i').exec(c); return m ? decodeURIComponent(m[1]) : null }
+    // The picture read back with the page's own QR reader: what it holds, and its version (size).
+    const qrRead = () => page.eval(`(async()=>{ const img=document.querySelector('#qr'); if(!img.getAttribute('src')) return null; if(!img.complete) await new Promise(r=>img.onload=r);
+      const c=document.createElement('canvas'); const k=Math.max(1, Math.ceil(600/img.naturalWidth)); c.width=img.naturalWidth*k+80; c.height=img.naturalHeight*k+80; const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height); x.imageSmoothingEnabled=false; x.drawImage(img,40,40,img.naturalWidth*k,img.naturalHeight*k);
+      const d=x.getImageData(0,0,c.width,c.height); const r=window.jsQR(d.data,d.width,d.height); return r ? { data: r.data, version: r.version } : { data: null } })()`)
+    const qrCheck = async (what) => { const q = await qrRead(); const c = await codeNow(); check(`${what}: the picture reads back as the code`, !!q && q.data === c, q && { version: q.version, chars: c.length }) }
+    const noWords = async (what) => { const w = forbiddenIn(await visibleText(page)).filter((x) => !['on-chain', 'lightning', 'channel', 'channels'].includes(x)); check(what + ': none of the words default mode never says', !w.length, w) }
+    // 1. The code, and New code.
+    const c1 = await page.waitFor(`${isCode} ? document.querySelector('#addr').textContent : false`, 300000)
+    check('Receive shows the code; the Confidential switch is under it, off', await page.eval("!document.querySelector('#recvConfRow').classList.contains('hide') && !document.querySelector('#recvConfChk').checked && document.querySelector('#recvConfLbl').textContent==='Confidential'"), await page.eval("document.querySelector('#recvConfTip').textContent"))
+    await shot(page, `${name}-receive-1-code.png`)
+    await qrCheck('the code')
+    await click(page, '#btnNewAddr')
+    const c2 = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^bitcoin:/i.test(t) && t!==${JSON.stringify(c1)} ? t : false })()`, 300000)
+    check('New code moves the code to a new address', addrOf(c2) !== addrOf(c1) && /^tb1/.test(addrOf(c2)), `${addrOf(c1)} -> ${addrOf(c2)}`)
+    check('and makes its other parts new', param(c2, 'sequentia') !== param(c1, 'sequentia'))
+    await shot(page, `${name}-receive-2-new-code.png`)
+    const addrs = new Set([addrOf(c1), addrOf(c2)])
+    for (let i = 0; i < 3; i++) { const was = await codeNow(); await click(page, '#btnNewAddr'); addrs.add(addrOf(await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^bitcoin:/i.test(t) && t!==${JSON.stringify(was)} ? t : false })()`, 300000))) }
+    check('five codes, five addresses', addrs.size === 5, [...addrs])
+    // The address moved to is the one shown again after a reload, while it is unused.
+    const last = addrOf(await codeNow())
+    await page.go(base); await page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000)
+    const again = addrOf(await waitJoined(page))
+    check('after a reload the code shows the same address', again === last, `${last} -> ${again}`)
+    // 2. A payment name: the code without an amount carries its LNURL-pay.
+    let named = await page.eval("document.querySelector('#nameAddr').textContent")
+    const held = !!named
+    if (!named) {
+      const want = nameArg || ('am5' + Math.random().toString(36).slice(2, 9))
+      await page.waitFor("document.querySelector('#btnNameChoose') && document.querySelector('#btnNameChoose').offsetParent !== null", 120000)
+      await click(page, '#btnNameChoose')
+      await page.eval(`(()=>{ const i=document.querySelector('#nameInput'); i.value=${JSON.stringify(want)}; return true })()`)
+      await click(page, '#btnNameSave')
+      named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; const s=document.querySelector('#nameStatus').textContent; return t || (s ? 'ERR '+s : false) })()", 120000)
+    }
+    check('the wallet holds a payment name', /@/.test(named), named)
+    const c3 = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /[?&]lightning=LNURL1/.test(t) ? t : false })()`, 120000).catch(() => null)
+    check('without an amount the code carries the name\'s LNURL-pay', !!c3, c3 && param(c3, 'lightning').slice(0, 24) + '…')
+    if (c3) {
+      const { lnurlDecode } = await import('../pay-code.js')
+      const url = lnurlDecode(param(c3, 'lightning'))
+      const n = named.split('@')[0]
+      check('it is the name\'s own LNURL-pay', url === `https://${named.split('@')[1]}/.well-known/lnurlp/${n}`, url)
+      const pr = await fetch(url).then((r) => r.json()).catch((e) => ({ error: e.message }))
+      check('which the service answers with a pay request', pr.tag === 'payRequest' && typeof pr.callback === 'string', { tag: pr.tag, minSendable: pr.minSendable, maxSendable: pr.maxSendable, error: pr.reason || pr.error })
+      // A Lightning wallet scanning the code asks the callback for an amount of its choosing: the
+      // open wallet makes the invoice for exactly it.
+      if (pr.callback) {
+        const want = 2000n * 1000n
+        const cb = await fetch(pr.callback + (pr.callback.includes('?') ? '&' : '?') + 'amount=' + want).then((r) => r.json()).catch((e) => ({ error: e.message }))
+        const { decodeBolt11 } = await import('../bolt11.js')
+        const d = cb.pr ? decodeBolt11(cb.pr) : null
+        check('a Lightning wallet paying it gets an invoice for the amount it chose, from this wallet', !!d && d.ok && d.chain === 'btc' && BigInt(d.amountMsat) === want, cb.pr ? cb.pr.slice(0, 24) + '…' : cb)
+      }
+      note(`code with the name: ${c3.length} characters`)
+      writeFileSync(join(work, name + '.code'), c3)
+    }
+    await shot(page, `${name}-receive-3-name.png`)
+    await qrCheck('the code with the name')
+    await noWords('Receive with a name')
+    // 3. An amount: an invoice, not the name.
+    const setAmount = (v, asset = 'BTC') => page.eval(`(()=>{ const s=document.querySelector('#recvAsset'); const o=[...s.options].find(o=>o.textContent.trim()===${JSON.stringify(asset)}); if(!o) return 'no '+${JSON.stringify(asset)}+': '+[...s.options].map(o=>o.textContent).join(','); s.value=o.value; s.dispatchEvent(new Event('change')); const i=document.querySelector('#recvAmt'); i.value=${JSON.stringify(v)}; i.dispatchEvent(new Event('input')); return true })()`)
+    await setAmount('0.0002')
+    const c4 = await page.waitFor("(()=>{ const t=document.querySelector('#addr').textContent; return /[?&]lightning=LNTB/i.test(t) ? t : false })()", 120000).catch(() => null)
+    check('an amount in BTC: the code names it and carries an invoice, not the name', !!c4 && param(c4, 'amount') === '0.0002' && !/LNURL1/.test(c4), c4 && { amount: param(c4, 'amount'), lightning: param(c4, 'lightning').slice(0, 16) + '…' })
+    await shot(page, `${name}-receive-4-amount-btc.png`)
+    await qrCheck('the code with an amount in BTC')
+    const assets = await page.eval("[...document.querySelector('#recvAsset').options].map(o=>o.textContent.trim())")
+    note('the amount\'s menu: ' + assets.join(', '))
+    const asset = assets.find((a) => a !== 'BTC')
+    if (asset) {
+      const r = await setAmount('1', asset)
+      if (r !== true) note(r)
+      const c5 = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /[?&]lightning=/i.test(t) && !/LNURL1/.test(t) && !/[?&]amount=/.test(t) && t!==${JSON.stringify(c4)} ? t : false })()`, 180000).catch(() => null)
+      check(`an amount in ${asset}: the code carries its invoice in the asset, and no BTC amount`, !!c5, c5 && param(c5, 'lightning').slice(0, 16) + '…')
+      await shot(page, `${name}-receive-5-amount-${asset}.png`)
+      await qrCheck(`the code with an amount in ${asset}`)
+    } else note('the operator receives no asset over Lightning now: no asset in the menu')
+    await setAmount('')
+    await page.waitFor("/[?&]lightning=LNURL1/.test(document.querySelector('#addr').textContent)", 120000).catch(() => null)
+    // 4. Confidential.
+    await page.eval("(()=>{ const c=document.querySelector('#recvConfChk'); c.checked=true; c.dispatchEvent(new Event('change')); return true })()")
+    const cc = await codeNow()
+    check('Confidential on: the code is the confidential address alone', /^tsqb1[0-9a-z]+$/.test(cc), cc.slice(0, 20) + '…')
+    const shown = await page.eval("({ note: document.querySelector('#recvConfNote').textContent, noteShown: !document.querySelector('#recvConfNote').classList.contains('hide'), amount: !document.querySelector('#recvAmtRow').classList.contains('hide'), qr: !!document.querySelector('#qr').getAttribute('src') })")
+    check('it says what stays public, shows no amount, and has its picture', shown.noteShown && /BTC is never confidential/.test(shown.note) && !shown.amount && shown.qr, shown)
+    await shot(page, `${name}-receive-6-confidential.png`)
+    writeFileSync(join(work, name + '.confidential-code'), cc)
+    await qrCheck('the confidential code')
+    await noWords('Receive, Confidential on')
+    await click(page, '#btnNewAddr')
+    const cc2 = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^tsqb1/.test(t) && t!==${JSON.stringify(cc)} ? t : false })()`, 60000).catch(() => null)
+    check('New code moves the confidential code to a new address too', !!cc2)
+    await tab(page, 'balance'); await sleep(300); await tab(page, 'receive')
+    const back = await page.waitFor(`${isCode} ? document.querySelector('#addr').textContent : false`, 120000).catch(() => null)
+    check('leaving Receive turns Confidential off again', !!back && !(await page.eval("document.querySelector('#recvConfChk').checked")))
+    await shot(page, `${name}-receive-7-back.png`)
+    if (keep !== 'keep' && (!held || keep === 'release')) {
+      await click(page, '#btnNameRemove')
+      await page.waitFor("!document.querySelector('#nameAddr').textContent", 60000).catch(() => null)
+      const c7 = await codeNow()
+      check('with the name removed, the code carries no LNURL-pay', !/LNURL1/.test(c7))
+    }
     await page.stop()
   } else if (step === 'show') {
     const page = await openWallet(name)

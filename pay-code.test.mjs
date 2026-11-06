@@ -1,7 +1,7 @@
 // pay-code.js: the one receive code, written and read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildPayCode, readPayCode, compactRequest, expandRequest, readShortRequest, libraryRequest, bech32mEncode, bech32mDecode } from './pay-code.js'
+import { buildPayCode, readPayCode, compactRequest, expandRequest, readShortRequest, libraryRequest, bech32mEncode, bech32mDecode, lnurlEncode, lnurlDecode, nameLnurlUrl } from './pay-code.js'
 
 const TB1 = 'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx'
 // Bark's testnet ark address, as the Bitcoin ark gives one (131 characters, bech32m).
@@ -125,4 +125,40 @@ test('what is not a request, or names nothing to pay, is not read', () => {
 test('an address-less request with an ark address is read (BIP321 allows an empty path)', () => {
   const r = readPayCode('bitcoin:?ark=' + ARK)
   assert.equal(r.address, null); assert.equal(r.ark, ARK)
+})
+
+// LUD-01's own example.
+const LUD01_URL = 'https://service.com/api?q=3fc3645b439ce8e7f2553a69e5267081d96dcd340693afabe04be7b0ccd178df'
+const LUD01 = 'LNURL1DP68GURN8GHJ7UM9WFMXJCM99E3K7MF0V9CXJ0M385EKVCENXC6R2C35XVUKXEFCV5MKVV34X5EKZD3EV56NYD3HXQURZEPEXEJXXEPNXSCRVWFNV9NXZCN9XQ6XYEFHVGCXXCMYXYMNSERXFQ5FNS'
+
+test('LNURL: LUD-01\'s example is read and written back; anything else is not an LNURL', () => {
+  assert.equal(lnurlDecode(LUD01), LUD01_URL)
+  assert.equal(lnurlDecode('lightning:' + LUD01.toLowerCase()), LUD01_URL)
+  assert.equal(lnurlEncode(LUD01_URL).toUpperCase(), LUD01)
+  assert.equal(lnurlDecode(LUD01.slice(0, -1) + 'Q'), null)
+  assert.equal(lnurlDecode(ARK), null)
+  assert.equal(lnurlDecode('lntb10u1pjexample'), null)
+  assert.equal(nameLnurlUrl('Alice', 'SequentiaTestnet.com'), 'https://sequentiatestnet.com/.well-known/lnurlp/alice')
+})
+
+test('a code without an amount carries the payment name\'s LNURL-pay; readers hand it on apart from any invoice', () => {
+  const url = nameLnurlUrl('alice', 'sequentiatestnet.com')
+  const code = buildPayCode({ address: TB1, ark: ARK, sequentia: LIB, lnurl: url })
+  const lightning = /[?&]lightning=([^&]*)/.exec(code)[1]
+  assert.match(lightning, /^LNURL1[0-9A-Z]+$/, 'upper case: the QR code holds it as alphanumeric')
+  assert.equal(lnurlDecode(lightning), url)
+  const c = readPayCode(code)
+  assert.equal(c.lnurl, url)
+  assert.equal(c.lightning, null, 'never taken for an invoice')
+  assert.equal(c.address, TB1); assert.equal(c.ark, ARK); assert.ok(c.sequentia)
+  // An invoice, when the code has one, is the code's `lightning`; the LNURL is not added beside it.
+  const inv = 'lntb210u1pjexampleinvoice'
+  const withInv = buildPayCode({ address: TB1, lightning: inv, lnurl: url })
+  assert.equal((withInv.match(/lightning=/g) || []).length, 1)
+  assert.equal(readPayCode(withInv).lnurl, null)
+  // A code that holds nothing but the name's LNURL still names a way to pay.
+  assert.equal(readPayCode('bitcoin:?lightning=' + lnurlEncode(url)).lnurl, url)
+  // Its size: about 140 characters more than the code without it, all alphanumeric.
+  const plain = buildPayCode({ address: TB1, ark: ARK, sequentia: LIB })
+  assert.ok(code.length - plain.length < 160, `${code.length - plain.length} more characters`)
 })

@@ -160,7 +160,8 @@ fixed to the bottom of the screen, icon over label, which steps aside while the 
   In default mode BTC that arrives there and is confirmed moves by itself into the Bitcoin ark
   (below), and a BTC invoice made on the Lightning card is paid into the ark.
   Confidential (blinded, `tsqb1...`) addresses are available as an explicit opt-in toggle;
-  Sequentia is transparent by default and confidentiality is opt-in (**Show blinded address**).
+  Sequentia is transparent by default and confidentiality is opt-in (**Show blinded address** in
+  developer mode, the **Confidential** switch under the receive code in default mode).
   **Show xpub** (developer mode) reveals the
   account key for a watch-only import — one key for both chains, since they share the
   `m/84'/1'/0'` account — as the extended public key
@@ -273,7 +274,11 @@ seconds, and any other wallet pays the address. An optional
 amount in BTC adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
 Lightning wallet pays; an amount in an asset the operator receives over Lightning adds a
 `lightning=` invoice in that asset from the operator's node, which a wallet of another operator
-pays in seconds. The address alone
+pays in seconds. Without an amount, a wallet with a payment name carries the name's LNURL-pay as
+`lightning=`, which any Lightning wallet pays in an amount it chooses. **New code** moves to an
+address not shown before, within the twenty past the last one paid that a restore reads
+(`receive-index.js`). The **Confidential** switch under the code turns it into the wallet's
+confidential address alone, saying what stays public. The address alone
 is shown in developer mode. Under the code the wallet can choose a **payment name**,
 `name@sequentiatestnet.com` (`lnaddr.js`), held by a key of its phrase: a Lightning address that
 any Lightning wallet pays in an amount it chooses, the open page making the Bitcoin ark invoice
@@ -828,7 +833,8 @@ works normally without the restricted rows.
 | `asset-lightning.js` | Default mode's rule for an asset sent to a receive code of another operator: over Lightning (the code's invoice in the asset, within the limit in USD, the operator able to carry it, its lock within the operator's window), or the code's address and why. No DOM. |
 | `faucet-wallet.js` | The wallet's id for the testnet faucet (sha256 of a tag and the scriptPubKey of its first receive address, the same in Ambra browser and Ambra mobile), the read of the assets it has already received, and the words of the faucet card. |
 | `lnaddr.js` | The payment name (`name@SEQ_LNADDR_DOMAIN`, a Lightning address): the name rules, its key from the phrase and the signed messages, the page's held link with the service that answers invoice and receive-code requests, and Send's resolver of `name@domain`. Its service is `tooling/lsp/lnaddr.mjs`. No DOM. |
-| `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`) and the Sequentia receive request (`sequentia=`). Chooses nothing. |
+| `pay-code.js` | The one receive code: writes and reads the BIP321 request carrying the address, the Bitcoin ark address (`ark=`), the Sequentia receive request (`sequentia=`) and an invoice or a payment name's LNURL-pay (`lightning=`). Chooses nothing. |
+| `receive-index.js` | Which address Receive shows: New code's next index, and the one kept across a reload, within what a restore from the phrase finds. No DOM. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |
