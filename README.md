@@ -307,6 +307,10 @@ SeqDEX, served on the same origin, trades through an open wallet page over the p
 channel: the wallet's dialog shows the site's connection and each of its orders before
 anything is signed, and each order settles as the Trade tab settles a trade (`site-orders.js`).
 `tooling/seqdex-bridge-drive.mjs` drives that against the live testnet.
+Pignus, the lending site on the same origin, builds each loan's transaction itself and asks an
+open wallet page to sign it: the dialog shows what the wallet pays, what it receives and the fee
+before anything is signed, and in default mode the wallet first moves what a loan needs out of the
+Ark to its own address, once its owner approves.
 
 ### Developer mode: leaves
 
@@ -819,7 +823,8 @@ works normally without the restricted rows.
 | `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
 | `ark-rail.js` | Developer mode's Ark choice for BTC in the Trade tab and its panel: a market trade of BTC in the Bitcoin ark for an asset in leaves, by the user composer's engine. |
 | `leaf-rail.js` | Developer mode's Leaf choice in the Trade tab and its panel: a take from leaves, an in-tree swap with another wallet, an order placed on the chain from leaves. The settlement router decides what a choice settles as; the leaf wallet decides everything else. |
-| `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog; and, over the channel, a site of this origin's account, balances and orders once its owner connects it ([docs/PAGE_API.md](docs/PAGE_API.md)). |
+| `wallet-api.js` | The page API (`window.sequentiaWallet`, the `sequentia-wallet` channel): the mode and, in developer mode, the leaf rail, each action behind the wallet's approval dialog; and, over the channel, a site of this origin's account, balances, orders, and the transactions a site builds itself (a lending site's loans), once its owner connects it ([docs/PAGE_API.md](docs/PAGE_API.md)). |
+| `pset-bytes.js` | Vendored from the browser extension (`src/psetbytes.js`, the commit named in its first line; `pset-bytes.test.mjs` fails on drift): reads what a transparent PSET a site built does to this wallet, and takes the wallet's key origins back out of it. |
 | `site-orders.js` | A site's market and limit orders settled as the Trade tab settles a trade: the user composer's engine, or an order placed from leaves that rests. No DOM; the browser extension copies it into its `vendor/`. |
 | `leaf-request.js` | Reads a receive request to show it before a payment, and shapes the library's balance for the page API. Copied into the browser extension's `src/`. |
 | `contracts.js` | Developer mode: the Contracts tab, which builds, shows and signs a contract spend through the kit's contract engine, under the five-point rule. Copied into the browser extension's `vendor/`. |

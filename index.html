@@ -1858,6 +1858,7 @@ import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
 import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
 import { composerState, setComposerRail, canonicalPair } from './swap.js';
 import { mountPageApi } from './wallet-api.js';
+import { stripBip32 } from './pset-bytes.js';
 import { mountContracts } from './contracts.js';
 import { watchTips } from './tip-watch.js';
 import { reapplyUnseen } from './own-txs.js';
@@ -4083,6 +4084,23 @@ function initLeaves(){
 // What a site its owner connects on this page may reach over the page API's channel
 // (wallet-api.js, docs/PAGE_API.md): the account, the balances, and orders settled the way the
 // Trade tab settles a trade (site-orders.js), each shown in this page's dialog first.
+// The wallet's coins on the chain that a site's transaction can spend: those in the clear (a
+// confidential coin cannot be spent where every amount is read), in the provider's shape.
+function siteUtxos(){
+  const out = [];
+  for(const u of wollet.utxos()){
+    try{
+      const sec = u.unblinded();
+      if(sec.isExplicit && !sec.isExplicit()) continue;
+      const op = u.outpoint(), spk = u.scriptPubkey();
+      let address = null; try{ address = u.address().toUnconfidential().toString(); }catch{}
+      out.push({ txid: op.txid().toString(), vout: op.vout(), asset: sec.asset().toString(), value: String(sec.value()),
+        scriptPubkey: spk.toString ? spk.toString() : hexOfBytes(spk.bytes()), address, height: u.height() ?? null, explicit: true });
+    }catch{}
+  }
+  return out;
+}
+function explicitAtoms(hex){ let n = 0n; try{ for(const u of siteUtxos()) if(u.asset === hex) n += BigInt(u.value); }catch{} return n; }
 let siteOrders = null;
 function siteDeps(){
   return {
@@ -4146,6 +4164,38 @@ function siteDeps(){
         setInterval(()=>{ siteOrders.follow().catch(()=>{}); }, 60000);
       }
       return siteOrders;
+    },
+    // A site that builds its own transactions (Pignus): the network, the address, the coins in
+    // the clear on the chain, the transaction with this wallet's key origins on it (read for the
+    // dialog), its signature, its broadcast, and coins moved onto the chain for it.
+    network: ()=> ({ network: DEV_CHAIN ? 'sequentia-regtest' : 'sequentia-testnet', genesis: network.genesisBlockHash().toString() }),
+    address: async ()=>{ const r = wollet.address(addrIndex == null ? undefined : addrIndex); const a = r.address(); return { address: (a.toUnconfidential ? a.toUnconfidential() : a).toString(), index: r.index() }; },
+    utxos: async ()=> siteUtxos(),
+    detailed: (b64)=>{ const p = new Pset(b64); p.addDetails(wollet); return p.toString(); },
+    signPset: async (b64)=> withWollet(async ()=>{
+      const p = new Pset(b64); p.addDetails(wollet);
+      let signed;
+      try{ signed = signer.sign(p); }
+      catch(e){ if(/No signature added/i.test(String(e && e.message))) throw new Error('this wallet holds none of the inputs in that transaction'); throw e; }
+      return stripBip32(signed.toString());
+    }),
+    broadcast: async ({ pset, hex })=> withWollet(async ()=>{
+      const tx = pset ? wollet.finalize(new Pset(pset)) : new Transaction(hex);
+      const txid = pset ? await client.broadcast(tx) : await client.broadcastTx(tx);
+      try{ wollet.applyTransaction(ownTx(tx)); }catch{}
+      try{ noteOwnTx(tx); }catch{}
+      return { txid: txid.toString ? txid.toString() : String(txid) };
+    }),
+    // What is missing on the chain, each with the fee the Ark quotes for moving it (when it can).
+    shortOnChain: async (coins)=>{
+      const short = coins.map(c=> ({ asset: c.asset, atoms: c.atoms - explicitAtoms(c.asset) })).filter(c=> c.atoms > 0n);
+      if(devMode() || !leavesApi || !leavesApi.isOpen()) return short;
+      const address = wollet.address(undefined).address().toUnconfidential().toString();
+      for(const c of short){ try{ const q = await leavesApi.offboardQuote({ asset: c.asset, amount: String(c.atoms), address }); if(q && q.fee) c.fee = { asset: q.fee.asset || c.asset, atoms: BigInt(q.fee.amount || 0) }; }catch{} }
+      return short;
+    },
+    prepareCoins: async (coins, name)=>{
+      await ensureOnChain(coins.map(c=> ({ hex: c.asset, atoms: c.atoms })), (t)=>{ try{ toast(t); }catch{} }, 'used on ' + name, explicitAtoms);
     },
     // A request waits on this page: bring it forward where the browser lets a page do that.
     attention: ()=>{ try{ window.focus(); }catch{} try{ const t = document.title; if(!/^\(1\) /.test(t)){ document.title = '(1) ' + t; setTimeout(()=>{ document.title = t; }, 15000); } }catch{} },

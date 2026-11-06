@@ -115,6 +115,12 @@ answers and refusals:
 | `getOrders()` | silent | `{ orders, trades }` |
 | `cancelOrder({ order })` | this page's dialog | `{ order, txid }` |
 | `signMessage({ message })` | this page's dialog: "Sign a message for Emissio?" | `{ address, signature }`: the Sign tab's signature ("Bitcoin Signed Message", base64), by the key of the shared `tb1` address |
+| `getNetwork()` | silent | `{ network, genesis }`: the network's name and its genesis block hash |
+| `getAddress()` | silent | `{ address, index }`: the shared `tb1` address |
+| `getUtxos({ asset? })` | silent | `{ utxos: [{ txid, vout, asset, value, scriptPubkey, address, height, explicit }] }`: the wallet's coins on the chain in the clear, the ones a site's transaction can spend |
+| `signPset({ pset })` | this page's dialog: "Sign a transaction for Pignus?" | `{ pset }`: signed for this wallet's inputs, neither finalized nor broadcast |
+| `broadcast({ pset? , hex? })` | silent | `{ txid }`: a signed PSET finalized and sent, or a raw transaction sent, on Sequentia |
+| `prepareCoins({ coins: [{ asset, amount }] })` | this page's dialog when anything moves: "Get coins ready for Pignus?" | `{ moved: [{ asset, amount }] }`: what was moved onto the chain, empty when the coins were there |
 
 A connection lasts while the wallet page is open, for the site's page (its address without the
 query). Until then every method but the first three and `signMessage` refuses with
@@ -131,6 +137,27 @@ signature is over the "Bitcoin Signed Message" hash of the text, which is no tra
 signature hash, so it proves control of the address and authorises nothing else. Signing
 connects nothing: `getAccounts` still answers `[]` until `connect`. `signMessage` is a method of the provider protocol (the browser extension's `doc/PROVIDER.md`),
 and these are its rules in every wallet that serves it.
+
+The last six serve a site that builds its own transactions, such as Pignus, which composes every
+loan's transaction from the coins `getUtxos` lists and the terms it checked itself. `getNetwork`
+needs no connection; the others do. `signPset` reads the PSET from its bytes once the wallet has
+written its own key origins on it (a site cannot know them), so a transparent transaction, which is
+what a covenant settles, reads in full. The dialog shows **You pay** (each asset the wallet sends,
+the fee apart), **You receive**, **Network fee** (with ", paid by the transaction, not from your
+coins" when another input pays it) and **Asked by**, then **Approve** or **Reject**; only the
+site's own bytes are signed, and the key origins are taken out again before the PSET goes back.
+Before any dialog it refuses a PSET it cannot read (`this wallet cannot read that transaction, so
+it signs nothing`), one in which none of the inputs is the wallet's (`this wallet holds none of
+the inputs in that transaction`), and one that spends a confidential coin of the wallet's.
+`broadcast` sends Sequentia transactions only; `chain: 'bitcoin'` is refused.
+
+`prepareCoins` asks for coins on the chain in the clear, which a site's transaction can spend.
+Default mode holds what it receives in the Ark, so when the wallet holds less than `amount` of an
+asset on the chain, its dialog shows each amount it moves (**Moves**), the fee the Ark quotes
+for moving it (**Fee for the move**) and the site, and on approval it moves what is missing out of the Ark to its own address, as Stake does, and answers
+once the coins have arrived; they stay the wallet's. When the
+coins are already there it answers at once, with no dialog. Developer mode moves nothing by
+itself: it refuses with the amount it is short.
 
 `placeOrder` settles as the Trade tab does (`site-orders.js`): a market order is one trade of the
 user composer's engine, priced and settled from the wallet's leaves or on-chain coins; a limit

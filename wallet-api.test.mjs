@@ -207,3 +207,121 @@ test('a site over the channel: signMessage behind its own dialog, and only a rea
   a = await sign(6, 'Emissio 0123456789')
   assert.match(a.error, /locked/); assert.equal(shown.length, 2)
 })
+
+// A site that builds its own transactions (Pignus): its network, address and coins; a transaction
+// it composed, signed behind this page's dialog with what it does to this wallet; the broadcast;
+// coins moved onto the chain for it. The fixture is a site-built transparent PSET whose input 1
+// and outputs 2 and 3 pay the wallet's script; `detailed` marks them as the wallet's own the way
+// Pset.addDetails writes key origins.
+function withOrigins (b64, ins, outs) {
+  const b = Buffer.from(b64, 'base64'); let i = 5
+  const varint = () => { const x = b[i++]; if (x < 0xfd) return x; if (x === 0xfd) { const v = b.readUInt16LE(i); i += 2; return v } const v = b.readUInt32LE(i); i += 4; return v }
+  const map = () => { const e = []; for (;;) { const kl = varint(); if (!kl) return e; const k = b.subarray(i, i + kl); i += kl; const vl = varint(); const v = b.subarray(i, i + vl); i += vl; e.push([k, v]) } }
+  const vi = (n) => n < 0xfd ? Buffer.from([n]) : Buffer.from([0xfd, n & 0xff, n >> 8])
+  const emit = (e) => Buffer.concat([...e.map(([k, v]) => Buffer.concat([vi(k.length), k, vi(v.length), v])), Buffer.from([0])])
+  const origin = (type) => [Buffer.concat([Buffer.from([type]), Buffer.alloc(33, 2)]), Buffer.alloc(8, 1)]
+  const g = map(); const n = (t) => { const e = g.find(([k]) => k.length === 1 && k[0] === t); return e[1][0] }
+  const parts = [b.subarray(0, 5), emit(g)]
+  for (let k = 0; k < n(4); k++) { const e = map(); if (ins.includes(k)) e.push(origin(0x06)); parts.push(emit(e)) }
+  for (let k = 0; k < n(5); k++) { const e = map(); if (outs.includes(k)) e.push(origin(0x02)); parts.push(emit(e)) }
+  return Buffer.concat(parts).toString('base64')
+}
+
+test('a site over the channel: a transaction it built, signed behind this page’s dialog; coins moved onto the chain only on approval', async () => {
+  const { readFileSync } = await import('node:fs')
+  const PSET = readFileSync(new URL('./tooling/fixtures/levo-buy.pset', import.meta.url), 'utf8').trim()
+  const A = '2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de'
+  const B = 'a'.repeat(64)
+  const L = fakeLeaves({ mode: 'user' })
+  const posted = []
+  const ch = { postMessage: (m) => posted.push(m), onmessage: null }
+  const shown = []
+  let approve = true, mine = { ins: [1], outs: [2, 3] }
+  const calls = []
+  const site = {
+    unlocked: () => true, account: () => ({ network: 'sequentia-testnet', address: 'tb1qx' }),
+    network: () => ({ network: 'sequentia-testnet', genesis: 'g' }),
+    address: async () => ({ address: 'tb1qx', index: 0 }),
+    utxos: async () => [{ txid: 't', vout: 0, asset: A, value: '5', scriptPubkey: '0014', explicit: true }, { txid: 't', vout: 1, asset: B, value: '7', scriptPubkey: '0014', explicit: true }],
+    detailed: (b64) => withOrigins(b64, mine.ins, mine.outs),
+    signPset: async (b64) => { calls.push(['sign', b64]); return 'SIGNED' },
+    broadcast: async (a) => { calls.push(['broadcast', a]); return { txid: 'T' } },
+    shortOnChain: async (coins) => coins.filter((c) => c.asset === B).map((c) => ({ asset: B, atoms: c.atoms - 7n, fee: { asset: B, atoms: 30000n } })).filter((c) => c.atoms > 0n),
+    prepareCoins: async (coins, name) => { calls.push(['prepare', coins.map((c) => [c.asset, String(c.atoms)]), name]) },
+  }
+  const meta = (h) => (h === A ? { ticker: 'USDX', precision: 8 } : h === B ? { ticker: 'GOLD', precision: 8 } : {})
+  mountPageApi({ leaves: L, assetMeta: meta, fmtAtoms: (a, p) => (Number(a) / 10 ** p).toString(), confirm: async (d) => { shown.push(d); return approve }, channel: ch, site })
+  const ask = async (msg) => { const n = posted.length; ch.onmessage({ data: msg }); for (let i = 0; i < 50 && posted.length === n; i++) await new Promise((r) => setTimeout(r, 1)); return posted[posted.length - 1] }
+  ch.onmessage({ data: { type: 'hello', from: 's3' } })
+  const W = posted.pop().wallet
+  const page = 'https://sequentiatestnet.com/lending/#borrow'
+  const key = 'https://sequentiatestnet.com/lending/'
+  const req = (id, method, params) => ask({ type: 'request', id, from: 's3', wallet: W, page, method, params })
+  let a = await req(1, 'getCapabilities')
+  for (const m of ['getNetwork', 'getAddress', 'getUtxos', 'signPset', 'broadcast', 'prepareCoins']) assert.ok(a.result.methods.includes(m), m)
+  assert.ok(a.result.features.includes('pset-site-built'))
+  a = await req(2, 'getNetwork')
+  assert.deepEqual(a.result, { network: 'sequentia-testnet', genesis: 'g' })
+  for (const m of ['getAddress', 'getUtxos', 'signPset', 'broadcast', 'prepareCoins']) {
+    a = await req(3, m, { pset: PSET })
+    assert.equal(a.ok, false); assert.match(a.error, /not connected/, m)
+  }
+  a = await req(4, 'connect')
+  assert.equal(shown.pop().text, 'Pignus wants to see your address and balances, and to ask you to sign what you borrow, lend and repay there. Each transaction is shown here for you to approve.')
+  a = await req(5, 'getUtxos', { asset: B })
+  assert.deepEqual(a.result.utxos.map((u) => u.vout), [1])
+  a = await req(6, 'getUtxos', { asset: 'zz' })
+  assert.match(a.error, /64-hex/)
+  // The dialog: what the wallet pays (the fee apart), what it receives, the fee, the site.
+  approve = false
+  a = await req(7, 'signPset', { pset: PSET })
+  assert.equal(a.error, 'the user rejected the request')
+  assert.deepEqual(calls, [])
+  const d = shown.pop()
+  assert.equal(d.title, 'Sign a transaction for Pignus?')
+  assert.deepEqual(d.rows, [['You pay', '250 USDX'], ['You receive', '100 GOLD'], ['Network fee', '0.01 USDX'], ['Asked by', key]])
+  approve = true
+  a = await req(8, 'signPset', { pset: PSET })
+  assert.deepEqual(a.result, { pset: 'SIGNED' }); assert.equal(calls[0][1], PSET, 'the site’s own bytes are signed')
+  // Refused before any dialog: nothing of this wallet's, or no PSET at all.
+  const before = shown.length
+  mine = { ins: [], outs: [2] }
+  a = await req(9, 'signPset', { pset: PSET })
+  assert.equal(a.error, 'this wallet holds none of the inputs in that transaction')
+  a = await req(10, 'signPset', { pset: 'bm90IGEgcHNldA==' })
+  assert.equal(a.error, 'this wallet cannot read that transaction, so it signs nothing')
+  assert.equal(shown.length, before)
+  a = await req(11, 'broadcast', { pset: 'SIGNED' })
+  assert.deepEqual(a.result, { txid: 'T' })
+  a = await req(12, 'broadcast', { hex: 'zz' })
+  assert.match(a.error, /pset or hex/)
+  a = await req(13, 'broadcast', { hex: '00', chain: 'bitcoin' })
+  assert.match(a.error, /Sequentia transactions only/)
+  // Coins onto the chain: nothing to ask when they are there; otherwise asked, and moved on approval.
+  a = await req(14, 'prepareCoins', { coins: [{ asset: B, amount: '7' }] })
+  assert.deepEqual(a.result, { moved: [] })
+  approve = false
+  a = await req(15, 'prepareCoins', { coins: [{ asset: B, amount: '1000000007' }] })
+  assert.equal(a.error, 'the user rejected the request')
+  const m = shown.pop()
+  assert.equal(m.title, 'Get coins ready for Pignus?')
+  assert.deepEqual(m.rows, [['Moves', '10 GOLD'], ['Fee for the move', '0.0003 GOLD'], ['Asked by', key]])
+  approve = true
+  a = await req(16, 'prepareCoins', { coins: [{ asset: B, amount: '1000000007' }] })
+  assert.deepEqual(a.result, { moved: [{ asset: B, amount: '1000000000' }] })
+  assert.deepEqual(calls.at(-1), ['prepare', [[B, '1000000007']], 'Pignus'])
+  a = await req(17, 'prepareCoins', { coins: [{ asset: B, amount: '0' }] })
+  assert.match(a.error, /positive/)
+})
+
+test('a wallet page that cannot sign a site’s transaction serves none of those methods', async () => {
+  const L = fakeLeaves({ mode: 'user' })
+  const posted = []
+  const ch = { postMessage: (m) => posted.push(m), onmessage: null }
+  mountPageApi({ leaves: L, assetMeta: () => ({}), fmtAtoms: String, confirm: async () => true, channel: ch, site: { unlocked: () => true, account: () => ({ address: 'tb1qx' }) } })
+  ch.onmessage({ data: { type: 'hello', from: 's4' } })
+  const W = posted.pop().wallet
+  ch.onmessage({ data: { type: 'request', id: 1, from: 's4', wallet: W, page: 'p/', method: 'getCapabilities' } })
+  await new Promise((r) => setTimeout(r, 5))
+  assert.ok(!posted.pop().result.methods.includes('signPset'))
+})
