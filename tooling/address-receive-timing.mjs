@@ -38,6 +38,9 @@ const BOTH = bool('--both')
 // `--close-payer M`: the payer's page is closed once it says Sent, and opened again after M minutes
 // (a web wallet payer only): what the receiver sees while the payer is away.
 const CLOSE_PAYER = Number(flag('--close-payer', '0'))
+// `--fund`: a wallet holding less than three payments of the asset asks the faucet for it first
+// (its phrase is written to --phrases before that).
+const FUND = bool('--fund')
 const [workArg, specA, specB] = argv
 if (!workArg || !specA || !specB) { console.error('usage: address-receive-timing.mjs <work-dir> <kind:name> <kind:name> [--ext dir]'); process.exit(2) }
 const work = resolve(workArg); mkdirSync(work, { recursive: true })
@@ -69,6 +72,13 @@ try {
     // Ambra browser's leaf wallet runs in its offscreen document: its console is read there.
     if (w.kind === 'browser') w.logPage = await browser.target((t) => /offscreen\.html/.test(t.url), 60000).catch(() => null)
     say(`${w.kind} ${w.name} open`)
+    if (FUND && (await w.figure(ASSET)) < 3 * Number(AMOUNT)) {
+      const f = await w.faucet(ASSET)
+      say(`${w.name} faucet ${ASSET}: ${f.said} (${f.seconds} s)`)
+      const t = Date.now()
+      while (Date.now() - t < 900000 && (await w.figure(ASSET)) < 3 * Number(AMOUNT)) await sleep(10000)
+      say(`${w.name} holds ${await w.figure(ASSET)} ${ASSET}`)
+    }
   }
   const logOf = (w) => (w.logPage || w.page).console
   const arrivingLine = (w) => w.kind === 'web'

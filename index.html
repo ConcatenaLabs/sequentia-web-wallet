@@ -9927,7 +9927,11 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
         // The fee's margin in the asset itself, which default mode pays it in; none when the node
         // prices no fee in it (the chain's coins then pay none of it).
         let margin=0n; try{ margin=feeMarginAtoms(h); }catch{}
-        if(addressRoute(a, availableFor(h), tree, margin) !== 'tree') continue;
+        // What a board just spent is not the chain's to pay from, though this page's reading may
+        // still list it: the chain is only tried with what is left beside the board, so a payment
+        // right after a board never signs a spent coin.
+        let onchain = availableFor(h); try{ if(leavesApi && leavesApi.onchainLessBoards) onchain = leavesApi.onchainLessBoards(h, onchain); }catch{}
+        if(addressRoute(a, onchain, tree, margin) !== 'tree') continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
         await offboardReview(rows[0], reset);
         return;
