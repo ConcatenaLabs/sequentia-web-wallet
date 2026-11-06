@@ -801,7 +801,20 @@ async function main () {
         const c=document.createElement('canvas'); const k=Math.max(1, Math.ceil(600/img.naturalWidth)); c.width=img.naturalWidth*k+80; c.height=img.naturalHeight*k+80; const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height); x.imageSmoothingEnabled=false; x.drawImage(img,40,40,img.naturalWidth*k,img.naturalHeight*k);
         const d=x.getImageData(0,0,c.width,c.height); const r=window.jsQR(d.data,d.width,d.height); return r ? r.data : null })()`)
       check('the QR code holds it in lower case', !!named && q === named.toLowerCase(), q)
-      writeFileSync(join(work, name + '.name'), (named || '').toLowerCase() + '\n')
+      writeFileSync(join(work, name + '.name'), (named || '') + '\n')
+      // A Lightning wallet given the name with its capitals asks the same LNURL-pay as with none.
+      if (named) {
+        const origin = new URL(base).origin.replace(/^http:\/\/127\.0\.0\.1:\d+$/, 'https://sequentiatestnet.com')
+        const user = named.split('@')[0]
+        const [lo, up] = await Promise.all([user.toLowerCase(), user].map((u) => fetch(`${origin}/.well-known/lnurlp/${u}`).then(async (r) => ({ status: r.status, body: await r.text() })).catch((e) => ({ error: e.message }))))
+        check(`a Lightning wallet's lookup of ${user} answers exactly as of ${user.toLowerCase()}`, lo.status === up.status && lo.body === up.body, { status: up.status, body: (up.body || '').slice(0, 120) })
+      }
+    }
+    // `namescreen <name> expect=<wallet>`: the name shown must be the one <wallet> showed (a restore).
+    const exp = rest.find((x) => /^expect=/.test(x))
+    if (exp) {
+      const want = readFileSync(join(work, exp.slice(7) + '.name'), 'utf8').trim()
+      check(`the name is ${exp.slice(7)}'s, shown the same`, named === want, `${named} (want ${want})`)
     }
     const once = await page.eval("[...document.querySelectorAll('section[data-panel=\"receive\"] *')].filter(e=>e.children.length===0 && e.offsetParent!==null && e.textContent.trim()===document.querySelector('#addr').textContent).length")
     check('the name is said once', once === 1, once)
