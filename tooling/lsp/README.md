@@ -264,7 +264,9 @@ maker's own pass of a sync, its resting desk and its boards can take longer than
 A coin of a round is refreshed again only when it has to be, since each such refresh keeps the
 operator's capital out until the lowest node the coin leaves comes back: the operator fronts the
 new coin meanwhile, and that counts against the asset's in-flight cap. It keeps about `max_coins`
-live coins of an asset (32 by default, or per asset). Past that it merges coins in the operator's
+live coins of an asset (32 by default, or per asset), not counting its resting orders, which it
+never merges: a refresh of an order's coin cancels the order, and the resting desk would rest it
+again from another coin, which the operator fronts anew. Past that it merges coins in the operator's
 next round, 64 at most a pass: boards first, since merging one fronts nothing (the operator's
 forfeit of a board pays it back at once), then coins of a round of at most `coin_size`, down to
 three quarters of the cap. A merge's own coin is larger, and is not merged again at every coin that
