@@ -500,7 +500,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   a minute or two. Nothing has moved." (or "… it is ready once the next Bitcoin blocks settle it.")
   (what is held of it is given up in a refresh, or kept by a plan, and is free again after the
   next round); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
-  moment."
+  moment."; "Your wallet is still finishing something it started, so it could not get a price in
+  time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
+  wallet was busy; a price that comes later is let go).
 - A price comes within seconds: the best few offers are asked at once (the next few when none of
   them answers), and one that has not answered within eight seconds of being asked is left out of
   the price rather than waited for. What the wallet itself checks of a price it was given in time
