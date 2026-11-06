@@ -344,7 +344,8 @@ must answer CORS. The tab then has:
 - **Receive**: a single-use receive request (`request:…`), for any asset or one the operator
   serves (its published list, then any other asset held in leaves). A payment arrives in the
   mailbox, which sync reads. On the testnet, **Ask the testnet faucet to pay it** sends the
-  request to the faucet, which pays it as a leaf out of round, and the page syncs.
+  request to the faucet, which pays it as a leaf out of round, and the page reads its mailbox
+  for it.
 - **Send to a receive request**: pays a receive request (or a channel code), in the asset named,
   by the route chosen: **By a channel** (the wallet's channel in the asset into the receiver's,
   at once), **By a leaf** (out of round, into the request's leaf), or **Either way**, which

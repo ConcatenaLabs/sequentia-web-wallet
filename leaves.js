@@ -125,6 +125,10 @@ export function codeOpen (kept, schedule, readAt) {
 // code shows within seconds rather than at the schedule's next sync.
 export const MAILBOX_POLL_MS = 10_000
 export const MAILBOX_QUIET_MS = 20_000
+// A payment another service says it made to the wallet's receive code (the faucet's): how long the
+// page reads the mailbox for it, and how often, before it says the coin is still on its way.
+export const TAKE_IN_MS = 45_000
+export const TAKE_IN_EVERY_MS = 2_000
 // How often user mode asks the library to refresh what it received out of round.
 export const REFRESH_EVERY_MS = 120_000
 // Whether user mode refreshes what it receives out of round by itself: on unless the page sets
@@ -762,7 +766,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (ctx.onChange) try { ctx.onChange() } catch {}
     }
   }
-  const arrivals = (mb) => { for (const c of listOf(mb && mb.accepted)) emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind }) }
+  // Every coin the library takes in, by whichever read (a sync, the mailbox watch, takeIn): the
+  // page told, and the asset kept with when, for takeIn.
+  const arrivals = (mb) => {
+    for (const c of listOf(mb && mb.accepted)) {
+      S.arrived = [...(S.arrived || []).slice(-49), { asset: String(c.asset || '').toLowerCase(), at: now() }]
+      emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind })
+    }
+  }
   // What the sync's catch-up with the phrase's other wallets changed (the library runs one at most
   // every ten minutes): coins they made taken in, coins of this store they gave up dropped.
   const caughtUp = (c) => {
@@ -896,6 +907,45 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
       watchMailbox()
     }, ctx.mailboxPollMs || MAILBOX_POLL_MS)
+  }
+
+  // ---- a payment another service made to the receive code: taken in at once ----
+  // The faucet answers once its coin is in the wallet's mailbox, so the library's `mailbox` (a read
+  // of seconds) takes it in, never a whole sync, which can sit in a round for a minute or more.
+  // Like what a person asks, it goes before the wallet's own upkeep and waits only for a command
+  // already running. It reads again every TAKE_IN_EVERY_MS until a coin of `asset` has arrived since
+  // `since` (by this read or any other) or `ms` have passed; then the balance is read again, so the
+  // figure holds the coin before the page says Received. -> whether the coin arrived.
+  async function takeIn ({ asset, since = 0, ms = TAKE_IN_MS } = {}) {
+    if (!S.open) return false
+    const hex = String(asset || '').toLowerCase()
+    const until = now() + ms
+    const came = () => (S.arrived || []).some((a) => a.asset === hex && a.at >= since)
+    return await asking(async () => {
+      while (!came()) {
+        while (S.busy && now() < until && !came()) await sleep(100)
+        if (came()) break
+        if (S.busy) return false
+        S.busy = true
+        const t0 = now()
+        try { arrivals(await run('mailbox')) } catch (e) { log('[leaves] mailbox read: ' + ((e && e.message) || e)) } finally { S.busy = false }
+        if (now() - t0 > 2000) log(`[leaves] mailbox read: ${now() - t0} ms`)
+        if (came()) break
+        if (now() >= until) return false
+        await sleep(ctx.takeInEveryMs || TAKE_IN_EVERY_MS)
+      }
+      const free = now() + 10_000
+      while (S.busy && now() < free) await sleep(50)
+      if (S.busy) { reloadAfter(); return true }
+      S.busy = true
+      try {
+        S.balance = await run('balance')
+        try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(S.balance)) } catch {}
+        if (ctx.onChange) try { ctx.onChange() } catch {}
+      } catch {} finally { S.busy = false }
+      reloadAfter()
+      return true
+    })
   }
 
   async function openSync () {
@@ -1496,7 +1546,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // The testnet faucet pays a receive request as a leaf, out of round, from its own wallet
   // on the operator: the request names the operator, the chain and this wallet's mailbox,
   // and the faucet refuses one for another operator or chain. The coin is in the mailbox
-  // once the faucet answers; the sync that follows reads it.
+  // once the faucet answers; a mailbox read (takeIn) takes it in.
   function renderFaucetAsk (c) {
     const choices = faucetAssets(S.info, S.request.asset)
     if (!choices.length) return
@@ -1505,12 +1555,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const fb = button('Ask the testnet faucet to pay it', async () => {
       const asset = val('leafFaucetAsset') || choices[0]
       S.faucet = { busy: true }; render()
+      const since = now()
       try {
         const answer = await ctx.askFaucet(faucetRequestBody(S.request.text, tick(asset)))
         S.faucet = { answer }
       } catch (e) { S.faucet = { error: e } }
       render()
-      if (S.faucet && S.faucet.answer) syncNow()
+      const l = S.faucet && S.faucet.answer && S.faucet.answer.leaf
+      if (l && l.asset) takeIn({ asset: l.asset, since }).then(() => render()).catch(() => {})
     }, 'ghost')
     fb.id = 'btnLeafFaucet'; fb.disabled = S.busy || !!(S.faucet && S.faucet.busy)
     const r = el('div', 'row'); r.style.marginTop = '8px'; r.appendChild(fb); c.appendChild(r)
@@ -1519,7 +1571,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (f && f.answer) {
       const l = f.answer.leaf || {}
       const d = el('div', 'status ok'); d.id = 'leafFaucetAnswer'
-      d.textContent = `The faucet paid ${l.asset ? amt(l.asset, l.atoms) : (f.answer.amount + ' ' + f.answer.asset)} into this request; sync reads it from the mailbox.`
+      d.textContent = `The faucet paid ${l.asset ? amt(l.asset, l.atoms) : (f.answer.amount + ' ' + f.answer.asset)} into this request; the wallet reads it from its mailbox.`
       c.appendChild(d)
     }
     if (f && f.error) { const d = el('div', 'status err'); d.id = 'leafFaucetAnswer'; d.textContent = 'The faucet refused: ' + (f.error.message || String(f.error)); c.appendChild(d) }
@@ -2110,12 +2162,20 @@ export function mountLeaves (ctx, root, settingsRoot) {
     leafAtoms: (hex) => liveLeaves(hex) + expecting(hex),
     leafAssets: () => [...new Set([...[...leafBalances(shown()).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a), ...S.expected.map((x) => x.hex)])].filter((h) => liveLeaves(h) + expecting(h) > 0n),
     // A payment made to this wallet that the library has not taken in yet: `hex`, `atoms`.
-    expect: (hex, atoms) => {
+    // `ms`: how long it is counted as arriving at most (two minutes unless said).
+    expect: (hex, atoms, ms = 120000) => {
       if (!/^[0-9a-f]{64}$/.test(String(hex || '')) || !(big(atoms) > 0n)) return
-      S.expected.push({ hex, atoms: big(atoms), base: liveLeaves(hex), until: now() + 120000 })
+      S.expected.push({ hex, atoms: big(atoms), base: liveLeaves(hex), until: now() + ms })
       if (ctx.onChange) try { ctx.onChange() } catch {}
     },
     syncNow,
+    takeIn,
+    // The receive code the faucet (or any payer the page hears from) has just paid: forgotten, so
+    // the next one shown is new. A code is paid once.
+    forgetCode: (owner) => {
+      const key = tagged(CODE_KEY, tag())
+      try { const kept = JSON.parse(ctx.store.getItem(key) || 'null'); if (kept && (!owner || kept.owner === owner)) ctx.store.removeItem(key) } catch {}
+    },
     // ---- every coin home (default mode's "Take my coins home") ----
     // While the operator cannot be reached, as the library last said: the coins that could go home
     // ({ leaf_id, asset, value }) and since when; else null.
