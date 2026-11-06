@@ -62,6 +62,10 @@ export const DEFAULT_WORDS = Object.freeze({
   receiveTipConf: 'Any Sequentia asset, any amount, paid to your confidential address.',
   // What a payment to a confidential address is moved out of the Ark for (movingOut).
   confidentialPurpose: 'sent confidentially',
+  // The review of a payment to a confidential address, while the wallet pays it from coins in the
+  // clear with its change in the clear: the payment's output is blinded, but its amount and asset
+  // follow from the inputs, the change and the fee (sequentia-web-wallet#585).
+  confidentialSeen: 'This payment\u2019s amount and asset can still be worked out by anyone reading the chain.',
   confidentialTip: 'Hides the asset and amount of a payment from everyone but you and the payer.',
   confidentialNote: 'Everyone can still see that a payment was made. A payment that arrives in seconds is never confidential, so this one arrives after the next block, in about a minute. BTC is never confidential: to receive BTC, turn this off.',
   sendTitle: (amount, ticker) => `Send ${amount} ${ticker}?`,
