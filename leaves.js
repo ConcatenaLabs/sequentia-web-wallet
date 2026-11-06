@@ -674,7 +674,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   async function run (command, args) {
+    const t0 = now()
     const v = await S.client.run(command, args)
+    // A command over ten seconds says so, with what the library says it cost (and a sync its
+    // steps): the one long command that holds every other behind it can then be named.
+    const took = now() - t0
+    if (took > 10000) {
+      let cost = ''
+      try { cost = JSON.stringify({ cost: v && v.cost, steps: v && v.result && v.result.cost_by_step }).slice(0, 900) } catch {}
+      log(`[leaves] slow ${command} ${took} ms ${cost}`)
+    }
     if (v && v.start && v.start.witness && v.start.witness.error) S.startNote = v.start.witness.error.message
     else if (v && v.start && v.start.recheck && v.start.recheck.error) S.startNote = v.start.recheck.error.message
     else S.startNote = null

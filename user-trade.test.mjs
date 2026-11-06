@@ -683,3 +683,34 @@ test('engine: offers refused because the coins paid are not live now say the ass
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   assert.equal(q.why, 'freeing')
 })
+
+test('engine: a quote ends within its bound whatever the library is doing, says the wallet is busy, and lets a late price go (TR1)', async () => {
+  const s = standIn()
+  let gate
+  const held = new Promise((r) => { gate = r })
+  const leaves = { ...s.lib, command: async (c, a) => { if (c === 'swap_read') await held; return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 100, quoteReadMs: 60000, quoteMostMs: 400 })
+  const t0 = Date.now()
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.why, 'wallet-busy')
+  assert.ok(Date.now() - t0 < 1500, `ended at its bound (${Date.now() - t0} ms)`)
+  assert.deepEqual(forbiddenIn(USER_WORDS.walletBusy), [])
+  const before = s.posts.filter(([p]) => p === 'release').length
+  gate()
+  await new Promise((r) => setTimeout(r, 300))
+  assert.ok(s.posts.filter(([p]) => p === 'release').length > before, 'the price that came late is let go')
+})
+
+test('engine: what the wallet can pay is read from the store alone, and in full only when a coin is given up in a refresh (TR1)', async () => {
+  const s = standIn()
+  const asked = []
+  const leaves = { ...s.lib, command: (c, a) => { if (c === 'coins') asked.push(JSON.stringify(a || {})); return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']) })
+  await eng.spendable()
+  assert.match(asked[0], /"brief":true/)
+  assert.equal(asked.length, 1)
+  s.coins.push({ leaf_id: 'g1', asset: X, value: '1000', state: 'given', kind: 'transfer', refresh_waiting: 'p1' })
+  await eng.spendable()
+  assert.equal(asked.length, 3, 'a given coin: read again in full')
+  assert.doesNotMatch(asked[2], /brief/)
+})
