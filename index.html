@@ -4425,13 +4425,16 @@ function renderNameBox(){
   $('nameLbl').textContent = dev ? NAME_WORDS.devLabel : NAME_WORDS.label;
   $('nameTip').textContent = name ? (dev ? NAME_WORDS.devTip : NAME_WORDS.tip) : NAME_WORDS.none;
   $('nameAddr').textContent = name ? lnAddr.address() : '';
-  $('nameAddr').classList.toggle('hide', !name || _nameEditing);
+  // Receive above shows the name already: here only what to know about it, and Remove name.
+  const above = !!name && nameViewOn();
+  $('nameLbl').classList.toggle('hide', above);
+  $('nameAddr').classList.toggle('hide', !name || _nameEditing || above);
   $('nameForm').classList.toggle('hide', !_nameEditing);
   $('nameDomain').textContent = '@'+lnaddrDomain();
   $('nameInput').placeholder = NAME_WORDS.hint;
   show('btnNameChoose', !name && !_nameEditing);
   show('btnNameSave', _nameEditing); show('btnNameCancel', _nameEditing);
-  show('btnNameCopy', !!name && !_nameEditing); show('btnNameRemove', !!name && !_nameEditing);
+  show('btnNameCopy', !!name && !_nameEditing && !above); show('btnNameRemove', !!name && !_nameEditing);
   $('btnNameChoose').textContent=NAME_WORDS.choose; $('btnNameCancel').textContent=NAME_WORDS.cancel;
   $('btnNameCopy').textContent=NAME_WORDS.copy;
   if(!_nameBusy){ $('btnNameSave').textContent=NAME_WORDS.save; $('btnNameRemove').textContent=NAME_WORDS.remove; }

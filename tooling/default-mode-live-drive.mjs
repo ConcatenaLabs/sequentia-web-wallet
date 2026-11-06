@@ -31,6 +31,15 @@
 //          A name the wallet did not hold before is removed at the end unless `keep` follows
 //          (`receive A keep`), and one it held is removed with `release`; `--name <name>` chooses
 //          the name
+//   name   wallet <name>'s payment name as its receive QR, paid by wallet <payer> while <name> is
+//          closed: `name B A [USDX]` with the page served by tooling/live-proxy.mjs --lnaddr <dir>
+//          --lnaddr-forge <file>, and the same <dir> and <file> given here (`--lnaddr-dir`,
+//          `--forge`). B chooses a name (or keeps its own), its QR holds the name alone, and its stock
+//          of signed codes fills; B closes; A pays the name twice (each a different signed code from
+//          the stock, in seconds), is refused a code whose address the service swapped and one under
+//          a key of the service's own, and pays the address of the stocked code at the highest index
+//          on the chain; B opens again, its stock fills up again, and its figures are written for
+//          `restore` (<work>/evidence/B.totals.json)
 //   coins  wallet <name>'s coins in the tree as developer mode lists them (state, kind, asset,
 //          value, dates), written to <work>/<name>.coins.json
 //   settle wallet <name> settles every coin it holds in the tree that is not a leaf of a round (kind batch)
@@ -69,6 +78,9 @@ const base = flag('--base', 'http://127.0.0.1:8791/wallet/')
 const toBase = flag('--to-base', null)
 // `receive --name <name>`: the payment name the step chooses, when the wallet holds none.
 const nameArg = flag('--name', null)
+// `name`: the local name service's directory and the file that makes it forge a lookup.
+const lnaddrDir = flag('--lnaddr-dir', null)
+const forgeFile = flag('--forge', null)
 // `pay --paste`: the invoice is pasted into Pay an invoice instead of handed over by the link, for
 // a page that predates the link.
 const paste = argv.includes('--paste'); if (paste) argv.splice(argv.indexOf('--paste'), 1)
@@ -138,7 +150,8 @@ async function waitJoined (page, ms = 240000) {
   // Default mode's receive code: a wallet a developer-mode step left there is put back first.
   await page.eval("(()=>{ const u=document.querySelector('#modeUser'); if(u && !u.checked){ u.checked=true; u.dispatchEvent(new Event('change')) } return true })()").catch(() => {})
   await tab(page, 'receive')
-  return page.waitFor("(()=>{ const a=document.querySelector('#addr'); return a && a.classList.contains('recv-code') && /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(a.textContent) ? a.textContent : false })()", ms)
+  // A wallet with a payment name shows the name: its full code is one tap away.
+  return page.waitFor("(()=>{ const f=document.querySelector('#btnRecvFull'); if(f && !f.classList.contains('hide') && f.textContent==='Show full code') f.click(); const a=document.querySelector('#addr'); return a && a.classList.contains('recv-code') && /^(bitcoin:|[A-Za-z0-9-]+:[0-9a-f]{40,})/i.test(a.textContent) ? a.textContent : false })()", ms)
 }
 
 async function faucet (page, asset) {
@@ -556,6 +569,15 @@ async function main () {
       named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; const s=document.querySelector('#nameStatus').textContent; return t || (s ? 'ERR '+s : false) })()", 120000)
     }
     check('the wallet holds a payment name', /@/.test(named), named)
+    // With a name, Receive shows the name: the picture holds it alone, in lower case.
+    const nameView = await page.waitFor(`(()=>{ const a=document.querySelector('#addr').textContent; return a===${JSON.stringify(named)} && !document.querySelector('#btnRecvFull').classList.contains('hide') ? a : false })()`, 120000).catch(() => null)
+    check('Receive shows the name, with Show full code beside it', !!nameView, nameView)
+    { const q = await qrRead(); check('the picture reads back as the name alone', !!q && q.data === named.toLowerCase(), q && { data: q.data, version: q.version }) }
+    check('under the name: lookups are public, in plain words', await page.eval("!document.querySelector('#recvNamePublic').classList.contains('hide') && document.querySelector('#recvNamePublic').textContent"), await page.eval("document.querySelector('#recvNamePublic').textContent"))
+    check('no New code with the name shown', await page.eval("document.querySelector('#btnNewAddr').classList.contains('hide')"))
+    await shot(page, `${name}-receive-3a-name-qr.png`)
+    await noWords('Receive showing the name')
+    await click(page, '#btnRecvFull')
     const c3 = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /[?&]lightning=LNURL1/.test(t) ? t : false })()`, 120000).catch(() => null)
     check('without an amount the code carries the name\'s LNURL-pay', !!c3, c3 && param(c3, 'lightning').slice(0, 24) + '…')
     if (c3) {
@@ -614,16 +636,125 @@ async function main () {
     const cc2 = await page.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return /^tsqb1/.test(t) && t!==${JSON.stringify(cc)} ? t : false })()`, 60000).catch(() => null)
     check('New code moves the confidential code to a new address too', !!cc2)
     await tab(page, 'balance'); await sleep(300); await tab(page, 'receive')
-    const back = await page.waitFor(`${isCode} ? document.querySelector('#addr').textContent : false`, 120000).catch(() => null)
+    const back = await page.waitFor(`${isCode} || document.querySelector('#addr').textContent===${JSON.stringify(named)} ? document.querySelector('#addr').textContent : false`, 120000).catch(() => null)
+    check('leaving Receive shows the name again', back === named, back)
     check('leaving Receive turns Confidential off again', !!back && !(await page.eval("document.querySelector('#recvConfChk').checked")))
     await shot(page, `${name}-receive-7-back.png`)
     if (keep !== 'keep' && (!held || keep === 'release')) {
       await click(page, '#btnNameRemove')
+      await page.waitFor(`${isCode}`, 120000).catch(() => null)
       await page.waitFor("!document.querySelector('#nameAddr').textContent", 60000).catch(() => null)
       const c7 = await codeNow()
       check('with the name removed, the code carries no LNURL-pay', !/LNURL1/.test(c7))
     }
     await page.stop()
+  } else if (step === 'name') {
+    const [payer, ticker = 'USDX'] = rest
+    if (!lnaddrDir || !forgeFile) throw new Error('name needs --lnaddr-dir and --forge (tooling/live-proxy.mjs --lnaddr, --lnaddr-forge)')
+    const { readPayCode } = await import('../pay-code.js')
+    const { NAME_WORDS } = await import('../lnaddr.js')
+    const { STOCK_SIZE } = await import('../name-stock.js')
+    const { RECEIVE_GAP } = await import('../receive-index.js')
+    const store = () => { try { return JSON.parse(readFileSync(join(lnaddrDir, 'lnaddr-names.json'), 'utf8')).names || {} } catch { return {} } }
+    const held = (n) => ((store()[n] || {}).stock || [])
+    const waitStock = async (n, want, ms) => { const t = Date.now(); while (Date.now() - t < ms) { if (held(n).length >= want) return held(n).length; await sleep(2000) } return held(n).length }
+    // 1. B: the name, its QR, its stock.
+    const pb = await openWallet(name)
+    await waitJoined(pb)
+    await tab(pb, 'balance'); await tab(pb, 'receive')
+    let named = await pb.waitFor("document.querySelector('#nameBox') && !document.querySelector('#nameBox').classList.contains('hide') ? (document.querySelector('#nameAddr').textContent || 'none') : false", 120000)
+    if (named === 'none') {
+      const want = nameArg || ('pn1' + Math.random().toString(36).slice(2, 9))
+      await click(pb, '#btnNameChoose')
+      await pb.eval(`(()=>{ const i=document.querySelector('#nameInput'); i.value=${JSON.stringify(want)}; return true })()`)
+      await click(pb, '#btnNameSave')
+      named = await pb.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; const s=document.querySelector('#nameStatus').textContent; return t || (s ? 'ERR '+s : false) })()", 120000)
+    }
+    const n = named.split('@')[0]
+    writeFileSync(join(work, name + '.name'), named + '\n')
+    check('B holds a payment name', /@/.test(named), named)
+    const nv = await pb.waitFor(`document.querySelector('#addr').textContent===${JSON.stringify(named)} ? true : false`, 60000).catch(() => false)
+    const q = await pb.eval(`(async()=>{ const img=document.querySelector('#qr'); if(!img.getAttribute('src')) return null; if(!img.complete) await new Promise(r=>img.onload=r);
+      const c=document.createElement('canvas'); const k=Math.max(1, Math.ceil(600/img.naturalWidth)); c.width=img.naturalWidth*k+80; c.height=img.naturalHeight*k+80; const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height); x.imageSmoothingEnabled=false; x.drawImage(img,40,40,img.naturalWidth*k,img.naturalHeight*k);
+      const d=x.getImageData(0,0,c.width,c.height); const r=window.jsQR(d.data,d.width,d.height); return r ? { data: r.data, version: r.version } : { data: null } })()`)
+    check('Receive shows the name, and the picture holds the name alone', nv && !!q && q.data === named, q)
+    await shot(pb, `${name}-name-1-qr.png`)
+    const tS = Date.now()
+    const got = await waitStock(n, STOCK_SIZE, 600000)
+    check(`B left ${STOCK_SIZE} signed codes with the service`, got >= STOCK_SIZE, `${got} in ${secs(Date.now() - tS)}`)
+    const mine = await pb.eval(`(()=>{ const k=Object.keys(localStorage).find(k=>k.startsWith('swk.lnaddr.stock.')); return k ? JSON.parse(localStorage.getItem(k)) : null })()`)
+    const idx = Object.values((mine && mine.mine) || {}).map((c) => c.index).sort((a, b) => a - b)
+    const nextUnused = await pb.eval('(()=>{ try{ return unifiedNextUnused() }catch{ return null } })()').catch(() => null)
+    check('every stocked code is at an address inside the twenty a restore reads past the last one paid', idx.length >= STOCK_SIZE && idx.every((i) => i >= 0 && i < (nextUnused ?? 0) + RECEIVE_GAP), { indices: idx, nextUnused })
+    // The code at the highest index: its address is paid on the chain later.
+    const top = Object.entries((mine && mine.mine) || {}).sort((a, b) => b[1].index - a[1].index)[0]
+    const topCode = (held(n).find((c) => c.id === (top && top[0])) || {}).code
+    const topAddr = topCode ? readPayCode(topCode).address : null
+    note(`highest stocked index ${top && top[1].index}: ${topAddr}`)
+    await click(pb, '#btnRecvFull'); await sleep(800)
+    await shot(pb, `${name}-name-2-full-code.png`)
+    await click(pb, '#btnRecvFull')
+    await pb.stop(); pages.splice(pages.indexOf(pb), 1)
+    note('B is closed')
+    // 2. A pays the name, twice, while B is closed.
+    const pa = await openWallet(payer)
+    await waitJoined(pa)
+    const send = async (dest, amount, what) => {
+      await tab(pa, 'send')
+      await pa.waitFor(`[...document.querySelectorAll('#recipients .rec .rasset option')].some(o=>o.textContent.trim()===${JSON.stringify(ticker)})`, 180000)
+      await pa.eval(`(()=>{ document.querySelector('#sendErr').textContent=''; const r=document.querySelector('#recipients .rec'); r.querySelector('.raddr').value=${JSON.stringify(dest)}; r.querySelector('.raddr').dispatchEvent(new Event('input'));
+        const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); s.value=o.value; s.dispatchEvent(new Event('change'));
+        r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
+      const before = held(n).length
+      await click(pa, '#btnReview')
+      const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving /.test(e) ? 'ERR '+e : false })()", 600000)
+      if (/^ERR /.test(title)) return { refused: title.slice(4), before }
+      await shot(pa, `${payer}-name-${what}-review.png`)
+      const tClick = Date.now()
+      await pa.eval("document.querySelector('.modal button.primary').click()")
+      const done = await pa.waitFor("(()=>{ if(document.querySelector('.modal .sent-title')) return 'Sent ' + (document.querySelector('.modal .kv .v.mono')?.textContent||''); const st=document.querySelector('.modal .status'); const t=st?st.textContent:''; return t && !/Sending|Signing|Checking/.test(t) ? t : false })()", 2400000)
+      const all = await pa.eval("document.querySelector('.modal')?.innerText||''")
+      await shot(pa, `${payer}-name-${what}-done.png`)
+      await pa.eval("(()=>{ const b=[...document.querySelectorAll('.modal button')].find(b=>/close|done|ok/i.test(b.textContent)); if(b) b.click(); else document.querySelector('.modal')?.remove(); return true })()").catch(() => {})
+      return { done, all, ms: Date.now() - tClick, title, before }
+    }
+    for (const k of [1, 2]) {
+      const r = await send(named, '1', `pay${k}`)
+      check(`A pays ${named} (${k}) while B is closed`, !!r.done && /^Sent/.test(r.done) && /in seconds/.test(r.title), r.refused || `${r.done.trim().slice(0, 60)} (${secs(r.ms)} from the click)`)
+      check(`  it took one code from the stock`, held(n).length === r.before - 1, `${r.before} -> ${held(n).length}`)
+    }
+    // 3. A service broken into: the address swapped, then a key of its own.
+    writeFileSync(forgeFile, 'address\n')
+    let r = await send(named, '1', 'forged')
+    check('a code whose address the service swapped is refused, nothing sent', r.refused === NAME_WORDS.unsigned, r.refused || r.done)
+    await shot(pa, `${payer}-name-forged-refused.png`)
+    writeFileSync(forgeFile, 'key\n')
+    r = await send(named, '1', 'forged-key')
+    check('a code under a key of the service\'s own is refused: A paid this name before', r.refused === NAME_WORDS.changed, r.refused || r.done)
+    await shot(pa, `${payer}-name-forged-key-refused.png`)
+    const { unlinkSync } = await import('node:fs'); unlinkSync(forgeFile)
+    // 4. The address of the stocked code at the highest index, paid on the chain.
+    if (topAddr) {
+      r = await send(topAddr, '1', 'address')
+      check(`A pays the address of the highest stocked code (${topAddr}) on the chain`, !!r.done && /^Sent/.test(r.done), r.refused || r.done)
+    } else check('the highest stocked code\'s address was read', false)
+    await pa.stop(); pages.splice(pages.indexOf(pa), 1)
+    // 5. B opens again: its stock fills up again, and it shows what it was paid.
+    const left = held(n).length
+    const pb2 = await openWallet(name)
+    await waitJoined(pb2)
+    const t2 = Date.now()
+    const again = await waitStock(n, STOCK_SIZE, 600000)
+    check('B, open again, fills its stock up again', again >= STOCK_SIZE, `${left} -> ${again} in ${secs(Date.now() - t2)}`)
+    await tab(pb2, 'balance')
+    note('B waits for the payment on the chain to arrive (up to 20 minutes)')
+    const tB = Date.now()
+    let figs = await balances(pb2)
+    for (;;) { figs = await balances(pb2); if ((figs[ticker] && /^[0-9.,]+/.test(figs[ticker].total) && parseFloat(figs[ticker].total.replace(/,/g, '')) >= 3 && !figs[ticker].arriving) || Date.now() - tB > 1200000) break; await sleep(15000) }
+    check(`B shows the ${ticker} paid to its name and its address`, !!figs[ticker] && parseFloat(figs[ticker].total.replace(/,/g, '')) >= 3, figs[ticker])
+    writeFileSync(join(ev, name + '.totals.json'), JSON.stringify(figs, null, 2))
+    await shot(pb2, `${name}-name-3-balance.png`)
+    note('console B: ' + pb2.console.filter((l) => /lnaddr|leaves|board/i.test(l)).slice(-8).join(' | '))
   } else if (step === 'show') {
     const page = await openWallet(name)
     const tOpen = Date.now()
