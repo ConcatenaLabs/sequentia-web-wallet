@@ -146,10 +146,12 @@ modes (`asset-picker.js`):
 
 - **With a payment name** (below), Receive shows the name: the card's label is **Your payment
   name**, the QR code holds `name@sequentiatestnet.com` in lower case and nothing else, and the
-  name is written under it. Under the label: "Any asset, any amount. Another wallet that pays this
-  name gets a new receive code of yours each time." Under the name: "Anyone who has your name can
-  look it up and get a receive code of yours." Buttons: **Copy name** and **Show full code**; there
-  is no New code, since every payer gets a new code anyway. The amount field and the Confidential
+  name is written under it. Under the label: "Any asset, any amount, a new receive code of yours
+  for each payer. A Sequentia wallet can pay this name while this wallet is closed; other wallets,
+  while it is open." Under the name: "Anyone who has your name can look it up and get a receive
+  code of yours." Buttons: **Copy name** and **Show full code**; there is no New code, since every
+  payer gets a new code anyway. Under them the Confidential switch, and at the foot of the same card
+  **Remove name** as a quiet link: one card, the name said once. The amount field and the Confidential
   switch stay: an amount typed, or Confidential on, shows the full code as below, and so does
   **Show full code** (for a wallet that can't look names up, or to pay without a connection), whose
   line reads "For a wallet that can't look names up, or to pay without a connection. Each code is
