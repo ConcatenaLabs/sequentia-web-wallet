@@ -744,3 +744,35 @@ test('a payment waiting for its round lets go of the wallet: other commands and 
   assert.equal(api.state.asked, 0)
   api.stop()
 })
+
+test('the composer following its trades (reads, a sync) while nobody waits does not count as a person asking', { timeout: 20000 }, async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  let api
+  const seen = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    if (api && (c === 'swaps' || c === 'sync')) seen.push({ c, asked: api.state.asked || 0 })
+    const result = c === 'schedule' ? { now: 1, due: false, next_sync_at: null } : c === 'care' ? { claims: [], planned: [], cancelled: [] }
+      : c === 'balance' ? { arca: {} } : c === 'sync' ? { mailbox: { accepted: [] } } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    sleep: async (ms) => { clock += ms }, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  try {
+  const asked0 = api.state.lastAsked
+  seen.length = 0
+  await api.pay('swaps', {})
+  await api.pay('sync', {})
+  assert.ok(seen.length >= 2 && seen.every((x) => x.asked === 0), 'neither counted as asking: ' + JSON.stringify(seen))
+  assert.equal(api.state.lastAsked, asked0, 'nor moved the quiet window of the mailbox read')
+  // Inside a hold (a quote) the same read is the person's.
+  seen.length = 0
+  await api.hold(() => api.pay('swaps', {}))
+  assert.ok(seen[0].asked >= 1, "inside a hold it is the person's")
+  } finally { api.stop() }
+})
