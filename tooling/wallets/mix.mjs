@@ -382,15 +382,21 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   // and the line says what came.
   const want = before + Number(amount) * (o.asset === 'BTC' ? 0.5 : 1) - 1e-9
   let seen = null
+  // The figure read before may still have counted a payment the receiver had just made (a wallet
+  // shows what it sent a moment after "Sent"): the arrival is also a rise of the amount above the
+  // lowest figure read since.
+  let low = before
+  const rise = Number(amount) * (o.asset === 'BTC' ? 0.5 : 1) - 1e-9
   // A payer that never answered is watched for 20 minutes, a sent payment for an hour.
   while (Date.now() - t0 < (silent ? 1200000 : 3600000)) {
     const f = await S('figure ' + o.to, to.figure(o.asset))
-    if (f >= want) { seen = f; break }
+    low = Math.min(low, f)
+    if (f >= want || f - low >= rise) { seen = f; break }
     await sleep(o.how === 'address' ? 10000 : 1500)
   }
   const secs = (Date.now() - t0) / 1000
   const rb = o.how === 'closed' ? 60 : bound
-  record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (was ${before}: +${Number((seen - before).toPrecision(8))} of ${amount})${opened != null ? `; opened ${opened}s, closed ${((t0 - closedAt) / 1000).toFixed(0)}s before, its process ${closedHow}` : ''}` : `${o.to} never showed it in ${silent ? '20 minutes' : 'an hour'} (was ${before})`,
+  record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (was ${before}${low < before ? `, lowest since ${low}` : ''}: +${Number((seen - Math.min(before, low)).toPrecision(8))} of ${amount})${opened != null ? `; opened ${opened}s, closed ${((t0 - closedAt) / 1000).toFixed(0)}s before, its process ${closedHow}` : ''}` : `${o.to} never showed it in ${silent ? '20 minutes' : 'an hour'} (was ${before})`,
     seconds: secs, bound: rb, within: seen != null && rb ? secs <= rb : (seen != null ? null : false) })
 }
 
