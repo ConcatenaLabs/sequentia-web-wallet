@@ -38,7 +38,11 @@ test('Max for an asset paid in the Ark counts what the Ark can send', () => {
 test('every payment out of the Ark shows its fee line, "No fees" when there is none', () => {
   assert.equal(DEFAULT_WORDS.feeLabel, 'Fee');
   assert.equal(DEFAULT_WORDS.noFee, 'No fees');
-  assert.match(fn('treeSendReview'), /kv: \[\[DEFAULT_WORDS\.feeLabel, DEFAULT_WORDS\.noFee\]\]/);
+  // A payment in the tree shows the fee the library quotes for it (`send_quote`): what it keeps back
+  // for its transfer, "No fees" only over a channel, and "a little" from a library that quotes none.
+  assert.match(fn('treeSendReview'), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker\) : DEFAULT_WORDS\.noFee\]\]/);
+  assert.match(fn('treeSendReview'), /leavesApi\.sendQuote\(r\.addr\.trim\(\), atoms, r\.asset\)/);
+  assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX'), '0.00000704 EURX, kept back for the transfer');
   for (const name of ['assetLightningReview', 'offboardReview'])
     assert.match(fn(name), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee\]\]/, name);
   assert.ok(!/kv: fee>0n \?/.test(html), 'no review hides a zero fee');

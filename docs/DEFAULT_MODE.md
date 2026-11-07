@@ -325,8 +325,15 @@ modes (`asset-picker.js`):
   back, says so ("This couldn't go through in seconds, and nothing was sent." / "This couldn't
   go through in seconds and came back to you.", then "Send it to the address instead? It arrives
   after the next block, in about a minute.") with the button **Send to the address**.
-- The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds." and the
-  buttons **Cancel** and **Send**.
+- The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds.", its
+  fee line, and the buttons **Cancel** and **Send**. The fee is the leaf library's quote of that very
+  payment (`send_quote`): "Fee <amount> <TICKER>, kept back for the transfer", what the payment
+  leaves for the fees of the transactions it keeps ready out of the wallet's own coins (the
+  receiver gets the whole amount); "No fees" over a channel, which costs nothing; and "A little of
+  it, kept back for the transfer" from a library that quotes none. When part of what is sent is
+  set aside for instant payments, the review adds "Part of it is set aside for instant payments: it
+  is set free first, which takes about a minute. Keep this page open.", and Send frees it through
+  the next settlement before paying, with the same line while it waits.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
   can be seen.
 - A payment of an asset from the wallet's own coins on the chain has the same review, titled

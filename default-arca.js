@@ -79,6 +79,12 @@ export const DEFAULT_WORDS = Object.freeze({
   // The fee line of a payment in the Ark: none, said so rather than left out.
   feeLabel: 'Fee',
   noFee: 'No fees',
+  // A payment in the tree leaves a little of what it moves for the fees of the transactions it
+  // keeps ready (the library's `send_quote`): the review shows it, never "No fees" when it is not.
+  feeKept: (amount, ticker) => `${amount} ${ticker}, kept back for the transfer`,
+  feeKeptSome: 'A little of it, kept back for the transfer',
+  // Part of what is sent is first set free from instant payments, through the next settlement.
+  freeingFirst: 'Part of it is set aside for instant payments: it is set free first, which takes about a minute. Keep this page open.',
   // Max for an asset held in the Ark, to a destination it pays with a fee: type the amount.
   maxArkElsewhere: 'Max sizes a payment to a receive code. For this recipient, type the amount.',
   // A receive code paid at its address, because nothing the wallet holds pays it in seconds.
