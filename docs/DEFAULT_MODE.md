@@ -336,7 +336,14 @@ modes (`asset-picker.js`):
   the next block, in about a minute." Developer mode keeps its own review, with the network, the
   fee asset and the transaction.
 - Refusals: one sentence each, and nothing is signed.
-  - "Part of this <TICKER> is still arriving: try again in a moment."
+  - "You can send up to <amount> <TICKER> this way now: a payment keeps a little back for its fees."
+    when the wallet cannot spend the whole amount now: <amount> is what its spendable coins hold less
+    what the payment keeps back for the fees of the transactions it keeps ready, so sending that much
+    goes through. The library's own refusal goes to the console.
+  - "None of your <TICKER> can be sent this way right now: try again in a moment." when none of it
+    can be, and nothing of it is arriving.
+  - "Part of this <TICKER> is still arriving: try again in a moment." when none of it can be sent
+    yet and some of it is still arriving.
   - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
   - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
     invoice." When the wallet's coins on the chain don't cover a payment to an address with its

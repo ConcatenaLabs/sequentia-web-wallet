@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, sendableNow, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll, onchainLessBoards, boardSpent, offboardOutcome } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -20,6 +20,21 @@ const info = { operator: OP, genesis_hash: GEN, server_info: { assets: [{ asset:
 test('every word default mode shows is free of the words it never says', () => {
   const words = Object.values(DEFAULT_WORDS).map((w) => typeof w === 'function' ? w('1.5', 'USDX') : w)
   for (const w of words) assert.deepEqual(forbiddenIn(w), [], w)
+})
+
+test('a payment refused for want of funds says the most it can send now', () => {
+  // Every coin final, the whole balance asked: the margins its transactions leave are kept back.
+  const all = 'refused: the wallet holds 30503305 of asset ' + B + ' in live coins, and paying 30503305 takes 30504009 with the margins its transactions leave for their fees'
+  assert.equal(sendableNow(30503305n, all), 30502601n)
+  // Half of it out of reach (in a channel, or not final yet): what the final coins allow.
+  const half = 'refused: the wallet holds 15251653 of asset ' + B + ' in live coins, and paying 30503305 takes 30503737 with the margins its transactions leave for their fees'
+  assert.equal(sendableNow(30503305n, half), 15251221n)
+  // Nothing final: nothing can be sent.
+  assert.equal(sendableNow(5000n, 'the wallet holds 0 of asset ' + B + ' in live coins, and paying 5000 takes 5432 with the margins'), 0n)
+  // The change below the smallest leaf: that much less.
+  assert.equal(sendableNow(30503305n, 'the change would be below the operator\'s smallest leaf in asset ' + B + ' (10000 atoms): pay a little less, or that much more'), 30493305n)
+  assert.equal(sendableNow(5000n, 'the operator is unreachable'), null)
+  assert.match(DEFAULT_WORDS.sendUpTo('0.30502601', 'EURX'), /up to 0\.30502601 EURX/)
 })
 
 test('the page names an operator only with a server, a node and a key', () => {

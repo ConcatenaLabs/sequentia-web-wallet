@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2838,6 +2838,22 @@ async function btcBuildTx(outputs, feeRate, { unsigned = false } = {}){
     outputIndexes: outputs.map((_, i) => i), changeIndex: withChange ? btcChangeNext : null };
 }
 
+// What a payment the library refused for want of what it can spend now says: the most it can send
+// this way now, which is what its final coins hold less what the payment keeps back for the fees of
+// its transactions (default-arca.js sendableNow); that nothing can be sent, and why, when nothing
+// can. A coin just received is not final until its round is, and counts as arriving until then.
+// The library's own words go to the console, so the figure can be checked against them.
+function shortWords(e, atoms, hex, m0){
+  const said = String(e?.message??e);
+  if(!/in live coins|smallest leaf/.test(said)) return prettyErr(e);
+  console.warn('[send] refused:', said);
+  const most = sendableNow(atoms, said);
+  let arriving = 0n; try{ arriving = leavesApi.arriving(hex) || 0n; }catch{}
+  if(most == null) return DEFAULT_WORDS.stillArriving(m0.ticker);
+  if(most > 0n) return DEFAULT_WORDS.sendUpTo(fmtAtoms(most, m0.precision||0), m0.ticker);
+  return arriving > 0n ? DEFAULT_WORDS.stillArriving(m0.ticker) : DEFAULT_WORDS.sendNoneNow(m0.ticker);
+}
+
 // review + broadcast a Bitcoin testnet4 payment (mirrors the Sequentia reviewBroadcast UX)
 // A payment to a receive code in the tree (leaves.js payCode): what is sent, to whom, and its
 // fee, reviewed before anything is signed; the leaf library refuses what it would not pay, in its
@@ -2868,8 +2884,7 @@ async function treeSendReview(r, onDone){
       ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
       if(onDone) onDone(); renderBalance();
     }catch(e){
-      // The library holds none of it spendable yet (just received, not final): said as arriving.
-      st.className='status err'; st.textContent = /in live coins/.test(String(e?.message||'')) ? DEFAULT_WORDS.stillArriving(m0.ticker) : prettyErr(e); ok.disabled=false; }
+      st.className='status err'; st.textContent = shortWords(e, atoms, r.asset, m0); ok.disabled=false; }
   };
 }
 
@@ -2907,7 +2922,7 @@ async function assetLightningReview(r, onDone, toAddress){
     catch(e){
       console.warn('[asset lightning] pay:', e?.message??e);
       if(isRouteRefusal(e)) offerAddress(DEFAULT_WORDS.lnNotThrough);
-      else { st.className='status err'; st.textContent = /in live coins/.test(String(e?.message||'')) ? DEFAULT_WORDS.stillArriving(m0.ticker) : prettyErr(e); ok.disabled=false; }
+      else { st.className='status err'; st.textContent = shortWords(e, atoms, r.asset, m0); ok.disabled=false; }
       return;
     }
     const hash = v && v.paying && v.paying.payment_hash;
