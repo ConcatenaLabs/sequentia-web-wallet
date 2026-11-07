@@ -156,7 +156,7 @@ test('coins expiring before the resting order\'s are refreshed for the trade, ne
   s.coins[0].expiry = 1700000000
   const quoteOf = s.lib.command.bind(s.lib)
   s.lib.command = (cmd, a) => {
-    if (cmd === 'order_fill_resting_quote') { s.calls.push(cmd); throw new Error(`refused: the wallet's live coins of asset ${X} that expire no earlier than the order's coin (median time 1790000000) keep 0 past their checkpoints; the fill of 10 costs 20 and its fee, with change of none or at least 1000`) }
+    if (cmd === "order_fill_resting_quote") { s.calls.push(cmd + ":" + a.amount); throw new Error(`refused: the wallet's live coins of asset ${X} that expire no earlier than the order's coin (median time 1790000000) keep 0 past their checkpoints; the fill of 10 costs 20 and its fee, with change of none or at least 1000`) }
     return quoteOf(cmd, a)
   }
   const eng = createEngine({ leaves: s.lib, fetchJson: async () => ({}), makers: () => [], relayBook: s.relayBook, relayFills: s.relayFills, admitted, store: s.store, anchorDepth: () => 0 })
@@ -174,11 +174,32 @@ test('a coin new enough for the order is never refreshed for it', async () => {
   const s = standIn()
   const quoteOf = s.lib.command.bind(s.lib)
   s.lib.command = (cmd, a) => {
-    if (cmd === 'order_fill_resting_quote') { s.calls.push(cmd); throw new Error(`refused: the wallet's live coins of asset ${X} that expire no earlier than the order's coin (median time 1790000000) keep 0 past their checkpoints`) }
+    if (cmd === "order_fill_resting_quote") { s.calls.push(cmd + ":" + a.amount); throw new Error(`refused: the wallet's live coins of asset ${X} that expire no earlier than the order's coin (median time 1790000000) keep 0 past their checkpoints`) }
     return quoteOf(cmd, a)
   }
   const eng = createEngine({ leaves: s.lib, fetchJson: async () => ({}), makers: () => [], relayBook: s.relayBook, relayFills: s.relayFills, admitted, store: s.store })
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
   assert.equal(q.why, 'no-firm-offer', 'its coin (expiry 1800000000) is not older than the order\'s: nothing to refresh')
   assert.ok(!s.calls.includes('participate'))
+})
+
+// Seen live (RB4): a resting order whose fill costs more than the wallet's coins hold whatever
+// amount is asked (its lot rule) was asked again three times, each a library command of minutes
+// that held every other command of the wallet behind it. A refusal the same as the last is not
+// asked again, and nothing is asked again past the quote's deadline.
+test('a resting fill refused the same way twice is not asked a third time', async () => {
+  const s = standIn()
+  const lib = s.lib.command
+  s.lib.command = (cmd, a) => {
+    if (cmd === "order_fill_resting_quote") { s.calls.push(cmd + ":" + a.amount); throw new Error(`refused: the outputs take 2000000 of asset ${X}, more than the 1000000 the inputs hold`) }
+    return lib(cmd, a)
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(!q.ok)
+  // The quote's two passes over the order each ask once, and once more at the size the first
+  // refusal names; the second refusal is the same, so neither asks again (four each before).
+  const asked = s.calls.filter((c) => c.startsWith('order_fill_resting_quote'))
+  assert.deepEqual(asked, ['order_fill_resting_quote:200251', 'order_fill_resting_quote:100124', 'order_fill_resting_quote:200251',
+    'order_fill_resting_quote:100124'], 'asked once more after the first refusal, not again: ' + s.calls.join(','))
 })

@@ -271,7 +271,12 @@ next round, 64 at most a pass: boards first, since merging one fronts nothing (t
 forfeit of a board pays it back at once), then coins of a round of at most `coin_size`, down to
 three quarters of the cap. A merge's own coin is larger, and is not merged again at every coin that
 comes in. At twice the cap it boards no more of the asset and merges its smallest coins of all, as
-few as bring it back under.
+few as bring it back under. With `merge_max_coins` (a number, at least 2), the coins one pass merges
+hold at most that many `coin_size` together, so no merge makes a coin larger: a swap's change is out
+of round until the maker's next round refreshes it, and counts against its instant budget all that
+time, so a coin many times the size of its trades would put most of itself out of round at every
+trade. The library pays a swap from the smallest coin of the latest date that holds it (the arca
+CLI README, `swap offer`); the bound keeps such coins about.
 
 The library reads what each command needs, by state: the coins the maker traded away and the
 participations it completed, thousands after a few days of trading, are not read again. The
@@ -301,7 +306,7 @@ feed's mid has moved to within `rest.guard_bps` of. A level cancelled to be repr
 again at what its coin came back with (its value less the cancel's fee, when that is within a
 thousandth of the level), so the library rests it from that coin alone and the operator fronts no
 change beside the order. Every command slower than
-`slow_ms` (2,000 by default) is logged (`slow <command> <ms> ms {detail}`), which names what a slow firm offer
+`slow_ms` (2,000 by default) is logged (`slow <command> <ms> ms {detail}`), answered or refused, which names what a slow firm offer
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the
 milliseconds each part of that re-check took, and for a sync what each of its steps cost. The
@@ -332,7 +337,7 @@ pool, fee, service, founder, drip) is refused at start.
   "operator": { "server": "https://host/arca", "node_url": "http://127.0.0.1:18891/", "node_user": "user", "node_password_file": "/var/lib/leaf-maker/node-password" },
   "pairs": [ { "give": "<asset id>", "want": "<asset id>", "rate_num": "1", "rate_den": "1", "min_give": "10000" } ],
   "fee_margin": "2000", "board_keep": "100000",
-  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "forfeit_seconds": 30, "max_coins": 32,
+  "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600, "forfeit_seconds": 30, "max_coins": 32, "merge_max_coins": 4,
   "instant_budget": "0.1"
 }
 ```
@@ -350,7 +355,8 @@ and the one the operator suggests in `info.bond`. On every pass the maker reads 
 `after_next_round: true`, and a pair cut to nothing is named in the answer's `after_next_round`
 list. A firm offer past the room is answered 409 "the maker takes this much after its next round"
 (`after_next_round: true`), as is the library's own refusal past the budget, which also has the
-maker refresh every coin it received at once. A wallet then says the rest can be traded in a few
+maker refresh every coin it received at once and log what it holds out of round by state and asset
+("holds out of round, by its last reading: …"). A wallet then says the rest can be traded in a few
 minutes.
 
 What the maker holds out of round of an asset whose refresh would take the operator's in-flight

@@ -81,6 +81,9 @@
 //     "max_coins": 32,                           optional, one figure or one an asset: past it, coins
 //                                                are merged (boards and small coins first), and at
 //                                                twice it boards stop
+//     "merge_max_coins": 4,                      optional: no merge makes a coin of more than this
+//                                                many `coin_size`, so a swap's change (out of round
+//                                                until its next round) stays near a trade's size
 //     "exit_delay_units": 36,                    optional; the operator's default otherwise
 //     "rest": { … },                             optional: orders resting in the tree, a ladder a
 //                                                pair, listed on SeqDEX's relay (leaf-maker-rest.mjs
@@ -156,18 +159,55 @@ export const isOrderCoin = (c) => !!c && typeof c.template === 'string' && c.tem
 // front the whole of it at every coin that comes in. At twice the cap, the smallest coins of all,
 // as few as bring the count back under it. None when fewer than two qualify.
 export const MERGE_TO = 0.75
-export function coinsToMerge (coins, asset, cap, exclude = [], small = null) {
+// With `most` (atoms), the coins merged in one pass hold at most that much together, so no merge
+// makes a coin larger: a swap pays from the coins the maker holds, its change is out of round until
+// its next round, and a coin many times the maker's trades put most of it out of round at every
+// trade (`merge_max_coins` in the configuration: `most` is that many `coin_size`).
+export function coinsToMerge (coins, asset, cap, exclude = [], small = null, most = null) {
   const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live' && !isOrderCoin(c))
   if (live.length <= cap) return []
   const b = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
   const full = live.length >= 2 * cap
   const limit = small != null && !full ? b(small) : null
-  const pool = live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id) && (c.kind === 'board' || limit == null || b(c.value) <= limit))
+  let pool = live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id) && (c.kind === 'board' || limit == null || b(c.value) <= limit))
     .sort((x, y) => ((x.kind === 'board') !== (y.kind === 'board') ? (x.kind === 'board' ? -1 : 1)
       : b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
+  if (most != null) {
+    // The smallest first, as many as fit together under `most`.
+    pool = pool.slice().sort((x, y) => (b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
+    let sum = 0n, k = 0
+    while (k < pool.length && sum + b(pool[k].value) <= b(most)) { sum += b(pool[k].value); k++ }
+    pool = pool.slice(0, k)
+  }
   const target = full ? 2 * cap - Math.max(1, Math.floor(cap / 4)) : Math.floor(cap * MERGE_TO)
   const n = Math.min(MERGE_PER_PASS, live.length - target + 1, pool.length)
   return n < 2 ? [] : pool.slice(0, n).map((c) => c.leaf_id)
+}
+
+// The most the coins of `asset` merged in one pass hold together (coinsToMerge's `most`): the
+// configuration's `merge_max_coins` times the asset's `coin_size`; null (no bound) without both.
+export function mergeMost (cfg, asset) {
+  const k = Number(cfg && cfg.merge_max_coins)
+  const coin = perAsset(cfg && cfg.coin_size, asset, null)
+  if (!(k >= 2) || coin == null) return null
+  return big(coin) * BigInt(Math.floor(k))
+}
+
+// What the maker holds out of round when an offer is refused for it, from its last reading of
+// its coins: the coins received out of round (kind transfer or fill) in each state that counts,
+// by state and asset (`name` gives an asset's ticker). The refusal's figure adds the payment asked.
+const HELD_OUT = ['live', 'offered', 'sending', 'given', 'forfeited']
+export function outOfRoundSummary (coins, name = (a) => a) {
+  const by = new Map()
+  for (const c of coins || []) {
+    if (!c || (c.kind !== 'transfer' && c.kind !== 'fill') || !HELD_OUT.includes(c.state)) continue
+    const k = c.state + ' ' + name(c.asset)
+    const e = by.get(k) || { n: 0, atoms: 0n, largest: 0n }
+    const v = big(c.value)
+    e.n++; e.atoms += v; if (v > e.largest) e.largest = v
+    by.set(k, e)
+  }
+  return [...by].sort(([x], [y]) => (x < y ? -1 : 1)).map(([k, e]) => `${k}: ${e.n} coin(s), ${e.atoms} atoms, the largest ${e.largest}`).join('; ') || 'none'
 }
 
 // The library's refusal of a payment that would leave the wallet holding more out of round than the
@@ -809,7 +849,7 @@ async function main () {
       // up 16 a participation), so every command it makes reads a store of bounded size.
       for (const [a, n] of counted) {
         if (n <= cap(a)) continue
-        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null))
+        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null), mergeMost(cfg, a))
         if (merge.length < 2) continue
         try {
           const q = await cmd('quote', { leaves: merge })
@@ -830,6 +870,7 @@ async function main () {
     const url = new URL(req.url, 'http://x')
     const p = url.pathname.replace(/\/+$/, '')
     if (req.method === 'OPTIONS') return send(res, 200, {})
+    let asked = null
     try {
       if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash })
       if (req.method === 'GET' && p === '/v1/quotes') {
@@ -854,6 +895,7 @@ async function main () {
       if (req.method !== 'POST') return send(res, 404, { error: 'no such path' })
       const b = await body(req)
       if (!b) return send(res, 400, { error: 'the body is not JSON' })
+      asked = b
       if (p === '/v1/firm' || p === '/v1/btc/firm') {
         if (b.want_asset && capped.has(b.want_asset)) return send(res, 409, { error: cappedRefusal(tickerOf(b.want_asset)), capped: true })
       }
@@ -912,7 +954,10 @@ async function main () {
     } catch (e) {
       log('refused', p, e.message)
       const full = OUT_OF_ROUND_FULL.test(e.message || '')
-      if (full) { outOfRoundFull = true; readRoom(true).catch(() => {}); setImmediate(tick) }
+      if (full) {
+        log('holds out of round, by its last reading:', outOfRoundSummary(holdings && holdings.coins, tickerOf), '; asked to take', asked && asked.want_asset ? tickerOf(asked.want_asset) : '?')
+        outOfRoundFull = true; readRoom(true).catch(() => {}); setImmediate(tick)
+      }
       return send(res, 409, { error: e.message, kind: e.kind || null, ...(full ? { after_next_round: true } : {}) })
     }
   })

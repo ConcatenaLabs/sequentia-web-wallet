@@ -184,7 +184,8 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
   const call = (f) => {
     try { return f() } catch (e) {
       // A refusal is the library's own JSON, { error: { kind, message, code?, status? } }.
-      if (typeof e === 'string') { let j = null; try { j = JSON.parse(e) } catch {} ; if (j && j.error) { const x = new Error(j.error.message); Object.assign(x, j.error); throw x } }
+      // With what the command cost before it was refused (`cost`), where the library says.
+      if (typeof e === 'string') { let j = null; try { j = JSON.parse(e) } catch {} ; if (j && j.error) { const x = new Error(j.error.message); Object.assign(x, j.error); if (j.cost) x.cost = j.cost; throw x } }
       throw e
     }
   }
@@ -294,7 +295,7 @@ export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = nu
           if (full.result && full.result.cost_by_step) detail.steps = full.result.cost_by_step
         }
         wt.parentPort.postMessage({ id, ok: true, value, detail })
-      } catch (e) { wt.parentPort.postMessage({ id, ok: false, error: { message: e.message, kind: e.kind || null, code: e.code || null, status: e.status || null } }) }
+      } catch (e) { wt.parentPort.postMessage({ id, ok: false, error: { message: e.message, kind: e.kind || null, code: e.code || null, status: e.status || null }, detail: e.cost ? { cost: e.cost, refused: String(e.message).slice(0, 300) } : null }) }
     })
   }
 }

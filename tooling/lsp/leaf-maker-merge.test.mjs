@@ -5,7 +5,7 @@
 //   node --test tooling/lsp/leaf-maker-merge.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { coinsToMerge, isOrderCoin, MAX_COINS, MERGE_PER_PASS, MERGE_TO } from './leaf-maker.mjs'
+import { coinsToMerge, isOrderCoin, mergeMost, outOfRoundSummary, MAX_COINS, MERGE_PER_PASS, MERGE_TO } from './leaf-maker.mjs'
 
 const coin = (id, value, kind = 'batch', asset = 'a', state = 'live') => ({ leaf_id: id, asset, value: String(value), kind, state })
 const order = (id, value, asset = 'a') => ({ ...coin(id, value, 'batch', asset), template: 'order-3' })
@@ -104,4 +104,38 @@ for (const CAP of [8, MAX_COINS]) test(`boarding sixty coins at a cap of ${CAP} 
   assert.equal(before.boarded, 60)
   assert.ok(before.fronted > 25n * 60n * SIZE, String(before.fronted))
   assert.ok(after.fronted <= 60n * SIZE * 2n, String(after.fronted))
+})
+
+// Seen live (RB4): at twice the cap the maker merged its coins into one of ~$2M, and every swap,
+// however small, then paid from it: its change came back out of round, over the maker's share of
+// the bond, at every trade. With merge_max_coins no merge holds more than that many coin sizes.
+test('no merge makes a coin larger than merge_max_coins coin sizes', () => {
+  const size = 25_000
+  const flood = Array.from({ length: 2 * MAX_COINS }, (_, k) => coin('f' + k, size + k))
+  const giant = coin('g', 80 * size)
+  const unbounded = coinsToMerge([...flood, giant], 'a', MAX_COINS, [], String(size))
+  const most = mergeMost({ merge_max_coins: 4, coin_size: String(size) }, 'a')
+  assert.equal(most, 100_000n)
+  const bounded = coinsToMerge([...flood, giant], 'a', MAX_COINS, [], String(size), most)
+  const sum = (ids) => ids.reduce((n, id) => n + BigInt([...flood, giant].find((c) => c.leaf_id === id).value), 0n)
+  assert.ok(sum(unbounded) > most, 'without the bound a pass merges more: ' + sum(unbounded))
+  assert.ok(bounded.length >= 2 && sum(bounded) <= most, `${bounded.length} coins, ${sum(bounded)} atoms`)
+  assert.ok(!bounded.includes('g'), 'never the giant')
+  // Without both settings, no bound.
+  assert.equal(mergeMost({ coin_size: String(size) }, 'a'), null)
+  assert.equal(mergeMost({ merge_max_coins: 4 }, 'a'), null)
+  assert.equal(mergeMost({ merge_max_coins: 4, coin_size: { a: '10', default: '7' } }, 'b'), 28n)
+})
+
+test('what the maker holds out of round, said by state and asset', () => {
+  const coins = [
+    { leaf_id: 'a', kind: 'transfer', asset: 'X', value: '3861098558629', state: 'live' },
+    { leaf_id: 'b', kind: 'transfer', asset: 'X', value: '5', state: 'given' },
+    { leaf_id: 'c', kind: 'fill', asset: 'Y', value: '7', state: 'offered' },
+    { leaf_id: 'd', kind: 'batch', asset: 'X', value: '9', state: 'live' },
+    { leaf_id: 'e', kind: 'transfer', asset: 'X', value: '9', state: 'spent' },
+  ]
+  assert.equal(outOfRoundSummary(coins, (a) => a === 'X' ? 'SILVR' : a),
+    'given SILVR: 1 coin(s), 5 atoms, the largest 5; live SILVR: 1 coin(s), 3861098558629 atoms, the largest 3861098558629; offered Y: 1 coin(s), 7 atoms, the largest 7')
+  assert.equal(outOfRoundSummary([]), 'none')
 })

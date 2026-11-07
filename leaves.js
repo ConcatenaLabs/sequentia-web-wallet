@@ -396,6 +396,8 @@ export class LeafError extends Error {
     // A payment that planned coins could cover: their asset, and which to give up.
     if (e && e.asset) this.asset = e.asset
     if (e && Array.isArray(e.release)) this.release = e.release
+    // What the command cost before it was refused, where the library says (its `cost`).
+    if (e && e.cost) this.cost = e.cost
   }
 }
 
@@ -682,7 +684,18 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   async function run (command, args) {
     const t0 = now()
-    const v = await S.client.run(command, args)
+    let v
+    try { v = await S.client.run(command, args) } catch (e) {
+      // A command refused after holding the wallet over ten seconds is named as one that answered
+      // is: a refusal holds every command behind it just as long.
+      const took = now() - t0
+      if (took > 10000) {
+        let cost = ''
+        try { cost = e && e.cost ? ' ' + JSON.stringify({ cost: e.cost }).slice(0, 900) : '' } catch {}
+        log(`[leaves] slow ${command} ${took} ms, refused: ${String((e && e.message) || e).slice(0, 300)}${cost}`)
+      }
+      throw e
+    }
     // A command over ten seconds says so, with what the library says it cost (and a sync its
     // steps): the one long command that holds every other behind it can then be named.
     const took = now() - t0
