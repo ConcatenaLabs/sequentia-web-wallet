@@ -136,8 +136,8 @@ test('the arrival time covers the whole way to the other wallet, or none is said
   assert.equal(arrivalMinutes(600), 20)
   assert.equal(arrivalMinutes(5), 10)
   assert.equal(arrivalMinutes(60, 600), 45)
-  // Every payment measured on the testnet (223 to 405 s from Send) is within what is stated.
-  for (const s of [223, 356, 405]) assert.ok(s <= arrivalMinutes(60, 60) * 60)
+  // Every payment measured on the testnet (189 to 356 s from Send) is within what is stated.
+  for (const s of [189, 223, 231, 313, 317, 340, 356]) assert.ok(s <= arrivalMinutes(60, 60) * 60)
   assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(60, 60)), 'It arrives within 10 minutes.')
   assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(600, 60)), 'It arrives within 20 minutes.')
   assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
