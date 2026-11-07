@@ -8916,7 +8916,7 @@ async function confidentialReview(r, reset){
   const others = own>0n ? otherConfidentialCoins(h) : [];
   const pset=buildConfidentialPset(r.addr, h, a, own, others);
   const said = own===0n ? DEFAULT_WORDS.confidentialSeen : others.length ? DEFAULT_WORDS.confidentialHidden : DEFAULT_WORDS.confidentialAmountHidden(m.ticker);
-  await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, h, { rows:[{ addr:r.addr, atoms:a, hex:h }], feeAssetHex:h, extra:[['', said]] });
+  await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, h, { rows:[{ addr:r.addr, atoms:a, hex:h }], feeAssetHex:h, extra:[['', said]], plain:{ amt: fmtAmount(a, prec), ticker: m.ticker } });
 }
 // The wallet's confidential coins of assets other than `hex` (never the Sequence token's, which may
 // be staked): [{ outpoint, hex, atoms }].
@@ -9104,9 +9104,22 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
   // Read now: signing takes the Pset by value, and its outputs cannot be read after that.
   const builtFee = psetFee(pset);
   const kv=[];
+  // Default mode's review of a payment from the wallet's own coins on the chain (review.plain: one
+  // asset): the contract's "Send <amount> <TICKER>?" with whom it goes to, its fee and when it
+  // arrives; no network, no fee asset, Send and Cancel (docs/DEFAULT_MODE.md, Send).
+  const plain = review && review.plain && Array.isArray(review.rows) && !devMode() ? review.plain : null;
+  if(plain){
+    for(const r of review.rows) kv.push([BTC_WORDS.to, r.addr ? r.addr.slice(0, 14) + '…' + (review.rows.length > 1 ? ' · ' + fmtAtoms(r.atoms, assetMeta(r.hex).precision) + ' ' + assetMeta(r.hex).ticker : '') : '']);
+    if(builtFee){ const fm=assetMeta(builtFee.hex); kv.push([DEFAULT_WORDS.feeLabel, fmtAtoms(builtFee.atoms, fm.precision)+' '+fm.ticker]); }
+    const extra = (review.extra || []).filter(l=> l && l[1]);
+    for(const line of extra) kv.push(line);
+    if(!extra.some(l=> /arrives/.test(String(l[1])))) kv.push(['', DEFAULT_WORDS.arrivesNextBlock]);
+    title = DEFAULT_WORDS.sendTitle(plain.amt, plain.ticker);
+  }
   // First line: this is a Sequentia (testnet) payment, NOT a parent-chain BTC one.
-  kv.push(['Network', 'Sequentia testnet']);
-  if(review && Array.isArray(review.rows)){
+  else kv.push(['Network', 'Sequentia testnet']);
+  if(plain){ /* the contract's rows, above */ }
+  else if(review && Array.isArray(review.rows)){
     for(const r of review.rows){
       const m=assetMeta(r.hex);
       const amtStr=fmtAtoms(r.atoms, m.precision)+' '+m.ticker;
@@ -9149,6 +9162,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
     if(feeAssetHex && feeAssetHex!==POLICY_HEX) kv.push(['Fee paid in', assetMeta(feeAssetHex).ticker]);
   }
   const {m, ok, st} = modalRows({title, kv});
+  if(plain) ok.textContent = DEFAULT_WORDS.send;
   endReview();
   // A fee worth more than 30 reference units (USD) is almost always a typed rate gone wrong.
   { const f=builtFee, pu = f ? priceFor(priceTicker(f.hex)) : 0;
@@ -9193,7 +9207,10 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
         queued('send › record the spend', () => { try { wollet.applyTransaction(ownTx(finalized)); } catch {} })
           .finally(() => { _spendsPending--; try{ renderBalance(); renderHistory(); }catch{} })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
       endConfirm();
-      showSent(m, { title, kv, txid: txid.toString() });
+      if(plain){
+        st.className='status ok'; st.textContent = DEFAULT_WORDS.sentBlock(plain.amt, plain.ticker);
+        ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+      } else showSent(m, { title, kv, txid: txid.toString() });
       if(onDone) onDone(txid); await sync();
     }catch(e){
       if(e && e.settled){ st.className='status ok'; st.textContent=e.message; return; }   // nothing signed: the rescue is no longer needed
@@ -10032,7 +10049,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       const reviewRows = rows.map(r=>({ addr:r.addr, atoms:parseAtoms(r.amtS, sendPrecision(r.asset)), hex:r.asset, ref:r.ref }));
       // Default mode says plainly what a payment to a confidential address does not hide (#585).
       const seen = !devMode() && rows.some(r=>isConfidentialAddress(r.addr)) ? [['', DEFAULT_WORDS.confidentialSeen]] : [];
-      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:[...byAddressNote(false), ...seen]});
+      // Default mode: one asset reads as the contract's review (reviewBroadcast `plain`).
+      const one = new Set(reviewRows.map(r=>r.hex)).size===1 ? reviewRows : null;
+      const plain = one ? { amt: fmtAmount(one.reduce((n,r)=>n+r.atoms, 0n), assetMeta(one[0].hex).precision||0), ticker: assetMeta(one[0].hex).ticker } : null;
+      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:[...byAddressNote(false), ...seen], plain});
     }
   }catch(e){ $('sendErr').textContent=plainErr(e); }
   finally{ btn.disabled=false; btn.textContent=label; } };

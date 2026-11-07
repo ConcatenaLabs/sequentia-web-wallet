@@ -329,6 +329,12 @@ modes (`asset-picker.js`):
   buttons **Cancel** and **Send**.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
   can be seen.
+- A payment of an asset from the wallet's own coins on the chain has the same review, titled
+  **Send <amount> <TICKER>?**, with "To <address>", its "Fee <amount> <TICKER>" and "It arrives
+  after the next block, in about a minute.", and the buttons **Cancel** and **Send**: no network,
+  no fee asset, no transaction id. Once it is broadcast: "Sent <amount> <TICKER>. It arrives after
+  the next block, in about a minute." Developer mode keeps its own review, with the network, the
+  fee asset and the transaction.
 - Refusals: one sentence each, and nothing is signed.
   - "Part of this <TICKER> is still arriving: try again in a moment."
   - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
