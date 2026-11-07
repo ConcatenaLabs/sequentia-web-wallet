@@ -42,7 +42,8 @@
 //                 `pct` is within the stated time of the timed operations (a refusal before
 //                 anything moved is not timed); `pctAsked` also counts as missed each refusal
 //                 that was the wallet's (busy, no price, coins not ready) rather than the
-//                 person's (too small, more than held).
+//                 person's (too small, more than held), and each failure whose time could not
+//                 be taken (a payment that never answered): `refusedByWallet` counts both.
 //
 // Each operation is a line of <work-dir>/reliability-<lane>.jsonl: what was asked, what the wallet
 // said at each step, the outcome (settled, returned, refused, failed), the seconds it took and the
