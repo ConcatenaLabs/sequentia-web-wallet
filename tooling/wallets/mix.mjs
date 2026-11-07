@@ -417,7 +417,9 @@ export function summarize (lines) {
     // A refusal is a clean return, not timed; but one the wallet could have avoided (busy, no price,
     // coins not ready) is an operation the person did not get: `pctAsked` counts it as missed.
     // (A receive whose payment was refused is counted once, on the payer.)
-    const missed = ls.filter((l) => l.outcome === 'refused' && !personsOwn(l) && !(l.op === 'receive' && /^the payer said|^nothing was sent/.test(String(l.said || ''))))
+    // A failure the time was not taken of (a payment that never answered) is missed there too.
+    const missed = ls.filter((l) => (l.outcome === 'refused' && !personsOwn(l) && !(l.op === 'receive' && /^the payer said|^nothing was sent/.test(String(l.said || ''))))
+      || (l.outcome === 'failed' && l.within !== true && l.within !== false))
     const asked = timed.length + missed.length
     return { n: ls.length, ended: ls.filter(ended).length, timed: timed.length, within: within.length, pct: timed.length ? Math.round(1000 * within.length / timed.length) / 10 : null,
       refusedByWallet: missed.length, pctAsked: asked ? Math.round(1000 * within.length / asked) / 10 : null, kinds }

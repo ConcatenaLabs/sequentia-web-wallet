@@ -39,15 +39,16 @@ test('the verdict counts within the stated time and leaves out what the drive co
     { op: 'receive', kind: 'browser', outcome: 'settled', within: false, seconds: 90, bound: 60, said: 'x' },
     { op: 'trade', kind: 'mobile', outcome: 'refused', seconds: 9, said: 'Nobody could confirm a price for this just now.' },
     { op: 'trade', kind: 'mobile', outcome: 'failed', seconds: 0, said: 'drive: no GOLD', drive_error: true },
-    { op: 'trade', kind: 'mobile', outcome: 'refused', seconds: 0, said: 'no GOLD shown to sell', drive_skip: true }
+    { op: 'trade', kind: 'mobile', outcome: 'refused', seconds: 0, said: 'no GOLD shown to sell', drive_skip: true },
+    { op: 'payment', kind: 'browser', outcome: 'failed', seconds: 602, said: 'x → no answer in 10 min', within: null }
   ])
-  assert.equal(s.all.n, 3)
+  assert.equal(s.all.n, 4)
   assert.equal(s.all.ended, 3)
   assert.equal(s.all.timed, 2)
   assert.equal(s.all.pct, 50)
   // The refusal for no price is the wallet's: counted as missed where refusals count.
-  assert.equal(s.all.refusedByWallet, 1)
-  assert.equal(s.all.pctAsked, 33.3)
+  assert.equal(s.all.refusedByWallet, 2)
+  assert.equal(s.all.pctAsked, 25)
   assert.equal(s.driveErrors, 1)
   assert.equal(s.wallets.mobile.n, 1)
 })
