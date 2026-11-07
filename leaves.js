@@ -134,6 +134,8 @@ export const TAKE_IN_MS = 45_000
 export const TAKE_IN_EVERY_MS = 2_000
 // How often user mode asks the library to refresh what it received out of round.
 export const REFRESH_EVERY_MS = 120_000
+// How long care leaves channels alone after a payment closed one to spend its side.
+export const CHANNEL_HOLD_AFTER_MS = 10 * 60_000
 // Whether user mode refreshes what it receives out of round by itself: on unless the page sets
 // window.SEQ_REFRESH_RECEIVED = false. The library gives a coin up only where the operator can
 // fund its refresh and takes back a refresh that waits, so a coin received stays the wallet's to pay with.
@@ -164,8 +166,11 @@ export const RELEASE_TRIES = 3
 // (each read and its credit folded, and one opened in each asset the operator makes channels
 // of, from half of the wallet's leaves of it). Its planning reach is the library's own: a leaf
 // of a round is planned once its first step could run within ten days.
-export function careArgs (scan) {
-  const a = { channels: true }
+// While a payment closes a channel to spend its side (`holdChannels`), care neither reads, folds nor
+// opens channels, so it never puts half of the side just freed back into a channel before the
+// payment is made.
+export function careArgs (scan, holdChannels = false) {
+  const a = { channels: !holdChannels }
   if (scan) a.scan = scan
   return a
 }
@@ -406,6 +411,8 @@ export class LeafError extends Error {
     // A payment that planned coins could cover: their asset, and which to give up.
     if (e && e.asset) this.asset = e.asset
     if (e && Array.isArray(e.release)) this.release = e.release
+    // A payment the wallet's side of its channels could cover: which channel leaves to close.
+    if (e && Array.isArray(e.close)) this.close = e.close
     // What the command cost before it was refused, where the library says (its `cost`).
     if (e && e.cost) this.cost = e.cost
   }
@@ -1210,13 +1217,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // ---- what the wallet does by itself: claims taken up, plans kept ----
   const claimScan = () => { try { const n = ctx.claimScan ? Number(ctx.claimScan()) : NaN; return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined } catch { return undefined } }
+  const channelsHeld = () => S.channelsHeldUntil != null && now() < S.channelsHeldUntil
   async function careIfDue () {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
     if (S.asked) { S.upkeepLater = true; return }
     S.careAt = now()
     const t0 = now()
     try {
-      const v = await run('care', careArgs(claimScan()))
+      const v = await run('care', careArgs(claimScan(), channelsHeld()))
       log(`[leaves] care: ${now() - t0} ms`)
       S.lastCare = { at: now(), value: v }
       const sum = careSummary(v)
@@ -1366,6 +1374,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
             log(`[leaves] ${leaves.length} coin(s) refreshed in the next round before paying`)
             await roundWait(() => waitReleased(leaves, { turns: true }))
           } finally { S.releasing = null; render() }
+          continue
+        }
+        // What the wallet's side of a channel would cover (the library's `in_channel`, naming the
+        // channel leaves): they are closed into the next round, a leaf of the wallet's own given
+        // back for each side, and the payment asked again once that round is final. Care leaves
+        // channels alone meanwhile, and for a while after, so it does not put the side back.
+        if (e instanceof LeafError && e.kind === 'in_channel' && e.close && e.close.length && i < RELEASE_TRIES) {
+          S.releasing = { coins: e.close, asset: e.asset, since: now(), command, why: 'channel' }
+          S.channelsHeldUntil = now() + RELEASE_WAIT_MS
+          render()
+          try {
+            const q = await run('quote', { leaves: e.close })
+            await run('participate', { leaves: e.close, shown: q.coins })
+            log(`[leaves] ${command}: ${e.close.length} channel(s) closed into the next round; paid once it is final`)
+            await roundWait(() => waitReleased(e.close, { turns: true }))
+          } finally { S.releasing = null; S.channelsHeldUntil = now() + CHANNEL_HOLD_AFTER_MS; render() }
           continue
         }
         if (!(e instanceof LeafError) || e.kind !== 'planned' || !e.release || !e.release.length || i >= RELEASE_TRIES) throw e
@@ -2348,6 +2372,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
+    // What a payment to a receive code would cost, paying nothing (the library's `send_quote`): its
+    // route, its fee in the asset paid and the coins it gives up, or the payment's own refusal.
+    sendQuote: (text, amount, asset) => asking(() => act('send_quote', () => run('send_quote', { request: text, amount: String(amount), asset }), { answerFirst: true })),
+    // Why a payment waits for a round, while it does: 'channel' (a channel's side set free first),
+    // 'depth' or a plan's release; null when none waits.
+    releasing: () => (S.releasing ? { why: S.releasing.why || 'planned', asset: S.releasing.asset, coins: S.releasing.coins.length } : null),
     refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
     // `atoms` of an asset as the page's own reading of the chain shows them, less what a board just

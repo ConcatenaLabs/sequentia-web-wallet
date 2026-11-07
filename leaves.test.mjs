@@ -221,6 +221,8 @@ test('care plans every leaf of a round: its arguments', () => {
   // The library's own planning reach: a leaf stays free to trade until its refresh nears.
   assert.deepEqual(careArgs(), { channels: true })
   assert.deepEqual(careArgs(21), { channels: true, scan: 21 })
+  // While a payment frees a channel's side, care leaves channels alone.
+  assert.deepEqual(careArgs(21, true), { channels: false, scan: 21 })
 })
 
 test('a release is done once no coin it gave up is still live or in its round', () => {
@@ -284,6 +286,50 @@ test('a payment the planned coins cover is made through the next round, by itsel
   await api2.start()
   await assert.rejects(api2.pay('send', { request: 'r' }), (e) => e.kind === 'refused' && e.message === 'refused: no')
   api.stop(); api2.stop()
+})
+
+test('a payment the side of a channel covers closes the channel through the next round, and is made', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const runs = []
+  let sends = 0
+  let synced = 0
+  const cares = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    runs.push(c === 'quote' || c === 'participate' ? [c, m.args.args] : c)
+    if (c === 'care') cares.push(m.args.args)
+    if (c === 'send') {
+      sends++
+      if (sends === 1) return { id: m.id, ok: false, error: { kind: 'in_channel', asset: X, close: ['ch'], message: 'refused: the wallet holds 15 of asset … in live coins …; 20 more is the wallet\'s side of its channels' } }
+      return { id: m.id, ok: true, value: { result: { transfer: 't1' }, start: {} } }
+    }
+    if (c === 'sync') synced++
+    const result = c === 'coins' ? [{ leaf_id: 'ch', state: synced >= 3 ? 'spent' : 'given' }, { leaf_id: 'new', state: synced >= 3 ? 'live' : 'pending' }]
+      : c === 'quote' ? { coins: [{ leaf_id: 'ch', fee: '1' }] }
+      : c === 'participate' ? { participations: [{ state: 'pending' }] }
+      : c === 'schedule' ? { now: 1, due: false, next_sync_at: null }
+      : c === 'care' ? { claims: [], planned: [], cancelled: [] }
+      : c === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    sleep: async (ms) => { clock += ms }, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  const caresBefore = cares.length
+  const v = await api.pay('send', { request: 'r', amount: '30', asset: X })
+  assert.deepEqual(v, { transfer: 't1' })
+  assert.deepEqual(runs.find((r) => Array.isArray(r) && r[0] === 'quote'), ['quote', { leaves: ['ch'] }])
+  assert.deepEqual(runs.find((r) => Array.isArray(r) && r[0] === 'participate'), ['participate', { leaves: ['ch'], shown: [{ leaf_id: 'ch', fee: '1' }] }])
+  assert.equal(sends, 2, 'asked again once the round set the side free')
+  assert.equal(api.state.releasing, null)
+  assert.equal(api.releasing(), null)
+  // Care, run meanwhile or right after, leaves channels alone and so never reopens one with the side.
+  for (const a of cares.slice(caresBefore)) assert.equal(a.channels, false, JSON.stringify(cares))
+  api.stop()
 })
 
 test('a release that never frees its coins gives up in plain words, having paid nothing', async () => {

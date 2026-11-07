@@ -2865,8 +2865,20 @@ async function treeSendReview(r, onDone){
   const held = leavesApi.leafAtoms(r.asset) || 0n, arriving = leavesApi.arriving(r.asset) || 0n;
   if(atoms > held - arriving) throw new Error(atoms <= held ? DEFAULT_WORDS.stillArriving(m0.ticker) : `You can send up to ${fmtAtoms(held - arriving, m0.precision||0)} ${m0.ticker} this way now.`);
   const amt = fmtAtoms(atoms, m0.precision||0);
-  // A payment in the tree costs nothing: the review says so, as the Bitcoin ark's does.
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, DEFAULT_WORDS.noFee]]});
+  // The fee is the library's (`send_quote`): what the payment keeps back for the fees of the
+  // transactions it keeps ready, or none over a channel. A refusal of the quote is the payment's:
+  // said, and nothing is offered; one a channel's side would cover is paid after freeing it. A
+  // library that has no quote says a little is kept back, never that there is no fee.
+  let quote = null, freeing = false;
+  try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
+  catch(e){
+    if(e && e.kind === 'in_channel') freeing = true;
+    else if(!/\bno command send_quote\b/.test(String(e?.message??e))) throw new Error(shortWords(e, atoms, r.asset, m0));
+  }
+  const fee = quote && quote.fee != null ? BigInt(quote.fee) : null;
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee == null ? DEFAULT_WORDS.feeKeptSome
+    : fee > 0n ? DEFAULT_WORDS.feeKept(fmtAtoms(fee, m0.precision||0), m0.ticker) : DEFAULT_WORDS.noFee]]});
+  if(freeing){ const line=el('p','sub', DEFAULT_WORDS.freeingFirst); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   // The wallet's own channel reads wait while the review is open, so Send never waits for one.
@@ -2876,7 +2888,9 @@ async function treeSendReview(r, onDone){
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
     const t0=performance.now();
     try{
-      await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ try{ leavesApi.holdReads(0); }catch{} });
+      // While a channel's side is set free first, the wait says so.
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.freeingFirst; }catch{} }, 1000);
+      await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
       console.log('[tree send] paid in', ms, 'ms');
