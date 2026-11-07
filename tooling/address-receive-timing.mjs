@@ -6,6 +6,9 @@
 //   node tooling/address-receive-timing.mjs <work-dir> <kind:name> <kind:name> --ext <unpacked
 //     Ambra browser> [--phrases <dir>] [--asset OILX] [--amount 1] [--count 1] [--both]
 //
+// A kind is `web`, `browser` (Ambra browser, --ext) or `mobile` (Ambra mobile on the one device
+// adb sees, AMBRA_APP for a test build beside the release; its wallet made beforehand).
+//
 // The first wallet pays the second (`--both`: then the second the first, in turn), `--count`
 // times; `--burst k` makes each turn k payments to the same address, one right after another.
 // Each turn is a line of <work-dir>/address-timing.jsonl with the seconds from the first click on
@@ -24,6 +27,7 @@ import { join, resolve } from 'node:path'
 import { Page, chromium } from './cdp-page.mjs'
 import { WebWallet } from './wallets/web.mjs'
 import { AmbraBrowser } from './wallets/ambra-browser.mjs'
+import { AmbraMobile } from './wallets/ambra-mobile.mjs'
 
 const argv = process.argv.slice(2)
 const flag = (n, d) => { const i = argv.indexOf(n); if (i < 0) return d; const v = argv[i + 1]; argv.splice(i, 2); return v }
@@ -35,8 +39,9 @@ const BURST = Number(flag('--burst', '1')); const AFTER = Number(flag('--after',
 const BASE = flag('--base', 'https://sequentiatestnet.com/wallet/')
 const API = flag('--api', 'https://sequentiatestnet.com/api')
 const BOTH = bool('--both')
-// `--close-payer M`: the payer's page is closed once it says Sent, and opened again after M minutes
-// (a web wallet payer only): what the receiver sees while the payer is away.
+// `--close-payer M`: the payer's page is closed once it says Sent (Ambra browser: its popup, the
+// extension itself running on), and opened again after M minutes: what the receiver sees while the
+// payer is away.
 const CLOSE_PAYER = Number(flag('--close-payer', '0'))
 // `--fund`: a wallet holding less than three payments of the asset asks the faucet for it first
 // (its phrase is written to --phrases before that).
@@ -62,6 +67,8 @@ const make = (spec) => {
   const [kind, name] = spec.split(':')
   if (kind === 'web') return new WebWallet(browser, { name, base: BASE, phrase: phraseOf(name) })
   if (kind === 'browser') return new AmbraBrowser(browser, { name, phrase: phraseOf(name) })
+  // Ambra mobile: the app on the one device adb sees (AMBRA_APP for a test build), its wallet made beforehand.
+  if (kind === 'mobile') return new AmbraMobile({ name })
   throw new Error('no wallet kind ' + kind)
 }
 const A = make(specA); const B = make(specB)
@@ -80,7 +87,7 @@ try {
       say(`${w.name} holds ${await w.figure(ASSET)} ${ASSET}`)
     }
   }
-  const logOf = (w) => (w.logPage || w.page).console
+  const logOf = (w) => (w.kind === 'mobile' ? [] : (w.logPage || w.page).console)
   const arrivingLine = (w) => w.kind === 'web'
     ? `(()=>{ const r=[...document.querySelectorAll('.bt-row')].find(r=>r.querySelector('.tk')?.textContent.trim()===${JSON.stringify(ASSET)}); return r ? [...r.querySelectorAll('.bt-arriving,.bt-moving')].map(e=>e.textContent).join(' | ') : '' })()`
     : `(()=>{ const r=[...document.querySelectorAll('#assetList .asset-row')].find(r=>r.querySelector('.tk')?.textContent.trim()===${JSON.stringify(ASSET)}); return r ? (r.innerText.match(/[^\\n]*arriving[^\\n]*/i)||[''])[0] : '' })()`
@@ -101,7 +108,10 @@ try {
     }
     const paid = sends.filter((s) => !s.refused).length
     let closedAt = null; let reopened = null
-    if (CLOSE_PAYER && paid && from.kind === 'web') { await from.page.go('about:blank'); closedAt = Date.now(); say(`${from.name}'s page closed`) }
+    if (CLOSE_PAYER && paid) {
+      if (from.kind === 'web') await from.page.go('about:blank'); else await from.page.stop()
+      closedAt = Date.now(); say(`${from.name}'s ${from.kind === 'web' ? 'page' : 'popup'} closed`)
+    }
     if (!paid) { appendFileSync(out, JSON.stringify({ at: new Date().toISOString(), from: from.name, to: to.name, refused: sends[0].refused }) + '\n'); continue }
     const t0 = sends[0].clickedAt || Date.now()
     const at = () => Math.round((Date.now() - t0) / 100) / 10
@@ -123,9 +133,9 @@ try {
         if (tx.status && tx.status.confirmed && e.block == null) e.block = at()
         if (e.board == null) { const os = await json(`${API}/tx/${tx.txid}/outspend/${vout}`); if (os && os.spent) { e.board = at(); e.board_txid = os.txid } }
       }
-      const line = await to.page.eval(arrivingLine(to)).catch(() => '')
+      const line = to.kind === 'mobile' ? '' : await to.page.eval(arrivingLine(to)).catch(() => '')
       if (line && steps.arriving == null) { steps.arriving = at(); steps.arriving_said = line }
-      const f = await to.figure(ASSET, { quiet: true }).catch(() => null)
+      const f = await to.figure(ASSET, { quiet: to.kind !== 'mobile' }).catch(() => null)
       if (f != null) {
         const n = Math.floor((f - before) / Number(AMOUNT) + 0.1)
         while (levels.length < Math.min(n, paid)) levels.push(at())
@@ -133,9 +143,11 @@ try {
         if (levels.length >= paid && doneAt == null) doneAt = Date.now()
       }
       if (closedAt && reopened == null && Date.now() - closedAt > CLOSE_PAYER * 60000) {
-        reopened = at(); say(`${from.name}'s page opened again`)
-        await from.page.go(BASE)
-        await from.page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000).catch(() => {})
+        reopened = at(); say(`${from.name} opened again`)
+        if (from.kind === 'web') {
+          await from.page.go(BASE)
+          await from.page.waitFor("document.querySelector('#app') && getComputedStyle(document.querySelector('#app')).display !== 'none'", 300000).catch(() => {})
+        } else await from.open().catch((e) => say('reopening the popup: ' + e.message))
       }
       const c = logOf(to)
       for (; seenLog < c.length; seenLog++) if (WORTH.test(c[seenLog])) logs.push([at(), c[seenLog].slice(0, 300)])
