@@ -865,3 +865,31 @@ test('an action whose command only waited behind another says it waited, with it
   assert.ok(!lines.some((l) => l.includes('offboards held the wallet')), lines.join('\n'))
   api.stop && api.stop()
 })
+
+// Seen live (RB4): a command spent 436 s in the re-check it starts with (875 node reads), and the
+// slow line could not say which part. It now carries the re-check's parts.
+test('a slow command whose start re-checked the coins names the re-check by part', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const lines = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    if (m.args.command === 'channel_sync') {
+      clock += 436_171
+      return { id: m.id, ok: true, value: { result: [], start: { recheck: { ms: { coins: 2_000, lineages: 433_000, participations: 900, rounds: 200 }, read_again: 'all', changes: [] } },
+        cost: { start: { ms: 436_137, node: 875, operator: 2 }, command: { ms: 33, node: 0, operator: 4 } } } }
+    }
+    const result = m.args.command === 'schedule' ? { now: 1, due: false, next_sync_at: null } : m.args.command === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    log: (l) => lines.push(l), tickMs: 3_600_000 }, null, null)
+  await api.start()
+  await api.pay('channel_sync', {}).catch(() => {})
+  const l = lines.find((x) => x.startsWith('[leaves] slow channel_sync 436171 ms'))
+  assert.ok(l, lines.join('\n'))
+  assert.match(l, /"recheck":\{"ms":\{"coins":2000,"lineages":433000,"participations":900,"rounds":200\},"read_again":"all","changes":0\}/)
+  api.stop && api.stop()
+})
