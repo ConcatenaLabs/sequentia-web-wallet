@@ -588,7 +588,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   next round); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
   moment."; "Your wallet is still finishing something it started, so it could not get a price in
   time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
-  wallet was busy; a price that comes later is let go).
+  wallet was busy, or a maker gave a price in time and the wallet was still checking it when the
+  time ran out; a price that comes later is let go).
 - A price comes within seconds: the best few offers are asked at once (the next few when none of
   them answers), and one that has not answered within eight seconds of being asked is left out of
   the price rather than waited for. What the wallet itself checks of a price it was given in time
