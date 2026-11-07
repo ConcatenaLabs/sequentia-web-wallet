@@ -5,7 +5,7 @@
 import assert from 'node:assert'
 import { test } from 'node:test'
 import { DEFAULT_WORDS, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
-  boardValue, boardAll, onchainLessBoards, boardSpent } from './default-arca.js'
+  boardValue, boardAll, onchainLessBoards, boardSpent, offboardOutcome } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
 const OP = 'b6f4c5924ad81947658cf85bb93d9267efc54c7fcb2e4577e8c954c68fa087bb'
@@ -128,15 +128,23 @@ test('an address is paid on the chain while the chain covers it, else out of the
   assert.equal(addressRoute(100n, 101n, 50n, 3n), 'chain')
 })
 
-test('the arrival time is the operator\'s interval in whole minutes, or none', () => {
-  assert.equal(arrivalMinutes(600), 10)
-  assert.equal(arrivalMinutes(61), 2)
-  assert.equal(arrivalMinutes(5), 1)
+test('the arrival time covers the whole way to the other wallet, or none is said (#574)', () => {
+  // The whole way to the other wallet's figure, at most: the settlement, four blocks and four
+  // minutes, rounded up to five minutes.
+  assert.equal(arrivalMinutes(60), 10)
+  assert.equal(arrivalMinutes(60, 60), 10)
+  assert.equal(arrivalMinutes(600), 20)
+  assert.equal(arrivalMinutes(5), 10)
+  assert.equal(arrivalMinutes(60, 600), 45)
+  // Every payment measured on the testnet (223 to 405 s from Send) is within what is stated.
+  for (const s of [223, 356, 405]) assert.ok(s <= arrivalMinutes(60, 60) * 60)
+  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(60, 60)), 'It arrives within 10 minutes.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(600, 60)), 'It arrives within 20 minutes.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
   assert.equal(arrivalMinutes(null), null)
   assert.equal(arrivalMinutes(0), null)
-  assert.equal(DEFAULT_WORDS.arrivesWithin(10), 'It arrives in about 10 minutes.')
-  assert.equal(DEFAULT_WORDS.arrivesWithin(1), 'It arrives in a few minutes.')
-  assert.equal(DEFAULT_WORDS.sentLater('1', 'GOLD', 1), 'Sent 1 GOLD. It arrives in a few minutes.')
+  assert.equal(DEFAULT_WORDS.sentLater('1', 'GOLD', 10), 'Sent 1 GOLD. It arrives within 10 minutes.')
+  assert.equal(DEFAULT_WORDS.sentAlready('1', 'OILX', 10), '1 OILX to this address is already on its way, so nothing more was sent. It arrives within 10 minutes. To pay the same again, send once it has arrived.')
   assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
 })
 
@@ -177,6 +185,44 @@ test('a board just made comes off the chain\'s part until the page\'s reading sh
   assert.deepEqual(onchainLessBoards(part, 1_000n, t + 31 * 60_000), { atoms: 1_000n, seen: true })
   assert.equal(onchainLessBoards(boardSpent(500n, 500n, t), 300n, t).atoms, 0n)
   assert.deepEqual(onchainLessBoards(null, 7n, t), { atoms: 7n, seen: true })
+})
+
+test('a coin that reaches the address after a board never vanishes from the figure (#574)', () => {
+  const t = 1_800_000_000_000
+  const TX = 'ab'.repeat(32)
+  // 1 OILX boarded whole (fee included), its transaction TX.
+  const rec = boardSpent(100_000_000n, 100_000_000n, t, TX)
+  // A second payment of 1 OILX reaches the address; the page's next reading holds the board
+  // (its spend) and the new coin at once. The new coin stays in the figure, at once.
+  const holds = (txid) => txid === TX
+  assert.deepEqual(onchainLessBoards(rec, 100_000_000n, t + 60_000, holds), { atoms: 100_000_000n, seen: true })
+  // Before the reading holds the board, only what it holds of the board's coins comes off: here
+  // the old coin and the new one, so the new one stays.
+  const notYet = () => false
+  assert.deepEqual(onchainLessBoards(rec, 200_000_000n, t + 30_000, notYet), { atoms: 100_000_000n, seen: false })
+  // A reading that has not seen the boarded coin yet takes nothing off for it: the leaf counts it.
+  assert.deepEqual(onchainLessBoards(rec, 0n, t + 10_000, notYet), { atoms: 0n, seen: false })
+  // Other coins the library had not read (still unconfirmed when it boarded) stay counted.
+  assert.deepEqual(onchainLessBoards(boardSpent(1_000n, 1_000n, t, TX), 1_500n, t, notYet), { atoms: 500n, seen: false })
+  // A reading short of what the library read when it boarded takes off only what it holds.
+  assert.deepEqual(onchainLessBoards(boardSpent(1_000n, 1_000n, t, TX), 400n, t, notYet), { atoms: 0n, seen: false })
+  assert.deepEqual(onchainLessBoards(boardSpent(1_000n, 600n, t, TX), 700n, t, notYet), { atoms: 400n, seen: false })
+  // A page that cannot tell, or a record without its transaction: as before, never past half an hour.
+  assert.deepEqual(onchainLessBoards(rec, 100_000_000n, t, () => undefined), { atoms: 0n, seen: false })
+  assert.deepEqual(onchainLessBoards(rec, 100_000_000n, t + 31 * 60_000, notYet), { atoms: 100_000_000n, seen: true })
+  assert.equal(rec.txid, TX)
+  assert.equal(boardSpent(1n, 1n, t, 'not a txid').txid, undefined)
+})
+
+test('the same payment to an address asked again while the first is on its way is never said to be sent twice', () => {
+  // The library's answer for a new payment, then for the same one asked again (it goes on with the first).
+  const first = { offboard: 'ab'.repeat(32), state: 'pending', round_within_seconds: 60 }
+  const again = { offboard: 'ab'.repeat(32), state: 'pending', already: true }
+  assert.deepEqual(offboardOutcome(first, '1', 'OILX', 10, 60), { text: 'Sent 1 OILX. It arrives within 10 minutes.', sent: true })
+  const o = offboardOutcome(again, '1', 'OILX', 10, 60)
+  assert.equal(o.sent, false)
+  assert.match(o.text, /already on its way, so nothing more was sent/)
+  assert.doesNotMatch(o.text, /^Sent/)
 })
 
 test('the page names the other operators\' watchtowers, and nothing else', () => {
