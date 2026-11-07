@@ -335,16 +335,19 @@ modes (`asset-picker.js`):
   - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
     invoice." When the wallet's coins on the chain don't cover a payment to an address with its
     network fee, it is paid out of what the wallet holds for instant payments: the review is titled
-    **Send <amount> <TICKER>?**, with "It arrives within <N> minutes." and a "Fee <amount>
-    <TICKER>" line when there is a fee; when done, "Sent <amount> <TICKER>. It arrives within <N>
-    minutes." <N> is the most the whole way to the other wallet's figure takes, never the
+    **Send <amount> <TICKER>?**, with "It arrives within <N> minutes. Keep this page open
+    meanwhile." and a "Fee <amount> <TICKER>" line when there is a fee; when done, "Sent <amount>
+    <TICKER>. It arrives within <N> minutes. Keep this page open meanwhile." (Ambra mobile says
+    "screen"). The paying wallet signs its part of the operator's settlement as it is
+    made: a wallet closed before then makes nothing, and its coins stay its own. <N> is the most the whole way to the other wallet's figure takes, never the
     operator's settlement alone: the interval between its settlements, four blocks (the
     settlement's, the operator's payment to the address, and the paying wallet handing over its
     part between them) and four minutes for the wallets to read the chain, rounded up to five
     minutes: ten on the testnet. The same amount of the same asset to the same address, asked
     again while the first is still on its way, is that first payment: nothing more is sent, and
     the wallet says "<amount> <TICKER> to this address is already on its way, so nothing more was
-    sent. It arrives within <N> minutes. To pay the same again, send once it has arrived." The
+    sent. It arrives within <N> minutes. Keep this page open meanwhile. To pay the same again,
+    send once it has arrived." The
     sentence above is for when even that cannot be made.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
