@@ -701,6 +701,26 @@ test('engine: a quote ends within its bound whatever the library is doing, says 
   assert.ok(s.posts.filter(([p]) => p === 'release').length > before, 'the price that came late is let go')
 })
 
+test('engine: a maker\'s offer still being read when the quote\'s time runs out says the wallet is busy, never "nobody could confirm" (TR1)', async () => {
+  // Seen live: the maker gave firm terms in 2 s, the wallet's library was held five minutes by a
+  // resting order's check of its coin, and the person was told nobody could confirm a price.
+  const s = standIn()
+  let gate
+  const held = new Promise((r) => { gate = r })
+  const leaves = { ...s.lib, command: async (c, a) => { if (c === 'swap_read') await held; return s.lib.command(c, a) } }
+  const eng = createEngine({ leaves, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 100, quoteReadMs: 200 })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q.why, 'wallet-busy')
+  gate()
+  await new Promise((r) => setTimeout(r, 100))
+  // A maker that gave no offer at all is still "nobody could confirm".
+  const none = standIn()
+  const refusing = async (u, i) => { if (u.endsWith('/v1/firm')) throw new Error('the maker is closed'); return none.fetchJson(u, i) }
+  const eng2 = createEngine({ leaves: none.lib, fetchJson: refusing, store: none.store, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), quoteFirmMs: 100, quoteReadMs: 200 })
+  const q2 = await eng2.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(q2.why, 'no-firm-offer')
+})
+
 test('engine: what the wallet can pay is read from the store alone, and in full only when a coin is given up in a refresh (TR1)', async () => {
   const s = standIn()
   const asked = []

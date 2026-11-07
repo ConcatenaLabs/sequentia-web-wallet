@@ -738,7 +738,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const t = timing(command, took, v && v.cost)
     if (took > 10000) {
       let cost = ''
-      try { cost = JSON.stringify({ cost: v && v.cost, steps: v && v.result && v.result.cost_by_step }).slice(0, 900) } catch {}
+      // The re-check every command starts with, by part (its coins' bases, their lineages, the
+      // participations' rounds), when that is where the time went: what names a slow start.
+      const re = v && v.start && v.start.recheck
+      try { cost = JSON.stringify({ cost: v && v.cost, recheck: re ? { ms: re.ms, read_again: re.read_again, changes: (re.changes || []).length } : undefined,
+        steps: v && v.result && v.result.cost_by_step }).slice(0, 1200) } catch {}
       log(`[leaves] slow ${command} ${took} ms${t.said} ${cost}`)
     }
     if (v && v.start && v.start.witness && v.start.witness.error) S.startNote = v.start.witness.error.message
