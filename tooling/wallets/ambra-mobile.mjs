@@ -315,7 +315,9 @@ export class AmbraMobile {
     let said = 'no answer in 15 min'
     while (Date.now() - t < 900000) {
       const s = await u.screen()
-      const m = s.find((n) => /^(Received |Sent |The faucet |This wallet has already|The faucet could not|Could not)/.test(n.say) && !old.has(n.say))
+      // "Sent … arriving…" is the faucet's answer before the wallet has taken the coin in: the
+      // line then turns to "Received …", or to "The faucet sent …" when it is still on its way.
+      const m = s.find((n) => /^(Received |Sent |The faucet |This wallet has already|The faucet could not|Could not)/.test(n.say) && !/^Sent .*arriving/.test(n.say) && !old.has(n.say))
       if (m) { said = m.say; break }
       await sleep(700)
     }
