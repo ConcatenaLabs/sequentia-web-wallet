@@ -647,6 +647,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     while (S.busy) await new Promise((r) => setTimeout(r, 100))
     S.queued--
     S.busy = true; S.error = null; render()
+    const t0 = now()
     try {
       const v = await f()
       S.last = { what, value: v }
@@ -655,6 +656,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.error = { what, e }
       throw e
     } finally {
+      // An action that held the wallet over ten seconds says so, by name: every command asked
+      // meanwhile waited for it, and their own lines show only the wait.
+      if (now() - t0 > 10000) log(`[leaves] ${what} held the wallet ${now() - t0} ms`)
       if (answerFirst) reloadAfter()
       else { try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } }
       S.busy = false
@@ -1313,7 +1317,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
             const q = await run('quote', { leaves })
             await run('participate', { leaves, shown: q.coins })
             log(`[leaves] ${leaves.length} coin(s) refreshed in the next round before paying`)
-            await waitReleased(leaves)
+            await roundWait(() => waitReleased(leaves, { turns: true }))
           } finally { S.releasing = null; render() }
           continue
         }
@@ -1323,7 +1327,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try {
           const r = await run('plan_release', { leaves: e.release })
           S.releasing.answer = r
-          await waitReleased(e.release)
+          log(`[leaves] ${command}: ${e.release.length} planned coin(s) given up in the next round; paid once it is final`)
+          await roundWait(() => waitReleased(e.release, { turns: true }))
         } finally { S.releasing = null; render() }
       }
     }
@@ -1347,16 +1352,37 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return { releasing: leaves.length, asset }
   }
 
+  // A payment waiting for a round (to free planned coins, or to refresh coins too many payments
+  // deep) waits minutes, up to RELEASE_WAIT_MS: meanwhile it neither holds the wallet (`busy`) nor
+  // counts as a person asking, so other commands, the mailbox and channel reads and the upkeep go
+  // on, and a payment to the wallet still shows; the wait's own commands take their turn
+  // (`turns`). The payment takes the wallet back for its retry.
+  async function roundWait (f) {
+    const busy = S.busy; const asked = (S.asked || 0) > 0
+    if (busy) S.busy = false
+    if (asked) S.asked--
+    try { return await f() } finally {
+      if (asked) S.asked++
+      if (busy) { while (S.busy) await sleep(50); S.busy = true }
+    }
+  }
+
   // `yieldToPerson`: the release runs in the background (one a trade's quote asked for), so a
   // person waiting on the wallet comes first and the round is followed between their steps. A
   // release inside the person's own payment never waits for itself.
-  async function waitReleased (coins, { yieldToPerson = false } = {}) {
+  async function waitReleased (coins, { yieldToPerson = false, turns = false } = {}) {
     const until = now() + RELEASE_WAIT_MS
+    const turn = async (g) => {
+      if (!turns) return g()
+      while (S.busy) await sleep(50)
+      S.busy = true
+      try { return await g() } finally { S.busy = false }
+    }
     for (;;) {
       while (yieldToPerson && S.asked && now() < until) await sleep(500)
-      try { const v = await run('sync'); synced(v); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
+      try { const v = await turn(() => run('sync')); synced(v); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
       let cs = null
-      try { cs = await run('coins'); S.coins = cs || [] } catch {}
+      try { cs = await turn(() => run('coins')); S.coins = cs || [] } catch {}
       if (cs && releaseDone(cs, coins)) return
       if (now() >= until) {
         throw new LeafError({ kind: 'refused', message: 'the next round did not free the coins this payment needs in time; nothing was paid, and the payment can be asked again' })
