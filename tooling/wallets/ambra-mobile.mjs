@@ -20,6 +20,17 @@ const num = (s) => { const m = String(s).replace(/,/g, '').match(/[0-9]+(\.[0-9]
 export class AmbraMobile {
   constructor ({ name } = {}) { Object.assign(this, { name: name || 'mobile', kind: 'mobile' }) }
 
+  // The device's log of the app's own lines (Flutter's `I flutter`), timed, into `file`, until
+  // stopLog(): what held a phone's operation up (adb as adb-ui.mjs finds it).
+  async logTo (file) {
+    const { spawn } = await import('node:child_process')
+    const { openSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { homedir } = await import('node:os')
+    this.logcat = spawn(process.env.ADB || join(homedir(), 'Android/Sdk/platform-tools/adb'), ['logcat', '-v', 'time', '-T', '1', 'flutter:I', '*:S'], { stdio: ['ignore', openSync(file, 'a'), 'ignore'] })
+  }
+  stopLog () { try { this.logcat && this.logcat.kill() } catch {} }
+
   async open () {
     await this.launch()
     // The app opens where it was left: a pushed screen (the faucet) is left with Back.

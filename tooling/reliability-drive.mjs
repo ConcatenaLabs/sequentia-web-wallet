@@ -23,6 +23,26 @@
 //                 phrases are read from (and a new wallet's written to, mode 600) --phrases,
 //                 <work-dir> by default; Ambra mobile is the app installed on the one device adb sees
 //                 (AMBRA_APP=<application id> for a test build installed beside the released one).
+//                 Each wallet's console (the page; Ambra browser's popup, service worker and
+//                 offscreen document; Ambra mobile's own log lines) goes to
+//                 <work-dir>/console-<name>.log, timed: what held an operation up.
+//                 The laptop's memory: the run starts only with --start-mb (9000) MB available,
+//                 waiting until it is; while fewer than --pause-mb (3500) are, it starts no new
+//                 operation until --resume-mb (5000) are again. Stopped (a kill, the browser
+//                 gone: exit code 75), the same command resumes it: an operation with a line
+//                 is not done again, and a payment whose receiver was being watched when it
+//                 stopped gets a drive line (not counted). To carry a run through kills:
+//                   until node tooling/reliability-drive.mjs <same arguments>; do sleep 60; done
+//
+//   lane `fund`   node tooling/reliability-drive.mjs <work-dir> fund web:<name> browser:<name>
+//                   --ext <unpacked Ambra browser> [--phrases <dir>] [--assets USDX,EURX,GOLD,SILVR,OILX]
+//                 each wallet made (its phrase kept first) or opened, and paid by the faucet in
+//                 every asset it shows none of: the wallets for a run.
+//   lane `summary` node tooling/reliability-drive.mjs <work-dir> summary [mix]: the verdict.
+//                 `pct` is within the stated time of the timed operations (a refusal before
+//                 anything moved is not timed); `pctAsked` also counts as missed each refusal
+//                 that was the wallet's (busy, no price, coins not ready) rather than the
+//                 person's (too small, more than held).
 //
 // Each operation is a line of <work-dir>/reliability-<lane>.jsonl: what was asked, what the wallet
 // said at each step, the outcome (settled, returned, refused, failed), the seconds it took and the
@@ -41,6 +61,8 @@ const OPS = Number(flag('--ops', '250'))
 const ASSET = flag('--asset', 'USDX'); const PAY = flag('--pay', '2')
 const GET = flag('--get', 'GOLD'); const TRADE = flag('--trade', '2')
 const EXT = flag('--ext', null); const PHRASES = flag('--phrases', null); const SEED = Number(flag('--seed', '1'))
+const ASSETS = flag('--assets', null)
+const START_MB = Number(flag('--start-mb', '9000')); const PAUSE_MB = Number(flag('--pause-mb', '3500')); const RESUME_MB = Number(flag('--resume-mb', '5000'))
 const [workArg, lane, A, B] = argv
 if (!workArg || !lane || (!A && lane !== 'summary')) { console.error('usage: reliability-drive.mjs <work-dir> <pay|trade> <A> <B|->'); process.exit(2) }
 const work = resolve(workArg)
@@ -169,10 +191,17 @@ async function main () {
     console.log(JSON.stringify(summarize(lines), null, 1))
     return
   }
+  if (lane === 'fund') {
+    // node tooling/reliability-drive.mjs <work-dir> fund web:<name> browser:<name> --ext <dir>
+    //   [--phrases <dir>] [--assets USDX,EURX,GOLD,SILVR,OILX]: the run's wallets made and funded.
+    const { runFund } = await import('./wallets/mix.mjs')
+    return runFund({ work, specs: argv.slice(2), ext: EXT ? resolve(EXT) : null, base, phrases: PHRASES ? resolve(PHRASES) : work, assets: (ASSETS || 'USDX,EURX,GOLD,SILVR,OILX').split(','), say })
+  }
   if (lane === 'mix') {
     const { runMix } = await import('./wallets/mix.mjs')
     if (argv.slice(2).some((s) => s.startsWith('browser:')) && !EXT) throw new Error('Ambra browser needs --ext <its unpacked directory>')
-    return runMix({ work, specs: argv.slice(2), ops: OPS, ext: EXT ? resolve(EXT) : null, base, phrases: PHRASES ? resolve(PHRASES) : work, seed: SEED, say })
+    return runMix({ work, specs: argv.slice(2), ops: OPS, ext: EXT ? resolve(EXT) : null, base, phrases: PHRASES ? resolve(PHRASES) : work, seed: SEED, say,
+      startMb: START_MB, pauseMb: PAUSE_MB, resumeMb: RESUME_MB })
   }
   let n = existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).length : 0
   say(`starting at operation ${n + 1} of ${OPS}`)

@@ -1,7 +1,7 @@
 // The reliability run's plan, the time each operation is held to, and its verdict.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { boundOf, plan, summarize } from './mix.mjs'
+import { availableMb, boundOf, memoryFor, plan, summarize, unfinished } from './mix.mjs'
 
 const W = [{ name: 'w', kind: 'web' }, { name: 'b', kind: 'browser' }, { name: 'm', kind: 'mobile' }]
 
@@ -45,6 +45,35 @@ test('the verdict counts within the stated time and leaves out what the drive co
   assert.equal(s.all.ended, 3)
   assert.equal(s.all.timed, 2)
   assert.equal(s.all.pct, 50)
+  // The refusal for no price is the wallet's: counted as missed where refusals count.
+  assert.equal(s.all.refusedByWallet, 1)
+  assert.equal(s.all.pctAsked, 33.3)
   assert.equal(s.driveErrors, 1)
   assert.equal(s.wallets.mobile.n, 1)
+})
+
+test('memory: the available figure is read, and a start waits until there is enough', async () => {
+  assert.equal(availableMb('MemTotal:       32001024 kB\nMemAvailable:    9216000 kB\n'), 9000)
+  assert.equal(availableMb('nothing'), null)
+  const seen = [8000, 8500, 9100]; const said = []
+  const a = await memoryFor(9000, (s) => said.push(s), { read: () => seen.shift(), wait: async () => {} })
+  assert.equal(a, 9100)
+  assert.equal(said.length, 1)
+  assert.match(said[0], /8000 MB available, waiting for 9000 MB/)
+})
+
+test('a resumed run gives each payment watched when the drive stopped a line of the drive', () => {
+  const lines = [
+    { id: 1, op: 'payment', from: 'w', to: 'b', how: 'code', outcome: 'settled', said: 'x → Sent 1 USDX' },
+    { id: 1, op: 'receive', from: 'w', to: 'b', how: 'code', outcome: 'settled' },
+    { id: 2, op: 'payment', from: 'b', to: 'm', how: 'code', outcome: 'settled', said: 'x → Sent 1 USDX' },
+    { id: 3, op: 'payment', from: 'm', to: 'w', how: 'code', outcome: 'refused', said: 'x → Nothing was sent' },
+    { id: 4, op: 'payment', from: 'w', to: 'm', how: 'address', outcome: 'failed', said: 'x → no answer in 10 min' },
+    { id: 5, op: 'trade', outcome: 'received' }
+  ]
+  const u = unfinished(lines)
+  assert.deepEqual(u.map((l) => l.id), [2, 4])
+  assert.ok(u.every((l) => l.op === 'receive' && l.drive_error === true))
+  // Not counted: the verdict leaves them out.
+  assert.equal(summarize([...lines, ...u]).driveErrors, 2)
 })

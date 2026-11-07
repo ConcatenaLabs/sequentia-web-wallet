@@ -3,7 +3,7 @@
 //
 // Needs a Chromium: CHROMIUM=/path/to/chrome, or one of the usual places.
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 
@@ -87,6 +87,9 @@ export class Page {
     throw new Error('no such target in ' + ms + ' ms')
   }
 
+  // Every console line of this page from now on, timed and labelled, appended to `file`.
+  logTo (file, label) { this.log = file; this.label = label; return this }
+
   async attach (wsUrl) {
     this.ws = new WebSocket(wsUrl)
     await new Promise((ok, no) => { this.ws.onopen = ok; this.ws.onerror = no })
@@ -103,6 +106,9 @@ export class Page {
       if (m.method === 'Runtime.consoleAPICalled') {
         const text = m.params.args.map((a) => a.value ?? a.description).join(' ')
         this.console.push(m.params.type + ': ' + text)
+        // A long drive keeps the last lines only; `log` (a file) keeps them all, timed.
+        if (this.console.length > 2000) this.console.splice(0, 1000)
+        if (this.log) try { appendFileSync(this.log, `${new Date().toISOString()} ${this.label || ''} ${m.params.type}: ${text}\n`) } catch {}
         if (m.params.type === 'error') this.errors.push(text)
       }
     }

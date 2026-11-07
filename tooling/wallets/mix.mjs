@@ -96,9 +96,45 @@ export function plan (wallets, ops, seed = 1) {
   return out
 }
 
-export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say }) {
+// The laptop's memory: what /proc/meminfo calls available, in MB (null where there is none).
+export function availableMb (text = null) {
+  try {
+    const m = String(text ?? readFileSync('/proc/meminfo', 'utf8')).match(/^MemAvailable:\s+(\d+) kB/m)
+    return m ? Math.floor(Number(m[1]) / 1024) : null
+  } catch { return null }
+}
+
+// Waits until at least `mb` MB are available, saying so once a minute: a run that starts, or goes
+// on, short of memory is the one the out-of-memory guard ends.
+export async function memoryFor (mb, say, { read = availableMb, wait = sleep, why = 'starting' } = {}) {
+  let told = 0
+  for (;;) {
+    const a = read()
+    if (a == null || a >= mb) return a
+    if (Date.now() - told >= 60000) { say(`${why}: ${a} MB available, waiting for ${mb} MB`); told = Date.now() }
+    await wait(5000)
+  }
+}
+
+// What a run stopped by a kill left half done: a payment recorded as sent whose receiver's side
+// was being watched when the drive stopped. Its time from the click can no longer be taken, so
+// the resumed run records it as the drive's (not counted), never as a wallet's failure; the run's
+// end still reads every figure, so a payment that never arrived is told from one that did.
+// -> the lines to add.
+export function unfinished (lines) {
+  const recv = new Set(lines.filter((l) => l.op === 'receive').map((l) => l.id))
+  return lines.filter((l) => l.op === 'payment' && !recv.has(l.id) && (l.outcome === 'settled' || /^no answer/.test(String(l.said || '').replace(/^.*→ /, ''))))
+    .map((l) => ({ id: l.id, op: 'receive', from: l.from, to: l.to, how: l.how, asset: l.asset, amount: l.amount, outcome: 'failed',
+      said: 'drive: the drive stopped while it watched for this payment; not timed', seconds: 0, drive_error: true }))
+}
+
+export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say, startMb = 9000, pauseMb = 3500, resumeMb = 5000 }) {
   const out = join(work, 'reliability-mix.jsonl')
-  const done = new Set(existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).id) : [])
+  const had = existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []
+  for (const l of unfinished(had)) { appendFileSync(out, JSON.stringify({ n: null, at: new Date().toISOString(), ...l }) + '\n'); say(`resumed: [${l.id}] ${l.from}→${l.to} ${l.how} receive not timed (the drive stopped while watching it)`) }
+  const done = new Set(had.map((l) => l.id))
+  if (had.length) say(`resuming: ${done.size} operation(s) already recorded`)
+  await memoryFor(startMb, say)
   // A line the drive itself could not make an operation of (`drive_skip`: nothing a person did)
   // does not count towards `ops`.
   let n = existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).filter((l) => { const x = JSON.parse(l); return !x.drive_skip && !x.drive_error }).length : 0
@@ -114,13 +150,21 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say 
   const browser = new Page(chromium(), { profile: join(work, 'profiles', 'mix'), ext })
   await browser.open()
   writeFileSync(join(work, 'browser.pid'), String(browser.proc.pid))
+  // A browser that dies (the out-of-memory guard's usual pick) ends the run at once, with a code
+  // that says to run it again: every operation after it would only be the drive's failure.
+  let stopping = false
+  const wallets = []
+  const stopLogs = () => { for (const w of wallets) if (w.stopLog) w.stopLog() }
+  browser.proc.once('exit', (code, sig) => { if (stopping) return; say(`the browser exited (${sig || code}): stopping; run the same command again to resume`); stopLogs(); process.exit(75) })
+  // Stopped from outside (a kill, Ctrl-C): the browser and the phone's log go with the drive, never
+  // left running without it.
+  for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { stopping = true; say(`stopped (${sig}); run the same command again to resume`); stopLogs(); try { browser.proc.kill() } catch {} process.exit(sig === 'SIGINT' ? 130 : 143) })
   // A browser stopped by an earlier run reopens its tabs, and a wallet tab among them holds the
   // web wallet's one-tab lock: every page but the first is closed.
   try {
     const me = (await browser.send('Target.getTargetInfo')).targetInfo.targetId
     for (const t of (await browser.send('Target.getTargets')).targetInfos) if (t.type === 'page' && t.targetId !== me) await browser.send('Target.closeTarget', { targetId: t.targetId })
   } catch (e) { say('closing other tabs: ' + e.message) }
-  const wallets = []
   try {
     for (const s of specs) {
       const [kind, name] = s.split(':')
@@ -129,6 +173,7 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say 
           : kind === 'mobile' ? new AmbraMobile({ name }) : null
       if (!w) throw new Error('no wallet kind ' + kind)
       await w.open(); keep(w); wallets.push(w)
+      if (w.logTo) await w.logTo(join(work, `console-${name}.log`))
       say(`${kind} ${name} open`)
     }
     const byName = Object.fromEntries(wallets.map((w) => [w.name, w]))
@@ -152,8 +197,21 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say 
     }
     const free = (o) => needs(o).every((w) => !busy.has(w) && !wanted.get(w)) && !(o.how === 'address' && watched.has(o.to))
     const take = () => { const i = todo.findIndex(free); return i < 0 ? null : todo.splice(i, 1)[0] }
+    // Short of memory, no new operation starts (those running go on) until enough is free again,
+    // and the browser is asked to let go of what it can: a pause, rather than the guard's kill.
+    let paused = null
+    const roomy = async () => {
+      const a = availableMb()
+      if (a == null || (paused == null ? a >= pauseMb : a >= resumeMb)) { if (paused != null) { say(`memory: ${a} MB available, going on after ${((Date.now() - paused) / 1000).toFixed(0)} s`); paused = null } return true }
+      if (paused == null) {
+        paused = Date.now(); say(`memory: ${a} MB available (under ${pauseMb}): no new operation until ${resumeMb} MB`)
+        browser.send('Memory.simulatePressureNotification', { level: 'critical' }).catch(() => {})
+      }
+      return false
+    }
     const worker = async () => {
       while (todo.length && n < ops) {
+        if (!(await roomy())) { await sleep(5000); continue }
         const o = take()
         if (!o) { await sleep(1000); continue }
         needs(o).forEach((w) => busy.add(w))
@@ -173,8 +231,40 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say 
     writeFileSync(join(work, 'end.json'), JSON.stringify(end, null, 1))
     say('end: ' + JSON.stringify(end).slice(0, 2000))
   } finally {
+    stopping = true
+    stopLogs()
     await browser.stop()
   }
+}
+
+// The `fund` lane: each wallet opened (made, its phrase kept, when it has none) and paid by the
+// faucet in each asset of `assets` it shows none of, then its figures read. Wallets for a run.
+export async function runFund ({ work, specs, ext, base, phrases, assets, say }) {
+  const phraseOf = (name) => { const f = join(phrases, name + '.phrase'); return existsSync(f) ? readFileSync(f, 'utf8').trim() : null }
+  const browser = new Page(chromium(), { profile: join(work, 'profiles', 'mix'), ext })
+  await browser.open()
+  try {
+    const me = (await browser.send('Target.getTargetInfo')).targetInfo.targetId
+    for (const t of (await browser.send('Target.getTargets')).targetInfos) if (t.type === 'page' && t.targetId !== me) await browser.send('Target.closeTarget', { targetId: t.targetId })
+  } catch {}
+  try {
+    for (const s of specs) {
+      const [kind, name] = s.split(':')
+      const w = kind === 'web' ? new WebWallet(browser, { name, base, phrase: phraseOf(name) })
+        : kind === 'browser' ? new AmbraBrowser(browser, { name, phrase: phraseOf(name) })
+          : kind === 'mobile' ? new AmbraMobile({ name }) : null
+      if (!w) throw new Error('no wallet kind ' + kind)
+      await w.open()
+      // The phrase is kept before anything is paid to the wallet.
+      if (w.created && w.phrase) { writeFileSync(join(phrases, name + '.phrase'), w.phrase + '\n', { mode: 0o600 }); say(`${name}: made, its phrase kept`) }
+      for (const a of assets) {
+        if ((await w.figure(a)) > 0) { say(`${name}: holds ${a}`); continue }
+        const r = await w.faucet(a)
+        say(`${name}: faucet ${a} ${r.seconds}s ${r.said}`)
+      }
+      for (const a of assets) say(`${name}: ${a} ${await w.figure(a)}`)
+    }
+  } finally { await browser.stop() }
 }
 
 const kindOf = (w) => w.kind
@@ -237,7 +327,9 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   // hour live: it goes in OILX, which no other payment moves, so its watch can let both wallets go
   // on with other operations and still tell its arrival from theirs.
   if (o.how === 'address') { o = { ...o, asset: 'OILX', amount: '1' } }
-  let recipient; const amount = o.amount || (o.asset === 'USDX' ? '1' : o.asset === 'EURX' ? '1' : '0.0001')
+  // Above the operator's smallest leaf in each asset (SILVR's is about 0.00017): an amount below
+  // it is refused as the drive's choice, not the wallet's failure.
+  let recipient; const amount = o.amount || (o.asset === 'USDX' ? '1' : o.asset === 'EURX' ? '1' : o.asset === 'SILVR' ? '0.001' : '0.0001')
   if (o.how === 'invoice') recipient = await S('invoice ' + o.to, to.invoice(amount))
   else {
     const code = await S('code ' + o.to, to.code())
@@ -258,11 +350,13 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   }
   const bound = boundOf(s.review) ?? boundOf(s.status)
   const sent = /^(Sent|Paid)/.test(s.status)
-  record({ ...base, op: 'payment', outcome: sent ? 'settled' : /try again|nothing was sent|not sent|came back|couldn't/i.test(s.status) ? 'refused' : 'failed',
+  const payOutcome = sent ? 'settled' : /try again|nothing was sent|not sent|came back|couldn't/i.test(s.status) ? 'refused' : 'failed'
+  record({ ...base, op: 'payment', outcome: payOutcome,
     said: s.review.slice(0, 200) + ' → ' + s.status, stated: s.review.match(/It arrives[^.]*\./)?.[0] || null, seconds: s.seconds, bound, within: sent && bound ? s.seconds <= bound : null })
   // A payer that never answered may still have paid: its receiver is watched as for a sent one.
   const silent = /^no answer/.test(s.status)
-  if (!sent && !silent) { if (o.how === 'closed') await to.open(); record({ ...base, op: 'receive', kind: kindOf(to), outcome: /came back|nothing/i.test(s.status) ? 'refused' : 'failed', said: 'the payer said: ' + s.status, seconds: 0 }); return }
+  // A payment refused before anything moved: its receiver had nothing coming either.
+  if (!sent && !silent) { if (o.how === 'closed') await to.open(); record({ ...base, op: 'receive', kind: kindOf(to), outcome: payOutcome === 'refused' || /came back|nothing/i.test(s.status) ? 'refused' : 'failed', said: 'the payer said: ' + s.status, seconds: 0 }); return }
   if (o.how === 'address') {
     const t0 = s.clickedAt
     watched.add(o.to)
@@ -300,6 +394,10 @@ async function run (o, W, record, trace, later, got, lock, watched) {
     seconds: secs, bound: rb, within: seen != null && rb ? secs <= rb : (seen != null ? null : false) })
 }
 
+// A refusal that is the person's own doing: an amount too small or more than held, nothing to
+// sell, an asset the faucet already paid. Every other refusal is the wallet's.
+export const personsOwn = (l) => /too small|more than|not enough|no \S+ shown|already|once per wallet|nothing was sent$/i.test(String(l.said || ''))
+
 // The verdict of a run, from its lines: per wallet and in all, how many ended (settled, received,
 // returned, or refused before anything moved), how many of the timed ones were within the time
 // stated, what was lost (sent and never shown, a trade never ended), and the failures and the
@@ -316,7 +414,13 @@ export function summarize (lines) {
     for (const l of ls) { const k = `${l.op}${l.how ? ':' + l.how : ''}`; kinds[k] = kinds[k] || { n: 0, within: 0, timed: 0, over: 0, refused: 0, failed: 0, secs: [] }
       const g = kinds[k]; g.n++; if (l.within != null) g.timed++; if (l.within === true) g.within++; if (l.within === false) g.over++; if (l.outcome === 'refused') g.refused++; if (l.outcome === 'failed') g.failed++; if (l.seconds) g.secs.push(l.seconds) }
     for (const g of Object.values(kinds)) { const s = g.secs.sort((a, b) => a - b); g.median = s.length ? s[Math.floor(s.length / 2)] : null; g.p90 = s.length ? s[Math.floor(s.length * 0.9)] : null; g.max = s.length ? s[s.length - 1] : null; delete g.secs }
-    return { n: ls.length, ended: ls.filter(ended).length, timed: timed.length, within: within.length, pct: timed.length ? Math.round(1000 * within.length / timed.length) / 10 : null, kinds }
+    // A refusal is a clean return, not timed; but one the wallet could have avoided (busy, no price,
+    // coins not ready) is an operation the person did not get: `pctAsked` counts it as missed.
+    // (A receive whose payment was refused is counted once, on the payer.)
+    const missed = ls.filter((l) => l.outcome === 'refused' && !personsOwn(l) && !(l.op === 'receive' && /^the payer said|^nothing was sent/.test(String(l.said || ''))))
+    const asked = timed.length + missed.length
+    return { n: ls.length, ended: ls.filter(ended).length, timed: timed.length, within: within.length, pct: timed.length ? Math.round(1000 * within.length / timed.length) / 10 : null,
+      refusedByWallet: missed.length, pctAsked: asked ? Math.round(1000 * within.length / asked) / 10 : null, kinds }
   }
   const by = (f) => { const m = {}; for (const l of lines) (m[f(l)] = m[f(l)] || []).push(l); return m }
   const actor = (l) => l.kind || 'unknown'
