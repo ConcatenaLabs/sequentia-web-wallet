@@ -1875,6 +1875,7 @@ import { mountBtcArk, arkConfig, BTC_WORDS, splitPay, heldBesideBoard, boardSeen
 import { dueNow, markRaised, raiseRate, btcChildPlan, SPEED_WORDS } from './speed-up.js';
 import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
 import { noteArrival, noteSent, instantLog, instantRows, addressPayments, setStages, untoldEnds, markTold, pendingOut } from './instant-history.js';
+import { arkMovementRows, keptMovements } from './btc-ark-history.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
@@ -4416,7 +4417,7 @@ function initBtcArk(){
     makeWorker: ()=> new Worker(new URL('./btc-ark/worker.js', import.meta.url), { type:'module' }),
     mnemonic: ()=> bip39Phrase(), config,
     decode: (s)=> decodeBolt11(s),
-    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} try{ refreshLnSendReceive(); }catch{} },
+    onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshAllAvail(); }catch{} try{ refreshLnSendReceive(); }catch{} refreshBtcArkHistory().catch(()=>{}); },
     log: (...a)=> console.log(...a),
     fmt: (sats)=> fmtAtoms(BigInt(sats), 8),
     store: { get: (k)=> localStorage.getItem('swk.'+k+'.'+walletTag()), set: (k, v)=> v == null ? localStorage.removeItem('swk.'+k+'.'+walletTag()) : localStorage.setItem('swk.'+k+'.'+walletTag(), v) },
@@ -10379,6 +10380,7 @@ function renderHistory(){
   renderBtcHistory().catch(()=>{});
   renderLnHistory().catch((e)=>console.warn('[history] Lightning card:', e?.message??e));   // dual-chain (T6): parent-chain BTC history alongside Sequentia; async + independent
   renderOampHistory(); refreshOampHistory().catch(()=>{});   // WW-6: restricted-transfer history + confirmation/anchor chips
+  refreshBtcArkHistory().catch(()=>{});
   const list=$('histList'); if(!wollet){ return; }
   // Before this session's first sync the wollet may hold nothing yet, and "No transactions yet"
   // would be a claim about the chain that nobody has checked: show the last snapshot (dated, on
@@ -10500,7 +10502,30 @@ function renderHistory(){
 function instantHistoryRows(){
   let recs=[];
   try{ recs = userTrade ? userTrade.records() : JSON.parse(localStorage.getItem('swk.usertrade.'+walletTag())||'[]'); }catch{}
-  try{ return instantRows(instantLog(localStorage, walletTag()), recs); }catch(e){ console.warn('[history] instant rows:', e?.message??e); return []; }
+  const ark = btcArkHistoryRows(recs);
+  try{ return instantRows([...instantLog(localStorage, walletTag()), ...ark], recs); }catch(e){ console.warn('[history] instant rows:', e?.message??e); return []; }
+}
+// The Bitcoin ark's payments (btc-ark-history.js), from the ark wallet's own record of its
+// movements as last read, kept per wallet so History shows them before the ark opens. A Lightning
+// payment of a trade, or of the move from the wallet's own channel, is that row's, not one of its own.
+function btcArkHistKey(){ return 'swk.btcArk.hist.'+walletTag(); }
+function btcArkHistoryRows(recs){
+  let kept=[]; try{ kept=JSON.parse(localStorage.getItem(btcArkHistKey())||'[]'); }catch{}
+  const skip=(recs||[]).map(r=>r && r.hash).filter(Boolean);
+  try{ if(lnToArk) skip.push(...lnToArk.ownHashes()); }catch{}
+  try{ return arkMovementRows(kept, { skipHashes: skip }); }catch(e){ console.warn('[history] ark rows:', e?.message??e); return []; }
+}
+// Reads the ark wallet's record again (at most every five seconds, one read at a time) and draws
+// History again when it changed.
+let _btcArkHistAt=0, _btcArkHistBusy=false;
+async function refreshBtcArkHistory(){
+  if(!btcArk || !btcArk.isOpen() || _btcArkHistBusy || Date.now()-_btcArkHistAt < 5000) return;
+  _btcArkHistBusy=true; _btcArkHistAt=Date.now();
+  try{
+    const kept=JSON.stringify(keptMovements(await btcArk.run('history')));
+    if(kept!==localStorage.getItem(btcArkHistKey())){ localStorage.setItem(btcArkHistKey(), kept); renderHistory(); }
+  }catch(e){ console.warn('[history] ark:', e?.message??e); }
+  finally{ _btcArkHistBusy=false; }
 }
 // One row, as default mode words it (docs/DEFAULT_MODE.md, History): a trade is "Swapped <pay> for
 // <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
@@ -10519,7 +10544,8 @@ function instantItem(r){
   const when = r.at ? whenText(r.at) : '';
   // A payment to an address is pending until the library says it is made (its `stage`); one that
   // was not made took nothing from the wallet. A row written before stages were kept: its first hour.
-  const pending = r.kind==='out' && r.later && (r.offboard ? r.stage==='pending' || !r.stage : Date.now()-r.at < 3600000);
+  // A payment of the Bitcoin ark is pending while its wallet says so.
+  const pending = r.pending || (r.kind==='out' && r.later && (r.offboard ? r.stage==='pending' || !r.stage : Date.now()-r.at < 3600000));
   const sub=[when, status, pending ? 'Pending' : '', r.stage==='not_made' ? DEFAULT_WORDS.rowNotMadeSub : ''].filter(Boolean).join(' · ');
   if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
   item.appendChild(mid);
