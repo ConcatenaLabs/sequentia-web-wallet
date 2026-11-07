@@ -708,3 +708,39 @@ test('a coin whose shared steps another coin already took out goes on its lower 
   assert.ok(!runs.some(([c, a]) => c === 'exit' && a.leaf_id === 'a3' && a.shown[X] === '500'))
   api.stop()
 })
+
+test('a payment waiting for its round lets go of the wallet: other commands and the reads go on meanwhile', { timeout: 20000 }, async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  let sends = 0
+  let synced = 0
+  const during = []
+  let api
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    if (c === 'send') {
+      sends++
+      if (sends === 1) return { id: m.id, ok: false, error: { kind: 'planned', asset: X, release: ['big'], message: 'short' } }
+      return { id: m.id, ok: true, value: { result: { transfer: 't1' }, start: {} } }
+    }
+    if (c === 'sync') synced++
+    const result = c === 'coins' ? [{ leaf_id: 'big', state: synced >= 3 ? 'spent' : 'given' }]
+      : c === 'plan_release' ? { plans: [], participations: [] } : c === 'schedule' ? { now: 1, due: false, next_sync_at: null }
+        : c === 'care' ? { claims: [], planned: [], cancelled: [] } : c === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    sleep: async (ms) => { if (api && api.state.releasing) during.push({ busy: api.state.busy, asked: api.state.asked }); clock += ms },
+    tickMs: 3_600_000 }, null, null)
+  await api.start()
+  const v = await api.pay('send', { request: 'r', amount: '500000', asset: X })
+  assert.deepEqual(v, { transfer: 't1' })
+  assert.ok(during.length >= 1, 'it waited for the round')
+  assert.ok(during.every((d) => d.busy === false && !d.asked), 'neither busy nor asking while it waited: ' + JSON.stringify(during))
+  assert.equal(api.state.busy, false)
+  assert.equal(api.state.asked, 0)
+  api.stop()
+})
