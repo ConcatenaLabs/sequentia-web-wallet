@@ -138,14 +138,14 @@ test('the arrival time covers the whole way to the other wallet, or none is said
   assert.equal(arrivalMinutes(60, 600), 45)
   // Every payment measured on the testnet (189 to 356 s from Send) is within what is stated.
   for (const s of [189, 223, 231, 313, 317, 340, 356]) assert.ok(s <= arrivalMinutes(60, 60) * 60)
-  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(60, 60)), 'It arrives within 10 minutes.')
-  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(600, 60)), 'It arrives within 20 minutes.')
-  assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(60, 60)), 'It arrives within 10 minutes. Keep this page open meanwhile.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(600, 60)), 'It arrives within 20 minutes. Keep this page open meanwhile.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly. Keep this page open meanwhile.')
   assert.equal(arrivalMinutes(null), null)
   assert.equal(arrivalMinutes(0), null)
-  assert.equal(DEFAULT_WORDS.sentLater('1', 'GOLD', 10), 'Sent 1 GOLD. It arrives within 10 minutes.')
-  assert.equal(DEFAULT_WORDS.sentAlready('1', 'OILX', 10), '1 OILX to this address is already on its way, so nothing more was sent. It arrives within 10 minutes. To pay the same again, send once it has arrived.')
-  assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly.')
+  assert.equal(DEFAULT_WORDS.sentLater('1', 'GOLD', 10), 'Sent 1 GOLD. It arrives within 10 minutes. Keep this page open meanwhile.')
+  assert.equal(DEFAULT_WORDS.sentAlready('1', 'OILX', 10), '1 OILX to this address is already on its way, so nothing more was sent. It arrives within 10 minutes. Keep this page open meanwhile. To pay the same again, send once it has arrived.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly. Keep this page open meanwhile.')
 })
 
 test('of what is arriving, the coins a Bitcoin reorganisation took back are said apart', () => {
@@ -218,7 +218,7 @@ test('the same payment to an address asked again while the first is on its way i
   // The library's answer for a new payment, then for the same one asked again (it goes on with the first).
   const first = { offboard: 'ab'.repeat(32), state: 'pending', round_within_seconds: 60 }
   const again = { offboard: 'ab'.repeat(32), state: 'pending', already: true }
-  assert.deepEqual(offboardOutcome(first, '1', 'OILX', 10, 60), { text: 'Sent 1 OILX. It arrives within 10 minutes.', sent: true })
+  assert.deepEqual(offboardOutcome(first, '1', 'OILX', 10, 60), { text: 'Sent 1 OILX. It arrives within 10 minutes. Keep this page open meanwhile.', sent: true })
   const o = offboardOutcome(again, '1', 'OILX', 10, 60)
   assert.equal(o.sent, false)
   assert.match(o.text, /already on its way, so nothing more was sent/)
