@@ -31,6 +31,7 @@ const BASE = flag('--base', 'https://sequentiatestnet.com/wallet/')
 const API = flag('--api', 'https://sequentiatestnet.com/api')
 const ASSET = flag('--asset', 'OILX'); const AMOUNT = flag('--amount', '1')
 const AWAY = Number(flag('--away', '12'))
+// 4: only open the payer again and read what it says (a payment left by an earlier run).
 const STEPS = new Set(flag('--steps', '1,2,3').split(',').map(Number))
 const [workArg, payerSpec, recvSpec] = argv
 if (!workArg || !payerSpec || !recvSpec) { console.error('usage: address-not-made-drive.mjs <work-dir> <payer kind:name> <receiver web:name>'); process.exit(2) }
@@ -46,14 +47,20 @@ async function json (url) { try { const r = await fetch(url); return r.ok ? awai
 
 const [pKind, pName] = payerSpec.split(':'); const [, rName] = recvSpec.split(':')
 const recvBrowser = new Page(chromium(), { profile: join(work, 'profile-' + rName) })
-await recvBrowser.open()
+await recvBrowser.open(); await closeWalletTabs(recvBrowser)
 writeFileSync(join(work, 'browser-' + rName + '.pid'), String(recvBrowser.proc.pid))
 let payBrowser = null
 const openPayerBrowser = async () => {
   payBrowser = new Page(chromium(), { profile: join(work, 'profile-' + pName), ext: pKind === 'browser' ? resolve(EXT) : undefined })
-  await payBrowser.open()
+  await payBrowser.open(); await closeWalletTabs(payBrowser)
   writeFileSync(join(work, 'browser-' + pName + '.pid'), String(payBrowser.proc.pid))
   return payBrowser
+}
+// A browser on a kept profile can come back with the wallet's last tab, which holds the page's
+// one-tab lock ("The wallet is open in another tab"): closed before the wallet is opened.
+async function closeWalletTabs (b) {
+  const list = await (await fetch(`http://127.0.0.1:${b.port}/json/list`)).json().catch(() => [])
+  for (const t of list) if (t.type === 'page' && /\/wallet\//.test(t.url)) await fetch(`http://127.0.0.1:${b.port}/json/close/${t.id}`).catch(() => {})
 }
 const makePayer = () => (pKind === 'web' ? new WebWallet(payBrowser, { name: pName, base: BASE, phrase: phraseOf(pName) }) : new AmbraBrowser(payBrowser, { name: pName, phrase: phraseOf(pName) }))
 
@@ -83,7 +90,7 @@ async function review (w, to) {
 }
 const statusNow = (w) => w.page.eval(MODAL).then((m) => (m ? m.status : '')).catch(() => '')
 
-let payer; let receiver
+let payer; let receiver; let paidAt = async () => null
 try {
   receiver = await new WebWallet(recvBrowser, { name: rName, base: BASE, phrase: phraseOf(rName) }).open(); keep(receiver)
   await openPayerBrowser(); payer = await makePayer().open(); keep(payer)
@@ -94,7 +101,7 @@ try {
   }
   const code = await receiver.code()
   const addr = decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]).toLowerCase()
-  const paidAt = async () => (((await json(`${API}/address/${addr}/txs`)) || []).length)
+  paidAt = async () => (((await json(`${API}/address/${addr}/txs`)) || []).length)
   note({ step: 0, payer: payer.name, receiver: receiver.name, address: addr, figure: await payer.figure(ASSET), txs: await paidAt() })
 
   if (STEPS.has(1)) {
@@ -106,7 +113,7 @@ try {
       const seen = []; let last = ''
       while (Date.now() - t0 < 900000) {
         const s = await statusNow(payer)
-        if (s && s !== last) { last = s; seen.push({ s, at: (Date.now() - t0) / 1000 }); if (/^Sending \d/.test(s)) await payer.page.screenshot(join(work, `1-${payer.name}-sending.png`)) }
+        if (s && s !== last) { last = s; seen.push({ s, secs: (Date.now() - t0) / 1000 }); if (/^Sending \d/.test(s)) await payer.page.screenshot(join(work, `1-${payer.name}-sending.png`)) }
         if (/^Sent |not made|did not arrive|went wrong|Failed/i.test(s)) break
         await sleep(1000)
       }
@@ -124,20 +131,35 @@ try {
     if (r.refused) throw new Error('step 3 refused: ' + r.refused)
     const t0 = Date.now(); await pressPrimary(payer.page)
     const sending = await payer.page.waitFor(`(${MODAL}||{}).status && /^Sending \\d|^Sent|went wrong/.test((${MODAL}).status) ? (${MODAL}).status : false`, 120000)
-    note({ step: 3, review: r.review, said: sending, at: (Date.now() - t0) / 1000 })
+    note({ step: 3, review: r.review, said: sending, secs: (Date.now() - t0) / 1000 })
     if (STEPS.has(2)) {
       // 2: the next payment while that one's change is arriving.
       await payer.page.eval(CLOSE_MODALS)
       const r2 = await review(payer, addr)
       await payer.page.screenshot(join(work, `2-${payer.name}-arriving.png`))
-      note({ step: 2, at: (Date.now() - t0) / 1000, ...r2 })
+      note({ step: 2, secs: (Date.now() - t0) / 1000, ...r2 })
       await payer.page.eval(CLOSE_MODALS)
     }
     if (payer.kind === 'web') await payer.page.go('about:blank'); else await payBrowser.stop()
-    note({ step: 3, closed: (Date.now() - t0) / 1000 })
+    note({ step: 3, closed_secs: (Date.now() - t0) / 1000 })
     await sleep(AWAY * 60000)
     note({ step: 3, address_txs_before: txs, address_txs_now: await paidAt() })
-    if (payer.kind === 'web') { await payer.page.go(BASE); payer = await makePayer().open() } else { await openPayerBrowser(); payer = await makePayer().open() }
+    await reopen(before)
+  }
+  if (STEPS.has(4)) await reopen(null)
+} catch (e) {
+  note({ error: String(e && e.stack || e) })
+  process.exitCode = 1
+} finally {
+  await recvBrowser.stop().catch(() => {}); if (payBrowser) await payBrowser.stop().catch(() => {})
+}
+
+// The payer opened again (its page anew: one tab of a wallet at a time), and what it says read:
+// the card, the History row, the figure; then OK, which says it once. `before`: its figure before
+// the payment, when known. Alone (`--steps 4`), it reads a wallet whose payment was left earlier.
+async function reopen (before) {
+  {
+    if (payer.kind === 'web') { await payer.page.stop(); payer = await makePayer().open() } else { await openPayerBrowser(); payer = await makePayer().open() }
     await payer.tab('balance')
     const card = await payer.page.waitFor("(()=>{ const c=document.getElementById('newsCard'); return c && !c.classList.contains('hide') && c.innerText.trim() ? c.innerText.replace(/\\s+/g,' ').trim() : false })()", 900000).catch((e) => 'NO CARD: ' + e.message)
     await payer.page.screenshot(join(work, `3-${payer.name}-balance-card.png`))
@@ -156,9 +178,4 @@ try {
     const gone = await payer.page.eval("document.getElementById('newsCard').classList.contains('hide')")
     note({ step: 3, ok_pressed_card_gone: gone })
   }
-} catch (e) {
-  note({ error: String(e && e.stack || e) })
-  process.exitCode = 1
-} finally {
-  await recvBrowser.stop().catch(() => {}); if (payBrowser) await payBrowser.stop().catch(() => {})
 }
