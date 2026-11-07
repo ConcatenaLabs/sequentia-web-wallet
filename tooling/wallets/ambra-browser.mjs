@@ -15,6 +15,8 @@ export class AmbraBrowser {
     this.sw = await this.browser.target((t) => t.type === 'service_worker' && /^chrome-extension:\/\/[a-p]{32}\/background\.js$/.test(t.url))
     this.id = new URL(this.sw.url).host
     const p = this.page = await this.browser.tab(`chrome-extension://${this.id}/popup/popup.html`)
+    // The tab is made before its document has loaded.
+    await p.waitFor("document.readyState === 'complete' && !!document.body", 60000)
     await p.eval("document.body.style.width='380px'; true")
     const v = await p.waitFor("(()=>{ for (const id of ['vWelcome','vUnlock','vApp']) { const e=document.getElementById(id); if(e && !e.classList.contains('hide')) return id } return false })()", 120000)
     if (v === 'vWelcome') {
@@ -39,6 +41,13 @@ export class AmbraBrowser {
     await this.tab('receive')
     await p.waitFor("/^bitcoin:.*sequentia=/i.test(document.querySelector('#recvDCode').innerText)", 600000)
     return this
+  }
+
+  // Every console line of the popup, the service worker and the offscreen document (where the
+  // wallet's library and its upkeep run), timed, into `file`: what held an operation up.
+  async logTo (file) {
+    this.page.logTo(file, 'popup'); this.sw.logTo(file, 'sw')
+    try { this.offscreen = (await this.browser.target((t) => t.url.startsWith(`chrome-extension://${this.id}/offscreen.html`), 30000)).logTo(file, 'offscreen') } catch {}
   }
 
   click (sel) { return this.page.eval(`(()=>{ const b=document.querySelector(${JSON.stringify(sel)}); if(!b) throw new Error('no ${sel}'); b.click(); return true })()`) }
@@ -113,7 +122,9 @@ export class AmbraBrowser {
     const t = Date.now()
     const btn = await p.eval(`(()=>{ const b=[...document.querySelectorAll('#faucetBtns [data-faucet]')].find(b=>b.dataset.faucet===${JSON.stringify(tk)} || b.textContent.trim().split(/\\s/)[0]===${JSON.stringify(tk)}); if(!b) return false; b.click(); return true })()`)
     if (!btn) return { said: 'no faucet button for ' + tk, seconds: 0 }
-    const said = await p.waitFor("(()=>{ const t=document.querySelector('#faucetStatus').innerText; return /\\S/.test(t) && !/Requesting/i.test(t) ? t : false })()", 900000).catch(() => 'no answer in 15 min')
+    // The line answers this request: a sentence naming another asset is an earlier request's late
+    // word, not this one's answer.
+    const said = await p.waitFor(`(()=>{ const t=document.querySelector('#faucetStatus').innerText; return /\\S/.test(t) && !/Requesting/i.test(t) && !(/^(Received|The faucet sent)/.test(t) && !t.includes(' ' + ${JSON.stringify(tk)})) ? t : false })()`, 900000).catch(() => 'no answer in 15 min')
     return { said: said.trim(), seconds: (Date.now() - t) / 1000 }
   }
 

@@ -41,6 +41,9 @@ export class WebWallet {
     return this
   }
 
+  // Every console line of the page, timed, into `file`.
+  async logTo (file) { this.page.logTo(file, 'page') }
+
   click (sel) { return this.page.eval(`(()=>{ const b=document.querySelector(${JSON.stringify(sel)}); if(!b) throw new Error('no ${sel}'); b.click(); return true })()`) }
   tab (t) { return this.click(`#tabs button[data-tab="${t}"]`) }
 
@@ -108,7 +111,7 @@ export class WebWallet {
     await p.eval("(()=>{ const s=document.querySelector('#faucetStatus'); if(s) s.textContent=''; return true })()")
     const t = Date.now()
     await this.click(`#faucetBtns button[data-faucet="${tk === 'tSEQ' ? '' : tk}"]`)
-    const said = await p.waitFor("(()=>{ const t=document.querySelector('#faucetStatus')?.textContent||''; return /^\s*Received|It arrives after|error|refused|could not|already/i.test(t) ? t : false })()", 900000).catch(() => 'no answer in 15 min')
+    const said = await p.waitFor("(()=>{ const t=document.querySelector('#faucetStatus')?.textContent||''; return /^\s*Received|^\s*The faucet sent|It arrives after|error|refused|could not|already/i.test(t) ? t : false })()", 900000).catch(() => 'no answer in 15 min')
     return { said: said.trim(), seconds: (Date.now() - t) / 1000 }
   }
 
@@ -145,13 +148,16 @@ export async function followTrade (p, review, confirm, ms) {
   const ticket = tk.replace(/\s+/g, ' ').trim()
   const priceSeconds = (Date.now() - t0) / 1000
   if (tk.startsWith('ERR')) return { refused: ticket.slice(4), priceSeconds }
-  const rows0 = await p.eval("document.querySelectorAll('#ucTrades .uc-trade').length")
+  // The list shows at most a dozen trades, open ones first: the trade confirmed is the row whose id
+  // was not there before, never the first row or a count.
+  const ids0 = await p.eval("[...document.querySelectorAll('#ucTrades .uc-trade')].map(r=>r.dataset.trade)")
   const tC = Date.now()
   await confirm()
-  await p.waitFor(`document.querySelectorAll('#ucTrades .uc-trade').length > ${rows0}`, 300000).catch(() => null)
+  const id = await p.waitFor(`(()=>{ const was=${JSON.stringify(ids0)}; const r=[...document.querySelectorAll('#ucTrades .uc-trade')].find(r=>!was.includes(r.dataset.trade)); return r ? r.dataset.trade : false })()`, 300000).catch(() => null)
   let received = null; let final = null; const states = []
+  if (!id) return { ticket, priceSeconds, states: ['drive: the trade confirmed never showed in the list'], received, final, seconds: (Date.now() - tC) / 1000, confirmedAt: tC, row: null }
   while (Date.now() - tC < ms) {
-    const st = await p.eval("(()=>{ const r=document.querySelector('#ucTrades .uc-trade'); return r ? r.querySelector('.uc-state').textContent : '' })()").catch(() => '')
+    const st = await p.eval(`(()=>{ const r=document.querySelector('#ucTrades .uc-trade[data-trade=${JSON.stringify(id)}]'); return r ? r.querySelector('.uc-state').textContent : '' })()`).catch(() => '')
     const s = st.replace(/ \(\d+ min\)$/, '')
     if (s && states[states.length - 1] !== s) states.push(s)
     if (received == null && /^(Received|Settled)/.test(st)) received = (Date.now() - tC) / 1000
@@ -159,5 +165,5 @@ export async function followTrade (p, review, confirm, ms) {
     if (received != null && (Date.now() - tC) / 1000 > received + 30) break
     await sleep(2000)
   }
-  return { ticket, priceSeconds, states, received, final, seconds: (Date.now() - tC) / 1000, confirmedAt: tC }
+  return { ticket, priceSeconds, states, received, final, seconds: (Date.now() - tC) / 1000, confirmedAt: tC, row: id }
 }
