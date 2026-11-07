@@ -111,7 +111,7 @@ answers and refusals:
 | `connect()` | this page's dialog: "Connect SeqDEX?" | `{ network, address }` (the shared `tb1` address) |
 | `getAccounts()` | silent | `{ accounts: [account] }`, or `[]` until connected |
 | `getBalances()` | silent | `{ assets, btc, leaves, total, arriving, spendable }` (and `by_place` in developer mode): on-chain Sequentia assets, BTC on the chain, what is held as leaves and spendable now, one figure per asset wherever it is held, what of it is arriving, and what a trade can pay from now (the composer's own figure), each in atoms |
-| `placeOrder({ type, base, quote, side, amount, price?, post_only?, rest?, min_fill?, take_back_after? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }` |
+| `placeOrder({ type, base, quote, side, amount, price?, post_only?, rest?, min_fill?, take_back_after? })` | this page's dialog | `{ trade, filled, failed, order, order_error, gave, got }`, or `{ trade, filled: 0, under_way: 1, state, … }` for a trade still being sent |
 | `getOrders()` | silent | `{ orders, trades }` |
 | `cancelOrder({ order })` | this page's dialog | `{ order, txid }` |
 | `signMessage({ message })` | this page's dialog: "Sign a message for Emissio?" | `{ address, signature }`: the Sign tab's signature ("Bitcoin Signed Message", base64), by the key of the shared `tb1` address |
@@ -182,7 +182,14 @@ A limit order takes four options, each listed in `getCapabilities().features`:
 
 A market order refuses all four.
 
-`getOrders` lists each trade the site made with a `state` and a `note`. The state is `sent` once
+A trade's step can take minutes behind the wallet's other work (a purchase paid in BTC pays the
+maker's invoice from the Bitcoin ark). The site is answered once the step is taken or after 20
+seconds, whichever is first. In the second case the answer is the trade under way: `filled: 0`,
+`under_way: 1`, its `state` as `getOrders` gives it, and `gave` and `got` of `'0'`. Nothing of it
+is a fill; the site follows the trade through `getOrders`.
+
+`getOrders` lists each trade the site made with a `state` and a `note`. The state is `sending`
+while the wallet is still taking its step, `sent` once
 the wallet has paid or signed its side, and `received` as soon as what the trade brings is the
 wallet's (a swap with a maker is received seconds after it is sent). It is `settled` once the
 trade's coins are settled with the network, and `failed` when it did not happen and what was

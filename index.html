@@ -393,6 +393,10 @@
   .hamts .hval{font:13px ui-monospace,monospace;color:var(--txt);white-space:nowrap}
   .hamts .fee,.hamts .hfval{font:11.5px ui-monospace,monospace;color:var(--dim);white-space:nowrap}
   .hamts .fee.zero{font:italic 11.5px system-ui,sans-serif}
+  .hamts.not-made .amt,.hamts.not-made .hval{text-decoration:line-through;opacity:.6}
+  .news-card .news-line{display:flex;gap:12px;align-items:center;justify-content:space-between}
+  .news-card .news-line+.news-line{margin-top:10px}
+  .news-card .news-text{margin:0}
   @media (max-width:560px){ .hamts{width:100%;justify-content:end} .hamts .fee{white-space:normal} }
   .txdetail{margin:0 0 10px 52px;padding:2px 0 2px 12px;border-left:2px solid var(--line)}
   .txdetail .kv{font-size:12.5px;padding:5px 0}
@@ -1853,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, offboardOutcome, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -1870,7 +1874,7 @@ import { attachChooser, PICKER_WORDS } from './asset-picker.js';
 import { mountBtcArk, arkConfig, BTC_WORDS, splitPay, heldBesideBoard, boardSeen, arkRefused } from './btc-ark.js';
 import { dueNow, markRaised, raiseRate, btcChildPlan, SPEED_WORDS } from './speed-up.js';
 import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
-import { noteArrival, noteSent, instantLog, instantRows } from './instant-history.js';
+import { noteArrival, noteSent, instantLog, instantRows, addressPayments, setStages, untoldEnds, markTold, pendingOut } from './instant-history.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
 import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
@@ -2951,18 +2955,78 @@ async function offboardReview(r, onDone){
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
-    try{
-      const v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q });
-      // The same payment asked again while the first is on its way is that first one: nothing more
-      // is sent, nothing more is written down, and the person is told so (offboardOutcome).
-      const out = offboardOutcome(v, amt, m0.ticker, minutes, leavesApi.blockSeconds());
-      if(out.sent) try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true }); }catch{}
-      console.log('[offboard]', v && v.offboard, v && v.state, out.sent ? '' : 'already on its way');
-      st.className='status ok'; st.textContent = out.text;
-      ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
-      if(onDone) onDone(); renderBalance();
-    }catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; }
+    let v;
+    try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q }); }
+    catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; return; }
+    // The same payment asked again while the first is on its way is that first one: nothing more
+    // is sent, nothing more is written down, and the person is told so (offboardOutcome).
+    const out = offboardOutcome(v, amt, m0.ticker, minutes, leavesApi.blockSeconds());
+    const id = v && v.offboard ? String(v.offboard) : null;
+    if(out.sent) try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true, offboard: id, address }); }catch{}
+    console.log('[offboard]', id, v && v.state, out.sent ? '' : 'already on its way');
+    ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+    if(onDone) onDone(); renderBalance(); try{ renderHistory(); }catch{}
+    if(!out.sent || !id){ st.className='status ok'; st.textContent = out.text; return; }
+    // "Sending" until the library says the payment is made, then "Sent"; one that ended unmade says
+    // so here, and is not said again on Balance (followAddressPayments).
+    st.className='status'; st.innerHTML='<span class="spin"></span>' + esc(out.text);
+    const t0=Date.now();
+    while(document.body.contains(m) && Date.now() - t0 < OFFBOARD_FOLLOW_MS){
+      await new Promise(ok2=> setTimeout(ok2, 5000));
+      const stage = await followAddressPayments({ sync: true, id });
+      if(stage==='made'){ st.className='status ok'; st.textContent = DEFAULT_WORDS.sentLater(amt, m0.ticker, out.minutes); return; }
+      if(stage==='not_made' || stage==='reclaimed'){
+        try{ markTold(localStorage, walletTag(), id); renderBalance(); }catch{}
+        st.className='status err'; st.textContent = offboardNewsText({ address, stage }, amt, m0.ticker); return;
+      }
+    }
   };
+}
+
+// A payment to an address out of the tree is followed until the library says it is made, it ended
+// unmade or it was taken back (default-arca.js offboardStage), from the review while it is open and
+// every OFFBOARD_FOLLOW_EVERY_MS besides while the page is: what it became is written into its
+// History row, and an end other than made is said once on Balance (renderNewsCard), the next time
+// the wallet is open if it was closed meanwhile. `sync`: let the library move it on first (the
+// paying wallet signs its part of the settlement as it is made). -> the stage of payment `id`.
+const OFFBOARD_FOLLOW_MS = 15 * 60_000, OFFBOARD_FOLLOW_EVERY_MS = 20_000;
+let _offboardFollowing = null;
+async function followAddressPayments({ sync = false, id = null } = {}){
+  if(!leavesApi || !leavesApi.isOpen()) return null;
+  // The wallet's own reads never stand in a person's way (leaves.js personBusy); the review's do.
+  if(!id && leavesApi.personBusy && leavesApi.personBusy()) return null;
+  const tag = walletTag();
+  const stageOf = ()=>{ const r = addressPayments(localStorage, tag).find(x=> x.offboard===id); return r ? r.stage : null; };
+  if(!addressPayments(localStorage, tag).some(r=> r.stage==='pending' || !r.stage)) return id ? stageOf() : null;
+  if(_offboardFollowing){ await _offboardFollowing.catch(()=>{}); return id ? stageOf() : null; }
+  _offboardFollowing = (async()=>{
+    if(sync) try{ await leavesApi.syncNow(); }catch{}
+    let list; try{ list = await leavesApi.own('offboards', {}); }catch(e){ console.warn('[offboard] follow:', e?.message??e); return; }
+    const { stages, news } = offboardEnds(addressPayments(localStorage, tag), list);
+    for(const n of news) console.log('[offboard]', n.offboard, n.state);
+    if(setStages(localStorage, tag, stages)){ try{ renderHistory(); }catch{} try{ renderBalance(); }catch{} }
+  })();
+  try{ await _offboardFollowing; } finally { _offboardFollowing = null; }
+  return id ? stageOf() : null;
+}
+setInterval(()=>{ followAddressPayments().catch(()=>{}); }, OFFBOARD_FOLLOW_EVERY_MS);
+
+// A payment to an address that did not reach it, said once, on one card above Balance's list with
+// the button OK, in both modes (docs/DEFAULT_MODE.md, Send).
+function renderNewsCard(list){
+  let box=$('newsCard');
+  if(!box){ box=el('div','card news-card'); box.id='newsCard'; list.parentNode.insertBefore(box, list); }
+  box.innerHTML='';
+  let ends=[]; try{ ends = untoldEnds(localStorage, walletTag()); }catch{}
+  if(!ends.length){ box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  for(const r of ends){
+    const l = r.legs[0], mm = assetMeta(l.asset);
+    const line = el('div','news-line'); line.dataset.offboard = r.offboard;
+    line.appendChild(el('p','news-text', offboardNewsText({ address: r.address, stage: r.stage }, fmtAmount(BigInt(l.atoms), mm.precision||0), mm.ticker)));
+    const b = el('button','ghost', DEFAULT_WORDS.newsOk); b.onclick=()=>{ markTold(localStorage, walletTag(), r.offboard); renderNewsCard(list); };
+    line.appendChild(b); box.appendChild(line);
+  }
 }
 
 async function btcReviewBroadcast(outputs, onDone, satPerVb, note = []){
@@ -7708,6 +7772,7 @@ function renderBalance(){
   }
   try{ updateRateStaleBadge(); }catch{}
   try{ renderHomeCard(list); }catch(e){ console.warn('[home] card:', e?.message ?? e); }
+  try{ renderNewsCard(list); }catch(e){ console.warn('[news] card:', e?.message ?? e); }
 
   // BTC (parent chain) leads only because it is the other chain, not a privileged unit.
   rowFull({ ticker:'BTC', refKey:'BTC', precision:8, onchainAtoms:btcBal, kind:'BTC',
@@ -8851,7 +8916,7 @@ async function confidentialReview(r, reset){
   const others = own>0n ? otherConfidentialCoins(h) : [];
   const pset=buildConfidentialPset(r.addr, h, a, own, others);
   const said = own===0n ? DEFAULT_WORDS.confidentialSeen : others.length ? DEFAULT_WORDS.confidentialHidden : DEFAULT_WORDS.confidentialAmountHidden(m.ticker);
-  await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, h, { rows:[{ addr:r.addr, atoms:a, hex:h }], feeAssetHex:h, extra:[['', said]] });
+  await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, h, { rows:[{ addr:r.addr, atoms:a, hex:h }], feeAssetHex:h, extra:[['', said]], plain:{ amt: fmtAmount(a, prec), ticker: m.ticker } });
 }
 // The wallet's confidential coins of assets other than `hex` (never the Sequence token's, which may
 // be staked): [{ outpoint, hex, atoms }].
@@ -9039,9 +9104,22 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
   // Read now: signing takes the Pset by value, and its outputs cannot be read after that.
   const builtFee = psetFee(pset);
   const kv=[];
+  // Default mode's review of a payment from the wallet's own coins on the chain (review.plain: one
+  // asset): the contract's "Send <amount> <TICKER>?" with whom it goes to, its fee and when it
+  // arrives; no network, no fee asset, Send and Cancel (docs/DEFAULT_MODE.md, Send).
+  const plain = review && review.plain && Array.isArray(review.rows) && !devMode() ? review.plain : null;
+  if(plain){
+    for(const r of review.rows) kv.push([BTC_WORDS.to, r.addr ? r.addr.slice(0, 14) + '…' + (review.rows.length > 1 ? ' · ' + fmtAtoms(r.atoms, assetMeta(r.hex).precision) + ' ' + assetMeta(r.hex).ticker : '') : '']);
+    if(builtFee){ const fm=assetMeta(builtFee.hex); kv.push([DEFAULT_WORDS.feeLabel, fmtAtoms(builtFee.atoms, fm.precision)+' '+fm.ticker]); }
+    const extra = (review.extra || []).filter(l=> l && l[1]);
+    for(const line of extra) kv.push(line);
+    if(!extra.some(l=> /arrives/.test(String(l[1])))) kv.push(['', DEFAULT_WORDS.arrivesNextBlock]);
+    title = DEFAULT_WORDS.sendTitle(plain.amt, plain.ticker);
+  }
   // First line: this is a Sequentia (testnet) payment, NOT a parent-chain BTC one.
-  kv.push(['Network', 'Sequentia testnet']);
-  if(review && Array.isArray(review.rows)){
+  else kv.push(['Network', 'Sequentia testnet']);
+  if(plain){ /* the contract's rows, above */ }
+  else if(review && Array.isArray(review.rows)){
     for(const r of review.rows){
       const m=assetMeta(r.hex);
       const amtStr=fmtAtoms(r.atoms, m.precision)+' '+m.ticker;
@@ -9084,6 +9162,7 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
     if(feeAssetHex && feeAssetHex!==POLICY_HEX) kv.push(['Fee paid in', assetMeta(feeAssetHex).ticker]);
   }
   const {m, ok, st} = modalRows({title, kv});
+  if(plain) ok.textContent = DEFAULT_WORDS.send;
   endReview();
   // A fee worth more than 30 reference units (USD) is almost always a typed rate gone wrong.
   { const f=builtFee, pu = f ? priceFor(priceTicker(f.hex)) : 0;
@@ -9128,7 +9207,10 @@ async function reviewBroadcast(pset, title, onDone, feeAssetHex, review, beforeS
         queued('send › record the spend', () => { try { wollet.applyTransaction(ownTx(finalized)); } catch {} })
           .finally(() => { _spendsPending--; try{ renderBalance(); renderHistory(); }catch{} })]).catch(()=>{});   // spend-tracking: see seqLeg.fund
       endConfirm();
-      showSent(m, { title, kv, txid: txid.toString() });
+      if(plain){
+        st.className='status ok'; st.textContent = DEFAULT_WORDS.sentBlock(plain.amt, plain.ticker);
+        ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
+      } else showSent(m, { title, kv, txid: txid.toString() });
       if(onDone) onDone(txid); await sync();
     }catch(e){
       if(e && e.settled){ st.className='status ok'; st.textContent=e.message; return; }   // nothing signed: the rescue is no longer needed
@@ -9924,6 +10006,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     { const want=new Map(); for(const r of rows) if(r.asset!=='BTC' && !isOampAsset(r.asset)){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
       for(const [h, a] of want){
         const tree = leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n) : 0n;
+        // What is arriving, less what this wallet's payments still on their way give up: that
+        // comes back only as their change.
+        let comingBack = 0n; if(leavesApi && leavesApi.isOpen()){ comingBack = (leavesApi.arriving(h)||0n) - pendingOut(localStorage, walletTag(), h); if(comingBack < 0n) comingBack = 0n; }
         // The fee's margin in the asset itself, which default mode pays it in; none when the node
         // prices no fee in it (the chain's coins then pay none of it).
         let margin=0n; try{ margin=feeMarginAtoms(h); }catch{}
@@ -9931,7 +10016,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
         // still list it: the chain is only tried with what is left beside the board, so a payment
         // right after a board never signs a spent coin.
         let onchain = availableFor(h); try{ if(leavesApi && leavesApi.onchainLessBoards) onchain = leavesApi.onchainLessBoards(h, onchain); }catch{}
-        if(addressRoute(a, onchain, tree, margin) !== 'tree') continue;
+        const route = addressRoute(a, onchain, tree, margin, comingBack);
+        // Coins of this payment still arriving: said, with when they can go, never "Not enough".
+        if(route === 'arriving' && !devMode()) throw new Error(DEFAULT_WORDS.stillArrivingWithin(assetMeta(h).ticker, arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds())));
+        if(route !== 'tree') continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
         await offboardReview(rows[0], reset);
         return;
@@ -9961,7 +10049,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       const reviewRows = rows.map(r=>({ addr:r.addr, atoms:parseAtoms(r.amtS, sendPrecision(r.asset)), hex:r.asset, ref:r.ref }));
       // Default mode says plainly what a payment to a confidential address does not hide (#585).
       const seen = !devMode() && rows.some(r=>isConfidentialAddress(r.addr)) ? [['', DEFAULT_WORDS.confidentialSeen]] : [];
-      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:[...byAddressNote(false), ...seen]});
+      // Default mode: one asset reads as the contract's review (reviewBroadcast `plain`).
+      const one = new Set(reviewRows.map(r=>r.hex)).size===1 ? reviewRows : null;
+      const plain = one ? { amt: fmtAmount(one.reduce((n,r)=>n+r.atoms, 0n), assetMeta(one[0].hex).precision||0), ticker: assetMeta(one[0].hex).ticker } : null;
+      await reviewBroadcast(pset, 'Confirm Sequentia payment', reset, faHex, {rows:reviewRows, feeAssetHex:faHex, extra:[...byAddressNote(false), ...seen], plain});
     }
   }catch(e){ $('sendErr').textContent=plainErr(e); }
   finally{ btn.disabled=false; btn.textContent=label; } };
@@ -10423,15 +10514,19 @@ function instantItem(r){
   let head, status='';
   if(r.kind==='swap'){ head='Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1]); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
   else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
-  else head = r.kind==='in' ? 'Received' : 'Sent';
+  else head = r.kind==='in' ? 'Received' : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
   mid.appendChild(el('div',null, head));
   const when = r.at ? whenText(r.at) : '';
-  const sub=[when, status, r.kind==='out' && r.later && Date.now()-r.at < 3600000 ? 'Pending' : ''].filter(Boolean).join(' · ');
+  // A payment to an address is pending until the library says it is made (its `stage`); one that
+  // was not made took nothing from the wallet. A row written before stages were kept: its first hour.
+  const pending = r.kind==='out' && r.later && (r.offboard ? r.stage==='pending' || !r.stage : Date.now()-r.at < 3600000);
+  const sub=[when, status, pending ? 'Pending' : '', r.stage==='not_made' ? DEFAULT_WORDS.rowNotMadeSub : ''].filter(Boolean).join(' · ');
   if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
   item.appendChild(mid);
   const legs = r.legs.map(l=>({ hex:l.asset, atoms:l.atoms, out: r.kind==='out' || BigInt(l.atoms)<0n }));
   const fees = (r.fee ? [r.fee] : (r.kind==='swap' || r.kind==='returned' ? (r.fees||[]) : [])).map(f=>({ hex:f.asset, atoms:f.atoms }));
-  item.appendChild(histAmounts(legs, fees, { out: r.kind!=='in' }));
+  if(r.stage==='not_made'){ const a=histAmounts(legs, [], { out: false }); a.classList.add('not-made'); item.appendChild(a); }
+  else item.appendChild(histAmounts(legs, fees, { out: r.kind!=='in' }));
   tagRow(item, r.at || 0, [...legs.map(l=>l.hex), ...fees.map(f=>f.hex)]);
   return item;
 }

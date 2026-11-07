@@ -19,5 +19,5 @@ test('a payment just after a board is routed with what the board left on the cha
 test('the Send tab asks for that route with the board taken off', () => {
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
   assert.match(html, /onchain = leavesApi\.onchainLessBoards\(h, onchain\)/)
-  assert.match(html, /addressRoute\(a, onchain, tree, margin\)/)
+  assert.match(html, /addressRoute\(a, onchain, tree, margin, comingBack\)/)
 })
