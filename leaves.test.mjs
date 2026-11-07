@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { issuerAssets, bondRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { issuerAssets, bondRefusal, holdingRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -803,5 +803,36 @@ test('a command refused after holding the wallet over ten seconds is named, with
   const named = lines.find((l) => l.startsWith('[leaves] slow order_fill_resting_quote 360000 ms, refused: refused: the outputs take'))
   assert.ok(named, lines.join('\n'))
   assert.match(named, /"cost":\{"command":\{"ms":359000,"node":3000/)
+  api.stop && api.stop()
+})
+
+// faucet#30 (RB4): a new wallet that takes all five faucet assets holds more out of round than the
+// operator's bond covers, and its receive requests are refused until it has settled them. The
+// refusal said the deposit was "missing or being withdrawn", which it is not; and the settling
+// waited for the refresh's two-minute pace. The words say what is true, and the refusal has what
+// was received settled at the next turn of the upkeep.
+test('a refusal for what the wallet holds out of round is said as settling, and settles at once', async () => {
+  const held = { message: 'refused: with this payment the wallet would hold out of round 204008250000000 atoms of the reference unit at this node\'s rates, more than the bond\'s 175368870000000: a double-sign would pay the operator more than its bond costs it; have coins refreshed in a round first' }
+  assert.ok(holdingRefusal(held) && bondRefusal(held))
+  assert.equal(plainRefusal(held).message, BOND_WORDS.holding)
+  const gone = { message: 'refused: the operator\'s bond is missing: the bond coin x:1 is spent; the wallet takes no payment out of round from an operator whose bond does not stand' }
+  assert.ok(!holdingRefusal(gone))
+  assert.equal(plainRefusal(gone).message, BOND_WORDS.refused)
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    if (m.args.command === 'receive') return { id: m.id, ok: false, error: { kind: 'refused', message: held.message } }
+    const result = m.args.command === 'schedule' ? { now: 1, due: false, next_sync_at: null } : m.args.command === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1_000_000,
+    tickMs: 3_600_000 }, null, null)
+  await api.start()
+  api.state.refreshedAt = 1_000_000   // a refresh asked a moment ago: the usual pace would wait two minutes
+  await assert.rejects(api.command('receive', {}))
+  assert.equal(api.state.refreshedAt, null, 'the pace no longer holds the next refresh')
+  assert.equal(api.state.upkeepLater, true, 'the upkeep runs at its next turn')
   api.stop && api.stop()
 })
