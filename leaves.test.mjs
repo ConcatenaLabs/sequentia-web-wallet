@@ -776,3 +776,32 @@ test('the composer following its trades (reads, a sync) while nobody waits does 
   assert.ok(seen[0].asked >= 1, "inside a hold it is the person's")
   } finally { api.stop() }
 })
+
+// Seen live (RB4): a trader page's library was held ten minutes by quotes that ended in refusals,
+// and nothing named them: a command was named as slow only when it answered. A refusal after more
+// than ten seconds is named too, with what the library says it cost before it.
+test('a command refused after holding the wallet over ten seconds is named, with its cost', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const lines = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    if (m.args.command === 'order_fill_resting_quote') {
+      clock += 360_000
+      return { id: m.id, ok: false, error: { kind: 'refused', message: 'refused: the outputs take 2 of asset aa, more than the 1 the inputs hold',
+        cost: { command: { ms: 359_000, node: 3_000, operator: 2 }, start: { ms: 1_000, node: 5, operator: 0 } } } }
+    }
+    const result = m.args.command === 'schedule' ? { now: 1, due: false, next_sync_at: null } : m.args.command === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    log: (l) => lines.push(l), tickMs: 3_600_000 }, null, null)
+  await api.start()
+  await assert.rejects(api.pay('order_fill_resting_quote', { order: 'o', amount: '1' }))
+  const named = lines.find((l) => l.startsWith('[leaves] slow order_fill_resting_quote 360000 ms, refused: refused: the outputs take'))
+  assert.ok(named, lines.join('\n'))
+  assert.match(named, /"cost":\{"command":\{"ms":359000,"node":3000/)
+  api.stop && api.stop()
+})
