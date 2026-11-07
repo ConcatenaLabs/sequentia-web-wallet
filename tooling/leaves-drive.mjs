@@ -335,7 +335,7 @@ async function main () {
   await page.waitFor("!document.querySelector('#tabLeaves').classList.contains('hide')", 10000)
   await click('[data-tab=balance]')
   const row2 = await page.eval(`(()=>{ const rows=[...document.querySelectorAll('#assetList .bt-row')]; const r=rows.find(x=>x.innerText.includes('XLEAF')); return r ? { head: r.querySelector('.bt-t').innerText, split: (r.querySelector('.leaf-split')||{}).innerText||'' } : null })()`)
-  check('in developer mode the row splits by rail, and its figure is the same as in user mode', !!row2 && / in leaves · /.test(row2.split) && row && row.head === row2.head, { user: row, developer: row2 })
+  check('in developer mode the row keeps the one figure user mode shows, with no rail split', !!row2 && !row2.split && row && row.head === row2.head, { user: row, developer: row2 })
   await shot('balance-developer-mode')
   await click('[data-tab=leaves]')
 
