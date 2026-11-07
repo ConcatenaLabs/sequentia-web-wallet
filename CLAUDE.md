@@ -109,7 +109,10 @@ a payment to a receive code of the same operator and chain goes in the tree (`tr
 coins new on the chain are boarded in `leaves.js`'s upkeep (`boardArrivals`: never in developer
 mode, never ahead of a person, never within a minute of the page's own on-chain payment, since
 both spend the same keys' coins). An address the chain's coins can't cover is paid out of the tree
-(`offboard_quote`, then `offboard` with the quote as `shown`). A payment the operator refuses as too
+(`offboard_quote`, then `offboard` with the quote as `shown`), and followed to its end by the
+library's `offboards` (`followAddressPayments` in `index.html`, `offboardEnds` in `default-arca.js`,
+the record in `instant-history.js`): "Sent" only once it is made, and one never made said once on
+Balance. A payment the operator refuses as too
 many reassignments from a round (`depth_limit`) refreshes that asset's coins in the next round and
 is asked again once it is final (`paying`), as a release is. A wallet joined by itself restores
 once to the end (`RESTORED_KEY`; a page closed mid-restore restores at its next open) and counts

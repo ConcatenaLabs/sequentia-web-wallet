@@ -37,16 +37,62 @@ export function noteArrival (store, tag, coin, at = Date.now()) {
 }
 
 // A payment this wallet made: `asset`, `atoms`, its `fee` ({asset, atoms}) when it paid one, and
-// whether it waits for the operator's next settlement (`later`).
-export function noteSent (store, tag, { asset, atoms, fee = null, later = false }, at = Date.now()) {
+// whether it waits for the operator's next settlement (`later`). A payment to an address out of the
+// tree also keeps the library's id for it (`offboard`) and its address, and where it stands
+// (`stage`, default-arca.js offboardStage), so History and Balance say what became of it.
+export function noteSent (store, tag, { asset, atoms, fee = null, later = false, offboard = null, address = null }, at = Date.now()) {
   if (!asset || !(big(atoms) > 0n)) return false
   const list = instantLog(store, tag)
   const row = { kind: 'out', at, legs: [{ asset, atoms: String(big(atoms)) }] }
   if (fee && big(fee.atoms) > 0n) row.fee = { asset: fee.asset || asset, atoms: String(big(fee.atoms)) }
   if (later) row.later = true
+  if (offboard) { row.offboard = String(offboard); row.stage = 'pending'; if (address) row.address = String(address) }
   list.push(row)
   save(store, tag, list)
   return true
+}
+
+// The payments to an address out of the tree this wallet asked for, as written down (each with its
+// `offboard` id and `stage`).
+export function addressPayments (store, tag) {
+  return instantLog(store, tag).filter((r) => r && r.kind === 'out' && r.offboard)
+}
+
+// Writes down where each payment to an address stands now (`stages`: Map(id -> stage)).
+// -> whether anything changed.
+export function setStages (store, tag, stages) {
+  const list = instantLog(store, tag)
+  let changed = false
+  for (const r of list) {
+    if (!r || !r.offboard || !stages.has(r.offboard)) continue
+    const st = stages.get(r.offboard)
+    if (r.stage !== st) { r.stage = st; changed = true }
+  }
+  if (changed) save(store, tag, list)
+  return changed
+}
+
+// The payments to an address that ended without reaching it ('not_made', 'reclaimed') and that the
+// person has not acknowledged yet: each is said once, until they press OK (`markTold`).
+export function untoldEnds (store, tag) {
+  return addressPayments(store, tag).filter((r) => (r.stage === 'not_made' || r.stage === 'reclaimed') && !r.told)
+}
+export function markTold (store, tag, offboard) {
+  const list = instantLog(store, tag)
+  const r = list.find((x) => x && x.offboard === offboard)
+  if (!r || r.told) return false
+  r.told = true
+  save(store, tag, list)
+  return true
+}
+
+// Of an asset, what this wallet's payments to an address still on their way hold of what the tree
+// counts as arriving: the coins given up for them come back only as change, so they are no part of
+// what will be spendable. In atoms.
+export function pendingOut (store, tag, asset) {
+  let n = 0n
+  for (const r of addressPayments(store, tag)) if (r.stage === 'pending' && r.legs[0] && r.legs[0].asset === asset) n += big(r.legs[0].atoms) + (r.fee ? big(r.fee.atoms) : 0n)
+  return n
 }
 
 // The composer's trades that moved something: every one sent, waiting or settled, and one

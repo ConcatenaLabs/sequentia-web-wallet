@@ -58,16 +58,16 @@ In practice:
   place. The line above the list reads "Syncing… showing your wallet as of <time>" until each part
   has been read again, then **"Up to date."**
 - A coin that could be spent, and that a Bitcoin reorganisation took back out of the chain with
-  the block it rested on, stays in the figure and appears under it as **"<amount> <TICKER> being
-  redone after a Bitcoin reorganisation"** until the network takes it in again. It is never shown
-  as gone.
+  the block it rested on, stays in the figure until the network takes it in again. It is never
+  shown as gone. Developer mode says so under the figure: **"<amount> <TICKER> being redone after
+  a Bitcoin reorganisation"**.
 - A coin the wallet left unrefreshed while it was away, or one paid to it whose sender took an
   earlier coin of its lineage back on the chain, is taken on the chain under its own key by the
   operator or a watchtower: the wallet deposits each coin, sealed and with nothing shown, with
-  the watchtowers its operator names and those the other operators run for its users. It stays in the figure and appears
-  under it as **"<amount> <TICKER> moved out of the Ark to keep it safe while you were away"**
-  while the wallet, open again, puts it back by itself; it is then arriving until that is final.
-  Developer mode names it `kept_safe`.
+  the watchtowers its operator names and those the other operators run for its users. It stays in
+  the figure while the wallet, open again, puts it back by itself; it is then arriving until that
+  is final. Developer mode says so under the figure, **"<amount> <TICKER> moved out of the Ark to
+  keep it safe while you were away"**, and names it `kept_safe`.
 - A coin another wallet paid this one is made the wallet's own in the operator's next settlement,
   by itself, which ends what its senders could still do with it, wherever the operator can fund
   that settlement now. Until it is final the coin is arriving, as above, and still pays: a
@@ -336,10 +336,22 @@ modes (`asset-picker.js`):
     invoice." When the wallet's coins on the chain don't cover a payment to an address with its
     network fee, it is paid out of what the wallet holds for instant payments: the review is titled
     **Send <amount> <TICKER>?**, with "It arrives within <N> minutes. Keep this page open
-    meanwhile." and a "Fee <amount> <TICKER>" line when there is a fee; when done, "Sent <amount>
-    <TICKER>. It arrives within <N> minutes. Keep this page open meanwhile." (Ambra mobile says
-    "screen"). The paying wallet signs its part of the operator's settlement as it is
-    made: a wallet closed before then makes nothing, and its coins stay its own. <N> is the most the whole way to the other wallet's figure takes, never the
+    meanwhile." and a "Fee <amount> <TICKER>" line when there is a fee (Ambra mobile says
+    "screen"). The paying wallet signs its part of the operator's settlement as it is made: a
+    wallet closed before then makes nothing, and its coins stay its own. So after Send it reads
+    "Sending <amount> <TICKER>. Keep this page open until it is sent." until the wallet's leaf
+    library says the payment is made (its `offboards` reads `unlocking` or `paid`), and only then
+    "Sent <amount> <TICKER>. It arrives within <N> minutes." "Sent" is never shown for a payment
+    the library has not made. The wallet follows each such payment to its end, while the review
+    is open and afterwards. One that ended without being made (`not_made`) says "Your payment of
+    <amount> <TICKER> to <address> was not made: nothing left your wallet. Send it again." in the
+    review when it is still open, and otherwise once, on a card above Balance's list with the
+    button **OK**, the next time the wallet is open; its History row reads "Not sent", with
+    "Nothing left your wallet." and the amount struck through. One made and then taken back by
+    the service before it reached the address (`reclaimed`) says "Your payment of <amount>
+    <TICKER> to <address> did not arrive. Report a problem, so it can be put right." the same
+    way, its row "Did not arrive". The address is shown by its first fourteen and last four
+    characters. <N> is the most the whole way to the other wallet's figure takes, never the
     operator's settlement alone: the interval between its settlements, four blocks (the
     settlement's, the operator's payment to the address, and the paying wallet handing over its
     part between them) and four minutes for the wallets to read the chain, rounded up to five
@@ -347,8 +359,11 @@ modes (`asset-picker.js`):
     again while the first is still on its way, is that first payment: nothing more is sent, and
     the wallet says "<amount> <TICKER> to this address is already on its way, so nothing more was
     sent. It arrives within <N> minutes. Keep this page open meanwhile. To pay the same again,
-    send once it has arrived." The
-    sentence above is for when even that cannot be made.
+    send once it has arrived." When the wallet's coins of the asset are still arriving (the change
+    of a payment just made, a coin just received) and would cover the payment once they are in,
+    it says "Part of this <TICKER> is still arriving: it can be sent within <N> minutes.", never
+    that there is not enough. What a payment still on its way gives up counts only as its change.
+    The sentence above is for when even that cannot be made.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
@@ -674,6 +689,9 @@ What it shows beyond the Market and Trade sections above:
   tab: the wallet writes each down as it happens, in the browser that holds it, and shows them
   in the one list, by time, with what the chain holds. While it waits for a block, its time line ends with "Waiting for a Bitcoin block" (BTC) or
   "Pending", and that goes once it is confirmed.
+- A payment to an address paid out of what the wallet holds for instant payments reads "Pending"
+  until it is made. One that was not made reads "Not sent", with "Nothing left your wallet." and
+  its amount struck through, and one taken back before it arrived reads "Did not arrive" (Send).
 - A payment on either chain that has waited two blocks is sped up by the wallet itself (a small
   payment to itself that pays for both, `speed-up.js`), and again, paying more, each time it waits
   two more. Its row then reads "Taking longer than usual: the wallet paid a little more to speed it
