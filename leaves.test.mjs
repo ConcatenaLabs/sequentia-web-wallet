@@ -800,7 +800,7 @@ test('a command refused after holding the wallet over ten seconds is named, with
     log: (l) => lines.push(l), tickMs: 3_600_000 }, null, null)
   await api.start()
   await assert.rejects(api.pay('order_fill_resting_quote', { order: 'o', amount: '1' }))
-  const named = lines.find((l) => l.startsWith('[leaves] slow order_fill_resting_quote 360000 ms, refused: refused: the outputs take'))
+  const named = lines.find((l) => l.startsWith('[leaves] slow order_fill_resting_quote 360000 ms (own 360000 ms, waited 0 ms behind other commands), refused: refused: the outputs take'))
   assert.ok(named, lines.join('\n'))
   assert.match(named, /"cost":\{"command":\{"ms":359000,"node":3000/)
   api.stop && api.stop()
@@ -834,5 +834,34 @@ test('a refusal for what the wallet holds out of round is said as settling, and 
   await assert.rejects(api.command('receive', {}))
   assert.equal(api.state.refreshedAt, null, 'the pace no longer holds the next refresh')
   assert.equal(api.state.upkeepLater, true, 'the upkeep runs at its next turn')
+  api.stop && api.stop()
+})
+
+// Seen live (RB4): "[leaves] offboards held the wallet 471471 ms", while offboards itself cost the
+// library 21 ms: it waited behind a resting-fill quote that read blocks for minutes. A command's
+// time is split into its own work and its wait, and an action whose command only waited says it
+// waited, so the line never names a command that held nothing.
+test('an action whose command only waited behind another says it waited, with its own time', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const lines = []
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    if (m.args.command === 'offboards') {
+      clock += 471_471
+      return { id: m.id, ok: true, value: { result: [], start: {}, cost: { start: { ms: 21, node: 1, operator: 0 }, command: { ms: 0, node: 0, operator: 0 } } } }
+    }
+    const result = m.args.command === 'schedule' ? { now: 1, due: false, next_sync_at: null } : m.args.command === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    log: (l) => lines.push(l), tickMs: 3_600_000 }, null, null)
+  await api.start()
+  await api.command('offboards', {})
+  assert.ok(lines.includes('[leaves] slow offboards 471471 ms (own 21 ms, waited 471450 ms behind other commands) {"cost":{"start":{"ms":21,"node":1,"operator":0},"command":{"ms":0,"node":0,"operator":0}}}'), lines.join('\n'))
+  assert.ok(lines.includes('[leaves] offboards waited 471450 ms behind another library command (its own offboards took 21 ms)'), lines.join('\n'))
+  assert.ok(!lines.some((l) => l.includes('offboards held the wallet')), lines.join('\n'))
   api.stop && api.stop()
 })

@@ -669,8 +669,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
       throw e
     } finally {
       // An action that held the wallet over ten seconds says so, by name: every command asked
-      // meanwhile waited for it, and their own lines show only the wait.
-      if (now() - t0 > 10000) log(`[leaves] ${what} held the wallet ${now() - t0} ms`)
+      // meanwhile waited for it, and their own lines show only the wait. One whose own command
+      // only waited behind another (the library runs one command at a time) says that instead,
+      // so the line names the action that held it, never one that waited.
+      if (now() - t0 > 10000) {
+        const r = S.lastRun
+        if (r && r.at >= t0 && r.waited > 10000) log(`[leaves] ${what} waited ${r.waited} ms behind another library command (its own ${r.command} took ${r.own} ms)`)
+        else log(`[leaves] ${what} held the wallet ${now() - t0} ms`)
+      }
       if (answerFirst) reloadAfter()
       else { try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } }
       S.busy = false
@@ -692,6 +698,18 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (S.reloadTimer && typeof S.reloadTimer.unref === 'function') S.reloadTimer.unref()
   }
 
+  // A command's time from asking to its answer, split into its own work (the library's cost, its
+  // start and the command) and the wait behind other commands, since the library runs one at a
+  // time: kept as S.lastRun, and said (`said`) when the library gave its cost. A refusal from a
+  // library that gives no cost counts as all its own.
+  function timing (command, took, cost) {
+    const ms = (p) => Number((cost && cost[p] && cost[p].ms) || 0)
+    const known = !!(cost && cost.command)
+    const own = known ? Math.min(took, ms('start') + ms('command')) : took
+    S.lastRun = { command, took, own, waited: took - own, at: now() }
+    return { own, waited: took - own, said: known ? ` (own ${own} ms, waited ${took - own} ms behind other commands)` : '' }
+  }
+
   async function run (command, args) {
     const t0 = now()
     let v
@@ -699,20 +717,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
       // A command refused after holding the wallet over ten seconds is named as one that answered
       // is: a refusal holds every command behind it just as long.
       const took = now() - t0
+      const t = timing(command, took, e && e.cost)
       if (took > 10000) {
         let cost = ''
         try { cost = e && e.cost ? ' ' + JSON.stringify({ cost: e.cost }).slice(0, 900) : '' } catch {}
-        log(`[leaves] slow ${command} ${took} ms, refused: ${String((e && e.message) || e).slice(0, 300)}${cost}`)
+        log(`[leaves] slow ${command} ${took} ms${t.said}, refused: ${String((e && e.message) || e).slice(0, 300)}${cost}`)
       }
       throw e
     }
     // A command over ten seconds says so, with what the library says it cost (and a sync its
     // steps): the one long command that holds every other behind it can then be named.
     const took = now() - t0
+    const t = timing(command, took, v && v.cost)
     if (took > 10000) {
       let cost = ''
       try { cost = JSON.stringify({ cost: v && v.cost, steps: v && v.result && v.result.cost_by_step }).slice(0, 900) } catch {}
-      log(`[leaves] slow ${command} ${took} ms ${cost}`)
+      log(`[leaves] slow ${command} ${took} ms${t.said} ${cost}`)
     }
     if (v && v.start && v.start.witness && v.start.witness.error) S.startNote = v.start.witness.error.message
     else if (v && v.start && v.start.recheck && v.start.recheck.error) S.startNote = v.start.recheck.error.message
