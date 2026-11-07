@@ -271,6 +271,9 @@ export function plainRefusal (e) {
   // The operator's own reason, when it asks for the wallet to be updated: said so, plainly.
   if (e && e.code === 'declined' && /\bupdate the wallet\b/i.test(m)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: UPDATE_WORDS })
   if (e && e.code === 'declined') return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: DECLINED_WORDS })
+  // The bond stands, but the wallet holds what it was paid in the last minutes out of round up to
+  // what the bond covers: it takes more once those coins are settled in the next round.
+  if (holdingRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.holding })
   if (bondRefusal(e)) return new LeafError({ kind: e.kind || 'refused', code: e.code, status: e.status, message: BOND_WORDS.refused })
   // A coin that has not vested (the operator's `vesting`): its date, plainly.
   const vested = vestingRefusal(e)
@@ -300,7 +303,14 @@ export function bondRefusal (e) {
 }
 export const BOND_WORDS = Object.freeze({
   refused: 'Not accepted: the security deposit that backs these instant payments is missing or being withdrawn, so this wallet takes no payment that rests on it. Nothing was signed.',
+  holding: 'Not yet: this wallet is settling what it was just paid, and takes a new instant payment once that is done, in a few minutes. Nothing was signed.',
 })
+// The library's refusal of a payment that would leave the wallet holding more out of round than
+// the operator's bond covers, or than its instant budget: the bond stands, and room comes back
+// once what the wallet holds is refreshed in a round.
+export function holdingRefusal (e) {
+  return /would hold out of round/i.test(String((e && e.message) || ''))
+}
 
 // The user composer's pairs, as the operator serves them: a pair with a supervised asset
 // keeps only the in-tree swap with a live maker, since the operator serves no take, no
@@ -2127,7 +2137,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- for the page API (wallet-api.js): the library's commands, one at a time ----
   async function command (cmd, args) {
     if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet has not joined a leaf operator: join one in the wallet\u2019s Leaves tab' })
-    return await asking(() => act(cmd, () => paying(cmd, args || {})))
+    try { return await asking(() => act(cmd, () => paying(cmd, args || {}))) } catch (e) {
+      // Refused for what the wallet holds out of round (a large payment just received, such as
+      // the faucet's five assets): what it received is given up in the next round at the next
+      // turn of the upkeep, not after the refresh's usual pace, so room comes back sooner.
+      if (holdingRefusal(e)) settleSoon()
+      throw e
+    }
+  }
+  function settleSoon () {
+    if (S.refreshedAt != null) log('[leaves] holding past what the bond covers: what was received is settled at once')
+    S.refreshedAt = null
+    S.upkeepLater = true
+    if (!S.asked) upkeepSoon(0)
   }
   // One on-chain address of the leaf wallet, the same each time a page asks: taking a
   // new one on every ask would let a page grow the wallet's scan without end.
