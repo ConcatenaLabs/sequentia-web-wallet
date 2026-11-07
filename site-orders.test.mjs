@@ -237,3 +237,37 @@ test('a take whose price is no longer held when approved asks for the review aga
   const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
   await assert.rejects(S.confirm(q.id), (e) => e.message === SITE_WORDS.lapsed)
 })
+
+test('a trade whose step outlasts the site\'s wait is answered as under way, never as filled (#596)', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  // The engine writes the record, then its step (paying a maker's invoice) takes long.
+  let finish
+  E.confirm = (choice, ticket) => { const r = { id: 'slow', state: 'confirming', ticket, at: Date.now() }; E.recs.push(r)
+    return new Promise((ok) => { finish = () => { r.state = 'sent'; r.sentAt = Date.now(); ok(r) } }) }
+  const busy = []
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't', answerMs: 30, busy: (on) => busy.push(on) })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  busy.length = 0
+  const r = await S.confirm(q.id)
+  assert.deepEqual(r, { trade: 'slow', filled: 0, under_way: 1, state: 'sending', failed: [], order: null, order_error: null, gave: '0', got: '0' })
+  let o = await S.orders('https://s/dex/')
+  assert.equal(o.trades[0].trade, 'slow'); assert.equal(o.trades[0].state, 'sending')
+  // The page's own follow still waits for the step.
+  assert.deepEqual(busy, [true])
+  finish(); await new Promise((ok) => setTimeout(ok, 5))
+  assert.deepEqual(busy, [true, false])
+  o = await S.orders('https://s/dex/')
+  assert.equal(o.trades.length, 1); assert.equal(o.trades[0].state, 'sent')
+})
+
+test('a step that is quick is answered with its fill, as before; one that never started is refused', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't', answerMs: 1000 })
+  let q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  assert.equal((await S.confirm(q.id)).filled, 1)
+  // No record and no answer within the wait: nothing was sent, and the site is not told otherwise.
+  E.confirm = () => new Promise(() => {})
+  const S2 = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't', answerMs: 20 })
+  q = await S2.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  await assert.rejects(S2.confirm(q.id), (e) => e.message === USER_WORDS.failed)
+})
