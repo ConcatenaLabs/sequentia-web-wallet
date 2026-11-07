@@ -2182,15 +2182,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
     command,
     // A person's span of work (a trade's quote, its confirmation): the wallet's own upkeep waits
     // until it is over, not only while one of its commands runs.
-    hold: (f) => asking(f),
+    hold: async (f) => { S.holds = (S.holds || 0) + 1; try { return await asking(f) } finally { S.holds-- } },
     // A command for the user composer, asked directly (no reload after it), paid through
     // the next round when it needs a planned coin.
     // A read (a price, the coins) is asked as it is: freeing planned coins and following the next
     // round is for a payment, never for a quote, whose person waits on its answer.
+    // A read or a sync the composer asks while nobody waits on it (`hold`: a quote, a
+    // confirmation) is how it follows its open trades, every few seconds: the wallet's own work,
+    // not a person asking, so it never keeps the mailbox and channel reads off for as long as a
+    // trade is open. What its sync takes in is told as any sync's is.
     pay: (cmd, args) => {
       if (!S.open) return Promise.reject(new LeafError({ kind: 'refused', message: 'this wallet holds no leaves' }))
       const read = COMPOSER_READS.has(String(cmd))
-      return asking(() => (read ? run(cmd, args || {}) : paying(cmd, args || {}))).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
+      const fail = (e) => { throw dev() ? devRefusal(e) : plainRefusal(e) }
+      if (!S.holds && read) return run(cmd, args || {}).catch(fail)
+      if (!S.holds && cmd === 'sync') return run('sync', args || {}).then((v) => { try { synced(v) } catch {} return v }).catch(fail)
+      return asking(() => (read ? run(cmd, args || {}) : paying(cmd, args || {}))).catch(fail)
     },
     // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
     frozenAtoms: (hex) => frozenAtoms(S.coins, S.balance).get(hex) || 0n,
