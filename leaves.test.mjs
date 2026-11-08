@@ -939,3 +939,10 @@ test('a slow command whose start re-checked the coins names the re-check by part
   assert.match(l, /"recheck":\{"ms":\{"coins":2000,"lineages":433000,"participations":900,"rounds":200\},"read_again":"all","changes":0\}/)
   api.stop && api.stop()
 })
+
+test('a refusal in_channel carries the most and the fee once the channels are closed', () => {
+  const e = new LeafError({ kind: 'in_channel', message: 'refused: short', asset: 'aa', close: ['ch1'], side: '7', most: '30502601', fee: '704' })
+  assert.deepEqual([e.close, e.most, e.fee], [['ch1'], '30502601', '704'])
+  const older = new LeafError({ kind: 'in_channel', message: 'refused: short', asset: 'aa', close: ['ch1'] })
+  assert.equal(older.most, undefined)
+})

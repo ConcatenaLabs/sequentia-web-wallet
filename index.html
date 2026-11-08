@@ -2865,6 +2865,19 @@ function shortWords(e, atoms, hex, m0){
 // A payment to a receive code in the tree (leaves.js payCode): what is sent, to whom, and its
 // fee, reviewed before anything is signed; the leaf library refuses what it would not pay, in its
 // own words (plain words in default mode).
+// What a payment refused `in_channel` can pay once the channel is closed, and its fee then: the
+// library's own figures (`most`, `fee`, counted with the leaves the close gives back), or, from an
+// older library, read from its words (which count only the coins live now, so they can be a
+// little off). `most` is at most `atoms`.
+function afterClose(e, atoms, said){
+  const big = (v)=>{ try{ return v == null ? null : BigInt(v); }catch{ return null; } };
+  let most = big(e && e.most), fee = big(e && e.fee);
+  if(most == null) most = sendableAfterFreeing(atoms, said);
+  if(fee == null) fee = feeFromRefusal(atoms, said);
+  if(most != null && most > atoms) most = atoms;
+  return { most, fee };
+}
+
 // How long a payment waits for the block of the round it needs: a Sequentia block for the tree,
 // a Bitcoin block for the Bitcoin ark.
 function waitFor(hex){ return hex === 'BTC' ? DEFAULT_WORDS.tenMinutes : DEFAULT_WORDS.aMinute; }
@@ -2883,9 +2896,9 @@ async function treeQuoteFor(addr, atoms, hex){
   }catch(e){
     const said = String(e?.message??e);
     if(e && e.kind === 'in_channel'){
-      const most = sendableAfterFreeing(atoms, said);
+      const most = afterClose(e, atoms, said).most;
       if(most != null && most < atoms) return upTo(most);
-      const fee = feeFromRefusal(atoms, said), now = sendableNow(atoms, said);
+      const fee = afterClose(e, atoms, said).fee, now = sendableNow(atoms, said);
       return { most: atoms, text: DEFAULT_WORDS.hintWait(fee != null ? feeText(fee) : '', waitFor(hex), now != null && now > 0n ? fmtAtoms(now, p) : '', m0.ticker) };
     }
     const most = sendableNow(atoms, said);
@@ -2906,17 +2919,17 @@ async function treeSendReview(r, onDone, note){
   // library that has no quote says a little is kept back, never that there is no fee.
   // A payment the wallet's channel side would cover is quoted from the library's refusal: its fee,
   // and, when more is asked than can go once the fee is taken out, the review is for the most.
-  let quote = null, freeing = false, refused = '';
+  let quote = null, freeing = false, refused = '', closing = null;
   try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
   catch(e){
-    if(e && e.kind === 'in_channel'){ freeing = true; refused = String(e.message||''); }
+    if(e && e.kind === 'in_channel'){ freeing = true; refused = String(e.message||''); closing = afterClose(e, atoms, refused); }
     else if(!/\bno command send_quote\b/.test(String(e?.message??e))) throw new Error(shortWords(e, atoms, r.asset, m0));
   }
   if(freeing){
-    const most = sendableAfterFreeing(atoms, refused);
+    const most = closing.most;
     if(most != null && most > 0n && most < atoms) return treeSendReview({...r, amtS: fmtAtoms(most, m0.precision||0)}, onDone, DEFAULT_WORDS.feeOutOfAll(m0.ticker));
   }
-  const fee = quote && quote.fee != null ? BigInt(quote.fee) : freeing ? feeFromRefusal(atoms, refused) : null;
+  const fee = quote && quote.fee != null ? BigInt(quote.fee) : freeing ? closing.fee : null;
   let feeValue = ''; try{ if(fee > 0n) feeValue = feeValueStr(r.asset, fee); }catch{}
   const kv = [[DEFAULT_WORDS.feeLabel, fee == null ? DEFAULT_WORDS.feeKeptSome
     : fee > 0n ? DEFAULT_WORDS.feeKept(fmtAtoms(fee, m0.precision||0), m0.ticker, feeValue) : DEFAULT_WORDS.noFee]];
