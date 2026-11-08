@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, sendableNow, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, sendableNow, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll, onchainLessBoards, boardSpent, offboardOutcome } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -35,6 +35,22 @@ test('a payment refused for want of funds says the most it can send now', () => 
   assert.equal(sendableNow(30503305n, 'the change would be below the operator\'s smallest leaf in asset ' + B + ' (10000 atoms): pay a little less, or that much more'), 30493305n)
   assert.equal(sendableNow(5000n, 'the operator is unreachable'), null)
   assert.match(DEFAULT_WORDS.sendUpTo('0.30502601', 'EURX'), /up to 0\.30502601 EURX/)
+})
+
+test('a payment the Lightning side would cover: its fee and the most it can send', () => {
+  // The tester's refusal: 0.15251653 EURX outside the channel, 0.15251652 on their side of it, and a
+  // payment of all of it that keeps 704 atoms back for its fees.
+  const said = 'refused: the wallet holds 15251653 of asset ' + B + ' in live coins, and paying 30503305 takes 30504009 with the margins its ' +
+    "transactions leave for their fees; 15251652 more is the wallet's side of its channels in the asset, which a transfer does not spend, " +
+    'and does not cover it all: closing the 1 of them into the next round'
+  assert.equal(feeFromRefusal(30503305n, said), 704n)
+  assert.equal(sendableAfterFreeing(30503305n, said), 30502601n)
+  // Asked for less than that: the payment as asked.
+  assert.equal(sendableAfterFreeing(20000000n, said.replace('paying 30503305 takes 30504009', 'paying 20000000 takes 20000600')), 20000000n)
+  // Another payment's figures, or words that do not say: nothing read.
+  assert.equal(feeFromRefusal(5000n, said), null)
+  assert.equal(sendableAfterFreeing(5000n, 'the operator is unreachable'), null)
+  assert.equal(sendableAfterFreeing(30503305n, 'refused: the wallet holds 15251653 of asset ' + B + ' in live coins, and paying 30503305 takes 30504009 with the margins'), null)
 })
 
 test('the page names an operator only with a server, a node and a key', () => {

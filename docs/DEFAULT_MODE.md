@@ -327,13 +327,18 @@ modes (`asset-picker.js`):
   after the next block, in about a minute.") with the button **Send to the address**.
 - The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds.", its
   fee line, and the buttons **Cancel** and **Send**. The fee is the leaf library's quote of that very
-  payment (`send_quote`): "Fee <amount> <TICKER>, kept back for the transfer", what the payment
-  leaves for the fees of the transactions it keeps ready out of the wallet's own coins (the
-  receiver gets the whole amount); "No fees" over a channel, which costs nothing; and "A little of
-  it, kept back for the transfer" from a library that quotes none. When part of what is sent is
-  set aside for instant payments, the review adds "Part of it is set aside for instant payments: it
-  is set free first, which takes about a minute. Keep this page open.", and Send frees it through
-  the next settlement before paying, with the same line while it waits.
+  payment (`send_quote`), or the one its refusal names when part of the asset is kept ready for
+  Lightning: "<amount> <TICKER> (≈ <value>)", what the payment keeps back for the fees of the
+  transactions it keeps ready, out of the wallet's own coins, with the line "The recipient gets the
+  whole amount. The fee comes out of what you hold and pays the network fees of the transactions that
+  keep this payment safe."; "No fees" over a channel, which costs nothing. When part of the asset is
+  kept ready for Lightning, the review adds "Part of your <TICKER> is kept ready for Lightning
+  payments, and a payment can't spend it there. Send first moves it back to your balance, which takes
+  about a minute. Keep this page open.", and Send moves it through the next settlement before paying,
+  with the same line while it waits. Asked for more than can go once the fee is out (sending all one
+  holds), the review is for the most that can, with "The fee comes out of your <TICKER>, so this is
+  the most you can send."; a payment refused for want of the fee afterwards (the settlement cost a
+  little too) turns Send into **Send <most> <TICKER>**, reviewed again before anything is signed.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
   can be seen.
 - A payment of an asset from the wallet's own coins on the chain has the same review, titled

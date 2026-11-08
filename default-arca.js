@@ -81,10 +81,17 @@ export const DEFAULT_WORDS = Object.freeze({
   noFee: 'No fees',
   // A payment in the tree leaves a little of what it moves for the fees of the transactions it
   // keeps ready (the library's `send_quote`): the review shows it, never "No fees" when it is not.
-  feeKept: (amount, ticker) => `${amount} ${ticker}, kept back for the transfer`,
-  feeKeptSome: 'A little of it, kept back for the transfer',
-  // Part of what is sent is first set free from instant payments, through the next settlement.
-  freeingFirst: 'Part of it is set aside for instant payments: it is set free first, which takes about a minute. Keep this page open.',
+  // Its value beside it, when the asset has a price, so "a little" is never left to guess.
+  feeKept: (amount, ticker, value) => `${amount} ${ticker}` + (value ? ` (${value})` : ''),
+  feeKeptSome: 'A small part of what you send, shown once it is sent',
+  // Why a payment in the wallet has a fee at all, under the fee line.
+  feeWhy: 'The recipient gets the whole amount. The fee comes out of what you hold and pays the network fees of the transactions that keep this payment safe.',
+  // Part of what is sent is kept ready for Lightning payments, which a payment can't spend as it
+  // is: it is moved back to the balance first, through the next settlement.
+  freeingFirst: (ticker) => `Part of your ${ticker} is kept ready for Lightning payments, and a payment can't spend it there. Send first moves it back to your balance, which takes about a minute. Keep this page open.`,
+  // Asked for more than can go once the fee is taken out: the review offers the most that can.
+  feeOutOfAll: (ticker) => `The fee comes out of your ${ticker}, so this is the most you can send.`,
+  sendInstead: (amount, ticker) => `Send ${amount} ${ticker}`,
   // Max for an asset held in the Ark, to a destination it pays with a fee: type the amount.
   maxArkElsewhere: 'Max sizes a payment to a receive code. For this recipient, type the amount.',
   // A receive code paid at its address, because nothing the wallet holds pays it in seconds.
@@ -526,6 +533,30 @@ export function treeRoute (text, info) {
 // ("the wallet holds H of asset A in live coins, and paying P takes N with the margins …": H less
 // N - P), or that much less than `paid` when the change would fall below the operator's smallest
 // leaf. 0n when nothing can be sent; null for any other refusal.
+// The fee a refused payment would have kept back, from the library's own words ("paying P takes
+// N with the margins …": N - P), in atoms; null when the words do not say it.
+export function feeFromRefusal (paid, message) {
+  const s = String(message || '').match(/paying (\d+) takes (\d+)/)
+  if (!s || BigInt(s[1]) !== BigInt(paid)) return null
+  const fee = BigInt(s[2]) - BigInt(s[1])
+  return fee >= 0n ? fee : null
+}
+
+// The most a payment refused `in_channel` can send once the channels it names are moved back:
+// what the live coins hold, plus the wallet's side of its channels, less the payment's fee
+// ("holds H … paying P takes N …; T more is the wallet's side": H + T - (N - P)), at most `paid`.
+// The round that moves them back may cost a little more; the payment then says the most it can.
+// null when the words do not say it.
+export function sendableAfterFreeing (paid, message) {
+  const m = String(message || '')
+  const s = m.match(/holds (\d+) of asset \S+ in live coins, and paying (\d+) takes (\d+)/)
+  const t = m.match(/; (\d+) more is the wallet's side of its channels/)
+  if (!s || !t) return null
+  const most = BigInt(s[1]) + BigInt(t[1]) - (BigInt(s[3]) - BigInt(s[2]))
+  const p = BigInt(paid)
+  return most > 0n ? (most < p ? most : p) : 0n
+}
+
 export function sendableNow (paid, message) {
   const m = String(message || '')
   const p = BigInt(paid)
