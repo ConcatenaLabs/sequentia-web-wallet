@@ -97,3 +97,18 @@ test('under the amount, the fee, how soon and the most, before the review', () =
   // Max to a receive code in the tree is what the library would pay.
   assert.match(html, /if\(inTree && typed && others===0n && max>0n\)\{ try\{ const q=await treeQuoteFor\(typed, max, hex\); if\(q\) max=q\.most; \}catch\{\} \}/)
 });
+
+test('nothing sendable while held: the wallet says its own maintenance is moving it, and for how long', () => {
+  assert.equal(DEFAULT_WORDS.movingNow('EURX', DEFAULT_WORDS.aMinute),
+    "Your EURX is being moved by the wallet's automatic maintenance in the current block: you can send it in about a minute.")
+  assert.match(fn('noneNowWords'), /if\(arriving > 0n\) return DEFAULT_WORDS\.stillArriving\(m0\.ticker\);\s+if\(held > 0n\) return DEFAULT_WORDS\.movingNow\(m0\.ticker, waitFor\(hex\)\);/)
+  assert.match(fn('shortWords'), /return noneNowWords\(hex, m0\);/)
+  assert.match(fn('treeQuoteFor'), /: noneNowWords\(hex, m0\) \}\);/)
+})
+
+test('care opens no channel in an asset being sent, nor in one held for under CHANNEL_MIN_USD', () => {
+  assert.match(html, /const CHANNEL_MIN_USD = 10;/)
+  assert.match(fn('noOpenChannelAssets'), /if\(hex && hex !== 'BTC' && \(addr \|\| amt\)\) out\.add\(hex\);/)
+  assert.match(fn('noOpenChannelAssets'), /if\(usd != null && usd < CHANNEL_MIN_USD\) out\.add\(hex\);/)
+  assert.match(html, /noOpenChannels: \(\)=> noOpenChannelAssets\(\),/)
+})

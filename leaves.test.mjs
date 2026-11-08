@@ -2,7 +2,7 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { issuerAssets, bondRefusal, holdingRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { issuerAssets, bondRefusal, holdingRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, heldAssets, channelHoldMs, CHANNEL_HOLD_AFTER_MS, CHANNEL_HOLD_BTC_MS, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -223,6 +223,10 @@ test('care plans every leaf of a round: its arguments', () => {
   assert.deepEqual(careArgs(21), { channels: true, scan: 21 })
   // While a payment frees a channel's side, care leaves channels alone.
   assert.deepEqual(careArgs(21, true), { channels: false, scan: 21 })
+  // No channel opened in the assets named; none named while channels are held whole.
+  assert.deepEqual(careArgs(21, false, ['b', 'a', 'b']), { channels: true, scan: 21, no_open: ['a', 'b'] })
+  assert.deepEqual(careArgs(21, true, ['a']), { channels: false, scan: 21 })
+  assert.deepEqual(careArgs(undefined, false, []), { channels: true })
 })
 
 test('a release is done once no coin it gave up is still live or in its round', () => {
@@ -327,8 +331,11 @@ test('a payment the side of a channel covers closes the channel through the next
   assert.equal(sends, 2, 'asked again once the round set the side free')
   assert.equal(api.state.releasing, null)
   assert.equal(api.releasing(), null)
-  // Care, run meanwhile or right after, leaves channels alone and so never reopens one with the side.
-  for (const a of cares.slice(caresBefore)) assert.equal(a.channels, false, JSON.stringify(cares))
+  // Care, run meanwhile, leaves channels alone; after, it opens none in the asset paid, for the time
+  // a payment takes, kept in the store so a reload keeps it too.
+  for (const a of cares.slice(caresBefore)) assert.ok(a.channels === false || (a.no_open || []).includes(X), JSON.stringify(cares))
+  const holds = JSON.parse(store.getItem('leaves.channelHolds.t') || '{}')
+  assert.ok(holds[X] > clock && holds[X] <= clock + CHANNEL_HOLD_AFTER_MS, JSON.stringify(holds))
   api.stop()
 })
 
@@ -945,4 +952,14 @@ test('a refusal in_channel carries the most and the fee once the channels are cl
   assert.deepEqual([e.close, e.most, e.fee], [['ch1'], '30502601', '704'])
   const older = new LeafError({ kind: 'in_channel', message: 'refused: short', asset: 'aa', close: ['ch1'] })
   assert.equal(older.most, undefined)
+})
+
+test('a payment that closed a channel holds that asset alone, for ten minutes, an hour for Bitcoin', () => {
+  assert.equal(CHANNEL_HOLD_AFTER_MS, 10 * 60_000)
+  assert.equal(CHANNEL_HOLD_BTC_MS, 60 * 60_000)
+  assert.equal(channelHoldMs('e396'), CHANNEL_HOLD_AFTER_MS)
+  assert.equal(channelHoldMs('BTC'), CHANNEL_HOLD_BTC_MS)
+  assert.deepEqual(heldAssets({ b: 2000, a: 3000, c: 999 }, 1000), ['a', 'b'])
+  assert.deepEqual(heldAssets({ a: 1000 }, 1000), [])
+  assert.deepEqual(heldAssets(null, 1000), [])
 })

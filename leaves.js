@@ -134,8 +134,18 @@ export const TAKE_IN_MS = 45_000
 export const TAKE_IN_EVERY_MS = 2_000
 // How often user mode asks the library to refresh what it received out of round.
 export const REFRESH_EVERY_MS = 120_000
-// How long care leaves channels alone after a payment closed one to spend its side.
+// How long care opens no channel in an asset after a payment closed one to spend its side, so a
+// person sending it has the time a payment takes, reloads included (kept in the store): ten
+// minutes for an asset of the tree, whose round is final in a Sequentia block; an hour for
+// Bitcoin, whose blocks come every ten minutes or slower. Channels are still read and folded.
 export const CHANNEL_HOLD_AFTER_MS = 10 * 60_000
+export const CHANNEL_HOLD_BTC_MS = 60 * 60_000
+export const CHANNEL_HOLDS_KEY = 'leaves.channelHolds'
+export function channelHoldMs (asset) { return asset === 'BTC' ? CHANNEL_HOLD_BTC_MS : CHANNEL_HOLD_AFTER_MS }
+// The assets whose hold `holds` ({ asset: until }) still runs at `at`.
+export function heldAssets (holds, at) {
+  return Object.entries(holds || {}).filter(([, until]) => Number(until) > at).map(([a]) => a).sort()
+}
 // Whether user mode refreshes what it receives out of round by itself: on unless the page sets
 // window.SEQ_REFRESH_RECEIVED = false. The library gives a coin up only where the operator can
 // fund its refresh and takes back a refresh that waits, so a coin received stays the wallet's to pay with.
@@ -169,9 +179,12 @@ export const RELEASE_TRIES = 3
 // While a payment closes a channel to spend its side (`holdChannels`), care neither reads, folds nor
 // opens channels, so it never puts half of the side just freed back into a channel before the
 // payment is made.
-export function careArgs (scan, holdChannels = false) {
+// `noOpen` names the assets care opens no channel in (held after a payment, being sent, or held too
+// little of): their channels are still read and folded.
+export function careArgs (scan, holdChannels = false, noOpen = []) {
   const a = { channels: !holdChannels }
   if (scan) a.scan = scan
+  if (!holdChannels && noOpen && noOpen.length) a.no_open = [...new Set(noOpen)].sort()
   return a
 }
 
@@ -1222,13 +1235,29 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- what the wallet does by itself: claims taken up, plans kept ----
   const claimScan = () => { try { const n = ctx.claimScan ? Number(ctx.claimScan()) : NaN; return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined } catch { return undefined } }
   const channelsHeld = () => S.channelsHeldUntil != null && now() < S.channelsHeldUntil
+  // The per-asset holds, in the store so a reload keeps them.
+  const readHolds = () => { try { return JSON.parse(ctx.store.getItem(tagged(CHANNEL_HOLDS_KEY, tag())) || '{}') || {} } catch { return {} } }
+  const holdChannel = (asset) => {
+    if (!asset) return
+    const h = readHolds(), at = now()
+    for (const [a, until] of Object.entries(h)) if (!(Number(until) > at)) delete h[a]
+    h[asset] = at + channelHoldMs(asset)
+    try { ctx.store.setItem(tagged(CHANNEL_HOLDS_KEY, tag()), JSON.stringify(h)) } catch {}
+  }
+  // No channel opened in an asset held after a payment, nor in one the page names (being sent, or
+  // held too little of: ctx.noOpenChannels).
+  const noOpen = () => {
+    let page = []
+    try { page = (ctx.noOpenChannels && ctx.noOpenChannels()) || [] } catch {}
+    return [...heldAssets(readHolds(), now()), ...page]
+  }
   async function careIfDue () {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
     if (S.asked) { S.upkeepLater = true; return }
     S.careAt = now()
     const t0 = now()
     try {
-      const v = await run('care', careArgs(claimScan(), channelsHeld()))
+      const v = await run('care', careArgs(claimScan(), channelsHeld(), noOpen()))
       log(`[leaves] care: ${now() - t0} ms`)
       S.lastCare = { at: now(), value: v }
       const sum = careSummary(v)
@@ -1393,7 +1422,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
             await run('participate', { leaves: e.close, shown: q.coins })
             log(`[leaves] ${command}: ${e.close.length} channel(s) closed into the next round; paid once it is final`)
             await roundWait(() => waitReleased(e.close, { turns: true }))
-          } finally { S.releasing = null; S.channelsHeldUntil = now() + CHANNEL_HOLD_AFTER_MS; render() }
+          } finally { S.releasing = null; S.channelsHeldUntil = null; holdChannel(e.asset); render() }
           continue
         }
         if (!(e instanceof LeafError) || e.kind !== 'planned' || !e.release || !e.release.length || i >= RELEASE_TRIES) throw e
@@ -2411,6 +2440,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Holds the channel reads for `ms` (0 lets them go on): while a person reviews a payment,
     // so the payment never waits for one.
     holdReads: (ms) => { S.holdUntil = ms > 0 ? now() + ms : 0 },
+    // The assets the operator serves in the tree.
+    servedAssets: () => (((S.info && S.info.server_info && S.info.server_info.assets) || []).map((a) => a && a.asset).filter(Boolean)),
     stop: () => { S.stopped = true; clearTimeout(S.chanTimer); clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer) },
   }
   render()

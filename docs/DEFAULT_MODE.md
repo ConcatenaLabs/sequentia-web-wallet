@@ -342,6 +342,13 @@ modes (`asset-picker.js`):
   **Send**. Asked for more than can go once the fee is out, the review is for the most, with "The
   fee comes out of your <TICKER>, so this is the most you can send."; refused for want of the fee
   after the wait, Send becomes **Send <most> <TICKER>**, reviewed again before anything is signed.
+- When nothing of the asset can be sent now and none of it is arriving, but the wallet holds some
+  (its maintenance is moving it in a round: a refresh, or part of it kept for instant payments):
+  "Your <TICKER> is being moved by the wallet's automatic maintenance in the current block: you can
+  send it in about a minute." (about 10 minutes for BTC).
+- The wallet's maintenance puts no part of an asset into a channel while a payment of it is being
+  written (a recipient or an amount typed), for ten minutes after a payment closed a channel to
+  spend its side (an hour for BTC; kept across reloads), nor while it holds less than 10 USD of it.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
   can be seen.
 - A payment of an asset from the wallet's own coins on the chain has the same review, titled

@@ -134,6 +134,9 @@ export const DEFAULT_WORDS = Object.freeze({
   // leaves a little of the asset for the fees of the transactions the payment keeps ready.
   sendUpTo: (amount, ticker) => `You can send up to ${amount} ${ticker}: the fee comes out of your balance.`,
   sendNoneNow: (ticker) => `None of your ${ticker} can be sent this way right now: try again in a moment.`,
+  // Held, not arriving, and none of it spendable: the wallet is moving it in a round (a refresh, or
+  // part of it kept for instant payments), which is final with the next block.
+  movingNow: (ticker, time) => `Your ${ticker} is being moved by the wallet's automatic maintenance in the current block: you can send it in ${time}.`,
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
   stillArrivingWithin: (ticker, minutes) => minutes
