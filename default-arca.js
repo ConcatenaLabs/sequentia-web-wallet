@@ -86,8 +86,8 @@ export const DEFAULT_WORDS = Object.freeze({
   feeKeptSome: 'A small part of what you send, shown once it is sent',
   // Why a payment in the wallet has a fee at all, under the fee line.
   feeWhy: 'The recipient gets the whole amount. The fee comes out of what you hold and pays the network fees of the transactions that keep this payment safe.',
-  // Part of what is sent is kept ready for Lightning payments, which a payment can't spend as it
-  // is: it is moved back to the balance first, through the next settlement.
+  // Part of what is sent is on the wallet's side of an Arca channel with the operator (instant
+  // payments), which a transfer can't spend: it is closed into the next round first.
   freeingFirst: (ticker) => `Part of your ${ticker} is kept ready for instant payments, and a regular payment can't use it there. Send first moves it back to your balance, which takes about a minute. Keep this page open.`,
   // Asked for more than can go once the fee is taken out: the review offers the most that can.
   feeOutOfAll: (ticker) => `The fee comes out of your ${ticker}, so this is the most you can send.`,

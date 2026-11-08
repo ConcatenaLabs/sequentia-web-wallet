@@ -2869,7 +2869,7 @@ async function treeSendReview(r, onDone, note){
   // transactions it keeps ready, or none over a channel. A refusal of the quote is the payment's:
   // said, and nothing is offered; one a channel's side would cover is paid after freeing it. A
   // library that has no quote says a little is kept back, never that there is no fee.
-  // A payment the wallet's Lightning side would cover is quoted from the library's refusal: its fee,
+  // A payment the wallet's channel side would cover is quoted from the library's refusal: its fee,
   // and, when more is asked than can go once the fee is taken out, the review is for the most.
   let quote = null, freeing = false, refused = '';
   try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
@@ -2909,7 +2909,7 @@ async function treeSendReview(r, onDone, note){
       if(onDone) onDone(); renderBalance();
     }catch(e){
       st.className='status err'; st.textContent = shortWords(e, atoms, r.asset, m0); ok.disabled=false;
-      // Refused for want of the fee (the Lightning side moved back costs the round's fee too): the
+      // Refused for want of the fee (closing the channel costs the round's fee too): the
       // review offers the most it can send now, reviewed again before anything is signed.
       const most = sendableNow(atoms, String(e?.message??e));
       if(most != null && most > 0n && most < atoms){

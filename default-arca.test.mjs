@@ -37,7 +37,7 @@ test('a payment refused for want of funds says the most it can send now', () => 
   assert.match(DEFAULT_WORDS.sendUpTo('0.30502601', 'EURX'), /up to 0\.30502601 EURX/)
 })
 
-test('a payment the Lightning side would cover: its fee and the most it can send', () => {
+test('a payment the channel side would cover: its fee and the most it can send', () => {
   // The tester's refusal: 0.15251653 EURX outside the channel, 0.15251652 on their side of it, and a
   // payment of all of it that keeps 704 atoms back for its fees.
   const said = 'refused: the wallet holds 15251653 of asset ' + B + ' in live coins, and paying 30503305 takes 30504009 with the margins its ' +
