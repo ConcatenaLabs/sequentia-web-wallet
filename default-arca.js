@@ -81,10 +81,26 @@ export const DEFAULT_WORDS = Object.freeze({
   noFee: 'No fees',
   // A payment in the tree leaves a little of what it moves for the fees of the transactions it
   // keeps ready (the library's `send_quote`): the review shows it, never "No fees" when it is not.
-  feeKept: (amount, ticker) => `${amount} ${ticker}, kept back for the transfer`,
-  feeKeptSome: 'A little of it, kept back for the transfer',
-  // Part of what is sent is first set free from instant payments, through the next settlement.
-  freeingFirst: 'Part of it is set aside for instant payments: it is set free first, which takes about a minute. Keep this page open.',
+  // Its value beside it, when the asset has a price, so "a little" is never left to guess.
+  feeKept: (amount, ticker, value) => `${amount} ${ticker}` + (value ? ` (${value})` : ''),
+  feeKeptSome: 'A small part of what you send, shown once it is sent',
+  // What leaves the wallet: the amount and the fee on top of it.
+  totalLabel: 'Total',
+  // Part of what is sent is on the wallet's side of an Arca channel with the operator (instant
+  // payments), which a transfer can't spend: it is closed into the next round, whose block the
+  // payment waits for (about a minute on Sequentia, about 10 on Bitcoin). `instant` is the most
+  // that goes without the wait, '' when none.
+  aMinute: 'about a minute',
+  tenMinutes: 'about 10 minutes',
+  waitBlock: (time, instant, ticker) => `This payment takes ${time} because it is larger than what you can send instantly, so it waits for the next block.` +
+    (instant ? ` You can send up to ${instant} ${ticker} instantly.` : '') + ' Keep this page open.',
+  // Under the amount, while it is typed, before anything is reviewed.
+  feeHint: (amount, ticker, value) => `Fee ${amount} ${ticker}` + (value ? ` (${value})` : ''),
+  hintSeconds: (fee) => `${fee} · arrives in seconds`,
+  hintWait: (fee, time, instant, ticker) => (fee ? `${fee} · takes ${time}.` : `Takes ${time}.`) + (instant ? ` Up to ${instant} ${ticker} goes instantly.` : ''),
+  // Asked for more than can go once the fee is taken out: the review offers the most that can.
+  feeOutOfAll: (ticker) => `The fee comes out of your ${ticker}, so this is the most you can send.`,
+  sendInstead: (amount, ticker) => `Send ${amount} ${ticker}`,
   // Max for an asset held in the Ark, to a destination it pays with a fee: type the amount.
   maxArkElsewhere: 'Max sizes a payment to a receive code. For this recipient, type the amount.',
   // A receive code paid at its address, because nothing the wallet holds pays it in seconds.
@@ -116,7 +132,7 @@ export const DEFAULT_WORDS = Object.freeze({
   stillArriving: (ticker) => `Part of this ${ticker} is still arriving: try again in a moment.`,
   // A payment the library refused for want of what it can spend now: the most it can send, which
   // leaves a little of the asset for the fees of the transactions the payment keeps ready.
-  sendUpTo: (amount, ticker) => `You can send up to ${amount} ${ticker} this way now: a payment keeps a little back for its fees.`,
+  sendUpTo: (amount, ticker) => `You can send up to ${amount} ${ticker}: the fee comes out of your balance.`,
   sendNoneNow: (ticker) => `None of your ${ticker} can be sent this way right now: try again in a moment.`,
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
@@ -526,6 +542,30 @@ export function treeRoute (text, info) {
 // ("the wallet holds H of asset A in live coins, and paying P takes N with the margins …": H less
 // N - P), or that much less than `paid` when the change would fall below the operator's smallest
 // leaf. 0n when nothing can be sent; null for any other refusal.
+// The fee a refused payment would have kept back, from the library's own words ("paying P takes
+// N with the margins …": N - P), in atoms; null when the words do not say it.
+export function feeFromRefusal (paid, message) {
+  const s = String(message || '').match(/paying (\d+) takes (\d+)/)
+  if (!s || BigInt(s[1]) !== BigInt(paid)) return null
+  const fee = BigInt(s[2]) - BigInt(s[1])
+  return fee >= 0n ? fee : null
+}
+
+// The most a payment refused `in_channel` can send once the channels it names are moved back:
+// what the live coins hold, plus the wallet's side of its channels, less the payment's fee
+// ("holds H … paying P takes N …; T more is the wallet's side": H + T - (N - P)), at most `paid`.
+// The round that moves them back may cost a little more; the payment then says the most it can.
+// null when the words do not say it.
+export function sendableAfterFreeing (paid, message) {
+  const m = String(message || '')
+  const s = m.match(/holds (\d+) of asset \S+ in live coins, and paying (\d+) takes (\d+)/)
+  const t = m.match(/; (\d+) more is the wallet's side of its channels/)
+  if (!s || !t) return null
+  const most = BigInt(s[1]) + BigInt(t[1]) - (BigInt(s[3]) - BigInt(s[2]))
+  const p = BigInt(paid)
+  return most > 0n ? (most < p ? most : p) : 0n
+}
+
 export function sendableNow (paid, message) {
   const m = String(message || '')
   const p = BigInt(paid)

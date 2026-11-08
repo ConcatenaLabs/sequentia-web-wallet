@@ -325,15 +325,23 @@ modes (`asset-picker.js`):
   back, says so ("This couldn't go through in seconds, and nothing was sent." / "This couldn't
   go through in seconds and came back to you.", then "Send it to the address instead? It arrives
   after the next block, in about a minute.") with the button **Send to the address**.
-- The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds.", its
-  fee line, and the buttons **Cancel** and **Send**. The fee is the leaf library's quote of that very
-  payment (`send_quote`): "Fee <amount> <TICKER>, kept back for the transfer", what the payment
-  leaves for the fees of the transactions it keeps ready out of the wallet's own coins (the
-  receiver gets the whole amount); "No fees" over a channel, which costs nothing; and "A little of
-  it, kept back for the transfer" from a library that quotes none. When part of what is sent is
-  set aside for instant payments, the review adds "Part of it is set aside for instant payments: it
-  is set free first, which takes about a minute. Keep this page open.", and Send frees it through
-  the next settlement before paying, with the same line while it waits.
+- Under the amount of a payment to a receive code in the tree, while it is typed and before any
+  review, one line from the leaf library's quote of that very payment (`send_quote`, or its
+  refusal): "Fee <amount> <TICKER> (< 0.01 USD) · arrives in seconds"; "Fee … · takes about a
+  minute. Up to <instant> <TICKER> goes instantly." when part of it must come back from the
+  wallet's side of its channel with the operator first (`in_channel`; about 10 minutes for BTC);
+  "You can send up to <most> <TICKER>: the fee comes out of your balance." above the most. **Max**
+  fills in that most, not the whole balance.
+- The review is titled **Send <amount> <TICKER>?**, the amount the recipient gets, with its rows
+  **Fee** "<amount> <TICKER> (≈ <value>)" (in cents, "< 0.01 USD" below a cent, in BTC as it is;
+  "No fees" over a channel) and **Total**, what leaves the wallet, the fee on top of the amount;
+  then "It arrives in seconds.", or, when part of it must come back from the channel first,
+  "This payment takes about a minute because it is larger than what you can send instantly, so it
+  waits for the next block. You can send up to <instant> <TICKER> instantly. Keep this page open."
+  (the same line while it waits; "about 10 minutes" for BTC); and the buttons **Cancel** and
+  **Send**. Asked for more than can go once the fee is out, the review is for the most, with "The
+  fee comes out of your <TICKER>, so this is the most you can send."; refused for want of the fee
+  after the wait, Send becomes **Send <most> <TICKER>**, reviewed again before anything is signed.
 - When it is done: **"Sent <amount> <TICKER> (<seconds> s)."** The seconds stay in, so the speed
   can be seen.
 - A payment of an asset from the wallet's own coins on the chain has the same review, titled
