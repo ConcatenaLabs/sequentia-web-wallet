@@ -47,7 +47,9 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   // Below a cent it reads "< 0.01 USD", never a row of zeros.
   assert.match(fn('feeValueStr'), /if\(rv\.v < 0\.01\) return '< 0\.01 ' \+ refName\(rv\.ref\);/);
   assert.match(fn('feeValueStr'), /maximumFractionDigits:2/);
-  assert.match(fn('treeSendReview'), /if\(fee == null \|\| fee > 0n\) say\(DEFAULT_WORDS\.feeWhy\);/);
+  // What leaves the wallet, the fee on top of the amount; no "the recipient gets the whole amount".
+  assert.match(fn('treeSendReview'), /if\(fee != null && fee > 0n\) kv\.push\(\[DEFAULT_WORDS\.totalLabel, fmtAtoms\(atoms \+ fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker\]\);/);
+  assert.ok(!('feeWhy' in DEFAULT_WORDS));
   assert.match(fn('treeSendReview'), /leavesApi\.sendQuote\(r\.addr\.trim\(\), atoms, r\.asset\)/);
   assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX'), '0.00000704 EURX');
   assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX', '< 0.01 USD'), '0.00000704 EURX (< 0.01 USD)');
@@ -66,9 +68,24 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.match(fn('treeSendReview'), /await treeSendReview\(\{\.\.\.r, amtS: less\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\); m\.remove\(\);/);
   assert.equal(DEFAULT_WORDS.sendInstead('0.30502601', 'EURX'), 'Send 0.30502601 EURX');
   // Never "It arrives in seconds." beside "takes about a minute".
-  assert.match(fn('treeSendReview'), /say\(freeing \? DEFAULT_WORDS\.freeingFirst\(m0\.ticker\) : DEFAULT_WORDS\.sendLine\);/);
+  assert.match(fn('treeSendReview'), /say\(freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
+  assert.match(fn('treeSendReview'), /const instant = freeing \? sendableNow\(atoms, refused\) : null;/);
   // The channel side named plainly: no "set free", no "channel", no "Lightning".
-  const f = DEFAULT_WORDS.freeingFirst('EURX');
-  assert.equal(f, 'This payment takes about a minute: part of your EURX has to be made available first. Keep this page open.');
-  assert.ok(!/set free|channel|lightning/i.test(f), f);
+  // The wait says why, how long by the chain, and the most that goes without it.
+  assert.equal(DEFAULT_WORDS.waitBlock(DEFAULT_WORDS.aMinute, '0.15251221', 'EURX'),
+    'This payment takes about a minute because it is larger than what you can send instantly, so it waits for the next block. You can send up to 0.15251221 EURX instantly. Keep this page open.')
+  assert.match(DEFAULT_WORDS.waitBlock(DEFAULT_WORDS.tenMinutes, '', 'BTC'), /^This payment takes about 10 minutes because .* Keep this page open\.$/)
+  assert.match(fn('waitFor'), /hex === 'BTC' \? DEFAULT_WORDS\.tenMinutes : DEFAULT_WORDS\.aMinute/)
+  assert.ok(!/set free|channel|lightning/i.test(DEFAULT_WORDS.waitBlock('x', '1', 'EURX')))
+})
+
+test('under the amount, the fee, how soon and the most, before the review', () => {
+  assert.equal(DEFAULT_WORDS.hintSeconds(DEFAULT_WORDS.feeHint('0.00000432', 'EURX', '< 0.01 USD')), 'Fee 0.00000432 EURX (< 0.01 USD) · arrives in seconds')
+  assert.equal(DEFAULT_WORDS.hintWait(DEFAULT_WORDS.feeHint('0.00000704', 'BTC', '< 0.01 USD'), DEFAULT_WORDS.tenMinutes, '0.15251221', 'BTC'),
+    'Fee 0.00000704 BTC (< 0.01 USD) · takes about 10 minutes. Up to 0.15251221 BTC goes instantly.')
+  assert.equal(DEFAULT_WORDS.sendUpTo('0.30502601', 'EURX'), 'You can send up to 0.30502601 EURX: the fee comes out of your balance.')
+  assert.match(fn('treeQuoteFor'), /if\(most != null && most < atoms\) return upTo\(most\);/)
+  assert.match(html, /r\.querySelector\('\.ramt'\)\.addEventListener\('input', \(\)=>\{ sendFeeResize\(\); showSendFee\(\); r\._quote\(\); \}\);/)
+  // Max to a receive code in the tree is what the library would pay.
+  assert.match(html, /if\(inTree && typed && others===0n && max>0n\)\{ try\{ const q=await treeQuoteFor\(typed, max, hex\); if\(q\) max=q\.most; \}catch\{\} \}/)
 });

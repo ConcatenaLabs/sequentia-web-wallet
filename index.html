@@ -2865,6 +2865,34 @@ function shortWords(e, atoms, hex, m0){
 // A payment to a receive code in the tree (leaves.js payCode): what is sent, to whom, and its
 // fee, reviewed before anything is signed; the leaf library refuses what it would not pay, in its
 // own words (plain words in default mode).
+// How long a payment waits for the block of the round it needs: a Sequentia block for the tree,
+// a Bitcoin block for the Bitcoin ark.
+function waitFor(hex){ return hex === 'BTC' ? DEFAULT_WORDS.tenMinutes : DEFAULT_WORDS.aMinute; }
+
+// What a payment to a receive code in the tree would be, before it is reviewed (the library's
+// `send_quote`, or its refusal): { most, text }, the most of `atoms` it can send and the line under
+// the amount ("Fee … · arrives in seconds", "Fee … · takes about a minute. Up to … goes
+// instantly.", "You can send up to …"). null when the library says nothing that reads as either.
+async function treeQuoteFor(addr, atoms, hex){
+  const m0 = hex==='BTC' ? { precision:8, ticker:'BTC' } : assetMeta(hex), p = m0.precision||0;
+  const feeText = (fee)=> fee > 0n ? DEFAULT_WORDS.feeHint(fmtAtoms(fee, p), m0.ticker, feeValueStr(hex, fee)) : DEFAULT_WORDS.noFee;
+  const upTo = (most)=> ({ most, text: most > 0n ? DEFAULT_WORDS.sendUpTo(fmtAtoms(most, p), m0.ticker) : DEFAULT_WORDS.sendNoneNow(m0.ticker) });
+  try{
+    const q = await leavesApi.sendQuote(addr, atoms, hex);
+    return { most: atoms, text: DEFAULT_WORDS.hintSeconds(feeText(q && q.fee != null ? BigInt(q.fee) : 0n)) };
+  }catch(e){
+    const said = String(e?.message??e);
+    if(e && e.kind === 'in_channel'){
+      const most = sendableAfterFreeing(atoms, said);
+      if(most != null && most < atoms) return upTo(most);
+      const fee = feeFromRefusal(atoms, said), now = sendableNow(atoms, said);
+      return { most: atoms, text: DEFAULT_WORDS.hintWait(fee != null ? feeText(fee) : '', waitFor(hex), now != null && now > 0n ? fmtAtoms(now, p) : '', m0.ticker) };
+    }
+    const most = sendableNow(atoms, said);
+    return most != null ? upTo(most) : null;
+  }
+}
+
 async function treeSendReview(r, onDone, note){
   const m0 = r.asset==='BTC' ? { precision:8, ticker:'BTC' } : assetMeta(r.asset);
   const atoms = parseAtoms(r.amtS, m0.precision||0);
@@ -2890,13 +2918,18 @@ async function treeSendReview(r, onDone, note){
   }
   const fee = quote && quote.fee != null ? BigInt(quote.fee) : freeing ? feeFromRefusal(atoms, refused) : null;
   let feeValue = ''; try{ if(fee > 0n) feeValue = feeValueStr(r.asset, fee); }catch{}
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee == null ? DEFAULT_WORDS.feeKeptSome
-    : fee > 0n ? DEFAULT_WORDS.feeKept(fmtAtoms(fee, m0.precision||0), m0.ticker, feeValue) : DEFAULT_WORDS.noFee]]});
+  const kv = [[DEFAULT_WORDS.feeLabel, fee == null ? DEFAULT_WORDS.feeKeptSome
+    : fee > 0n ? DEFAULT_WORDS.feeKept(fmtAtoms(fee, m0.precision||0), m0.ticker, feeValue) : DEFAULT_WORDS.noFee]];
+  // What leaves the wallet: the recipient gets the amount, the fee is on top of it.
+  if(fee != null && fee > 0n) kv.push([DEFAULT_WORDS.totalLabel, fmtAtoms(atoms + fee, m0.precision||0) + ' ' + m0.ticker]);
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv});
   const say = (t)=>{ const line=el('p','sub', t); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); };
   if(note) say(note);
-  if(fee == null || fee > 0n) say(DEFAULT_WORDS.feeWhy);
-  // It arrives in seconds, or in about a minute when part of it is made available first.
-  say(freeing ? DEFAULT_WORDS.freeingFirst(m0.ticker) : DEFAULT_WORDS.sendLine);
+  // It arrives in seconds, or after the next block when part of it is on the channel side, with
+  // the most that would go instantly.
+  const instant = freeing ? sendableNow(atoms, refused) : null;
+  const waitLine = DEFAULT_WORDS.waitBlock(waitFor(r.asset), instant != null && instant > 0n ? fmtAtoms(instant, m0.precision||0) : '', m0.ticker);
+  say(freeing ? waitLine : DEFAULT_WORDS.sendLine);
   ok.textContent = DEFAULT_WORDS.send;
   // The wallet's own channel reads wait while the review is open, so Send never waits for one.
   try{ leavesApi.holdReads(120_000); }catch{}
@@ -2906,7 +2939,7 @@ async function treeSendReview(r, onDone, note){
     const t0=performance.now();
     try{
       // While a channel's side is set free first, the wait says so.
-      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.freeingFirst(m0.ticker); }catch{} }, 1000);
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; }catch{} }, 1000);
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
@@ -8825,6 +8858,9 @@ async function fillMax(r){
       const tree=(!devMode() && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n;
       const inTree=tree > 0n && (!typed || !!leavesApi.treeRoute(payCodeDestination(typed, hex)));
       max = (inTree ? tree : BigInt(availableFor(hex))) - others;
+      // To a receive code in the tree, Max is what the library would pay: the fee off what is
+      // held, the channel side counted (treeQuoteFor).
+      if(inTree && typed && others===0n && max>0n){ try{ const q=await treeQuoteFor(typed, max, hex); if(q) max=q.most; }catch{} }
       // An address the chain's coins can't cover is paid out of the Ark (addressRoute), so Max to
       // an address is what the Ark can send it with its fee off, whenever that is more than the
       // chain's coins hold: the chain's coins alone (a few atoms beside an Ark of millions) could not
@@ -8887,7 +8923,8 @@ function addRecipientRow(){
     <div class="status err rwarn"></div>
     <label class="lbl" style="margin-top:10px">Amount</label>
     <div class="ramt-row"><div class="grow"><input class="mono ramt" placeholder="0.0"></div><button type="button" class="ghost maxbtn" title="Send everything you can, after the fee">Max</button></div>
-    <div class="sub ravail"></div>`;
+    <div class="sub ravail"></div>
+    <div class="sub rquote"></div>`;
   const rsel=r.querySelector('.rasset');
   ownedOptions(rsel);
   const sbtn=r.querySelector('.scanbtn'); if(sbtn) sbtn.onclick=()=> openScanner(r.querySelector('.raddr'), r.querySelector('.ramt'));
@@ -8908,10 +8945,20 @@ function addRecipientRow(){
   updAddrPh();
   const warn=r.querySelector('.rwarn');
   r._checkAddr=()=>{ warn.textContent=recipientProblem(raddr.value.trim(), rsel.value)||''; };
-  raddr.addEventListener('input', ()=>{ fillFromCode(r); r._checkAddr(); sendFeeResize(); showSendFee(); });
-  r.querySelector('.ramt').addEventListener('input', ()=>{ sendFeeResize(); showSendFee(); });
+  // To a receive code in the tree, the fee, how soon it arrives and the most that can go, under the
+  // amount while it is typed (treeQuoteFor), so no review is the first to say so.
+  const quoteLine=r.querySelector('.rquote'); let quoteSeq=0, quoteTimer=null;
+  r._quote=()=>{ clearTimeout(quoteTimer); quoteLine.textContent=''; const seq=++quoteSeq;
+    quoteTimer=setTimeout(async()=>{ try{
+      const hex=rsel.value, addr=raddr.value.trim(), s=hex ? assetAmountOf(r.querySelector('.ramt'), hex) : '';
+      if(!hex || hex==='BTC' || !addr || !s || !leavesApi || !leavesApi.isOpen() || !leavesApi.treeRoute(addr)) return;
+      const atoms=parseAtoms(s, assetMeta(hex).precision||0); if(atoms<=0n) return;
+      const q=await treeQuoteFor(addr, atoms, hex); if(seq===quoteSeq && q) quoteLine.textContent=q.text;
+    }catch{} }, 500); };
+  raddr.addEventListener('input', ()=>{ fillFromCode(r); r._checkAddr(); sendFeeResize(); showSendFee(); r._quote(); });
+  r.querySelector('.ramt').addEventListener('input', ()=>{ sendFeeResize(); showSendFee(); r._quote(); });
   r.querySelector('.maxbtn').onclick=()=>fillMax(r);
-  rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); r._refreshAvail(); updAddrPh(); r._checkAddr(); };   // default the fee to the sent asset; re-value too
+  rsel.onchange=()=>{ defaultFeeAssetToSent(); updateFeeForSendType(); updRecHint(); r._refreshAvail(); updAddrPh(); r._checkAddr(); r._quote(); };   // default the fee to the sent asset; re-value too
   r._refreshAvail();
   r.querySelector('.x').onclick=()=>{ if(box.children.length>1){ r.remove(); updateFeeForSendType(); } };
   box.appendChild(r);

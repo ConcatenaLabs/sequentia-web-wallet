@@ -84,11 +84,20 @@ export const DEFAULT_WORDS = Object.freeze({
   // Its value beside it, when the asset has a price, so "a little" is never left to guess.
   feeKept: (amount, ticker, value) => `${amount} ${ticker}` + (value ? ` (${value})` : ''),
   feeKeptSome: 'A small part of what you send, shown once it is sent',
-  // Why a payment in the wallet has a fee at all, under the fee line.
-  feeWhy: 'The recipient gets the whole amount. The fee covers network costs.',
+  // What leaves the wallet: the amount and the fee on top of it.
+  totalLabel: 'Total',
   // Part of what is sent is on the wallet's side of an Arca channel with the operator (instant
-  // payments), which a transfer can't spend: it is closed into the next round first.
-  freeingFirst: (ticker) => `This payment takes about a minute: part of your ${ticker} has to be made available first. Keep this page open.`,
+  // payments), which a transfer can't spend: it is closed into the next round, whose block the
+  // payment waits for (about a minute on Sequentia, about 10 on Bitcoin). `instant` is the most
+  // that goes without the wait, '' when none.
+  aMinute: 'about a minute',
+  tenMinutes: 'about 10 minutes',
+  waitBlock: (time, instant, ticker) => `This payment takes ${time} because it is larger than what you can send instantly, so it waits for the next block.` +
+    (instant ? ` You can send up to ${instant} ${ticker} instantly.` : '') + ' Keep this page open.',
+  // Under the amount, while it is typed, before anything is reviewed.
+  feeHint: (amount, ticker, value) => `Fee ${amount} ${ticker}` + (value ? ` (${value})` : ''),
+  hintSeconds: (fee) => `${fee} · arrives in seconds`,
+  hintWait: (fee, time, instant, ticker) => (fee ? `${fee} · takes ${time}.` : `Takes ${time}.`) + (instant ? ` Up to ${instant} ${ticker} goes instantly.` : ''),
   // Asked for more than can go once the fee is taken out: the review offers the most that can.
   feeOutOfAll: (ticker) => `The fee comes out of your ${ticker}, so this is the most you can send.`,
   sendInstead: (amount, ticker) => `Send ${amount} ${ticker}`,
@@ -123,7 +132,7 @@ export const DEFAULT_WORDS = Object.freeze({
   stillArriving: (ticker) => `Part of this ${ticker} is still arriving: try again in a moment.`,
   // A payment the library refused for want of what it can spend now: the most it can send, which
   // leaves a little of the asset for the fees of the transactions the payment keeps ready.
-  sendUpTo: (amount, ticker) => `You can send up to ${amount} ${ticker} this way now: a payment keeps a little back for its fees.`,
+  sendUpTo: (amount, ticker) => `You can send up to ${amount} ${ticker}: the fee comes out of your balance.`,
   sendNoneNow: (ticker) => `None of your ${ticker} can be sent this way right now: try again in a moment.`,
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
