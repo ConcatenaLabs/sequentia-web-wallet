@@ -88,7 +88,7 @@ export const DEFAULT_WORDS = Object.freeze({
   feeWhy: 'The recipient gets the whole amount. The fee comes out of what you hold and pays the network fees of the transactions that keep this payment safe.',
   // Part of what is sent is kept ready for Lightning payments, which a payment can't spend as it
   // is: it is moved back to the balance first, through the next settlement.
-  freeingFirst: (ticker) => `Part of your ${ticker} is kept ready for Lightning payments, and a payment can't spend it there. Send first moves it back to your balance, which takes about a minute. Keep this page open.`,
+  freeingFirst: (ticker) => `Part of your ${ticker} is kept ready for instant payments, and a regular payment can't use it there. Send first moves it back to your balance, which takes about a minute. Keep this page open.`,
   // Asked for more than can go once the fee is taken out: the review offers the most that can.
   feeOutOfAll: (ticker) => `The fee comes out of your ${ticker}, so this is the most you can send.`,
   sendInstead: (amount, ticker) => `Send ${amount} ${ticker}`,

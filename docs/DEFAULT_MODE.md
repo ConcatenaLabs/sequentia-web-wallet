@@ -332,8 +332,8 @@ modes (`asset-picker.js`):
   transactions it keeps ready, out of the wallet's own coins, with the line "The recipient gets the
   whole amount. The fee comes out of what you hold and pays the network fees of the transactions that
   keep this payment safe."; "No fees" over a channel, which costs nothing. When part of the asset is
-  kept ready for Lightning, the review adds "Part of your <TICKER> is kept ready for Lightning
-  payments, and a payment can't spend it there. Send first moves it back to your balance, which takes
+  kept ready for Lightning, the review adds "Part of your <TICKER> is kept ready for instant
+  payments, and a regular payment can't use it there. Send first moves it back to your balance, which takes
   about a minute. Keep this page open.", and Send moves it through the next settlement before paying,
   with the same line while it waits. Asked for more than can go once the fee is out (sending all one
   holds), the review is for the most that can, with "The fee comes out of your <TICKER>, so this is
