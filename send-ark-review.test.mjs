@@ -40,7 +40,7 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   assert.equal(DEFAULT_WORDS.noFee, 'No fees');
   // A payment in the tree shows the fee the library quotes for it (`send_quote`): what it keeps back
   // for its transfer, "No fees" only over a channel, and "a little" from a library that quotes none.
-  assert.match(fn('treeSendReview'), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\) : DEFAULT_WORDS\.noFee\]\]/);
+  assert.match(fn('treeSendReview'), /const kv = \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\) : DEFAULT_WORDS\.noFee\]\]/);
   // Refused for the channel side, the fee is read from the refusal, and its value shown beside it.
   assert.match(fn('treeSendReview'), /: freeing \? feeFromRefusal\(atoms, refused\) : null;/);
   assert.match(fn('treeSendReview'), /feeValue = feeValueStr\(r\.asset, fee\);/);
