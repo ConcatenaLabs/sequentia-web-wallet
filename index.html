@@ -2895,8 +2895,8 @@ async function treeSendReview(r, onDone, note){
   const say = (t)=>{ const line=el('p','sub', t); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); };
   if(note) say(note);
   if(fee == null || fee > 0n) say(DEFAULT_WORDS.feeWhy);
-  if(freeing) say(DEFAULT_WORDS.freeingFirst(m0.ticker));
-  { const line=el('p','sub', DEFAULT_WORDS.sendLine); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  // It arrives in seconds, or in about a minute when part of it is made available first.
+  say(freeing ? DEFAULT_WORDS.freeingFirst(m0.ticker) : DEFAULT_WORDS.sendLine);
   ok.textContent = DEFAULT_WORDS.send;
   // The wallet's own channel reads wait while the review is open, so Send never waits for one.
   try{ leavesApi.holdReads(120_000); }catch{}

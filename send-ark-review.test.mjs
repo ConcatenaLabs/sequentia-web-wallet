@@ -65,6 +65,8 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.match(fn('treeSendReview'), /ok\.textContent = DEFAULT_WORDS\.sendInstead\(less, m0\.ticker\);/);
   assert.match(fn('treeSendReview'), /await treeSendReview\(\{\.\.\.r, amtS: less\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\); m\.remove\(\);/);
   assert.equal(DEFAULT_WORDS.sendInstead('0.30502601', 'EURX'), 'Send 0.30502601 EURX');
+  // Never "It arrives in seconds." beside "takes about a minute".
+  assert.match(fn('treeSendReview'), /say\(freeing \? DEFAULT_WORDS\.freeingFirst\(m0\.ticker\) : DEFAULT_WORDS\.sendLine\);/);
   // The channel side named plainly: no "set free", no "channel", no "Lightning".
   const f = DEFAULT_WORDS.freeingFirst('EURX');
   assert.equal(f, 'This payment takes about a minute: part of your EURX has to be made available first. Keep this page open.');

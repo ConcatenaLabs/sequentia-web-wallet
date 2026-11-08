@@ -325,7 +325,7 @@ modes (`asset-picker.js`):
   back, says so ("This couldn't go through in seconds, and nothing was sent." / "This couldn't
   go through in seconds and came back to you.", then "Send it to the address instead? It arrives
   after the next block, in about a minute.") with the button **Send to the address**.
-- The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds.", its
+- The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds." (or the one below), its
   fee line, and the buttons **Cancel** and **Send**. The fee is the leaf library's quote of that very
   payment (`send_quote`), or the one its refusal names when part of the asset sits on the wallet's side of a channel
   with the operator (`in_channel`): "<amount> <TICKER> (≈ <value>)", its value in cents, or
