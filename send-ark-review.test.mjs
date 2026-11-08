@@ -42,7 +42,7 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   // for its transfer, "No fees" only over a channel, and "a little" from a library that quotes none.
   assert.match(fn('treeSendReview'), /const kv = \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\) : DEFAULT_WORDS\.noFee\]\]/);
   // Refused for the channel side, the fee is read from the refusal, and its value shown beside it.
-  assert.match(fn('treeSendReview'), /: freeing \? feeFromRefusal\(atoms, refused\) : null;/);
+  assert.match(fn('treeSendReview'), /: freeing \? closing\.fee : null;/);
   assert.match(fn('treeSendReview'), /feeValue = feeValueStr\(r\.asset, fee\);/);
   // Below a cent it reads "< 0.01 USD", never a row of zeros.
   assert.match(fn('feeValueStr'), /if\(rv\.v < 0\.01\) return '< 0\.01 ' \+ refName\(rv\.ref\);/);
@@ -62,7 +62,7 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
 
 test('asking for more than can go once the fee is out, the review offers the most', () => {
   // Before: the channel side would cover it, but not with the fee: the review is for the most.
-  assert.match(fn('treeSendReview'), /const most = sendableAfterFreeing\(atoms, refused\);\s+if\(most != null && most > 0n && most < atoms\) return treeSendReview\(\{\.\.\.r, amtS: fmtAtoms\(most, m0\.precision\|\|0\)\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\);/);
+  assert.match(fn('treeSendReview'), /const most = closing\.most;\s+if\(most != null && most > 0n && most < atoms\) return treeSendReview\(\{\.\.\.r, amtS: fmtAtoms\(most, m0\.precision\|\|0\)\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\);/);
   // After: refused for want of the fee, Send becomes "Send <most>", reviewed again.
   assert.match(fn('treeSendReview'), /ok\.textContent = DEFAULT_WORDS\.sendInstead\(less, m0\.ticker\);/);
   assert.match(fn('treeSendReview'), /await treeSendReview\(\{\.\.\.r, amtS: less\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\); m\.remove\(\);/);
@@ -77,6 +77,14 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.match(DEFAULT_WORDS.waitBlock(DEFAULT_WORDS.tenMinutes, '', 'BTC'), /^This payment takes about 10 minutes because .* Keep this page open\.$/)
   assert.match(fn('waitFor'), /hex === 'BTC' \? DEFAULT_WORDS\.tenMinutes : DEFAULT_WORDS\.aMinute/)
   assert.ok(!/set free|channel|lightning/i.test(DEFAULT_WORDS.waitBlock('x', '1', 'EURX')))
+})
+
+test('the most and the fee after the wait are the library\'s, counted with the leaves the close gives back', () => {
+  // The library names them (`most`, `fee`); an older one's words count only the coins live now.
+  assert.match(fn('afterClose'), /let most = big\(e && e\.most\), fee = big\(e && e\.fee\);/)
+  assert.match(fn('afterClose'), /if\(most == null\) most = sendableAfterFreeing\(atoms, said\);/)
+  assert.match(fn('treeSendReview'), /closing = afterClose\(e, atoms, refused\);/)
+  assert.match(fn('treeQuoteFor'), /const most = afterClose\(e, atoms, said\)\.most;/)
 })
 
 test('under the amount, the fee, how soon and the most, before the review', () => {

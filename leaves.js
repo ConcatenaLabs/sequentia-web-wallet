@@ -413,6 +413,10 @@ export class LeafError extends Error {
     if (e && Array.isArray(e.release)) this.release = e.release
     // A payment the wallet's side of its channels could cover: which channel leaves to close.
     if (e && Array.isArray(e.close)) this.close = e.close
+    // And, for a payment to a receive code, the most it can pay once they are closed and that
+    // payment's fee, with the leaves the close gives back counted (the library's `most`, `fee`).
+    if (e && e.most != null) this.most = String(e.most)
+    if (e && e.fee != null) this.fee = String(e.fee)
     // What the command cost before it was refused, where the library says (its `cost`).
     if (e && e.cost) this.cost = e.cost
   }
