@@ -11463,7 +11463,7 @@ function initRewardsEngine(){
 function acTargetOptions(){
   // Bitcoin first: the top seat is the whole of its privilege here, exactly as
   // in the Send picker. Everything else is one row among equals.
-  const opts = [{ hex: AC_BTC, label: 'tBTC (Bitcoin)' }];
+  const opts = [{ hex: AC_BTC, label: 'BTC — Bitcoin' }];
   const seen = new Set([AC_BTC]);
   let bal = {}; try{ bal = balObj(); }catch{}
   for(const hex of Object.keys(bal)){
@@ -11495,7 +11495,7 @@ function renderAcSettings(){
   $('acSlip').value = String(s.maxSlippageBp);
 }
 
-function acTargetTicker(t){ return t === AC_BTC ? 'tBTC' : (assetMeta(t).ticker || 'the target asset'); }
+function acTargetTicker(t){ return t === AC_BTC ? 'BTC' : (assetMeta(t).ticker || 'the target asset'); }
 
 async function refreshRewards(){
   const list = $('rewardList'); if(!list) return;
