@@ -43,11 +43,14 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   assert.match(fn('treeSendReview'), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\) : DEFAULT_WORDS\.noFee\]\]/);
   // Refused for the channel side, the fee is read from the refusal, and its value shown beside it.
   assert.match(fn('treeSendReview'), /: freeing \? feeFromRefusal\(atoms, refused\) : null;/);
-  assert.match(fn('treeSendReview'), /feeValue = refValueStr\(r\.asset, fee\)/);
+  assert.match(fn('treeSendReview'), /feeValue = feeValueStr\(r\.asset, fee\);/);
+  // Below a cent it reads "< 0.01 USD", never a row of zeros.
+  assert.match(fn('feeValueStr'), /if\(rv\.v < 0\.01\) return '< 0\.01 ' \+ refName\(rv\.ref\);/);
+  assert.match(fn('feeValueStr'), /maximumFractionDigits:2/);
   assert.match(fn('treeSendReview'), /if\(fee == null \|\| fee > 0n\) say\(DEFAULT_WORDS\.feeWhy\);/);
   assert.match(fn('treeSendReview'), /leavesApi\.sendQuote\(r\.addr\.trim\(\), atoms, r\.asset\)/);
   assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX'), '0.00000704 EURX');
-  assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX', '≈ 0.000008 USD'), '0.00000704 EURX (≈ 0.000008 USD)');
+  assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX', '< 0.01 USD'), '0.00000704 EURX (< 0.01 USD)');
   assert.ok(!/a little/i.test(DEFAULT_WORDS.feeKeptSome), 'no "a little" left to guess');
   for (const name of ['assetLightningReview', 'offboardReview'])
     assert.match(fn(name), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee\]\]/, name);
@@ -64,6 +67,6 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.equal(DEFAULT_WORDS.sendInstead('0.30502601', 'EURX'), 'Send 0.30502601 EURX');
   // The channel side named plainly: no "set free", no "channel", no "Lightning".
   const f = DEFAULT_WORDS.freeingFirst('EURX');
-  assert.match(f, /Part of your EURX is kept ready for instant payments/);
+  assert.equal(f, 'This payment takes about a minute: part of your EURX has to be made available first. Keep this page open.');
   assert.ok(!/set free|channel|lightning/i.test(f), f);
 });

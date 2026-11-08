@@ -328,13 +328,12 @@ modes (`asset-picker.js`):
 - The review is titled **Send <amount> <TICKER>?** with the line "It arrives in seconds.", its
   fee line, and the buttons **Cancel** and **Send**. The fee is the leaf library's quote of that very
   payment (`send_quote`), or the one its refusal names when part of the asset sits on the wallet's side of a channel
-  with the operator (`in_channel`): "<amount> <TICKER> (≈ <value>)", what the payment keeps back for the fees of the
+  with the operator (`in_channel`): "<amount> <TICKER> (≈ <value>)", its value in cents, or
+  "(< 0.01 USD)" below a cent (in BTC as it is), what the payment keeps back for the fees of the
   transactions it keeps ready, out of the wallet's own coins, with the line "The recipient gets the
-  whole amount. The fee comes out of what you hold and pays the network fees of the transactions that
-  keep this payment safe."; "No fees" over a channel, which costs nothing. When part of the asset is
-  in such a channel, the review adds "Part of your <TICKER> is kept ready for instant
-  payments, and a regular payment can't use it there. Send first moves it back to your balance, which takes
-  about a minute. Keep this page open.", and Send moves it through the next settlement before paying,
+  whole amount. The fee covers network costs."; "No fees" over a channel, which costs nothing. When part of the asset is
+  in such a channel, the review adds "This payment takes about a minute: part of your <TICKER> has to be made
+  available first. Keep this page open.", and Send moves it through the next settlement before paying,
   with the same line while it waits. Asked for more than can go once the fee is out (sending all one
   holds), the review is for the most that can, with "The fee comes out of your <TICKER>, so this is
   the most you can send."; a payment refused for want of the fee afterwards (the settlement cost a

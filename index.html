@@ -2495,6 +2495,13 @@ function refName(ref){ return (ref==='SEQ' && POLICY_HEX) ? (assetMeta(POLICY_HE
 function fmtRef(v, ref){ const dp = ref==='BTC' ? 8 : (Math.abs(v) >= 1 ? 2 : 6); return v.toLocaleString(undefined,{maximumFractionDigits:dp}) + ' ' + refName(ref); }
 // "≈ 12.34 USD" for `atoms` of asset `hex`, or '' if unpriced.
 function refValueStr(hex, atoms){ const rv = refValue(hex, atoms); return rv ? '≈ ' + fmtRef(rv.v, rv.ref) : ''; }
+// A fee's value: in cents, and "< 0.01 USD" below a cent, never a row of zeros; in BTC as it is.
+function feeValueStr(hex, atoms){
+  const rv = refValue(hex, atoms); if(!rv) return '';
+  if(rv.ref === 'BTC') return '≈ ' + fmtRef(rv.v, rv.ref);
+  if(rv.v < 0.01) return '< 0.01 ' + refName(rv.ref);
+  return '≈ ' + rv.v.toLocaleString(undefined,{maximumFractionDigits:2}) + ' ' + refName(rv.ref);
+}
 // Changing the reference re-denominates the whole wallet at once: the balance rows
 // and every live "≈" hint under an amount field.
 function setRef(r){ REF=r; try{ localStorage.setItem('seqRefCcy', r); }catch{} initRefSelector(); try{ renderBalance(); }catch{} refreshAllRefHints(); }
@@ -2882,7 +2889,7 @@ async function treeSendReview(r, onDone, note){
     if(most != null && most > 0n && most < atoms) return treeSendReview({...r, amtS: fmtAtoms(most, m0.precision||0)}, onDone, DEFAULT_WORDS.feeOutOfAll(m0.ticker));
   }
   const fee = quote && quote.fee != null ? BigInt(quote.fee) : freeing ? feeFromRefusal(atoms, refused) : null;
-  let feeValue = ''; try{ if(fee > 0n) feeValue = refValueStr(r.asset, fee) || ''; }catch{}
+  let feeValue = ''; try{ if(fee > 0n) feeValue = feeValueStr(r.asset, fee); }catch{}
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee == null ? DEFAULT_WORDS.feeKeptSome
     : fee > 0n ? DEFAULT_WORDS.feeKept(fmtAtoms(fee, m0.precision||0), m0.ticker, feeValue) : DEFAULT_WORDS.noFee]]});
   const say = (t)=>{ const line=el('p','sub', t); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); };
