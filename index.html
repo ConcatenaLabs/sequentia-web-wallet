@@ -2858,7 +2858,7 @@ function shortWords(e, atoms, hex, m0){
   let arriving = 0n; try{ arriving = leavesApi.arriving(hex) || 0n; }catch{}
   if(most == null) return DEFAULT_WORDS.stillArriving(m0.ticker);
   if(most > 0n) return DEFAULT_WORDS.sendUpTo(fmtAtoms(most, m0.precision||0), m0.ticker);
-  return arriving > 0n ? DEFAULT_WORDS.stillArriving(m0.ticker) : DEFAULT_WORDS.sendNoneNow(m0.ticker);
+  return noneNowWords(hex, m0);
 }
 
 // review + broadcast a Bitcoin testnet4 payment (mirrors the Sequentia reviewBroadcast UX)
@@ -2878,6 +2878,37 @@ function afterClose(e, atoms, said){
   return { most, fee };
 }
 
+// Nothing of an asset can be sent now: still arriving, or held but being moved in a round by the
+// wallet's own maintenance (a refresh, or part of it kept for instant payments), or truly none.
+function noneNowWords(hex, m0){
+  let held = 0n, arriving = 0n;
+  try{ held = leavesApi.leafAtoms(hex) || 0n; arriving = leavesApi.arriving(hex) || 0n; }catch{}
+  if(arriving > 0n) return DEFAULT_WORDS.stillArriving(m0.ticker);
+  if(held > 0n) return DEFAULT_WORDS.movingNow(m0.ticker, waitFor(hex));
+  return DEFAULT_WORDS.sendNoneNow(m0.ticker);
+}
+
+// Care opens no channel in an asset a payment is being written in (a recipient or an amount
+// typed), nor in one the wallet holds less than CHANNEL_MIN_USD of: there half of it in a channel
+// is worth less than the minute a payment of all of it then waits (leaves.js careArgs no_open).
+const CHANNEL_MIN_USD = 10;
+function usdOf(hex, atoms){
+  const pu = priceFor(priceTicker(hex)); if(!(pu > 0)) return null;
+  return Number(atoms) / Math.pow(10, assetMeta(hex).precision||0) * pu;
+}
+function noOpenChannelAssets(){
+  const out = new Set();
+  try{ for(const r of $('recipients').children){
+    const hex = r.querySelector('.rasset')?.value, addr = (r.querySelector('.raddr')?.value||'').trim(), amt = (r.querySelector('.ramt')?.value||'').trim();
+    if(hex && hex !== 'BTC' && (addr || amt)) out.add(hex);
+  } }catch{}
+  try{ for(const hex of leavesApi.servedAssets()){
+    const atoms = leavesApi.leafAtoms(hex) || 0n; if(atoms <= 0n) continue;
+    const usd = usdOf(hex, atoms); if(usd != null && usd < CHANNEL_MIN_USD) out.add(hex);
+  } }catch{}
+  return [...out];
+}
+
 // How long a payment waits for the block of the round it needs: a Sequentia block for the tree,
 // a Bitcoin block for the Bitcoin ark.
 function waitFor(hex){ return hex === 'BTC' ? DEFAULT_WORDS.tenMinutes : DEFAULT_WORDS.aMinute; }
@@ -2889,7 +2920,7 @@ function waitFor(hex){ return hex === 'BTC' ? DEFAULT_WORDS.tenMinutes : DEFAULT
 async function treeQuoteFor(addr, atoms, hex){
   const m0 = hex==='BTC' ? { precision:8, ticker:'BTC' } : assetMeta(hex), p = m0.precision||0;
   const feeText = (fee)=> fee > 0n ? DEFAULT_WORDS.feeHint(fmtAtoms(fee, p), m0.ticker, feeValueStr(hex, fee)) : DEFAULT_WORDS.noFee;
-  const upTo = (most)=> ({ most, text: most > 0n ? DEFAULT_WORDS.sendUpTo(fmtAtoms(most, p), m0.ticker) : DEFAULT_WORDS.sendNoneNow(m0.ticker) });
+  const upTo = (most)=> ({ most, text: most > 0n ? DEFAULT_WORDS.sendUpTo(fmtAtoms(most, p), m0.ticker) : noneNowWords(hex, m0) });
   try{
     const q = await leavesApi.sendQuote(addr, atoms, hex);
     return { most: atoms, text: DEFAULT_WORDS.hintSeconds(feeText(q && q.fee != null ? BigInt(q.fee) : 0n)) };
@@ -4242,6 +4273,8 @@ function initLeaves(){
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
     // Claims named for any address this wallet handed out are found: the kit's next index and 20 more.
     claimScan: ()=> Math.max(Number(addrIndex ?? 0), 0) + 20,
+    // Assets care opens no channel in: one being sent, one held for too little (noOpenChannelAssets).
+    noOpenChannels: ()=> noOpenChannelAssets(),
     careEveryMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_CARE_MS)) || undefined,
     // A page out of view reads its channels less often (leaves.js watchChannels).
     visible: ()=> typeof document==='undefined' || document.visibilityState!=='hidden',
