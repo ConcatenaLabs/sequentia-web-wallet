@@ -1863,7 +1863,7 @@ import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
 import { confidentialPlan, ownShare, liveFromRefusal, feeMarginAtoms as confidentialMargin } from './confidential-pay.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
-import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, receiveSyncDue, receiveMovesOnSync, RECEIVE_SYNC_MS, RECEIVE_FOLLOW_MS, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, receivePlan, statusMovesOn, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, moveOutSats, moveRetryMs, moveWaits, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
@@ -4252,6 +4252,47 @@ function applyModeClass(){
   document.body.classList.toggle('devmode', devMode());
   try{ lnStatusPill(); }catch{}
 }
+// Every receive of the wallet's invoices in an asset, followed until its payment is the wallet's
+// (asset-lightning.js receivePlan): the operator asked how it stands while nothing is paid, a sync
+// once a payment is held, and syncs until its leaf is taken. One loop for the page, whatever the
+// Receive card shows and with the tab in front or behind; the library's own schedule would leave a
+// payment held at the operator for up to a quarter of its receive window.
+function followAssetReceives(){
+  let syncedAt = 0;
+  const askedAt = new Map();
+  const info = ()=>{ try{ return leavesApi.info() || {}; }catch{ return {}; } };
+  const expiryS = ()=>{ try{ const i = info(); const si = i.server_info || i; return Number(si.lightning.receive.invoice_expiry_seconds) || undefined; }catch{ return undefined; } };
+  const server = ()=> String(info().server || (window.SEQ_ARCA && window.SEQ_ARCA.server) || '').replace(/\/+$/, '');
+  const status = async (hash)=>{
+    const ctl = new AbortController(); const t = setTimeout(()=> ctl.abort(), 5000);
+    try{
+      const r = await fetch(server() + '/v1/lightning_receive_status', { method:'POST', headers:{ 'content-type':'application/json' },
+        body: JSON.stringify({ payment_hash: hash }), cache:'no-store', signal: ctl.signal });
+      return r.ok ? await r.json() : null;
+    }catch{ return null; } finally { clearTimeout(t); }
+  };
+  (async()=>{
+    for(;;){
+      await new Promise(ok=> setTimeout(ok, 3_000));
+      if(!leavesApi || !leavesApi.isOpen() || !server()) continue;
+      let receives=null; try{ receives = await leavesApi.own('lightning_receives', {}); }catch{ continue; }
+      const now = Date.now();
+      let sync = false;
+      for(const [hash, rec] of Object.entries(receives || {})){
+        const plan = receivePlan(rec, now/1000, expiryS());
+        if(!plan){ askedAt.delete(hash); continue; }
+        if(plan.action==='sync'){ if(now - syncedAt >= plan.everyMs) sync = true; continue; }
+        if(now - (askedAt.get(hash) || 0) < plan.everyMs) continue;
+        askedAt.set(hash, now);
+        if(statusMovesOn(await status(hash))) sync = true;
+      }
+      if(!sync || (leavesApi.personBusy && leavesApi.personBusy())) continue;
+      syncedAt = Date.now();
+      try{ await leavesApi.syncNow(); }catch{}
+      try{ renderBalance(); }catch{}
+    }
+  })();
+}
 function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
@@ -4289,6 +4330,7 @@ function initLeaves(){
     // Whether this page's reading of the chain holds a transaction (a board the leaf wallet made).
     holdsTx: (txid)=>{ if(!_scannedOnce) return undefined; try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return undefined; } },
   }, $('leavesRoot'), $('devModeRoot'));
+  followAssetReceives();
   // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
   if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
   // And where BTC is held, read while the page stays in default mode (tooling/limits-live-drive.mjs).
@@ -8197,37 +8239,11 @@ function payCodeText(){
     lightning: inv ? inv.invoice : undefined, lnurl: name ? nameLnurlUrl(name, lnaddrDomain()) : undefined,
     ark: large ? undefined : (_recvArk || undefined), sequentia: _recvCode.text });
 }
-// A payment held for an invoice in an asset, once the code shows a new one: synced until its leaf
-// is the wallet's (`received`), so the balance shows it within a minute, not at the library's
-// next scheduled sync. One follow per payment, for RECEIVE_FOLLOW_MS at most.
-const _assetReceiveFollows = new Set();
-function followAssetReceive(hash){
-  if(_assetReceiveFollows.has(hash)) return;
-  _assetReceiveFollows.add(hash);
-  (async()=>{
-    const t0 = Date.now();
-    try{
-      while(Date.now() - t0 < RECEIVE_FOLLOW_MS){
-        let rec=null; try{ rec = ((await leavesApi.own('lightning_receives', {})) || {})[hash]; }catch{}
-        if(!receiveMovesOnSync(rec, Date.now()/1000)) break;
-        if(document.visibilityState!=='hidden' && !(leavesApi.personBusy && leavesApi.personBusy())){
-          try{ await leavesApi.syncNow(); }catch{}
-          try{ renderBalance(); }catch{}
-        }
-        await new Promise(ok=> setTimeout(ok, RECEIVE_SYNC_MS));
-      }
-    } finally {
-      _assetReceiveFollows.delete(hash);
-      try{ renderBalance(); }catch{}
-    }
-  })();
-}
 // The code's invoice is claimed as soon as it is paid; the code then shows a new one. An asset's
 // is the leaf library's receive: once a payment is held for it the wallet syncs, which claims the
 // leaf and settles the payment; one that lapsed or failed is drawn again.
 function watchRecvInvoice(inv){
   const mine = ++_recvInvWatch;
-  let syncedAt = Date.now();
   (async()=>{
     while(mine===_recvInvWatch && Date.now()/1000 < Number(inv.expires_at)){
       if(inv.asset==='BTC'){
@@ -8237,21 +8253,11 @@ function watchRecvInvoice(inv){
       } else {
         let all=null; try{ all = await leavesApi.own('lightning_receives', {}); }catch{}
         if(mine!==_recvInvWatch) return;
-        const rec = all ? all[inv.payment_hash] : { state: 'waiting', expires_at: inv.expires_at };
-        const st = all ? receiveState(rec, Date.now()/1000) : 'open';
+        const st = all ? receiveState(all[inv.payment_hash], Date.now()/1000) : 'open';
         if(st!=='open'){
           _recvInv=null;
-          if(st==='paid') followAssetReceive(inv.payment_hash);
+          if(st==='paid'){ try{ await leavesApi.syncNow(); }catch{} }
           try{ renderBalance(); renderReceive(); }catch{} return;
-        }
-        // A payment held for the invoice moves on only in a sync (asset-lightning.js
-        // receiveSyncDue): asked for here while the code shows, not left to the library's schedule.
-        if(receiveSyncDue({ rec, nowMs: Date.now(), lastSyncMs: syncedAt, hidden: document.visibilityState==='hidden',
-          busy: !!(leavesApi.personBusy && leavesApi.personBusy()) })){
-          syncedAt = Date.now();
-          try{ await leavesApi.syncNow(); }catch{}
-          if(mine!==_recvInvWatch) return;
-          continue;
         }
       }
       await new Promise(ok=> setTimeout(ok, inv.asset==='BTC' ? 3000 : 5000));
