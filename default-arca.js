@@ -583,6 +583,30 @@ export function sendableNow (paid, message) {
   return null
 }
 
+// Max for a payment in the tree: the most of `held` atoms a payment can send once the fee the
+// library keeps back for it comes out of what is held. `quote(atoms)` is the library's
+// `send_quote` for that amount ({ fee } on top of it), or throws with its refusal. A quote of all
+// that is held answers with its fee rather than refusing, so the fee is taken off and the smaller
+// amount quoted again, until the amount and its fee fit; a refusal that says the most it can send
+// (sendableNow) is taken as it is. -> atoms, 0n when nothing can be sent.
+export async function treeSendMax (held, quote, tries = 4) {
+  const all = big(held)
+  let a = all
+  for (let i = 0; i < tries && a > 0n; i++) {
+    let q
+    try { q = await quote(a) } catch (e) {
+      const most = sendableNow(a, String((e && e.message) || e))
+      if (most == null || most >= a) throw e
+      a = most
+      continue
+    }
+    const fee = big(q && q.fee)
+    if (a + fee <= all) return a
+    a = all - fee
+  }
+  return a > 0n ? a : 0n
+}
+
 // What of an asset is arriving: the leaf states counted as such in the library's balance.
 export function arrivingAtoms (balance, asset) {
   const states = (balance && balance.arca && balance.arca[asset]) || {}
