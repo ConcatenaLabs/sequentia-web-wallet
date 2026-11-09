@@ -94,8 +94,10 @@ test('under the amount, the fee, how soon and the most, before the review', () =
   assert.equal(DEFAULT_WORDS.sendUpTo('0.30502601', 'EURX'), 'You can send up to 0.30502601 EURX: the fee comes out of your balance.')
   assert.match(fn('treeQuoteFor'), /if\(most != null && most < atoms\) return upTo\(most\);/)
   assert.match(html, /r\.querySelector\('\.ramt'\)\.addEventListener\('input', \(\)=>\{ sendFeeResize\(\); showSendFee\(\); r\._quote\(\); \}\);/)
-  // Max to a receive code in the tree is what the library would pay.
-  assert.match(html, /if\(inTree && typed && others===0n && max>0n\)\{ try\{ const q=await treeQuoteFor\(typed, max, hex\); if\(q\) max=q\.most; \}catch\{\} \}/)
+  // Max to a receive code in the tree is what the library would pay, its fee off what is held
+  // (default-arca.js treeSendMax), the quote's own most when the library refuses otherwise.
+  assert.match(html, /try\{ max = await treeSendMax\(max, \(a\)=> leavesApi\.sendQuote\(dest, a, hex\)\); \}/)
+  assert.match(html, /catch\(e\)\{ const q=await treeQuoteFor\(typed, max, hex\)\.catch\(\(\)=>null\); if\(q\) max=q\.most; \}/)
 });
 
 test('nothing sendable while held: the wallet says its own maintenance is moving it, and for how long', () => {
