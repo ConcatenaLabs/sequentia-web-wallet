@@ -379,6 +379,24 @@ export function moveOutMinutes (seconds, blockSeconds) {
   return Math.max(1, Math.ceil((n + MOVE_OUT_BLOCKS * b + MOVE_OUT_SLACK_S) / 60))
 }
 
+// How often the page syncs while some coin is arriving (ARRIVING_STATES: a coin given up in the
+// next round, a transfer not yet completed). The operator holds a round for the wallet's part of
+// it (its forfeits, handed over in a sync) before the round goes on the chain, and the library's
+// own schedule syncs once a minute: a coin the wallet refreshes by itself after receiving it, or
+// moves out of the Ark, then waits on this wallet for a minute or more, unspendable meanwhile.
+// ARRIVING_SYNC_FOR_MS bounds one stretch of it, so a coin that stays arriving for long (one the
+// operator owes back) does not keep the page syncing.
+export const ARRIVING_SYNC_MS = 10_000
+export const ARRIVING_SYNC_FOR_MS = 10 * 60_000
+
+// Whether the page syncs now because something is arriving: `arriving` the atoms arriving over
+// every asset, `since` when this stretch of arriving began (ms), `lastSyncMs` the last such sync.
+export function arrivingSyncDue ({ arriving, nowMs, since, lastSyncMs = 0, busy = false } = {}) {
+  if (busy || !(big(arriving) > 0n)) return false
+  if (since != null && Number(nowMs) - Number(since) > ARRIVING_SYNC_FOR_MS) return false
+  return Number(nowMs) - Number(lastSyncMs || 0) >= ARRIVING_SYNC_MS
+}
+
 export const ADDRESS_PATH_BLOCKS = 4
 export const ADDRESS_PATH_SLACK_S = 240
 export function arrivalMinutes (seconds, blockSeconds) {

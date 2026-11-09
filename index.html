@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -4298,6 +4298,27 @@ function followAssetReceives(){
     }
   })();
 }
+// While any coin is arriving (default-arca.js arrivingSyncDue: a coin the wallet refreshes by
+// itself after receiving it, one moved out of the Ark), the page syncs every few seconds: the
+// operator holds the round for this wallet's part of it, which the library hands over in a sync,
+// and the coin is not spendable until that round is final.
+function followArriving(){
+  let syncedAt = 0, since = null;
+  (async()=>{
+    for(;;){
+      await new Promise(ok=> setTimeout(ok, 5_000));
+      if(!leavesApi || !leavesApi.isOpen()) continue;
+      let arriving = 0n; try{ for(const h of leavesApi.leafAssets()) arriving += leavesApi.arriving(h) || 0n; }catch{ continue; }
+      if(arriving <= 0n){ since = null; continue; }
+      if(since == null) since = Date.now();
+      if(!arrivingSyncDue({ arriving, nowMs: Date.now(), since, lastSyncMs: syncedAt,
+        busy: !!(leavesApi.personBusy && leavesApi.personBusy()) })) continue;
+      syncedAt = Date.now();
+      try{ await leavesApi.syncNow(); }catch{}
+      try{ renderBalance(); }catch{}
+    }
+  })();
+}
 function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
@@ -4336,6 +4357,7 @@ function initLeaves(){
     holdsTx: (txid)=>{ if(!_scannedOnce) return undefined; try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return undefined; } },
   }, $('leavesRoot'), $('devModeRoot'));
   followAssetReceives();
+  followArriving();
   // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
   if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
   // And where BTC is held, read while the page stays in default mode (tooling/limits-live-drive.mjs).
