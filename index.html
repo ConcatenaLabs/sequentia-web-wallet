@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -8946,9 +8946,14 @@ async function fillMax(r){
       const tree=(!devMode() && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n;
       const inTree=tree > 0n && (!typed || !!leavesApi.treeRoute(payCodeDestination(typed, hex)));
       max = (inTree ? tree : BigInt(availableFor(hex))) - others;
-      // To a receive code in the tree, Max is what the library would pay: the fee off what is
-      // held, the channel side counted (treeQuoteFor).
-      if(inTree && typed && others===0n && max>0n){ try{ const q=await treeQuoteFor(typed, max, hex); if(q) max=q.most; }catch{} }
+      // To a receive code in the tree, Max is what the library would pay: the fee it keeps back
+      // comes out of what is held (default-arca.js treeSendMax). Max of the whole balance read the
+      // quote's yes and left the fee in, and the payment was then refused for want of it.
+      if(inTree && typed && others===0n && max>0n){
+        const dest=payCodeDestination(typed, hex);
+        try{ max = await treeSendMax(max, (a)=> leavesApi.sendQuote(dest, a, hex)); }
+        catch(e){ const q=await treeQuoteFor(typed, max, hex).catch(()=>null); if(q) max=q.most; }
+      }
       // An address the chain's coins can't cover is paid out of the Ark (addressRoute), so Max to
       // an address is what the Ark can send it with its fee off, whenever that is more than the
       // chain's coins hold: the chain's coins alone (a few atoms beside an Ark of millions) could not

@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, sendableNow, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, sendableNow, treeSendMax, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll, onchainLessBoards, boardSpent, offboardOutcome } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -304,4 +304,28 @@ test('Receive asks again for its code with a backoff, and shows the address only
   assert.deepEqual(receiveCodeRetry(1), { waitMs: 2000, address: false })
   assert.deepEqual(receiveCodeRetry(2), { waitMs: 2000, address: false })
   assert.deepEqual([3, 4, 5, 6, 7, 8, 30].map((n) => receiveCodeRetry(n)), [5000, 10000, 20000, 40000, 60000, 60000, 60000].map((w) => ({ waitMs: w, address: true })))
+})
+
+// Max to a receive code in the tree: the fee the library keeps back comes out of what is held. Seen
+// live: 0.38946117 EURX held, a quote of all of it answered with a fee of 432 atoms, Max filled in
+// all of it, and the payment was refused ("You can send up to 0.38945685 EURX").
+test('treeSendMax: the fee comes out of what is held', async () => {
+  const held = 38946117n, fee = 432n
+  const asked = []
+  const quote = async (a) => { asked.push(a); if (a + fee > held) return { fee: String(fee) }; return { fee: String(fee) } }
+  assert.equal(await treeSendMax(held, quote), held - fee)
+  assert.deepEqual(asked, [held, held - fee], 'quoted again at the smaller amount')
+
+  // No fee: all of it.
+  assert.equal(await treeSendMax(1000n, async () => ({ fee: '0' })), 1000n)
+
+  // A library that refuses the whole amount with the most it can send: that most.
+  const refusal = 'refused: the wallet holds 30503305 of asset ab in live coins, and paying 30503305 takes 30504009'
+  let n = 0
+  const refusing = async (a) => { n++; if (a === 30503305n) throw new Error(refusal); return { fee: '0' } }
+  assert.equal(await treeSendMax(30503305n, refusing), 30502601n)
+  assert.equal(n, 2)
+
+  // A refusal that says nothing of what can be sent is the caller's to show.
+  await assert.rejects(treeSendMax(10n, async () => { throw new Error('the operator is down') }), /operator is down/)
 })
