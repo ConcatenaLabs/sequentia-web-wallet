@@ -203,11 +203,12 @@ modes (`asset-picker.js`):
   asset of the operator's node (`lightning=`, the leaf library's `lightning_receive`), which a
   wallet of another operator pays in seconds; `amount=` is left out, since it counts BTC. Either
   invoice is claimed while the wallet is open, and a new one is made with the code. A payment of
-  an invoice in an asset reaches the wallet only through a sync of its leaves, so the page syncs by
-  itself while any such receive waits on one: every 20 seconds while a payment is held for it or
-  its invoice is less than ten minutes old, every minute after that until the invoice lapses,
-  whatever the Receive card shows and with the tab in front or behind; a step of something the
-  person asked for under way holds those syncs back. Without an
+  an invoice in an asset reaches the wallet in the operator's next round (about a minute) and only
+  through a sync of its leaves, so the page follows each such receive itself, whatever the Receive
+  card shows and with the tab in front or behind: while nothing is paid it asks the operator how
+  the receive stands (every 3 seconds for an invoice under ten minutes old, every 30 after that),
+  and once a payment is held it syncs every 10 seconds until the payment is in the balance; a
+  step of something the person asked for under way holds those syncs back. Without an
   amount, a wallet with a payment name (below) carries that name in the code instead, as its
   LNURL-pay (`lightning=LNURL1…`, the LUD-01 form of `https://<domain>/.well-known/lnurlp/<name>`),
   which any Lightning wallet pays in an amount it chooses; a wallet without a name carries no

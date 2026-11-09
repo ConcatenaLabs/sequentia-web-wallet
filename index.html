@@ -1863,7 +1863,7 @@ import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
 import { confidentialPlan, ownShare, liveFromRefusal, feeMarginAtoms as confidentialMargin } from './confidential-pay.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
-import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, receivesSyncDue, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
+import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, receivePlan, statusMovesOn, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
 import { arkLimits, boardRoom, moveOutAtoms, moveOutSats, moveRetryMs, moveWaits, directUsd, goesToAddress, usdAtoms } from './ark-limits.js';
 import { mountLeafRail, postParams as leafPostParams, offerTtl as leafOfferTtl } from './leaf-rail.js';
 import { mountArkRail } from './ark-rail.js';
@@ -4252,20 +4252,41 @@ function applyModeClass(){
   document.body.classList.toggle('devmode', devMode());
   try{ lnStatusPill(); }catch{}
 }
-// Every payment of the wallet's invoices in an asset, followed by syncs until it is the wallet's
-// (asset-lightning.js receivesSyncDue): the library's own schedule would leave it held at the
-// operator for up to a quarter of its receive window. One loop for the page, whatever the Receive
-// card shows and whether or not the tab is in front.
+// Every receive of the wallet's invoices in an asset, followed until its payment is the wallet's
+// (asset-lightning.js receivePlan): the operator asked how it stands while nothing is paid, a sync
+// once a payment is held, and syncs until its leaf is taken. One loop for the page, whatever the
+// Receive card shows and with the tab in front or behind; the library's own schedule would leave a
+// payment held at the operator for up to a quarter of its receive window.
 function followAssetReceives(){
   let syncedAt = 0;
-  const expiryS = ()=>{ try{ const i = leavesApi.info(); const si = (i && i.server_info) || i; return Number(si.lightning.receive.invoice_expiry_seconds) || undefined; }catch{ return undefined; } };
+  const askedAt = new Map();
+  const info = ()=>{ try{ return leavesApi.info() || {}; }catch{ return {}; } };
+  const expiryS = ()=>{ try{ const i = info(); const si = i.server_info || i; return Number(si.lightning.receive.invoice_expiry_seconds) || undefined; }catch{ return undefined; } };
+  const server = ()=> String(info().server || (window.SEQ_ARCA && window.SEQ_ARCA.server) || '').replace(/\/+$/, '');
+  const status = async (hash)=>{
+    const ctl = new AbortController(); const t = setTimeout(()=> ctl.abort(), 5000);
+    try{
+      const r = await fetch(server() + '/v1/lightning_receive_status', { method:'POST', headers:{ 'content-type':'application/json' },
+        body: JSON.stringify({ payment_hash: hash }), cache:'no-store', signal: ctl.signal });
+      return r.ok ? await r.json() : null;
+    }catch{ return null; } finally { clearTimeout(t); }
+  };
   (async()=>{
     for(;;){
-      await new Promise(ok=> setTimeout(ok, 10_000));
-      if(!leavesApi || !leavesApi.isOpen()) continue;
+      await new Promise(ok=> setTimeout(ok, 3_000));
+      if(!leavesApi || !leavesApi.isOpen() || !server()) continue;
       let receives=null; try{ receives = await leavesApi.own('lightning_receives', {}); }catch{ continue; }
-      if(!receivesSyncDue({ receives, nowMs: Date.now(), lastSyncMs: syncedAt, expiryS: expiryS(),
-        busy: !!(leavesApi.personBusy && leavesApi.personBusy()) })) continue;
+      const now = Date.now();
+      let sync = false;
+      for(const [hash, rec] of Object.entries(receives || {})){
+        const plan = receivePlan(rec, now/1000, expiryS());
+        if(!plan){ askedAt.delete(hash); continue; }
+        if(plan.action==='sync'){ if(now - syncedAt >= plan.everyMs) sync = true; continue; }
+        if(now - (askedAt.get(hash) || 0) < plan.everyMs) continue;
+        askedAt.set(hash, now);
+        if(statusMovesOn(await status(hash))) sync = true;
+      }
+      if(!sync || (leavesApi.personBusy && leavesApi.personBusy())) continue;
       syncedAt = Date.now();
       try{ await leavesApi.syncNow(); }catch{}
       try{ renderBalance(); }catch{}

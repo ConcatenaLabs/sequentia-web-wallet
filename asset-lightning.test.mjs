@@ -6,7 +6,7 @@ import assert from 'node:assert'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { assetLightningRoute, lightningLimitUsd, lockFits, usdValue, operatorLeg, receivableAssets, receiveState, isRouteRefusal,
-  receivesSyncDue, receiveSyncEvery, receiveMovesOnSync, RECEIVE_SYNC_MS, RECEIVE_SYNC_IDLE_MS, DEFAULT_LIMIT_USD, HOP_CLTV_BLOCKS } from './asset-lightning.js'
+  receivePlan, statusMovesOn, receiveMovesOnSync, RECEIVE_STATUS_MS, RECEIVE_STATUS_IDLE_MS, RECEIVE_SYNC_MS, DEFAULT_LIMIT_USD, HOP_CLTV_BLOCKS } from './asset-lightning.js'
 import { DEFAULT_WORDS } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -140,9 +140,9 @@ test('the operator\'s facts and the receive side', () => {
 })
 
 // A payment of the wallet's invoice in an asset reaches it only by a sync: the operator releases its
-// leaf to this wallet alone, so the page syncs while any receive moves on that way, and stops once
-// each one is the wallet's.
-test('receive sync: while a receive moves on only by a sync', () => {
+// leaf to this wallet alone. The page asks the operator how a receive stands while nothing is paid,
+// and syncs once a payment is held, until each one is the wallet's.
+test('receive follow: ask while waiting, sync once held', () => {
   for (const state of ['requested', 'waiting', 'issuing', 'claiming']) {
     assert.equal(receiveMovesOnSync({ state, expires_at: 200 }, 100), true, state)
   }
@@ -151,22 +151,18 @@ test('receive sync: while a receive moves on only by a sync', () => {
   for (const state of ['received', 'failed']) assert.equal(receiveMovesOnSync({ state }, 100), false, state)
   assert.equal(receiveMovesOnSync(undefined, 100), false)
 
-  // Pace: fast while held or fresh, slower for an older invoice nothing paid yet.
   const now = 10_000
-  assert.equal(receiveSyncEvery({ state: 'issuing' }, now), RECEIVE_SYNC_MS)
-  assert.equal(receiveSyncEvery({ state: 'waiting', expires_at: now + 3500 }, now, 3600), RECEIVE_SYNC_MS, 'asked 100 s ago')
-  assert.equal(receiveSyncEvery({ state: 'waiting', expires_at: now + 1000 }, now, 3600), RECEIVE_SYNC_IDLE_MS, 'asked 2600 s ago')
-  assert.equal(receiveSyncEvery({ state: 'received' }, now), null)
+  assert.deepEqual(receivePlan({ state: 'waiting', expires_at: now + 3500 }, now, 3600), { action: 'status', everyMs: RECEIVE_STATUS_MS }, 'fresh')
+  assert.deepEqual(receivePlan({ state: 'waiting', expires_at: now + 1000 }, now, 3600), { action: 'status', everyMs: RECEIVE_STATUS_IDLE_MS }, 'older')
+  assert.deepEqual(receivePlan({ state: 'issuing' }, now), { action: 'sync', everyMs: RECEIVE_SYNC_MS })
+  assert.deepEqual(receivePlan({ state: 'claiming' }, now), { action: 'sync', everyMs: RECEIVE_SYNC_MS })
+  assert.equal(receivePlan({ state: 'requested', expires_at: now + 3500 }, now).action, 'sync', 'the operator never answered: asked again in a sync')
+  assert.equal(receivePlan({ state: 'received' }, now), null)
+  assert.equal(receivePlan({ state: 'waiting', expires_at: now - 1 }, now), null, 'lapsed')
 
-  const at = now * 1000
-  const receives = { a: { state: 'received' }, b: { state: 'waiting', expires_at: now + 3500 } }
-  assert.equal(receivesSyncDue({ receives, nowMs: at, lastSyncMs: at - RECEIVE_SYNC_MS }), true)
-  assert.equal(receivesSyncDue({ receives, nowMs: at, lastSyncMs: at - RECEIVE_SYNC_MS + 1 }), false, 'too soon')
-  assert.equal(receivesSyncDue({ receives, nowMs: at, lastSyncMs: 0, busy: true }), false, 'a person is busy')
-  assert.equal(receivesSyncDue({ receives: { a: { state: 'received' } }, nowMs: at, lastSyncMs: 0 }), false, 'nothing waits')
-  assert.equal(receivesSyncDue({ receives: {}, nowMs: at, lastSyncMs: 0 }), false)
-  assert.equal(receivesSyncDue({ receives: { h: { state: 'claiming' } }, nowMs: at, lastSyncMs: at - RECEIVE_SYNC_MS }), true, 'held')
-  assert.ok(RECEIVE_SYNC_MS <= 30_000, 'a held payment waits seconds, not the schedule of the library')
+  for (const state of ['accepted', 'claimed', 'cancelled']) assert.equal(statusMovesOn({ state }), true, state)
+  for (const st of [{ state: 'open' }, null, {}]) assert.equal(statusMovesOn(st), false, JSON.stringify(st))
+  assert.ok(RECEIVE_STATUS_MS <= 5_000 && RECEIVE_SYNC_MS <= 20_000, 'a payment waits seconds past its round, not the schedule of the library')
 })
 
 test('which refusals mean the way cannot carry it', () => {
