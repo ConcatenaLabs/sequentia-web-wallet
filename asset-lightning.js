@@ -183,17 +183,20 @@ export function receiveState (rec, nowSeconds) {
   return 'paid'
 }
 
-// How often the Receive card syncs while its invoice in an asset is open and showing. A payment
-// held for the invoice reaches the wallet only through `sync` (the library asks the operator how
-// the receive stands, then follows the participation that wants its leaf), and the operator
-// releases that leaf to no one but this wallet: on the library's own schedule, a quarter of the
-// operator's receive window (90 minutes on a six-hour window), the payer waits that long and the
-// card reads "waiting" while the asset sits held.
+// A payment of one of the wallet's invoices in an asset reaches it only through `sync`: the library
+// asks the operator how the receive stands, follows the participation that wants its leaf, and
+// claims the leaf, which the operator releases to no one but this wallet. On the library's own
+// schedule that sync comes a quarter of the operator's receive window after the invoice was asked
+// (90 minutes on a six-hour window), while the payer reads "paying". So the page syncs by itself
+// while a receive waits on a sync: every RECEIVE_SYNC_MS while a payment is held for it or its
+// invoice is fresh, every RECEIVE_SYNC_IDLE_MS while it is older and nothing came, whatever the
+// Receive card shows and whether or not the tab is in front (the payer is most often another tab).
 export const RECEIVE_SYNC_MS = 20_000
-
-// How long the wallet keeps syncing for a payment held for its invoice, once the code has moved on
-// to a new one, until the payment's leaf is its own (`received`).
-export const RECEIVE_FOLLOW_MS = 15 * 60_000
+export const RECEIVE_SYNC_IDLE_MS = 60_000
+// How long an invoice counts as fresh, measured from its lapse back by the operator's invoice
+// expiry (RECEIVE_INVOICE_EXPIRY_S when the operator's info does not say).
+export const RECEIVE_FRESH_S = 10 * 60
+export const RECEIVE_INVOICE_EXPIRY_S = 3600
 
 // Whether a receive the library lists (`lightning_receives` under its hash) still waits on a sync to
 // move on: asked and not lapsed (`requested`, `waiting`: the operator may hold a payment for it),
@@ -205,14 +208,29 @@ export function receiveMovesOnSync (rec, nowSeconds) {
   return receiveState(rec, nowSeconds) === 'open'
 }
 
-// Whether the wallet syncs now for a receive in an asset: while it moves on only by a sync, nobody
-// is in the middle of something the wallet does for them (`busy`, the library's personBusy), and
-// RECEIVE_SYNC_MS have passed since the last such sync. A hidden page syncs too: the payer is
-// most often another tab or window of the same person, which they switch to once the code is
-// copied, and the wallet's tab is then in the background for the whole payment.
-export function receiveSyncDue ({ rec, nowMs, lastSyncMs = 0, busy = false, everyMs = RECEIVE_SYNC_MS } = {}) {
-  if (busy || !receiveMovesOnSync(rec, Number(nowMs) / 1000)) return false
-  return Number(nowMs) - Number(lastSyncMs || 0) >= everyMs
+// How often to sync for one receive, in ms, or null when it waits on no sync.
+export function receiveSyncEvery (rec, nowSeconds, expiryS = RECEIVE_INVOICE_EXPIRY_S) {
+  if (!receiveMovesOnSync(rec, nowSeconds)) return null
+  const s = String(rec.state || '')
+  if (s === 'issuing' || s === 'claiming') return RECEIVE_SYNC_MS
+  if (rec.expires_at == null) return RECEIVE_SYNC_IDLE_MS
+  const age = Number(expiryS) - (Number(rec.expires_at) - Number(nowSeconds))
+  return age < RECEIVE_FRESH_S ? RECEIVE_SYNC_MS : RECEIVE_SYNC_IDLE_MS
+}
+
+// Whether the page syncs now for the receives the library lists (`receives`, its
+// `lightning_receives`): when one of them waits on a sync and its pace has passed since the last
+// such sync, and nobody is in the middle of something the wallet does for them (`busy`, the
+// library's personBusy).
+export function receivesSyncDue ({ receives, nowMs, lastSyncMs = 0, busy = false, expiryS = RECEIVE_INVOICE_EXPIRY_S } = {}) {
+  if (busy || !receives) return false
+  const nowS = Number(nowMs) / 1000
+  let every = null
+  for (const rec of Object.values(receives)) {
+    const e = receiveSyncEvery(rec, nowS, expiryS)
+    if (e != null && (every == null || e < every)) every = e
+  }
+  return every != null && Number(nowMs) - Number(lastSyncMs || 0) >= every
 }
 
 export const __test__ = { big }
