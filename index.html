@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -4298,6 +4298,27 @@ function followAssetReceives(){
     }
   })();
 }
+// While any coin is arriving (default-arca.js arrivingSyncDue: a coin the wallet refreshes by
+// itself after receiving it, one moved out of the Ark), the page syncs every few seconds: the
+// operator holds the round for this wallet's part of it, which the library hands over in a sync,
+// and the coin is not spendable until that round is final.
+function followArriving(){
+  let syncedAt = 0, since = null;
+  (async()=>{
+    for(;;){
+      await new Promise(ok=> setTimeout(ok, 5_000));
+      if(!leavesApi || !leavesApi.isOpen()) continue;
+      let arriving = 0n; try{ for(const h of leavesApi.leafAssets()) arriving += leavesApi.arriving(h) || 0n; }catch{ continue; }
+      if(arriving <= 0n){ since = null; continue; }
+      if(since == null) since = Date.now();
+      if(!arrivingSyncDue({ arriving, nowMs: Date.now(), since, lastSyncMs: syncedAt,
+        busy: !!(leavesApi.personBusy && leavesApi.personBusy()) })) continue;
+      syncedAt = Date.now();
+      try{ await leavesApi.syncNow(); }catch{}
+      try{ renderBalance(); }catch{}
+    }
+  })();
+}
 function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
@@ -4336,6 +4357,7 @@ function initLeaves(){
     holdsTx: (txid)=>{ if(!_scannedOnce) return undefined; try{ return wollet.transactions().some(t=>t.txid().toString()===txid); }catch{ return undefined; } },
   }, $('leavesRoot'), $('devModeRoot'));
   followAssetReceives();
+  followArriving();
   // A browser drive reads the leaf wallet's own answers (tooling/channel-drive.mjs).
   if(typeof window!=='undefined' && window.SEQ_TEST_HOOKS) window.__leavesApi = leavesApi;
   // And where BTC is held, read while the page stays in default mode (tooling/limits-live-drive.mjs).
@@ -11791,7 +11813,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   for(const m of missing){ const can = instantAtoms(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
   const address = wollet.address(undefined).address().toUnconfidential().toString();
   _keepOnChainUntil = Date.now() + MOVE_WAIT_MS + KEEP_ON_CHAIN_MS;
-  let minutes = arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
+  let minutes = moveOutMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
   const what = (missing.length ? missing : all).map(m=>amountWords(m.hex, m.atoms)).join(' and ');
   // A round pays the whole coin a move gives (what is moved and its change) out of the operator's
   // wallet: when that is more than the operator can fund now, nothing is asked, so no coin waits.
@@ -11812,7 +11834,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
     for(const [i, m] of missing.entries()){
       const q = quotes[i];
       const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, shown: q });
-      minutes = arrivalMinutes(v && v.round_within_seconds, leavesApi.blockSeconds()) || minutes;
+      minutes = moveOutMinutes(v && v.round_within_seconds, leavesApi.blockSeconds()) || minutes;
       try{ noteSent(localStorage, walletTag(), { asset: m.hex, atoms: m.atoms, fee: q && q.fee ? { asset: m.hex, atoms: BigInt(q.fee.amount||0) } : null, later: true }); }catch{}
     }
   }catch(e){ console.warn('[on chain] moving out of the Ark:', e?.message??e); _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; throw new Error(DEFAULT_WORDS.notMoved); }
@@ -11822,12 +11844,13 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   let n = 0;
   while(Date.now() < until){
     await new Promise(r=>setTimeout(r, 10_000));
-    if(++n % 3 === 0){
-      try{ await leavesApi.syncNow(); }catch(e){ console.warn('[on chain] sync:', e?.message??e); }
-      // Still waiting for a round after a few minutes: the operator cannot pay that much on the
-      // chain yet. Said plainly; the move goes ahead by itself once it can, and the coins stay the wallet's.
-      if(n >= 18 && (await movesUnderWay()).some(o=>o.state==='waiting')) say(DEFAULT_WORDS.movingWaits(what, purpose));
-    }
+    // The operator's round goes on the chain only once the wallet has handed over its part of it,
+    // which the library does in a sync: one every 10 seconds, so the round waits seconds on this
+    // wallet, not a minute and a half (synced every 30 seconds, the library's own schedule a minute).
+    try{ await leavesApi.syncNow(); }catch(e){ console.warn('[on chain] sync:', e?.message??e); }
+    // Still waiting for a round after a few minutes: the operator cannot pay that much on the
+    // chain yet. Said plainly; the move goes ahead by itself once it can, and the coins stay the wallet's.
+    if(++n >= 18 && n % 3 === 0 && (await movesUnderWay()).some(o=>o.state==='waiting')) say(DEFAULT_WORDS.movingWaits(what, purpose));
     try{ await sync(); }catch{}
     if(needs.every(n=> have(n.hex) >= n.atoms)){ _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; return true; }
   }
