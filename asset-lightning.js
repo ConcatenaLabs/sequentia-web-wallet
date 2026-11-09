@@ -183,4 +183,34 @@ export function receiveState (rec, nowSeconds) {
   return 'paid'
 }
 
+// How often the Receive card syncs while its invoice in an asset is open and showing. A payment
+// held for the invoice reaches the wallet only through `sync` (the library asks the operator how
+// the receive stands, then follows the participation that wants its leaf), and the operator
+// releases that leaf to no one but this wallet: on the library's own schedule, a quarter of the
+// operator's receive window (90 minutes on a six-hour window), the payer waits that long and the
+// card reads "waiting" while the asset sits held.
+export const RECEIVE_SYNC_MS = 20_000
+
+// How long the wallet keeps syncing for a payment held for its invoice, once the code has moved on
+// to a new one, until the payment's leaf is its own (`received`).
+export const RECEIVE_FOLLOW_MS = 15 * 60_000
+
+// Whether a receive the library lists (`lightning_receives` under its hash) still waits on a sync to
+// move on: asked and not lapsed (`requested`, `waiting`: the operator may hold a payment for it),
+// or held and its leaf on the way (`issuing`, `claiming`). `received` and `failed` are done.
+export function receiveMovesOnSync (rec, nowSeconds) {
+  if (!rec) return false
+  const s = String(rec.state || '')
+  if (s === 'issuing' || s === 'claiming') return true
+  return receiveState(rec, nowSeconds) === 'open'
+}
+
+// Whether the wallet syncs now for a receive in an asset: while it moves on only by a sync, the
+// page is showing, nobody is in the middle of something the wallet does for them (`busy`, the
+// library's personBusy), and RECEIVE_SYNC_MS have passed since the last such sync.
+export function receiveSyncDue ({ rec, nowMs, lastSyncMs = 0, hidden = false, busy = false, everyMs = RECEIVE_SYNC_MS } = {}) {
+  if (hidden || busy || !receiveMovesOnSync(rec, Number(nowMs) / 1000)) return false
+  return Number(nowMs) - Number(lastSyncMs || 0) >= everyMs
+}
+
 export const __test__ = { big }
