@@ -205,8 +205,9 @@ modes (`asset-picker.js`):
   invoice is claimed while the wallet is open, and a new one is made with the code. A payment of
   the invoice in an asset reaches the wallet only through a sync of its leaves, so while the code
   shows the wallet syncs every 20 seconds, and once a payment is held for the invoice it keeps
-  syncing until the payment is in the balance (15 minutes at most); the page hidden, or a step of
-  something the person asked for under way, holds those syncs back. Without an
+  syncing until the payment is in the balance (15 minutes at most), also while the wallet's tab is
+  in the background, where the payer most often is; a step of something the person asked for
+  under way holds those syncs back. Without an
   amount, a wallet with a payment name (below) carries that name in the code instead, as its
   LNURL-pay (`lightning=LNURL1…`, the LUD-01 form of `https://<domain>/.well-known/lnurlp/<name>`),
   which any Lightning wallet pays in an amount it chooses; a wallet without a name carries no

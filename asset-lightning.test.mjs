@@ -155,7 +155,7 @@ test('receive sync: while the receive moves on only by a sync', () => {
   const at = 1_000_000
   assert.equal(receiveSyncDue({ rec, nowMs: at, lastSyncMs: at - RECEIVE_SYNC_MS }), true)
   assert.equal(receiveSyncDue({ rec, nowMs: at, lastSyncMs: at - RECEIVE_SYNC_MS + 1 }), false, 'too soon')
-  assert.equal(receiveSyncDue({ rec, nowMs: at, lastSyncMs: 0, hidden: true }), false, 'page hidden')
+  assert.equal(receiveSyncDue({ rec, nowMs: at, lastSyncMs: 0, hidden: true }), true, 'page hidden: the payer is another tab')
   assert.equal(receiveSyncDue({ rec, nowMs: at, lastSyncMs: 0, busy: true }), false, 'a person is busy')
   assert.equal(receiveSyncDue({ rec: { state: 'received' }, nowMs: at, lastSyncMs: 0 }), false, 'done')
   assert.ok(RECEIVE_SYNC_MS <= 30_000, 'a held payment waits seconds, not the schedule of the library')

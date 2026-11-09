@@ -8210,7 +8210,7 @@ function followAssetReceive(hash){
       while(Date.now() - t0 < RECEIVE_FOLLOW_MS){
         let rec=null; try{ rec = ((await leavesApi.own('lightning_receives', {})) || {})[hash]; }catch{}
         if(!receiveMovesOnSync(rec, Date.now()/1000)) break;
-        if(document.visibilityState!=='hidden' && !(leavesApi.personBusy && leavesApi.personBusy())){
+        if(!(leavesApi.personBusy && leavesApi.personBusy())){
           try{ await leavesApi.syncNow(); }catch{}
           try{ renderBalance(); }catch{}
         }
@@ -8246,7 +8246,7 @@ function watchRecvInvoice(inv){
         }
         // A payment held for the invoice moves on only in a sync (asset-lightning.js
         // receiveSyncDue): asked for here while the code shows, not left to the library's schedule.
-        if(receiveSyncDue({ rec, nowMs: Date.now(), lastSyncMs: syncedAt, hidden: document.visibilityState==='hidden',
+        if(receiveSyncDue({ rec, nowMs: Date.now(), lastSyncMs: syncedAt,
           busy: !!(leavesApi.personBusy && leavesApi.personBusy()) })){
           syncedAt = Date.now();
           try{ await leavesApi.syncNow(); }catch{}

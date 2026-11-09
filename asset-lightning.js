@@ -205,11 +205,13 @@ export function receiveMovesOnSync (rec, nowSeconds) {
   return receiveState(rec, nowSeconds) === 'open'
 }
 
-// Whether the wallet syncs now for a receive in an asset: while it moves on only by a sync, the
-// page is showing, nobody is in the middle of something the wallet does for them (`busy`, the
-// library's personBusy), and RECEIVE_SYNC_MS have passed since the last such sync.
-export function receiveSyncDue ({ rec, nowMs, lastSyncMs = 0, hidden = false, busy = false, everyMs = RECEIVE_SYNC_MS } = {}) {
-  if (hidden || busy || !receiveMovesOnSync(rec, Number(nowMs) / 1000)) return false
+// Whether the wallet syncs now for a receive in an asset: while it moves on only by a sync, nobody
+// is in the middle of something the wallet does for them (`busy`, the library's personBusy), and
+// RECEIVE_SYNC_MS have passed since the last such sync. A hidden page syncs too: the payer is
+// most often another tab or window of the same person, which they switch to once the code is
+// copied, and the wallet's tab is then in the background for the whole payment.
+export function receiveSyncDue ({ rec, nowMs, lastSyncMs = 0, busy = false, everyMs = RECEIVE_SYNC_MS } = {}) {
+  if (busy || !receiveMovesOnSync(rec, Number(nowMs) / 1000)) return false
   return Number(nowMs) - Number(lastSyncMs || 0) >= everyMs
 }
 
