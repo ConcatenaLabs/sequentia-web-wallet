@@ -364,6 +364,21 @@ export function homeUnderWay (coins, kept, unreachable) {
 // settlement, rounded up to five minutes. On the testnet (a settlement a minute, a block a
 // minute) that is ten minutes; payments measured there took three to six. A time stated is one
 // the wallet keeps. -> minutes, or null when the operator publishes no interval.
+// The minutes coins the wallet moves out of the tree to its own address take to be its to spend on
+// the chain (for a stake, say): the operator's next settlement (`seconds`), the wallet handing
+// over its part of it at once, and the settlement's block, with MOVE_OUT_BLOCKS blocks and
+// MOVE_OUT_SLACK_S seconds for the reads on either side. Nothing waits on another wallet, so it is
+// not ADDRESS_PATH's ten minutes: on the testnet (a settlement a minute, a block a minute) it is
+// four. -> minutes, or null when the operator publishes no interval.
+export const MOVE_OUT_BLOCKS = 2
+export const MOVE_OUT_SLACK_S = 30
+export function moveOutMinutes (seconds, blockSeconds) {
+  const n = Number(seconds)
+  if (!Number.isFinite(n) || n <= 0) return null
+  const b = Number(blockSeconds) > 0 ? Number(blockSeconds) : 60
+  return Math.max(1, Math.ceil((n + MOVE_OUT_BLOCKS * b + MOVE_OUT_SLACK_S) / 60))
+}
+
 export const ADDRESS_PATH_BLOCKS = 4
 export const ADDRESS_PATH_SLACK_S = 240
 export function arrivalMinutes (seconds, blockSeconds) {

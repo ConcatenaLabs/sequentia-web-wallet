@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, sendableNow, treeSendMax, amountFits, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, moveOutMinutes, sendableNow, treeSendMax, amountFits, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll, onchainLessBoards, boardSpent, offboardOutcome } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -337,4 +337,16 @@ test('amountFits: the fee on top of the amount, out of what can be spent', () =>
   assert.deepEqual(amountFits(8489352n, 16n, 8489368n), { fits: true })
   assert.deepEqual(amountFits(10n, 0n, 10n), { fits: true })
   assert.deepEqual(amountFits(10n, 20n, 10n), { fits: false, most: 0n })
+})
+
+// Coins moved out of the tree to the wallet's own address (to stake them, say) wait for one
+// settlement and its block, not for another wallet: measured on the testnet, request to final on
+// the chain in 4 min 45 s, of which 97 s was this wallet handing over its part late.
+test('moveOutMinutes: a settlement and its block, not the ten minutes of a payment to another wallet', () => {
+  assert.equal(moveOutMinutes(60, 60), 4)
+  assert.equal(moveOutMinutes(60), 4)
+  assert.equal(moveOutMinutes(600, 60), 13)
+  assert.equal(moveOutMinutes(null), null)
+  assert.equal(DEFAULT_WORDS.movingOut('40,000 tSEQ', 'staked', moveOutMinutes(60, 60)),
+    'Moving 40,000 tSEQ out of the Ark so it can be staked. They are ready within 4 minutes. Keep this page open.')
 })
