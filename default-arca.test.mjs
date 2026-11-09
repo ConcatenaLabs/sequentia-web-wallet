@@ -4,7 +4,7 @@
 //   node --test default-arca.test.mjs
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { DEFAULT_WORDS, sendableNow, treeSendMax, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
+import { DEFAULT_WORDS, sendableNow, treeSendMax, amountFits, sendableAfterFreeing, feeFromRefusal, arrivalMinutes, addressRoute, pinnedOperator, defaultWatchtowers, checkPinned, parseReceiveCode, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates,
   boardValue, boardAll, onchainLessBoards, boardSpent, offboardOutcome } from './default-arca.js'
 import { forbiddenIn } from './user-trade.js'
 
@@ -328,4 +328,13 @@ test('treeSendMax: the fee comes out of what is held', async () => {
 
   // A refusal that says nothing of what can be sent is the caller's to show.
   await assert.rejects(treeSendMax(10n, async () => { throw new Error('the operator is down') }), /operator is down/)
+})
+
+// The hint under the amount says the most as soon as the amount and its fee do not fit, not only
+// on Review & send. Seen live: 0.08489368 SILVR held and typed, the most 0.08489352.
+test('amountFits: the fee on top of the amount, out of what can be spent', () => {
+  assert.deepEqual(amountFits(8489368n, 16n, 8489368n), { fits: false, most: 8489352n })
+  assert.deepEqual(amountFits(8489352n, 16n, 8489368n), { fits: true })
+  assert.deepEqual(amountFits(10n, 0n, 10n), { fits: true })
+  assert.deepEqual(amountFits(10n, 20n, 10n), { fits: false, most: 0n })
 })
