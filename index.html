@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax } from './default-arca.js';
+import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2923,7 +2923,12 @@ async function treeQuoteFor(addr, atoms, hex){
   const upTo = (most)=> ({ most, text: most > 0n ? DEFAULT_WORDS.sendUpTo(fmtAtoms(most, p), m0.ticker) : noneNowWords(hex, m0) });
   try{
     const q = await leavesApi.sendQuote(addr, atoms, hex);
-    return { most: atoms, text: DEFAULT_WORDS.hintSeconds(feeText(q && q.fee != null ? BigInt(q.fee) : 0n)) };
+    const fee = q && q.fee != null ? BigInt(q.fee) : 0n;
+    // The fee comes out of what is held, on top of the amount: an amount it does not fit beside is
+    // said at once, with the most that fits (default-arca.js amountFits).
+    let spendable = null; try{ spendable = (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n); }catch{}
+    if(spendable != null){ const f = amountFits(atoms, fee, spendable); if(!f.fits) return { ...upTo(f.most), over: true }; }
+    return { most: atoms, text: DEFAULT_WORDS.hintSeconds(feeText(fee)) };
   }catch(e){
     const said = String(e?.message??e);
     if(e && e.kind === 'in_channel'){
@@ -2933,7 +2938,7 @@ async function treeQuoteFor(addr, atoms, hex){
       return { most: atoms, text: DEFAULT_WORDS.hintWait(fee != null ? feeText(fee) : '', waitFor(hex), now != null && now > 0n ? fmtAtoms(now, p) : '', m0.ticker) };
     }
     const most = sendableNow(atoms, said);
-    return most != null ? upTo(most) : null;
+    return most != null ? { ...upTo(most), over: most < atoms } : null;
   }
 }
 
@@ -9041,12 +9046,17 @@ function addRecipientRow(){
   // To a receive code in the tree, the fee, how soon it arrives and the most that can go, under the
   // amount while it is typed (treeQuoteFor), so no review is the first to say so.
   const quoteLine=r.querySelector('.rquote'); let quoteSeq=0, quoteTimer=null;
-  r._quote=()=>{ clearTimeout(quoteTimer); quoteLine.textContent=''; const seq=++quoteSeq;
+  r._quote=()=>{ clearTimeout(quoteTimer); quoteLine.textContent=''; quoteLine.classList.remove('err'); const seq=++quoteSeq;
     quoteTimer=setTimeout(async()=>{ try{
-      const hex=rsel.value, addr=raddr.value.trim(), s=hex ? assetAmountOf(r.querySelector('.ramt'), hex) : '';
-      if(!hex || hex==='BTC' || !addr || !s || !leavesApi || !leavesApi.isOpen() || !leavesApi.treeRoute(addr)) return;
+      const hex=rsel.value, typed=raddr.value.trim(), s=hex ? assetAmountOf(r.querySelector('.ramt'), hex) : '';
+      if(!hex || hex==='BTC' || !typed || !s || !leavesApi || !leavesApi.isOpen()) return;
+      // A receive code is quoted at its part in the tree, as Review & send pays it (payCodeRoute):
+      // the code as typed is no tree route, and the hint never showed for one.
+      const addr=payCodeDestination(typed, hex);
+      if(!leavesApi.treeRoute(addr)) return;
       const atoms=parseAtoms(s, assetMeta(hex).precision||0); if(atoms<=0n) return;
-      const q=await treeQuoteFor(addr, atoms, hex); if(seq===quoteSeq && q) quoteLine.textContent=q.text;
+      const q=await treeQuoteFor(addr, atoms, hex);
+      if(seq===quoteSeq && q){ quoteLine.textContent=q.text; quoteLine.classList.toggle('err', !!q.over); }
     }catch{} }, 500); };
   raddr.addEventListener('input', ()=>{ fillFromCode(r); r._checkAddr(); sendFeeResize(); showSendFee(); r._quote(); });
   r.querySelector('.ramt').addEventListener('input', ()=>{ sendFeeResize(); showSendFee(); r._quote(); });

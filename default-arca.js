@@ -607,6 +607,19 @@ export async function treeSendMax (held, quote, tries = 4) {
   return a > 0n ? a : 0n
 }
 
+// Whether an amount typed for a payment in the tree fits once its fee is counted: `atoms` the
+// amount, `fee` the library's quote of it (on top of the amount), `spendable` what the wallet can
+// pay with now (held less arriving). -> { fits: true } or { fits: false, most } with the most that
+// fits (0n when nothing does). A quote answers with its fee rather than refusing an amount the fee
+// does not fit beside, so the hint under the amount says the most as the amount is typed, not only
+// once Review & send is pressed.
+export function amountFits (atoms, fee, spendable) {
+  const a = big(atoms), f = big(fee), s = big(spendable)
+  if (a + f <= s) return { fits: true }
+  const most = s - f
+  return { fits: false, most: most > 0n ? most : 0n }
+}
+
 // What of an asset is arriving: the leaf states counted as such in the library's balance.
 export function arrivingAtoms (balance, asset) {
   const states = (balance && balance.arca && balance.arca[asset]) || {}
