@@ -261,15 +261,24 @@ export function requireExitArgs (developer, info) {
   const offered = !!(info && info.server_info && info.server_info.checkpoint_exit === true)
   return { on: !developer && offered }
 }
-// What to set `require_checkpoint_exit` to now, given the leaf wallet's `info` as last read and the
-// switch as last set (`applied`, its arguments as JSON, or null when not set this session): the
-// mode's arguments when they differ from it, else null. An `info` without the operator's answer
-// (it could not be reached) changes nothing in default mode, so an outage never turns the
-// exit off; developer mode is off whatever the operator says.
-export function exitSwitch (developer, info, applied) {
+// What to set `require_checkpoint_exit` to now, given the leaf wallet's `info` as last read, the
+// switch as last set (`applied`, its arguments as JSON, or null when not set this session) and
+// whether this wallet's operator has ever offered the exit (`seen`, kept in the store): the mode's
+// arguments when they differ from it, else null. In default mode the switch only ever goes on: once
+// the operator has offered the exit, an answer that no longer offers it (or an older operator's,
+// without the field) leaves it on, so an operator cannot take the exit away by what it says, and
+// trades it cannot make with the exit read "Not offered right now". An `info` without the
+// operator's answer (it could not be reached) changes nothing. Developer mode is off whatever the
+// operator says.
+export const EXIT_SEEN_KEY = 'leaves.exitSeen'
+export function exitSwitch (developer, info, applied, seen = false) {
   const si = info && info.server_info
-  if (!developer && (!si || typeof si !== 'object' || si.unreachable)) return null
-  const args = requireExitArgs(developer, info)
+  const reached = !!si && typeof si === 'object' && !si.unreachable
+  let args
+  if (developer) args = { on: false }
+  else if (seen || (reached && si.checkpoint_exit === true)) args = { on: true }
+  else if (!reached || applied != null) return null
+  else args = { on: false }
   return JSON.stringify(args) === applied ? null : args
 }
 
@@ -1454,13 +1463,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // moment its operator offers the exit (`info.checkpoint_exit`). Before that it trades as it always
   // has, with no exit asked and nothing refused for the want of one (requireExitArgs).
   // The operator can begin offering the exit while the page is open: its `info` is read again at
-  // each care, and the switch set again when what it asks has changed (exitSwitch).
+  // each care, and the switch set on when it does (exitSwitch). Once offered, it stays on.
   async function applyLimit () {
     try { await run('instant_limit', instantLimitArgs(dev())) } catch (e) { log('[leaves] instant limit: ' + ((e && e.message) || e)) }
     await applyExit(null)
   }
   async function applyExit (applied) {
-    const args = exitSwitch(dev(), S.info, applied)
+    const si = S.info && S.info.server_info
+    if (si && typeof si === 'object' && si.checkpoint_exit === true) { try { ctx.store.setItem(tagged(EXIT_SEEN_KEY, tag()), '1') } catch {} }
+    let seen = false; try { seen = ctx.store.getItem(tagged(EXIT_SEEN_KEY, tag())) === '1' } catch {}
+    const args = exitSwitch(dev(), S.info, applied, seen)
     if (!args) return
     try { await run('require_checkpoint_exit', args); S.exitApplied = JSON.stringify(args) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
   }
