@@ -74,16 +74,15 @@
 //                                                This, coin_size and fee_margin each take one figure
 //                                                for every asset, or { "<asset hex>": "atoms", …,
 //                                                "default": "atoms" }
-//     "coin_size": "2000000",                    optional: boards in coins of at most this many atoms,
-//                                                one a pass, so several takers are served at once;
+//     "coin_size": "2000000",                    optional: boards in coins of at most this many atoms
+//                                                (and never above a working coin), one a pass;
 //                                                a coin of a round larger than this is merged only
 //                                                once twice `max_coins` are live
 //     "max_coins": 32,                           optional, one figure or one an asset: past it, coins
 //                                                are merged (boards and small coins first), and at
 //                                                twice it boards stop
 //     "merge_max_coins": 4,                      optional: no merge makes a coin of more than this
-//                                                many `coin_size`, so a swap's change (out of round
-//                                                until its next round) stays near a trade's size
+//                                                many `coin_size`, nor above a working coin
 //     "exit_delay_units": 36,                    optional; the operator's default otherwise
 //     "rest": { … },                             optional: orders resting in the tree, a ladder a
 //                                                pair, listed on SeqDEX's relay (leaf-maker-rest.mjs
@@ -102,7 +101,10 @@
 // Every coin the maker receives is refreshed in the operator's next round once it has rested
 // `settle_seconds`, so what it trades settles as the takers' coins do; on its first pass after a
 // start, every coin it already holds; and at once, all of them, when an offer is refused because
-// it would hold more out of round than the operator's bond covers, or than its instant budget.
+// it would hold more out of round than the operator's bond covers, or than its instant budget, or
+// when it holds more than half its budget out of round. For each asset it gives it keeps four
+// working coins worth at most a quarter of its budget each (D94; workingSizes and the README's
+// "Working coins"), cut inside rounds, and quotes no more than such a coin pays.
 // A coin of a round is refreshed again only when it is merged (past `max_coins`): every refresh of
 // a coin of a round keeps the operator's capital out until the node it leaves comes back.
 import { createServer } from 'node:http'
@@ -185,12 +187,15 @@ export function coinsToMerge (coins, asset, cap, exclude = [], small = null, mos
 }
 
 // The most the coins of `asset` merged in one pass hold together (coinsToMerge's `most`): the
-// configuration's `merge_max_coins` times the asset's `coin_size`; null (no bound) without both.
-export function mergeMost (cfg, asset) {
+// configuration's `merge_max_coins` times the asset's `coin_size`, and never more than a working
+// coin (`working`, its atoms, when the budget gives one), so no merge makes a coin larger than a
+// working coin; null (no bound) without any of them.
+export function mergeMost (cfg, asset, working = null) {
   const k = Number(cfg && cfg.merge_max_coins)
   const coin = perAsset(cfg && cfg.coin_size, asset, null)
-  if (!(k >= 2) || coin == null) return null
-  return big(coin) * BigInt(Math.floor(k))
+  const most = !(k >= 2) || coin == null ? null : big(coin) * BigInt(Math.floor(k))
+  if (working == null) return most
+  return most == null || big(working) < most ? big(working) : most
 }
 
 // What the maker holds out of round when an offer is refused for it, from its last reading of
@@ -314,6 +319,141 @@ export const shareText = (ppm) => String(ppm / 1_000_000)
 // names another ("off" for none): a tenth, so that a double-sign of what the maker holds at once
 // costs the operator ten times what it could take from it.
 export const DEFAULT_INSTANT_BUDGET = '0.1'
+
+// Working coins (D94). A swap pays from one coin, and that coin's whole worth is then out of round
+// until the next round: its change, and what the taker pays in its place. So for each asset it
+// gives, the maker keeps WORKING_COUNT coins worth at most 1/WORKING_SHARE of its instant budget
+// each, at its node's rates, and the rest in larger reserve coins that a small swap does not reach
+// (the library pays a swap from the smallest coin that pays it alone). The size is derived from
+// the budget at every pass, never a fixed number of atoms; coins are cut to it inside rounds (a
+// refresh in pieces), never by a payment to itself out of round.
+export const WORKING_SHARE = 4n
+export const WORKING_COUNT = 4
+const atomsOf = (value, rate) => (big(rate) > 0n ? (big(value) * 100_000_000n) / big(rate) : null)
+const worthOf = (atoms, rate) => (big(atoms) * big(rate)) / 100_000_000n
+
+// The size of a working coin of each asset the node prices: a quarter of the instant budget (the
+// library's `bond` answer, `instant_budget.value`, reference atoms) in atoms at `rates` (asset ->
+// reference atoms per 1e8 atoms, as the library weighs the budget). -> Map asset -> atoms, empty
+// while no budget is set.
+export function workingSizes (bond, rates) {
+  const b = bond && bond.instant_budget
+  const out = new Map()
+  if (!b || b.value == null) return out
+  const q = big(b.value) / WORKING_SHARE
+  if (q <= 0n) return out
+  for (const [a, r] of rates || []) { const n = atomsOf(q, r); if (n != null && n > 0n) out.set(a, n) }
+  return out
+}
+
+// How long a coin the maker gave up in a round, and the library took back (a refresh that waited
+// for the operator's funds or its in-flight cap, WITHDRAW_AFTER 120 s, or one a swap needed), is
+// left before it is given up again: the library's own RETRY_AFTER for received coins. Without it
+// the maker would give the coin up and take it back every pass while the cap stays full.
+export const GIVE_UP_AGAIN_MS = 600_000
+
+// The coin of `asset` to cut into working coins of `size` this pass: when fewer than WORKING_COUNT
+// of its live coins are working coins (at most `size`, at least half of it), its smallest larger
+// coin of a round or a board (never one received out of round, which settling takes into a round
+// already, nor a resting order's), cut into as many pieces as are missing and a reserve coin of the
+// rest. Read from the coins as they are now: none while a reserve coin of the asset is given up in
+// a round (a cut under way); a cut taken back leaves its coin live, and it is cut again once
+// `gaveUp` (leaf -> when the maker gave it up) is GIVE_UP_AGAIN_MS old. -> { leaf, piece, pieces }
+export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now()) {
+  if (size == null || big(size) <= 0n) return null
+  const mine = (coins || []).filter((c) => c && c.asset === asset && !isOrderCoin(c))
+  const reserveOf = (c) => (c.kind === 'batch' || c.kind === 'board') && big(c.value) > big(size)
+  if (mine.some((c) => c.state === 'given' && reserveOf(c))) return null
+  const live = mine.filter((c) => c.state === 'live')
+  // A working coin is at most `size` and at least half of it: crumbs a swap's change left do not
+  // count, since they pay no trade of a working coin's size (merges gather them).
+  const working = live.filter((c) => big(c.value) <= big(size) && big(c.value) * 2n >= big(size)).length
+  if (working >= WORKING_COUNT) return null
+  const reserve = live.filter((c) => reserveOf(c) && !(gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS))
+    .sort((x, y) => (big(x.value) < big(y.value) ? -1 : big(x.value) > big(y.value) ? 1 : 0))
+  if (!reserve.length) return null
+  return { leaf: reserve[0].leaf_id, piece: String(big(size)), pieces: WORKING_COUNT - working }
+}
+
+// The room left in the maker's instant budget now, in reference atoms, from its coins as they are
+// (`coins`, the latest reading) rather than from the last pass: the budget's value (`budgetValue`,
+// the library's `bond` answer, which moves only with the bond asset's rate) less the worth of what
+// it holds out of round (coins received or made by a payment out of round, kind transfer or fill,
+// in a state the library counts), and less the worth of every coin an open firm offer holds (state
+// offered, a coin of a round or a board), which is out of round in full once its swap completes.
+// A coin of an asset the node does not price leaves no room at all (it cannot be weighed). Null
+// without a budget. So a swap that completes takes its room at the next reading of the coins, which
+// the maker makes at every offer and completion, and two offers open at once never pass the budget
+// together (web wallet #632, #653).
+export function roomNow (budgetValue, coins, rates) {
+  if (budgetValue == null) return null
+  let room = big(budgetValue)
+  for (const c of coins || []) {
+    if (!c) continue
+    const out = (c.kind === 'transfer' || c.kind === 'fill') && HELD_OUT.includes(c.state)
+    const offered = c.state === 'offered' && c.kind !== 'transfer' && c.kind !== 'fill'
+    if (!out && !offered) continue
+    const r = rates && rates.get(c.asset)
+    if (r == null || big(r) <= 0n) return 0n
+    room -= worthOf(c.value, r)
+  }
+  return room < 0n ? 0n : room
+}
+
+// The room left (`roomValue`, reference atoms) in atoms of each asset `rates` prices, rounded down:
+// what a quote or a firm offer may take in of the asset it wants, from the same reading as the coin
+// it gives from (roomNow). Null without a budget.
+export function roomAtomsOf (roomValue, rates) {
+  if (roomValue == null) return null
+  const m = new Map()
+  for (const [a, r] of rates || []) if (big(r) > 0n) m.set(a, (big(roomValue) * 100_000_000n) / big(r))
+  return m
+}
+
+// What the maker can give of each asset now without holding more out of round than its budget:
+// its largest live coin of the asset whose whole worth fits in the room left (`roomValue`,
+// reference atoms, roomNow), since that coin is out of round once a swap pays from it; nothing when
+// none fits, and nothing of an asset the node does not price, which no budget can bound (#654).
+// `sp` is what it can pay (asset -> atoms); with no budget (`roomValue` null) it stays as it is. A
+// quote and a firm offer sized on this are never refused for the budget.
+export function budgetedSpendable (sp, coins, roomValue, rates) {
+  if (roomValue == null) return sp
+  const out = new Map(sp)
+  for (const [a, v] of sp || []) {
+    const r = rates && rates.get(a)
+    if (r == null || big(r) <= 0n) { out.set(a, 0n); continue }
+    let best = 0n
+    for (const c of coins || []) {
+      if (!c || c.asset !== a || c.state !== 'live' || isOrderCoin(c)) continue
+      const x = big(c.value)
+      if (x > best && worthOf(x, r) <= big(roomValue)) best = x
+    }
+    out.set(a, best < big(v) ? best : big(v))
+  }
+  return out
+}
+
+// Whether the maker holds out of round more than half its budget (the library's `bond` answer):
+// it then settles what it received at once, not only on its timer.
+export function pastHalfBudget (bond) {
+  const b = bond && bond.instant_budget
+  if (!b || b.value == null || b.held_value == null) return false
+  return big(b.held_value) * 2n > big(b.value)
+}
+
+// The received coins due for settling, by asset, each with the piece its refresh is cut into (a
+// working coin's size, when known): -> [{ asset, leaves, piece }].
+export function settleGroups (coins, due, sizes) {
+  const by = new Map()
+  const of = new Map((coins || []).map((c) => [c.leaf_id, c]))
+  for (const id of due || []) {
+    const c = of.get(id)
+    const a = c ? c.asset : ''
+    if (!by.has(a)) by.set(a, [])
+    by.get(a).push(id)
+  }
+  return [...by].map(([asset, leaves]) => ({ asset, leaves, piece: sizes && sizes.has(asset) ? String(sizes.get(asset)) : null }))
+}
 
 // The room left in the maker's instant budget, in atoms of each asset its node prices, from the
 // library's `bond` answer: null when no budget is set or the bond does not stand (then the
@@ -644,10 +784,21 @@ async function main () {
   // Coins the operator's cap holds back out of round (heldAtCap) widen the maker's own share by
   // what they are worth (budgetPpm), and the share goes back once they are refreshed.
   const heldBackFile = join(cfg.store_dir, 'held-back.json')
+  // The assets it gives: in-tree, and at its BTC desk.
+  const givesOf = () => new Set([...(cfg.pairs || []), ...((cfg.btc && cfg.btc.pairs) || [])].map((x) => x.give).filter((a) => a !== 'BTC'))
   let room = null, lastInfo = null, heldBackLog = '', stuckPrev = heldBackFrom(existsSync(heldBackFile) ? readFileSync(heldBackFile, 'utf8') : null)
+  // The budget as the last pass read it (D94): the bond answer, the node's rates, each asset's
+  // working-coin size, and the room left in reference atoms.
+  let bondNow = null, ratesNow = new Map(), sizes = new Map(), budgetValue = null, sizesLog = ''
   const readRoom = async (first = false) => {
     let bond = null
     try { bond = await cmd('bond', {}, first); room = budgetRoom(bond) } catch (e) { log('bond:', e.message); return }
+    bondNow = bond
+    budgetValue = bond && bond.instant_budget && bond.instant_budget.value != null ? big(bond.instant_budget.value) : null
+    try { ratesNow = await nodeRates() } catch (e) { log('rates:', e.message) }
+    sizes = workingSizes(bond, ratesNow)
+    const sl = [...sizes].filter(([a]) => givesOf().has(a)).map(([a, v]) => tickerOf(a) + ' ' + v).sort().join(', ')
+    if (sl !== sizesLog) { log('working coins of at most:', sl || 'none (no budget)'); sizesLog = sl }
     const b = bond && bond.instant_budget
     if (basePpm == null || !b || !lastInfo || first) return
     try {
@@ -724,6 +875,8 @@ async function main () {
   if (desk) log('the BTC desk is open')
 
   const firm = new Map()   // swap -> { give_asset, give, expires }
+  const gaveUp = new Map()    // leaf -> when the maker gave it up in a round (a cut or a settle)
+  let noPieces = false        // the library answered a refresh in pieces with one leaf: no cuts
   const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
   // An offer refused because the maker holds too much out of round (the operator's bond caps it):
   // every coin it received is refreshed at the next pass, not after its rest, and that pass runs now.
@@ -761,7 +914,19 @@ async function main () {
   const HOLDINGS_FOR_FIRM_MS = 5 * 60 * 1000
   // What a firm offer is sized on: the upkeep's last reading while it is fresh, else a reading
   // asked ahead of the queue.
-  const firmHoldings = async () => (holdings && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings.sp : spendable(true))
+  // An offer or a completion since the last reading changed the coins (an offered coin, a swap's
+  // change and what came in), so the reading is stale until the next one: a firm offer then reads
+  // the coins first, and quotes give nothing meanwhile.
+  // The room a reading leaves, and what that room takes in of each asset: none while the reading
+  // is stale, and the pass's bond answer without a budget.
+  const roomOf = (h) => (h.stale && budgetValue != null ? 0n : roomNow(budgetValue, h.coins, ratesNow))
+  const wantRoomOf = (h) => (budgetValue == null ? room : roomAtomsOf(roomOf(h), ratesNow))
+  let firmReading = null
+  const firmHoldings = async () => {
+    const h = holdings && !holdings.stale && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true)
+    firmReading = h
+    return budgetedSpendable(h.sp, h.coins, roomOf(h), ratesNow)
+  }
   const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
   async function tick () {
     if (busy || Date.now() - passEnd < passTook) return
@@ -799,6 +964,8 @@ async function main () {
           // is taken or released, so a maker of one coin serves one taker at a time.
           const coin = perAsset(cfg.coin_size, a, null)
           if (coin && amount > big(coin)) amount = big(coin)
+          // Never a board above a working coin's size, which is derived from the budget.
+          if (sizes.has(a) && amount > sizes.get(a)) amount = sizes.get(a)
           if (amount < big((gives.find((x) => x.give === a) || {}).min_give || 1)) continue
           if ((counted.get(a) || 0) >= 2 * cap(a)) continue
           const feeAssets = [a, ...Object.keys(onchain).filter((x) => x !== a && big(onchain[x]) > 0n).sort((x, y) => (big(onchain[y]) > big(onchain[x]) ? 1 : -1))]
@@ -832,30 +999,57 @@ async function main () {
       // acceptance read the coins again since (each renews the holdings): the latest reading.
       if (changed) { try { await readHoldings() } catch (e) { log('holdings:', e.message) } }
       const coins = (holdings && holdings.coins) || []
-      const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull, first: firstPass })
+      // Past half its budget out of round, every received coin is settled now, not on its timer.
+      const half = pastHalfBudget(bondNow)
+      // A coin given up already and taken back (its refresh waited for the operator) waits
+      // GIVE_UP_AGAIN_MS before it is given up again, so a full in-flight cap is not met with the
+      // same participation every pass (#655).
+      const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull || half, first: firstPass })
+        .filter((id) => t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS)
       firstPass = false
-      if (due.length) {
+      for (const [id, at] of gaveUp) if (t - at > 6 * GIVE_UP_AGAIN_MS) gaveUp.delete(id)
+      // Each asset in its own participation, its new value cut into working coins (a refresh in
+      // pieces), so settling never makes a coin larger than a working coin but a reserve of the rest.
+      for (const g of settleGroups(coins, due, sizes)) {
         try {
-          const q = await cmd('quote', { leaves: due })
-          const r = await cmd('participate', { leaves: due, shown: q.coins })
-          log('settling', due.length, 'received coins' + (outOfRoundFull ? ' (offers refused for what it holds out of round)' : '') + ':',
+          const args = { leaves: g.leaves, ...(g.piece ? { piece: g.piece } : {}) }
+          const q = await cmd('quote', args)
+          const r = await cmd('participate', { ...args, shown: q.coins })
+          log('settling', g.leaves.length, 'received coins of', tickerOf(g.asset) + (g.piece ? ' in pieces of ' + g.piece : '') +
+            (outOfRoundFull ? ' (offers refused for what it holds out of round)' : half ? ' (past half its budget out of round)' : '') + ':',
             JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
-          for (const d of due) seen.delete(d)
-          outOfRoundFull = false
+          for (const d of g.leaves) { seen.delete(d); gaveUp.set(d, t) }
         } catch (e) { log('settle:', e.message) }
       }
+      if (due.length) outOfRoundFull = false
       // More live coins of an asset than `max_coins`: boards and the smallest coins are merged in
       // the operator's next round (coinsToMerge), MERGE_PER_PASS at most a pass (the library gives
       // up 16 a participation), so every command it makes reads a store of bounded size.
       for (const [a, n] of counted) {
         if (n <= cap(a)) continue
-        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null), mergeMost(cfg, a))
+        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null), mergeMost(cfg, a, sizes.get(a) ?? null))
         if (merge.length < 2) continue
         try {
           const q = await cmd('quote', { leaves: merge })
           const r = await cmd('participate', { leaves: merge, shown: q.coins })
           log('merging', merge.length, 'coins of', a.slice(0, 8), `(${n} held, at most ${cap(a)}):`, JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
         } catch (e) { log('merge:', e.message) }
+      }
+      // Working coins: an asset it gives with fewer than WORKING_COUNT coins of a working size has
+      // its smallest reserve coin cut into them in the next round.
+      for (const a of givesOf()) {
+        const s = shapeFor(coins, a, sizes.get(a) ?? null, gaveUp)
+        if (!s) continue
+        try {
+          const args = { leaves: [s.leaf], piece: s.piece, pieces: s.pieces }
+          const q = await cmd('quote', args)
+          // A library that does not cut a refresh into pieces answers no `pieces`: it would give the
+          // coin back whole, and the next pass would cut it again, so nothing is given up.
+          if (!q || !q.pieces) { if (!noPieces) log('working coins: this leaf library does not cut a refresh into pieces; coins are left as they are'); noPieces = true; continue }
+          const r = await cmd('participate', { ...args, shown: q.coins })
+          gaveUp.set(s.leaf, Date.now())
+          log('cutting a coin of', tickerOf(a), 'into', s.pieces, 'working coins of', s.piece, 'and a reserve:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
+        } catch (e) { log('working coins:', e.message) }
       }
     }
   }
@@ -881,11 +1075,13 @@ async function main () {
         // Before its first reading (just started, the library reading its store) it quotes
         // nothing, at once: a taker asks the other sources rather than waiting on this one.
         if (!holdings) { if (!firstReading) firstReading = spendable(true).catch(() => {}).finally(() => { firstReading = null }); return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [] }) }
-        const sp = holdings.sp
+        // What it can give without passing its budget once a swap's coin is out of round (D94):
+        // a price it shows is one it would confirm.
+        const sp = budgetedSpendable(holdings.sp, holdings.coins, roomOf(holdings), ratesNow)
         // In-tree quotes are cut to the room left in its instant budget; a pair cut to nothing is
         // named in `after_next_round`.
         // And none that wants an asset the operator refreshes no more of now.
-        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), room)
+        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), wantRoomOf(holdings))
         const kept = withoutCapped([...cut.quotes, ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])], cut.later, capped)
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: kept.quotes, ...(kept.later.length ? { after_next_round: kept.later } : {}) })
@@ -916,15 +1112,20 @@ async function main () {
         if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
         const pair = sl.pair
         const want = w.want
-        // More than the room left in its instant budget: the rest after its next round.
-        if (room && room.has(pair.want) && want > room.get(pair.want)) {
+        // More than the room left in its instant budget, from the same reading: the rest after its
+        // next round.
+        const wantRoom = firmReading ? wantRoomOf(firmReading) : room
+        if (wantRoom && wantRoom.has(pair.want) && want > wantRoom.get(pair.want)) {
           return send(res, 409, { error: 'the maker takes this much after its next round', after_next_round: true,
-            quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), room).quotes.pop() || null })
+            quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), wantRoom).quotes.pop() || null })
         }
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
-        spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
+        // The coins read again at once, ahead of the queue (a quote's 90 s hold lets only such
+        // commands run): quotes give nothing only until it answers (#659).
+        if (holdings) holdings.stale = true
+        readHoldings(true).catch(() => {})
         log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8),
           'in', Date.now() - asked, 'ms')
         return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
@@ -937,7 +1138,10 @@ async function main () {
         const f = firm.get(b.swap)
         if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)
-        spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
+        // The coins read again at once, ahead of the queue (a quote's 90 s hold lets only such
+        // commands run): quotes give nothing only until it answers (#659).
+        if (holdings) holdings.stale = true
+        readHoldings(true).catch(() => {})
         log('done', String(r.swap).slice(0, 12))
         return send(res, 200, { swap: b.swap, state: 'done' })
       }
