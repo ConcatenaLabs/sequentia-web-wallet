@@ -130,12 +130,16 @@ export const USER_WORDS = Object.freeze({
   notReady: (pay, soon) => soon ? `Your ${pay} is on its way: it is ready to trade in a minute or two. Nothing has moved.`
     : `Your ${pay} is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved.`,
   // Part of what is paid can be traded now, too little for any offer; the rest settles first.
+  // More than the wallet holds of what is paid, nothing of it waiting: the whole of it, named.
+  moreThanHeld: (have) => `That is more than your ${have}.`,
   partReady: (ready, pay, soon) => soon ? `Only ${ready} of your ${pay} can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.`
     : `Only ${ready} of your ${pay} can be traded now, too little for any offer: the rest is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
   // A coin that was ready, taken back out of the chain with its Bitcoin block: still the wallet's,
   // and in its balance, while the network takes it in again.
   redoing: (pay) => `Your ${pay} is being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once that settles. Nothing has moved.`,
-  busy: (pay) => `Your ${pay} is held by an order you placed or a move your wallet is making, and can be traded once that completes. Nothing has moved.`,
+  // Held by an order the person placed, which they can cancel; never said of the wallet's own moves,
+  // which a trade waits for by itself.
+  busy: (pay) => `Your ${pay} is held by an order you placed, and can be traded once it is filled or cancelled. Nothing has moved.`,
   // Kept by the wallet's plan to refresh it while the wallet is closed, which only a round can end:
   // the wallet gives it up in its next round for a coin it can trade.
   // The best offers are orders resting in the tree that only coins expiring later can fill: the
@@ -351,7 +355,8 @@ export function spendableFrom (coins, plans, { waiting = false } = {}) {
   const planned = plannedCoins(plans)
   const out = new Map()
   for (const c of coins || []) {
-    if (!c || planned.has(c.leaf_id)) continue
+    // A resting order's coin is the order the person placed: a fill or a cancel spends it, no trade.
+    if (!c || planned.has(c.leaf_id) || c.order === true) continue
     if (c.state !== 'live' && !(waiting && c.state === 'given' && c.refresh_waiting)) continue
     out.set(c.asset, (out.get(c.asset) || 0n) + big(c.value))
   }
@@ -437,7 +442,7 @@ export const SETTLE_POLL_MS = 5000
 export const SETTLE_MOST_MS = 10 * 60_000
 // How far under the amount a person accepted the trade may receive, in basis points, and still go
 // ahead by itself once what it pays has been settled first.
-export const SETTLE_BOUND_BPS = 100
+export const SETTLE_BOUND_BPS = 100n
 // The book's entries read while the amount was typed stand for the quote this long.
 const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
@@ -1184,12 +1189,14 @@ export function createEngine (deps) {
         // Live coins kept by an open offline-refresh plan are freed through the wallet's next round
         // (deps.release, the page's plan_release), as a payment from them is.
         if (await freePlanned(payAsset, mine)) return settleFirst(payAsset, [], held)
-        const busy = !mine.some((c) => c.state === 'pending') && mine.some((c) => BUSY_STATES.includes(c.state))
+        // Held by an order the person placed (a resting order's coin, an offer of theirs still open):
+        // true words, since the person can act on it (cancel the order). Everything else that holds
+        // it is the wallet's own doing (a refresh its upkeep runs, a payment under way, a coin not
+        // final yet): the trade waits for that and goes, never a refusal (D96).
+        const ordered = mine.some((c) => c.order === true || c.state === 'offered')
         // Coins a Bitcoin reorganisation took back out of the chain, being redone: never a loss.
-        if (!busy && mine.some((c) => c.redoing === true)) return { ok: false, why: 'redoing', held: String(held) }
-        // Held, and waiting only for a round (arriving, given up in a refresh, not final yet): the
-        // trade settles it first and goes (D96), never "not ready".
-        return busy ? { ok: false, why: 'busy', held: String(held), soon: soonNow } : settleFirst(payAsset, [], held)
+        if (!ordered && mine.some((c) => c.redoing === true)) return { ok: false, why: 'redoing', held: String(held) }
+        return ordered ? { ok: false, why: 'busy', held: String(held), soon: soonNow } : settleFirst(payAsset, [], held)
       }
       return { ok: false, why: 'no-funds' }
     }
@@ -1214,8 +1221,10 @@ export function createEngine (deps) {
       // wallet's next round, whatever the free coins hold, never left waiting for nothing.
       if (payAsset !== 'BTC' && await freePlanned(payAsset)) return settleFirst(payAsset, [], haveLeaf)
       // Part of what the balance shows waits for a round: settled first, then traded (D96). The
-      // wallet never names a tradable part of a balance.
-      if (payAsset !== 'BTC') return settleFirst(payAsset, [], haveLeaf)
+      // wallet never names a tradable part of a balance. When nothing waits (the amount is more than
+      // the wallet holds), the answer below says that.
+      const shown = payAsset !== 'BTC' && deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : null
+      if (payAsset !== 'BTC' && (shown == null || shown > haveLeaf)) return settleFirst(payAsset, [], haveLeaf)
       const ready = es.reduce((m, e) => (haveOf(e) > m ? haveOf(e) : m), 0n)
       return { ok: false, why: 'part-ready', ready: String(ready), soon: soonNow }
     }
@@ -1263,6 +1272,12 @@ export function createEngine (deps) {
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }
     const have = haveOf(best.entry)
+    // Less can be paid now than asked, while the wallet shows more of it (the rest waiting for a
+    // round): settled first, then the whole amount is priced (D96), never "up to" a part of it.
+    if (have < A && payAsset !== 'BTC' && best.entry.source !== 'onchain-fill' && deps.held) {
+      const shown = big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n))
+      if (shown > have) { drop(best); return settleFirst(payAsset, [], have) }
+    }
     if (have < A && best.give <= have) ticket.upTo = String(have)
     return { ok: true, ticket, choice: best, moving }
   }

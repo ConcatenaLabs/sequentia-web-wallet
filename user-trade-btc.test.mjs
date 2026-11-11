@@ -435,6 +435,6 @@ test('selling for BTC: the wallet\'s own coins falling short is said as such, ne
   const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
   assert.equal(q.ok, false)
-  assert.equal(q.why, 'freeing', 'the wallet\'s own shortfall: ' + q.why)
+  assert.equal(q.why, 'settle-first', 'the wallet\'s own shortfall: ' + q.why)
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the maker\'s offer is released')
 })
