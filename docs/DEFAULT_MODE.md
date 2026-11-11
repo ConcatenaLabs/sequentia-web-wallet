@@ -370,9 +370,11 @@ modes (`asset-picker.js`):
   fee comes out of your <TICKER>, so this is the most you can send."; refused for want of the fee
   after the wait, Send becomes **Send <most> <TICKER>**, reviewed again before anything is signed.
 - When what is sent waits only for the next settlement (the wallet's own upkeep is moving the
-  asset in it, or coins must be settled first), the review goes on with "Goes through in about a
-  minute" in place of "It arrives in seconds."; **Send** then waits for that settlement, saying the
-  same, and the payment goes ahead by itself after it. It is never refused for it.
+  asset in it, or coins must be settled first, such as a payment received that is still
+  arriving), the review goes on with "Goes through in about a minute" in place of "It arrives in
+  seconds."; **Send** then waits for that settlement, saying the same, and the payment goes ahead
+  by itself after it. It is never refused for it: what is still arriving counts in what can be
+  sent, to a receive code, to an address, and in a move out of the Ark.
 - The wallet's maintenance puts no part of an asset into a channel while a payment of it is being
   written (a recipient or an amount typed), for ten minutes after a payment closed a channel to
   spend its side (an hour for BTC; kept across reloads), nor while it holds less than 10 USD of it.
@@ -391,8 +393,6 @@ modes (`asset-picker.js`):
     goes through. The library's own refusal goes to the console.
   - "None of your <TICKER> can be sent this way right now: try again in a moment." when none of it
     can be, and nothing of it is arriving.
-  - "Part of this <TICKER> is still arriving: try again in a moment." when none of it can be sent
-    yet and some of it is still arriving.
   - "A receive code takes Sequentia assets. For BTC, use an address or an invoice."
   - "This amount can't be sent to an address right now. Send it to a receive code, or pay an
     invoice." When the wallet's coins on the chain don't cover a payment to an address with its
@@ -423,9 +423,10 @@ modes (`asset-picker.js`):
     sent. It arrives within <N> minutes. Keep this page open meanwhile. To pay the same again,
     send once it has arrived." When the wallet's coins of the asset are still arriving (the change
     of a payment just made, a coin just received) and would cover the payment once they are in,
-    it says "Part of this <TICKER> is still arriving: it can be sent within <N> minutes.", never
-    that there is not enough. What a payment still on its way gives up counts only as its change.
-    The sentence above is for when even that cannot be made.
+    the review opens all the same, its fee line "A small part of what you send, shown once it is
+    sent" and <N> one settlement longer; **Send** reads "Goes through in about a minute" while
+    the wallet settles them, then the payment is made as above. What a payment still on its way
+    gives up counts only as its change. The sentence above is for when even that cannot be made.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
     when what is asked for needs what has not vested yet. Trade, Stake, Mix and every other
     action that would spend it say the same sentence, with the earliest date of what it needs.
@@ -456,8 +457,7 @@ modes (`asset-picker.js`):
     already under way is waited for, never asked twice, so Review pressed again (the browser
     extension's popup closed and opened again) goes on waiting for it. When the move cannot be
     made, one of the sentences under "Stake, pools and Mix" says why and nothing moves; a coin
-    just received that cannot be paid out yet says "Part of this <TICKER> is still arriving: try
-    again in a moment."
+    just received that is still arriving is settled first, and the move goes on after it.
   - The asset is hidden only among the assets of the inputs. When the wallet holds a confidential
     coin of another asset (not the Sequence token, which may be staked), it is spent to the
     wallet's own confidential address in the same transaction, and the review says "Anyone

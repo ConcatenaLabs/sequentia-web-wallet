@@ -55,7 +55,7 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX', '< 0.01 USD'), '0.00000704 EURX (< 0.01 USD)');
   assert.ok(!/a little/i.test(DEFAULT_WORDS.feeKeptSome), 'no "a little" left to guess');
   for (const name of ['assetLightningReview', 'offboardReview'])
-    assert.match(fn(name), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee\]\]/, name);
+    assert.match(fn(name), /kv: \[\[DEFAULT_WORDS\.feeLabel, (settling \? DEFAULT_WORDS\.feeKeptSome : )?fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee\]\]/, name);
   assert.ok(!/kv: fee>0n \?/.test(html), 'no review hides a zero fee');
   assert.ok(DEFAULT_WORDS.maxArkElsewhere.length > 0);
 });

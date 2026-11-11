@@ -1670,7 +1670,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
         // leaving the tree, or of a format the other side does not read): those coins go through the
         // next round (`settle_first`, which gives up nothing twice), and the payment is asked again
         // once it is through, about a minute later. Nothing is refused for it.
-        if (e instanceof LeafError && e.kind === 'settle_first' && i < RELEASE_TRIES) {
+        // An offboard's quote answers at once, as the library gave it: the page reviews the payment
+        // then, and the offboard made on that review settles first.
+        if (e instanceof LeafError && e.kind === 'settle_first' && i < RELEASE_TRIES && command !== 'offboard_quote') {
           const coins = e.coins && e.coins.length ? e.coins : null
           const ask = coins ? { coins } : { asset: e.asset }
           S.releasing = { coins: coins || [], asset: e.asset, since: now(), command, why: 'settle' }
@@ -2709,6 +2711,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // What of the figure is not spendable yet: nothing in default mode with places read (the figure
     // holds none of it); else the library's arriving states and what is expected.
     arriving: (hex) => (placesOn() ? 0n : arrivingAtoms(shown(), hex) + expecting(hex)),
+    // Default mode with places read: what of an asset is on its way to the wallet and in no figure
+    // yet (the coins the library places as arriving, and payments it has not taken in yet), in
+    // atoms. A payment or a move out of it goes through after the next settlement (`paying`,
+    // `settle_first`), so it counts in what can be sent. Otherwise 0n: the figure holds it.
+    onItsWay: (hex) => (placesOn() ? (arrivingByAsset(shownPlaces()).get(hex) || 0n) + expecting(hex) : 0n),
     // Of what is arriving, what is being redone after a Bitcoin reorganisation, in atoms.
     redoing: (hex) => redoingAtoms(S.coins, hex),
     // What was moved out to keep it safe while the wallet was away, until it is put back, in atoms.
