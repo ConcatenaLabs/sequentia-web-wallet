@@ -2879,12 +2879,26 @@ function afterClose(e, atoms, said){
 }
 
 // Nothing of an asset can be sent now: still arriving, or held but being moved in a round by the
-// wallet's own maintenance (a refresh, or part of it kept for instant payments), or truly none.
+// wallet's own upkeep (then the payment goes through after it), or truly none.
+// Whether a refusal of a payment's quote only waits for the next settlement: the library's
+// `settle_first`, or a shortfall of coins while the wallet holds the asset, none of it arriving
+// (its own upkeep is moving it in a round). The payment is then reviewed and goes ahead by itself
+// once that settlement is through (leaves.js paying), never refused (D96).
+function settlesFirst(e, atoms, hex){
+  if(e && e.kind === 'settle_first') return true;
+  const said = String(e?.message??e);
+  if(!/in live coins|smallest leaf/.test(said)) return false;
+  let held = 0n, arriving = 0n;
+  try{ held = leavesApi.leafAtoms(hex) || 0n; arriving = leavesApi.arriving(hex) || 0n; }catch{}
+  const most = sendableNow(atoms, said);
+  return held > 0n && arriving <= 0n && (most == null || most <= 0n);
+}
 function noneNowWords(hex, m0){
   let held = 0n, arriving = 0n;
   try{ held = leavesApi.leafAtoms(hex) || 0n; arriving = leavesApi.arriving(hex) || 0n; }catch{}
   if(arriving > 0n) return DEFAULT_WORDS.stillArriving(m0.ticker);
-  if(held > 0n) return DEFAULT_WORDS.movingNow(m0.ticker, waitFor(hex));
+  // Held, and moved by the wallet's own upkeep now: the payment waits for it and goes (D96).
+  if(held > 0n) return DEFAULT_WORDS.settling;
   return DEFAULT_WORDS.sendNoneNow(m0.ticker);
 }
 
@@ -2955,10 +2969,11 @@ async function treeSendReview(r, onDone, note){
   // library that has no quote says a little is kept back, never that there is no fee.
   // A payment the wallet's channel side would cover is quoted from the library's refusal: its fee,
   // and, when more is asked than can go once the fee is taken out, the review is for the most.
-  let quote = null, freeing = false, refused = '', closing = null;
+  let quote = null, freeing = false, refused = '', closing = null, settling = false;
   try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
   catch(e){
     if(e && e.kind === 'in_channel'){ freeing = true; refused = String(e.message||''); closing = afterClose(e, atoms, refused); }
+    else if(settlesFirst(e, atoms, r.asset)){ settling = true; console.warn('[send] settles first:', String(e?.message??e)); }
     else if(!/\bno command send_quote\b/.test(String(e?.message??e))) throw new Error(shortWords(e, atoms, r.asset, m0));
   }
   if(freeing){
@@ -2978,7 +2993,7 @@ async function treeSendReview(r, onDone, note){
   // the most that would go instantly.
   const instant = freeing ? sendableNow(atoms, refused) : null;
   const waitLine = DEFAULT_WORDS.waitBlock(waitFor(r.asset), instant != null && instant > 0n ? fmtAtoms(instant, m0.precision||0) : '', m0.ticker);
-  say(freeing ? waitLine : DEFAULT_WORDS.sendLine);
+  say(settling ? DEFAULT_WORDS.settling : freeing ? waitLine : DEFAULT_WORDS.sendLine);
   ok.textContent = DEFAULT_WORDS.send;
   // The wallet's own channel reads wait while the review is open, so Send never waits for one.
   try{ leavesApi.holdReads(120_000); }catch{}
@@ -2988,7 +3003,7 @@ async function treeSendReview(r, onDone, note){
     const t0=performance.now();
     try{
       // While a channel's side is set free first, the wait says so.
-      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'round'){
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; else if(w && w.why === 'round'){
         // The time true for the operator's finality rule, and past it, that it takes longer.
         let d=null; try{ d=leavesApi.anchorDepth(); }catch{}
         const rm=roundMinutes(d), late=w.since!=null && Date.now()-w.since > statedSeconds('round', 5, rm)*1000;

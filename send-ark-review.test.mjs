@@ -68,7 +68,7 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.match(fn('treeSendReview'), /await treeSendReview\(\{\.\.\.r, amtS: less\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\); m\.remove\(\);/);
   assert.equal(DEFAULT_WORDS.sendInstead('0.30502601', 'EURX'), 'Send 0.30502601 EURX');
   // Never "It arrives in seconds." beside "takes about a minute".
-  assert.match(fn('treeSendReview'), /say\(freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
+  assert.match(fn('treeSendReview'), /say\(settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
   assert.match(fn('treeSendReview'), /const instant = freeing \? sendableNow\(atoms, refused\) : null;/);
   // The channel side named plainly: no "set free", no "channel", no "Lightning".
   // The wait says why, how long by the chain, and the most that goes without it.
@@ -100,12 +100,19 @@ test('under the amount, the fee, how soon and the most, before the review', () =
   assert.match(html, /catch\(e\)\{ const q=await treeQuoteFor\(typed, max, hex\)\.catch\(\(\)=>null\); if\(q\) max=q\.most; \}/)
 });
 
-test('nothing sendable while held: the wallet says its own maintenance is moving it, and for how long', () => {
-  assert.equal(DEFAULT_WORDS.movingNow('EURX', DEFAULT_WORDS.aMinute),
-    "Your EURX is being moved by the wallet's automatic maintenance in the current block: you can send it in about a minute.")
-  assert.match(fn('noneNowWords'), /if\(arriving > 0n\) return DEFAULT_WORDS\.stillArriving\(m0\.ticker\);\s+if\(held > 0n\) return DEFAULT_WORDS\.movingNow\(m0\.ticker, waitFor\(hex\)\);/)
+test('nothing sendable while held by the wallet\'s own upkeep: the payment goes through after it, said only as how long', () => {
+  assert.equal(DEFAULT_WORDS.settling, 'Goes through in about a minute')
+  assert.equal(DEFAULT_WORDS.movingNow, undefined, 'the wallet never names its maintenance')
+  assert.match(fn('noneNowWords'), /if\(arriving > 0n\) return DEFAULT_WORDS\.stillArriving\(m0\.ticker\);[\s\S]*if\(held > 0n\) return DEFAULT_WORDS\.settling;/)
   assert.match(fn('shortWords'), /return noneNowWords\(hex, m0\);/)
   assert.match(fn('treeQuoteFor'), /: noneNowWords\(hex, m0\) \}\);/)
+  // The review of a payment whose quote waits only for a settlement goes on, saying how long, and
+  // the payment waits for it (leaves.js paying); it is never refused for it.
+  assert.match(fn('settlesFirst'), /if\(e && e\.kind === 'settle_first'\) return true;/)
+  assert.match(fn('settlesFirst'), /return held > 0n && arriving <= 0n && \(most == null \|\| most <= 0n\);/)
+  assert.match(fn('treeSendReview'), /else if\(settlesFirst\(e, atoms, r\.asset\)\)\{ settling = true;/)
+  assert.match(fn('treeSendReview'), /say\(settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/)
+  assert.match(fn('treeSendReview'), /w\.why === 'settle'\) st\.innerHTML='<span class="spin"><\/span>' \+ DEFAULT_WORDS\.settling/)
 })
 
 test('care opens no channel in an asset being sent, nor in one held for under CHANNEL_MIN_USD', () => {
