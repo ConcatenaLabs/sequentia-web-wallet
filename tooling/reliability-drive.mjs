@@ -25,7 +25,8 @@
 //                 (AMBRA_APP=<application id> for a test build installed beside the released one).
 //                 Each wallet's console (the page; Ambra browser's popup, service worker and
 //                 offscreen document; Ambra mobile's own log lines) goes to
-//                 <work-dir>/console-<name>.log, timed: what held an operation up.
+//                 <work-dir>/console-<name>.log, timed: what held an operation up. The `pay` and
+//                 `trade` lanes keep the page's console there too.
 //                 The laptop's memory: the run starts only with --start-mb (9000) MB available,
 //                 waiting until it is; while fewer than --pause-mb (3500) are, it starts no new
 //                 operation until --resume-mb (5000) are again. Stopped (a kill, the browser
@@ -76,6 +77,9 @@ const record = (o) => { appendFileSync(out, JSON.stringify({ at: new Date().toIS
 async function open (who) {
   const page = new Page(chromium(), { profile: join(work, 'profiles', who) })
   await page.open()
+  // Every line of the page's console, timed, in <work-dir>/console-<name>.log: an operation that
+  // fails or comes back names its cause there (web wallet #632).
+  page.logTo(join(work, `console-${who}.log`), who)
   try {
     const me = (await page.send('Target.getTargetInfo')).targetInfo.targetId
     for (const t of (await page.send('Target.getTargets')).targetInfos) if (t.type === 'page' && t.targetId !== me) await page.send('Target.closeTarget', { targetId: t.targetId })

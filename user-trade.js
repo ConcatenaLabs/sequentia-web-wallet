@@ -624,6 +624,8 @@ export function createEngine (deps) {
   // by the asset paid: the next offer of that asset is asked for that much less, so the check does
   // not send it back for a smaller one.
   const marginsSeen = new Map()
+  // The quote under way's hook for a refusal of the wallet's own (its coins short now).
+  let refusalSeen = null
   async function firm (entry, payAsset, receiveAsset, pay, have, until = Date.now() + firmMs, hard = until) {
     planSingleStep(entry.source, { payAsset, receiveAsset, caps: entry.source === 'covenant-round' ? { leaf_take: true } : undefined })
     // Sized on what the wallet can pay, never on more: a site asks the price of all the wallet can
@@ -631,7 +633,7 @@ export function createEngine (deps) {
     // not hold.
     const size = sizeEntry(entry, pay < have ? pay : have)
     if (!size) return null
-    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep)
+    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep, (e) => { if (refusalSeen) refusalSeen(e) })
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size, hard)
     if (entry.source === 'onchain-fill') return firmOnchain(entry, payAsset, receiveAsset, pay, have)
     if (entry.source === 'covenant-round') {
@@ -996,6 +998,8 @@ export function createEngine (deps) {
   // now (held in a refresh, received and not yet settled): the trade waits on them, and is said to.
   let liveShort = false
   const noteLiveShort = (e) => { if (/ in live coins/.test(String(e && e.message))) liveShort = true }
+  // The BTC desk's check of the wallet's own payment reports here too (#666).
+  refusalSeen = noteLiveShort
   // The makers' firm offers of this quote that came in and are still being read by the wallet's
   // library (one mark each): a new set every quote, so a reading a past quote let go of never counts.
   let makerReads = new Set()

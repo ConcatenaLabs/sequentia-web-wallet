@@ -167,6 +167,14 @@ export function heldAssets (holds, at) {
 export function refreshReceivedOn () {
   try { return !(typeof window !== 'undefined' && window.SEQ_REFRESH_RECEIVED === false) } catch { return true }
 }
+// How a command's time is said in its slow line: its own part, and the wait, named after the
+// commands it waited behind (`behind`, each once, in the order asked), or "other commands" when the
+// page knows none (web wallet #667).
+export function waitedWords (own, waited, behind = []) {
+  const who = behind && behind.length ? [...new Set(behind)].join(', ') : 'other commands'
+  return ` (own ${own} ms, waited ${waited} ms behind ${who})`
+}
+
 // The library's commands that only read (bark/src/arca/command.rs reads_only): a quote's.
 export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 'refusals', 'participations', 'schedule', 'orders',
   'swaps', 'plans', 'info', 'supply', 'board_quote', 'quote', 'settle_quote', 'take_quote', 'order_fill_quote', 'order_quote',
@@ -823,22 +831,29 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // start and the command) and the wait behind other commands, since the library runs one at a
   // time: kept as S.lastRun, and said (`said`) when the library gave its cost. A refusal from a
   // library that gives no cost counts as all its own.
-  function timing (command, took, cost) {
+  // `behind` names the commands that were asked before it and still running or waiting when it was
+  // asked: the wait is said as theirs (web wallet #667: a trade's price that waited half a minute
+  // behind the bond watch says so).
+  function timing (command, took, cost, behind = []) {
     const ms = (p) => Number((cost && cost[p] && cost[p].ms) || 0)
     const known = !!(cost && cost.command)
     const own = known ? Math.min(took, ms('start') + ms('command')) : took
-    S.lastRun = { command, took, own, waited: took - own, at: now() }
-    return { own, waited: took - own, said: known ? ` (own ${own} ms, waited ${took - own} ms behind other commands)` : '' }
+    S.lastRun = { command, took, own, waited: took - own, at: now(), behind }
+    return { own, waited: took - own, said: known ? waitedWords(own, took - own, behind) : '' }
   }
 
   async function run (command, args) {
     const t0 = now()
+    const behind = (S.inflight || []).map((x) => x.command)
+    const me = { command }
+    S.inflight = [...(S.inflight || []), me]
     let v
     try { v = await S.client.run(command, args) } catch (e) {
+      S.inflight = (S.inflight || []).filter((x) => x !== me)
       // A command refused after holding the wallet over ten seconds is named as one that answered
       // is: a refusal holds every command behind it just as long.
       const took = now() - t0
-      const t = timing(command, took, e && e.cost)
+      const t = timing(command, took, e && e.cost, behind)
       if (took > 10000) {
         let cost = ''
         try { cost = e && e.cost ? ' ' + JSON.stringify({ cost: e.cost }).slice(0, 900) : '' } catch {}
@@ -848,8 +863,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     }
     // A command over ten seconds says so, with what the library says it cost (and a sync its
     // steps): the one long command that holds every other behind it can then be named.
+    S.inflight = (S.inflight || []).filter((x) => x !== me)
     const took = now() - t0
-    const t = timing(command, took, v && v.cost)
+    const t = timing(command, took, v && v.cost, behind)
     if (took > 10000) {
       let cost = ''
       // The re-check every command starts with, by part (its coins' bases, their lineages, the

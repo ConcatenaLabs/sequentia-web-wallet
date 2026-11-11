@@ -424,3 +424,17 @@ test('selling for BTC: what the payment spends changed since the ticket was show
   assert.equal(eng.records()[0].state, 'failed')
   assert.ok(s.posts.filter(([p]) => p === 'release').length > released, 'the maker\'s offer is let go')
 })
+
+test('selling for BTC: the wallet\'s own coins falling short is said as such, never "nobody could confirm a price" (#666)', async () => {
+  const s = standIn()
+  const lib = s.lib
+  const short = { command (cmd, a) {
+    if (cmd === 'lightning_pay_quote') throw new Error('refused: the wallet holds 999647047 of asset ' + X + ' in live coins, and paying 999931875 takes 999932651 with the margins its transactions leave for their fees')
+    return lib.command(cmd, a)
+  } }
+  const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
+  assert.equal(q.ok, false)
+  assert.equal(q.why, 'freeing', 'the wallet\'s own shortfall: ' + q.why)
+  assert.ok(s.posts.some(([p]) => p === 'release'), 'the maker\'s offer is released')
+})
