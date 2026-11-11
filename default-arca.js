@@ -47,8 +47,9 @@ export const DEFAULT_WORDS = Object.freeze({
   boardWhen: (n) => `usually within ${n} minutes`,
   comingBackWhen: 'within about two days',
   takingLonger: 'taking longer than usual; the wallet keeps at it',
-  // A payment that waits for the wallet's own money being moved (its refresh, in a round now).
-  waitRound: 'Your money is being moved: this goes ahead by itself in about a minute.',
+  // A payment that waits for the wallet's own money being moved (its refresh, in a round now),
+  // `when` as causeWhen says it for a round ("about a minute", or "usually within N minutes").
+  waitRound: (when) => `Your money is being moved: this goes ahead by itself (${when}).`,
   // Held, spendable before, and taken back out of the chain with the Bitcoin block it rested on:
   // still the wallet's, and counted, while the network takes it in again.
   redoing: (amount, ticker) => `${amount} ${ticker} being redone after a Bitcoin reorganisation`,
@@ -916,16 +917,16 @@ export function vestedOpen (claims) {
 // `shown`: the leaf ids a received row already shows (that row says it instead); `firstSeen`: when
 // each line was first seen (ms, by id), `nowMs`, `boardMin` from boardMinutes.
 // -> [{ asset, atoms: BigInt, leaf, kind: 'arriving'|'coming_back', cause, when, late }]
-export function arrivingRows (arriving, shown = [], { firstSeen = {}, nowMs = Date.now(), boardMin = 5 } = {}) {
+export function arrivingRows (arriving, shown = [], { firstSeen = {}, nowMs = Date.now(), boardMin = 5, roundMin = 1 } = {}) {
   const seen = new Set(shown || [])
   const out = []
   for (const a of arriving || []) {
     if (!a || !a.asset || (a.leaf_id && seen.has(a.leaf_id))) continue
     const cause = arrivingCause(a)
     const since = a.leaf_id && firstSeen[a.leaf_id] != null ? Number(firstSeen[a.leaf_id]) : null
-    const late = since != null && nowMs - since > statedSeconds(cause, boardMin) * 1000
+    const late = since != null && nowMs - since > statedSeconds(cause, boardMin, roundMin) * 1000
     out.push({ asset: a.asset, atoms: big(a.atoms), leaf: a.leaf_id || null, kind: cause === 'return' || a.channel === true ? 'coming_back' : 'arriving',
-      cause, late, when: late ? DEFAULT_WORDS.takingLonger : causeWhen(cause, boardMin) })
+      cause, late, when: late ? DEFAULT_WORDS.takingLonger : causeWhen(cause, boardMin, roundMin) })
   }
   return out
 }
@@ -942,11 +943,21 @@ export function boardMinutes (anchorDepth) {
   const m = (Number.isFinite(d) && d > 0 ? d * 10 : 0) + 5
   return Math.ceil(m / 5) * 5
 }
+// The minutes a round's coin takes to be the wallet's: the round, and its block certified with its
+// anchor buried under `anchorDepth` Bitcoin blocks (the same finality rule as a board's). 1 at depth
+// 0 ("about a minute"); otherwise a minute and ten for each Bitcoin block, rounded up to five.
+export function roundMinutes (anchorDepth) {
+  const d = Number(anchorDepth)
+  if (!(Number.isFinite(d) && d > 0)) return 1
+  return Math.ceil((1 + d * 10) / 5) * 5
+}
 // The seconds after which a line of `cause` is taking longer than it said.
-export function statedSeconds (cause, boardMin = 5) {
-  return cause === 'return' ? 2 * 86_400 : cause === 'board' ? boardMin * 60 : 180
+export function statedSeconds (cause, boardMin = 5, roundMin = 1) {
+  return cause === 'return' ? 2 * 86_400 : cause === 'board' ? boardMin * 60 : roundMin <= 1 ? 180 : roundMin * 60
 }
 // When, in words, for a line of `cause`.
-export function causeWhen (cause, boardMin = 5) {
-  return cause === 'return' ? DEFAULT_WORDS.comingBackWhen : cause === 'board' ? DEFAULT_WORDS.boardWhen(boardMin) : DEFAULT_WORDS.arrivingSoon
+export function causeWhen (cause, boardMin = 5, roundMin = 1) {
+  if (cause === 'return') return DEFAULT_WORDS.comingBackWhen
+  if (cause === 'board') return DEFAULT_WORDS.boardWhen(boardMin)
+  return roundMin <= 1 ? DEFAULT_WORDS.arrivingSoon : DEFAULT_WORDS.boardWhen(roundMin)
 }

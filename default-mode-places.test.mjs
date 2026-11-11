@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves } from './leaves.js'
-import { arrivingRows, arrivingCause, boardMinutes, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
+import { arrivingRows, arrivingCause, boardMinutes, roundMinutes, causeWhen, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
 import { tradeStateWord, USER_WORDS, undoneOf } from './user-trade.js'
 import { mountLeaves, JOINED_KEY, setWalletMode } from './leaves.js'
@@ -190,5 +190,77 @@ test('a payment while the wallet\'s own refresh is in a round waits for that rou
   assert.deepEqual(sent, [false, true], 'refused once while the refresh was in its round, then asked again after it')
   assert.deepEqual(v.sent, { asset: X, value: '5' })
   assert.equal(api.releasing(), null)
+  api.stop()
+})
+
+test('a round\'s time follows the operator\'s finality rule, as a board\'s does', () => {
+  assert.equal(roundMinutes(0), 1)
+  assert.equal(causeWhen('round', 5, roundMinutes(0)), 'about a minute')
+  assert.equal(roundMinutes(2), 25, 'two Bitcoin blocks of burial: a minute and twenty, rounded up to five')
+  assert.equal(causeWhen('round', 25, roundMinutes(2)), 'usually within 25 minutes')
+  assert.equal(statedSeconds('round', 25, roundMinutes(2)), 25 * 60)
+  assert.equal(DEFAULT_WORDS.waitRound(causeWhen('round', 5, 1)), 'Your money is being moved: this goes ahead by itself (about a minute).')
+  const rows = arrivingRows([{ leaf_id: 'r', asset: X, atoms: 1n, state: 'live' }], [], { roundMin: roundMinutes(2) })
+  assert.equal(rows[0].when, 'usually within 25 minutes')
+})
+
+test('a payment waiting for the wallet\'s own round that fails goes ahead at once, its coins live again', async () => {
+  let failed = false
+  const sent = []
+  let syncs = 0
+  const w = {}
+  w.postMessage = (m) => {
+    const ok = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: true, value } }))
+    const no = (error) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: false, error } }))
+    if (m.op === 'exists') return ok(true)
+    if (m.op === 'open') return ok({})
+    const c = m.args.command
+    if (c === 'send') {
+      sent.push(failed)
+      if (!failed) return no({ kind: 'refused', message: 'the wallet holds 0 of asset X in live coins' })
+      return ok({ result: { sent: { asset: X, value: '5' } }, start: {} })
+    }
+    // The round is dropped: the refresh is voided and its coin is live again, unspent.
+    if (c === 'sync') { if (sent.length) { syncs++; failed = true } return ok({ result: {}, start: {} }) }
+    const coins = [{ leaf_id: 'g', asset: X, value: '900', state: failed ? 'live' : 'forfeited' }]
+    const result = c === 'coins' ? coins : c === 'balance' ? { held: { [X]: '900' } } : c === 'schedule' ? { now: 1 } : c === 'info' ? {}
+      : (c === 'care' || c === 'mailbox' || c === 'instant_limit') ? {} : []
+    return ok({ result, start: {} })
+  }
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1000
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    tickMs: 3_600_000, sleep: async (ms) => { clock += ms } }, null, null)
+  await api.start()
+  const v = await api.command('send', { request: 'request:00', amount: '5', asset: X })
+  assert.deepEqual(sent, [false, true], 'asked again as soon as the coin is live again')
+  assert.equal(syncs, 1, 'one read of the wallet, not hours of them')
+  assert.ok(clock - 1000 < 60_000, 'no long wait: ' + (clock - 1000) + ' ms')
+  assert.deepEqual(v.sent, { asset: X, value: '5' })
+  api.stop()
+})
+
+test('a payment refused for another reason does not wait for the round', async () => {
+  const sent = []
+  const w = {}
+  w.postMessage = (m) => {
+    const ok = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: true, value } }))
+    const no = (error) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: false, error } }))
+    if (m.op === 'exists') return ok(true)
+    if (m.op === 'open') return ok({})
+    const c = m.args.command
+    if (c === 'send') { sent.push(1); return no({ kind: 'refused', message: 'the receive request lapsed' }) }
+    const result = c === 'coins' ? [{ leaf_id: 'g', asset: X, value: '900', state: 'forfeited' }] : c === 'schedule' ? { now: 1 } : c === 'info' ? {}
+      : c === 'balance' ? { held: { [X]: '900' } } : (c === 'sync' || c === 'care' || c === 'mailbox' || c === 'instant_limit') ? {} : []
+    return ok({ result, start: {} })
+  }
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1000,
+    tickMs: 3_600_000, sleep: () => Promise.resolve() }, null, null)
+  await api.start()
+  await assert.rejects(api.command('send', { request: 'request:00', amount: '5', asset: X }), /lapsed/)
+  assert.equal(sent.length, 1)
   api.stop()
 })

@@ -756,11 +756,15 @@ What it shows beyond the Market and Trade sections above:
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
 - A payment's row has its description (or "Received" / "Sent"), its time and its amount as +/-.
 - A payment made while the wallet is moving that very money (its own refresh, already in its
-  round) is not refused: it says "Your money is being moved: this goes ahead by itself in about a
-  minute.", and goes ahead once that round is final.
+  round) is not refused: it says "Your money is being moved: this goes ahead by itself (about a
+  minute).", with the round's time as below, and goes ahead as soon as that round has ended, made
+  final or dropped. Past that time it says "(taking longer than usual; the wallet keeps at it)".
 - What is not in the figure yet is in History alone, each line with the time that is true for
   why it waits: **Arriving**, "about a minute", for a payment from someone else past what counts
-  at once, or one a Bitcoin reorganisation took back; **Arriving**, "usually within <N> minutes",
+  at once, or one a Bitcoin reorganisation took back (a round, final once its block is certified
+  with its anchor buried under the operator's anchor depth: "about a minute" while that depth is
+  0, else "usually within <N> minutes", a minute and ten for each Bitcoin block, rounded up to
+  five); **Arriving**, "usually within <N> minutes",
   for a deposit to the address (Balance); **Coming back**, "about a minute", for what a channel
   being closed held; **Coming back**, "within about two days", for what an undone trade, or the
   wallet's safekeeping, is bringing home. Past that time the line says "taking longer than usual;

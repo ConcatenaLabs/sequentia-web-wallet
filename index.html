@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, arrivingRows, boardMinutes, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
+import { DEFAULT_WORDS, arrivingRows, boardMinutes, roundMinutes, causeWhen, statedSeconds, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2988,7 +2988,12 @@ async function treeSendReview(r, onDone, note){
     const t0=performance.now();
     try{
       // While a channel's side is set free first, the wait says so.
-      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'round') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.waitRound; }catch{} }, 1000);
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'round'){
+        // The time true for the operator's finality rule, and past it, that it takes longer.
+        let d=null; try{ d=leavesApi.anchorDepth(); }catch{}
+        const rm=roundMinutes(d), late=w.since!=null && Date.now()-w.since > statedSeconds('round', 5, rm)*1000;
+        st.innerHTML='<span class="spin"></span>' + (late ? DEFAULT_WORDS.waitRound(DEFAULT_WORDS.takingLonger) : DEFAULT_WORDS.waitRound(causeWhen('round', 5, rm)));
+      } }catch{} }, 1000);
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
@@ -10665,7 +10670,7 @@ function renderHistory(){
   for(const k of Object.keys(seen)) if(!ids.has(k)) delete seen[k];
   try{ localStorage.setItem(seenKey, JSON.stringify(seen)); }catch{}
   let depth=null; try{ depth=leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null; }catch{}
-  const opts={ firstSeen: seen, nowMs, boardMin: boardMinutes(depth) };
+  const opts={ firstSeen: seen, nowMs, boardMin: boardMinutes(depth), roundMin: roundMinutes(depth) };
   _arrivingWhen=new Map(arrivingRows(arrivingNow, [], opts).map(r=>[r.leaf, r.when]));
   _depositWhen=new Map(arrivingRows(deposits, [], opts).map((r, i)=>[deposits[i].txid, r.when]));
   const arrRows=arrivingRows(arrivingNow, instant.filter(r=>r.kind==='in' && r.leaf).map(r=>r.leaf), opts);

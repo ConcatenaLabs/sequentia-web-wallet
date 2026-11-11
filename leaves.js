@@ -184,6 +184,8 @@ export const CARE_EVERY_MS = 10 * 60_000
 // that frees the planned coins, how long it waits at most, and how many releases one
 // payment may need (a release can fall short by the new leaf's own margins).
 export const RELEASE_POLL_MS = 15_000
+// How often a payment that waits for the wallet's own round reads whether it has ended.
+export const ROUND_POLL_MS = 5_000
 export const RELEASE_WAIT_MS = 3 * 3600_000
 export const RELEASE_TRIES = 3
 
@@ -1580,7 +1582,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         // past being taken back: what the figure shows is the person's, so the payment waits for
         // that round (about a minute) and is asked again once it is final; it is not refused.
         const payAsset = args && (args.asset || args.give_asset)
-        if (e instanceof LeafError && e.kind === 'refused' && payAsset && i < RELEASE_TRIES) {
+        if (e instanceof LeafError && e.kind === 'refused' && /in live coins/.test(String(e.message || '')) && payAsset && i < RELEASE_TRIES) {
           let cs = S.coins
           try { cs = (await run('coins')) || cs; S.coins = cs } catch {}
           const held = inRoundCoins(cs, payAsset)
@@ -1588,7 +1590,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
             S.releasing = { coins: held, asset: payAsset, since: now(), command, why: 'round' }
             render()
             log(`[leaves] ${command}: waits for the round that refreshes ${held.length} coin(s) of its asset, then goes ahead`)
-            try { await roundWait(() => waitReleased(held, { turns: true })) } finally { S.releasing = null; render() }
+            try { await roundWait(() => waitOutOfRound(held)) } finally { S.releasing = null; render() }
             continue
           }
         }
@@ -1635,6 +1637,24 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { return await f() } finally {
       if (asked) S.asked++
       if (busy) { while (S.busy) await sleep(50); S.busy = true }
+    }
+  }
+
+  // Until none of `coins` is in the wallet's own round any more (`given`, `forfeited`): spent by a
+  // round that went through, or live again after one that failed. Either way the payment is asked
+  // again at once. Read every ROUND_POLL_MS, up to RELEASE_WAIT_MS.
+  async function waitOutOfRound (coins) {
+    const until = now() + RELEASE_WAIT_MS
+    for (;;) {
+      while (S.busy) await sleep(50)
+      S.busy = true
+      try {
+        try { const v = await run('sync'); synced(v) } catch {}
+        try { S.coins = (await run('coins')) || S.coins } catch {}
+      } finally { S.busy = false }
+      if (!inRoundCoins((S.coins || []).filter((c) => coins.includes(c.leaf_id)), S.releasing ? S.releasing.asset : null).length) return
+      if (now() >= until) throw new LeafError({ kind: 'refused', message: 'the wallet\'s own round did not end in time; nothing was paid, and the payment can be asked again' })
+      await sleep(ROUND_POLL_MS)
     }
   }
 
@@ -2605,7 +2625,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     sendQuote: (text, amount, asset) => asking(() => act('send_quote', () => run('send_quote', { request: text, amount: String(amount), asset }), { answerFirst: true })),
     // Why a payment waits for a round, while it does: 'channel' (a channel's side set free first),
     // 'depth' or a plan's release; null when none waits.
-    releasing: () => (S.releasing ? { why: S.releasing.why || 'planned', asset: S.releasing.asset, coins: S.releasing.coins.length } : null),
+    releasing: () => (S.releasing ? { why: S.releasing.why || 'planned', asset: S.releasing.asset, coins: S.releasing.coins.length, since: S.releasing.since } : null),
     refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
     // `atoms` of an asset as the page's own reading of the chain shows them, less what a board just
