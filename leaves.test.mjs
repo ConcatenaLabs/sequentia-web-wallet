@@ -2,7 +2,8 @@
 // The library itself is driven in a browser by tooling/leaves-drive.mjs.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { issuerAssets, bondRefusal, holdingRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, heldAssets, channelHoldMs, CHANNEL_HOLD_AFTER_MS, CHANNEL_HOLD_BTC_MS, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
+import { readFileSync } from 'node:fs'
+import { waitedWords, issuerAssets, bondRefusal, holdingRefusal, BOND_WORDS, DECLINED_WORDS, UPDATE_WORDS, supervisedAssets, frozenAtoms, frozenSentence, plainRefusal, servedPairs, careDue, careSummary, careArgs, heldAssets, channelHoldMs, CHANNEL_HOLD_AFTER_MS, CHANNEL_HOLD_BTC_MS, channelArrivals, payableChannels, codeNamesChannels, CHANNEL_FAST_FOR_MS, releaseDone, plannedCoins, mountLeaves, CARE_EVERY_MS, JOINED_KEY, syncDecision, leafBalances, receiveAssets, faucetAssets, faucetRequestBody, railRows, heldCoins, inFlight, nextAskMs, when, exitSteps, LeafClient, LeafError,
   devModeOn, walletMode, setWalletMode, joinedOperator, MODE_KEY, LEGACY_DEV_MODE_KEY, MODE_WORDS } from './leaves.js'
 
 const X = '75'.repeat(32)
@@ -469,7 +470,7 @@ test('a payment asked while the wallet keeps itself goes first: the bond\'s watc
   w.postMessage = (m) => {
     w.posted.push(m)
     if (m.op === 'exists') return queueMicrotask(() => w.onmessage({ data: { id: m.id, ok: true, value: true } }))
-    if (m.op === 'open') return queueMicrotask(() => w.onmessage({ data: { id: m.id, ok: true, value: {} } }))
+    if (m.op === 'open' || !m.args) return queueMicrotask(() => w.onmessage({ data: { id: m.id, ok: true, value: {} } }))
     const c = m.args.command
     runs.push(c)
     // The composer pays while care runs; the payment's answer takes its time.
@@ -962,4 +963,19 @@ test('a payment that closed a channel holds that asset alone, for ten minutes, a
   assert.deepEqual(heldAssets({ b: 2000, a: 3000, c: 999 }, 1000), ['a', 'b'])
   assert.deepEqual(heldAssets({ a: 1000 }, 1000), [])
   assert.deepEqual(heldAssets(null, 1000), [])
+})
+
+// Seen live (RB5, 2026-11-11): "[leaves] slow coins 31988 ms (own 1333 ms, waited 30655 ms behind
+// other commands)": a trade's price waited half a minute behind the bond watch. The wait names the
+// commands it waited behind (web wallet #667).
+test('a command that waited names the commands it waited behind', () => {
+  assert.equal(waitedWords(1333, 30655, ['watch_bond']), ' (own 1333 ms, waited 30655 ms behind watch_bond)')
+  assert.equal(waitedWords(10, 5, ['sync', 'watch_bond', 'sync']), ' (own 10 ms, waited 5 ms behind sync, watch_bond)')
+  assert.equal(waitedWords(21, 471450, []), ' (own 21 ms, waited 471450 ms behind other commands)')
+  // Each command the page asks is counted in flight until it answers, and a command asked meanwhile
+  // is told the ones ahead of it.
+  const src = readFileSync(new URL('./leaves.js', import.meta.url), 'utf8')
+  const run = src.slice(src.indexOf('  async function run (command, args) {'), src.indexOf('  async function run (command, args) {') + 1600)
+  assert.match(run, /const behind = \(S\.inflight \|\| \[\]\)\.map/)
+  assert.equal((run.match(/timing\(command, took, [^)]*, behind\)/g) || []).length, 2)
 })

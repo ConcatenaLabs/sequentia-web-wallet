@@ -60,8 +60,9 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
   const releaseNow = async (maker, swap) => { if (maker && swap) { try { await post(maker + '/v1/btc/release', { swap }) } catch {} } }
 
   // Firm terms of one entry (source 'btc-gateway') for `pay` of the pay asset. `onStep(key)`, when
-  // given, is told each step as it starts (user-trade.js tradeSteps).
-  async function firm (entry, payAsset, receiveAsset, pay, have, sized, onStep = null) {
+  // given, is told each step as it starts (user-trade.js tradeSteps); `onRefused(e)` is told the
+  // wallet's own refusal of the payment it checks.
+  async function firm (entry, payAsset, receiveAsset, pay, have, sized, onStep = null, onRefused = null) {
     if (!B()) return null
     const step = (k) => { if (onStep) try { onStep(k) } catch {} }
     let size = sized
@@ -78,7 +79,9 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         catch (e) { log('[user trade] maker btc firm:', e.message); B().cancelInvoice(inv.payment_hash).catch(() => {}); return null }
         const drop = () => { release(entry.maker, o.swap); B().cancelInvoice(inv.payment_hash).catch(() => {}) }
         step('check')
-        try { q = await run('lightning_pay_quote', { invoice: o.invoice, asset: payAsset, max_fee_ppm: maxFeePpm }) } catch (e) { log('[user trade] lightning_pay_quote:', e.message); drop(); return null }
+        // The wallet's own refusal (its coins of the asset fall short now) is told to the quote, which
+        // then says so, never that the other side gave no price (#666).
+        try { q = await run('lightning_pay_quote', { invoice: o.invoice, asset: payAsset, max_fee_ppm: maxFeePpm }) } catch (e) { log('[user trade] lightning_pay_quote:', e.message); if (onRefused) try { onRefused(e) } catch {} drop(); return null }
         // The maker's invoice is under the wallet's own hash, for the asset paid, at the price quoted.
         const fair = ceilDiv(sats * entry.rateNum, entry.rateDen)
         if (q.payment_hash !== inv.payment_hash || q.asset !== payAsset || big(q.amount) !== big(o.want) || big(o.want) > fair) { log('[user trade] the maker\'s btc terms are not the quote\'s'); drop(); return null }
