@@ -400,6 +400,16 @@ export function roomNow (budgetValue, coins, rates) {
   return room < 0n ? 0n : room
 }
 
+// The room left (`roomValue`, reference atoms) in atoms of each asset `rates` prices, rounded down:
+// what a quote or a firm offer may take in of the asset it wants, from the same reading as the coin
+// it gives from (roomNow). Null without a budget.
+export function roomAtomsOf (roomValue, rates) {
+  if (roomValue == null) return null
+  const m = new Map()
+  for (const [a, r] of rates || []) if (big(r) > 0n) m.set(a, (big(roomValue) * 100_000_000n) / big(r))
+  return m
+}
+
 // What the maker can give of each asset now without holding more out of round than its budget:
 // its largest live coin of the asset whose whole worth fits in the room left (`roomValue`,
 // reference atoms, roomNow), since that coin is out of round once a swap pays from it; nothing when
@@ -907,9 +917,15 @@ async function main () {
   // An offer or a completion since the last reading changed the coins (an offered coin, a swap's
   // change and what came in), so the reading is stale until the next one: a firm offer then reads
   // the coins first, and quotes give nothing meanwhile.
+  // The room a reading leaves, and what that room takes in of each asset: none while the reading
+  // is stale, and the pass's bond answer without a budget.
+  const roomOf = (h) => (h.stale && budgetValue != null ? 0n : roomNow(budgetValue, h.coins, ratesNow))
+  const wantRoomOf = (h) => (budgetValue == null ? room : roomAtomsOf(roomOf(h), ratesNow))
+  let firmReading = null
   const firmHoldings = async () => {
     const h = holdings && !holdings.stale && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true)
-    return budgetedSpendable(h.sp, h.coins, roomNow(budgetValue, h.coins, ratesNow), ratesNow)
+    firmReading = h
+    return budgetedSpendable(h.sp, h.coins, roomOf(h), ratesNow)
   }
   const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
   async function tick () {
@@ -1061,11 +1077,11 @@ async function main () {
         if (!holdings) { if (!firstReading) firstReading = spendable(true).catch(() => {}).finally(() => { firstReading = null }); return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [] }) }
         // What it can give without passing its budget once a swap's coin is out of round (D94):
         // a price it shows is one it would confirm.
-        const sp = budgetedSpendable(holdings.sp, holdings.coins, holdings.stale && budgetValue != null ? 0n : roomNow(budgetValue, holdings.coins, ratesNow), ratesNow)
+        const sp = budgetedSpendable(holdings.sp, holdings.coins, roomOf(holdings), ratesNow)
         // In-tree quotes are cut to the room left in its instant budget; a pair cut to nothing is
         // named in `after_next_round`.
         // And none that wants an asset the operator refreshes no more of now.
-        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), room)
+        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), wantRoomOf(holdings))
         const kept = withoutCapped([...cut.quotes, ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])], cut.later, capped)
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: kept.quotes, ...(kept.later.length ? { after_next_round: kept.later } : {}) })
@@ -1096,16 +1112,20 @@ async function main () {
         if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
         const pair = sl.pair
         const want = w.want
-        // More than the room left in its instant budget: the rest after its next round.
-        if (room && room.has(pair.want) && want > room.get(pair.want)) {
+        // More than the room left in its instant budget, from the same reading: the rest after its
+        // next round.
+        const wantRoom = firmReading ? wantRoomOf(firmReading) : room
+        if (wantRoom && wantRoom.has(pair.want) && want > wantRoom.get(pair.want)) {
           return send(res, 409, { error: 'the maker takes this much after its next round', after_next_round: true,
-            quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), room).quotes.pop() || null })
+            quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), wantRoom).quotes.pop() || null })
         }
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
+        // The coins read again at once, ahead of the queue (a quote's 90 s hold lets only such
+        // commands run): quotes give nothing only until it answers (#659).
         if (holdings) holdings.stale = true
-        spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
+        readHoldings(true).catch(() => {})
         log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8),
           'in', Date.now() - asked, 'ms')
         return send(res, 200, { swap: o.swap, offer: o.offer, give: String(give), want: String(want), expires_at: Math.floor(expires / 1000) })
@@ -1118,8 +1138,10 @@ async function main () {
         const f = firm.get(b.swap)
         if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)
+        // The coins read again at once, ahead of the queue (a quote's 90 s hold lets only such
+        // commands run): quotes give nothing only until it answers (#659).
         if (holdings) holdings.stale = true
-        spendable().catch(() => {})   // renewed in the upkeep's turn, never ahead of a taker
+        readHoldings(true).catch(() => {})
         log('done', String(r.swap).slice(0, 12))
         return send(res, 200, { swap: b.swap, state: 'done' })
       }

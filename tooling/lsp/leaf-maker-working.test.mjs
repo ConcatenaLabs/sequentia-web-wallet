@@ -160,3 +160,36 @@ test('the room is read from the coins as they are: open offers and a completed s
   // No budget: no bound.
   assert.equal(roomNow(null, after, rates), null)
 })
+
+test('the want side is bounded by the same reading as the coin given (RV29 delta 2, low)', async () => {
+  const { roomAtomsOf } = await import('./leaf-maker.mjs')
+  const size = workingSizes(bond(), rates).get('G')
+  const w = size * 407_500_000_000n / 100_000_000n
+  // Received coins leave room for one working coin and 0.5 % more.
+  const heldIn = BUDGET - w - w / 200n
+  const coins = [coin('w1', size), coin('in', heldIn, 'U', 'transfer')]
+  const room = roomNow(BUDGET, coins, rates)
+  assert.equal(budgetedSpendable(new Map([['G', size]]), coins, room, rates).get('G'), size)
+  // A 1 % premium: the taker pays more USDX than the room takes; cut to what the room takes.
+  const wantU = w * 101n / 100n
+  const q = capQuotes([{ give_asset: 'G', want_asset: 'U', rate_num: String(wantU), rate_den: String(size), min_give: '1', max_give: String(size) }],
+    roomAtomsOf(room, rates))
+  const max = q.quotes.length ? BigInt(q.quotes[0].max_give) : 0n
+  assert.ok(max < size, 'cut below the whole coin: ' + max)
+  assert.ok(heldIn + (max * wantU + size - 1n) / size <= BUDGET, 'what it takes in fits the budget')
+  assert.equal(roomAtomsOf(null, rates), null)
+})
+
+test('after a firm offer or an acceptance the coins are read again ahead of the queue (#659)', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { nextJob } = await import('../leaf-node.mjs')
+  const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
+  // Both places that make the reading stale read the coins again with `first`.
+  const stale = src.split('holdings.stale = true').slice(1).map((s) => s.split('\n').slice(0, 3).join('\n'))
+  assert.equal(stale.length, 2)
+  for (const s of stale) assert.match(s, /readHoldings\(true\)/)
+  // A `first` command runs during a quote's 90 s hold; a queued one does not.
+  const t = 1000, hold = t + 90_000
+  assert.equal(nextJob([{ id: 1, name: 'coins', first: true }], t + 1000, hold), 0)
+  assert.equal(nextJob([{ id: 1, name: 'coins' }], t + 1000, hold), -1)
+})
