@@ -356,7 +356,9 @@ export function makeSiteOrders (d) {
   async function follow () {
     const v = db()
     const recs = d.followTrades === false ? [] : (d.engine.records ? d.engine.records() : []).filter((r) => v.trades[r.id] && !['settled', 'returned', 'failed'].includes(r.state))
-    for (const r of recs) { try { await d.engine.advance(r) } catch (e) { log('[site orders] follow:', e && e.message) } }
+    for (const r of recs) {
+      try { if (keepEnded(v, await d.engine.advance(r))) write(v) } catch (e) { log('[site orders] follow:', e && e.message) }
+    }
     const mine = Object.keys(v.orders)
     if (!mine.length || !d.list) return
     let lib = []
@@ -390,16 +392,33 @@ export function makeSiteOrders (d) {
     return big(o.holds) < big(rec.sold) ? 'filling' : 'open'
   }
 
+  // A site trade whose record has ended keeps how it ended here, in `swk.siteorders`: the wallet
+  // keeps the records of ended trades only up to a bound (user-trade.js KEEP_ENDED), and getOrders
+  // answers for a trade after its record is gone. Returns whether it changed `v`.
+  function keepEnded (v, r) {
+    const t = r && r.id && v.trades[r.id]
+    if (!t || !['settled', 'returned', 'failed'].includes(r.state)) return false
+    const state = tradeState(r), note = tradeStateWord(r, now())
+    if (t.ended === state && t.endedNote === note) return false
+    t.ended = state; t.endedNote = note
+    return true
+  }
+
   // getOrders' answer: the trades and orders this site made through this wallet.
   async function orders (origin) {
     const v = db()
     const recs = d.engine.records ? d.engine.records() : []
     const byId = new Map(recs.map((r) => [r.id, r]))
+    let kept = false
+    for (const r of recs) kept = keepEnded(v, r) || kept
+    if (kept) write(v)
     const trades = Object.entries(v.trades).filter(([, t]) => t.origin === origin).map(([id, t]) => {
       const r = byId.get(id)
-      const state = tradeState(r)
+      // A record no longer kept is that of an ended trade (an unfinished one is never dropped): how
+      // it ended, as kept when it ended, or `ended` when the wallet never saw it end.
+      const state = r ? tradeState(r) : (t.ended || 'ended')
       // The trade's own words, as the wallet's list says them (with the minutes it has waited).
-      const note = r ? tradeStateWord(r, now()) : null
+      const note = r ? tradeStateWord(r, now()) : (t.endedNote || null)
       return { trade: id, at: t.at, market: t.market, side: t.side, type: t.type, kind: 'take', order: null, state, note,
         fills: t.base != null ? [{ txid: id, base: t.base, quote: t.quote, state }] : [] }
     })

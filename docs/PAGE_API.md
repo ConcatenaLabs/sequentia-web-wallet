@@ -194,4 +194,6 @@ the wallet has paid or signed its side, and `received` as soon as what the trade
 wallet's (a swap with a maker is received seconds after it is sent). It is `settled` once the
 trade's coins are settled with the network, and `failed` when it did not happen and what was
 paid came back. The note says the same in the wallet's own words, with the minutes a trade has
-waited, for a site to show beside its state.
+waited, for a site to show beside its state. The wallet keeps how each of the site's trades ended
+after it no longer keeps the trade's own record; a trade that ended while the wallet was not
+watching, and whose record is gone, is `ended`, with no note.
