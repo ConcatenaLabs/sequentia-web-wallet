@@ -3,7 +3,7 @@
 // wallet's is in History alone; no channel is opened, named or kept; a settled trade can be undone.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves, requireExitArgs } from './leaves.js'
+import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves, requireExitArgs, exitSwitch } from './leaves.js'
 import { arrivingRows, arrivingCause, boardMinutes, roundMinutes, causeWhen, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
 import { tradeStateWord, USER_WORDS, undoneOf } from './user-trade.js'
@@ -286,4 +286,52 @@ test('default mode asks every trade for the exit only once its operator offers i
   assert.deepEqual(requireExitArgs(true, { server_info: { checkpoint_exit: true } }), { on: false }, 'developer mode: its own choice, off')
   assert.equal(USER_WORDS.notYet, 'This trade isn\'t available right now. Nothing moved; try again in a few minutes.')
   for (const w of ['exit', 'checkpoint', 'maker', 'operator', 'coin', 'round']) assert.ok(!new RegExp('\\b' + w).test(USER_WORDS.notYet), w)
+})
+
+test('the exit switch follows the operator\'s info as read again, and an outage never turns it off', () => {
+  const offers = { server_info: { checkpoint_exit: true } }
+  const not = { server_info: { checkpoint_exit: false } }
+  const gone = { server_info: { unreachable: 'connection refused' } }
+  assert.deepEqual(exitSwitch(false, not, null), { on: false }, 'first set: what the operator says')
+  assert.equal(exitSwitch(false, not, JSON.stringify({ on: false })), null, 'unchanged: nothing to set')
+  assert.deepEqual(exitSwitch(false, offers, JSON.stringify({ on: false })), { on: true }, 'the operator begins offering it: on')
+  assert.equal(exitSwitch(false, gone, JSON.stringify({ on: true })), null, 'the operator cannot be reached: left on')
+  assert.equal(exitSwitch(false, {}, JSON.stringify({ on: true })), null, 'no answer of the operator: left on')
+  assert.deepEqual(exitSwitch(true, gone, JSON.stringify({ on: true })), { on: false }, 'developer mode: off whatever the operator says')
+})
+
+test('an open page sets the exit on once its operator begins offering it, and keeps it on through an outage', async () => {
+  const m = new Map()
+  const store = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
+  store.setItem(JOINED_KEY + '.t', '1')
+  let si = { checkpoint_exit: false }
+  const set = []
+  const w = {}
+  w.postMessage = (msg) => {
+    const reply = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: msg.id, ok: true, value } }))
+    if (msg.op === 'exists') return reply(true)
+    if (msg.op === 'open') return reply({})
+    const c = msg.args.command
+    if (c === 'require_checkpoint_exit') set.push(msg.args.args.on)
+    const result = c === 'info' ? { operator: 'k', server_info: si } : c === 'schedule' ? { now: 1 } : c === 'balance' ? {}
+      : (c === 'sync' || c === 'care' || c === 'mailbox' || c === 'instant_limit' || c === 'require_checkpoint_exit' || c === 'claims') ? {} : []
+    reply({ result, start: {} })
+  }
+  const clock = { t: 1_000_000 }
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock.t, tickMs: 3_600_000,
+    careEveryMs: 60_000, log: () => {} }, null, null)
+  try {
+  await api.start()
+  assert.deepEqual(set, [false], 'opened before the operator offers the exit: off')
+  await api.syncNow()
+  assert.deepEqual(set, [false], 'the same answer: nothing set again')
+  si = { checkpoint_exit: true }
+  clock.t += 61_000
+  await api.syncNow()
+  assert.deepEqual(set, [false, true], 'the operator now offers it: set on without a reload')
+  si = { unreachable: 'connection refused' }
+  clock.t += 61_000
+  await api.syncNow()
+  assert.deepEqual(set, [false, true], 'an outage leaves it on')
+  } finally { api.stop() }
 })

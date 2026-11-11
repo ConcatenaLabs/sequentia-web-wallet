@@ -253,6 +253,17 @@ export function requireExitArgs (developer, info) {
   const offered = !!(info && info.server_info && info.server_info.checkpoint_exit === true)
   return { on: !developer && offered }
 }
+// What to set `require_checkpoint_exit` to now, given the leaf wallet's `info` as last read and the
+// switch as last set (`applied`, its arguments as JSON, or null when not set this session): the
+// mode's arguments when they differ from it, else null. An `info` without the operator's answer
+// (it could not be reached) changes nothing in default mode, so an outage never turns the
+// exit off; developer mode is off whatever the operator says.
+export function exitSwitch (developer, info, applied) {
+  const si = info && info.server_info
+  if (!developer && (!si || typeof si !== 'object' || si.unreachable)) return null
+  const args = requireExitArgs(developer, info)
+  return JSON.stringify(args) === applied ? null : args
+}
 
 // What of each asset is arriving, by the library's places (`coin_places`): coins received past
 // the instant limit, coins not final yet, and coins on their way home on the chain (`exiting`):
@@ -1426,15 +1437,31 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // `require_checkpoint_exit`), so what a trade gives always comes home if the trade dies: from the
   // moment its operator offers the exit (`info.checkpoint_exit`). Before that it trades as it always
   // has, with no exit asked and nothing refused for the want of one (requireExitArgs).
+  // The operator can begin offering the exit while the page is open: its `info` is read again at
+  // each care, and the switch set again when what it asks has changed (exitSwitch).
   async function applyLimit () {
     try { await run('instant_limit', instantLimitArgs(dev())) } catch (e) { log('[leaves] instant limit: ' + ((e && e.message) || e)) }
-    try { await run('require_checkpoint_exit', requireExitArgs(dev(), S.info)) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
+    await applyExit(null)
+  }
+  async function applyExit (applied) {
+    const args = exitSwitch(dev(), S.info, applied)
+    if (!args) return
+    try { await run('require_checkpoint_exit', args); S.exitApplied = JSON.stringify(args) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
+  }
+  async function infoAgain () {
+    try {
+      const v = await run('info')
+      if (v && typeof v === 'object') S.info = v
+      noteUnreachable(unreachableOf(v, 'info'))
+    } catch (e) { log('[leaves] info: ' + ((e && e.message) || e)); return }
+    await applyExit(S.exitApplied ?? null)
   }
   const receiveArgs = () => (dev() ? {} : { channels: false })
   async function careIfDue () {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
     if (S.asked) { S.upkeepLater = true; return }
     S.careAt = now()
+    await infoAgain()
     const t0 = now()
     try {
       const v = await run('care', careArgs(claimScan(), channelsHeld(), noOpen(), dev()))
@@ -1778,6 +1805,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           S.open = true
           S.joined = info.result
           S.info = info.result
+          await applyLimit()
           return info
         })
         schedule()
