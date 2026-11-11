@@ -190,9 +190,18 @@ export const USER_WORDS = Object.freeze({
   returned: 'Returned: nothing traded.',
   returnedFees: (fees) => `Returned: nothing traded. Fees of ${fees} were paid.`,
   returnedLapsed: 'Returned: nothing traded. The other side\'s offer ran out while the trade waited.',
+  // A trade that settled and was then undone: it never completed on the network, so what the
+  // wallet paid comes back by itself (within its exit delay, about two days), and what it was to
+  // bring is not the wallet's.
+  undone: 'Undone: this trade did not complete. What you paid is coming back to you, within about two days.',
+  undoneWithin: (hours) => `Undone: this trade did not complete. What you paid is coming back to you, within about ${hours} hour${hours === 1 ? '' : 's'}.`,
+  undoneBack: 'Undone: this trade did not complete. What you paid came back to you.',
   // A trade confirmed and being sent: the screen is free at once, the trade goes on in Open.
   sending: 'Sending…',
   failed: 'This trade could not be made. Nothing moved.',
+  // A trade whose other side cannot yet give what default mode asks of every trade (that what it
+  // gives comes home if the trade dies): nothing moved, and the other sides offer it again shortly.
+  notYet: 'This trade isn\'t available right now. Nothing moved; try again in a few minutes.',
   recent: 'Your trades',
   openTrades: 'Open',
   pastTrades: 'Past',
@@ -258,6 +267,12 @@ export function tradeSteps ({ r = null, quote = null, payAsset, receiveAsset, na
 export function tradeStateWord (r, now = Date.now()) {
   const W = USER_WORDS
   if (r.state === 'settled') return W.settled
+  if (r.state === 'undone') {
+    if (r.undoneBack) return W.undoneBack
+    // The time true for it: until its coin can be claimed home, and a little for the claim.
+    const left = r.claimFrom ? r.claimFrom * 1000 + 600_000 - now : null
+    return left != null && left > 0 && left < 2 * 86_400_000 ? W.undoneWithin(Math.max(1, Math.ceil(left / 3_600_000))) : W.undone
+  }
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' || r.state === 'failed') return W.returned
@@ -342,7 +357,23 @@ const TRADES_KEY = 'swk.usertrade'
 // and its fill stays in the relay's trade log.
 export const KEEP_ENDED = 200
 export const KEEP_BYTES = 1_000_000
-const ENDED_STATES = ['settled', 'returned', 'failed']
+const ENDED_STATES = ['settled', 'returned', 'failed', 'undone']
+// The library's states of a swap that settled and is dead: its coin coming home (`returning`), and
+// home (`returned`). The page reads them; it infers nothing.
+export const UNDOING_STATES = Object.freeze(['returning'])
+export const UNDONE_STATES = Object.freeze(['returned'])
+// A trade record as the library's swap state `swapState` makes it, or null when it changes nothing:
+// undone (what was paid coming back) when the swap is dead, and undone and back once it is home.
+// `ret`: the library's `return` (its `claim_from`, the median time from which the coin can be
+// claimed home), kept for the row's time.
+export function undoneOf (rec, swapState, ret = null) {
+  if (!rec || !rec.swap) return null
+  const back = UNDONE_STATES.includes(swapState)
+  if (!back && !UNDOING_STATES.includes(swapState)) return null
+  const claimFrom = ret && Number(ret.claim_from) > 0 ? Number(ret.claim_from) : (rec.claimFrom || null)
+  if (rec.state === 'undone' && !!rec.undoneBack === back && rec.claimFrom === claimFrom) return null
+  return { ...rec, state: 'undone', undoneAt: rec.undoneAt || Date.now(), undoneBack: back, claimFrom }
+}
 export const STORAGE_FULL = 'The trade was not made: this browser has no room left to keep its record. Nothing was signed.'
 // `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
 // left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped.
@@ -1283,7 +1314,7 @@ export function createEngine (deps) {
   }
 
   async function advanceOnce (rec) {
-    if (!rec || ['settled', 'returned', 'failed'].includes(rec.state)) return rec
+    if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an
       // acceptance the library made is in its own store; read it there. A step that did not answer
@@ -1503,11 +1534,21 @@ export function createEngine (deps) {
     return put(rec)
   }
 
-  // Every open trade, moved on.
+  // Every open trade, moved on; every settled swap, and every undone one not home yet, looked at in
+  // the library's swaps: a swap dead after it settled is undone the moment the library says so
+  // (undoneOf), however long after, and says so again once what was paid is home.
   async function resume () {
     const out = []
-    for (const r of records()) {
-      if (['settled', 'returned', 'failed'].includes(r.state)) continue
+    const all = records()
+    const watch = all.filter((r) => r.swap && (r.state === 'settled' || (r.state === 'undone' && !r.undoneBack)))
+    if (watch.length) {
+      let swaps = []
+      try { swaps = (await run('swaps')) || [] } catch (e) { log('[user trade] swaps:', e.message) }
+      const by = new Map(swaps.map((x) => [x.swap, x]))
+      for (const r of watch) { const x = by.get(r.swap); const u = x && undoneOf(r, x.state, x.return); if (u) out.push(put(u)) }
+    }
+    for (const r of all) {
+      if (ENDED_STATES.includes(r.state)) continue
       try { out.push(await advance(r)) } catch (e) { log('[user trade] resume', r.id, e.message) }
     }
     return out

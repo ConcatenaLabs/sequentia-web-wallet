@@ -46,16 +46,19 @@ test('a reload shows the balance the library last gave this wallet until it give
   assert.equal(other.expected(), false)
 })
 
-test('a payment the faucet made is arriving at once, and counted once when it lands', async () => {
+test('a payment the faucet made is arriving at once, in History, and counted once the library holds it', async () => {
   const store = memStore()
   store.setItem(JOINED_KEY + '.t', '1')
   let held = 0n, clock = 1000
   const api = mountLeaves({ makeWorker: () => worker(() => held), store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock, tickMs: 3_600_000 }, null, null)
   await api.start()
   api.expect(X, '500')
-  assert.equal(api.leafAtoms(X), 500n, 'in the figure the moment the faucet says it paid')
-  assert.equal(api.arriving(X), 500n, 'and said as arriving')
-  assert.deepEqual(api.leafAssets(), [X], 'the asset has its row')
+  // Default mode: the figure is what can be traded or sent now; a payment the library has not
+  // taken in yet is arriving, in History alone (docs/DEFAULT_MODE.md, Balance).
+  assert.equal(api.leafAtoms(X), 0n, 'not in the figure before the library holds it')
+  assert.deepEqual(api.arrivingPayments().map((a) => [a.asset, a.atoms]), [[X, 500n]], 'arriving, the moment the faucet says it paid')
+  assert.equal(api.arriving(X), 0n, 'nothing of the figure is arriving')
+  assert.deepEqual(api.leafAssets(), [], 'no row for nothing spendable')
   held = 500n; await api.syncNow()
   assert.equal(api.leafAtoms(X), 500n, 'once the library holds it, it is counted once')
   api.expect(X, '20')

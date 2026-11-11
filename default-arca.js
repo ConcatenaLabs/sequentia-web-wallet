@@ -40,6 +40,17 @@ function readyWords (minutes) {
 
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
+  // Activity's row for a payment that is not in the balance yet, and when it will be, in words.
+  rowArriving: 'Arriving',
+  rowComingBack: 'Coming back',
+  arrivingSoon: 'about a minute',
+  boardWhen: (n) => `usually within ${n} minutes`,
+  comingBackWhen: 'within about two days',
+  comingBackWithin: (hours) => `within about ${hours} hour${hours === 1 ? '' : 's'}`,
+  takingLonger: 'taking longer than usual; the wallet keeps at it',
+  // A payment that waits for the wallet's own money being moved (its refresh, in a round now),
+  // `when` as causeWhen says it for a round ("about a minute", or "usually within N minutes").
+  waitRound: (when) => `Your money is being moved: this goes ahead by itself (${when}).`,
   // Held, spendable before, and taken back out of the chain with the Bitcoin block it rested on:
   // still the wallet's, and counted, while the network takes it in again.
   redoing: (amount, ticker) => `${amount} ${ticker} being redone after a Bitcoin reorganisation`,
@@ -892,4 +903,68 @@ export function vestingRefusal (e) {
 // taken up yet: care is then run at once rather than at its pace, so it becomes a coin by itself.
 export function vestedOpen (claims) {
   return (Array.isArray(claims) ? claims : []).some((c) => c && c.state === 'open' && !c.held && c.vest != null)
+}
+
+// Activity's rows for what is not in the figure yet, each with when it will be in words, true for
+// its cause (docs/DEFAULT_MODE.md, History):
+// - `round`: a payment past what counts at once, a channel being closed, a coin a reorganisation
+//   took back: the operator's next round, about a minute (a median of 64 s; three minutes is the
+//   time past which it is said to take longer);
+// - `board`: a deposit to the wallet's address, on the chain until the wallet has it in the tree:
+//   its block, then its board's block certified with its anchor buried (`boardMinutes`);
+// - `return`: a coin coming home on the chain, within about two days.
+// Past its time a line says it is taking longer than usual, and the wallet keeps at it.
+// `arriving`: leaves.js arrivingPayments, and the page's deposits on the chain ({ deposit: true });
+// `shown`: the leaf ids a received row already shows (that row says it instead); `firstSeen`: when
+// each line was first seen (ms, by id), `nowMs`, `boardMin` from boardMinutes.
+// -> [{ asset, atoms: BigInt, leaf, kind: 'arriving'|'coming_back', cause, when, late }]
+export function arrivingRows (arriving, shown = [], { firstSeen = {}, nowMs = Date.now(), boardMin = 5, roundMin = 1 } = {}) {
+  const seen = new Set(shown || [])
+  const out = []
+  for (const a of arriving || []) {
+    if (!a || !a.asset || (a.leaf_id && seen.has(a.leaf_id))) continue
+    const cause = arrivingCause(a)
+    const since = a.leaf_id && firstSeen[a.leaf_id] != null ? Number(firstSeen[a.leaf_id]) : null
+    // A coin coming home whose claim time the library knows: the hours until then, and a little for
+    // the claim; past it, taking longer.
+    const left = cause === 'return' && Number(a.claimFrom) > 0 ? Number(a.claimFrom) * 1000 + 600_000 - nowMs : null
+    const late = left != null ? left < 0 : since != null && nowMs - since > statedSeconds(cause, boardMin, roundMin) * 1000
+    const when = late ? DEFAULT_WORDS.takingLonger
+      : left != null && left < 2 * 86_400_000 ? DEFAULT_WORDS.comingBackWithin(Math.max(1, Math.ceil(left / 3_600_000)))
+        : causeWhen(cause, boardMin, roundMin)
+    out.push({ asset: a.asset, atoms: big(a.atoms), leaf: a.leaf_id || null, kind: cause === 'return' || a.channel === true ? 'coming_back' : 'arriving',
+      cause, late, when })
+  }
+  return out
+}
+// The cause of an arriving line (arrivingRows).
+export function arrivingCause (a) {
+  if (a && a.state === 'exiting') return 'return'
+  if (a && (a.deposit === true || a.kind === 'board')) return 'board'
+  return 'round'
+}
+// The minutes a deposit takes to be usable: a Sequentia block, and its board's block certified with
+// its anchor buried under `anchorDepth` Bitcoin blocks (about ten minutes each), rounded up to five.
+export function boardMinutes (anchorDepth) {
+  const d = Number(anchorDepth)
+  const m = (Number.isFinite(d) && d > 0 ? d * 10 : 0) + 5
+  return Math.ceil(m / 5) * 5
+}
+// The minutes a round's coin takes to be the wallet's: the round, and its block certified with its
+// anchor buried under `anchorDepth` Bitcoin blocks (the same finality rule as a board's). 1 at depth
+// 0 ("about a minute"); otherwise a minute and ten for each Bitcoin block, rounded up to five.
+export function roundMinutes (anchorDepth) {
+  const d = Number(anchorDepth)
+  if (!(Number.isFinite(d) && d > 0)) return 1
+  return Math.ceil((1 + d * 10) / 5) * 5
+}
+// The seconds after which a line of `cause` is taking longer than it said.
+export function statedSeconds (cause, boardMin = 5, roundMin = 1) {
+  return cause === 'return' ? 2 * 86_400 : cause === 'board' ? boardMin * 60 : roundMin <= 1 ? 180 : roundMin * 60
+}
+// When, in words, for a line of `cause`.
+export function causeWhen (cause, boardMin = 5, roundMin = 1) {
+  if (cause === 'return') return DEFAULT_WORDS.comingBackWhen
+  if (cause === 'board') return DEFAULT_WORDS.boardWhen(boardMin)
+  return roundMin <= 1 ? DEFAULT_WORDS.arrivingSoon : DEFAULT_WORDS.boardWhen(roundMin)
 }

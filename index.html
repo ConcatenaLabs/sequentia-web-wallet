@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
+import { DEFAULT_WORDS, arrivingRows, boardMinutes, roundMinutes, causeWhen, statedSeconds, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2988,7 +2988,12 @@ async function treeSendReview(r, onDone, note){
     const t0=performance.now();
     try{
       // While a channel's side is set free first, the wait says so.
-      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; }catch{} }, 1000);
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'round'){
+        // The time true for the operator's finality rule, and past it, that it takes longer.
+        let d=null; try{ d=leavesApi.anchorDepth(); }catch{}
+        const rm=roundMinutes(d), late=w.since!=null && Date.now()-w.since > statedSeconds('round', 5, rm)*1000;
+        st.innerHTML='<span class="spin"></span>' + (late ? DEFAULT_WORDS.waitRound(DEFAULT_WORDS.takingLonger) : DEFAULT_WORDS.waitRound(causeWhen('round', 5, rm)));
+      } }catch{} }, 1000);
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
@@ -4420,6 +4425,8 @@ function siteDeps(){
       try{ if(leavesApi && leavesApi.isOpen()) for(const h of leavesApi.leafAssets()){ const n = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n); if(n > 0n) leaves[h] = n.toString(); } }catch{}
       let assets = {};
       try{ assets = balObj(); }catch{}
+      // Default mode: a deposit still arriving is in no figure the wallet shows, so a site sees none.
+      try{ if(!devMode()) for(const [h, v] of chainArriving()){ const n=BigInt(assets[h]||0)-v; assets[h]=(n>0n?n:0n).toString(); } }catch{}
       // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
       const total = {}, arriving = {}, by_place = {};
       for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves)])){
@@ -4538,7 +4545,7 @@ async function relayPairBook(base, quote){
 }
 function userHeld(a){
   let n = 0n;
-  try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0)); } catch {}
+  try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0) - (chainArriving().get(a) || 0n)); } catch {}
   try { if(leavesApi) n += leavesApi.leafAtoms(a) || 0n; } catch {}
   try { n += BigInt(Math.round(lnSpendableFor(a).units || 0)); } catch {}
   // BTC on the Bitcoin ark, which default mode's trades pay from.
@@ -4665,7 +4672,7 @@ function initLnAddress(){
       const address = String(wollet.address(index).address().toUnconfidential());
       let ark=null, sequentia=null;
       try{ if(btcArk && btcArk.isOpen()) ark=(await btcArk.run('address')).address; }catch{}
-      try{ sequentia=(await leavesApi.command('receive', {})).request; }catch{ return null; }
+      try{ sequentia=(await leavesApi.command('receive', leavesApi.receiveArgs ? leavesApi.receiveArgs() : {})).request; }catch{ return null; }
       return buildPayCode({ address, ark: ark||undefined, sequentia });
     },
     nextUnused: ()=>{ try{ return unifiedNextUnused(); }catch{ return 0; } },
@@ -7668,7 +7675,7 @@ let _onchainSeen = null;   // the on-chain balance the last sync read, to board 
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
 function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkPays() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
-  const b=balObj(); return b[hex]||0n; }
+  const b=balObj(); return BigInt(b[hex]||0n) - (chainArriving().get(hex) || 0n); }
 // What the Send tab says can be sent of an asset: on the chain, and, in default mode, what the
 // tree holds spendable now (one figure, as the balance shows it).
 function sendableFor(hex){ let n=availableFor(hex);
@@ -8514,10 +8521,34 @@ function walletAssetRow(v, text){
 }
 // What the wallet holds of an asset, wherever it holds it (the figure Balance shows for it): on the
 // chain, for instant payments, on Lightning, staked; BTC also on the Bitcoin ark.
+// In default mode a deposit to the wallet's address on Sequentia (a coin from someone else) is
+// arriving from the moment the wallet sees it until it is a coin the wallet can use: while it waits
+// in the mempool, and, for an asset the wallet boards by itself, until its board is final (the
+// board's own coin is then arriving in the library's places). It counts once. The wallet's own
+// change from a payment it made counts at once. -> [{ asset, atoms, deposit, leaf_id: 'chain:txid:vout', txid }]
+function chainDeposits(){
+  const out=[];
+  if(!wollet || devMode()) return out;
+  const own=new Set();
+  try{ for(const t of wollet.transactions()){ if(Object.values(t.balance().toJSON()).some(v=>BigInt(v)<0n)) own.add(t.txid().toString()); } }catch{}
+  try{ for(const u of wollet.utxos()){
+    const op=u.outpoint(), id=op.txid().toString();
+    if(own.has(id)) continue;
+    const s=u.unblinded(), a=s.asset().toString(), v=BigInt(s.value());
+    if(u.height()!=null && !(leavesApi && leavesApi.boardable && leavesApi.boardable(a, v))) continue;
+    out.push({ asset:a, atoms:v, deposit:true, leaf_id:'chain:'+id+':'+op.vout(), txid:id });
+  } }catch{}
+  return out;
+}
+function chainArriving(){
+  const m=new Map();
+  for(const d of chainDeposits()) m.set(d.asset,(m.get(d.asset)||0n)+d.atoms);
+  return m;
+}
 function assetFigure(v){
   if(String(v).startsWith('oamp:')) return (oampBalances[String(v).slice(5)]?.atoms) || 0n;
   let n = 0n;
-  try{ n += v==='BTC' ? btcOnchainShown(btcBalance || 0n) : BigInt(balObj()[v] || 0); }catch{}
+  try{ n += v==='BTC' ? btcOnchainShown(btcBalance || 0n) : BigInt(balObj()[v] || 0) - (chainArriving().get(v) || 0n); }catch{}
   try{ if(v!=='BTC' && leavesApi) n += leavesApi.leafAtoms(v) || 0n; }catch{}
   try{ if(v==='BTC') n += btcArkAtoms(); }catch{}
   try{ n += lnBalanceFor(v) || 0n; }catch{}
@@ -10626,8 +10657,36 @@ function renderHistory(){
   else { list.innerHTML=''; list.appendChild(el('div','muted','Syncing your history…')); _histCounts.seq=null; arrangeHistory(); return; }
   list.innerHTML='';
   const pending=livePending();
-  _histCounts.seq=rows.length+pending.length+instant.length; arrangeHistory();
-  if(!rows.length && !pending.length && !instant.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  // Default mode: what is not in the balance yet shows here alone, as arriving (or coming back),
+  // with when in words, true for its cause; a received row, or the deposit's own row on the chain,
+  // that is still arriving says so itself. Each line's first sighting is kept for the wallet, so a
+  // line past its time says it is taking longer.
+  let arrivingNow=[]; try{ if(leavesApi && leavesApi.arrivingPayments) arrivingNow=leavesApi.arrivingPayments(); }catch{}
+  const deposits=chainDeposits();
+  const seenKey='swk.arrivingSeen.'+walletTag(), nowMs=Date.now();
+  let seen={}; try{ seen=JSON.parse(localStorage.getItem(seenKey)||'{}')||{}; }catch{}
+  const ids=new Set([...arrivingNow, ...deposits].map(a=>a.leaf_id).filter(Boolean));
+  for(const id of ids) if(seen[id]==null) seen[id]=nowMs;
+  for(const k of Object.keys(seen)) if(!ids.has(k)) delete seen[k];
+  try{ localStorage.setItem(seenKey, JSON.stringify(seen)); }catch{}
+  let depth=null; try{ depth=leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null; }catch{}
+  const opts={ firstSeen: seen, nowMs, boardMin: boardMinutes(depth), roundMin: roundMinutes(depth) };
+  _arrivingWhen=new Map(arrivingRows(arrivingNow, [], opts).map(r=>[r.leaf, r.when]));
+  _depositWhen=new Map(arrivingRows(deposits, [], opts).map((r, i)=>[deposits[i].txid, r.when]));
+  const arrRows=arrivingRows(arrivingNow, instant.filter(r=>r.kind==='in' && r.leaf).map(r=>r.leaf), opts);
+  _histCounts.seq=rows.length+pending.length+instant.length+arrRows.length; arrangeHistory();
+  if(!rows.length && !pending.length && !instant.length && !arrRows.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
+  for(const a of arrRows){
+    const item=el('div','item instant');
+    item.appendChild(el('span','badge dir b-in','IN'));
+    const mid=el('div','grow');
+    mid.appendChild(el('div',null, a.kind==='coming_back' ? DEFAULT_WORDS.rowComingBack : DEFAULT_WORDS.rowArriving));
+    mid.appendChild(el('div','sub unconf', a.when));
+    item.appendChild(mid);
+    item.appendChild(histAmounts([{ hex:a.asset, atoms:a.atoms, out:false }], [], { out:false }));
+    tagRow(item, Date.now(), [a.asset]);
+    list.appendChild(item);
+  }
   // Each instant row goes in before the first chain row older than it.
   let ii=0;
   const flushInstant=(beforeTs)=>{ while(ii<instant.length && (beforeTs==null || (instant[ii].at||0)/1000 >= beforeTs)) list.appendChild(instantItem(instant[ii++])); };
@@ -10698,7 +10757,7 @@ function renderHistory(){
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
     if(dropped){}
     else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
-    else if(!devRows){}
+    else if(!devRows){ if(_depositWhen.has(txid)) mid.appendChild(el('div','sub unconf', DEFAULT_WORDS.rowArriving+' · '+_depositWhen.get(txid))); }
     else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -10760,6 +10819,9 @@ async function refreshBtcArkHistory(){
 }
 // One row, as default mode words it (docs/DEFAULT_MODE.md, History): a trade is "Swapped <pay> for
 // <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
+// What default mode shows as arriving, and when in words, as the last history drawing read it: by
+// leaf id, and the deposits on the chain by transaction.
+let _arrivingWhen=new Map(), _depositWhen=new Map();
 function instantItem(r){
   const metaOf=(h)=> h==='BTC' ? { ticker:'BTC', precision:8 } : assetMeta(h);
   const fmtLeg=(l)=>{ const m=metaOf(l.asset), a=BigInt(l.atoms); return fmtAtoms(a<0n?-a:a, m.precision)+' '+m.ticker; };
@@ -10768,15 +10830,17 @@ function instantItem(r){
   item.appendChild(el('span','badge dir '+(swap?'b-swap':r.kind==='in'?'b-in':'b-out'), swap?'SWAP':r.kind==='in'?'IN':'OUT'));
   const mid=el('div','grow');
   let head, status='';
-  if(r.kind==='swap'){ head='Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1]); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
+  if(r.kind==='swap'){ const tk=r.trade.ticket||{}; const leg=(a, n)=>fmtLeg({ asset:a, atoms:n });
+    head=(r.trade.state==='undone' ? 'Trade undone: '+leg(tk.payAsset, tk.amountIn)+' for '+leg(tk.receiveAsset, tk.amountOut) : 'Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1])); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
   else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
-  else head = r.kind==='in' ? 'Received' : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
+  else head = r.kind==='in' ? (r.leaf && _arrivingWhen.has(r.leaf) ? DEFAULT_WORDS.rowArriving : 'Received') : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
   mid.appendChild(el('div',null, head));
   const when = r.at ? whenText(r.at) : '';
   // A payment to an address is pending until the library says it is made (its `stage`); one that
   // was not made took nothing from the wallet. A row written before stages were kept: its first hour.
   // A payment of the Bitcoin ark is pending while its wallet says so.
   const pending = r.pending || (r.kind==='out' && r.later && (r.offboard ? r.stage==='pending' || !r.stage : Date.now()-r.at < 3600000));
+  if(r.kind==='in' && r.leaf && _arrivingWhen.has(r.leaf)) status=_arrivingWhen.get(r.leaf);
   const sub=[when, status, pending ? 'Pending' : '', r.stage==='not_made' ? DEFAULT_WORDS.rowNotMadeSub : ''].filter(Boolean).join(' · ');
   if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
   item.appendChild(mid);

@@ -95,8 +95,8 @@ export function pendingOut (store, tag, asset) {
   return n
 }
 
-// The composer's trades that moved something: every one sent, waiting or settled, and one
-// returned that paid fees. A ticket never confirmed, or one that failed or came back whole, moved
+// The composer's trades that moved something: every one sent, waiting, settled or undone after it
+// settled (its row says so, and that what was paid is coming back), and one returned that paid fees. A ticket never confirmed, or one that failed or came back whole, moved
 // nothing and has no row.
 export function tradeRows (records) {
   const out = []
@@ -104,7 +104,10 @@ export function tradeRows (records) {
     const t = r && r.ticket
     if (!t || !t.payAsset || !t.receiveAsset) continue
     const at = Number(r.sentAt || r.at) || 0
-    if (['sent', 'waiting', 'settled'].includes(r.state) || (r.state === 'confirming' && r.uncertain)) {
+    if (r.state === 'undone') {
+      // Undone: what it was to bring never came; what was paid is coming back, then back.
+      out.push({ kind: 'swap', at, trade: r, legs: r.undoneBack ? [] : [{ asset: t.payAsset, atoms: '-' + String(big(t.amountIn)) }], fees: [] })
+    } else if (['sent', 'waiting', 'settled'].includes(r.state) || (r.state === 'confirming' && r.uncertain)) {
       out.push({ kind: 'swap', at, trade: r, legs: [{ asset: t.payAsset, atoms: '-' + String(big(t.amountIn)) }, { asset: t.receiveAsset, atoms: String(big(t.amountOut)) }],
         fees: (t.fees || []).filter((f) => big(f.atoms) > 0n) })
     } else if (r.state === 'returned' && (r.feesPaid || []).length) {

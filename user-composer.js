@@ -409,7 +409,7 @@ export function mountUserComposer (ctx) {
       // A price no longer held is priced again, and shown before anything is signed.
       if (e && e.code === 'lapsed') { reset(); S.note = USER_WORDS.priceMoved; S.busy = false; await review(); S.note = S.ticket ? USER_WORDS.priceMoved : S.note; paintTicket(); return }
       // A record the browser has no room to keep refuses the trade before anything is signed: said as it is.
-      reset(); S.error = e && e.code === 'storage-full' ? e.message : USER_WORDS.failed
+      reset(); S.error = e && e.code === 'storage-full' ? e.message : /require-checkpoint-exit/.test(String((e && e.message) || '')) ? USER_WORDS.notYet : USER_WORDS.failed
     } finally { S.busy = false; paintTicket(); paintTrades(); follow() }
   }
 
@@ -418,7 +418,7 @@ export function mountUserComposer (ctx) {
     return tradeStateWord(r, Date.now())
   }
 
-  const ENDED = ['settled', 'returned', 'failed']
+  const ENDED = ['settled', 'returned', 'failed', 'undone']
   const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`
 
   function paintTrades () {
@@ -520,7 +520,7 @@ export function mountUserComposer (ctx) {
   // the next.
   async function follow () {
     clearTimeout(S.timer)
-    const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed'].includes(r.state))
+    const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed', 'undone'].includes(r.state))
     if (!openRecs.length) return
     if (S.busy) { S.timer = setTimeout(follow, ctx.followMs || 4000); return }
     try { await ctx.engine.resume() } catch (e) { console.warn('[user composer] resume:', e && e.message) }
