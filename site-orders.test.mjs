@@ -271,3 +271,25 @@ test('a step that is quick is answered with its fill, as before; one that never 
   q = await S2.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
   await assert.rejects(S2.confirm(q.id), (e) => e.message === USER_WORDS.failed)
 })
+
+test('a trade whose record the wallet no longer keeps reads as it ended, never as "sent" (#656)', async () => {
+  const E = fakeEngine(), L = fakeLeaves(), store = mem()
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store, tag: () => 't' })
+  const take = async () => { const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/'); return (await S.confirm(q.id)).trade }
+  const seen = await take(), followed = await take(), unseen = await take()
+  // One settles while getOrders is asked, one while the page follows it, one while nobody looks.
+  E.recs[0].state = 'settled'
+  assert.equal((await S.orders('https://s/dex/')).trades.find((t) => t.trade === seen).state, 'settled')
+  E.advance = async (r) => (r.id === followed ? Object.assign(r, { state: 'failed', error: 'not taken' }) : r)
+  await S.follow()
+  E.recs[2].state = 'settled'
+  // The engine trims the ended records past its bound: all three are gone.
+  E.recs = []
+  const o = await S.orders('https://s/dex/')
+  const st = Object.fromEntries(o.trades.map((t) => [t.trade, t.state]))
+  assert.equal(st[seen], 'settled', 'how it ended, kept when getOrders saw it')
+  assert.equal(st[followed], 'failed', 'how it ended, kept when the follow saw it')
+  assert.equal(st[unseen], 'ended', 'ended unseen: never "sent"')
+  assert.ok(o.trades.find((t) => t.trade === seen).note, 'the kept note')
+  assert.ok(!Object.values(st).includes('sent'))
+})
