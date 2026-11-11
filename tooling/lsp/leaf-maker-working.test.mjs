@@ -6,8 +6,8 @@
 //   node --test tooling/lsp/leaf-maker-working.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { workingSizes, shapeFor, budgetedSpendable, pastHalfBudget, settleGroups, mergeMost, coinsToMerge, capQuotes, quotesFrom, budgetRoom,
-  WORKING_COUNT } from './leaf-maker.mjs'
+import { workingSizes, shapeFor, budgetedSpendable, roomNow, pastHalfBudget, settleGroups, mergeMost, coinsToMerge, capQuotes, quotesFrom, budgetRoom,
+  WORKING_COUNT, GIVE_UP_AGAIN_MS } from './leaf-maker.mjs'
 
 const coin = (id, value, asset = 'G', kind = 'batch', state = 'live') => ({ leaf_id: id, asset, value: String(value), kind, state })
 
@@ -47,10 +47,17 @@ test('the smallest reserve coin is cut into the working coins missing, one cut a
   assert.equal(shapeFor(two, 'G', size).pieces, 2)
   // Four: nothing to cut.
   assert.equal(shapeFor([...two, coin('w3', size), coin('w4', size)], 'G', size), null)
-  // While the coin an earlier cut gave up is still held, no second cut.
-  assert.equal(shapeFor([...coins.slice(1), { ...coins[0], state: 'given' }], 'G', size, 'g1'), null)
+  // While a reserve coin is given up in a round (a cut under way), no second cut.
+  assert.equal(shapeFor([...coins.slice(1), { ...coins[0], state: 'given' }], 'G', size), null)
   // Once it is spent (gone from the held coins), the next cut may run.
-  assert.equal(shapeFor(coins.slice(1), 'G', size, 'g1').leaf, 'g2')
+  assert.equal(shapeFor(coins.slice(1), 'G', size).leaf, 'g2')
+  // A cut the library took back (g1 live again, given up a minute ago): the next coin is cut; g1
+  // itself again once GIVE_UP_AGAIN_MS has passed. Never stalled for good (#652).
+  const t = 1_000_000_000
+  const gave = new Map([['g1', t - 60_000]])
+  assert.equal(shapeFor(coins, 'G', size, gave, t).leaf, 'g2')
+  assert.equal(shapeFor([coins[0]], 'G', size, gave, t), null)
+  assert.equal(shapeFor([coins[0]], 'G', size, gave, t - 60_000 + GIVE_UP_AGAIN_MS).leaf, 'g1')
   // A coin received out of round (settling takes it) and a resting order's coin are never cut.
   assert.equal(shapeFor([coin('r', GOLD_560K, 'G', 'transfer'), { ...coin('o', GOLD_560K), template: 'order-3' }], 'G', size), null)
   // No size known: no cut.
@@ -69,6 +76,8 @@ test('a quote gives at most the largest coin whose whole worth fits the room lef
   // Room for less than a working coin: the half one.
   out = budgetedSpendable(sp, coins, size * 407_500_000_000n / 100_000_000n - 1n, rates)
   assert.equal(out.get('G'), size / 2n)
+  // An asset the node does not price: nothing quoted, as no budget can bound it (#654).
+  assert.equal(budgetedSpendable(new Map([['X', 10n ** 15n]]), [coin('x1', 10n ** 15n, 'X')], BUDGET, rates).get('X'), 0n)
   // No room: nothing quoted of the asset, so no price shown that the maker would refuse.
   out = budgetedSpendable(sp, coins, 0n, rates)
   assert.equal(out.get('G'), 0n)
@@ -128,15 +137,26 @@ test('the room cut and the coin cut agree with what the library will take in', (
   assert.equal(q.quotes[0].max_give, '500')
 })
 
-test('a coin an open firm offer holds takes its worth out of the room first (web wallet #632)', () => {
+test('the room is read from the coins as they are: open offers and a completed swap take theirs (#632, #653)', () => {
   const size = workingSizes(bond(), rates).get('G')
-  // Two working coins; the first is held by an open firm offer.
-  const coins = [coin('w1', size, 'G', 'batch', 'offered'), coin('w2', size)]
-  const sp = new Map([['G', size]])
-  // Room for one working coin and a bit: alone, w2 fits; with w1's offer counted, it does not.
-  const room = size * 407_500_000_000n / 100_000_000n + 1000n
-  assert.equal(budgetedSpendable(sp, [coin('w2', size)], room, rates).get('G'), size)
-  assert.equal(budgetedSpendable(sp, coins, room, rates).get('G'), 0n)
-  // A received coin offered (out of round already, counted by the library) is not counted twice.
-  assert.equal(budgetedSpendable(sp, [coin('t', size, 'G', 'transfer', 'offered'), coin('w2', size)], room, rates).get('G'), size)
+  const worth = size * 407_500_000_000n / 100_000_000n
+  const budget = worth + 1000n                      // room for one working coin
+  // Three working coins; nothing out of round.
+  const coins = [coin('w1', size), coin('w2', size), coin('w3', size)]
+  assert.equal(roomNow(budget, coins, rates), budget)
+  assert.equal(budgetedSpendable(new Map([['G', 3n * size]]), coins, roomNow(budget, coins, rates), rates).get('G'), size)
+  // An open firm offer holds w1: its worth comes off, nothing else is quoted.
+  const offered = [{ ...coins[0], state: 'offered' }, coins[1], coins[2]]
+  assert.equal(budgetedSpendable(new Map([['G', 2n * size]]), offered, roomNow(budget, offered, rates), rates).get('G'), 0n)
+  // The swap completed: w1 is gone; its change (a crumb) and what the taker paid (USDX worth w1)
+  // are out of round. The next reading of the coins gives no room for w2: no price is shown that
+  // swap_offer would then refuse.
+  const after = [coins[1], coins[2], coin('chg', 10n, 'G', 'transfer'), coin('in', worth, 'U', 'transfer')]
+  const room = roomNow(budget, after, rates)
+  assert.ok(room < worth, String(room))
+  assert.equal(budgetedSpendable(new Map([['G', 2n * size]]), after, room, rates).get('G'), 0n)
+  // A coin held out of round in an asset the node does not price leaves no room at all.
+  assert.equal(roomNow(budget, [coin('x', 1n, 'X', 'transfer')], rates), 0n)
+  // No budget: no bound.
+  assert.equal(roomNow(null, after, rates), null)
 })
