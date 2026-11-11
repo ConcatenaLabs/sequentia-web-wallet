@@ -67,6 +67,7 @@
 //   claimScan()         optional: how many receive keys `care` looks for claims under
 //                       (the kit wallet's next receive index and 20 more)
 //   careEveryMs         optional: how often `care` runs at most (default CARE_EVERY_MS)
+//   refreshNeedMs       optional: how often the library's refresh rule is asked (default REFRESH_NEED_MS)
 //   claimsEveryMs       optional: how often `claims` is read at most (default CLAIMS_EVERY_MS)
 //   boardRoom(asset)    optional: how many more atoms of the asset the wallet moves into the tree
 //                       by itself (ark-limits.js), null for no limit
@@ -134,6 +135,19 @@ export const TAKE_IN_MS = 45_000
 export const TAKE_IN_EVERY_MS = 2_000
 // How often user mode asks the library to refresh what it received out of round.
 export const REFRESH_EVERY_MS = 120_000
+// What the wallet received out of round is refreshed when the library says it must
+// (`refresh_needed`, D95: a coin one reassignment short of the operator's limit, more than half of
+// what the wallet may hold out of round over every asset, a coin near its expiry, or the person
+// gone REFRESH_IDLE_MS). The page asks it every REFRESH_NEED_MS and at once on every receipt, and
+// counts the person's idle time. A coin given up in a round is not spendable until the round is
+// final, so a wallet in use gives up only what must go now.
+export const REFRESH_IDLE_MS = 120_000
+export const REFRESH_NEED_MS = 30_000
+// The arguments of the library's `refresh_needed`: the whole seconds since the person last asked
+// anything of the wallet (or opened it).
+export function refreshNeededArgs (lastAsked, openedAt, at) {
+  return { idle_seconds: Math.max(0, Math.floor((at - Math.max(lastAsked || 0, openedAt || 0)) / 1000)) }
+}
 // How long care opens no channel in an asset after a payment closed one to spend its side, so a
 // person sending it has the time a payment takes, reloads included (kept in the store): ten
 // minutes for an asset of the tree, whose round is final in a Sequentia block; an hour for
@@ -640,6 +654,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   const now = ctx.now || (() => Date.now())
   const tickMs = ctx.tickMs || TICK_MS
   const careEvery = ctx.careEveryMs || CARE_EVERY_MS
+  const needEvery = ctx.refreshNeedMs || REFRESH_NEED_MS
   const claimsEvery = ctx.claimsEveryMs || CLAIMS_EVERY_MS
   const sleep = ctx.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const log = (m) => { try { (ctx.log || console.log)(m) } catch {} }
@@ -830,7 +845,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return S.expected.filter((x) => x.hex === hex).reduce((n, x) => n + x.atoms, 0n)
   }
   const dev = () => devModeOn(ctx.store, tag())
-  const emit = (name, data) => { if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {} }
+  const emit = (name, data) => {
+    if (ctx.onEvent) try { ctx.onEvent(name, data) } catch {}
+    // Every receipt has the library's refresh rule asked at once (`refresh_needed`).
+    if (name === 'leafArrived') needSoon(0)
+  }
   // Every schedule read also says whether the receive code kept for the page was paid (or lapsed)
   // meanwhile, by this page or while it was closed: the code is then forgotten and the page told
   // ('codeUsed'), so Receive shows a new one rather than a code no sender can pay again.
@@ -1108,6 +1127,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   async function upkeep () {
     if (!S.open) return
+    if (!S.needTimer) needSoon()
     await new Promise((r) => setTimeout(r, 0))   // the page paints what it holds first
     if (S.busy || S.asked || reviewing()) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
     // In user mode on the page's operator, upkeep also leaves room between the steps of what a
@@ -1125,12 +1145,30 @@ export function mountLeaves (ctx, root, settingsRoot) {
     } finally { S.busy = false; render() }
   }
 
+  // The library's refresh rule asked on a timer, every REFRESH_NEED_MS while the wallet is open, and
+  // at once on a receipt: nothing else need run the upkeep for a coin that arrives later (RV29).
+  function needSoon (ms) {
+    if (S.stopped) return
+    clearTimeout(S.needTimer)
+    S.needTimer = setTimeout(async () => {
+      S.needTimer = null
+      if (S.stopped) return
+      if (S.open && !dev() && pinned() && !S.busy && !S.asked) {
+        S.busy = true
+        try { await refreshReceived() } catch {} finally { S.busy = false }
+      }
+      needSoon()
+    }, ms ?? needEvery)
+  }
+
   // ---- user mode: what is received out of round is refreshed at the next round ----
   // A coin another wallet paid this one out of round rests on its senders until it is refreshed
   // in a round (until then a sender together with the operator could spend it again). In user
   // mode the library gives every such coin up in the operator's next round for a coin of its own
-  // (`refresh_received`), at most once every REFRESH_EVERY_MS, never ahead of a person, and never
-  // while the page's own on-chain payment may still be spending coins. Developer mode does it
+  // (`refresh_received`), at most once every REFRESH_EVERY_MS, never ahead of a person, never
+  // while the page's own on-chain payment may still be spending coins, and only once the person
+  // has left the wallet alone REFRESH_IDLE_MS, unless the library's `refresh_needed` says it is needed now, or a payment
+  // was refused for what the wallet holds out of round (settleSoon). Developer mode does it
   // only when asked. Until the round is final the coin counts as arriving. Nothing is said unless
   // it goes wrong: a refusal is kept in S.lastRefresh and asked again at the next turn.
   // On unless the page sets window.SEQ_REFRESH_RECEIVED = false. The library gives up a coin only
@@ -1140,8 +1178,25 @@ export function mountLeaves (ctx, root, settingsRoot) {
   async function refreshReceived () {
     if (!refreshReceivedOn()) return
     if (!S.open || dev() || !pinned() || S.asked) return
-    if (S.refreshedAt != null && now() - S.refreshedAt < REFRESH_EVERY_MS) return
+    const paced = S.refreshedAt != null && now() - S.refreshedAt < REFRESH_EVERY_MS
+    // Only when the library's rule says so (D95), or at once after a payment was refused for what
+    // the wallet holds out of round (settleSoon). The idle rule keeps the pace of one refresh every
+    // REFRESH_EVERY_MS; a rule that needs it now does not wait for the pace.
+    if (!S.settleNow) {
+      let v
+      try { v = await run('refresh_needed', refreshNeededArgs(S.lastAsked, S.openedAt, now())) } catch (e) {
+        // A library without the rule: refreshed as before, on the pace alone.
+        if (!/no command|unknown command/i.test(String((e && e.message) || ''))) { log('[leaves] refresh_needed: ' + (e && e.message)); return }
+        v = { needed: true, reasons: [{ rule: 'pace' }] }
+      }
+      if (!v || !v.needed) return
+      const rules = (v.reasons || []).map((r) => r.rule)
+      const now_ = rules.filter((r) => r !== 'idle' && r !== 'pace')
+      if (!now_.length && paced) return
+      if (now_.length) log('[leaves] refreshing what was received now: ' + now_.join(', '))
+    }
     try { if (ctx.onchainQuiet && ctx.onchainQuiet()) return } catch {}
+    S.settleNow = false
     S.refreshedAt = now()
     try {
       const v = await run('refresh_received', {})
@@ -2229,6 +2284,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function settleSoon () {
     if (S.refreshedAt != null) log('[leaves] holding past what the bond covers: what was received is settled at once')
     S.refreshedAt = null
+    S.settleNow = true
     S.upkeepLater = true
     if (!S.asked) upkeepSoon(0)
   }
@@ -2442,7 +2498,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     holdReads: (ms) => { S.holdUntil = ms > 0 ? now() + ms : 0 },
     // The assets the operator serves in the tree.
     servedAssets: () => (((S.info && S.info.server_info && S.info.server_info.assets) || []).map((a) => a && a.asset).filter(Boolean)),
-    stop: () => { S.stopped = true; clearTimeout(S.chanTimer); clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer) },
+    stop: () => { S.stopped = true; clearTimeout(S.chanTimer); clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer); clearTimeout(S.needTimer) },
   }
   render()
   return api
