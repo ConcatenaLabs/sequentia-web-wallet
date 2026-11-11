@@ -259,10 +259,19 @@ export function arrivingByAsset (places) {
 export function arrivingCoins (places) {
   const out = []
   for (const c of (places && Array.isArray(places.coins)) ? places.coins : []) {
-    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state })
+    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, channel: c.channel === true })
   }
   return out
 }
+// The coins a refresh gives up (`refresh_received`'s `leaves`): when the only rule the library's
+// `refresh_needed` gives is `arriving`, those coins alone, so what counts already stays spendable;
+// otherwise every received coin (null).
+export function refreshLeaves (needed) {
+  const reasons = (needed && Array.isArray(needed.reasons)) ? needed.reasons : []
+  if (!reasons.length || reasons.some((r) => r.rule !== 'arriving')) return null
+  return [...new Set(reasons.flatMap((r) => r.coins || []))]
+}
+
 // The channel coins default mode closes into plain coins at the next round: each live one.
 export function channelsToClose (channels) {
   return (channels || []).filter((c) => c && c.coin_state === 'live' && c.leaf_id).map((c) => c.leaf_id)
@@ -1241,6 +1250,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Only when the library's rule says so (D95), or at once after a payment was refused for what
     // the wallet holds out of round (settleSoon). The idle rule keeps the pace of one refresh every
     // REFRESH_EVERY_MS; a rule that needs it now does not wait for the pace.
+    let only = null
     if (!S.settleNow) {
       let v
       try { v = await run('refresh_needed', refreshNeededArgs(S.lastAsked, S.openedAt, now())) } catch (e) {
@@ -1249,6 +1259,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         v = { needed: true, reasons: [{ rule: 'pace' }] }
       }
       if (!v || !v.needed) return
+      only = refreshLeaves(v)
       const rules = (v.reasons || []).map((r) => r.rule)
       const now_ = rules.filter((r) => r !== 'idle' && r !== 'pace')
       if (!now_.length && paced) return
@@ -1258,7 +1269,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     S.settleNow = false
     S.refreshedAt = now()
     try {
-      const v = await run('refresh_received', {})
+      const v = await run('refresh_received', only ? { leaves: only } : {})
       S.lastRefresh = { at: now(), value: v }
       const n = ((v && v.refreshed) || []).length
       if (n) { log(`[leaves] ${n} coin(s) received out of round given up in the next round`); await reload() }

@@ -3,7 +3,7 @@
 // wallet's is in History alone; no channel is opened, named or kept; a settled trade can be undone.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT } from './leaves.js'
+import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves } from './leaves.js'
 import { arrivingRows, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
 import { tradeStateWord, USER_WORDS, UNDO_WINDOW_MS } from './user-trade.js'
@@ -60,4 +60,17 @@ test('a settled trade the library marks undone reads as undone, with what was pa
   assert.equal(rows.length, 1)
   assert.equal(rows[0].trade.state, 'undone')
   assert.equal(UNDO_WINDOW_MS, 3 * 86_400_000)
+})
+
+test('the arriving rule refreshes the arriving coins alone; any other rule, every received coin', () => {
+  assert.deepEqual(refreshLeaves({ needed: true, reasons: [{ rule: 'arriving', coins: ['a2', 'a3'] }] }), ['a2', 'a3'])
+  assert.equal(refreshLeaves({ needed: true, reasons: [{ rule: 'arriving', coins: ['a2'] }, { rule: 'idle' }] }), null)
+  assert.equal(refreshLeaves({ needed: true, reasons: [{ rule: 'exposure' }] }), null)
+  assert.equal(refreshLeaves(null), null)
+})
+
+test('a channel the wallet is closing is coming back, at its side alone, in about a minute', () => {
+  const p = { coins: [{ leaf_id: 'ch', asset: X, value: '3400000', state: 'live', place: 'arriving', channel: true }] }
+  const rows = arrivingRows(arrivingCoins(p))
+  assert.deepEqual(rows.map((r) => [r.kind, r.atoms, r.when]), [['coming_back', 3_400_000n, DEFAULT_WORDS.arrivingSoon]])
 })

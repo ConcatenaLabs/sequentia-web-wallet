@@ -57,7 +57,8 @@ In practice:
   the coins a move spends come off the address's part only until that reading holds the move,
   and a coin that arrived meanwhile is never taken for one of them.
 - The wallet keeps its money in ordinary coins: it opens no channel, names none in its receive
-  code, and closes any it holds into a coin at the next settlement.
+  code, and closes any it holds into a coin at the next settlement. Until then what it held there
+  (its own side alone) is in History as **Coming back**, "about a minute", not in the figure.
 - Developer mode shows every part under the figure, **"<amount> <TICKER> arriving"** included
   (and moving, redone, kept safe), counts every payment at once, and keeps its channels and
   their choices.
@@ -609,9 +610,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   the figure while what was paid shows in History as **Coming back**.
 - Every trade is instant at any size, what it brings is in the figure at once and can be traded
   on at once, and the wallet never leaves change of its own in a trade (it pays itself the exact
-  amount first when it must). What a trade brought is sent out of the wallet (to an address, over
-  Lightning, for BTC) only once the next settlement has made it the wallet's own, within about a
-  minute.
+  amount first when it must). What a trade brought pays anything at once, over Lightning and to an
+  address included, except the other side of a trade for BTC: that waits for the next settlement to
+  make it the wallet's own, which the wallet asks for by itself, about a minute.
 
 - Settling waits for the network, and no status promises how long: the only time a row shows is
   the minutes it has waited, once that is one or more. While it waits the row says what is
