@@ -242,7 +242,9 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 | `GET` | `/v1/swap/<id>` | where a swap stands |
 
 Every coin it receives is refreshed in the operator's next round once it has rested
-`settle_seconds`, so what it trades settles as the takers' coins do.
+`settle_seconds`, so what it trades settles as the takers' coins do; and every one at once when
+it holds more than half its instant budget out of round. Each asset is settled in a participation
+of its own, its new value cut into working coins (below).
 
 It takes in no asset whose refreshes the operator holds back. It reads the operator's
 `/v1/info` every minute, straight from the operator rather than through the library. An asset
@@ -272,11 +274,34 @@ forfeit of a board pays it back at once), then coins of a round of at most `coin
 three quarters of the cap. A merge's own coin is larger, and is not merged again at every coin that
 comes in. At twice the cap it boards no more of the asset and merges its smallest coins of all, as
 few as bring it back under. With `merge_max_coins` (a number, at least 2), the coins one pass merges
-hold at most that many `coin_size` together, so no merge makes a coin larger: a swap's change is out
-of round until the maker's next round refreshes it, and counts against its instant budget all that
-time, so a coin many times the size of its trades would put most of itself out of round at every
-trade. The library pays a swap from the smallest coin of the latest date that holds it (the arca
-CLI README, `swap offer`); the bound keeps such coins about.
+hold at most that many `coin_size` together; and with an instant budget, no merge holds more than
+a working coin (below).
+
+### Working coins
+
+A swap pays from one coin, and that coin's whole worth is then out of round until the maker's next
+round: its change, and what the taker pays in its place. So for every asset it gives, the maker
+keeps four working coins worth at most a quarter of its instant budget each, at its node's rates,
+and the rest in reserve coins. The size is worked out from the budget at every pass, never a
+number of atoms in the configuration, so a price move changes it at once. The library pays a swap
+from the smallest coin that pays it alone (the arca CLI README, `swap offer`), so small swaps reach
+the working coins and never a reserve coin.
+
+- **Cutting.** An asset with fewer than four working coins has its smallest reserve coin of a round
+  or a board cut into the ones missing and a reserve of the rest, in the operator's next round (the
+  library's refresh in pieces, `quote` and `participate` with `piece` and `pieces`), one cut at a
+  time, read from the coins' state. A coin the library takes back from a refresh that waited at
+  the operator is given up again ten minutes later, whether it was being cut or settled. Coins are
+  never cut by a payment to itself out of round. A library that does not cut a
+  refresh into pieces is detected from its quote, and nothing is given up.
+- **Settling and merging.** What it received is settled into working coins and a reserve of the
+  rest. No merge makes a coin larger than a working coin, and no board is larger than one.
+- **Quotes.** It quotes of an asset at most its largest live coin whose whole worth fits the room
+  left in its budget, and a firm offer is sized the same way, so a price it shows is a price it
+  confirms. The room is worked out from its latest reading of its coins: the budget less what it
+  holds out of round and what its open offers hold. After an offer or a completion it quotes
+  nothing until that reading is renewed. With no coin that fits, the asset is not quoted until its
+  next round, and an asset its node does not price is not quoted at all.
 
 The library reads what each command needs, by state: the coins the maker traded away and the
 participations it completed, thousands after a few days of trading, are not read again. The
