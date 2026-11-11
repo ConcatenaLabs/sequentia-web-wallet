@@ -209,7 +209,8 @@ test('a joined wallet in user mode runs care when it opens, with the kit\'s scan
     claimScan: () => 47, onChange: () => { changes++ }, onEvent: (n, d) => events.push([n, d]), tickMs: 3_600_000 }, null, null)
   await api.start()
   const care = runs.filter((r) => Array.isArray(r) && r[0] === 'care')
-  assert.deepEqual(care, [['care', { channels: true, scan: 47 }]])
+  // Default mode keeps no channel: care opens and folds none (docs/DEFAULT_MODE.md, Balance).
+  assert.deepEqual(care, [['care', { channels: false, scan: 47 }]])
   // The claim taken up: the balance read again, and the page told.
   assert.ok(runs.lastIndexOf('balance') > runs.findIndex((r) => Array.isArray(r)), 'balance re-read after care')
   assert.ok(changes >= 2)
