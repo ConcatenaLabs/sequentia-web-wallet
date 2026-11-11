@@ -335,6 +335,29 @@ export function spendableFrom (coins, plans, { waiting = false } = {}) {
 }
 
 const TRADES_KEY = 'swk.usertrade'
+// The trade records kept: every unfinished trade's, always, since it is what lets a reload resume
+// or return the trade; and the newest ended ones, up to KEEP_ENDED of them and KEEP_BYTES in all,
+// the oldest out first. History draws its trade rows from these records, so a trade that ended
+// before the newest KEEP_ENDED is no longer a row there: the coins it brought are in the balance,
+// and its fill stays in the relay's trade log.
+export const KEEP_ENDED = 200
+export const KEEP_BYTES = 1_000_000
+const ENDED_STATES = ['settled', 'returned', 'failed']
+export const STORAGE_FULL = 'The trade was not made: this browser has no room left to keep its record. Nothing was signed.'
+// `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
+// left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped.
+export function boundedRecords (list, keep, bytes) {
+  const ended = (r) => ENDED_STATES.includes(r && r.state)
+  const size = list.map((r) => JSON.stringify(r).length + 1)
+  let endedLeft = list.filter(ended).length
+  let total = size.reduce((a, b) => a + b, 1)
+  const drop = new Set()
+  for (let i = 0; i < list.length && (endedLeft > keep || total > bytes); i++) {
+    if (!ended(list[i])) continue
+    drop.add(i); endedLeft--; total -= size[i]
+  }
+  return drop.size ? list.filter((_, i) => !drop.has(i)) : list
+}
 // How long a quote waits before it asks once more for firm terms that none gave.
 const FIRM_RETRY_MS = 3000
 // How long the sources are given to answer for firm terms, from the moment they are asked: every
@@ -414,7 +437,19 @@ export function createEngine (deps) {
   function markNotFinal (id) { const m = notFinal(); m[id] = now() + NOT_FINAL_MS; try { deps.store.setItem(nfKey(), JSON.stringify(m)) } catch {} }
 
   function records () { try { return JSON.parse(deps.store.getItem(key()) || '[]') } catch { return [] } }
-  function save (list) { deps.store.setItem(key(), JSON.stringify(list)) }
+  // Writes the records, bounded (`boundedRecords`). A store that refuses the write (a full
+  // localStorage) is tried again with fewer ended trades kept, then with none; one that refuses
+  // even that refuses the trade: `confirm` writes the record before anything is signed, so a trade
+  // whose record cannot be kept is never signed.
+  function save (list) {
+    const keep = deps.keepEnded ?? KEEP_ENDED, bytes = deps.keepBytes ?? KEEP_BYTES
+    let refused
+    for (const [k, b] of [[keep, bytes], [Math.floor(keep / 4), Math.floor(bytes / 4)], [0, 0]]) {
+      try { deps.store.setItem(key(), JSON.stringify(boundedRecords(list, k, b))); return } catch (e) { refused = e }
+    }
+    log('[user trade] the trade records could not be written:', refused && refused.message)
+    const e = new Error(STORAGE_FULL); e.code = 'storage-full'; throw e
+  }
   function put (rec) { const l = records(); const i = l.findIndex((r) => r.id === rec.id); if (i >= 0) l[i] = rec; else l.push(rec); save(l); return rec }
   const btcT = btcTrades({ run, deps, put, log, now, settleStep: (rec) => settleStep(rec), maxFeePpm: MAX_FEE_PPM, firmMarginMs: FIRM_MARGIN_MS })
 

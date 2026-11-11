@@ -408,7 +408,8 @@ export function mountUserComposer (ctx) {
       seenEnds()
       // A price no longer held is priced again, and shown before anything is signed.
       if (e && e.code === 'lapsed') { reset(); S.note = USER_WORDS.priceMoved; S.busy = false; await review(); S.note = S.ticket ? USER_WORDS.priceMoved : S.note; paintTicket(); return }
-      reset(); S.error = USER_WORDS.failed
+      // A record the browser has no room to keep refuses the trade before anything is signed: said as it is.
+      reset(); S.error = e && e.code === 'storage-full' ? e.message : USER_WORDS.failed
     } finally { S.busy = false; paintTicket(); paintTrades(); follow() }
   }
 

@@ -44,11 +44,17 @@ const w = lib.exists(mnemonic) ? lib.open(mnemonic, op.node_password)
   : lib.create(mnemonic, { server: op.server, node_url: op.node_url, node_user: op.node_user, node_password: op.node_password,
     ...(cfg.exit_delay_units ? { exit_delay_units: cfg.exit_delay_units, min_exit_delay_units: cfg.exit_delay_units } : {}) })
 
-// The trade records: a file, replaced whole on every write (written before anything is signed).
+// The trade records: a file, read once at the start and kept in memory, and replaced whole on
+// every write (written before anything is signed). A file that is there and does not read stops
+// the wallet rather than being written over: it holds the records of unfinished trades.
 const file = join(dir, 'trades.json')
+let kept = {}
+if (existsSync(file)) {
+  try { kept = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { console.error(`${file} does not read (${e.message}); not starting over it`); process.exit(1) }
+}
 const store = {
-  getItem: (k) => { try { return JSON.parse(readFileSync(file, 'utf8'))[k] ?? null } catch { return null } },
-  setItem: (k, v) => { let o = {}; try { o = JSON.parse(readFileSync(file, 'utf8')) } catch {} ; o[k] = v; writeFileSync(file + '.tmp', JSON.stringify(o)); renameSync(file + '.tmp', file) },
+  getItem: (k) => kept[k] ?? null,
+  setItem: (k, v) => { const next = { ...kept, [k]: v }; writeFileSync(file + '.tmp', JSON.stringify(next)); renameSync(file + '.tmp', file); kept = next },
 }
 const fetchJson = async (url, init) => {
   const r = await fetch(url, init ? { ...init, headers: { 'content-type': 'application/json' } } : undefined)
