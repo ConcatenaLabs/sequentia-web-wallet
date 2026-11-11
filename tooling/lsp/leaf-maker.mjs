@@ -347,7 +347,7 @@ export function workingSizes (bond, rates) {
 }
 
 // The coin of `asset` to cut into working coins of `size` this pass: when fewer than WORKING_COUNT
-// of its live coins are at most `size`, its smallest larger coin of a round or a board (never one
+// of its live coins are working coins (at most `size`, at least half of it), its smallest larger coin of a round or a board (never one
 // received out of round, which settling takes into a round already, nor a resting order's), cut
 // into as many pieces as are missing and a reserve coin of the rest. None while `busy` (the coin
 // an earlier cut gave up) is still held: one cut at a time. -> { leaf, piece, pieces } | null
@@ -356,7 +356,9 @@ export function shapeFor (coins, asset, size, busy = null) {
   const mine = (coins || []).filter((c) => c && c.asset === asset && !isOrderCoin(c))
   if (busy && mine.some((c) => c.leaf_id === busy)) return null
   const live = mine.filter((c) => c.state === 'live')
-  const working = live.filter((c) => big(c.value) <= big(size)).length
+  // A working coin is at most `size` and at least half of it: crumbs a swap's change left do not
+  // count, since they pay no trade of a working coin's size (merges gather them).
+  const working = live.filter((c) => big(c.value) <= big(size) && big(c.value) * 2n >= big(size)).length
   if (working >= WORKING_COUNT) return null
   const reserve = live.filter((c) => (c.kind === 'batch' || c.kind === 'board') && big(c.value) > big(size))
     .sort((x, y) => (big(x.value) < big(y.value) ? -1 : big(x.value) > big(y.value) ? 1 : 0))

@@ -42,8 +42,8 @@ test('the smallest reserve coin is cut into the working coins missing, one cut a
   // The box's GOLD: no coin at a working size; its smallest is the $560k coin.
   const coins = [coin('g1', GOLD_560K), coin('g2', 14_370_000_000n), coin('g3', 159_950_000_000n), coin('t1', TSEQ_COIN, 'T')]
   assert.deepEqual(shapeFor(coins, 'G', size), { leaf: 'g1', piece: String(size), pieces: WORKING_COUNT })
-  // Two working coins already: two more.
-  const two = [...coins, coin('w1', size), coin('w2', 1000n)]
+  // Two working coins already: two more. A crumb of change does not count as one.
+  const two = [...coins, coin('w1', size), coin('w2', size / 2n), coin('crumb', 1000n)]
   assert.equal(shapeFor(two, 'G', size).pieces, 2)
   // Four: nothing to cut.
   assert.equal(shapeFor([...two, coin('w3', size), coin('w4', size)], 'G', size), null)
