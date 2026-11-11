@@ -354,7 +354,7 @@ test('a page opened again after the operator offered the exit sets it on, even w
   const m = new Map()
   const store = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
   store.setItem(JOINED_KEY + '.t', '1')
-  store.setItem(EXIT_SEEN_KEY + '.t', '1')
+  store.setItem(EXIT_SEEN_KEY + '.t.k', '1')
   const set = []
   const w = {}
   w.postMessage = (msg) => {
@@ -373,4 +373,40 @@ test('a page opened again after the operator offered the exit sets it on, even w
     await api.start()
     assert.deepEqual(set, [true], 'seen before: on at open, although the operator now says it does not offer it')
   } finally { api.stop() }
+})
+
+test('the kept fact belongs to the wallet and its operator: another operator\'s, or a developer-mode answer, counts for nothing', async () => {
+  const K = 'a'.repeat(64)
+  const mount = async (seed, pinOp, offers) => {
+    const m = new Map(seed)
+    const store = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
+    store.setItem(JOINED_KEY + '.t', '1')
+    const set = []
+    const w = {}
+    w.postMessage = (msg) => {
+      const reply = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: msg.id, ok: true, value } }))
+      if (msg.op === 'exists') return reply(true)
+      if (msg.op === 'open') return reply({})
+      const c = msg.args.command
+      if (c === 'require_checkpoint_exit') set.push(msg.args.args.on)
+      const result = c === 'info' ? { operator: K, server_info: { checkpoint_exit: offers } } : c === 'schedule' ? { now: 1 } : c === 'balance' ? {}
+        : (c === 'sync' || c === 'care' || c === 'mailbox' || c === 'instant_limit' || c === 'require_checkpoint_exit' || c === 'claims') ? {} : []
+      reply({ result, start: {} })
+    }
+    const pinned = pinOp ? () => ({ server: 'https://op.example/arca', node_url: 'https://op.example/node', operator: pinOp }) : undefined
+    const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1_000_000, tickMs: 3_600_000,
+      careEveryMs: 60_000, log: () => {}, pinned }, null, null)
+    try { await api.start() } finally { api.stop() }
+    return { set, m }
+  }
+  let r = await mount([[EXIT_SEEN_KEY + '.t', '1']], null, false)
+  assert.deepEqual(r.set, [false], 'a fact kept without its operator counts for nothing')
+  r = await mount([[EXIT_SEEN_KEY + '.t.' + 'c'.repeat(64), '1']], null, false)
+  assert.deepEqual(r.set, [false], 'seen under another operator: nothing carried to this one')
+  r = await mount([], 'b'.repeat(64), true)
+  r = await mount([...r.m], 'b'.repeat(64), false)
+  assert.deepEqual(r.set, [false], 'an answer that is not the pinned operator\'s kept nothing: opened again, off')
+  r = await mount([], K, true)
+  assert.equal(r.m.get(EXIT_SEEN_KEY + '.t.' + K), '1', 'the pinned operator offering it: kept for it')
+  assert.deepEqual(r.set, [true])
 })

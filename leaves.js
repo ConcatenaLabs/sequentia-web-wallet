@@ -263,7 +263,8 @@ export function requireExitArgs (developer, info) {
 }
 // What to set `require_checkpoint_exit` to now, given the leaf wallet's `info` as last read, the
 // switch as last set (`applied`, its arguments as JSON, or null when not set this session) and
-// whether this wallet's operator has ever offered the exit (`seen`, kept in the store): the mode's
+// whether this wallet's operator has ever offered the exit (`seen`, kept in the store for the
+// wallet and that operator): the mode's
 // arguments when they differ from it, else null. In default mode the switch only ever goes on: once
 // the operator has offered the exit, an answer that no longer offers it (or an older operator's,
 // without the field) leaves it on, so an operator cannot take the exit away by what it says, and
@@ -1470,8 +1471,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   async function applyExit (applied) {
     const si = S.info && S.info.server_info
-    if (si && typeof si === 'object' && si.checkpoint_exit === true) { try { ctx.store.setItem(tagged(EXIT_SEEN_KEY, tag()), '1') } catch {} }
-    let seen = false; try { seen = ctx.store.getItem(tagged(EXIT_SEEN_KEY, tag())) === '1' } catch {}
+    // Kept for the wallet and its operator together, and written only from default mode's own
+    // operator's answer (the page's pinned one, when it pins one): a developer-mode join to another
+    // server, or another operator, neither sets it nor reads it.
+    const op = S.info && typeof S.info.operator === 'string' ? S.info.operator : null
+    const pin = pinned()
+    const key = op ? tagged(EXIT_SEEN_KEY, tag()) + '.' + op : null
+    if (key && !dev() && (!pin || pin.operator === op) && si && typeof si === 'object' && si.checkpoint_exit === true) { try { ctx.store.setItem(key, '1') } catch {} }
+    let seen = false; try { seen = !!key && ctx.store.getItem(key) === '1' } catch {}
     const args = exitSwitch(dev(), S.info, applied, seen)
     if (!args) return
     try { await run('require_checkpoint_exit', args); S.exitApplied = JSON.stringify(args) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
