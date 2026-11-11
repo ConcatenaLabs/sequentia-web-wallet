@@ -173,3 +173,24 @@ test('every pre-check of Send counts what is on its way', () => {
   // Nothing refuses a payment for being still arriving in default mode.
   assert.ok(!/route === 'arriving' && !devMode\(\)\) throw/.test(html))
 })
+
+test('while a payment is arriving, Balance shows the asset as Arriving with about how long, never 0 or nothing', { timeout: 20000 }, async (t) => {
+  const { api } = await mount(t)
+  const p = page(api)
+  // Once the library's places are read, `arriving` is 0n and the figure holds none of it: what the
+  // row, the asset list, the page's syncs and the page API read is what is on its way.
+  assert.equal(api.arriving(X), 0n)
+  assert.equal(api.leafAtoms(X), 0n)
+  assert.ok(!api.leafAssets().includes(X), 'no figure holds it')
+  assert.deepEqual(api.arrivingPayments().map((x) => [x.asset, x.atoms]), [[X, 2_000_000n]])
+  assert.equal(p.onItsWay(X), 2_000_000n)
+  const rb = fn('renderBalance')
+  assert.match(rb, /arrivingIn = \(leavesApi\.arriving\(kind\) \|\| 0n\) \+ onItsWay\(kind\);/)
+  assert.match(rb, /for\(const h of onItsWayAssets\(\)\) seqKeys\.add\(h\);/)
+  assert.match(rb, /if\(!alwaysShow && totalAtoms <= 0n && arrivingIn <= 0n\) return;/)
+  assert.match(rb, /total: \(totalAtoms <= 0n && arrivingIn > 0n\) \? .*DEFAULT_WORDS\.arrivingFigure/)
+  assert.match(rb, /DEFAULT_WORDS\.arrivingIn\(amt\(arrivingIn\), ticker\)/)
+  assert.match(fn('followArriving'), /arriving \+= \(leavesApi\.arriving\(h\) \|\| 0n\) \+ onItsWay\(h\);/)
+  assert.equal(DEFAULT_WORDS.arrivingIn('0.02', 'XT'), '0.02 XT arriving, in about a minute')
+  assert.equal(DEFAULT_WORDS.arrivingFigure, 'Arriving')
+})

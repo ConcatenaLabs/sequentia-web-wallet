@@ -4347,7 +4347,8 @@ function followArriving(){
     for(;;){
       await new Promise(ok=> setTimeout(ok, 5_000));
       if(!leavesApi || !leavesApi.isOpen()) continue;
-      let arriving = 0n; try{ for(const h of leavesApi.leafAssets()) arriving += leavesApi.arriving(h) || 0n; }catch{ continue; }
+      // Once the library's places are read, what is arriving is in no figure: onItsWay counts it.
+      let arriving = 0n; try{ for(const h of new Set([...leavesApi.leafAssets(), ...onItsWayAssets()])) arriving += (leavesApi.arriving(h) || 0n) + onItsWay(h); }catch{ continue; }
       if(arriving <= 0n){ since = null; continue; }
       if(since == null) since = Date.now();
       if(!arrivingSyncDue({ arriving, nowMs: Date.now(), since, lastSyncMs: syncedAt,
@@ -4463,9 +4464,9 @@ function siteDeps(){
       try{ if(!devMode()) for(const [h, v] of chainArriving()){ const n=BigInt(assets[h]||0)-v; assets[h]=(n>0n?n:0n).toString(); } }catch{}
       // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
       const total = {}, arriving = {}, by_place = {};
-      for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves)])){
+      for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves), ...onItsWayAssets()])){
         const t = userHeld(h); if(t > 0n || h === 'BTC') total[h] = t.toString();
-        try{ const a = h !== 'BTC' && leavesApi ? (leavesApi.arriving(h) || 0n) : 0n; if(a > 0n) arriving[h] = a.toString(); }catch{}
+        try{ const a = h !== 'BTC' && leavesApi ? (leavesApi.arriving(h) || 0n) + onItsWay(h) : 0n; if(a > 0n) arriving[h] = a.toString(); }catch{}
         if(devMode()){
           const chain = h === 'BTC' ? (btcBalance || 0n) : BigInt(assets[h] || 0);
           let lv = 0n; try{ if(h !== 'BTC' && leavesApi) lv = leavesApi.leafAtoms(h) || 0n; }catch{}
@@ -7867,7 +7868,8 @@ function renderBalance(){
     // Default mode: a payment received and still arriving (past the instant limit, until its round)
     // is shown at once, as arriving, with about how long; never as a part of the balance, and the
     // asset's row never reads 0 while one is on its way.
-    let arrivingIn = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arrivingIn = leavesApi.arriving(kind) || 0n; } catch {}
+    // (Once the library's places are read, what is on its way is in no figure: onItsWay.)
+    let arrivingIn = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arrivingIn = (leavesApi.arriving(kind) || 0n) + onItsWay(kind); } catch {}
     if(!alwaysShow && totalAtoms <= 0n && arrivingIn <= 0n) return;
     const amt=(x)=> known ? fmtAmount(x, precision) : (BigInt(x).toString()+' atoms');
     const a=el('div');
@@ -7984,6 +7986,8 @@ function renderBalance(){
   const seqKeys = new Set(Object.keys(b));
   // An asset held only as leaves still has its row, in both modes.
   if(leavesApi) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
+  // And one with a payment on its way and nothing else yet: its row reads Arriving, never nothing.
+  for(const h of onItsWayAssets()) seqKeys.add(h);
   // So does the Sequence token when all of it is staked.
   if(POLICY_HEX && stakedFor(POLICY_HEX)>0n) seqKeys.add(POLICY_HEX);
   // And an asset held only as what vests later.
@@ -11874,6 +11878,9 @@ function instantAtoms(hex){ try{ return (leavesApi && !devMode()) ? (leavesApi.l
 // onItsWay). A payment or a move of it goes through after the next settlement, never refused for it
 // (D96), so every pre-check counts it beside what can be sent now.
 function onItsWay(hex){ try{ return (hex!=='BTC' && leavesApi && !devMode() && leavesApi.onItsWay) ? (leavesApi.onItsWay(hex)||0n) : 0n; }catch{ return 0n; } }
+// The assets something is on its way in (leaves.js arrivingPayments): each has its row on Balance,
+// though nothing of it is in a figure yet.
+function onItsWayAssets(){ try{ return (leavesApi && !devMode() && leavesApi.arrivingPayments) ? [...new Set(leavesApi.arrivingPayments().map(p=>p.asset).filter(Boolean))] : []; }catch{ return []; } }
 // A margin for the network fees of `vbytes` of transactions, in atoms of `hex`, at the wallet's
 // default rate, twice over: what is moved for them is never short, and what is left stays the wallet's.
 function feeMarginAtoms(hex, vbytes = 1000){
