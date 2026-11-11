@@ -294,6 +294,47 @@ test('a payment the planned coins cover is made through the next round, by itsel
   api.stop(); api2.stop()
 })
 
+test('a payment of coins that wait only for a round (settle_first) settles them, then is made, nothing refused', async () => {
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  let clock = 1_000_000
+  const runs = []
+  let sends = 0
+  let synced = 0
+  let asked = 0
+  const w = fakeWorker((m) => {
+    if (m.op === 'exists') return { id: m.id, ok: true, value: true }
+    if (m.op === 'open') return { id: m.id, ok: true, value: {} }
+    const c = m.args.command
+    runs.push(c === 'settle_first' ? ['settle_first', m.args.args] : c)
+    if (c === 'send') {
+      sends++
+      if (sends === 1) return { id: m.id, ok: false, error: { kind: 'settle_first', asset: X, coins: ['deep'], message: 'refused: … settle them first (settle_first) …' } }
+      return { id: m.id, ok: true, value: { result: { transfer: 't1' }, start: {} } }
+    }
+    if (c === 'sync') synced++
+    if (c === 'settle_first') {
+      asked++
+      const result = asked === 1 ? { settling: ['deep'], waiting: [], done: [], left: [], ready: false }
+        : synced >= 2 ? { settling: [], waiting: [], done: ['deep'], left: [], ready: true } : { settling: [], waiting: ['deep'], done: [], left: [], ready: false }
+      return { id: m.id, ok: true, value: { result, start: {} } }
+    }
+    const result = c === 'coins' ? [] : c === 'schedule' ? { now: 1, due: false, next_sync_at: null } : c === 'care' ? { claims: [], planned: [], cancelled: [] }
+      : c === 'balance' ? { arca: {} } : []
+    return { id: m.id, ok: true, value: { result, start: {} } }
+  })
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => clock,
+    sleep: async (ms) => { clock += ms }, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  const v = await api.pay('send', { request: 'r', amount: '500000', asset: X })
+  assert.deepEqual(v, { transfer: 't1' })
+  assert.deepEqual(runs.find((r) => Array.isArray(r) && r[0] === 'settle_first'), ['settle_first', { coins: ['deep'] }])
+  assert.ok(asked >= 2, 'asked again until through; the library gives nothing up twice')
+  assert.equal(sends, 2, 'asked again once, after the round')
+  assert.equal(api.state.releasing, null)
+  api.stop()
+})
+
 test('a payment the side of a channel covers closes the channel through the next round, and is made', async () => {
   const store = memStore()
   store.setItem(JOINED_KEY + '.t', '1')
