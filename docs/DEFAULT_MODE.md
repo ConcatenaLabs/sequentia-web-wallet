@@ -607,7 +607,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   side's offer ran out while the trade waited." A trade that settled and then never completed on
   the network is undone by itself: its row reads "Trade undone: <pay> for <get>" the moment the
   wallet learns the trade is dead, however long after it settled, with "Undone: this trade did
-  not complete. What you paid is coming back to you, within about two days." What it was to bring
+  not complete. What you paid is coming back to you, within about <N> hours." (the hours until it
+  can be claimed home, as the wallet knows them; "within about two days" until it does). What it was to bring
   leaves the row and the figure; what was paid is in History as **Coming back**. Once it is home
   the row says "Undone: this trade did not complete. What you paid came back to you."
 - Every trade is instant at any size, what it brings is in the figure at once and can be traded
@@ -754,6 +755,9 @@ What it shows beyond the Market and Trade sections above:
   with the time and, while the trade is not settled, its status. On the right are
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
 - A payment's row has its description (or "Received" / "Sent"), its time and its amount as +/-.
+- A payment made while the wallet is moving that very money (its own refresh, already in its
+  round) is not refused: it says "Your money is being moved: this goes ahead by itself in about a
+  minute.", and goes ahead once that round is final.
 - What is not in the figure yet is in History alone, each line with the time that is true for
   why it waits: **Arriving**, "about a minute", for a payment from someone else past what counts
   at once, or one a Bitcoin reorganisation took back; **Arriving**, "usually within <N> minutes",

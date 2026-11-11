@@ -70,6 +70,11 @@ test('a settled trade is undone the moment the library says it is dead, however 
   assert.equal(tradeStateWord(back), USER_WORDS.undoneBack)
   assert.deepEqual(tradeRows([back])[0].legs, [], 'home: nothing moved')
   assert.equal(undoneOf({ ...settled, settledAt: 1 }, 'returned').state, 'undone', 'found home at once, months later: undone and back')
+  // The library's return says when the coin can be claimed home: the row states those hours.
+  const t = 1_800_000_000_000
+  const timed = undoneOf(settled, 'returning', { claim_from: String(t / 1000 + 5 * 3600) })
+  assert.equal(tradeStateWord(timed, t), USER_WORDS.undoneWithin(6))
+  assert.match(USER_WORDS.undoneWithin(6), /within about 6 hours/)
 })
 
 test('each arriving line states the time true for its cause, and says once it is past it', () => {
@@ -149,4 +154,41 @@ test('a channel the wallet is closing is coming back, at its side alone, in abou
   const p = { coins: [{ leaf_id: 'ch', asset: X, value: '3400000', state: 'live', place: 'arriving', channel: true }] }
   const rows = arrivingRows(arrivingCoins(p))
   assert.deepEqual(rows.map((r) => [r.kind, r.atoms, r.when]), [['coming_back', 3_400_000n, DEFAULT_WORDS.arrivingSoon]])
+})
+
+test('a payment while the wallet\'s own refresh is in a round waits for that round, then goes ahead by itself', async () => {
+  let roundDone = false
+  const sent = []
+  const w = {}
+  w.postMessage = (m) => {
+    const ok = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: true, value } }))
+    const no = (error) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: false, error } }))
+    if (m.op === 'exists') return ok(true)
+    if (m.op === 'open') return ok({})
+    const c = m.args.command
+    if (c === 'send') {
+      sent.push(roundDone)
+      if (!roundDone) return no({ kind: 'refused', message: 'the wallet holds 0 of asset X in live coins' })
+      return ok({ result: { sent: { asset: X, value: '5' } }, start: {} })
+    }
+    // A sync after the payment was refused: the round is final by then.
+    if (c === 'sync') { if (sent.length) roundDone = true; return ok({ result: {}, start: {} }) }
+    const coins = roundDone ? [{ leaf_id: 'g', asset: X, value: '900', state: 'spent' }, { leaf_id: 'n', asset: X, value: '900', state: 'live' }]
+      : [{ leaf_id: 'g', asset: X, value: '900', state: 'forfeited' }]
+    const result = c === 'coins' ? coins : c === 'balance' ? { held: { [X]: '900' } } : c === 'schedule' ? { now: 1 } : c === 'info' ? {}
+      : (c === 'care' || c === 'mailbox' || c === 'instant_limit') ? {} : []
+    return ok({ result, start: {} })
+  }
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1000,
+    tickMs: 3_600_000, sleep: () => Promise.resolve() }, null, null)
+  await api.start()
+  const seen = []
+  const v = await api.command('send', { request: 'request:00', amount: '5', asset: X }, { onWait: () => {} })
+    .finally(() => { seen.push(api.releasing()) })
+  assert.deepEqual(sent, [false, true], 'refused once while the refresh was in its round, then asked again after it')
+  assert.deepEqual(v.sent, { asset: X, value: '5' })
+  assert.equal(api.releasing(), null)
+  api.stop()
 })

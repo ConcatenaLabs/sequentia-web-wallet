@@ -194,6 +194,7 @@ export const USER_WORDS = Object.freeze({
   // wallet paid comes back by itself (within its exit delay, about two days), and what it was to
   // bring is not the wallet's.
   undone: 'Undone: this trade did not complete. What you paid is coming back to you, within about two days.',
+  undoneWithin: (hours) => `Undone: this trade did not complete. What you paid is coming back to you, within about ${hours} hour${hours === 1 ? '' : 's'}.`,
   undoneBack: 'Undone: this trade did not complete. What you paid came back to you.',
   // A trade confirmed and being sent: the screen is free at once, the trade goes on in Open.
   sending: 'Sending…',
@@ -263,7 +264,12 @@ export function tradeSteps ({ r = null, quote = null, payAsset, receiveAsset, na
 export function tradeStateWord (r, now = Date.now()) {
   const W = USER_WORDS
   if (r.state === 'settled') return W.settled
-  if (r.state === 'undone') return r.undoneBack ? W.undoneBack : W.undone
+  if (r.state === 'undone') {
+    if (r.undoneBack) return W.undoneBack
+    // The time true for it: until its coin can be claimed home, and a little for the claim.
+    const left = r.claimFrom ? r.claimFrom * 1000 + 600_000 - now : null
+    return left != null && left > 0 && left < 2 * 86_400_000 ? W.undoneWithin(Math.max(1, Math.ceil(left / 3_600_000))) : W.undone
+  }
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' || r.state === 'failed') return W.returned
@@ -355,12 +361,15 @@ export const UNDOING_STATES = Object.freeze(['returning'])
 export const UNDONE_STATES = Object.freeze(['returned'])
 // A trade record as the library's swap state `swapState` makes it, or null when it changes nothing:
 // undone (what was paid coming back) when the swap is dead, and undone and back once it is home.
-export function undoneOf (rec, swapState) {
+// `ret`: the library's `return` (its `claim_from`, the median time from which the coin can be
+// claimed home), kept for the row's time.
+export function undoneOf (rec, swapState, ret = null) {
   if (!rec || !rec.swap) return null
   const back = UNDONE_STATES.includes(swapState)
   if (!back && !UNDOING_STATES.includes(swapState)) return null
-  if (rec.state === 'undone' && !!rec.undoneBack === back) return null
-  return { ...rec, state: 'undone', undoneAt: rec.undoneAt || Date.now(), undoneBack: back }
+  const claimFrom = ret && Number(ret.claim_from) > 0 ? Number(ret.claim_from) : (rec.claimFrom || null)
+  if (rec.state === 'undone' && !!rec.undoneBack === back && rec.claimFrom === claimFrom) return null
+  return { ...rec, state: 'undone', undoneAt: rec.undoneAt || Date.now(), undoneBack: back, claimFrom }
 }
 export const STORAGE_FULL = 'The trade was not made: this browser has no room left to keep its record. Nothing was signed.'
 // `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
@@ -1528,8 +1537,8 @@ export function createEngine (deps) {
     if (watch.length) {
       let swaps = []
       try { swaps = (await run('swaps')) || [] } catch (e) { log('[user trade] swaps:', e.message) }
-      const by = new Map(swaps.map((x) => [x.swap, x.state]))
-      for (const r of watch) { const u = undoneOf(r, by.get(r.swap)); if (u) out.push(put(u)) }
+      const by = new Map(swaps.map((x) => [x.swap, x]))
+      for (const r of watch) { const x = by.get(r.swap); const u = x && undoneOf(r, x.state, x.return); if (u) out.push(put(u)) }
     }
     for (const r of all) {
       if (ENDED_STATES.includes(r.state)) continue

@@ -272,6 +272,13 @@ export function refreshLeaves (needed) {
   return [...new Set(reasons.flatMap((r) => r.coins || []))]
 }
 
+// The wallet's coins of `asset` its own refresh holds in a round (`given` or `forfeited`): in the
+// figure, as the person's own money being moved, yet past being taken back for a payment. A
+// payment they would make waits for that round (`paying`), about a minute, and then goes ahead.
+export function inRoundCoins (coins, asset) {
+  return (coins || []).filter((c) => c && c.asset === asset && (c.state === 'given' || c.state === 'forfeited')).map((c) => c.leaf_id)
+}
+
 // The channel coins default mode closes into plain coins at the next round: each live one.
 export function channelsToClose (channels) {
   return (channels || []).filter((c) => c && c.coin_state === 'live' && c.leaf_id).map((c) => c.leaf_id)
@@ -1568,6 +1575,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
             await roundWait(() => waitReleased(e.close, { turns: true }))
           } finally { S.releasing = null; S.channelsHeldUntil = null; holdChannel(e.asset); render() }
           continue
+        }
+        // Refused for want of coins while the wallet's own refresh of the asset is in a round,
+        // past being taken back: what the figure shows is the person's, so the payment waits for
+        // that round (about a minute) and is asked again once it is final; it is not refused.
+        const payAsset = args && (args.asset || args.give_asset)
+        if (e instanceof LeafError && e.kind === 'refused' && payAsset && i < RELEASE_TRIES) {
+          let cs = S.coins
+          try { cs = (await run('coins')) || cs; S.coins = cs } catch {}
+          const held = inRoundCoins(cs, payAsset)
+          if (held.length) {
+            S.releasing = { coins: held, asset: payAsset, since: now(), command, why: 'round' }
+            render()
+            log(`[leaves] ${command}: waits for the round that refreshes ${held.length} coin(s) of its asset, then goes ahead`)
+            try { await roundWait(() => waitReleased(held, { turns: true })) } finally { S.releasing = null; render() }
+            continue
+          }
         }
         if (!(e instanceof LeafError) || e.kind !== 'planned' || !e.release || !e.release.length || i >= RELEASE_TRIES) throw e
         S.releasing = { coins: e.release, asset: e.asset, since: now(), command }

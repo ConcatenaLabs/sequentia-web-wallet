@@ -47,6 +47,8 @@ export const DEFAULT_WORDS = Object.freeze({
   boardWhen: (n) => `usually within ${n} minutes`,
   comingBackWhen: 'within about two days',
   takingLonger: 'taking longer than usual; the wallet keeps at it',
+  // A payment that waits for the wallet's own money being moved (its refresh, in a round now).
+  waitRound: 'Your money is being moved: this goes ahead by itself in about a minute.',
   // Held, spendable before, and taken back out of the chain with the Bitcoin block it rested on:
   // still the wallet's, and counted, while the network takes it in again.
   redoing: (amount, ticker) => `${amount} ${ticker} being redone after a Bitcoin reorganisation`,
