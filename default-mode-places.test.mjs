@@ -4,9 +4,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves } from './leaves.js'
-import { arrivingRows, DEFAULT_WORDS } from './default-arca.js'
+import { arrivingRows, arrivingCause, boardMinutes, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
-import { tradeStateWord, USER_WORDS, UNDO_WINDOW_MS } from './user-trade.js'
+import { tradeStateWord, USER_WORDS, undoneOf } from './user-trade.js'
+import { mountLeaves, JOINED_KEY, setWalletMode } from './leaves.js'
 
 const X = '75'.repeat(32)
 const Y = '7f'.repeat(32)
@@ -38,6 +39,7 @@ test('History rows for what is arriving: one each, a coming-back one in days, no
   const rows = arrivingRows(arrivingCoins(places), ['a3'])
   assert.deepEqual(rows.map((r) => [r.leaf, r.kind, r.when]), [
     ['a2', 'arriving', DEFAULT_WORDS.arrivingSoon], ['a4', 'coming_back', DEFAULT_WORDS.comingBackWhen]])
+  assert.equal(DEFAULT_WORDS.takingLonger.includes('longer'), true)
   assert.equal(DEFAULT_WORDS.arrivingSoon, 'about a minute')
   const shown = [DEFAULT_WORDS.rowArriving, DEFAULT_WORDS.rowComingBack, DEFAULT_WORDS.arrivingSoon, DEFAULT_WORDS.comingBackWhen,
     USER_WORDS.undone].join(' ')
@@ -51,15 +53,89 @@ test('default mode opens no channel and closes the live ones; developer mode kee
   assert.deepEqual(channelsToClose(chans), ['c1'])
 })
 
-test('a settled trade the library marks undone reads as undone, with what was paid coming back', () => {
+test('a settled trade is undone the moment the library says it is dead, however late, and says so again once back', () => {
   const ticket = { payAsset: X, receiveAsset: Y, amountIn: '300000', amountOut: '400000', fees: [] }
-  const r = { id: 't', ticket, state: 'undone', sentAt: 1, swap: 's' }
-  assert.equal(tradeStateWord(r), USER_WORDS.undone)
-  assert.match(USER_WORDS.undone, /on its way back to you/)
-  const rows = tradeRows([r])
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].trade.state, 'undone')
-  assert.equal(UNDO_WINDOW_MS, 3 * 86_400_000)
+  const settled = { id: 't', ticket, state: 'settled', settledAt: 1, sentAt: 1, swap: 's' }
+  assert.equal(undoneOf(settled, 'done'), null, 'a swap done is left as it is')
+  const dead = undoneOf(settled, 'returning')
+  assert.equal(dead.state, 'undone')
+  assert.equal(dead.undoneBack, false)
+  assert.equal(tradeStateWord(dead), USER_WORDS.undone)
+  assert.match(USER_WORDS.undone, /coming back to you, within about two days/)
+  // The row: what was paid, coming back; what it was to bring is gone from it.
+  assert.deepEqual(tradeRows([dead])[0].legs, [{ asset: X, atoms: '-300000' }])
+  assert.equal(undoneOf(dead, 'returning'), null, 'nothing changes while it comes back')
+  const back = undoneOf(dead, 'returned')
+  assert.equal(back.undoneBack, true)
+  assert.equal(tradeStateWord(back), USER_WORDS.undoneBack)
+  assert.deepEqual(tradeRows([back])[0].legs, [], 'home: nothing moved')
+  assert.equal(undoneOf({ ...settled, settledAt: 1 }, 'returned').state, 'undone', 'found home at once, months later: undone and back')
+})
+
+test('each arriving line states the time true for its cause, and says once it is past it', () => {
+  assert.equal(arrivingCause({ state: 'live' }), 'round')
+  assert.equal(arrivingCause({ state: 'pending', kind: 'board' }), 'board')
+  assert.equal(arrivingCause({ deposit: true }), 'board')
+  assert.equal(arrivingCause({ state: 'exiting' }), 'return')
+  assert.equal(boardMinutes(0), 5, 'a board final at certification: about five minutes')
+  assert.equal(boardMinutes(2), 25, 'two Bitcoin blocks of burial')
+  const coins = [{ leaf_id: 'r', asset: X, atoms: 1n, state: 'live' }, { leaf_id: 'b', asset: X, atoms: 2n, state: 'pending', kind: 'board' },
+    { leaf_id: 'e', asset: X, atoms: 3n, state: 'exiting' }, { leaf_id: 'chain:t:0', asset: X, atoms: 4n, deposit: true }]
+  const t0 = 1_000_000
+  const fresh = arrivingRows(coins, [], { firstSeen: { r: t0, b: t0, e: t0, 'chain:t:0': t0 }, nowMs: t0 + 60_000, boardMin: 25 })
+  assert.deepEqual(fresh.map((r) => r.when), [DEFAULT_WORDS.arrivingSoon, DEFAULT_WORDS.boardWhen(25), DEFAULT_WORDS.comingBackWhen, DEFAULT_WORDS.boardWhen(25)])
+  assert.equal(DEFAULT_WORDS.boardWhen(25), 'usually within 25 minutes')
+  const later = arrivingRows(coins, [], { firstSeen: { r: t0, b: t0, e: t0, 'chain:t:0': t0 }, nowMs: t0 + statedSeconds('board', 25) * 1000 + 1, boardMin: 25 })
+  assert.deepEqual(later.map((r) => r.late), [true, true, false, true], 'past its time: a round after three minutes, a board after its minutes')
+  assert.equal(later[0].when, DEFAULT_WORDS.takingLonger)
+})
+
+// The figure, coin by coin, as the wallet builds it from the library: balance.held (less its own
+// coins on the chain) less every coin coin_places places as arriving.
+function figureWorker (balance, places) {
+  const w = {}
+  w.postMessage = (m) => {
+    const reply = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: m.id, ok: true, value } }))
+    if (m.op === 'exists') return reply(true)
+    if (m.op === 'open') return reply({})
+    const c = m.args.command
+    const result = c === 'balance' ? balance : c === 'coin_places' ? places : c === 'schedule' ? { now: 1 } : c === 'info' ? {}
+      : (c === 'sync' || c === 'care' || c === 'mailbox' || c === 'instant_limit') ? {} : []
+    reply({ result, start: {} })
+  }
+  return w
+}
+function memStore () {
+  const m = new Map()
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
+}
+
+test('the figure is held less what is arriving, coin by coin; developer mode shows all of it', async () => {
+  // X: 400 counted, 1,500 past the limit, 800 settled and given to the wallet's own refresh, 900
+  // coming home, a channel whose side is 300; 50 of X on the chain at the wallet's keys.
+  const balance = { held: { [X]: String(400 + 1500 + 800 + 900 + 300 + 50), [Y]: '5000' }, sequentia_onchain: { [X]: '50' },
+    arca: { [X]: { live: '2200', given: '800', exiting: '900' }, [Y]: { live: '5000' } } }
+  const places = { coins: [
+    { leaf_id: 'c', asset: X, value: '400', state: 'live', place: 'counted', kind: 'transfer' },
+    { leaf_id: 'a', asset: X, value: '1500', state: 'live', place: 'arriving', kind: 'transfer' },
+    { leaf_id: 'g', asset: X, value: '800', state: 'given', place: 'settled', kind: 'batch' },
+    { leaf_id: 'e', asset: X, value: '900', state: 'exiting', place: 'arriving', kind: 'transfer' },
+    { leaf_id: 'ch', asset: X, value: '300', state: 'live', place: 'arriving', kind: 'batch', channel: true },
+    { leaf_id: 'p', asset: Y, value: '5000', state: 'live', place: 'proceeds', kind: 'transfer' },
+  ] }
+  const store = memStore()
+  store.setItem(JOINED_KEY + '.t', '1')
+  const api = mountLeaves({ makeWorker: () => figureWorker(balance, places), store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}),
+    now: () => 1000, tickMs: 3_600_000 }, null, null)
+  await api.start()
+  await api.syncNow()
+  assert.equal(api.leafAtoms(X), 1200n, '400 counted and 800 being refreshed: what the wallet can trade or send, its own refresh included')
+  assert.equal(api.leafAtoms(Y), 5000n, 'what a trade brought is in the figure')
+  assert.equal(api.arriving(X), 0n, 'nothing of the figure is arriving')
+  assert.deepEqual(api.arrivingPayments().map((a) => [a.leaf_id, a.atoms]), [['a', 1500n], ['e', 900n], ['ch', 300n]])
+  setWalletMode(store, 't', 'developer')
+  assert.equal(api.leafAtoms(X), 3900n, 'developer mode: everything held')
+  api.stop()
 })
 
 test('the arriving rule refreshes the arriving coins alone; any other rule, every received coin', () => {

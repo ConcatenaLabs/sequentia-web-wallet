@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, arrivingRows, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
+import { DEFAULT_WORDS, arrivingRows, boardMinutes, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -4420,6 +4420,8 @@ function siteDeps(){
       try{ if(leavesApi && leavesApi.isOpen()) for(const h of leavesApi.leafAssets()){ const n = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n); if(n > 0n) leaves[h] = n.toString(); } }catch{}
       let assets = {};
       try{ assets = balObj(); }catch{}
+      // Default mode: a deposit still arriving is in no figure the wallet shows, so a site sees none.
+      try{ if(!devMode()) for(const [h, v] of chainArriving()){ const n=BigInt(assets[h]||0)-v; assets[h]=(n>0n?n:0n).toString(); } }catch{}
       // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
       const total = {}, arriving = {}, by_place = {};
       for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves)])){
@@ -4538,7 +4540,7 @@ async function relayPairBook(base, quote){
 }
 function userHeld(a){
   let n = 0n;
-  try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0)); } catch {}
+  try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0) - (chainArriving().get(a) || 0n)); } catch {}
   try { if(leavesApi) n += leavesApi.leafAtoms(a) || 0n; } catch {}
   try { n += BigInt(Math.round(lnSpendableFor(a).units || 0)); } catch {}
   // BTC on the Bitcoin ark, which default mode's trades pay from.
@@ -8514,18 +8516,28 @@ function walletAssetRow(v, text){
 }
 // What the wallet holds of an asset, wherever it holds it (the figure Balance shows for it): on the
 // chain, for instant payments, on Lightning, staked; BTC also on the Bitcoin ark.
-// In default mode a payment to the wallet's address on Sequentia counts once its block is in the
-// chain, never while it waits in the mempool: until then it is arriving (chainArriving).
+// In default mode a deposit to the wallet's address on Sequentia (a coin from someone else) is
+// arriving from the moment the wallet sees it until it is a coin the wallet can use: while it waits
+// in the mempool, and, for an asset the wallet boards by itself, until its board is final (the
+// board's own coin is then arriving in the library's places). It counts once. The wallet's own
+// change from a payment it made counts at once. -> [{ asset, atoms, deposit, leaf_id: 'chain:txid:vout', txid }]
+function chainDeposits(){
+  const out=[];
+  if(!wollet || devMode()) return out;
+  const own=new Set();
+  try{ for(const t of wollet.transactions()){ if(Object.values(t.balance().toJSON()).some(v=>BigInt(v)<0n)) own.add(t.txid().toString()); } }catch{}
+  try{ for(const u of wollet.utxos()){
+    const op=u.outpoint(), id=op.txid().toString();
+    if(own.has(id)) continue;
+    const s=u.unblinded(), a=s.asset().toString(), v=BigInt(s.value());
+    if(u.height()!=null && !(leavesApi && leavesApi.boardable && leavesApi.boardable(a, v))) continue;
+    out.push({ asset:a, atoms:v, deposit:true, leaf_id:'chain:'+id+':'+op.vout(), txid:id });
+  } }catch{}
+  return out;
+}
 function chainArriving(){
   const m=new Map();
-  if(!wollet || devMode()) return m;
-  // Transactions not in a block that took nothing from the wallet: payments from someone else. Its
-  // own sends' change still counts.
-  const incoming=new Set();
-  try{ for(const t of wollet.transactions()){ if(t.height()) continue; if(Object.values(t.balance().toJSON()).every(v=>BigInt(v)>=0n)) incoming.add(t.txid().toString()); } }catch{}
-  if(!incoming.size) return m;
-  try{ for(const u of wollet.utxos()){ if(u.height()!=null) continue; if(!incoming.has(u.outpoint().txid().toString())) continue;
-    const s=u.unblinded(); const a=s.asset().toString(); m.set(a,(m.get(a)||0n)+BigInt(s.value())); } }catch{}
+  for(const d of chainDeposits()) m.set(d.asset,(m.get(d.asset)||0n)+d.atoms);
   return m;
 }
 function assetFigure(v){
@@ -10641,10 +10653,22 @@ function renderHistory(){
   list.innerHTML='';
   const pending=livePending();
   // Default mode: what is not in the balance yet shows here alone, as arriving (or coming back),
-  // with when in words; a received row of the activity that is still arriving says so itself.
+  // with when in words, true for its cause; a received row, or the deposit's own row on the chain,
+  // that is still arriving says so itself. Each line's first sighting is kept for the wallet, so a
+  // line past its time says it is taking longer.
   let arrivingNow=[]; try{ if(leavesApi && leavesApi.arrivingPayments) arrivingNow=leavesApi.arrivingPayments(); }catch{}
-  _arrivingLeaves=new Set(arrivingNow.map(a=>a.leaf_id).filter(Boolean));
-  const arrRows=arrivingRows(arrivingNow, instant.filter(r=>r.kind==='in' && r.leaf).map(r=>r.leaf));
+  const deposits=chainDeposits();
+  const seenKey='swk.arrivingSeen.'+walletTag(), nowMs=Date.now();
+  let seen={}; try{ seen=JSON.parse(localStorage.getItem(seenKey)||'{}')||{}; }catch{}
+  const ids=new Set([...arrivingNow, ...deposits].map(a=>a.leaf_id).filter(Boolean));
+  for(const id of ids) if(seen[id]==null) seen[id]=nowMs;
+  for(const k of Object.keys(seen)) if(!ids.has(k)) delete seen[k];
+  try{ localStorage.setItem(seenKey, JSON.stringify(seen)); }catch{}
+  let depth=null; try{ depth=leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null; }catch{}
+  const opts={ firstSeen: seen, nowMs, boardMin: boardMinutes(depth) };
+  _arrivingWhen=new Map(arrivingRows(arrivingNow, [], opts).map(r=>[r.leaf, r.when]));
+  _depositWhen=new Map(arrivingRows(deposits, [], opts).map((r, i)=>[deposits[i].txid, r.when]));
+  const arrRows=arrivingRows(arrivingNow, instant.filter(r=>r.kind==='in' && r.leaf).map(r=>r.leaf), opts);
   _histCounts.seq=rows.length+pending.length+instant.length+arrRows.length; arrangeHistory();
   if(!rows.length && !pending.length && !instant.length && !arrRows.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
   for(const a of arrRows){
@@ -10728,7 +10752,7 @@ function renderHistory(){
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
     if(dropped){}
     else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
-    else if(!devRows){ if(!r.height && type==='incoming') mid.appendChild(el('div','sub unconf', DEFAULT_WORDS.rowArriving+' · '+DEFAULT_WORDS.arrivingSoon)); }
+    else if(!devRows){ if(_depositWhen.has(txid)) mid.appendChild(el('div','sub unconf', DEFAULT_WORDS.rowArriving+' · '+_depositWhen.get(txid))); }
     else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -10790,8 +10814,9 @@ async function refreshBtcArkHistory(){
 }
 // One row, as default mode words it (docs/DEFAULT_MODE.md, History): a trade is "Swapped <pay> for
 // <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
-// The leaf ids default mode shows as arriving, as the last history drawing read them.
-let _arrivingLeaves=new Set();
+// What default mode shows as arriving, and when in words, as the last history drawing read it: by
+// leaf id, and the deposits on the chain by transaction.
+let _arrivingWhen=new Map(), _depositWhen=new Map();
 function instantItem(r){
   const metaOf=(h)=> h==='BTC' ? { ticker:'BTC', precision:8 } : assetMeta(h);
   const fmtLeg=(l)=>{ const m=metaOf(l.asset), a=BigInt(l.atoms); return fmtAtoms(a<0n?-a:a, m.precision)+' '+m.ticker; };
@@ -10800,16 +10825,17 @@ function instantItem(r){
   item.appendChild(el('span','badge dir '+(swap?'b-swap':r.kind==='in'?'b-in':'b-out'), swap?'SWAP':r.kind==='in'?'IN':'OUT'));
   const mid=el('div','grow');
   let head, status='';
-  if(r.kind==='swap'){ head=(r.trade.state==='undone' ? 'Trade undone: '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1]) : 'Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1])); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
+  if(r.kind==='swap'){ const tk=r.trade.ticket||{}; const leg=(a, n)=>fmtLeg({ asset:a, atoms:n });
+    head=(r.trade.state==='undone' ? 'Trade undone: '+leg(tk.payAsset, tk.amountIn)+' for '+leg(tk.receiveAsset, tk.amountOut) : 'Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1])); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
   else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
-  else head = r.kind==='in' ? (r.leaf && _arrivingLeaves.has(r.leaf) ? DEFAULT_WORDS.rowArriving : 'Received') : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
+  else head = r.kind==='in' ? (r.leaf && _arrivingWhen.has(r.leaf) ? DEFAULT_WORDS.rowArriving : 'Received') : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
   mid.appendChild(el('div',null, head));
   const when = r.at ? whenText(r.at) : '';
   // A payment to an address is pending until the library says it is made (its `stage`); one that
   // was not made took nothing from the wallet. A row written before stages were kept: its first hour.
   // A payment of the Bitcoin ark is pending while its wallet says so.
   const pending = r.pending || (r.kind==='out' && r.later && (r.offboard ? r.stage==='pending' || !r.stage : Date.now()-r.at < 3600000));
-  if(r.kind==='in' && r.leaf && _arrivingLeaves.has(r.leaf)) status=DEFAULT_WORDS.arrivingSoon;
+  if(r.kind==='in' && r.leaf && _arrivingWhen.has(r.leaf)) status=_arrivingWhen.get(r.leaf);
   const sub=[when, status, pending ? 'Pending' : '', r.stage==='not_made' ? DEFAULT_WORDS.rowNotMadeSub : ''].filter(Boolean).join(' · ');
   if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
   item.appendChild(mid);

@@ -259,7 +259,7 @@ export function arrivingByAsset (places) {
 export function arrivingCoins (places) {
   const out = []
   for (const c of (places && Array.isArray(places.coins)) ? places.coins : []) {
-    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, channel: c.channel === true })
+    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, kind: c.kind, channel: c.channel === true })
   }
   return out
 }
@@ -2481,6 +2481,15 @@ export function mountLeaves (ctx, root, settingsRoot) {
       return out
     },
     receiveArgs,
+    // Whether the wallet boards `atoms` of `asset` held at its address by itself (the operator
+    // serves the asset, and it is at least its smallest leaf): such a deposit is arriving until its
+    // board is final.
+    boardable: (asset, atoms) => {
+      const a = ((S.info && S.info.server_info && S.info.server_info.assets) || []).find((x) => x && x.asset === asset)
+      return !!a && big(atoms) >= bigOf(a.min_leaf)
+    },
+    // The Bitcoin blocks that bury a block's anchor before the wallet calls it final (the operator's).
+    anchorDepth: () => (S.info && Number.isFinite(Number(S.info.anchor_depth)) ? Number(S.info.anchor_depth) : null),
     // The assets the figure holds some of (and, as before places are read, those expected).
     leafAssets: () => [...new Set([...[...leafBalances(shown()).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a), ...S.expected.map((x) => x.hex)])].filter((h) => liveLeaves(h) + (placesOn() ? 0n : expecting(h)) > 0n),
     // A payment made to this wallet that the library has not taken in yet: `hex`, `atoms`.
