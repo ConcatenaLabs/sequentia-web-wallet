@@ -46,6 +46,7 @@ export const DEFAULT_WORDS = Object.freeze({
   arrivingSoon: 'about a minute',
   boardWhen: (n) => `usually within ${n} minutes`,
   comingBackWhen: 'within about two days',
+  comingBackWithin: (hours) => `within about ${hours} hour${hours === 1 ? '' : 's'}`,
   takingLonger: 'taking longer than usual; the wallet keeps at it',
   // A payment that waits for the wallet's own money being moved (its refresh, in a round now),
   // `when` as causeWhen says it for a round ("about a minute", or "usually within N minutes").
@@ -924,9 +925,15 @@ export function arrivingRows (arriving, shown = [], { firstSeen = {}, nowMs = Da
     if (!a || !a.asset || (a.leaf_id && seen.has(a.leaf_id))) continue
     const cause = arrivingCause(a)
     const since = a.leaf_id && firstSeen[a.leaf_id] != null ? Number(firstSeen[a.leaf_id]) : null
-    const late = since != null && nowMs - since > statedSeconds(cause, boardMin, roundMin) * 1000
+    // A coin coming home whose claim time the library knows: the hours until then, and a little for
+    // the claim; past it, taking longer.
+    const left = cause === 'return' && Number(a.claimFrom) > 0 ? Number(a.claimFrom) * 1000 + 600_000 - nowMs : null
+    const late = left != null ? left < 0 : since != null && nowMs - since > statedSeconds(cause, boardMin, roundMin) * 1000
+    const when = late ? DEFAULT_WORDS.takingLonger
+      : left != null && left < 2 * 86_400_000 ? DEFAULT_WORDS.comingBackWithin(Math.max(1, Math.ceil(left / 3_600_000)))
+        : causeWhen(cause, boardMin, roundMin)
     out.push({ asset: a.asset, atoms: big(a.atoms), leaf: a.leaf_id || null, kind: cause === 'return' || a.channel === true ? 'coming_back' : 'arriving',
-      cause, late, when: late ? DEFAULT_WORDS.takingLonger : causeWhen(cause, boardMin, roundMin) })
+      cause, late, when })
   }
   return out
 }

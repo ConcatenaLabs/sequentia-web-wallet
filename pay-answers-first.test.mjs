@@ -41,8 +41,8 @@ test('a payment answers before the wallet reads itself again, and that read shar
   // The read follows on its own, every command of it in the look the first made.
   for (let i = 0; i < 50 && !asked.some((a) => a.c === 'channels'); i++) await new Promise((r) => setTimeout(r, 10))
   const after = asked.slice(at + 1)
-  // Default mode reads where each coin stands with the balance (coin_places).
-  assert.deepEqual(after.map((a) => a.c).slice(0, 7), ['balance', 'coin_places', 'coins', 'participations', 'schedule', 'refusals', 'channels'])
+  // Default mode reads where each coin stands with the balance (coin_places), and the returns (swaps).
+  assert.deepEqual(after.map((a) => a.c).slice(0, 8), ['balance', 'coin_places', 'swaps', 'coins', 'participations', 'schedule', 'refusals', 'channels'])
   assert.ok(after.every((a) => a.args.shared_view === true), 'each read shares the look')
   assert.equal(api.leafAtoms(X), 1000n, 'and the figure is the library\'s again')
   api.stop()

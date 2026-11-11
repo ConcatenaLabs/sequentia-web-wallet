@@ -258,10 +258,10 @@ export function arrivingByAsset (places) {
   return m
 }
 // The coins arriving, each { leaf_id, asset, atoms }, in the library's order.
-export function arrivingCoins (places) {
+export function arrivingCoins (places, claims = {}) {
   const out = []
   for (const c of (places && Array.isArray(places.coins)) ? places.coins : []) {
-    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, kind: c.kind, channel: c.channel === true })
+    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, kind: c.kind, channel: c.channel === true, claimFrom: claims[c.leaf_id] || null })
   }
   return out
 }
@@ -279,6 +279,18 @@ export function refreshLeaves (needed) {
 // payment they would make waits for that round (`paying`), about a minute, and then goes ahead.
 export function inRoundCoins (coins, asset) {
   return (coins || []).filter((c) => c && c.asset === asset && (c.state === 'given' || c.state === 'forfeited')).map((c) => c.leaf_id)
+}
+
+// When each coin coming home from a dead trade can be claimed home (median time, seconds), by leaf
+// id, from the library's `swaps`: each entry `returning`, its `return.coins` (one with its
+// `claim_from` absent is left out: its time is not known yet).
+export function returnClaims (swaps) {
+  const out = {}
+  for (const s of Array.isArray(swaps) ? swaps : []) {
+    if (!s || s.state !== 'returning' || !s.return) continue
+    for (const c of s.return.coins || []) if (c && c.leaf_id && Number(c.claim_from) > 0) out[c.leaf_id] = Number(c.claim_from)
+  }
+  return out
 }
 
 // The channel coins default mode closes into plain coins at the next round: each live one.
@@ -852,7 +864,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // so the figure leaves out what is arriving from the same reading. A library without it leaves
     // the figure as the balance says.
     let pl = null
-    if (!dev()) { try { pl = await read('coin_places') } catch {} }
+    if (!dev()) {
+      try { pl = await read('coin_places') } catch {}
+      // When each coin coming home from a dead trade can be claimed (the library's swaps'
+      // `return`, a trade of this page's or not: a restore, a fill), for its line's hours.
+      try { S.claimFrom = returnClaims(await read('swaps')) } catch {}
+    }
     S.balance = b
     S.places = pl
     try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
@@ -1399,8 +1416,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   // The instant limit the mode asks of the library (instantLimitArgs); a library without it is left
   // as it is.
+  // Default mode also trades only with its owner's exit on every checkpoint (the library's
+  // `require_checkpoint_exit`), so what a trade gives always comes home if the trade dies.
   async function applyLimit () {
     try { await run('instant_limit', instantLimitArgs(dev())) } catch (e) { log('[leaves] instant limit: ' + ((e && e.message) || e)) }
+    try { await run('require_checkpoint_exit', { on: !dev() }) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
   }
   const receiveArgs = () => (dev() ? {} : { channels: false })
   async function careIfDue () {
@@ -2519,7 +2539,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // library has not taken in yet. -> [{ asset, atoms, leaf_id? }]
     arrivingPayments: () => {
       if (!placesOn()) return []
-      const out = arrivingCoins(shownPlaces()).map((c) => ({ ...c }))
+      const out = arrivingCoins(shownPlaces(), S.claimFrom || {}).map((c) => ({ ...c }))
       for (const x of S.expected) if (expecting(x.hex) > 0n) out.push({ asset: x.hex, atoms: x.atoms })
       return out
     },

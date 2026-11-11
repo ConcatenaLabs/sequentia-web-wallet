@@ -7,7 +7,7 @@ import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimit
 import { arrivingRows, arrivingCause, boardMinutes, roundMinutes, causeWhen, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
 import { tradeStateWord, USER_WORDS, undoneOf } from './user-trade.js'
-import { mountLeaves, JOINED_KEY, setWalletMode } from './leaves.js'
+import { mountLeaves, JOINED_KEY, setWalletMode, returnClaims } from './leaves.js'
 
 const X = '75'.repeat(32)
 const Y = '7f'.repeat(32)
@@ -263,4 +263,18 @@ test('a payment refused for another reason does not wait for the round', async (
   await assert.rejects(api.command('send', { request: 'request:00', amount: '5', asset: X }), /lapsed/)
   assert.equal(sent.length, 1)
   api.stop()
+})
+
+test('a coin coming home says the hours the library gives for its claim, a trade of this page\'s or not', () => {
+  const swaps = [
+    { swap: null, role: null, state: 'returning', return: { coins: [{ leaf_id: 'e', claim_from: '2000000000' }, { leaf_id: 'u' }] } },
+    { swap: 's1', state: 'returned', return: { coins: [{ leaf_id: 'old', claim_from: '1' }] } },
+  ]
+  const claims = returnClaims(swaps)
+  assert.deepEqual(claims, { e: 2_000_000_000 }, 'a coin whose time is not known yet is left out; one home already too')
+  const nowMs = 2_000_000_000_000 - 3 * 3_600_000
+  const rows = arrivingRows([{ leaf_id: 'e', asset: X, atoms: 9n, state: 'exiting', claimFrom: claims.e }, { leaf_id: 'u', asset: X, atoms: 1n, state: 'exiting' }], [], { nowMs })
+  assert.deepEqual(rows.map((r) => r.when), [DEFAULT_WORDS.comingBackWithin(4), DEFAULT_WORDS.comingBackWhen])
+  const late = arrivingRows([{ leaf_id: 'e', asset: X, atoms: 9n, state: 'exiting', claimFrom: claims.e }], [], { nowMs: 2_000_000_000_000 + 3_600_000 })
+  assert.equal(late[0].when, DEFAULT_WORDS.takingLonger)
 })

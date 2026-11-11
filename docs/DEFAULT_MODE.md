@@ -611,6 +611,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   can be claimed home, as the wallet knows them; "within about two days" until it does). What it was to bring
   leaves the row and the figure; what was paid is in History as **Coming back**. Once it is home
   the row says "Undone: this trade did not complete. What you paid came back to you."
+- Default mode trades only with its owner's exit on every checkpoint of the trade, so what a
+  trade gives always comes home if the trade dies; a trade that cannot have it is not made.
 - Every trade is instant at any size, what it brings is in the figure at once and can be traded
   on at once, and the wallet never leaves change of its own in a trade (it pays itself the exact
   amount first when it must). What a trade brought pays anything at once, over Lightning and to an
@@ -766,8 +768,9 @@ What it shows beyond the Market and Trade sections above:
   0, else "usually within <N> minutes", a minute and ten for each Bitcoin block, rounded up to
   five); **Arriving**, "usually within <N> minutes",
   for a deposit to the address (Balance); **Coming back**, "about a minute", for what a channel
-  being closed held; **Coming back**, "within about two days", for what an undone trade, or the
-  wallet's safekeeping, is bringing home. Past that time the line says "taking longer than usual;
+  being closed held; **Coming back**, "within about <N> hours" (from when it can be claimed home,
+  once known; "within about two days" until then), for what an undone trade, or the wallet's
+  safekeeping, is bringing home, whether or not this browser made the trade. Past that time the line says "taking longer than usual;
   the wallet keeps at it", and the wallet keeps at it. A received row, or a deposit's row on the
   chain, that is still arriving says so itself.
 - A payment is in History the moment it leaves, and a payment arriving as soon as the network has
