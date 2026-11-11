@@ -611,8 +611,11 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   can be claimed home, as the wallet knows them; "within about two days" until it does). What it was to bring
   leaves the row and the figure; what was paid is in History as **Coming back**. Once it is home
   the row says "Undone: this trade did not complete. What you paid came back to you."
-- Default mode trades only with its owner's exit on every checkpoint of the trade, so what a
-  trade gives always comes home if the trade dies; a trade that cannot have it is not made.
+- Once its operator offers it, default mode trades only with its owner's exit on every checkpoint
+  of the trade, so what a trade gives always comes home if the trade dies. An offer that cannot
+  have it is left out of the prices ("Not offered right now…"); a trade refused for it when sent
+  says "This trade isn't available right now. Nothing moved; try again in a few minutes." Before
+  the operator offers it, the wallet trades as it always has.
 - Every trade is instant at any size, what it brings is in the figure at once and can be traded
   on at once, and the wallet never leaves change of its own in a trade (it pays itself the exact
   amount first when it must). What a trade brought pays anything at once, over Lightning and to an

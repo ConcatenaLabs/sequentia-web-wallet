@@ -3,7 +3,7 @@
 // wallet's is in History alone; no channel is opened, named or kept; a settled trade can be undone.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves } from './leaves.js'
+import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves, requireExitArgs } from './leaves.js'
 import { arrivingRows, arrivingCause, boardMinutes, roundMinutes, causeWhen, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
 import { tradeStateWord, USER_WORDS, undoneOf } from './user-trade.js'
@@ -277,4 +277,13 @@ test('a coin coming home says the hours the library gives for its claim, a trade
   assert.deepEqual(rows.map((r) => r.when), [DEFAULT_WORDS.comingBackWithin(4), DEFAULT_WORDS.comingBackWhen])
   const late = arrivingRows([{ leaf_id: 'e', asset: X, atoms: 9n, state: 'exiting', claimFrom: claims.e }], [], { nowMs: 2_000_000_000_000 + 3_600_000 })
   assert.equal(late[0].when, DEFAULT_WORDS.takingLonger)
+})
+
+test('default mode asks every trade for the exit only once its operator offers it; before, it trades as it always has', () => {
+  assert.deepEqual(requireExitArgs(false, { server_info: { checkpoint_exit: true } }), { on: true })
+  assert.deepEqual(requireExitArgs(false, { server_info: {} }), { on: false }, 'an operator without the exit: trades as before, nothing refused')
+  assert.deepEqual(requireExitArgs(false, null), { on: false })
+  assert.deepEqual(requireExitArgs(true, { server_info: { checkpoint_exit: true } }), { on: false }, 'developer mode: its own choice, off')
+  assert.equal(USER_WORDS.notYet, 'This trade isn\'t available right now. Nothing moved; try again in a few minutes.')
+  for (const w of ['exit', 'checkpoint', 'maker', 'operator', 'coin', 'round']) assert.ok(!new RegExp('\\b' + w).test(USER_WORDS.notYet), w)
 })

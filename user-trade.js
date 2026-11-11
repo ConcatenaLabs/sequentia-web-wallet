@@ -199,6 +199,9 @@ export const USER_WORDS = Object.freeze({
   // A trade confirmed and being sent: the screen is free at once, the trade goes on in Open.
   sending: 'Sending…',
   failed: 'This trade could not be made. Nothing moved.',
+  // A trade whose other side cannot yet give what default mode asks of every trade (that what it
+  // gives comes home if the trade dies): nothing moved, and the other sides offer it again shortly.
+  notYet: 'This trade isn\'t available right now. Nothing moved; try again in a few minutes.',
   recent: 'Your trades',
   openTrades: 'Open',
   pastTrades: 'Past',

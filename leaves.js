@@ -247,6 +247,12 @@ export function payableChannels (channels) {
 // Developer mode sets none: every payment counts at once there, as it always has.
 export const DEFAULT_INSTANT_LIMIT = '50000000000'
 export function instantLimitArgs (developer) { return { value: developer ? 'off' : DEFAULT_INSTANT_LIMIT } }
+// The library's `require_checkpoint_exit` for the mode: on in default mode once the operator offers
+// the exit (the leaf wallet's `info`, its `server_info.checkpoint_exit`), off otherwise.
+export function requireExitArgs (developer, info) {
+  const offered = !!(info && info.server_info && info.server_info.checkpoint_exit === true)
+  return { on: !developer && offered }
+}
 
 // What of each asset is arriving, by the library's places (`coin_places`): coins received past
 // the instant limit, coins not final yet, and coins on their way home on the chain (`exiting`):
@@ -1417,10 +1423,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // The instant limit the mode asks of the library (instantLimitArgs); a library without it is left
   // as it is.
   // Default mode also trades only with its owner's exit on every checkpoint (the library's
-  // `require_checkpoint_exit`), so what a trade gives always comes home if the trade dies.
+  // `require_checkpoint_exit`), so what a trade gives always comes home if the trade dies: from the
+  // moment its operator offers the exit (`info.checkpoint_exit`). Before that it trades as it always
+  // has, with no exit asked and nothing refused for the want of one (requireExitArgs).
   async function applyLimit () {
     try { await run('instant_limit', instantLimitArgs(dev())) } catch (e) { log('[leaves] instant limit: ' + ((e && e.message) || e)) }
-    try { await run('require_checkpoint_exit', { on: !dev() }) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
+    try { await run('require_checkpoint_exit', requireExitArgs(dev(), S.info)) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
   }
   const receiveArgs = () => (dev() ? {} : { channels: false })
   async function careIfDue () {
