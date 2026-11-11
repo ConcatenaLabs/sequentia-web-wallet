@@ -616,7 +616,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   have it is left out of the prices ("Not offered right now…"); a trade refused for it when sent
   says "This trade isn't available right now. Nothing moved; try again in a few minutes." Before
   the operator first offers it, the wallet trades as it always has; once it has, the wallet keeps
-  asking for it, also when a later answer of the operator no longer offers it.
+  asking that operator for it, also when a later answer no longer offers it. Only the page's own
+  operator, answering in default mode, sets this, and it holds for that operator alone.
 - Every trade is instant at any size, what it brings is in the figure at once and can be traded
   on at once, and the wallet never leaves change of its own in a trade (it pays itself the exact
   amount first when it must). What a trade brought pays anything at once, over Lightning and to an
