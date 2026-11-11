@@ -418,7 +418,7 @@ export function mountUserComposer (ctx) {
     return tradeStateWord(r, Date.now())
   }
 
-  const ENDED = ['settled', 'returned', 'failed']
+  const ENDED = ['settled', 'returned', 'failed', 'undone']
   const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`
 
   function paintTrades () {
@@ -520,7 +520,7 @@ export function mountUserComposer (ctx) {
   // the next.
   async function follow () {
     clearTimeout(S.timer)
-    const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed'].includes(r.state))
+    const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed', 'undone'].includes(r.state))
     if (!openRecs.length) return
     if (S.busy) { S.timer = setTimeout(follow, ctx.followMs || 4000); return }
     try { await ctx.engine.resume() } catch (e) { console.warn('[user composer] resume:', e && e.message) }

@@ -190,6 +190,9 @@ export const USER_WORDS = Object.freeze({
   returned: 'Returned: nothing traded.',
   returnedFees: (fees) => `Returned: nothing traded. Fees of ${fees} were paid.`,
   returnedLapsed: 'Returned: nothing traded. The other side\'s offer ran out while the trade waited.',
+  // A trade that settled and was then undone: the other side's coins never reached the network,
+  // so what the wallet paid comes back by itself (within its exit delay, about two days).
+  undone: 'Undone: the other side\'s payment never went through. What you paid is on its way back to you, within about two days.',
   // A trade confirmed and being sent: the screen is free at once, the trade goes on in Open.
   sending: 'Sending…',
   failed: 'This trade could not be made. Nothing moved.',
@@ -258,6 +261,7 @@ export function tradeSteps ({ r = null, quote = null, payAsset, receiveAsset, na
 export function tradeStateWord (r, now = Date.now()) {
   const W = USER_WORDS
   if (r.state === 'settled') return W.settled
+  if (r.state === 'undone') return W.undone
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' || r.state === 'failed') return W.returned
@@ -342,7 +346,11 @@ const TRADES_KEY = 'swk.usertrade'
 // and its fill stays in the relay's trade log.
 export const KEEP_ENDED = 200
 export const KEEP_BYTES = 1_000_000
-const ENDED_STATES = ['settled', 'returned', 'failed']
+const ENDED_STATES = ['settled', 'returned', 'failed', 'undone']
+// How long after a swap settled the wallet looks for it being undone: a trade one of whose
+// checkpoints is answered by no one within its exit delay (up to 48 hours) can be undone after it
+// settled; three days covers that with room.
+export const UNDO_WINDOW_MS = 3 * 86_400_000
 export const STORAGE_FULL = 'The trade was not made: this browser has no room left to keep its record. Nothing was signed.'
 // `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
 // left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped.
@@ -1279,7 +1287,7 @@ export function createEngine (deps) {
   }
 
   async function advanceOnce (rec) {
-    if (!rec || ['settled', 'returned', 'failed'].includes(rec.state)) return rec
+    if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an
       // acceptance the library made is in its own store; read it there. A step that did not answer
@@ -1499,11 +1507,24 @@ export function createEngine (deps) {
     return put(rec)
   }
 
-  // Every open trade, moved on.
+  // A settled swap the library later marks `returned`: the other side's coins never reached the
+  // network, and the coin the wallet gave comes home by its checkpoint's exit. Looked for while
+  // that can still happen, UNDO_WINDOW_MS after it settled.
+  async function undone (rec) {
+    const s = ((await run('swaps')) || []).find((x) => x.swap === rec.swap)
+    if (s && s.state === 'returned') { rec.state = 'undone'; rec.undoneAt = now(); return put(rec) }
+    return rec
+  }
+
+  // Every open trade, moved on; every settled swap still within its undo window, looked at.
   async function resume () {
     const out = []
     for (const r of records()) {
-      if (['settled', 'returned', 'failed'].includes(r.state)) continue
+      if (r.state === 'settled' && r.swap && now() - (r.settledAt || 0) < UNDO_WINDOW_MS) {
+        try { const u = await undone(r); if (u.state === 'undone') out.push(u) } catch (e) { log('[user trade] undone', r.id, e.message) }
+        continue
+      }
+      if (ENDED_STATES.includes(r.state)) continue
       try { out.push(await advance(r)) } catch (e) { log('[user trade] resume', r.id, e.message) }
     }
     return out

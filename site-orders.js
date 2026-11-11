@@ -355,7 +355,7 @@ export function makeSiteOrders (d) {
   // Moves this wallet's site trades on, and lists the orders placed here that rest now.
   async function follow () {
     const v = db()
-    const recs = d.followTrades === false ? [] : (d.engine.records ? d.engine.records() : []).filter((r) => v.trades[r.id] && !['settled', 'returned', 'failed'].includes(r.state))
+    const recs = d.followTrades === false ? [] : (d.engine.records ? d.engine.records() : []).filter((r) => v.trades[r.id] && !['settled', 'returned', 'failed', 'undone'].includes(r.state))
     for (const r of recs) {
       try { if (keepEnded(v, await d.engine.advance(r))) write(v) } catch (e) { log('[site orders] follow:', e && e.message) }
     }
@@ -397,7 +397,7 @@ export function makeSiteOrders (d) {
   // answers for a trade after its record is gone. Returns whether it changed `v`.
   function keepEnded (v, r) {
     const t = r && r.id && v.trades[r.id]
-    if (!t || !['settled', 'returned', 'failed'].includes(r.state)) return false
+    if (!t || !['settled', 'returned', 'failed', 'undone'].includes(r.state)) return false
     const state = tradeState(r), note = tradeStateWord(r, now())
     if (t.ended === state && t.endedNote === note) return false
     t.ended = state; t.endedNote = note

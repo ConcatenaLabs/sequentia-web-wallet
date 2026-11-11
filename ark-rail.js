@@ -245,7 +245,7 @@ export function mountArkRail (ctx) {
   function follow () {
     clearTimeout(S.timer)
     let openRecs = []
-    try { openRecs = arkRecords(ctx.engine().records()).filter((r) => !['settled', 'returned', 'failed'].includes(r.state)) } catch {}
+    try { openRecs = arkRecords(ctx.engine().records()).filter((r) => !['settled', 'returned', 'failed', 'undone'].includes(r.state)) } catch {}
     if (!openRecs.length || S.shape.kind === 'none') return
     S.timer = setTimeout(async () => {
       if (!S.busy) { try { await ctx.engine().resume() } catch (e) { console.warn('[ark rail] resume:', e && e.message) } }

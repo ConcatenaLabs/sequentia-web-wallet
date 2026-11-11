@@ -109,6 +109,7 @@ export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive
 export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
+export const PLACES_KEY = 'swk.leaves.places'        // + '.' + tag: the library's last coin_places, with that balance
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
 export const HOME_KEY = 'swk.leaves.home'            // + '.' + tag: the coins a person sent home, and when
 // A receive code is shown again while it has at least this long before it lapses.
@@ -195,8 +196,12 @@ export const RELEASE_TRIES = 3
 // payment is made.
 // `noOpen` names the assets care opens no channel in (held after a payment, being sent, or held too
 // little of): their channels are still read and folded.
-export function careArgs (scan, holdChannels = false, noOpen = []) {
-  const a = { channels: !holdChannels }
+// In default mode (`channels` false) care neither opens nor folds a channel: the wallet keeps its
+// money in coins, and closes any channel it still holds into a coin at the next round
+// (`channelsToClose`).
+export function careArgs (scan, holdChannels = false, noOpen = [], channels = true) {
+  const a = { channels: channels && !holdChannels }
+  if (!channels) { if (scan) a.scan = scan; return a }
   if (scan) a.scan = scan
   if (!holdChannels && noOpen && noOpen.length) a.no_open = [...new Set(noOpen)].sort()
   return a
@@ -231,6 +236,36 @@ export function payableChannels (channels) {
   const m = {}
   for (const c of channels || []) if (c && c.coin_state === 'live' && c.final === true && !(c.asset in m)) m[c.asset] = c.leaf_id
   return m
+}
+
+// Default mode's instant limit: 500 US dollars, in atoms of the reference unit (an atom is a
+// hundred-millionth of a dollar). The library counts a payment received as the wallet's own at
+// once up to it (the lowest of this, the operator's suggestion and the bond's share), and shows
+// one past it as arriving until a round makes it the wallet's (the library's `coin_places`).
+// Developer mode sets none: every payment counts at once there, as it always has.
+export const DEFAULT_INSTANT_LIMIT = '50000000000'
+export function instantLimitArgs (developer) { return { value: developer ? 'off' : DEFAULT_INSTANT_LIMIT } }
+
+// What of each asset is arriving, by the library's places (`coin_places`): coins received past
+// the instant limit, coins not final yet, and coins on their way home on the chain (`exiting`):
+// what the wallet cannot trade or send until a round, or its claim, has made it its own. Default
+// mode's figure leaves it out. -> Map(asset -> BigInt)
+export function arrivingByAsset (places) {
+  const m = new Map()
+  for (const c of arrivingCoins(places)) m.set(c.asset, (m.get(c.asset) || 0n) + c.atoms)
+  return m
+}
+// The coins arriving, each { leaf_id, asset, atoms }, in the library's order.
+export function arrivingCoins (places) {
+  const out = []
+  for (const c of (places && Array.isArray(places.coins)) ? places.coins : []) {
+    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state })
+  }
+  return out
+}
+// The channel coins default mode closes into plain coins at the next round: each live one.
+export function channelsToClose (channels) {
+  return (channels || []).filter((c) => c && c.coin_state === 'live' && c.leaf_id).map((c) => c.leaf_id)
 }
 
 // Whether a kept receive code names the channels the wallet can be paid over now: a code
@@ -795,8 +830,15 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const read = (cmd) => run(cmd, { shared_view: true })
     const gaveWay = () => { if (yieldTo && yieldTo()) { reloadAfter(200); return true } return false }
     const b = await read('balance')
+    // Where each coin stands (the library's `coin_places`), read with the balance in default mode,
+    // so the figure leaves out what is arriving from the same reading. A library without it leaves
+    // the figure as the balance says.
+    let pl = null
+    if (!dev()) { try { pl = await read('coin_places') } catch {} }
     S.balance = b
+    S.places = pl
     try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
+    try { ctx.store.setItem(tagged(PLACES_KEY, tag()), JSON.stringify(pl)) } catch {}
     if (ctx.onChange) try { ctx.onChange() } catch {}
     if (gaveWay()) return
     const [c, p, s, r] = [await read('coins'), await read('participations'), await read('schedule'), await read('refusals')]
@@ -838,7 +880,23 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // code), counted as arriving from that moment until the library's balance holds it, or for two
   // minutes at most: the person sees it the moment they are told it was sent.
   S.expected = []
-  const liveLeaves = (hex) => { const b = leafBalances(shown()).get(hex); return b ? b.leaves : 0n }
+  // The places read with the balance shown (`coin_places`), kept with it.
+  const shownPlaces = () => {
+    if (S.balance) return S.places || null
+    const k = tag()
+    if (!S.keptPlaces || S.keptPlaces.tag !== k) { let v = null; try { v = JSON.parse(ctx.store.getItem(tagged(PLACES_KEY, k)) || 'null') } catch {} S.keptPlaces = { tag: k, v } }
+    return S.keptPlaces.v
+  }
+  const placesOn = () => !dev() && !!shownPlaces()
+  // What the asset's figure counts in the tree: in default mode, all of it but what is arriving, so
+  // the figure is what the wallet can trade or send now; in developer mode, everything held.
+  const liveLeaves = (hex) => {
+    const b = leafBalances(shown()).get(hex)
+    const all = b ? b.leaves : 0n
+    if (dev()) return all
+    const a = arrivingByAsset(shownPlaces()).get(hex) || 0n
+    return all > a ? all - a : 0n
+  }
   const expecting = (hex) => {
     const t = now()
     S.expected = S.expected.filter((x) => t < x.until && liveLeaves(x.hex) < x.base + x.atoms)
@@ -921,6 +979,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
       S.joinError = null
       S.openedAt = now()
+      await applyLimit()
       // The other operators' watchtowers, beside the operator's own: the wallet deposits each
       // coin with them too, sealed, at its next sync.
       try { await run('set_default_watchtowers', { urls: defaultWatchtowers(ctx.pinned && ctx.pinned()) }) } catch (e) {
@@ -1306,13 +1365,32 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { page = (ctx.noOpenChannels && ctx.noOpenChannels()) || [] } catch {}
     return [...heldAssets(readHolds(), now()), ...page]
   }
+  // Default mode keeps no channel: each live channel coin is given up in the next round for a plain
+  // coin of the wallet's side, once (a participation already waiting for it is left alone).
+  async function closeChannels () {
+    const ids = channelsToClose(S.channels).filter((id) => !(S.coins || []).some((c) => c.leaf_id === id && c.state !== 'live'))
+    if (!ids.length) return
+    try {
+      const q = await run('quote', { leaves: ids })
+      await run('participate', { leaves: ids, shown: q.coins })
+      log(`[leaves] closing ${ids.length} channel(s) into coins at the next round`)
+    }
+    catch (e) { log('[leaves] closing channels: ' + ((e && e.message) || e)) }
+  }
+  // The instant limit the mode asks of the library (instantLimitArgs); a library without it is left
+  // as it is.
+  async function applyLimit () {
+    try { await run('instant_limit', instantLimitArgs(dev())) } catch (e) { log('[leaves] instant limit: ' + ((e && e.message) || e)) }
+  }
+  const receiveArgs = () => (dev() ? {} : { channels: false })
   async function careIfDue () {
     if (!S.open || !careDue(S.careAt, now(), careEvery)) return
     if (S.asked) { S.upkeepLater = true; return }
     S.careAt = now()
     const t0 = now()
     try {
-      const v = await run('care', careArgs(claimScan(), channelsHeld(), noOpen()))
+      const v = await run('care', careArgs(claimScan(), channelsHeld(), noOpen(), dev()))
+      if (!dev()) await closeChannels()
       log(`[leaves] care: ${now() - t0} ms`)
       S.lastCare = { at: now(), value: v }
       const sum = careSummary(v)
@@ -2264,6 +2342,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // page may reach, follows it.
   async function changeMode (m) {
     setWalletMode(ctx.store, tag(), m)
+    if (S.open) { await applyLimit(); S.places = null; reloadAfter(0) }
     if (ctx.onModeChange) try { ctx.onModeChange(m) } catch {}
     if (m === 'developer') { try { await start() } catch (e) { log('[leaves] open: ' + ((e && e.stack) || e)); S.error = { what: 'open', e } } }
     else watchMailbox()
@@ -2306,8 +2385,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
   async function receiveCode ({ quick = false } = {}) {
     const key = tagged(CODE_KEY, tag())
     let kept = null; try { kept = JSON.parse(ctx.store.getItem(key) || 'null') } catch {}
-    // A code made before the wallet's channels changed names the wrong ones: made again.
-    if (kept && !codeNamesChannels(kept, S.channels)) kept = null
+    // A code made before the wallet's channels changed names the wrong ones: made again. Default
+    // mode's code names none: every payment to it comes as a coin.
+    if (kept && !codeNamesChannels(kept, dev() ? S.channels : [])) kept = null
     if (quick && kept && kept.text && kept.until && kept.until - now() / 1000 > CODE_MARGIN_S && codeOpen(kept, S.schedule, S.scheduleAt) !== false) return kept
     if (kept && kept.text && kept.owner) {
       const t = now()
@@ -2315,7 +2395,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (codeOpen(kept, s, t)) return kept
     }
     const made = now()
-    const v = await command('receive', {})
+    const v = await command('receive', receiveArgs())
     const out = { text: v.request, owner: (v.details && v.details.owner) || null, until: (v.details && v.details.until) || null,
       channels: (v.details && v.details.channels) || {}, made }
     try { ctx.store.setItem(key, JSON.stringify(out)) } catch {}
@@ -2376,8 +2456,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // The assets the operator serves supervised.
     supervisedAssets: () => supervisedAssets(S.info),
     address,
-    leafAtoms: (hex) => liveLeaves(hex) + expecting(hex),
-    leafAssets: () => [...new Set([...[...leafBalances(shown()).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a), ...S.expected.map((x) => x.hex)])].filter((h) => liveLeaves(h) + expecting(h) > 0n),
+    // In default mode, with the library's places read, the figure is what the wallet can trade or
+    // send now: a payment arriving, or one the library has not taken in yet, is in the activity
+    // list alone (arrivingPayments). Otherwise what is held, and what is expected, as before.
+    leafAtoms: (hex) => liveLeaves(hex) + (placesOn() ? 0n : expecting(hex)),
+    // Default mode's payments arriving (shown in the activity list, never in the figure): each coin
+    // the library places as arriving, and each payment another service says it made that the
+    // library has not taken in yet. -> [{ asset, atoms, leaf_id? }]
+    arrivingPayments: () => {
+      if (!placesOn()) return []
+      const out = arrivingCoins(shownPlaces()).map((c) => ({ ...c }))
+      for (const x of S.expected) if (expecting(x.hex) > 0n) out.push({ asset: x.hex, atoms: x.atoms })
+      return out
+    },
+    receiveArgs,
+    // The assets the figure holds some of (and, as before places are read, those expected).
+    leafAssets: () => [...new Set([...[...leafBalances(shown()).entries()].filter(([, v]) => v.leaves > 0n).map(([a]) => a), ...S.expected.map((x) => x.hex)])].filter((h) => liveLeaves(h) + (placesOn() ? 0n : expecting(h)) > 0n),
     // A payment made to this wallet that the library has not taken in yet: `hex`, `atoms`.
     // `ms`: how long it is counted as arriving at most (two minutes unless said).
     expect: (hex, atoms, ms = 120000) => {
@@ -2408,7 +2502,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     homeUnderWay,
     // ---- default mode (default-arca.js) ----
     // What of an asset is arriving (held, not yet spendable), in atoms.
-    arriving: (hex) => arrivingAtoms(shown(), hex) + expecting(hex),
+    // What of the figure is not spendable yet: nothing in default mode with places read (the figure
+    // holds none of it); else the library's arriving states and what is expected.
+    arriving: (hex) => (placesOn() ? 0n : arrivingAtoms(shown(), hex) + expecting(hex)),
     // Of what is arriving, what is being redone after a Bitcoin reorganisation, in atoms.
     redoing: (hex) => redoingAtoms(S.coins, hex),
     // What was moved out to keep it safe while the wallet was away, until it is put back, in atoms.

@@ -40,6 +40,11 @@ function readyWords (minutes) {
 
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
+  // Activity's row for a payment that is not in the balance yet, and when it will be, in words.
+  rowArriving: 'Arriving',
+  rowComingBack: 'Coming back',
+  arrivingSoon: 'about a minute',
+  comingBackWhen: 'within about two days',
   // Held, spendable before, and taken back out of the chain with the Bitcoin block it rested on:
   // still the wallet's, and counted, while the network takes it in again.
   redoing: (amount, ticker) => `${amount} ${ticker} being redone after a Bitcoin reorganisation`,
@@ -892,4 +897,22 @@ export function vestingRefusal (e) {
 // taken up yet: care is then run at once rather than at its pace, so it becomes a coin by itself.
 export function vestedOpen (claims) {
   return (Array.isArray(claims) ? claims : []).some((c) => c && c.state === 'open' && !c.held && c.vest != null)
+}
+
+// Activity's rows for what is arriving (leaves.js arrivingPayments: coins the library places as
+// arriving, and payments another service says it made): one row each, except a coin a row of the
+// activity already shows (`shown`, the leaf ids of its received rows), which that row marks. A
+// coin on its way home on the chain is coming back, within about two days; anything else arrives
+// in about a minute (a round: a median of 64 s, none over three minutes).
+// -> [{ asset, atoms: BigInt, leaf, kind: 'arriving'|'coming_back', when }]
+export function arrivingRows (arriving, shown = []) {
+  const seen = new Set(shown || [])
+  const out = []
+  for (const a of arriving || []) {
+    if (!a || !a.asset || a.leaf_id && seen.has(a.leaf_id)) continue
+    const back = a.state === 'exiting'
+    out.push({ asset: a.asset, atoms: big(a.atoms), leaf: a.leaf_id || null, kind: back ? 'coming_back' : 'arriving',
+      when: back ? DEFAULT_WORDS.comingBackWhen : DEFAULT_WORDS.arrivingSoon })
+  }
+  return out
 }
