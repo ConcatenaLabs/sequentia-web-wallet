@@ -615,7 +615,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   of the trade, so what a trade gives always comes home if the trade dies. An offer that cannot
   have it is left out of the prices ("Not offered right now…"); a trade refused for it when sent
   says "This trade isn't available right now. Nothing moved; try again in a few minutes." Before
-  the operator offers it, the wallet trades as it always has.
+  the operator first offers it, the wallet trades as it always has; once it has, the wallet keeps
+  asking for it, also when a later answer of the operator no longer offers it.
 - Every trade is instant at any size, what it brings is in the figure at once and can be traded
   on at once, and the wallet never leaves change of its own in a trade (it pays itself the exact
   amount first when it must). What a trade brought pays anything at once, over Lightning and to an
