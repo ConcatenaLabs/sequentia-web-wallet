@@ -60,6 +60,10 @@ In practice:
 - The wallet keeps its money in ordinary coins: it opens no channel, names none in its receive
   code, and closes any it holds into a coin at the next settlement. Until then what it held there
   (its own side alone) is in History as **Coming back**, "about a minute", not in the figure.
+- A payment received past what counts at once shows under its asset the moment it is received:
+  **"<amount> <TICKER> arriving, in about a minute"**; an asset held only that way reads
+  **Arriving** in place of a figure, never 0. The wallet gives it to the very next settlement at
+  once (at the wallet's opening too), unless the person is asking it something.
 - Developer mode shows every part under the figure, **"<amount> <TICKER> arriving"** included
   (and moving, redone, kept safe), counts every payment at once, and keeps its channels and
   their choices.
@@ -586,6 +590,20 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   sources are given to answer (eight seconds), while the wallet still checks a price it was
   given: "Still getting the exact price: this can take up to half a minute…". If the price
   moves: "The price moved. Here is the new one."
+- **What the balance shows can always be traded or sent.** When part of what is paid waits only
+  for the operator's next settlement (a coin too many payments from one to give part of, a
+  payment still arriving, coins the wallet's own upkeep is settling, a coin of a format the other
+  side's older build does not read), the wallet puts it through that settlement by itself, the
+  button reads "Goes through in about a minute", and the price is asked again by itself once it
+  is through. If that is found only at **Trade**, the trade is kept under Your trades as "Goes
+  through in about a minute", with the price the person accepted as its bound: once through it
+  is priced again and goes ahead by itself while it receives no less than 1% under what was
+  shown and pays no more; otherwise "Returned: nothing traded. The price moved while it
+  waited." A page closed or reloaded meanwhile finds the trade again and goes on with it, never
+  twice. Past ten minutes: "This is taking longer than usual. Nothing has moved: try again in a
+  few minutes." Payments wait for that settlement the same way and then go. Coins too deep for
+  part of them to be traded are settled by the wallet once it has been left alone two minutes,
+  at a settlement's fee each, so the next trade from them goes at once.
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
@@ -632,29 +650,22 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - Refusals: "This trade could not be made. Nothing moved."; "The other side declined. Nothing was
   traded."; "Not offered right now: nobody offers <get> for <pay> in one step."; "<get> for <pay>
   is not offered."; "Not offered right now: nobody offers anything for <pay>." (nothing can be
-  chosen under You receive); "Up to <amount> can be traded now."; "Enter how much you pay."; "That amount
+  chosen under You receive); "Enter how much you pay."; "That amount
   is too small to trade."; "You have no <pay> to trade." (only when none is held anywhere);
   "Your BTC is being moved so it can be traded. It is ready after <n> Bitcoin blocks. Nothing has
   moved yet." (BTC held at the wallet's address, none yet where a trade pays BTC from: the wallet
   moves what the trade needs by itself, at most what one move of the Bitcoin ark carries, and
   prices the trade again every 20 s), and on a ticket that pays only part of what was typed,
-  "More of your BTC is being moved so it can be traded, ready after <n> Bitcoin blocks."; "Your
-  <pay> is on its way: it is ready to trade in a minute or two. Nothing has moved.", or, where the
-  operator also waits for Bitcoin blocks, "Your <pay> is not ready to trade yet: it is once the
-  next Bitcoin blocks settle it. Nothing has moved." (held, and shown in the balance, but not yet
-  where a trade pays from: just arrived, or still being moved in by the wallet); "Your <pay> is
+  "More of your BTC is being moved so it can be traded, ready after <n> Bitcoin blocks."; "Your <pay> is
   being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once
   that settles. Nothing has moved." (it could be traded, and a Bitcoin reorganisation took it
   back out of the chain); "Getting your <pay> ready for this trade: it is ready in a minute or two.
   Nothing has moved." (the offers are orders resting in the tree that only coins expiring later can
   fill: the wallet refreshes its older coins in the next round by itself, and prices the trade
-  again while the person waits, taking the next order if that one went); "Only <amount> of your <pay> can be traded now, too little for any
-  offer: the rest is on its way, ready in a minute or two. Nothing has moved.", or "… the rest is
-  ready once the next Bitcoin blocks settle it. Nothing has moved." (the amount would trade, but
-  most of what is held is not ready yet); "Your <pay> is being made ready to trade: it is ready in
-  a minute or two. Nothing has moved." (or "… it is ready once the next Bitcoin blocks settle it.")
-  (what is held of it is given up in a refresh, or kept by a plan, and is free again after the
-  next round); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
+  again while the person waits, taking the next order if that one went); "That is more than your
+  <amount>." (more than the wallet holds, nothing of it on its way); "Your <pay> is held by an order
+  you placed, and can be traded once it is filled or cancelled. Nothing has moved." (only a coin of
+  an order the person placed); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
   moment."; "Your wallet is still finishing something it started, so it could not get a price in
   time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
   wallet was busy, or a maker gave a price in time and the wallet was still checking it when the
