@@ -371,8 +371,20 @@ export function shapeFor (coins, asset, size, busy = null) {
 // reference atoms), since that coin is out of round once a swap pays from it; nothing when none
 // fits. `sp` is what it can pay (asset -> atoms); an asset the node does not price, or no budget,
 // stays as it is. A quote and a firm offer sized on this are never refused for the budget.
+// Each coin an open firm offer holds (state offered, a coin of a round or a board) is counted out of
+// the room first: once its swap completes its whole worth is out of round too, and two offers that
+// each fit the room alone would otherwise pass the budget together, the second refused at its
+// completion and the taker's trade returned minutes later (web wallet #632).
 export function budgetedSpendable (sp, coins, roomValue, rates) {
   if (roomValue == null || !rates || !rates.size) return sp
+  let room = big(roomValue)
+  for (const c of coins || []) {
+    if (!c || c.state !== 'offered' || c.kind === 'transfer' || c.kind === 'fill') continue
+    const r = rates.get(c.asset)
+    if (r != null && big(r) > 0n) room -= worthOf(c.value, r)
+  }
+  if (room < 0n) room = 0n
+  roomValue = room
   const out = new Map(sp)
   for (const [a, v] of sp || []) {
     const r = rates.get(a)

@@ -127,3 +127,16 @@ test('the room cut and the coin cut agree with what the library will take in', (
   const q = capQuotes([{ give_asset: 'G', want_asset: 'U', rate_num: '2', rate_den: '1', min_give: '1', max_give: '900' }], room)
   assert.equal(q.quotes[0].max_give, '500')
 })
+
+test('a coin an open firm offer holds takes its worth out of the room first (web wallet #632)', () => {
+  const size = workingSizes(bond(), rates).get('G')
+  // Two working coins; the first is held by an open firm offer.
+  const coins = [coin('w1', size, 'G', 'batch', 'offered'), coin('w2', size)]
+  const sp = new Map([['G', size]])
+  // Room for one working coin and a bit: alone, w2 fits; with w1's offer counted, it does not.
+  const room = size * 407_500_000_000n / 100_000_000n + 1000n
+  assert.equal(budgetedSpendable(sp, [coin('w2', size)], room, rates).get('G'), size)
+  assert.equal(budgetedSpendable(sp, coins, room, rates).get('G'), 0n)
+  // A received coin offered (out of round already, counted by the library) is not counted twice.
+  assert.equal(budgetedSpendable(sp, [coin('t', size, 'G', 'transfer', 'offered'), coin('w2', size)], room, rates).get('G'), size)
+})
