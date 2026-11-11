@@ -144,6 +144,8 @@ export const REFRESH_EVERY_MS = 120_000
 // final, so a wallet in use gives up only what must go now.
 export const REFRESH_IDLE_MS = 120_000
 export const REFRESH_NEED_MS = 30_000
+// How soon the refresh rule is asked again when an ask at once met the wallet's own upkeep.
+export const NEED_RETRY_MS = 2_000
 // The arguments of the library's `refresh_needed`: the whole seconds since the person last asked
 // anything of the wallet (or opened it).
 export function refreshNeededArgs (lastAsked, openedAt, at) {
@@ -294,7 +296,8 @@ export function arrivingCoins (places, claims = {}) {
 // `refresh_needed` gives is `arriving`, those coins alone, so what counts already stays spendable;
 // otherwise every received coin (null).
 export function refreshLeaves (needed) {
-  const reasons = (needed && Array.isArray(needed.reasons)) ? needed.reasons : []
+  // The rule `shape` names coins settled on their own (shapeCoins), not by this refresh.
+  const reasons = ((needed && Array.isArray(needed.reasons)) ? needed.reasons : []).filter((r) => r && r.rule !== 'shape')
   if (!reasons.length || reasons.some((r) => r.rule !== 'arriving')) return null
   return [...new Set(reasons.flatMap((r) => r.coins || []))]
 }
@@ -530,6 +533,8 @@ export class LeafError extends Error {
     if (e && Array.isArray(e.release)) this.release = e.release
     // A payment the wallet's side of its channels could cover: which channel leaves to close.
     if (e && Array.isArray(e.close)) this.close = e.close
+    // A spend that waits only for a round (`settle_first`): the coins to put through it first.
+    if (e && Array.isArray(e.coins)) this.coins = e.coins
     // And, for a payment to a receive code, the most it can pay once they are closed and that
     // payment's fee, with the leaves the close gives back counted (the library's `most`, `fee`).
     if (e && e.most != null) this.most = String(e.most)
@@ -737,6 +742,13 @@ export function exitSteps (answer) {
 
 // ---------------------------------------------------------------------------
 // The panels
+// The coins the library's rule `shape` names (`refresh_needed`, asked once the person has left the
+// wallet alone): too deep for part of them to be traded, so they go through the next round first
+// (`settle_first`).
+export function shapeCoins (needed) {
+  const reasons = (needed && Array.isArray(needed.reasons)) ? needed.reasons : []
+  return [...new Set(reasons.filter((r) => r && r.rule === 'shape').flatMap((r) => r.coins || []))]
+}
 // ---------------------------------------------------------------------------
 
 export function mountLeaves (ctx, root, settingsRoot) {
@@ -1254,7 +1266,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   async function upkeep () {
     if (!S.open) return
-    if (!S.needTimer) needSoon()
+    // At the wallet's opening the rule is asked at once: a payment that arrived while it was closed
+    // goes into the next round now, not after the timer's first turn.
+    if (!S.needTimer) needSoon(0)
     await new Promise((r) => setTimeout(r, 0))   // the page paints what it holds first
     if (S.busy || S.asked || reviewing()) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
     // In user mode on the page's operator, upkeep also leaves room between the steps of what a
@@ -1274,7 +1288,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // The library's refresh rule asked on a timer, every REFRESH_NEED_MS while the wallet is open, and
   // at once on a receipt: nothing else need run the upkeep for a coin that arrives later (RV29).
-  function needSoon (ms) {
+  function needSoon (ms, urgent = ms === 0) {
     if (S.stopped) return
     clearTimeout(S.needTimer)
     S.needTimer = setTimeout(async () => {
@@ -1283,6 +1297,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (S.open && !dev() && pinned() && !S.busy && !S.asked) {
         S.busy = true
         try { await refreshReceived() } catch {} finally { S.busy = false }
+      } else if (urgent && S.open && !dev() && pinned() && S.busy && !S.asked) {
+        // Asked at once (a receipt, the wallet's opening) while its own upkeep held it, the person
+        // asking nothing: asked again in a moment, not at the next turn of the timer, so a payment
+        // arriving goes into the next round at once.
+        needSoon(NEED_RETRY_MS, true)
+        return
       }
       needSoon()
     }, ms ?? needEvery)
@@ -1310,6 +1330,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // the wallet holds out of round (settleSoon). The idle rule keeps the pace of one refresh every
     // REFRESH_EVERY_MS; a rule that needs it now does not wait for the pace.
     let only = null
+    let shape = []
     if (!S.settleNow) {
       let v
       try { v = await run('refresh_needed', refreshNeededArgs(S.lastAsked, S.openedAt, now())) } catch (e) {
@@ -1319,6 +1340,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       }
       if (!v || !v.needed) return
       only = refreshLeaves(v)
+      shape = shapeCoins(v)
       const rules = (v.reasons || []).map((r) => r.rule)
       const now_ = rules.filter((r) => r !== 'idle' && r !== 'pace')
       if (!now_.length && paced) return
@@ -1334,6 +1356,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (n) { log(`[leaves] ${n} coin(s) received out of round given up in the next round`); await reload() }
       for (const l of (v && v.left) || []) log(`[leaves] a received coin left as it is: ${l.why}`)
     } catch (e) { S.lastRefresh = { at: now(), error: e }; log('[leaves] refreshing what was received: ' + (e && e.message)) }
+    // Coins too deep for a part of them to be traded (the rule `shape`, asked only once the person
+    // has left the wallet alone): through the next round, each at the refresh's fee, so the next
+    // trade from them goes at once. Never while the person asks anything.
+    if (shape.length && !S.asked) {
+      try {
+        const v = await run('settle_first', { coins: shape })
+        const n = ((v && v.settling) || []).length
+        if (n) { log(`[leaves] ${n} coin(s) too deep to trade part of given up in the next round`); await reload() }
+      } catch (e) { log('[leaves] settling coins too deep to trade part of: ' + (e && e.message)) }
+    }
   }
 
   // ---- user mode: coins that land on the chain go into the tree by themselves ----
@@ -1633,6 +1665,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
           } finally { S.releasing = null; render() }
           continue
         }
+        // What the wallet shows, held back only for want of a round (the library's `settle_first`,
+        // naming the coins: at the operator's depth limit, still arriving, trade proceeds for a leg
+        // leaving the tree, or of a format the other side does not read): those coins go through the
+        // next round (`settle_first`, which gives up nothing twice), and the payment is asked again
+        // once it is through, about a minute later. Nothing is refused for it.
+        if (e instanceof LeafError && e.kind === 'settle_first' && i < RELEASE_TRIES) {
+          const coins = e.coins && e.coins.length ? e.coins : null
+          const ask = coins ? { coins } : { asset: e.asset }
+          S.releasing = { coins: coins || [], asset: e.asset, since: now(), command, why: 'settle' }
+          render()
+          try {
+            log(`[leaves] ${command}: ${coins ? coins.length : 'the'} coin(s) it needs go through the next round first; paid once through`)
+            await roundWait(() => waitSettled(ask))
+          } finally { S.releasing = null; render() }
+          continue
+        }
         // What the wallet's side of a channel would cover (the library's `in_channel`, naming the
         // channel leaves): they are closed into the next round, a leaf of the wallet's own given
         // back for each side, and the payment asked again once that round is final. Care leaves
@@ -1708,6 +1756,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try { return await f() } finally {
       if (asked) S.asked++
       if (busy) { while (S.busy) await sleep(50); S.busy = true }
+    }
+  }
+
+  // Puts through the next round what a `settle_first` refusal named (`ask`: its coins, or its asset),
+  // asking the library again every ROUND_POLL_MS (it gives up nothing twice), after a sync, until it
+  // answers ready: nothing it named is settling or waiting any more. Up to RELEASE_WAIT_MS. A library
+  // without the command answers as before (the refusal stands).
+  async function waitSettled (ask) {
+    const until = now() + RELEASE_WAIT_MS
+    for (let first = true; ; first = false) {
+      while (S.busy) await sleep(50)
+      S.busy = true
+      let v = null
+      try {
+        if (!first) { try { const s = await run('sync'); synced(s) } catch {} }
+        v = await run('settle_first', ask)
+        if (v && (v.settling || []).length) log(`[leaves] ${v.settling.length} coin(s) given up in the next round to settle first`)
+      } finally { S.busy = false }
+      if (!v || v.ready) { try { S.coins = (await run('coins')) || S.coins } catch {}; return v }
+      if (now() >= until) throw new LeafError({ kind: 'refused', message: 'the next round did not settle the coins this needs in time; nothing was paid, and it can be asked again' })
+      await sleep(ROUND_POLL_MS)
     }
   }
 

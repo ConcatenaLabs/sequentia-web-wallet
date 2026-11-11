@@ -7757,6 +7757,8 @@ function refreshComposerHeld(){
     if(!userComposer || devMode() || !userTradeOn()) return;
     const panel = document.querySelector('[data-panel=swap]');
     if(!panel || panel.classList.contains('hide')) return;
+    // The balance line under You pay follows every change of the figure, not only of the assets held (#674).
+    if(userComposer.paintHave) userComposer.paintHave();
     if(userComposer.state.ticket || userComposer.state.busy) return;
     const sig = userKnownAssets().filter(a=> userHeld(a) + vestingFor(a) > 0n).sort().join(',');
     if(sig === _ucHeldSig) return;
@@ -7828,7 +7830,11 @@ function renderBalance(){
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
-    if(!alwaysShow && totalAtoms <= 0n) return;
+    // Default mode: a payment received and still arriving (past the instant limit, until its round)
+    // is shown at once, as arriving, with about how long; never as a part of the balance, and the
+    // asset's row never reads 0 while one is on its way.
+    let arrivingIn = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arrivingIn = leavesApi.arriving(kind) || 0n; } catch {}
+    if(!alwaysShow && totalAtoms <= 0n && arrivingIn <= 0n) return;
     const amt=(x)=> known ? fmtAmount(x, precision) : (BigInt(x).toString()+' atoms');
     const a=el('div');
     const head=el('div','bt-tk');
@@ -7853,6 +7859,7 @@ function renderBalance(){
     for(const l of vestAll) if(l.arriving && parts) arriving += BigInt(l.atoms);
     if(arriving - redoing > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving - redoing), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     if(redoing > 0n){ const rd=el('div','bt-redoing', DEFAULT_WORDS.redoing(amt(redoing), ticker)); rd.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(rd); }
+    if(!parts && arrivingIn > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arrivingIn(amt(arrivingIn), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     let keptSafe = 0n; try { if(kind!=='BTC' && leavesApi && parts && leavesApi.keptSafe) keptSafe = leavesApi.keptSafe(kind) || 0n; } catch {}
     if(keptSafe > 0n){ const ks=el('div','bt-kept-safe', DEFAULT_WORDS.keptSafe(amt(keptSafe), ticker)); ks.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ks); }
     if(parts && movingAtoms > 0n){ const mv=el('div','bt-moving', DEFAULT_WORDS.moving(amt(movingAtoms), ticker)); mv.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(mv); }
@@ -7929,7 +7936,7 @@ function renderBalance(){
     if(foot){ const f=el('div','bt-foot'); f.appendChild(foot); det.appendChild(f); }
     const open=_splitOpen.has(kind), tappable=det.children.length>0;
     if(tappable) head.appendChild(el('span','bt-tog', open ? 'hide details' : 'details'));
-    const row = balRow({ a, onchain: balAmt(amt(on)), ln: el('div'), total: balTotalCell(amt(totalAtoms), ticker),
+    const row = balRow({ a, onchain: balAmt(amt(on)), ln: el('div'), total: (totalAtoms <= 0n && arrivingIn > 0n) ? (()=>{ const d=el('div','bt-amt'); d.appendChild(el('b',null,DEFAULT_WORDS.arrivingFigure)); return d; })() : balTotalCell(amt(totalAtoms), ticker),
       value: balValueCell(known ? refKey : null, totalAtoms), extra: (tappable && open) ? det : null });
     if(tappable){
       row.classList.add('tappable'); row.title = open ? 'Hide the details' : 'Show the details';

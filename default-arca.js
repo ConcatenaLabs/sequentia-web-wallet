@@ -40,6 +40,10 @@ function readyWords (minutes) {
 
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
+  // Default mode, under an asset's figure: a payment received and still arriving, with how long.
+  arrivingIn: (amount, ticker) => `${amount} ${ticker} arriving, in about a minute`,
+  // The figure of an asset held only in a payment still arriving: never a bare 0.
+  arrivingFigure: 'Arriving',
   // Activity's row for a payment that is not in the balance yet, and when it will be, in words.
   rowArriving: 'Arriving',
   rowComingBack: 'Coming back',
