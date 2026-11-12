@@ -1770,6 +1770,10 @@
   // leaf wallet follows the chain through (same origin; it forwards only a wallet's read calls and
   // broadcasts), and the operator's key, pinned: a wallet in default mode joins it by itself, and
   // only while its server shows this key. A page that sets SEQ_ARCA = null first joins none.
+  // Where the leaf wallet's worker waits out a pause without using the processor: the node route's
+  // hold, which answers after the time asked (leaves/worker.js). A page that sets it to null waits
+  // on the clock.
+  if(window.SEQ_PAUSE_URL === undefined) window.SEQ_PAUSE_URL = location.origin + '/node-rpc/hold';
   if(window.SEQ_ARCA === undefined) window.SEQ_ARCA = {
     server:   location.origin + '/arca',
     node_url: location.origin + '/node-rpc',
@@ -4368,7 +4372,8 @@ function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
   leavesApi = mountLeaves({
-    makeWorker: ()=> new Worker(new URL('./leaves/worker.js', import.meta.url), { type:'module' }),
+    // The leaf wallet's pauses wait on the node route's hold (leaves/worker.js), same-origin.
+    makeWorker: ()=> { const w = new Worker(new URL('./leaves/worker.js', import.meta.url), { type:'module' }); if(window.SEQ_PAUSE_URL) w.postMessage({ op:'pause', args:{ url: window.SEQ_PAUSE_URL } }); return w },
     store: localStorage,
     walletTag,
     mnemonic: ()=> bip39Phrase(),
