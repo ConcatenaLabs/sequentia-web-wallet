@@ -78,6 +78,9 @@ export async function locateFunding (rec, io, now = Date.now()) {
 // Where an order's coin rests now, read from the chain by its script: a fill spends the coin and
 // rests what is left at the same script in the fill's transaction, so a record's first outpoint
 // says nothing about the coin after a fill.
+// Only an explicit coin of the asset the order locked is the order's: the script is public, so
+// anyone can pay a coin of another asset, or a blinded one, to it, and the refund cannot take
+// those (web wallet #723).
 //   -> { coin: { txid, vout, value, confirmed } }  what rests now (the largest, if several)
 //   -> { done: true, settled }                     nothing rests: filled whole or taken back;
 //                                                  settled only once every spend is in a block
@@ -85,8 +88,10 @@ export async function locateFunding (rec, io, now = Date.now()) {
 export async function restingCoin (rec, io) {
   const id = await explorerScriptHash(lc(rec.spkHex))
   const coins = await io.get(`/scripthash/${id}/utxo`)
-  if (Array.isArray(coins) && coins.length) {
-    const c = coins.reduce((a, b) => (BigInt(b.value) > BigInt(a.value) ? b : a))
+  const own = (Array.isArray(coins) ? coins : []).filter((c) =>
+    c && c.asset && lc(c.asset) === lc(rec.pay) && c.value != null && /^\d+$/.test(String(c.value)))
+  if (own.length) {
+    const c = own.reduce((a, b) => (BigInt(b.value) > BigInt(a.value) ? b : a))
     return { coin: { txid: c.txid, vout: Number(c.vout), value: BigInt(c.value), confirmed: !!(c.status && c.status.confirmed) } }
   }
   const hist = await io.get(`/scripthash/${id}/txs`)
@@ -168,14 +173,17 @@ export async function expiryCandidates (io, height) {
 // Each candidate costs about 0.2 ms (spkMatcher): its fill leaf once per key, then one root and one
 // multiplication of the base point per lock. The search runs in passes, likeliest first: the asset
 // byte order of every order placed since that fix and median-time locks; then height locks; then
-// the older byte order. It yields to the page as it goes.
-export async function searchOrder ({ lock, candidates, makers, expiries, budgetMs = 60_000, now = () => Date.now() }) {
+// the older byte order. It yields to the page at least every SLICE_MS of work, however slow the
+// device, and stops once budgetMs has passed.
+export const SLICE_MS = 12
+export async function searchOrder ({ lock, candidates, makers, expiries, budgetMs = 60_000, now = () => Date.now(),
+  pause = () => new Promise((resolve) => setTimeout(resolve, 0)) }) {
   const spk = lc(lock.spkHex), sell = BigInt(lock.value), minLot = covenantMinLot(sell)
   const matches = spkMatcher(spk)
   const times = expiries.filter((e) => isTimeLock(e)), heights = expiries.filter((e) => !isTimeLock(e))
   const refundH = new Map()   // `${index}:${expiry}` -> leaf hash
   const refund = (m, e) => { const k = m.index + ':' + e; let h = refundH.get(k); if (!h) { h = leafHash(buildRefundLeaf(e, m.internalKey)); refundH.set(k, h) } return h }
-  const t0 = now(); let tried = 0
+  const t0 = now(); let tried = 0, sliceAt = t0
   for (const [idsInternal, locks] of [[true, times], [true, heights], [false, expiries]]) {
     if (!locks.length) continue
     for (const c of candidates) {
@@ -187,9 +195,12 @@ export async function searchOrder ({ lock, candidates, makers, expiries, budgetM
         let fillH
         try { fillH = leafHash(buildFillLeaf(ids.assetA, ids.assetB, rateNum, rateDen, minLot, m.program, 1)) } catch { continue }
         for (const expiry of locks) {
-          if (++tried % 500 === 0) {
-            await new Promise((r) => setTimeout(r, 0))   // the page stays responsive
-            if (now() - t0 > budgetMs) return { rec: null, complete: false, tried }
+          tried++
+          const t = now()
+          if (t - sliceAt >= SLICE_MS) {
+            if (t - t0 > budgetMs) return { rec: null, complete: false, tried }
+            await pause()   // the page stays responsive
+            sliceAt = now()
           }
           if (!matches(fillH, refund(m, expiry))) continue
           return { tried, complete: true, rec: {
