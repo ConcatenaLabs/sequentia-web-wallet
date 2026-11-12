@@ -181,6 +181,7 @@ try {
   // 4. Both records deleted by hand. The page lists both coins and rebuilds the orders.
   writeRecords([])
   await sync()
+  SW.askLostOrders()   // the person asks to look for an order missing from the list
   await SW.scanLostOrders(true)
   const locks = SW.lostLocks()
   ok(locks.length === 2 && locks.some((l) => l.txid === original.fundTxid && l.value === SELL) && locks.some((l) => l.txid === second.covTxid && l.value === SELL2),
@@ -214,7 +215,7 @@ try {
     const payout = makerPayout(signer, network, back.makerIndex)
     const recipe = planRefund(order, { txid: back.covTxid, vout: back.covVout, locked: BigInt(back.sellAtoms) })
     recipe.covenantAsset = back.pay; recipe.makerKeyPath = payout.path
-    return { recipe, hooks: SW.refundHooksFor() }
+    return { recipe, hooks: SW.refundHooksFor({ asset: policy, atoms: 3000n }) }
   }
   ok(Number(back.expiry) >= 500000000, `the order's lock is a median time: ${back.expiry} (${new Date(back.expiry * 1000).toISOString()})`)
   {

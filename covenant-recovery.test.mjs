@@ -11,7 +11,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates, searchOrder, amountsFromRatios, amountsInRange,
+import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates, searchOrder, restingCoin, amountsFromRatios, amountsInRange,
   FUNDING_GRACE_MS, ABSENT_RECHECK_MS } from './covenant-recovery.js'
 import { planPlaceOrder } from './covenant-order.js'
 import { computeRate, covenantMinLot, covenantDerivationIds, orderExpiryTime } from './covenant-flow.js'
@@ -165,7 +165,18 @@ test('the wallet lists what it paid to a taproot script it holds no record of, a
   const io = { get: async (p) => txs[p] ?? (p.includes('/outspend/') ? { spent: false } : null), ownSpends: async () => ['t1', 't2', 't3', 't4'].map((txid) => ({ txid })) }
   const locks = await findUnrecordedLocks(io, { known: new Set([p2tr('04')]), checked: { has: (t) => seen.has(t), add: (t) => seen.add(t) } })
   assert.deepEqual(locks.map((l) => [l.txid, l.vout, l.value, l.height]), [['t1', 0, 5n, 10]])
-  assert.deepEqual([...seen].sort(), ['t2', 't3', 't4'], 'a transaction with nothing left is not read again')
+  assert.deepEqual([...seen].sort(), ['t4'], 'only a transaction with no taproot output is never read again')
+  // The record that explained t3's output goes: the next look lists it (RV45 P1).
+  const again = await findUnrecordedLocks(io, { known: new Set(), checked: { has: (t) => seen.has(t), add: (t) => seen.add(t) } })
+  assert.ok(again.some((l) => l.txid === 't3'), 'an output whose record went missing is listed by the next look')
+  // t2's spend was only in the mempool and is dropped: listed again (RV45 P1b).
+  delete txs['/tx/t2/outspend/0']
+  const third = await findUnrecordedLocks(io, { checked: { has: (t) => seen.has(t), add: (t) => seen.add(t) } })
+  assert.ok(third.some((l) => l.txid === 't2'), 'a coin whose spend left the mempool is listed again')
+  // Outputs the wallet derives itself are never listed and never keep a transaction from being settled.
+  const seen2 = new Set()
+  const own = await findUnrecordedLocks({ get: io.get, ownSpends: async () => [{ txid: 't1' }] }, { stable: new Set([p2tr('01')]), checked: { has: (t) => seen2.has(t), add: (t) => seen2.add(t) } })
+  assert.equal(own.length, 0); assert.ok(seen2.has('t1'))
 })
 
 test('what the person asked for, in atoms', () => {
@@ -204,4 +215,19 @@ test('the search stops at its budget and says it did not finish', async () => {
   const res = await searchOrder({ lock, candidates: Array.from({ length: 4000 }, (_, i) => ({ asset: B, recv: BigInt(1000 + i) })),
     makers: makerKeys(2), expiries: [1794465001, 1794465002], budgetMs: 10, now: () => (t += 1) })
   assert.equal(res.rec, null); assert.equal(res.complete, false)
+})
+
+test('an order\'s coin is followed through its fills by its script (RV45 P2, P3)', async () => {
+  const at = (utxo, txs) => ({ get: async (p) => (p.endsWith('/utxo') ? utxo : p.endsWith('/txs') ? txs : null) })
+  const rec = { spkHex: REC.script }
+  // After a part fill what is left rests at the same script in the fill's transaction.
+  const part = await restingCoin(rec, at([{ txid: 'f1'.repeat(32), vout: 1, value: 500, status: { confirmed: true } }], []))
+  assert.deepEqual(part, { coin: { txid: 'f1'.repeat(32), vout: 1, value: 500n, confirmed: true } })
+  // Filled whole: nothing rests; settled only once the spend is in a block.
+  assert.deepEqual(await restingCoin(rec, at([], [{ status: { confirmed: true } }, { status: { confirmed: true } }])), { done: true, settled: true })
+  assert.deepEqual(await restingCoin(rec, at([], [{ status: { confirmed: true } }, { status: { confirmed: false } }])), { done: true, settled: false })
+  // A fill reorganized out: the coin rests again where it was.
+  const back = await restingCoin(rec, at([{ txid: 'a0'.repeat(32), vout: 0, value: 1000, status: { confirmed: true } }], []))
+  assert.equal(back.coin.value, 1000n)
+  await assert.rejects(() => restingCoin(rec, { get: async () => { throw new Error('explorer 502') } }))
 })

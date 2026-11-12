@@ -75,6 +75,26 @@ export async function locateFunding (rec, io, now = Date.now()) {
   return { absent: true }
 }
 
+// Where an order's coin rests now, read from the chain by its script: a fill spends the coin and
+// rests what is left at the same script in the fill's transaction, so a record's first outpoint
+// says nothing about the coin after a fill.
+//   -> { coin: { txid, vout, value, confirmed } }  what rests now (the largest, if several)
+//   -> { done: true, settled }                     nothing rests: filled whole or taken back;
+//                                                  settled only once every spend is in a block
+//   -> { none: true }                              the script has no history at all
+export async function restingCoin (rec, io) {
+  const id = await explorerScriptHash(lc(rec.spkHex))
+  const coins = await io.get(`/scripthash/${id}/utxo`)
+  if (Array.isArray(coins) && coins.length) {
+    const c = coins.reduce((a, b) => (BigInt(b.value) > BigInt(a.value) ? b : a))
+    return { coin: { txid: c.txid, vout: Number(c.vout), value: BigInt(c.value), confirmed: !!(c.status && c.status.confirmed) } }
+  }
+  const hist = await io.get(`/scripthash/${id}/txs`)
+  const txs = Array.isArray(hist) ? hist : []
+  if (!txs.length) return { none: true }
+  return { done: true, settled: txs.every((t) => t.status && t.status.confirmed) }
+}
+
 // What the page does with a record after locateFunding: fill in its outpoint, note a first
 // absence, or say it is to be archived (absent again at least ABSENT_RECHECK_MS later).
 //   -> 'found' | 'noted' | 'archive' | 'wait'
@@ -92,9 +112,12 @@ export function applyLocate (rec, res, now = Date.now()) {
 
 // The outputs this wallet paid to a taproot script it holds no record of, still unspent.
 //   io.ownSpends() -> [{ txid }]   the wallet's transactions that spent its coins
-//   known          Set of script hex the wallet accounts for (its own, its records', its payouts)
-//   checked        optional { has(txid), add(txid) }: transactions already read with nothing left
-export async function findUnrecordedLocks (io, { known, checked } = {}) {
+//   known          Set of script hex the wallet's records account for now (not listed, but a
+//                  transaction paying one is read again next time: the record may go)
+//   stable         Set of script hex the wallet derives itself (its addresses, its order payouts)
+//   checked        optional { has(txid), add(txid) }: transactions with no taproot output but
+//                  ones in `stable`, which can never need listing; nothing else is remembered
+export async function findUnrecordedLocks (io, { known, stable, checked } = {}) {
   const out = []
   for (const { txid } of await io.ownSpends()) {
     if (checked && checked.has(txid)) continue
@@ -104,15 +127,16 @@ export async function findUnrecordedLocks (io, { known, checked } = {}) {
     for (let n = 0; n < (tx.vout || []).length; n++) {
       const o = tx.vout[n], spk = lc(o.scriptpubkey)
       if (!/^5120[0-9a-f]{64}$/.test(spk) || o.value == null || !o.asset) continue
+      if (stable && stable.has(spk)) continue
+      open++
       if (known && known.has(spk)) continue
       const sp = await io.get(`/tx/${txid}/outspend/${n}`)
-      if (sp && sp.spent) continue
-      open++
+      if (sp && sp.spent) continue   // spent now (a block or the mempool); read again next time
       out.push({ txid, vout: n, spkHex: spk, asset: lc(o.asset), value: BigInt(o.value),
         height: tx.status && tx.status.confirmed ? Number(tx.status.block_height) : null,
         time: tx.status && tx.status.block_time ? Number(tx.status.block_time) : null })
     }
-    if (!open && checked && tx.status && tx.status.confirmed) checked.add(txid)
+    if (!open && checked) checked.add(txid)
   }
   return out
 }

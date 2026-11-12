@@ -37,7 +37,7 @@ import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
 // match as the taker. Everything routes through these; no crypto is hand-rolled here.
 import { planPlaceOrder, buildCovenantTerms, settleFill as covSettleFill, planRefund as covPlanRefund, cancel as covCancel } from './covenant-order.js';
-import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, searchOrder, recvCandidates, amountsFromRatios, amountsInRange } from './covenant-recovery.js';
+import { locateFunding, applyLocate, findUnrecordedLocks, restingCoin, expiryCandidates, searchOrder, recvCandidates, amountsFromRatios, amountsInRange } from './covenant-recovery.js';
 import { verifyAgainstSPK as covVerifyAgainstSPK } from './covenant.js';
 import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
 import { computeRate, orderExpiry, orderExpiryTime, lockState, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits, DEFAULT_ORDER_BLOCKS, covenantMinLot, revHex, covenantDerivationIds } from './covenant-flow.js';
@@ -7166,7 +7166,8 @@ function fillHooksFor(matched){
   // CovenantTerms carry INTERNAL-order ids; the fee/wallet domain (feeRateFor, coin selection,
   // wasm AssetId) speaks DISPLAY hex — flip at the boundary.
   const assetB = revHex(String(ct.asset_b || ct.assetB || '').toLowerCase());
-  const feeAsset = assetB || C.POLICY_HEX;
+  if (!assetB) throw new Error('This order names no asset to pay for it.');
+  const feeAsset = assetB;   // the fill's fee is paid in what the taker pays with, never a fallback asset
   return makeCovenantHooks({
     wasm: C.wasm, wollet: C.wollet, network: C.network, mnemonic: C.mnemonic,
     esploraFetch: C.esploraFetch, noteOwnTx: C.noteOwnTx,
@@ -7222,13 +7223,29 @@ function orderFromPlaced(rec){
 // The maker REFUND hooks: reclaim an expired covenant's locked asset A. The fee is
 // paid in the policy asset (universally accepted) from the wallet's own coins; the
 // covenant asset A is never the fee asset here, so the reclaimed A is returned whole.
-function refundHooksFor(){
-  const feeAsset = C.POLICY_HEX;
+// The fee of taking an order's coins back, paid as every other transaction of the page pays it:
+// in the asset the person chose for fees when the wallet holds enough of it, else in the locked
+// asset itself out of the coins coming back when the network accepts it for fees, else in any
+// accepted asset the wallet holds enough of. Never silently in one privileged asset.
+//   -> { asset, atoms }; throws, in words, when no asset can pay it
+function refundFee(lockedAsset, locked){
+  const bal = C.balObj() || {};
+  const can = (h) => { if (!h || !acceptedFee(h)) return null; const atoms = covFeeAtoms(h);
+    if (h === lockedAsset) return BigInt(locked) > atoms ? atoms : null;
+    return big(bal[h] || 0) >= atoms ? atoms : null; };
+  for (const h of [S.feeAsset, lockedAsset, ...feeAssetOptions().map(o => o.hex)]){
+    const atoms = can(h); if (atoms != null) return { asset: h, atoms };
+  }
+  throw new Error(`No asset this wallet holds can pay the network fee for taking ${lockedAsset ? 'back these ' + C.assetMeta(lockedAsset).ticker : 'the coins back'}: receive a little of an asset the network accepts for fees, then try again.`);
+}
+function refundHooksFor(fee){
+  fee = fee || refundFee(null, 0n);
   return makeCovenantHooks({
     wasm: C.wasm, wollet: C.wollet, network: C.network, mnemonic: C.mnemonic,
     esploraFetch: C.esploraFetch, noteOwnTx: C.noteOwnTx,
     receiveAddress: covReceiveAddr,   // transparent by default (#6); blinded only if the user opted in
-    fee: { asset: feeAsset, atoms: covFeeAtoms(feeAsset) },
+    tickerOf: (h) => C.assetMeta(h).ticker,
+    fee: { asset: fee.asset, atoms: fee.atoms },
     onStatus: (m) => { try { C.toast && C.toast(m); } catch {} },
   });
 }
@@ -10439,25 +10456,28 @@ async function renderMyOrders(){
   // lists (its offer TTL is far shorter than the ~24h on-chain lock) but whose locked asset is
   // still reclaimable via the CLTV refund. Without these the reclaim UI vanished with the relay
   // listing and the funds became unreachable through the wallet.
+  await followPlacedCoins();   // each record's coin as it rests now: fills move it, a whole fill ends the order
   const localReclaim = PLACED.filter(r => r.covTxid != null && !relayIds.has(r.offerId) && !r._orphan);
   const tipNow = localReclaim.length ? await covTipNow() : { height: 0, medianTime: 0 };
   const localRows = localReclaim.map(r => {
     const give = C.assetMeta(r.pay);
+    const rest = BigInt(r.restAtoms || r.sellAtoms);
     // Before its lock opens the covenant has no way back but a fill: say until when, and how long
     // that is, instead of a Reclaim that answers with a toast and does nothing.
     const ls = lockState(r.expiry, tipNow);
     const locked = ls.known && !ls.open;
     if (!r.posted && locked) return `<div class="swbook-row myorder">
-      <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · funded on-chain, not listed yet</span>
+      <span class="mono">give ${esc(C.fmtAtoms(rest, give.precision))} ${esc(give.ticker)} · funded on-chain, not listed yet</span>
       <button type="button" class="ghost swrepost" data-id="${esc(r.offerId)}">List it</button></div>`;
     return `<div class="swbook-row myorder">
-      <span class="mono">give ${esc(C.fmtAtoms(BigInt(r.sellAtoms), give.precision))} ${esc(give.ticker)} · delisted · ${locked
+      <span class="mono">give ${esc(C.fmtAtoms(rest, give.precision))} ${esc(give.ticker)}${rest < BigInt(r.sellAtoms) ? ' (the rest was filled)' : ''} · delisted · ${locked
         ? `locked on-chain until ${esc(ls.until)}, ${esc(lockLeftText(ls))} from now`
         : 'its lock has expired: reclaim it'}</span>
       <button type="button" class="ghost swcancel" data-id="${esc(r.offerId)}"${locked ? ' disabled title="The covenant returns the coins only once its lock has passed."' : ''}>${locked ? 'Reclaim later' : 'Reclaim'}</button></div>`;
   }).join('');
   scanLostOrders().catch(() => {});   // an order whose record is gone (#708): at most every ten minutes
-  const lostRows = lostRowsHtml();
+  const lostRows = devModeNow() ? lostRowsHtml() + (_lostAsked ? (_lostLocks.length ? '' : `<div class="swbook-row myorder"><span class="mono">${_lostScanning ? 'Looking…' : 'This wallet paid nothing to a script it holds no order for.'}</span></div>`)
+    : `<div class="swbook-row myorder"><span class="sub">An order of yours missing from this list?</span><button type="button" class="ghost swlookfor">Look for it</button></div>`) : '';
   if (!orders.length && !localRows && !lostRows){ host.innerHTML = credits; return; }
   const rows = orders.map(o => {
     const give = C.assetMeta(o.offer_asset||o.offerAsset), want = C.assetMeta(o.want_asset||o.wantAsset);
@@ -10512,34 +10532,27 @@ async function renderMyOrders(){
       // REFUND leaf: once its lock has passed broadcast the reclaim; before that
       // delist + tell the maker when the funds become reclaimable. A non-covenant
       // (no local funded record) just delists on the relay.
-      if (rec && rec.covTxid != null){
-        const { order } = orderFromPlaced(rec);
-        const payout = makerPayout(C.signer, C.network, rec.makerIndex);
-        const recipe = covPlanRefund(order, { txid: rec.covTxid, vout: rec.covVout, locked: BigInt(rec.sellAtoms) });
-        // planRefund copies order.assetA into covenantAsset — INTERNAL byte order for a new
-        // (idsInternal) record. The refund host seam (wasm AssetId::from_str + fee-vs-covenant
-        // asset comparison) speaks DISPLAY hex, and rec.pay is display in BOTH generations, so
-        // hand it the display id explicitly. (Legacy records: order.assetA == rec.pay, a no-op.)
-        recipe.covenantAsset = rec.pay;
-        recipe.makerKeyPath = payout.path;   // m/86'/coin'/0'/0/index — the leaf's key
-        const out = await covCancel(id, { recipe, tipHeight: tipNow.height, tipTime: tipNow.medianTime, expiryLocktime: Number(rec.expiry) },
-          { relayCancel: async (offerId) => seqob.signAndCancel(offerId, makerPriv()), ...refundHooksFor() });
-        if (out.refundTxid){
+      if (rec && rec.covTxid != null && lockState(rec.expiry, tipNow).open){
+        const out = await reclaimPlaced(rec, tipNow, (fee) => confirmReclaim(rec, fee));
+        if (out.cancelled){ b.disabled = false; b.textContent = 'Reclaim'; return; }
+        if (out.done) C.toast('This order was filled: nothing is left in it to take back.');
+        else if (out.refundTxid){
           C.toast('Order cancelled · reclaimed on-chain (' + String(out.refundTxid).slice(0,12) + '…).');
           // SBTC silent peg: the reclaimed asset is SBTC, but the maker paid BTC and expects BTC back.
           // Redeem it (best-effort; on failure the user simply holds redeemable SBTC — fund-safe).
-          if (rec.pegged){ try { await C.sync(); await pegOutReceivedSbtc(BigInt(rec.sellAtoms)); } catch { recordPendingPegOut(BigInt(rec.sellAtoms)); } }
-        } else if (out.reclaimable){
-          const meta = C.assetMeta(rec.pay);
-          C.toast('Order delisted. The locked ' + esc(meta.ticker) + ' is reclaimable on-chain after ' + lockState(rec.expiry, tipNow).until + '.');
+          if (rec.pegged){ try { await C.sync(); await pegOutReceivedSbtc(BigInt(out.locked)); } catch { recordPendingPegOut(BigInt(out.locked)); } }
         }
+      } else if (rec && rec.covTxid != null){
+        await seqob.signAndCancel(id, makerPriv()).catch(() => {});
+        const meta = C.assetMeta(rec.pay);
+        C.toast('Order delisted. The locked ' + esc(meta.ticker) + ' is reclaimable on-chain after ' + lockState(rec.expiry, tipNow).until + '.');
       } else {
         await seqob.signAndCancel(id, makerPriv());
       }
       // Drop the local record only once the funds are back (or there were none to
       // reclaim); keep it while still-locked so a later Cancel can reclaim at expiry.
       const stillLocked = rec && rec.covTxid != null && !lockState(rec.expiry, tipNow).open;
-      if (!stillLocked){
+      if (!stillLocked && !(rec && rec.covTxid != null)){
         const before = PLACED.length;
         PLACED = PLACED.filter(r => r.offerId !== id);
         if (PLACED.length !== before){ savePlaced(); ensureCovenantRelay(); }
@@ -10577,30 +10590,48 @@ function makerIndexCeiling(){
   let mx = -1; for (const r of PLACED.concat(loadArchived())) if (typeof r.makerIndex === 'number' && r.makerIndex > mx) mx = r.makerIndex;
   return Math.max(mx + 5, 39);   // a wallet whose records are all gone still looks through its first forty order keys
 }
+// Developer mode only: default mode has no resting orders of this kind and says nothing of them.
+const devModeNow = () => !C.devMode || !!C.devMode();
+let _lostAsked = false;   // the person asked to look for an order missing from the list
+// An archived record whose coin rests on the chain again (a block that spent it left the chain, or a
+// record put away too early) comes back by itself: its script says it exactly.
+async function restoreArchived(){
+  const archived = loadArchived();
+  let restored = 0;
+  for (let i = archived.length - 1; i >= 0; i--){
+    const r = archived[i];
+    if (!r.spkHex || r.archivedWhy === 'reclaimed') continue;
+    let res; try { res = await restingCoin(r, { get: explorerGet }); } catch { continue; }
+    if (!res.coin || PLACED.some(x => String(x.spkHex).toLowerCase() === String(r.spkHex).toLowerCase())) continue;
+    const rec = { ...r, covTxid: res.coin.txid, covVout: res.coin.vout, restAtoms: String(res.coin.value) };
+    delete rec._orphan; delete rec.archivedAt; delete rec.absentAt; delete rec.archivedWhy;
+    PLACED.push(rec); archived.splice(i, 1); restored++;
+  }
+  if (restored){ savePlaced(); saveArchived(archived); ensureCovenantRelay(); }
+  return restored;
+}
 async function scanLostOrders(force){
   if (_lostScanning || (!force && Date.now() - _lostScanAt < LOST_SCAN_MS)) return;
+  if (!devModeNow()){ _lostLocks = []; return; }
   _lostScanning = true;
   try {
-    const known = new Set();
-    for (const r of PLACED) if (r.spkHex) known.add(String(r.spkHex).toLowerCase());
-    for (let i = 0; i <= makerIndexCeiling(); i++){ try { known.add(String(makerPayout(C.signer, C.network, i).spkHex).toLowerCase()); } catch {} }
-    const seen = new Set(readList(LOST_CHECKED_KEY));
-    const checked = { has: (t) => seen.has(t), add: (t) => seen.add(t) };
-    const locks = await findUnrecordedLocks({ get: explorerGet, ownSpends: async () => ownSpendTxids() }, { known, checked });
-    writeList(LOST_CHECKED_KEY, [...seen], 5000);
-    const archived = loadArchived(), dismissed = new Set(readList(LOST_DISMISSED_KEY));
-    let restored = 0;
-    for (const l of locks){
-      const at = archived.findIndex(r => String(r.spkHex).toLowerCase() === l.spkHex);
-      if (at < 0) continue;
-      const rec = { ...archived[at], covTxid: l.txid, covVout: l.vout };
-      delete rec._orphan; delete rec.archivedAt; delete rec.absentAt;
-      PLACED.push(rec); archived.splice(at, 1); restored++;
+    const restored = await restoreArchived();
+    // What the wallet paid to a taproot script it holds no order for is listed only when the person
+    // asks: without its terms an order's coin looks like any payment to such a script (a deposit, a
+    // payment to someone else), and a wallet that never left an order must see nothing.
+    if (_lostAsked){
+      const known = new Set(), stable = new Set();
+      for (const r of PLACED) if (r.spkHex) known.add(String(r.spkHex).toLowerCase());
+      for (let i = 0; i <= makerIndexCeiling(); i++){ try { stable.add(String(makerPayout(C.signer, C.network, i).spkHex).toLowerCase()); } catch {} }
+      const seen = new Set(readList(LOST_CHECKED_KEY));
+      const checked = { has: (t) => seen.has(t), add: (t) => seen.add(t) };
+      const locks = await findUnrecordedLocks({ get: explorerGet, ownSpends: async () => ownSpendTxids() }, { known, stable, checked });
+      writeList(LOST_CHECKED_KEY, [...seen], 5000);
+      const dismissed = new Set(readList(LOST_DISMISSED_KEY));
+      _lostLocks = locks.filter(l => !dismissed.has(l.txid + ':' + l.vout) && !PLACED.some(r => String(r.spkHex).toLowerCase() === l.spkHex));
     }
-    if (restored){ savePlaced(); saveArchived(archived); ensureCovenantRelay(); }
-    _lostLocks = locks.filter(l => !dismissed.has(l.txid + ':' + l.vout) && !PLACED.some(r => String(r.spkHex).toLowerCase() === l.spkHex));
     _lostScanAt = Date.now();
-    if (restored || _lostLocks.length) renderMyOrders();
+    if (restored || _lostAsked) renderMyOrders();
   } catch { /* a read failed: the next open looks again */ }
   finally { _lostScanning = false; }
 }
@@ -10614,6 +10645,7 @@ function lostRowsHtml(){
   }).join('');
 }
 function wireLostRows(host){
+  host.querySelectorAll('.swlookfor').forEach(b => b.onclick = () => { _lostAsked = true; b.disabled = true; scanLostOrders(true).then(() => renderMyOrders()).catch(() => {}); });
   host.querySelectorAll('.swnotorder').forEach(b => b.onclick = () => {
     writeList(LOST_DISMISSED_KEY, readList(LOST_DISMISSED_KEY).concat([b.dataset.op]), 500);
     _lostLocks = _lostLocks.filter(l => (l.txid + ':' + l.vout) !== b.dataset.op);
@@ -10714,6 +10746,85 @@ function takeBackLostOrder(l){
 }
 
 // ---------------------------------------------------------------------------
+// A resting order's coin, followed through its fills (web wallet #714 review). A fill spends the
+// coin and rests what is left at the same script in the fill's transaction; the record follows it,
+// read from the chain by the script, never assumed. An order filled whole, or taken back, with
+// every spend in a block, is archived (never deleted: a block taken out of the chain brings the coin
+// back, and the next look restores the record).
+// ---------------------------------------------------------------------------
+const _followedAt = new Map();
+async function followPlaced(rec){
+  const res = await restingCoin(rec, { get: explorerGet });
+  if (res.coin){
+    rec.covTxid = res.coin.txid; rec.covVout = res.coin.vout; rec.restAtoms = String(res.coin.value);
+    return 'resting';
+  }
+  if (res.done) return res.settled ? 'done' : 'spending';
+  return 'unknown';
+}
+function archivePlaced(rec, why){
+  saveArchived(loadArchived().concat([{ ...rec, archivedAt: Date.now(), archivedWhy: why }]));
+  PLACED = PLACED.filter(r => r !== rec); savePlaced();
+}
+async function followPlacedCoins(){
+  let changed = false;
+  for (const rec of PLACED.slice()){
+    if (rec.covTxid == null || rec._orphan) continue;
+    if (Date.now() - (_followedAt.get(rec.offerId) || 0) < 60_000) continue;
+    _followedAt.set(rec.offerId, Date.now());
+    let st; try { st = await followPlaced(rec); } catch { continue; }
+    if (st === 'resting') changed = true;
+    if (st === 'done'){ archivePlaced(rec, 'done'); changed = true; }
+  }
+  if (changed) savePlaced();
+}
+// Take back what rests of `rec` now. `confirm(fee)` shows the fee ({ asset, atoms, locked }) and
+// resolves true to go ahead. A fill that takes the coin first is followed: the refund is built again
+// for what is left, or the order reads as filled.
+//   -> { refundTxid, locked } | { done: true } | { cancelled: true }
+async function reclaimPlaced(rec, tipNow, confirm){
+  for (let attempt = 0; attempt < 2; attempt++){
+    const st = await followPlaced(rec); savePlaced();
+    if (st === 'done' || st === 'spending'){ if (st === 'done') archivePlaced(rec, 'done'); return { done: true }; }
+    if (st !== 'resting') throw new Error('The order\'s coins could not be read just now. Try again in a minute.');
+    const locked = BigInt(rec.restAtoms);
+    const fee = refundFee(rec.pay, locked);
+    if (attempt === 0 && confirm && !(await confirm({ ...fee, locked }))) return { cancelled: true };
+    const { order } = orderFromPlaced(rec);
+    const payout = makerPayout(C.signer, C.network, rec.makerIndex);
+    const recipe = covPlanRefund(order, { txid: rec.covTxid, vout: rec.covVout, locked });
+    // planRefund copies order.assetA into covenantAsset — INTERNAL byte order for a new
+    // (idsInternal) record. The refund host seam speaks DISPLAY hex, and rec.pay is display in BOTH
+    // generations, so hand it the display id explicitly.
+    recipe.covenantAsset = rec.pay;
+    recipe.makerKeyPath = payout.path;   // m/86'/coin'/0'/0/index — the leaf's key
+    try {
+      const out = await covCancel(rec.offerId, { recipe, tipHeight: tipNow.height, tipTime: tipNow.medianTime, expiryLocktime: Number(rec.expiry) },
+        { relayCancel: async (offerId) => seqob.signAndCancel(offerId, makerPriv()), ...refundHooksFor(fee) });
+      if (out.refundTxid){ archivePlaced(rec, 'reclaimed'); return { refundTxid: out.refundTxid, locked }; }
+      return out;
+    } catch (e){
+      if (attempt === 0 && /missingorspent|missing-inputs|txn-mempool-conflict/.test(String(e && e.message || e))) continue;   // filled meanwhile: look again
+      throw e;
+    }
+  }
+  return { done: true };
+}
+function confirmReclaim(rec, fee){
+  return new Promise((resolve) => {
+    const give = C.assetMeta(rec.pay), fm = C.assetMeta(fee.asset);
+    const back = fee.asset === rec.pay ? fee.locked - fee.atoms : fee.locked;
+    const { m, ok } = C.modalRows({ title: 'Take back ' + C.fmtAtoms(back, give.precision) + ' ' + give.ticker, kv: [
+      ['You get back', C.fmtAtoms(back, give.precision) + ' ' + give.ticker],
+      ['Network fee', C.fmtAtoms(fee.atoms, fm.precision) + ' ' + fm.ticker + (fee.asset === rec.pay ? ', out of the coins coming back' : '')],
+    ] });
+    const cancel = m.querySelector('button.ghost');
+    if (cancel) cancel.addEventListener('click', () => resolve(false));
+    ok.onclick = () => { m.remove(); resolve(true); };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // PSET bip32 / global-xpub stripper.  (UNCHANGED - verified byte-exact.)
 // ---------------------------------------------------------------------------
 function b64ToBytes(b64){
@@ -10782,7 +10893,7 @@ function stripBip32(b64){
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
 export const __test__ = {
   // #708: a resting order's record and the way back for one whose record is gone.
-  reconcileUnfundedPlaced, scanLostOrders, recoverLostOrder, autoRecoverLostOrder, orderFromPlaced, refundHooksFor, placeCovenant,
+  askLostOrders: () => { _lostAsked = true; }, reconcileUnfundedPlaced, scanLostOrders, recoverLostOrder, autoRecoverLostOrder, reclaimPlaced, followPlacedCoins, refundFee, orderFromPlaced, refundHooksFor, placeCovenant,
   lostLocks: () => _lostLocks, placed: () => PLACED, loadPlaced, archived: () => loadArchived(),
   crossableDepthAtoms, ratioRecvPerPay, stripBip32, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,
