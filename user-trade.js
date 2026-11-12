@@ -466,6 +466,9 @@ export function spendableFrom (coins, plans, { waiting = false } = {}) {
   for (const c of coins || []) {
     // A resting order's coin is the order the person placed: a fill or a cancel spends it, no trade.
     if (!c || planned.has(c.leaf_id) || c.order === true) continue
+    // Held out as spent elsewhere (another device of the wallet gave it to a round): the wallet's,
+    // and not spendable now, until the library's hold ends (its coin_places says the same).
+    if (c.spent_elsewhere_until != null) continue
     if (c.state !== 'live' && !(waiting && c.state === 'given' && c.refresh_waiting)) continue
     out.set(c.asset, (out.get(c.asset) || 0n) + big(c.value))
   }
