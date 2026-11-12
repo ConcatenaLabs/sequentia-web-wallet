@@ -275,7 +275,8 @@ async function main () {
     await page.waitFor("document.querySelector('#ucPay') && document.querySelector('#userComposer').offsetParent !== null", 120000)
     const words = forbiddenIn(await page.eval("document.querySelector('section[data-panel=\"swap\"]').innerText"))
     check('the Trade tab is three inputs and a button, none of the words', !words.length, words)
-    const pick = async (id, tk) => { if (!(await page.eval(pickExpr(id, tk)))) throw new Error('no ' + tk + ' in #' + id) }
+    // An asset the wallet holds is listed once its balances are read: picked as soon as it is, up to a minute.
+    const pick = async (id, tk) => { const t = Date.now(); while (!(await page.eval(pickExpr(id, tk)))) { if (Date.now() - t > 60000) throw new Error('no ' + tk + ' in #' + id); await sleep(1000) } if (Date.now() - t > 1500) note(`${tk} listed in #${id} ${secs(Date.now() - t)} after the tab opened`) }
     await pick('ucPay', pay); await sleep(500); await pick('ucGet', get)
     await page.eval(`(()=>{ const i=document.querySelector('#ucAmount'); i.value=${JSON.stringify(amount)}; i.dispatchEvent(new Event('input')); return true })()`)
     const tQ = Date.now()
