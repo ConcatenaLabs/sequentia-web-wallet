@@ -7609,6 +7609,7 @@ function initSwapTab(){
     // Transaction rides along for the covenant fill host's post-broadcast applyTransaction —
     // it guarded on ctx.wasm.Transaction, which was missing here, so that apply silently never ran.
     devMode,   // the Swap tab looks for an order missing from its list only in developer mode
+    keyRoot: () => btcRoot,   // the wallet's key tree: its resting orders' notes are sealed to a key of it (order-note.js)
     // buildCovenantRefundTx is what Reclaim builds a resting order's refund with (covenant-fill-host.js).
     wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction, scriptToAddress, buildCovenantFillTx, buildCovenantRefundTx, buildSeqHtlcRedeemScript, generateSwapSecret },
     noteOwnTx,   // spend-tracking ring: own broadcasts survive a stale scan Update (see reapplyOwnTxs)

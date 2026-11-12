@@ -224,6 +224,12 @@ identities derive from the wallet phrase in `seqln-keys.js`:
 | `m/1017'/1'/0'` | asset-node signing seed (determines that node's LN identity) |
 | `m/1017'/1'/1'` | btc-node signing seed |
 
+The same private range holds two keys of other uses: the payment name's key (`lnaddr.js`,
+`m/1017'/16'/0'`) and the key of a resting order's note (`order-note.js`): HKDF-SHA256 of the
+private key at `m/1017'/9'/0'`, empty salt, info `sequentia/resting-order-note/v1`, 32 bytes, used
+for AES-256-CTR. A wallet that writes or reads these notes derives it the same way;
+`order-note.test.mjs` holds a vector.
+
 The trade rail calls the LSP HTTP API (`GET /status`, `POST /swap`); the LSP drives its
 `seqob-cli` against the order book while the device signs each commitment update. Pure-LN
 swaps settle both legs on one preimage and are the only settlement labelled final; mixed
@@ -264,6 +270,8 @@ the coordinator's transaction pays what was promised. Signing the wallet's own i
 | `swk.sequentia.xmaker` | in-flight cross-chain maker sessions |
 | `swk.sequentia.submarine`, `swk.sequentia.subswap(s)`, `swk.subasset.*` | in-flight mixed-rail and sub-asset swap state |
 | `swk.sequentia.pegpending` / `swk.sequentia.pegoutpending`, `swk.sequentia.bridge` | pending SBTC peg-ins / peg-outs and leg-bridge jobs |
+| `seqobCovenantOrders.v1`, `seqobCovenantOrders.archived.v1` | resting covenant orders: the records (persisted before the funding is broadcast) and the ones put away, never deleted |
+| `seqobCovenantScan.v1`, `seqobCovenantNoteScan.v1` | the wallet's own transactions already read for an order without a record, and for a note |
 | `swk.sequentia.walk` | an in-flight Market fill that walks several resting offers |
 | `swk.sequentia.oampTransfers`, `swk.sequentia.signerHints` | OpenAMP transfer log; pool signer keys this browser has delegated to |
 | `swk.dex.*`, `swk.cj.*`, `swk.rescue.*`, `swk.seqln.chstore.*` | DEX order records, CoinJoin history, rescue records, channel store |

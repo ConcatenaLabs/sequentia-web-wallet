@@ -336,6 +336,11 @@ Match them; do not invent a new pattern.
   takes to get its coins back. It is put away only when two different reads agree the coins never
   left (the script's index and the transaction by its id, or the wallet's own history), twice, ten
   minutes apart, and then it is archived, never deleted (`covenant-recovery.js`).
+- **What a restore needs is on the chain.** A resting order's terms also ride in its funding as a
+  note sealed to the phrase's own key (`order-note.js`). A note is never trusted: an order is
+  rebuilt only when the note's terms derive the covenant's very script. The note's format and key
+  derivation are shared with any other wallet that reads them; change them only with a new version
+  number in its flags byte, and keep reading the old one.
 - **The explorer is asked by a script's hash through `explorerScriptHash`** (`explorer-script-hash.js`):
   the SHA-256 of the script as computed. Electrum's reversed form is answered with an empty list here,
   which reads as "nothing there".
