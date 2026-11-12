@@ -88,7 +88,7 @@ function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
     return {}
   }
   const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
-  return { lib, fetchJson, store, calls, posts, swaps, coins }
+  return { lib, fetchJson, store, calls, posts, swaps, coins, markRefused: () => { refusedOnce = true } }
 }
 
 const admitted = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
@@ -144,4 +144,25 @@ test('a maker whose offers are gone again and again: the trade comes back with w
   assert.equal(r.gave.length, 3)
   assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 0, 'nothing traded')
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the last offer made in place of a gone one is let go of')
+})
+
+test('a maker that answers done after the wait: the trade settles, its coins never taken back', async () => {
+  const s = standIn({ again: 'same' })
+  let t = 1_000_000
+  // The maker is away at the confirmation (no answer), and completes later, after the two minutes.
+  const real = s.fetchJson
+  let away = true
+  const eng2 = createEngine({ leaves: s.lib, fetchJson: async (u, i) => { if (away && u.endsWith('/v1/accept')) throw new Error('fetch failed'); return real(u, i) },
+    makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q2 = await eng2.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const rec = await eng2.confirm(q2.choice, q2.ticket)
+  assert.equal(rec.state, 'sent')
+  t += 130_000
+  away = false
+  // The stand-in completes an acceptance on its second hand-over only when it refused the first:
+  // mark it refused-once already so this hand-over completes, answering done.
+  s.markRefused()
+  const r = await eng2.advance(eng2.records().find((x) => x.id === rec.id))
+  assert.ok(!s.calls.includes('swap_cancel'), 'no cancel after a done answer')
+  assert.equal(r.state, 'settled', JSON.stringify(r))
 })

@@ -1361,8 +1361,10 @@ export function createEngine (deps) {
         const a = await run('swap_accept', { offer: choice.offer.offer, shown: choice.terms })
         rec.accept = a.accept; rec.state = 'sent'; rec.sentAt = now()
         put(rec)
-        try { await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) }) }
-        catch (e) {
+        try {
+          const a = await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) })
+          if (a && a.state === 'done') rec.makerDone = true
+        } catch (e) {
           log('[user trade] the maker did not take the acceptance yet:', e.message)
           // The operator refused the maker's completion: the offer is gone, and the next advance
           // re-prices at once (advanceGone).
@@ -1774,8 +1776,23 @@ export function createEngine (deps) {
       // and after the wait take the coins back. An answer that the offer is gone (the operator
       // refused the maker's completion) cannot change: the trade is priced again at once.
       if (rec.gone) return advanceGone(rec)
-      try { await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) }) }
-      catch (e) { if (e.body && e.body.gone) { rec.gone = e.body; return advanceGone(rec) } }
+      // A maker that says the swap is done completed it: what it pays the wallet is read from the
+      // mailbox now, and the coins signed into it are never taken back (a cancel then would say
+      // "Returned" of a trade that went through), however long the maker was away.
+      if (!rec.makerDone) {
+        try {
+          const a = await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) })
+          if (a && a.state === 'done') rec.makerDone = true
+        } catch (e) { if (e.body && e.body.gone) { rec.gone = e.body; return advanceGone(rec) } }
+      }
+      if (rec.makerDone) {
+        try { await run('mailbox') } catch (e) { log('[user trade] mailbox:', e && e.message) }
+        const s2 = ((await run('swaps')) || []).find((x) => x.swap === rec.swap)
+        rec.swapState = s2 && s2.state
+        if (!s2 || s2.state !== 'done') return put(rec)
+        if ((await settleStep(rec)) === 'settled') { rec.state = 'settled'; rec.settledAt = now() }
+        return put(rec)
+      }
       if (now() - (rec.sentAt || 0) > MAKER_COMPLETE_MS) {
         try {
           const held = ((await run('coins')) || []).filter((c) => c.state === 'offered')
