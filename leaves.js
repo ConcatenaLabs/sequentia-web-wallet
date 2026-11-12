@@ -115,6 +115,15 @@ export const RESTORE_RETRY_MS = 30_000
 // history should: the page says so, and a payment waiting for it stops waiting.
 export const RESTORE_SLOW_MS = 120_000
 export const RESTORE_LONG_MS = 1_800_000
+// A restore's history, after the wallet opens: each slice the page asks of the library runs
+// about HISTORY_SLICE_MS (past it only by the coin it was checking), the next comes
+// HISTORY_GAP_MS after, so an ask arriving between two goes first; while the wallet is busy the
+// page looks again after HISTORY_BUSY_MS, and after a slice that could check nothing (its coins
+// wait for the chain) after HISTORY_IDLE_MS.
+export const HISTORY_SLICE_MS = 500
+export const HISTORY_GAP_MS = 250
+export const HISTORY_BUSY_MS = 2_000
+export const HISTORY_IDLE_MS = 60_000
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 export const PLACES_KEY = 'swk.leaves.places'        // + '.' + tag: the library's last coin_places, with that balance
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
@@ -936,6 +945,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     }
     S.balance = b
     S.places = pl
+    historySoon()
     try { ctx.store.setItem(tagged(BALANCE_KEY, tag()), JSON.stringify(b)) } catch {}
     try { ctx.store.setItem(tagged(PLACES_KEY, tag()), JSON.stringify(pl)) } catch {}
     if (ctx.onChange) try { ctx.onChange() } catch {}
@@ -1660,6 +1670,42 @@ export function mountLeaves (ctx, root, settingsRoot) {
     S.nextAsk = now() + wait
     S.timer = setTimeout(autoSync, wait)
     render()
+  }
+
+  // ---- a restore's history: a slice at a time, while nobody asks ----
+  // A wallet restored from its phrase checks the coins its history gave up after it opens
+  // (the balance's `history`: loading, and how many are left). The library takes them in
+  // slices of about HISTORY_SLICE_MS (`restore_history {budget_ms}`); the page runs one
+  // whenever nobody is asking the wallet for anything, one after the other with a short gap,
+  // so what a person asks (a receive code, a trade's price) waits for one slice at most,
+  // never for the whole history. A slice that checks nothing (its coins wait for the chain)
+  // is tried again after HISTORY_IDLE_MS.
+  function historySoon (ms = 0) {
+    if (S.stopped || S.historyTimer || S.noSlices) return
+    const h = S.balance && S.balance.history
+    if (!(h && h.loading)) return
+    S.historyTimer = setTimeout(historySlice, ms)
+    if (S.historyTimer && typeof S.historyTimer.unref === 'function') S.historyTimer.unref()
+  }
+  async function historySlice () {
+    S.historyTimer = null
+    if (!S.open || S.stopped) return
+    if (S.busy || S.asked || reviewing()) { historySoon(S.asked ? HISTORY_GAP_MS : HISTORY_BUSY_MS); return }
+    S.busy = true
+    let v = null
+    try { v = await run('restore_history', { budget_ms: HISTORY_SLICE_MS }) } catch (e) {
+      log('[leaves] history slice: ' + ((e && e.message) || e))
+    } finally { S.busy = false }
+    if (!v) { historySoon(HISTORY_IDLE_MS); return }
+    // A library without slices answers a whole step and no `ms`: its syncs carry the history,
+    // and the page asks no more.
+    if (v.ms === undefined && v.left !== 0) { S.noSlices = true; log('[leaves] this library takes no slices of its history') }
+    const left = Number(v.left) || 0
+    if (S.balance) S.balance = { ...S.balance, history: left > 0 ? { ...(S.balance.history || {}), loading: true, left } : null }
+    if (left > 0) { historySoon(v.checked > 0 ? HISTORY_GAP_MS : HISTORY_IDLE_MS); render(); return }
+    // The history is whole: what it changed (coins it found spent) is read again.
+    log('[leaves] the history is whole')
+    reloadAfter(0)
   }
 
   async function autoSync () {
@@ -2492,7 +2538,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // After a restore the library checks the wallet's earlier leaves a few at each sync; what it
     // holds now is whole meanwhile (`balance.history`).
     const hist = S.balance && S.balance.history
-    if (hist && hist.loading) { const h = el('div', 'sub leaf-history-loading', `Earlier leaves still being checked after the restore: ${hist.left} left, a few at each sync. What the wallet holds now is complete.`); h.id = 'leafHistoryLoading'; c.appendChild(h) }
+    if (hist && hist.loading) { const h = el('div', 'sub leaf-history-loading', `Earlier leaves still being checked after the restore: ${hist.left} left, a few at a time while the wallet is idle. What the wallet holds now is complete.`); h.id = 'leafHistoryLoading'; c.appendChild(h) }
     if (!held.length) c.appendChild(el('div', 'muted', 'No leaves held.'))
     for (const co of held) c.appendChild(coinCard(co, s))
     if (S.quote) {
@@ -2915,7 +2961,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     holdReads: (ms) => { S.holdUntil = ms > 0 ? now() + ms : 0 },
     // The assets the operator serves in the tree.
     servedAssets: () => (((S.info && S.info.server_info && S.info.server_info.assets) || []).map((a) => a && a.asset).filter(Boolean)),
-    stop: () => { S.stopped = true; clearTimeout(S.chanTimer); clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer); clearTimeout(S.needTimer) },
+    stop: () => { S.stopped = true; clearTimeout(S.historyTimer); clearTimeout(S.chanTimer); clearTimeout(S.timer); clearTimeout(S.upkeepTimer); clearTimeout(S.joinTimer); clearTimeout(S.mailTimer); clearTimeout(S.refreshTimer); clearTimeout(S.needTimer) },
   }
   render()
   return api

@@ -32,6 +32,7 @@
 // from then on the library waits on the clock as before.
 
 import init, * as leaf from './pkg/leaf_wallet.js'
+import { holdThrough } from './hold.js'
 
 const { installStore, ArcaWallet, arcaWalletExists } = leaf
 
@@ -40,28 +41,11 @@ let wallet = null
 let ready = null
 let broken = null   // a wasm panic leaves the module unusable until the worker is replaced
 let chain = Promise.resolve()
-let pauseUrl = null   // the site's hold, from the page ('pause'); null: the clock
+const site = { url: null }   // the site's hold, from the page ('pause'); null: the clock
 
-// Blocks this worker for up to `ms` through the site's hold. Returns early when the hold is
-// refused, absent or broken; the library then waits out the rest on the clock.
-function hold (ms) {
-  const until = Date.now() + ms
-  for (;;) {
-    const left = Math.ceil(until - Date.now())
-    if (!pauseUrl || left <= 5) return
-    const x = new XMLHttpRequest()
-    try {
-      x.open('GET', pauseUrl + '?ms=' + left, false)
-      x.timeout = left + 5000
-      x.send()
-    } catch { return }
-    // 204: held. A 404 (no such path), or anything but a hold or a refusal for the moment,
-    // and this site has none: the clock from now on.
-    if (x.status === 204) continue
-    if (x.status !== 429 && x.status !== 502 && x.status !== 503) pauseUrl = null
-    return
-  }
-}
+// Blocks this worker for up to `ms` through the site's hold (leaves/hold.js). Returns early when
+// the hold is refused, absent or broken; the library then waits out the rest on the clock.
+const hold = (ms) => holdThrough(site, ms)
 
 function errorOf (e) {
   if (typeof e === 'string') {
@@ -101,7 +85,7 @@ async function handle (op, args) {
       if (wallet) { wallet.free(); wallet = null }
       return true
     case 'pause':
-      pauseUrl = typeof args.url === 'string' && args.url ? args.url : null
+      site.url = typeof args.url === 'string' && args.url ? args.url : null
       return true
     case 'wait':
       if (typeof leaf.pause !== 'function') throw JSON.stringify({ error: { kind: 'refused', message: 'this library has no pause' } })
