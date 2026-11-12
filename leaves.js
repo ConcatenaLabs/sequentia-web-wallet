@@ -759,12 +759,33 @@ export function exitSteps (answer) {
 
 // ---------------------------------------------------------------------------
 // The panels
-// The coins the library's rule `shape` names (`refresh_needed`, asked once the person has left the
-// wallet alone): too deep for part of them to be traded, so they go through the next round first
-// (`settle_first`).
+// The coins the library's rule `shape` names (`refresh_needed`): too deep for part of them to be
+// traded, so they go through the next round first (`settle_first`). The library names them at once
+// while the wallet keeps another coin of the asset that still trades and the operator refreshes
+// them for nothing, else only once the person has left the wallet alone.
 export function shapeCoins (needed) {
   const reasons = (needed && Array.isArray(needed.reasons)) ? needed.reasons : []
   return [...new Set(reasons.filter((r) => r && r.rule === 'shape').flatMap((r) => r.coins || []))]
+}
+// The library's `settle_first` arguments for the rule `shape`'s coins: cut into a few coins of the
+// asset when the rule says so (`spread`, so the wallet trades on from one while another is in a
+// round), and never at more than the fee bound the rule gives (`max_fee_ppm`: 0 while the person
+// uses the wallet, since nobody asked for that refresh). -> null when the rule names no coin.
+export function shapeSettleArgs (needed) {
+  const coins = shapeCoins(needed)
+  if (!coins.length) return null
+  const rules = ((needed && Array.isArray(needed.reasons)) ? needed.reasons : []).filter((r) => r && r.rule === 'shape')
+  const args = { coins }
+  if (rules.some((r) => r.spread === true)) args.spread = true
+  const bounds = rules.map((r) => r.max_fee_ppm).filter((f) => f != null && Number.isFinite(Number(f))).map(Number)
+  if (bounds.length) args.max_fee_ppm = Math.min(...bounds)
+  return args
+}
+// Whether `refresh_needed`'s answer asks for a refresh of what was received (`refresh_received`): a
+// rule other than `shape`, whose coins are settled on their own (shapeSettleArgs).
+export function receivedRefreshAsked (needed) {
+  const reasons = (needed && Array.isArray(needed.reasons)) ? needed.reasons : []
+  return reasons.some((r) => r && r.rule !== 'shape')
 }
 // ---------------------------------------------------------------------------
 
@@ -960,6 +981,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
       if (S.busy) { refreshSoon(); return }
       S.busy = true
       try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e } finally { S.busy = false; render() }
+      // A trade just used up some of a coin's room: the refresh rule is asked now, not at the next
+      // turn of its timer, so a coin with none left goes into the next round while others trade.
+      needSoon(0)
     }, 500)
   }
 
@@ -1390,7 +1414,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // the wallet holds out of round (settleSoon). The idle rule keeps the pace of one refresh every
     // REFRESH_EVERY_MS; a rule that needs it now does not wait for the pace.
     let only = null
-    let shape = []
+    let shape = null
+    let received = true
     if (!S.settleNow) {
       let v
       try { v = await run('refresh_needed', refreshNeededArgs(S.lastAsked, S.openedAt, now())) } catch (e) {
@@ -1399,8 +1424,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
         v = { needed: true, reasons: [{ rule: 'pace' }] }
       }
       if (!v || !v.needed) return
-      only = refreshLeaves(v)
-      shape = shapeCoins(v)
+      // A library that says which coins go now (`give_up`, one coin of each asset kept back so no
+      // asset is all in a round at once) is followed exactly; an older one as before.
+      only = Array.isArray(v.give_up) ? v.give_up : refreshLeaves(v)
+      shape = shapeSettleArgs(v)
+      received = Array.isArray(v.give_up) ? v.give_up.length > 0 : receivedRefreshAsked(v)
       const rules = (v.reasons || []).map((r) => r.rule)
       const now_ = rules.filter((r) => r !== 'idle' && r !== 'pace')
       if (!now_.length && paced) return
@@ -1408,20 +1436,21 @@ export function mountLeaves (ctx, root, settingsRoot) {
     }
     try { if (ctx.onchainQuiet && ctx.onchainQuiet()) return } catch {}
     S.settleNow = false
-    S.refreshedAt = now()
-    try {
+    // Only `shape` asked: what was received stays as it is (it still pays at once).
+    if (received) try {
+      S.refreshedAt = now()
       const v = await run('refresh_received', only ? { leaves: only } : {})
       S.lastRefresh = { at: now(), value: v }
       const n = ((v && v.refreshed) || []).length
       if (n) { log(`[leaves] ${n} coin(s) received out of round given up in the next round`); await reload() }
       for (const l of (v && v.left) || []) log(`[leaves] a received coin left as it is: ${l.why}`)
     } catch (e) { S.lastRefresh = { at: now(), error: e }; log('[leaves] refreshing what was received: ' + (e && e.message)) }
-    // Coins too deep for a part of them to be traded (the rule `shape`, asked only once the person
-    // has left the wallet alone): through the next round, each at the refresh's fee, so the next
-    // trade from them goes at once. Never while the person asks anything.
-    if (shape.length && !S.asked) {
+    // Coins too deep for a part of them to be traded (the rule `shape`): through the next round,
+    // cut into a few coins when the rule says so, at no more than the rule's fee bound, so the next
+    // trades from them go at once. Never while the person asks anything.
+    if (shape && !S.asked) {
       try {
-        const v = await run('settle_first', { coins: shape })
+        const v = await run('settle_first', shape)
         const n = ((v && v.settling) || []).length
         if (n) { log(`[leaves] ${n} coin(s) too deep to trade part of given up in the next round`); await reload() }
       } catch (e) { log('[leaves] settling coins too deep to trade part of: ' + (e && e.message)) }
@@ -1743,7 +1772,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
         // then, and the offboard made on that review settles first.
         if (e instanceof LeafError && e.kind === 'settle_first' && i < RELEASE_TRIES && command !== 'offboard_quote') {
           const coins = e.coins && e.coins.length ? e.coins : null
-          const ask = coins ? { coins } : { asset: e.asset }
+          // Cut into a few coins of the asset (`spread`, the same fee): what is paid or traded next goes
+          // from one while another is in a round.
+          const ask = coins ? { coins, spread: true } : { asset: e.asset, spread: true }
           S.releasing = { coins: coins || [], asset: e.asset, since: now(), command, why: 'settle' }
           render()
           try {

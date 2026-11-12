@@ -328,7 +328,7 @@ test('a payment of coins that wait only for a round (settle_first) settles them,
   await api.start()
   const v = await api.pay('send', { request: 'r', amount: '500000', asset: X })
   assert.deepEqual(v, { transfer: 't1' })
-  assert.deepEqual(runs.find((r) => Array.isArray(r) && r[0] === 'settle_first'), ['settle_first', { coins: ['deep'] }])
+  assert.deepEqual(runs.find((r) => Array.isArray(r) && r[0] === 'settle_first'), ['settle_first', { coins: ['deep'], spread: true }])
   assert.ok(asked >= 2, 'asked again until through; the library gives nothing up twice')
   assert.equal(sends, 2, 'asked again once, after the round')
   assert.equal(api.state.releasing, null)
