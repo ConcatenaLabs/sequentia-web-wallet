@@ -179,7 +179,7 @@ export const DEFAULT_WORDS = Object.freeze({
   bringLate: 'This is taking longer than usual. Nothing was sent, and your money is still yours.',
   // The network would not take the money in for it (too little of it to move once its fee is paid,
   // or not taken at all): nothing was sent.
-  bringRefused: 'This money cannot be moved for this payment. Nothing was sent, and your money is still yours.',
+  bringRefused: 'Nothing was sent, and your money is still yours. It can go to an address: ask for one, or paste one.',
   // What is held is less than the fee of sending it (the fee is paid in what is sent): nothing can go.
   belowFee: (ticker) => `This ${ticker} is less than the fee to send it, so it cannot be sent yet. Once more arrives, it can.`,
   // Money held on the chain that cannot be moved in (too little of it, or an asset taken in only on

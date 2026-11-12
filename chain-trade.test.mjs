@@ -357,15 +357,19 @@ test('money on the chain its issuer froze for this wallet: said at once with the
   const eng = engineOf(s)
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   console.log('all frozen ->', JSON.stringify(q))
-  assert.deepEqual([q.ok, q.why, q.stays, q.frozen], [false, 'chain-stays', 'frozen', '1000000'])
+  assert.deepEqual([q.ok, q.why, q.stays, q.frozen, q.most], [false, 'chain-stays', 'frozen', '1000000', '0'])
   assert.equal(s.brings, 0, 'nothing moved in')
-  assert.equal(USER_WORDS.chainFrozen('0.01 Z'), '0.01 Z is frozen by its issuer: it can\'t be traded until the issuer lifts the freeze. Nothing has moved.')
-  assert.ok(!/try again|ark|arca|leaf|board|round|operator|chain/i.test(USER_WORDS.chainFrozen('0.01 Z')))
+  assert.equal(USER_WORDS.chainFrozen('0.01 Z', ''), '0.01 Z is frozen by its issuer and stays where it is until the issuer lifts the freeze. Nothing has moved.')
+  assert.equal(USER_WORDS.chainFrozen('0.006 Z', '0.00398 Z'), '0.006 Z is frozen by its issuer and stays where it is until the issuer lifts the freeze. You can trade up to 0.00398 Z now. Nothing has moved.')
+  for (const w of [USER_WORDS.chainFrozen('0.01 Z', ''), USER_WORDS.chainFrozen('0.01 Z', '0.002 Z')]) {
+    assert.ok(!/try again|can't be traded|cannot be traded|ark|arca|leaf|board|round|operator|chain/i.test(w), w)
+  }
   // Part of it frozen, and the amount needs that part.
   const p = standIn({ onchain: 1_000_000n })
   p.chainDep = () => ({ atoms: p.chain, movable: 400_000n, margin: 2000n, minutes: 5, frozen: 600_000n })
   const q2 = await engineOf(p).quote({ payAsset: X, receiveAsset: Y, amount: '800000' })
-  assert.deepEqual([q2.ok, q2.why, q2.stays, q2.frozen], [false, 'chain-stays', 'frozen', '600000'])
+  // The rest trades now: what can be moved in less the fees kept back (400,000 − 2,000).
+  assert.deepEqual([q2.ok, q2.why, q2.stays, q2.frozen, q2.most], [false, 'chain-stays', 'frozen', '600000', '398000'])
   assert.equal(p.brings, 0)
   // What is not frozen still trades: moved in, the ticket at once.
   const q3 = await engineOf(p).quote({ payAsset: X, receiveAsset: Y, amount: '300000' })

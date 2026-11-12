@@ -363,8 +363,8 @@ modes (`asset-picker.js`):
   waits for the money to be in a block for the N minutes it said and no longer; past them nothing
   is sent: "This is taking longer than usual. Nothing was sent, and your money is still yours." If
   the network will not take the money in (too little of it to move once its fee is paid), it says
-  so at once: "This money cannot be moved for this payment. Nothing was sent, and your money is
-  still yours." Within a minute of a payment the wallet itself made on the chain it waits that
+  so at once: "Nothing was sent, and your money is still yours. It can go to an address: ask for
+  one, or paste one." Within a minute of a payment the wallet itself made on the chain it waits that
   minute first, since both spend the same coins. The line under the amount says the same while it
   is typed ("It arrives after the next block, in about a minute." or "Goes through within about
   <N> minutes"). **Max** to a receive code fills in all of it, what is on the
@@ -714,15 +714,17 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   the wallet expects, and past that by two minutes read "Taking longer than usual: this goes ahead
   by itself, or is returned with nothing traded". It waits the N minutes its ticket says, longer
   only when the wallet says the settlement takes longer (then twice that, as above), then
-  "Returned: nothing traded.", the money in the wallet; if the network will not take the money in: "Returned: nothing traded. This
-  money cannot be moved for a trade." Once the trade has gone ahead or been returned, the wallet
+  "Returned: nothing traded.", the money in the wallet; if the network will not take the money in: "Returned: nothing traded, and
+  your money stays in your wallet. You can send it to an address." Once the trade has gone ahead or been returned, the wallet
   stops moving money in for it. Money on the chain that cannot be moved in is never waited
   on: an order on the chain that takes it goes, and otherwise the ticket says why, at once: "This
   <TICKER> arrived in too small an amount to trade yet. You can send it, and once more arrives you
   can trade it." or "Nobody offers to trade this <TICKER> now. You can send it." Money on the chain
   its issuer froze for this wallet (a supervised asset) is never moved in or waited on either: when
-  the amount needs it, "<amount> <TICKER> is frozen by its issuer: it can't be traded until the
-  issuer lifts the freeze. Nothing has moved."
+  the amount needs it, "<amount> <TICKER> is frozen by its issuer and stays where it is until the
+  issuer lifts the freeze. Nothing has moved.", with "You can trade up to <most> now." before the
+  last sentence when the rest of the holding trades any (what it holds elsewhere and what can be
+  moved in, less the fees kept back).
 - A trade whose other side cannot complete it after all (the other side says the offer is gone:
   the network refused it, for example because another device of the same wallet had already
   spent the coin it named) is not waited on: the wallet takes its coins back at once, learning

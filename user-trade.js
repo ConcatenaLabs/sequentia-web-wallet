@@ -239,15 +239,17 @@ export const USER_WORDS = Object.freeze({
   returnedMoved: 'Returned: nothing traded. The price moved while it waited.',
   // A trade paid with money moved in first, whose move the network would not take (too little of
   // it to move once its fee is paid, or not taken at all): nothing traded.
-  returnedRefused: 'Returned: nothing traded. This money cannot be moved for a trade.',
+  returnedRefused: 'Returned: nothing traded, and your money stays in your wallet. You can send it to an address.',
   // Paid with money that arrived on the chain and cannot be moved to trade: too little of it to move
   // once its fee is paid (`dust`), or an asset traded only on the chain, where nobody offers it now.
   // It can be sent all the same.
   chainDust: (pay) => `This ${pay} arrived in too small an amount to trade yet. You can send it, and once more arrives you can trade it.`,
   chainStays: (pay) => `Nobody offers to trade this ${pay} now. You can send it.`,
   // What it pays is held on the chain and frozen by its issuer for this wallet (a supervised asset):
-  // it moves nowhere until the issuer lifts the freeze. `amount`: the frozen amount and its ticker.
-  chainFrozen: (amount) => `${amount} is frozen by its issuer: it can't be traded until the issuer lifts the freeze. Nothing has moved.`,
+  // it stays where it is until the issuer lifts the freeze. `amount`: the frozen amount and its
+  // ticker; `most`: what the rest of the holding trades now, less the fees kept back, when it trades any.
+  chainFrozen: (amount, most) => `${amount} is frozen by its issuer and stays where it is until the issuer lifts the freeze.` +
+    (most ? ` You can trade up to ${most} now.` : '') + ' Nothing has moved.',
   sent: 'Sent',
   // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
   sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
@@ -1294,7 +1296,7 @@ export function createEngine (deps) {
       const q = await quoteHeld(args)
       if (q.ok) return q
       return ['settle-first', 'no-funds', 'not-ready', 'part-ready', 'readying'].includes(q.why)
-        ? { ok: false, why: 'chain-stays', stays: plan.stays, ...(plan.stays === 'frozen' ? { frozen: String(plan.frozen) } : {}) } : q
+        ? { ok: false, why: 'chain-stays', stays: plan.stays, ...(plan.stays === 'frozen' ? { frozen: String(plan.frozen), most: String(plan.most) } : {}) } : q
     }
     if (plan.chainFill) {
       const q = await quoteHeld({ ...args, only: 'onchain-fill' })
@@ -1322,7 +1324,11 @@ export function createEngine (deps) {
     if (tree >= A) return null
     if (A + big(c.margin) > tree + big(c.movable)) {
       // The balance covers it only with frozen coins: said so, at once, never settled first.
-      if (frozen > 0n && A <= tree + chain) return { stays: 'frozen', frozen, chainFill: chain - frozen >= A }
+      // `most`: what the rest trades now, the tree's and what can be moved in, less the fees kept back.
+      if (frozen > 0n && A <= tree + chain) {
+        const rest = tree + big(c.movable) - big(c.margin)
+        return { stays: 'frozen', frozen, most: rest > 0n ? rest : 0n, chainFill: chain - frozen >= A }
+      }
       // The balance covers it only with money on the chain that cannot be moved in (`c.stays`: 'dust',
       // too little of it once the move's fee is paid; 'unserved', an asset the network does not take
       // in): said so, unless an order on the chain takes it (quoteOnce).
