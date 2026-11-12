@@ -72,6 +72,14 @@ export const DEFAULT_WORDS = Object.freeze({
   showCode: 'Show receive code',
   newCode: 'New code',
   addressTip: 'Your address, the same tb1 address on both chains. For BTC, and for senders that ask for an address.',
+  // While a wallet opened in this browser for the first time finds what it holds.
+  finding: 'Syncing… finding everything this wallet holds.',
+  findingTip: 'Your address, the same tb1 address on both chains. Your receive code shows here once the wallet has found everything it holds.',
+  // The same, while the service that holds the wallet's coins for instant payments does not answer:
+  // the wallet asks again by itself every half minute.
+  findingStalled: 'Syncing… the service that holds your coins for instant payments is not answering, so this wallet has not found them yet. They are still yours, and show here once it answers.',
+  // A payment asked then, that what the wallet holds elsewhere does not cover.
+  findingStalledPay: 'The service that holds your coins for instant payments is not answering, so this wallet has not found them yet. Nothing has moved. They are still yours: they show in your balance once it answers, and can be sent from then.',
   // Receive's Confidential switch: the code is then the wallet's confidential address alone. A
   // payment that arrives in seconds is never confidential (the operator publishes every leaf of
   // a round, its asset and value), so the code carries none of those ways; BTC never is either.

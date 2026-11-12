@@ -108,6 +108,8 @@ export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
 export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
+// A first restore the operator did not answer is asked again this often, until it answers.
+export const RESTORE_RETRY_MS = 30_000
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 export const PLACES_KEY = 'swk.leaves.places'        // + '.' + tag: the library's last coin_places, with that balance
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
@@ -263,15 +265,25 @@ export function requireExitArgs (developer, info) {
   const offered = !!(info && info.server_info && info.server_info.checkpoint_exit === true)
   return { on: !developer && offered }
 }
-// What to set `require_checkpoint_exit` to now, given the leaf wallet's `info` as last read and the
-// switch as last set (`applied`, its arguments as JSON, or null when not set this session): the
-// mode's arguments when they differ from it, else null. An `info` without the operator's answer
-// (it could not be reached) changes nothing in default mode, so an outage never turns the
-// exit off; developer mode is off whatever the operator says.
-export function exitSwitch (developer, info, applied) {
+// What to set `require_checkpoint_exit` to now, given the leaf wallet's `info` as last read, the
+// switch as last set (`applied`, its arguments as JSON, or null when not set this session) and
+// whether this wallet's operator has ever offered the exit (`seen`, kept in the store for the
+// wallet and that operator): the mode's
+// arguments when they differ from it, else null. In default mode the switch only ever goes on: once
+// the operator has offered the exit, an answer that no longer offers it (or an older operator's,
+// without the field) leaves it on, so an operator cannot take the exit away by what it says, and
+// trades it cannot make with the exit read "Not offered right now". An `info` without the
+// operator's answer (it could not be reached) changes nothing. Developer mode is off whatever the
+// operator says.
+export const EXIT_SEEN_KEY = 'leaves.exitSeen'
+export function exitSwitch (developer, info, applied, seen = false) {
   const si = info && info.server_info
-  if (!developer && (!si || typeof si !== 'object' || si.unreachable)) return null
-  const args = requireExitArgs(developer, info)
+  const reached = !!si && typeof si === 'object' && !si.unreachable
+  let args
+  if (developer) args = { on: false }
+  else if (seen || (reached && si.checkpoint_exit === true)) args = { on: true }
+  else if (!reached || applied != null) return null
+  else args = { on: false }
   return JSON.stringify(args) === applied ? null : args
 }
 
@@ -1231,15 +1243,40 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // The join's restore, run to its end once: a page closed while it ran restores again when it
   // next opens, so a phrase's coins are never left behind by a tab closed too soon.
+  // While it runs the wallet is finding what it holds (`restoring`): the page says so, rather than
+  // showing what it has read so far as all there is, and a payment asked meanwhile waits for it.
+  // Every request the library makes in it is bounded (the operator's at 60 s, the node's at
+  // 120 s), so it returns. When it returns because the operator does not answer, the wallet has
+  // found nothing: it is not opened empty, as if it held nothing, but stays finding, says why
+  // (`stalled`), and restores again every RESTORE_RETRY_MS until the operator answers.
   async function restoreOnce () {
     const key = tagged(RESTORED_KEY, tag())
     try { if (ctx.store.getItem(key)) return } catch {}
     const t0 = now()
+    S.restoring = { since: t0, stalled: null }
+    emit('restoring', { since: t0 })
     try {
-      S.restored = await run('restore')
-      try { ctx.store.setItem(key, String(now())) } catch {}
-      log(`[leaves] restore: ${now() - t0} ms`)
-    } catch (e) { S.restored = { error: e.message }; log('[leaves] restore: ' + e.message) }
+      for (;;) {
+        try {
+          S.restored = await run('restore')
+          try { ctx.store.setItem(key, String(now())) } catch {}
+          log(`[leaves] restore: ${now() - t0} ms`)
+          return
+        } catch (e) {
+          S.restored = { error: e.message }
+          log('[leaves] restore: ' + e.message)
+          if (!(e && e.kind === 'unreachable') || S.stopped) return
+          const first = !S.restoring.stalled
+          S.restoring = { ...S.restoring, stalled: { why: e.message, since: (S.restoring.stalled && S.restoring.stalled.since) || now() } }
+          if (first) emit('restoring', { since: t0, stalled: true })
+          await sleep(RESTORE_RETRY_MS)
+          if (S.stopped) return
+        }
+      }
+    } finally {
+      // The caller opens the wallet next and the page is drawn again once it has read the balance.
+      S.restoring = null
+    }
   }
 
   // A person reviewing a payment the wallet is about to make (`holdReads`): the wallet's own upkeep
@@ -1486,13 +1523,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // moment its operator offers the exit (`info.checkpoint_exit`). Before that it trades as it always
   // has, with no exit asked and nothing refused for the want of one (requireExitArgs).
   // The operator can begin offering the exit while the page is open: its `info` is read again at
-  // each care, and the switch set again when what it asks has changed (exitSwitch).
+  // each care, and the switch set on when it does (exitSwitch). Once offered, it stays on.
   async function applyLimit () {
     try { await run('instant_limit', instantLimitArgs(dev())) } catch (e) { log('[leaves] instant limit: ' + ((e && e.message) || e)) }
     await applyExit(null)
   }
   async function applyExit (applied) {
-    const args = exitSwitch(dev(), S.info, applied)
+    const si = S.info && S.info.server_info
+    // Kept for the wallet and its operator together, and written only from default mode's own
+    // operator's answer (the page's pinned one, when it pins one): a developer-mode join to another
+    // server, or another operator, neither sets it nor reads it.
+    const op = S.info && typeof S.info.operator === 'string' ? S.info.operator : null
+    const pin = pinned()
+    const key = op ? tagged(EXIT_SEEN_KEY, tag()) + '.' + op : null
+    if (key && !dev() && (!pin || pin.operator === op) && si && typeof si === 'object' && si.checkpoint_exit === true) { try { ctx.store.setItem(key, '1') } catch {} }
+    let seen = false; try { seen = !!key && ctx.store.getItem(key) === '1' } catch {}
+    const args = exitSwitch(dev(), S.info, applied, seen)
     if (!args) return
     try { await run('require_checkpoint_exit', args); S.exitApplied = JSON.stringify(args) } catch (e) { log('[leaves] checkpoint exit: ' + ((e && e.message) || e)) }
   }
@@ -2729,6 +2775,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Whether the library has given its balance this session (the figures are its own, not the
     // last ones kept), or the wallet has nothing with an operator to read.
     balanceRead: () => !!S.balance,
+    // Whether the wallet is finding what it holds: the restore of a wallet opened in this browser
+    // for the first time (or whose first restore was cut short), until it returns.
+    restoring: () => !!S.restoring,
+    // While restoring, since when the operator has not answered the restore (it is tried again
+    // every RESTORE_RETRY_MS): { why, since }, else null.
+    restoreStalled: () => (S.restoring && S.restoring.stalled) || null,
     // Whether this wallet has, or joins by itself, a wallet with an operator whose balance is to be read.
     expected: () => !!(S.open || S.starting || joinedOperator(ctx.store, tag()) || (!dev() && pinned())),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its

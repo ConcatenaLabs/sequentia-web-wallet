@@ -3,7 +3,7 @@
 // wallet's is in History alone; no channel is opened, named or kept; a settled trade can be undone.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves, requireExitArgs, exitSwitch } from './leaves.js'
+import { careArgs, arrivingByAsset, arrivingCoins, channelsToClose, instantLimitArgs, DEFAULT_INSTANT_LIMIT, refreshLeaves, requireExitArgs, exitSwitch, EXIT_SEEN_KEY } from './leaves.js'
 import { arrivingRows, arrivingCause, boardMinutes, roundMinutes, causeWhen, statedSeconds, DEFAULT_WORDS } from './default-arca.js'
 import { tradeRows } from './instant-history.js'
 import { tradeStateWord, USER_WORDS, undoneOf } from './user-trade.js'
@@ -298,6 +298,12 @@ test('the exit switch follows the operator\'s info as read again, and an outage 
   assert.equal(exitSwitch(false, gone, JSON.stringify({ on: true })), null, 'the operator cannot be reached: left on')
   assert.equal(exitSwitch(false, {}, JSON.stringify({ on: true })), null, 'no answer of the operator: left on')
   assert.deepEqual(exitSwitch(true, gone, JSON.stringify({ on: true })), { on: false }, 'developer mode: off whatever the operator says')
+  // Once the operator has offered it, nothing it says turns it off in default mode (W3).
+  assert.equal(exitSwitch(false, not, JSON.stringify({ on: true }), true), null, 'offered once: an answer without it leaves it on')
+  assert.equal(exitSwitch(false, { server_info: {} }, JSON.stringify({ on: true }), true), null, 'an older operator without the field: left on')
+  assert.deepEqual(exitSwitch(false, not, null, true), { on: true }, 'a reload after it was offered: on, whatever the operator now says')
+  assert.deepEqual(exitSwitch(false, not, JSON.stringify({ on: false }), true), { on: true }, 'back from developer mode: on again')
+  assert.equal(exitSwitch(false, not, JSON.stringify({ on: true })), null, 'never turned off in default mode')
 })
 
 test('an open page sets the exit on once its operator begins offering it, and keeps it on through an outage', async () => {
@@ -333,5 +339,74 @@ test('an open page sets the exit on once its operator begins offering it, and ke
   clock.t += 61_000
   await api.syncNow()
   assert.deepEqual(set, [false, true], 'an outage leaves it on')
+  si = { checkpoint_exit: false }
+  clock.t += 61_000
+  await api.syncNow()
+  assert.deepEqual(set, [false, true], 'the operator stops offering it: left on (W3)')
+  si = {}
+  clock.t += 61_000
+  await api.syncNow()
+  assert.deepEqual(set, [false, true], 'an answer without the field: left on')
   } finally { api.stop() }
+})
+
+test('a page opened again after the operator offered the exit sets it on, even when the operator no longer offers it', async () => {
+  const m = new Map()
+  const store = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
+  store.setItem(JOINED_KEY + '.t', '1')
+  store.setItem(EXIT_SEEN_KEY + '.t.k', '1')
+  const set = []
+  const w = {}
+  w.postMessage = (msg) => {
+    const reply = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: msg.id, ok: true, value } }))
+    if (msg.op === 'exists') return reply(true)
+    if (msg.op === 'open') return reply({})
+    const c = msg.args.command
+    if (c === 'require_checkpoint_exit') set.push(msg.args.args.on)
+    const result = c === 'info' ? { operator: 'k', server_info: { checkpoint_exit: false } } : c === 'schedule' ? { now: 1 } : c === 'balance' ? {}
+      : (c === 'sync' || c === 'care' || c === 'mailbox' || c === 'instant_limit' || c === 'require_checkpoint_exit' || c === 'claims') ? {} : []
+    reply({ result, start: {} })
+  }
+  const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1_000_000, tickMs: 3_600_000,
+    careEveryMs: 60_000, log: () => {} }, null, null)
+  try {
+    await api.start()
+    assert.deepEqual(set, [true], 'seen before: on at open, although the operator now says it does not offer it')
+  } finally { api.stop() }
+})
+
+test('the kept fact belongs to the wallet and its operator: another operator\'s, or a developer-mode answer, counts for nothing', async () => {
+  const K = 'a'.repeat(64)
+  const mount = async (seed, pinOp, offers) => {
+    const m = new Map(seed)
+    const store = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }
+    store.setItem(JOINED_KEY + '.t', '1')
+    const set = []
+    const w = {}
+    w.postMessage = (msg) => {
+      const reply = (value) => Promise.resolve().then(() => w.onmessage({ data: { id: msg.id, ok: true, value } }))
+      if (msg.op === 'exists') return reply(true)
+      if (msg.op === 'open') return reply({})
+      const c = msg.args.command
+      if (c === 'require_checkpoint_exit') set.push(msg.args.args.on)
+      const result = c === 'info' ? { operator: K, server_info: { checkpoint_exit: offers } } : c === 'schedule' ? { now: 1 } : c === 'balance' ? {}
+        : (c === 'sync' || c === 'care' || c === 'mailbox' || c === 'instant_limit' || c === 'require_checkpoint_exit' || c === 'claims') ? {} : []
+      reply({ result, start: {} })
+    }
+    const pinned = pinOp ? () => ({ server: 'https://op.example/arca', node_url: 'https://op.example/node', operator: pinOp }) : undefined
+    const api = mountLeaves({ makeWorker: () => w, store, walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}), now: () => 1_000_000, tickMs: 3_600_000,
+      careEveryMs: 60_000, log: () => {}, pinned }, null, null)
+    try { await api.start() } finally { api.stop() }
+    return { set, m }
+  }
+  let r = await mount([[EXIT_SEEN_KEY + '.t', '1']], null, false)
+  assert.deepEqual(r.set, [false], 'a fact kept without its operator counts for nothing')
+  r = await mount([[EXIT_SEEN_KEY + '.t.' + 'c'.repeat(64), '1']], null, false)
+  assert.deepEqual(r.set, [false], 'seen under another operator: nothing carried to this one')
+  r = await mount([], 'b'.repeat(64), true)
+  r = await mount([...r.m], 'b'.repeat(64), false)
+  assert.deepEqual(r.set, [false], 'an answer that is not the pinned operator\'s kept nothing: opened again, off')
+  r = await mount([], K, true)
+  assert.equal(r.m.get(EXIT_SEEN_KEY + '.t.' + K), '1', 'the pinned operator offering it: kept for it')
+  assert.deepEqual(r.set, [true])
 })
