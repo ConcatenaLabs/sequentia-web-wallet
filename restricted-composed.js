@@ -122,8 +122,13 @@ export async function composedAdvance (R, rec, E) {
   if (two) {
     if (two.state === 'settled') { rec.state = 'settled'; rec.settledAt = E.now(); rec.viaHeld = false; rec.card = null; return E.put(rec) }
     if (!ENDED.includes(two.state)) return E.put(rec)
-    // The trade on the chain moved nothing: the X is still the wallet's, and it is tried again
-    // (after COMPOSED_RETRY_MS) in that same record.
+    // The trade on the chain moved nothing as far as the explorer said: the X is still the wallet's,
+    // and it is tried again (after COMPOSED_RETRY_MS) in that same record. Each try's transaction is
+    // kept with its ticket: one called returned can still land (late, or back after a reorg), and the
+    // step's one record would otherwise forget it at the next try.
+    if (two.txid && !(rec.secondTries || []).some((t) => t.txid === two.txid)) {
+      rec.secondTries = [...(rec.secondTries || []), { txid: two.txid, ticket: two.ticket || null }]
+    }
     rec.second = null; rec.viaHeld = true
     if (!rec.waitUntil) rec.waitUntil = E.now() + COMPOSED_RETRY_MS
   }
@@ -180,8 +185,24 @@ export async function composedAdvance (R, rec, E) {
     }
   }
   // 3. The X on the chain, and no other, traded for R.
+  // Spent: by one of this trade's own tries that landed after it was called returned (web wallet
+  // #729), or by something else of the wallet's. A try the chain holds settles the trade as bought,
+  // with that try's record; one still in the mempool is waited for.
+  if (R.unspent && !(await R.unspent(rec.viaOut))) {
+    for (const t of rec.secondTries || []) {
+      const st = await Promise.resolve(R.status(t.txid)).catch(() => 'unknown')
+      if (st === 'confirmed') {
+        const one = step(secondId(rec))
+        if (one) E.put({ ...one, txid: t.txid, ...(t.ticket ? { ticket: t.ticket } : {}), state: 'settled', settledAt: E.now(), error: null, chainState: st, missingSince: null })
+        rec.second = secondId(rec); rec.state = 'settled'; rec.settledAt = E.now(); rec.viaHeld = false; rec.card = null; rec.why = null
+        rec.landedLate = t.txid
+        return E.put(rec)
+      }
+      if (st !== 'unknown') return wait('a trade sent earlier is on its way', MOVE_POLL_MS)
+    }
+    return endVia('spent')
+  }
   if (past) return endVia('time')
-  if (R.unspent && !(await R.unspent(rec.viaOut))) return endVia('spent')
   const value = big(rec.viaOut.value)
   const fee = rec.secondFeeAsset === rec.via ? big(rec.secondFee) : 0n
   const q = value > fee ? await restrictedQuote(R, { payAsset: rec.via, receiveAsset: rec.ticket.receiveAsset, amount: value - fee, arriving: value }).catch(() => null) : null

@@ -9,7 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { createEngine, forbiddenIn } from './user-trade.js'
+import { createEngine, forbiddenIn, UNCERTAIN_MS } from './user-trade.js'
 import { RESTRICTED_WORDS } from './restricted-trade.js'
 import { COMPOSED_SECOND_MS, COMPOSED_RETRY_MS, MOVE_POLL_MS, isStep, claimOnce, secondId } from './restricted-composed.js'
 import { tradeRows } from './instant-history.js'
@@ -465,4 +465,52 @@ test('a restricted trade whose page closed while its move ran is followed while 
   const eng2 = engine(s2, restrictedHost({ moving: async () => true }))
   await eng2.resume()
   assert.equal(eng2.records().find((x) => x.id === 'r1').state, 'failed')
+})
+
+// #729 (PV14 Q1): the trade on the chain is called returned (the explorer did not see it for
+// UNCERTAIN_MS: a late broadcast, an eviction after an anchor reorg) and then lands. The composed
+// trade ends bought, with that try's record, never "holding the X" that try spent.
+test('a trade on the chain called returned that then lands settles the purchase as bought (#729)', async () => {
+  const s = standIn(); const h = restrictedHost()
+  const eng = engine(s, h)
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: RA, amount: '50000' })
+  await eng.confirm(q.choice, q.ticket)
+  await settleFirst(eng, s)
+  await moveAndTake(eng, s, h)
+  assert.equal(h.takes.length, 1)
+  const t1 = second(eng)[0].txid
+  await eng.resume(); s.t += UNCERTAIN_MS + 1000; await eng.resume(); await eng.resume()
+  assert.equal(second(eng)[0].state, 'returned', 'the explorer never showed it: called returned')
+  // In the mempool at last: the trade waits for it, and takes nothing again.
+  h.status[t1] = 'mempool'
+  s.t += COMPOSED_RETRY_MS; await eng.resume(); await eng.resume()
+  let r = composed(eng)
+  assert.notEqual(r.state, 'settled'); assert.equal(h.takes.length, 1, 'nothing taken twice')
+  // It lands.
+  h.status[t1] = 'confirmed'
+  s.t += MOVE_POLL_MS; await eng.resume(); await eng.resume()
+  r = composed(eng)
+  assert.equal(r.state, 'settled'); assert.notEqual(r.ended, 'via', 'not ended as holding the USDX')
+  assert.equal(r.viaHeld, false); assert.equal(r.landedLate, t1)
+  const two = second(eng)
+  assert.equal(two.length, 1); assert.equal(two[0].state, 'settled'); assert.equal(two[0].txid, t1)
+  const rows = tradeRows(eng.records())
+  assert.deepEqual(rows.map((x) => x.trade.source).sort(), ['btc-gateway', 'restricted'], 'History shows the two steps')
+})
+
+test('a coin spent by something other than the trade\'s own tries still ends holding what the wallet holds', async () => {
+  const s = standIn(); const h = restrictedHost()
+  const eng = engine(s, h)
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: RA, amount: '50000' })
+  await eng.confirm(q.choice, q.ticket)
+  await settleFirst(eng, s)
+  await moveAndTake(eng, s, h)
+  const t1 = second(eng)[0].txid
+  await eng.resume(); s.t += UNCERTAIN_MS + 1000; await eng.resume(); await eng.resume()
+  assert.equal(second(eng)[0].state, 'returned')
+  // That try never lands (the explorer still does not know it); the coin is spent by something else.
+  h.spent.add(s.offboards[0].txid); delete h.status[t1]
+  s.t += COMPOSED_RETRY_MS; await eng.resume(); await eng.resume()
+  const r = composed(eng)
+  assert.equal(r.state, 'settled'); assert.equal(r.ended, 'via'); assert.equal(r.endWhy, 'spent')
 })
