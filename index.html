@@ -3045,7 +3045,7 @@ async function treeSendReview(r, onDone, note){
         // until it is final; the payment is then quoted, and goes only within the fee shown. Nothing
         // moved in: nothing sent, said so.
         const since = Date.now();
-        const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms), since, until: since + bringMinutes()*60_000 }).catch((e)=>{ console.warn('[send] moving in:', e?.message??e); return null; });
+        const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms), need: atoms + bound, since, until: since + bringMinutes()*60_000 }).catch((e)=>{ console.warn('[send] moving in:', e?.message??e); return null; });
         const stopped = (words)=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} st.className='status err'; st.textContent=words; ok.disabled=false; };
         if(!moved){ stopped(DEFAULT_WORDS.bringLate); return; }
         if(moved.refused){ console.warn('[send] moving in refused:', moved.refused); stopped(DEFAULT_WORDS.bringRefused); return; }
@@ -3194,7 +3194,7 @@ async function offboardReview(r, onDone){
       // An offboard is made only from final coins: the move in is waited for until it is, as long as
       // the words say and no longer; then quoted, and made only within the fee shown.
       const since = Date.now();
-      const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms, true), since, until: since + bringMinutes()*60_000 }).catch((e)=>{ console.warn('[offboard] moving in:', e?.message??e); return null; });
+      const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms, true), need: atoms + bound, since, until: since + bringMinutes()*60_000 }).catch((e)=>{ console.warn('[offboard] moving in:', e?.message??e); return null; });
       if(!moved){ clearInterval(tell); st.className='status err'; st.textContent=DEFAULT_WORDS.bringLate; ok.disabled=false; return; }
       if(moved.refused){ console.warn('[offboard] moving in refused:', moved.refused); clearInterval(tell); st.className='status err'; st.textContent=DEFAULT_WORDS.bringRefused; ok.disabled=false; return; }
       try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }catch(e){ console.warn('[offboard] quote once moved in:', e?.message??e); q = null; }

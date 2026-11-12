@@ -1510,9 +1510,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function movesSince (asset, since) {
     return (movesKept()[asset] || []).filter((m) => Number(m.at) >= Number(since || 0))
   }
-  async function bringIn (asset, { until = now() + 10 * 60_000, final = false, want = 0n, since = now(), stop = null } = {}) {
+  // `need`: what the payment needs in the tree in all; once the library holds that much there (a move
+  // another tab or device of the phrase made), it is answered { already }.
+  async function bringIn (asset, { until = now() + 10 * 60_000, final = false, want = 0n, need = 0n, since = now(), stop = null } = {}) {
     if (final) {
-      const v = await bringIn(asset, { until, want, since, stop })
+      const v = await bringIn(asset, { until, want, need, since, stop })
       if (!v || v.refused) return v
       await asking(() => roundWait(() => waitSettled({ asset })))
       return v
@@ -1524,7 +1526,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
       // What the moves made since this ask began took off the chain: an ask whose `want` they cover
       // (another ask's move, or upkeep's) is answered { already }; otherwise it waits for the rest.
       const moved = () => movesSince(asset, since).reduce((n, m) => n + big(m.spent), 0n)
-      const covered = () => { const m = moved(); return m > 0n && m >= big(want) }
+      const inTree = () => Object.values((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).reduce((n, v) => n + big(v), 0n)
+      const covered = () => { const m = moved(); return (m > 0n && m >= big(want)) || (big(need) > 0n && inTree() >= big(need)) }
       const rest = () => { const r = big(want) - moved(); return r > 0n ? r : 0n }
       while (S.open && !S.stopped && !gone()) {
         if (covered()) return { already: true }
@@ -1536,10 +1539,15 @@ export function mountLeaves (ctx, root, settingsRoot) {
           S.busy = true
           try {
             await coverReceiveKeys()
+            // With nothing of it on the chain to move, now and then a sync too: a move another device
+            // of the phrase made is learnt there (`need`).
+            if (big(need) > 0n && S.bringNoCoin && now() - (S.bringSynced || 0) >= 3 * BRING_EVERY_MS) { S.bringSynced = now(); try { await run('sync') } catch {} }
             S.balance = await run('balance')
           } catch (e) { log('[leaves] balance before moving in: ' + (e && e.message)) } finally { S.busy = false }
           c0 = boardCandidates(S.balance, S.info).find((x) => x.asset === asset) || null
           pending = big(((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).pending)
+          S.bringNoCoin = !c0
+          if (covered()) return { already: true }
         }
         if (c0 && c0.onchain >= rest()) {
           // One board of the asset at a time: a second asker waits for the first, then reads again.
@@ -1572,8 +1580,21 @@ export function mountLeaves (ctx, root, settingsRoot) {
               if (['unreachable', 'node', 'io'].includes(e && e.kind)) { log('[leaves] moving in: ' + (e && e.message)); return null }
               return { refused: String((e && e.message) || e) }
             })
-            if (v && v.refused) { log('[leaves] moving in refused: ' + v.refused); return v }
-            if (v) return v
+            if (v && v.refused) {
+              // Refused because the coins moved under it (another tab or device of the phrase boarded
+              // them a moment before): read again, the move found, and it is answered as moved in.
+              log('[leaves] moving in refused: ' + v.refused)
+              const was = c0.onchain
+              while (S.busy) await sleep(50)
+              S.busy = true
+              try { try { await run('sync') } catch {} S.balance = await run('balance') } catch {} finally { S.busy = false }
+              const c2 = boardCandidates(S.balance, S.info).find((x) => x.asset === asset)
+              const after = big(((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).pending)
+              if (covered() || after > pending || !c2 || c2.onchain !== was) {
+                log('[leaves] the coins moved meanwhile (another tab or device): read again')
+                if (covered() || after > pending) return { already: true }
+              } else return v
+            } else if (v) return v
           } finally { locks.delete(asset); done() }
         } else if (!c0 && !quiet && pending > 0n && !(big(want) > 0n)) {
           // Nothing of it on the chain the library reads, none asked for in particular, and a board
