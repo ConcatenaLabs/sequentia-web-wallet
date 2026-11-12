@@ -67,6 +67,11 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 // takes its coins back (the maker completes in seconds; the cancel and a late completion exclude
 // each other at the operator's signer).
 export const MAKER_COMPLETE_MS = 120_000
+// How long a trade whose maker's offer is gone keeps asking for a price within what was accepted
+// (the wallet busy, no firm offer yet) before it is returned with words.
+export const REPRICE_MOST_MS = 60_000
+// How many offers of one trade may be gone (each priced again at once) before it is returned.
+export const GONE_MOST = 3
 // A step whose outcome is unknown (the operator did not answer, so the library may still complete
 // it at its next sync) is looked for this long before the trade is called returned.
 export const UNCERTAIN_MS = 10 * 60 * 1000
@@ -190,6 +195,8 @@ export const USER_WORDS = Object.freeze({
   // accepted: nothing traded, said as an expired price is.
   returnedMoved: 'Returned: nothing traded. The price moved while it waited.',
   sent: 'Sent',
+  // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
+  sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
   settled: 'Settled',
   // A trade that waits on Bitcoin blocks says what is already true while it waits.
   waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
@@ -301,7 +308,7 @@ export function tradeStateWord (r, now = Date.now()) {
   // room for it yet): said so, the coins being the wallet's all along.
   const held = heldAlready(r)
   const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.received)
-    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : W.sent
+    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : r.awaiting ? W.sentAwaiting : W.sent
   return m >= 1 ? W.minutes(word, m) : word
 }
 
@@ -645,6 +652,9 @@ export function createEngine (deps) {
   // by the asset paid: the next offer of that asset is asked for that much less, so the check does
   // not send it back for a smaller one.
   const marginsSeen = new Map()
+  // The offer each maker made in place of one whose completion the operator refused, by maker:
+  // the next price asked of that maker for the same pair takes it rather than asking again.
+  const madeAgain = new Map()
   // The quote under way's hook for a refusal of the wallet's own (its coins short now).
   let refusalSeen = null
   async function firm (entry, payAsset, receiveAsset, pay, have, until = Date.now() + firmMs, hard = until) {
@@ -726,14 +736,20 @@ export function createEngine (deps) {
     const guess = marginsSeen.get(payAsset) || 0n
     const fitted = guess > 0n && lim > guess ? sizeEntry(entry, lim - guess) : null
     let give = fitted ? fitted.receive : size.receive
+    // The offer a maker made in place of one whose completion the operator refused (`made`): taken
+    // as the maker's firm offer here, at its own size, rather than asking again.
+    const made = madeAgain.get(entry.maker)
+    if (made && made.give_asset === receiveAsset && made.want_asset === payAsset) { madeAgain.delete(entry.maker); give = big(made.give) }
     for (let i = 0; i < 4; i++) {
       let o
       // A maker that does not answer a firm offer by the quote's deadline is left out of it; an
       // offer asked again for less, after the wallet's check, is given the makers' time again,
       // never past `hard`. Acceptances and releases, which must complete, are never cut short.
       const askBy = i === 0 ? until : Math.min(Date.now() + firmMs, hard)
-      try { o = await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }), signal: AbortSignal.timeout(Math.max(1000, askBy - Date.now())) }) }
-      catch (e) {
+      try {
+        o = i === 0 && made && made.give_asset === receiveAsset && made.want_asset === payAsset ? made
+          : await deps.fetchJson(entry.maker + '/v1/firm', { method: 'POST', body: JSON.stringify({ give_asset: receiveAsset, want_asset: payAsset, give: String(give) }), signal: AbortSignal.timeout(Math.max(1000, askBy - Date.now())) })
+      } catch (e) {
         log('[user trade] maker firm:', e.message)
         // The maker holds less than its quote now (its last trade spent some): ask for half.
         if (/does not hold that much|after its next round/.test(String(e.message))) {
@@ -1307,8 +1323,16 @@ export function createEngine (deps) {
     // What the wallet can pay changes with this trade: the next quote reads it afresh.
     holdings = null
     const id = prior ? prior.id : `${now()}-${Math.random().toString(16).slice(2, 10)}`
+    // A trade priced again after its offer was gone: a cancel's respend of its coins left margins
+    // (`cancelFees`), paid in the asset paid. The record's ticket counts them, in what is paid and
+    // in its fees, so the fee line is what the trade cost.
+    const cf = prior ? big(prior.cancelFees) : 0n
+    if (cf > 0n) {
+      ticket = { ...ticket, amountIn: String(big(ticket.amountIn) + cf), fees: [...(ticket.fees || []), { asset: ticket.payAsset, atoms: String(cf) }] }
+    }
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
-      ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: true, settleSince: prior.settleSince } : {}) })
+      ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: prior.state === 'settling' || !!prior.settledFirst, settleSince: prior.settleSince,
+        ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}) } : {}) })
     try {
       if (choice.source === 'covenant-round') {
         rec.order = choice.entry.id
@@ -1346,8 +1370,15 @@ export function createEngine (deps) {
         const a = await run('swap_accept', { offer: choice.offer.offer, shown: choice.terms })
         rec.accept = a.accept; rec.state = 'sent'; rec.sentAt = now()
         put(rec)
-        try { await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) }) }
-        catch (e) { log('[user trade] the maker did not take the acceptance yet:', e.message) }
+        try {
+          const a = await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) })
+          if (a && a.state === 'done') { rec.makerDone = true; rec.makerDoneAt = now() }
+        } catch (e) {
+          log('[user trade] the maker did not take the acceptance yet:', e.message)
+          // The operator refused the maker's completion: the offer is gone, and the next advance
+          // re-prices at once (advanceGone).
+          if (e.body && e.body.gone) rec.gone = e.body
+        }
         return put(rec)
       }
       if (choice.source === 'btc-gateway') return await btcT.confirm(choice, rec)
@@ -1435,6 +1466,49 @@ export function createEngine (deps) {
     } finally { advancing.delete(rec.id) }
   }
 
+  // A trade whose maker answered that its offer is gone: the operator refused the completion, so
+  // the acceptance cannot complete there. Its coins are taken back at once (the library's cancel:
+  // a coin of the wallet's given up elsewhere, by a second device, is found then, and the
+  // acceptance cancelled with nothing respent), then the trade is priced again for what was
+  // accepted and goes ahead in the same record only at that price or better (repriceWithin); the
+  // offer the maker made in its place is taken first when it is there. A cancel that cannot be
+  // made yet is asked again at the next advance; one that finds the swap done goes on as done.
+  async function advanceGone (rec) {
+    const gone = rec.gone
+    put(rec)
+    // Held for the swap, or waiting for the answer to an earlier cancel's respend.
+    const held = ((await run('coins')) || []).filter((c) => c.state === 'offered' || c.state === 'sending')
+    let c = null
+    try { c = await run('swap_cancel', { swap: rec.swap }) } catch (e) { log('[user trade] swap_cancel:', e && e.message); return put(rec) }
+    if (c && c.done) { rec.gone = null; rec.awaiting = false; return put(rec) }
+    if (!c || !c.cancelled) {
+      // Not known yet whether the coins came back: asked again at the next advance.
+      rec.awaiting = !!(c && c.unknown)
+      log('[user trade] the acceptance stands for now:', c && (c.note || c.error)); return put(rec)
+    }
+    rec.awaiting = false
+    if (c.respent && c.respent.length) {
+      const was = held.filter((x) => c.respent.includes(x.leaf_id)).reduce((n, x) => n + big(x.value), 0n)
+      const now2 = ((await run('coins')) || []).filter((x) => x.state === 'live' && !(rec.before || []).includes(x.leaf_id) && x.asset === rec.ticket.payAsset)
+      const got = now2.reduce((n, x) => n + big(x.value), 0n)
+      if (was > got) rec.cancelFees = String(big(rec.cancelFees) + was - got)
+    }
+    log('[user trade] the maker\'s offer is gone (' + (gone.whose ? `the ${gone.whose}'s coin` : String(gone.code || '')) + '); pricing again:', rec.id)
+    rec.gave = [...(rec.gave || []), { swap: rec.swap, why: String(gone.error || '').slice(0, 300), whose: gone.whose || null }]
+    // Offers gone GONE_MOST times over: the trade comes back with words rather than ask again.
+    if (rec.gave.length >= GONE_MOST) {
+      if (gone.offer && gone.offer.swap && rec.maker) release(rec.maker, gone.offer.swap)
+      rec.gone = null; rec.state = 'returned'; rec.whyKind = null; rec.error = 'the makers\' offers were gone ' + rec.gave.length + ' times'
+      if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
+      return put(rec)
+    }
+    if (gone.offer && gone.offer.swap && rec.maker) madeAgain.set(rec.maker, { ...gone.offer, give_asset: rec.ticket.receiveAsset, want_asset: rec.ticket.payAsset })
+    rec.gone = null
+    rec.state = 'repricing'; rec.repriceSince = now(); rec.accepted = rec.accepted || rec.ticket
+    put(rec)
+    return repriceWithin(rec, REPRICE_MOST_MS, rec.repriceSince)
+  }
+
   // Puts a settling trade's coins through the next round (the library gives up nothing twice).
   async function settleAsk (rec) {
     const t = rec.ticket
@@ -1447,7 +1521,6 @@ export function createEngine (deps) {
   // when it waited SETTLE_MOST_MS. Nothing asks twice: one advance of a record at a time (`advancing`),
   // and its stored state read again before the confirmation.
   async function advanceSettling (rec) {
-    const t = rec.ticket, accepted = rec.accepted || t
     const late = () => { rec.state = 'returned'; rec.whyKind = 'late'; rec.error = 'settling first took too long'; return put(rec) }
     let v = null
     try { v = await settleAsk(rec) } catch (e) {
@@ -1456,6 +1529,17 @@ export function createEngine (deps) {
     }
     if (!v || !v.ready) { if (now() - (rec.settleSince || rec.at) > SETTLE_MOST_MS) return late(); syncShared(); return rec }
     await syncShared()
+    return repriceWithin(rec, SETTLE_MOST_MS, rec.settleSince || rec.at)
+  }
+
+  // Prices a confirmed trade again for the amount accepted (`rec.accepted`), and confirms it into
+  // the same record only at the price accepted or better (no less received, no more paid); returns
+  // it with words when the price moved, or once `most` ms have passed since `since` with no price.
+  // Nothing asks twice: one advance of a record at a time (`advancing`), and its stored state read
+  // again before the confirmation. Coins that must be settled first make it a settling trade.
+  async function repriceWithin (rec, mostMs, since) {
+    const t = rec.ticket, accepted = rec.accepted || t
+    const state = rec.state
     // Priced again for at most one received atom's price above what the ticket pays (and never above
     // the amount the person typed), so the maker's rounding gives the same ticket at the same price,
     // and a ticket the maker's depth capped goes at its own size, never at the whole amount typed.
@@ -1467,6 +1551,11 @@ export function createEngine (deps) {
     const within = (x) => x && x.ok && big(x.ticket.amountOut) >= aOut && big(x.ticket.amountIn) <= most &&
       big(x.ticket.amountOut) * aIn >= aOut * big(x.ticket.amountIn)
     let q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: String(most) })
+    // The maker's offer made in place of a gone one, if this price did not take it: let go of.
+    const left = rec.maker && madeAgain.get(rec.maker)
+    if (left) { madeAgain.delete(rec.maker); release(rec.maker, left.swap) }
+    // A cancel's respend left margins: a trade returned now names them.
+    const back = () => { if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: t.payAsset, atoms: String(rec.cancelFees) }]; return put(rec) }
     // A ticket the maker's depth capped, whose next atom costs more than the ticket's price: priced
     // once more at exactly what the ticket paid.
     if (q.ok && !within(q) && most > aIn) {
@@ -1474,22 +1563,28 @@ export function createEngine (deps) {
       q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: String(aIn) })
     }
     if (!q.ok) {
-      if (q.why === 'settle-first' && now() - (rec.settleSince || rec.at) <= SETTLE_MOST_MS) { rec.settleCoins = q.coins || []; return put(rec) }
-      if (now() - (rec.settleSince || rec.at) <= SETTLE_MOST_MS && ['wallet-busy', 'no-firm-offer'].includes(q.why)) return rec
+      if (q.why === 'settle-first' && (state !== 'settling' || now() - since <= mostMs)) {
+        rec.settleCoins = q.coins || []
+        if (state !== 'settling') { rec.state = 'settling'; rec.settleSince = now(); settleAsk(rec).catch(() => {}) }
+        return put(rec)
+      }
+      // Nobody offers it this moment: a maker quotes nothing while it reads its coins again after a
+      // trade, so within the time given it is asked again at the next advance.
+      if (now() - since <= mostMs && ['wallet-busy', 'no-firm-offer', 'not-offered'].includes(q.why)) return put(rec)
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'no price within the bound: ' + q.why
-      return put(rec)
+      return back()
     }
     if (!within(q)) {
       drop(q.choice)
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.newTicket = q.ticket; rec.error = 'the price moved past the bound accepted'
-      return put(rec)
+      return back()
     }
     // The record as stored now: another follow may have moved it on meanwhile.
     const cur = records().find((r) => r.id === rec.id)
-    if (!cur || cur.state !== 'settling') { drop(q.choice); return cur || rec }
-    log('[user trade] settled first; going ahead at the price accepted:', rec.id)
+    if (!cur || cur.state !== state) { drop(q.choice); return cur || rec }
+    log(state === 'settling' ? '[user trade] settled first; going ahead at the price accepted:' : '[user trade] priced again; going ahead at the price accepted:', rec.id)
     try { return await confirm(q.choice, q.ticket, cur) } catch (e) {
-      log('[user trade] after settling first:', e && e.message)
+      log('[user trade] going ahead again:', e && e.message)
       return records().find((r) => r.id === rec.id) || rec
     }
   }
@@ -1497,6 +1592,7 @@ export function createEngine (deps) {
   async function advanceOnce (rec) {
     if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
     if (rec.state === 'settling') return advanceSettling(rec)
+    if (rec.state === 'repricing') return repriceWithin(rec, REPRICE_MOST_MS, rec.repriceSince || rec.at)
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an
       // acceptance the library made is in its own store; read it there. A step that did not answer
@@ -1694,12 +1790,34 @@ export function createEngine (deps) {
     if (s && s.state === 'cancelled') { rec.state = 'returned'; rec.returnedAt = now(); return put(rec) }
     if (s && s.state === 'accepted') {
       // The maker has not completed it: hand the acceptance over again (it may have missed it),
-      // and after the wait take the coins back.
-      try { await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) }) } catch {}
+      // and after the wait take the coins back. An answer that the offer is gone (the operator
+      // refused the maker's completion) cannot change: the trade is priced again at once.
+      if (rec.gone) return advanceGone(rec)
+      // A maker that says the swap is done completed it: what it pays the wallet is read from the
+      // mailbox now, and the coins signed into it are never taken back (a cancel then would say
+      // "Returned" of a trade that went through), however long the maker was away.
+      if (!rec.makerDone) {
+        try {
+          const a = await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) })
+          if (a && a.state === 'done') { rec.makerDone = true; rec.makerDoneAt = rec.makerDoneAt || now() }
+        } catch (e) { if (e.body && e.body.gone) { rec.gone = e.body; return advanceGone(rec) } }
+      }
+      // A done answer is waited on for MAKER_COMPLETE_MS more, then the coins are taken back as
+      // before: a maker that says done and never completes holds no price of the person's for
+      // good, and a cancel after a real completion reads done (the library's swap_cancel).
+      if (rec.makerDone && now() - (rec.makerDoneAt || 0) <= MAKER_COMPLETE_MS) {
+        try { await run('mailbox') } catch (e) { log('[user trade] mailbox:', e && e.message) }
+        const s2 = ((await run('swaps')) || []).find((x) => x.swap === rec.swap)
+        rec.swapState = s2 && s2.state
+        if (!s2 || s2.state !== 'done') return put(rec)
+        if ((await settleStep(rec)) === 'settled') { rec.state = 'settled'; rec.settledAt = now() }
+        return put(rec)
+      }
       if (now() - (rec.sentAt || 0) > MAKER_COMPLETE_MS) {
         try {
-          const held = ((await run('coins')) || []).filter((c) => c.state === 'offered')
+          const held = ((await run('coins')) || []).filter((c) => c.state === 'offered' || c.state === 'sending')
           const c = await run('swap_cancel', { swap: rec.swap })
+          rec.awaiting = !!(c && !c.cancelled && !c.done && c.unknown)
           if (c && c.cancelled) {
             rec.state = 'returned'; rec.returnedAt = now()
             // A cancel moves the coins signed into the acceptance to a fresh coin of the wallet's

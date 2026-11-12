@@ -632,6 +632,15 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   few minutes." Payments wait for that settlement the same way and then go. Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,
   at a settlement's fee each, so the next trade from them goes at once.
+- A trade whose other side cannot complete it after all (the other side says the offer is gone:
+  the network refused it, for example because another device of the same wallet had already
+  spent the coin it named) is not waited on: the wallet takes its coins back at once, learning
+  what its other devices did, and prices the trade again under the same bound, the other side's
+  new offer at the same price first. It goes ahead in the same row, still "Sent", only at the
+  price the person accepted or better; otherwise "Returned: nothing traded. The price moved while
+  it waited.", within seconds, or "Returned: nothing traded." when the other side's offers were gone
+  three times. A trade the other side says it completed is waited on for two minutes more, then
+  its coins are taken back as any trade's are.
 - Fees are one line, each fee in the asset it is paid in: "Fees <amount> <TICKER>, included
   above", or "No fees". What the wallet pays to be able to receive (for BTC, the room it needs to
   take a payment) is counted as one of these fees and has no row of its own.
