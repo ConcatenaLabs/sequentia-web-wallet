@@ -682,6 +682,13 @@ export function againWant (before, live) {
   return live != null && big(live) <= big(before) ? big(live) : null
 }
 
+// The answer to an acceptance of a swap that is not open here and was never refused: its state
+// only, never `gone`, which says nothing was co-signed. A swap the maker cancelled at its lapse
+// may still have been co-signed (an answer that never came back, taken by a later sync).
+export function notOpenAnswer (st) {
+  return { error: `the swap is ${st || 'unknown'} here`, state: st || null }
+}
+
 // How long the answer to an acceptance whose completion was refused is kept for the same
 // acceptance handed over again.
 export const GONE_KEEP_MS = 15 * 60 * 1000
@@ -1180,7 +1187,7 @@ async function main () {
         // An offer whose completion the operator refused is gone: asked again, the same answer, at
         // once, with the offer made in its place (`gone`).
         if (gone.has(b.swap)) return send(res, 409, gone.get(b.swap).body)
-        if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st, gone: true })
+        if (st !== 'open') return send(res, 409, notOpenAnswer(st))
         let r
         try { r = await cmd('swap_complete', { accept: String(b.accept || '') }, true) } catch (e) {
           if (!completionRefused(e)) throw e
