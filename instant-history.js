@@ -108,7 +108,8 @@ export function tradeRows (records) {
     const at = Number(r.sentAt || r.at) || 0
     if (r.state === 'undone') {
       // Undone: what it was to bring never came; what was paid is coming back, then back.
-      out.push({ kind: 'swap', at, trade: r, legs: r.undoneBack ? [] : [{ asset: t.payAsset, atoms: '-' + String(big(t.amountIn)) }], fees: [] })
+      // A cancel's respend margins (`cancelFees`, counted in what was paid) never come back.
+      out.push({ kind: 'swap', at, trade: r, legs: r.undoneBack ? [] : [{ asset: t.payAsset, atoms: '-' + String(big(t.amountIn) - big(r.cancelFees)) }], fees: [] })
     } else if (['sent', 'waiting', 'settled'].includes(r.state) || (r.state === 'confirming' && r.uncertain)) {
       out.push({ kind: 'swap', at, trade: r, legs: [{ asset: t.payAsset, atoms: '-' + String(big(t.amountIn)) }, { asset: t.receiveAsset, atoms: String(big(t.amountOut)) }],
         fees: (t.fees || []).filter((f) => big(f.atoms) > 0n) })

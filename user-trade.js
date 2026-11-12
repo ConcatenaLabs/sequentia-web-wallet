@@ -199,6 +199,8 @@ export const USER_WORDS = Object.freeze({
   // accepted: nothing traded, said as an expired price is.
   returnedMoved: 'Returned: nothing traded. The price moved while it waited.',
   sent: 'Sent',
+  // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
+  sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
   settled: 'Settled',
   // A trade that waits on Bitcoin blocks says what is already true while it waits.
   waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
@@ -310,7 +312,7 @@ export function tradeStateWord (r, now = Date.now()) {
   // room for it yet): said so, the coins being the wallet's all along.
   const held = heldAlready(r)
   const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.received)
-    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : W.sent
+    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : r.awaiting ? W.sentAwaiting : W.sent
   return m >= 1 ? W.minutes(word, m) : word
 }
 
@@ -1343,6 +1345,13 @@ export function createEngine (deps) {
     // What the wallet can pay changes with this trade: the next quote reads it afresh.
     holdings = null
     const id = prior ? prior.id : extra.id || `${now()}-${Math.random().toString(16).slice(2, 10)}`
+    // A trade priced again after its offer was gone: a cancel's respend of its coins left margins
+    // (`cancelFees`), paid in the asset paid. The record's ticket counts them, in what is paid and
+    // in its fees, so the fee line is what the trade cost.
+    const cf = prior ? big(prior.cancelFees) : 0n
+    if (cf > 0n) {
+      ticket = { ...ticket, amountIn: String(big(ticket.amountIn) + cf), fees: [...(ticket.fees || []), { asset: ticket.payAsset, atoms: String(cf) }] }
+    }
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
       ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: prior.state === 'settling' || !!prior.settledFirst, settleSince: prior.settleSince,
         ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}) } : {}),
@@ -1500,11 +1509,17 @@ export function createEngine (deps) {
   async function advanceGone (rec) {
     const gone = rec.gone
     put(rec)
-    const held = ((await run('coins')) || []).filter((c) => c.state === 'offered')
+    // Held for the swap, or waiting for the answer to an earlier cancel's respend.
+    const held = ((await run('coins')) || []).filter((c) => c.state === 'offered' || c.state === 'sending')
     let c = null
     try { c = await run('swap_cancel', { swap: rec.swap }) } catch (e) { log('[user trade] swap_cancel:', e && e.message); return put(rec) }
-    if (c && c.done) { rec.gone = null; return put(rec) }
-    if (!c || !c.cancelled) { log('[user trade] the acceptance stands for now:', c && (c.note || c.error)); return put(rec) }
+    if (c && c.done) { rec.gone = null; rec.awaiting = false; return put(rec) }
+    if (!c || !c.cancelled) {
+      // Not known yet whether the coins came back: asked again at the next advance.
+      rec.awaiting = !!(c && c.unknown)
+      log('[user trade] the acceptance stands for now:', c && (c.note || c.error)); return put(rec)
+    }
+    rec.awaiting = false
     if (c.respent && c.respent.length) {
       const was = held.filter((x) => c.respent.includes(x.leaf_id)).reduce((n, x) => n + big(x.value), 0n)
       const now2 = ((await run('coins')) || []).filter((x) => x.state === 'live' && !(rec.before || []).includes(x.leaf_id) && x.asset === rec.ticket.payAsset)
@@ -1586,7 +1601,9 @@ export function createEngine (deps) {
         if (state !== 'settling') { rec.state = 'settling'; rec.settleSince = now(); settleAsk(rec).catch(() => {}) }
         return put(rec)
       }
-      if (now() - since <= mostMs && ['wallet-busy', 'no-firm-offer'].includes(q.why)) return put(rec)
+      // Nobody offers it this moment: a maker quotes nothing while it reads its coins again after a
+      // trade, so within the time given it is asked again at the next advance.
+      if (now() - since <= mostMs && ['wallet-busy', 'no-firm-offer', 'not-offered'].includes(q.why)) return put(rec)
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'no price within the bound: ' + q.why
       return back()
     }
@@ -1872,8 +1889,9 @@ export function createEngine (deps) {
       }
       if (now() - (rec.sentAt || 0) > MAKER_COMPLETE_MS) {
         try {
-          const held = ((await run('coins')) || []).filter((c) => c.state === 'offered')
+          const held = ((await run('coins')) || []).filter((c) => c.state === 'offered' || c.state === 'sending')
           const c = await run('swap_cancel', { swap: rec.swap })
+          rec.awaiting = !!(c && !c.cancelled && !c.done && c.unknown)
           if (c && c.cancelled) {
             rec.state = 'returned'; rec.returnedAt = now()
             // A cancel moves the coins signed into the acceptance to a fresh coin of the wallet's
