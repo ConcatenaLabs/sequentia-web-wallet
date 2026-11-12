@@ -268,6 +268,14 @@ function btcBlocks (n) { return Number(n) === 1 ? 'a Bitcoin block' : `${Number(
 // Whether what an open trade brings is held already, and only its settling is left: a purchase
 // with BTC once the BTC is paid and the asset claimed, a sale for BTC once the BTC came, a swap once
 // the maker completed it, a take once its round released the coin.
+// What a trade has paid already in the asset paid, with nothing yet traded for it: the margins a
+// cancel's respend left (`cancelFees`) and those of the wallet's payment to itself that made the
+// coin a trade gives (`shapeFees`, the library's `pays.shapes`). Neither comes back; a trade priced
+// again counts them once, in what it pays and in its fees, and one returned names them.
+export function paidAlready (r) {
+  return big(r && r.cancelFees) + big(r && r.shapeFees)
+}
+
 export function heldAlready (r) {
   if (!r) return false
   if (r.source === 'btc-gateway') return r.dir === 'sell' ? !!r.btcPaid : !!(r.preimage && r.receiveState === 'received')
@@ -841,7 +849,12 @@ export function createEngine (deps) {
         }
         release(entry.maker, o.swap); return null
       }
-      if (t.gets.asset !== receiveAsset || t.gives.asset !== payAsset || big(t.gets.value) !== give) { release(entry.maker, o.swap); return null }
+      // What the wallet gets: what the offer gives, less what the wallet adds to the swap's margin
+      // when it pays from more coins than the maker's margin covers (the library's `tops_up`, #693),
+      // shown on the ticket and in its fees.
+      const topUp = big(t.tops_up && t.tops_up.asset === receiveAsset ? t.tops_up.margin : 0)
+      if (t.gets.asset !== receiveAsset || t.gives.asset !== payAsset || big(t.gets.value) + topUp !== give || big(t.gets.value) <= 0n) { release(entry.maker, o.swap); return null }
+      const gets = big(t.gets.value)
       const spend = big(t.gives.value) + big(t.pays.margins)
       marginsSeen.set(payAsset, big(t.pays.margins))
       const limit = pay < have ? pay : have
@@ -858,11 +871,11 @@ export function createEngine (deps) {
       // What settling costs, when it is needed, comes from the library.
       const most = await depthLimit()
       const settles = t.hops == null || most == null || Number(t.hops) >= most - 1
-      let s = { asset: receiveAsset, value: String(give), fee: '0', after: String(give) }, sc = null
+      let s = { asset: receiveAsset, value: String(gets), fee: '0', after: String(gets) }, sc = null
       const change = big(t.change && t.change.value)
       if (settles) {
         try {
-          s = await run('settle_quote', { asset: receiveAsset, value: String(give), expiry: t.dates && t.dates.expiry })
+          s = await run('settle_quote', { asset: receiveAsset, value: String(gets), expiry: t.dates && t.dates.expiry })
           if (change > 0n) sc = await run('settle_quote', { asset: payAsset, value: String(change), expiry: t.dates && t.dates.expiry })
         } catch (e) { log('[user trade] settle_quote:', e.message); release(entry.maker, o.swap); return null }
       }
@@ -876,6 +889,7 @@ export function createEngine (deps) {
         continue
       }
       const fees = [{ asset: payAsset, atoms: big(t.pays.margins) }]
+      if (topUp > 0n) fees.push({ asset: receiveAsset, atoms: topUp })
       if (settles) fees.push({ asset: receiveAsset, atoms: big(s.fee) })
       if (sc) fees.push({ asset: payAsset, atoms: big(sc.fee) })
       return { source: entry.source, id: entry.id, entry, receive: big(s.after), give: total, offer: o, terms: t,
@@ -1459,10 +1473,11 @@ export function createEngine (deps) {
     // What the wallet can pay changes with this trade: the next quote reads it afresh.
     holdings = null
     const id = prior ? prior.id : extra.id || `${now()}-${Math.random().toString(16).slice(2, 10)}`
-    // A trade priced again after its offer was gone: a cancel's respend of its coins left margins
-    // (`cancelFees`), paid in the asset paid. The record's ticket counts them, in what is paid and
-    // in its fees, so the fee line is what the trade cost.
-    const cf = prior ? big(prior.cancelFees) : 0n
+    // A trade priced again after its offer was gone, or after a refusal that came once the wallet
+    // had paid itself the coin it gives: what it paid already (paidAlready: a cancel's respend
+    // margins, the shaping payment's), in the asset paid. The record's ticket counts them, in what
+    // is paid and in its fees, so the fee line is what the trade cost.
+    const cf = prior ? paidAlready(prior) : 0n
     if (cf > 0n) {
       ticket = { ...ticket, amountIn: String(big(ticket.amountIn) + cf), fees: [...(ticket.fees || []), { asset: ticket.payAsset, atoms: String(cf) }] }
     }
@@ -1478,7 +1493,8 @@ export function createEngine (deps) {
     }
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
       ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: prior.state === 'settling' || !!prior.settledFirst, settleSince: prior.settleSince,
-        ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}) } : {}),
+        ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}),
+        ...(prior.shapeFees ? { shapeFees: prior.shapeFees, shaped: prior.shaped } : {}) } : {}),
       ...extra })
     try {
       if (choice.source === 'composed') {
@@ -1525,6 +1541,10 @@ export function createEngine (deps) {
         rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
         put(rec)
         const a = await run('swap_accept', { offer: choice.offer.offer, shown: choice.terms })
+        // The coin it gives was made first by a payment of the wallet to itself (`pays.shapes`):
+        // paid now, whatever becomes of the trade, so a price asked again does not charge it twice.
+        const shaped = big(a.pays && a.pays.shapes)
+        if (shaped > 0n) rec.shapeFees = String(big(rec.shapeFees) + shaped)
         rec.accept = a.accept; rec.state = 'sent'; rec.sentAt = now()
         put(rec)
         try {
@@ -1592,6 +1612,24 @@ export function createEngine (deps) {
         settleAsk(rec).catch(() => {})
         return put(rec)
       }
+      // Refused after the wallet paid itself the coin of exactly what the trade gives (the library's
+      // `shaped`): that payment moved, and its margins (`fee`, in the ticket shown) are paid; nothing
+      // else moved. The coin is kept for this trade, so it is priced again at once into the same
+      // record under what was accepted, from that coin, and the margins are counted once, never
+      // charged again (paidAlready). Twice over, it is returned with words naming them.
+      if (rec.state === 'confirming' && e && e.kind === 'shaped' && choice.source === 'leaf-maker') {
+        drop(choice)
+        rec.shapeFees = String(big(rec.shapeFees) + big(e.fee))
+        rec.shaped = (rec.shaped || 0) + 1
+        log('[user trade] refused after its coin was made; pricing again from it:', rec.id)
+        if (rec.shaped >= 2) {
+          rec.state = 'returned'; rec.whyKind = null; rec.error = e.message
+          rec.feesPaid = [{ asset: ticket.payAsset, atoms: String(paidAlready(rec)) }]
+          return put(rec)
+        }
+        rec.state = 'repricing'; rec.repriceSince = now(); rec.accepted = rec.accepted || ticket; rec.error = null
+        return put(rec)
+      }
       // A step refused, before anything was signed to the other side, because a coin of the
       // wallet's it paid from is spent elsewhere (a second device gave it to a round): a fill of an
       // order resting in the tree, a take of a covenant order, or an acceptance of a maker's offer
@@ -1605,7 +1643,7 @@ export function createEngine (deps) {
         log('[user trade] a coin it paid from was spent elsewhere; pricing again:', rec.id)
         if (rec.gave.length >= GONE_MOST) {
           rec.state = 'returned'; rec.whyKind = null; rec.error = 'the offers were gone ' + rec.gave.length + ' times'
-          if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
+          if (paidAlready(rec) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(paidAlready(rec)) }]
           return put(rec)
         }
         rec.state = 'repricing'; rec.repriceSince = now(); rec.accepted = rec.accepted || ticket; rec.error = null
@@ -1675,7 +1713,7 @@ export function createEngine (deps) {
     if (rec.gave.length >= GONE_MOST) {
       if (gone.offer && gone.offer.swap && rec.maker) release(rec.maker, gone.offer.swap)
       rec.gone = null; rec.state = 'returned'; rec.whyKind = null; rec.error = 'the makers\' offers were gone ' + rec.gave.length + ' times'
-      if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
+      if (paidAlready(rec) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(paidAlready(rec)) }]
       return put(rec)
     }
     if (gone.offer && gone.offer.swap && rec.maker) madeAgain.set(rec.maker, { ...gone.offer, give_asset: rec.ticket.receiveAsset, want_asset: rec.ticket.payAsset })
@@ -1741,7 +1779,7 @@ export function createEngine (deps) {
     const left = rec.maker && madeAgain.get(rec.maker)
     if (left) { madeAgain.delete(rec.maker); release(rec.maker, left.swap) }
     // A cancel's respend left margins: a trade returned now names them.
-    const back = () => { if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: t.payAsset, atoms: String(rec.cancelFees) }]; return put(rec) }
+    const back = () => { if (paidAlready(rec) > 0n) rec.feesPaid = [{ asset: t.payAsset, atoms: String(paidAlready(rec)) }]; return put(rec) }
     // A ticket the maker's depth capped, whose next atom costs more than the ticket's price: priced
     // once more at exactly what the ticket paid.
     if (q.ok && !within(q) && most > aIn) {
