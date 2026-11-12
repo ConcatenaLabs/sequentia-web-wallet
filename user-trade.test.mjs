@@ -54,6 +54,13 @@ test('what the library can pay now leaves out coins an offline-refresh plan name
   assert.equal(m.get(Y), 9n)
 })
 
+test('a coin the library holds out as spent elsewhere is not spendable now, as its coin_places says', () => {
+  const coins = [{ leaf_id: 'a', asset: X, value: '100', state: 'live' },
+    { leaf_id: 'h', asset: X, value: '1000', state: 'live', standing: 'spent_elsewhere', spent_elsewhere_until: 1796644446 }]
+  assert.equal(spendableFrom(coins, { plans: [] }).get(X), 100n)
+  assert.equal(spendableFrom(coins, { plans: [] }, { waiting: true }).get(X), 100n)
+})
+
 test('a coin given up in a refresh that waits is the library\'s to pay with: the trade takes the refresh back', () => {
   const coins = [{ leaf_id: 'a', asset: X, value: '100', state: 'live' }, { leaf_id: 'r', asset: X, value: '600', state: 'given', refresh_waiting: 'p1' },
     { leaf_id: 'o', asset: X, value: '40', state: 'given' }]
