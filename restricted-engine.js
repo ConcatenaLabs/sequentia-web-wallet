@@ -9,8 +9,11 @@
 //                           restricted offers (feature detection; false: as if none existed)
 //   isRestricted(asset)  -> whether the asset is one a policy server co-signs
 //   book(pay, receive)   -> the relay's verified offers of the pair, both directions
-//   sellers(asset)       -> the assets the book trades `asset` for now, either way: [{ asset }]
-//   btcBuys(asset)       -> whether bitcoin buys `asset` in one step now
+//   sellers(asset, { sell }) -> the assets the book trades `asset` for now, in the trade's direction:
+//                           buying it (sell false), the assets offers take for it; selling it (sell
+//                           true), the assets offers give for it: [{ asset }]
+//   btcBuys(asset, { sell }) -> whether bitcoin buys `asset` in one step now (sell false), or
+//                           `asset` buys bitcoin in one step now (sell true)
 //   eligible(asset, atoms) -> null when this wallet may receive it, else the approval card
 //                           (restricted-trade.js approvalCard)
 //   held(asset)          -> what the wallet holds of an asset, wherever it is (a restricted one:
@@ -20,7 +23,7 @@
 //   fee(asset)           -> the fee of one trade in that asset
 //   ensure(needs, say)   -> puts what the trade pays from on the chain ([{ hex, atoms }]), saying
 //                           so through say(text) while it waits
-//   take(entry, { receive, feeAsset }) -> { txid }
+//   take(entry, { receive, feeAsset, onTxid }) -> { txid }; onTxid(txid) before the broadcast
 //   status(txid)         -> 'confirmed' | 'pending' | 'unknown'
 //   name(asset)          -> its ticker
 
@@ -49,8 +52,11 @@ export async function restrictedQuote (R, { payAsset, receiveAsset, amount }) {
   // button starts the first step (bitcoin for it, or the restricted asset for it).
   if (payAsset === BTC || receiveAsset === BTC) {
     const r = rGet ? receiveAsset : payAsset
-    const others = await R.sellers(r)
-    const route = btcRoute(name(r), others, (x) => R.btcBuys(x), name, !rGet)
+    // Each leg in the trade's own direction: buying, bitcoin for X and X for R; selling, R for X
+    // and X for bitcoin. A card never names a route the book or the paths do not hold.
+    const sell = !rGet
+    const others = await R.sellers(r, { sell })
+    const route = btcRoute(name(r), others, (x) => R.btcBuys(x, { sell }), name, sell)
     if (route.via) return { ok: false, why: 'btc-route', card: { text: (rGet ? RESTRICTED_WORDS.btcVia : RESTRICTED_WORDS.btcViaSell)(name(r), name(route.via)), choices: [route.via], side: 'get' } }
     return { ok: false, why: 'btc-route', card: { ...route.card, side: rGet ? 'pay' : 'get' } }
   }
@@ -96,7 +102,9 @@ export async function restrictedConfirm (R, choice, rec, put) {
   put(rec)
   await R.ensure(needs, (text) => { rec.note = text; put(rec) })
   rec.note = null
-  const r = await R.take(choice.entry, { receive: choice.receive, feeAsset: choice.feeAsset })
+  // The trade's txid is recorded before the broadcast: a broadcast whose answer is lost is
+  // followed by it (the engine's uncertain step), never reported as nothing moved.
+  const r = await R.take(choice.entry, { receive: choice.receive, feeAsset: choice.feeAsset, onTxid: (txid) => { rec.txid = txid; put(rec) } })
   rec.txid = r.txid; rec.state = 'sent'; rec.sentAt = Date.now()
   return put(rec)
 }

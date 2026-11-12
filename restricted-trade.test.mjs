@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import { createHash } from 'node:crypto'
 
 const m = await import('./restricted-trade.js')
-const { restrictedQuote } = await import('./restricted-engine.js')
+const { restrictedQuote, restrictedConfirm } = await import('./restricted-engine.js')
 const seqob = await import('./seqob.js')
 const { forbiddenIn } = await import('./user-trade.js')
 
@@ -176,7 +176,8 @@ test('no word the default screen shows for a restricted trade is a forbidden one
   const W = m.RESTRICTED_WORDS
   const texts = [W.approvalNamed('Issuer', 'BOND'), W.approvalUnnamed('BOND'), W.copyCode, W.openPage('Issuer'), ...Object.values(W.reasons),
     W.sellerHeld, W.btcVia('BOND', 'USDX'), W.btcOther('BOND', 'USDX'), W.btcViaSell('BOND', 'USDX'), W.btcOtherSell('BOND', 'USDX'),
-    W.payWith('USDX'), W.getIn('USDX'), W.noneSelling('BOND'), W.noneBuying('BOND'), W.viaHeld('USDX')]
+    W.payWith('USDX'), W.getIn('USDX'), W.noneSelling('BOND'), W.noneBuying('BOND'), W.viaHeld('USDX'),
+    ...Object.values(W.waits).flatMap((f) => [f('BOND', '12 Nov 2026'), f('BOND', null)])]
   for (const t of texts) {
     assert.deepEqual(forbiddenIn(t), [], t)
     assert.doesNotMatch(t, /can(no|')t be traded|not tradable|cannot trade/i, t)
@@ -236,11 +237,11 @@ function dvpRig (maker) {
   const seen = { signed: 0, cosigned: 0 }
   const host = {
     policy: () => ({ asset: async () => ({ policy_pub: '22'.repeat(32), enforcement: 'cosign' }), enclaveScript: async () => MENC,
-      check: async () => ({ ok: true }), cosign: async () => { seen.cosigned++; return { txid: 'f'.repeat(64) } } }),
+      check: async () => ({ ok: true }), cosign: async (b) => { seen.cosigned++; seen.body = b; return { txid: m.readTx(b.tx).txid } } }),
     aid: () => 'AID', enclave: async () => ({ script: ENC }), enclaveCoins: async () => [],
     walletCoins: async (asset) => mine.filter((c) => c.asset === asset), walletOwns: async () => new Set(mine.map((c) => `${c.txid}:0`)),
     coinsAt: async (ops) => ops.map((o) => (o.txid === mine[0].txid ? mine[0] : coin(1, a, 300, MENC))),
-    newScript: async () => CH, scriptOf: async () => MREC, feeAtoms: async () => 20n, build: async (i, o) => m.buildTx(i, o),
+    newScript: async () => CH, scriptOf: async () => MREC, feeAtoms: async () => 20n, build: async (i, o) => { seen.built = m.buildTx(i, o); return seen.built },
     signWallet: async (hex) => { seen.signed++; const t = m.readTx(hex); return m.setWitnesses(hex, t.inputs.map((_, i) => (i === 0 ? [] : ['30', '02']))) },
     now: () => 1000,
     courier: async () => {
@@ -282,6 +283,84 @@ test('the taker refuses a trade its wallet signed beyond what it offered', async
   assert.equal(r.seen.cosigned, 0)
   // Honest: broadcast through the policy server.
   const r2 = dvpRig(ok)
-  assert.deepEqual(await m.takeDvP(r2.host, r2.entry, { feeAsset: F }), { txid: 'f'.repeat(64) })
+  assert.deepEqual(await m.takeDvP(r2.host, r2.entry, { feeAsset: F }), { txid: m.readTx(r2.seen.built).txid })
   assert.equal(r2.seen.cosigned, 1)
+})
+
+const makerSells = (expires) => (msg) => (msg.type === 'dvp_request' ? [{ type: 'dvp_coins', dvp_coins: [{ Txid: '01'.repeat(32), Vout: 0 }] }]
+  : msg.type === 'dvp_tx' ? [{ type: 'dvp_signed', user_sigs: { 0: 'aa' }, expires_at: expires, expiry_sig: 'bb' }] : [])
+
+test('the trade\'s own txid is recorded before its broadcast: a lost answer, or one naming another transaction, is followed, never "nothing moved"', async () => {
+  // A lost answer: the trade's txid was told first, and the error is not a refusal (the engine
+  // follows the txid instead of calling the trade failed).
+  const lost = dvpRig(makerSells(99999))
+  let told = null
+  lost.host.policy = ((p) => () => ({ ...p(), cosign: async () => { throw new Error('Failed to fetch') } }))(lost.host.policy)
+  const e = await m.takeDvP(lost.host, lost.entry, { feeAsset: F, onTxid: (t) => { told = t } }).then(() => null, (x) => x)
+  assert.match(String(e && e.message), /Failed to fetch/)
+  assert.doesNotMatch(String(e.message), /^refused/)
+  assert.equal(told, m.readTx(lost.seen.built).txid, 'the trade\'s txid, before the broadcast')
+  // An answer naming another transaction is not taken for this trade's.
+  const liar = dvpRig(makerSells(99999))
+  liar.host.policy = ((p) => () => ({ ...p(), cosign: async () => ({ txid: 'de'.repeat(32) }) }))(liar.host.policy)
+  let told2 = null
+  await assert.rejects(m.takeDvP(liar.host, liar.entry, { feeAsset: F, onTxid: (t) => { told2 = t } }), /named another transaction/)
+  assert.equal(told2, m.readTx(liar.seen.built).txid)
+  // The engine keeps the txid it was told when the take throws after it.
+  const rec = { ticket: { payAsset: 'p', receiveAsset: 'r' } }
+  const R = { isRestricted: () => false, ensure: async () => {}, take: async (_e, o) => { o.onTxid('ab'.repeat(32)); throw new Error('Failed to fetch') } }
+  await assert.rejects(restrictedConfirm(R, { entry: { id: 'x' }, give: 1n, receive: 1n, feeAsset: 'p', fee: 1n }, rec, (r) => r), /Failed to fetch/)
+  assert.equal(rec.txid, 'ab'.repeat(32))
+})
+
+test('the expiry is reckoned on the later of the device clock and the chain\'s median time', async () => {
+  // The device clock reads 1000, the chain 5000: a maker's signatures valid to 2000 have expired.
+  const r = dvpRig(makerSells(2000))
+  r.host.chainTime = async () => 5000
+  await assert.rejects(m.takeDvP(r.host, r.entry, { feeAsset: F }), /already expired/)
+  assert.equal(r.seen.cosigned, 0)
+  // A chain the explorer cannot read leaves the device clock.
+  const r2 = dvpRig(makerSells(2000))
+  r2.host.chainTime = async () => { throw new Error('explorer: HTTP 502') }
+  assert.equal((await m.takeDvP(r2.host, r2.entry, { feeAsset: F })).txid, m.readTx(r2.seen.built).txid)
+})
+
+test('only a refusal approval cures asks for approval; the others say what holds the trade, with its date', () => {
+  const asset = { ticker: 'BOND', entity: { name: 'Bond Issuer Ltd', url: 'https://bonds.example' }, domain: '' }
+  const now = () => Date.UTC(2026, 10, 12, 0, 0, 0)
+  const card = (code, reason, height) => m.approvalCard({ eligible: false, code, reason, height, onboarding: { name: 'Bond Issuer Ltd', url: 'https://bonds.example/apply' } }, asset, 'AID1', { now })
+  for (const code of ['unregistered', 'not_whitelisted', 'category', 'category_denied', 'frozen']) {
+    const c = card(code)
+    assert.match(c.text, /^Only holders approved by Bond Issuer Ltd/, code)
+    assert.equal(c.code, 'AID1', code)
+  }
+  // 1440 blocks of 60 s: one day on.
+  const lock = card('lockin', 'asset is locked in until height 2440 (current 1000)', 1000)
+  assert.equal(lock.text, 'BOND can change hands from about 13 Nov 2026, as its issuer set.')
+  const vest = card('vesting', 'vesting: 5 atoms locked until height 2440', 1000)
+  assert.equal(vest.text, 'Part of this BOND is still vesting, until about 13 Nov 2026. Try a smaller amount, or come back then.')
+  assert.equal(card('holder_cap', 'holder cap 5 would be exceeded (5 holders)').text, 'BOND has as many holders as its issuer allows right now. Come back later.')
+  assert.equal(card('receive_window').text, 'This wallet can receive BOND from a later date, as its issuer set.')
+  assert.equal(card('rules', 'any').text, 'BOND\'s issuer does not allow this trade right now. Come back later.')
+  assert.equal(card('sender_frozen').text, m.RESTRICTED_WORDS.sellerHeld)
+  for (const code of ['lockin', 'vesting', 'holder_cap', 'receive_window', 'rules', 'limit', 'velocity', 'sender_frozen', 'sender_locked']) {
+    const c = card(code)
+    assert.equal(c.code, null, code)
+    assert.equal(c.link, null, code)
+    assert.doesNotMatch(c.text, /approv/i, code)
+  }
+})
+
+test('bitcoin and a restricted asset: each leg read in the trade\'s own direction, never a route that does not exist', async () => {
+  const { a, b, R } = fakeR()
+  const asked = []
+  // The book holds offers selling RSB for USDX only, and bitcoin buys USDX but USDX buys no bitcoin.
+  const dirR = { ...R, sellers: async (_r, o = {}) => { asked.push(['sellers', !!o.sell]); return o.sell ? [] : [{ asset: b }] },
+    btcBuys: (_x, o = {}) => { asked.push(['btcBuys', !!o.sell]); return !o.sell } }
+  const sell = await restrictedQuote(dirR, { payAsset: a, receiveAsset: 'BTC', amount: 100n })
+  assert.equal(sell.card.text, 'No one is buying RSB right now. Check back later.')
+  assert.deepEqual(sell.card.choices, [])
+  const buy = await restrictedQuote(dirR, { payAsset: 'BTC', receiveAsset: a, amount: 100n })
+  assert.equal(buy.card.text, 'Bitcoin buys USDX, and USDX buys RSB. Get USDX first, then trade it for RSB.')
+  assert.deepEqual(asked, [['sellers', true], ['sellers', false], ['btcBuys', false]])
 })

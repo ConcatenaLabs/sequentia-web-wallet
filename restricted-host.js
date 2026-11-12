@@ -126,6 +126,13 @@ export function makeRestrictedHost (ctx) {
     courier: async (entry) => ctx.courier(entry.raw, big(entry.raw.base_amount || entry.raw.baseAmount)),
     gatedScript: ctx.gatedScript ? async (terms) => ctx.gatedScript(terms) : null,
     now: () => ctx.now(),
+    // The chain tip's median time, from the explorer's latest blocks (its block time where the
+    // explorer gives no median).
+    async chainTime () {
+      const bs = await ctx.esplora('/blocks')
+      const b = Array.isArray(bs) ? bs[0] : null
+      return b ? Number(b.mediantime ?? b.timestamp) || 0 : 0
+    },
     // The coins a trade held, given back when it ends without spending them.
     release (coins) { for (const c of coins || []) held.delete(key(c)) },
     releaseAll () { held.clear() },

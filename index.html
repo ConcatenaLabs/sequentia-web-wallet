@@ -4598,16 +4598,19 @@ function restrictedDeps(){
     available: restrictedAvailable,
     isRestricted: isRestrictedAsset,
     book: (pay, receive)=> isRestrictedAsset(receive) ? relayPairBook(receive, pay) : relayPairBook(pay, receive),
-    // The assets the book trades a restricted asset for now: every market the relay lists with it.
-    sellers: async (hex)=>{
+    // The assets the book trades a restricted asset for now, in the trade's direction: buying it,
+    // those offers take for it; selling it, those offers give for it.
+    sellers: async (hex, { sell = false } = {})=>{
       try{ const j = await fetch(`${seqob.seqobBase()}/v1/markets`, { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) }).then(r=> r.ok ? r.json() : {});
         const ms = (j.markets || []).map(m=> m.pair || m).filter(p=> p && p.base_asset === hex && /^[0-9a-f]{64}$/.test(p.quote_asset || ''));
         const out = [];
-        for(const p of ms){ const book = await relayPairBook(hex, p.quote_asset); if(restrictedEntries(book, { payAsset: p.quote_asset, receiveAsset: hex }).length || restrictedEntries(book, { payAsset: hex, receiveAsset: p.quote_asset }).length) out.push({ asset: p.quote_asset }); }
+        for(const p of ms){ const book = await relayPairBook(hex, p.quote_asset);
+          const dir = sell ? { payAsset: hex, receiveAsset: p.quote_asset } : { payAsset: p.quote_asset, receiveAsset: hex };
+          if(restrictedEntries(book, dir).length) out.push({ asset: p.quote_asset }); }
         return out;
       }catch{ return []; }
     },
-    btcBuys: (hex)=>{ const g = _genesis; return !!(_userPairs && g && admittedSources(_userPairs, g, 'BTC', hex).length); },
+    btcBuys: (hex, { sell = false } = {})=>{ const g = _genesis; return !!(_userPairs && g && (sell ? admittedSources(_userPairs, g, hex, 'BTC') : admittedSources(_userPairs, g, 'BTC', hex)).length); },
     eligible: async (hex, atoms)=>{
       const aid = OAMP_AID || (OAMP_XONLY ? openampComputeAid([OAMP_XONLY]) : '');
       let j; try{ j = await oampFetch(`/v1/eligibility?asset=${encodeURIComponent(hex)}&aid=${encodeURIComponent(aid)}&atoms=${encodeURIComponent(String(atoms || 1))}`); }catch{ return null; }

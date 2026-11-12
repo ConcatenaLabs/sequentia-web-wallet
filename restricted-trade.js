@@ -309,20 +309,26 @@ export const RESTRICTED_WORDS = Object.freeze({
   approvalUnnamed: (ticker) => `Only approved holders can hold ${ticker}. Ask its issuer to approve this wallet and give them your approval code.`,
   copyCode: 'Copy your approval code',
   openPage: (issuer) => `Open ${issuer}'s page`,
-  // Why, in plain words, by the policy server's code (openamp README, eligibility).
+  // Why, in plain words, by the policy server's code (openamp README, eligibility), for the
+  // refusals approval cures (APPROVAL_CODES).
   reasons: Object.freeze({
     frozen: 'This wallet is paused for this asset by its issuer.',
-    lockin: 'This asset cannot change hands yet: its issuer set a date from which it can.',
-    holder_cap: 'This asset has as many holders as its issuer allows right now.',
     category: 'This wallet is not yet approved for this asset.',
     category_denied: 'This wallet is not approved for this asset at the moment.',
     unregistered: 'This wallet is not yet known to this asset\'s issuer.',
     not_whitelisted: 'This wallet is not yet approved for this asset.',
-    receive_window: 'This wallet can receive this asset from a later date.',
-    limit: 'That is more than this asset allows in one trade: try a smaller amount.',
-    velocity: 'That is more of this asset than can change hands today: try a smaller amount or try again later.',
   }),
-  sellerHeld: 'The seller cannot sell this asset right now. Try again later.',
+  sellerHeld: 'The seller cannot sell this asset right now. Try another offer, or come back later.',
+  // A refusal that approval does not cure: its own words, and no request for approval.
+  waits: Object.freeze({
+    lockin: (t, date) => (date ? `${t} can change hands from about ${date}, as its issuer set.` : `${t} cannot change hands yet: its issuer set a date from which it can.`),
+    vesting: (t, date) => (date ? `Part of this ${t} is still vesting, until about ${date}. Try a smaller amount, or come back then.` : `Part of this ${t} is still vesting. Try a smaller amount, or come back later.`),
+    holder_cap: (t) => `${t} has as many holders as its issuer allows right now. Come back later.`,
+    receive_window: (t) => `This wallet can receive ${t} from a later date, as its issuer set.`,
+    limit: () => 'That is more than this asset allows in one trade: try a smaller amount.',
+    velocity: () => 'That is more of this asset than can change hands today: try a smaller amount, or come back later.',
+    other: (t) => `${t}'s issuer does not allow this trade right now. Come back later.`,
+  }),
   btcVia: (ticker, via) => `Bitcoin buys ${via}, and ${via} buys ${ticker}. Get ${via} first, then trade it for ${ticker}.`,
   btcOther: (ticker, list) => `${ticker} is bought with ${list}. Choose one to pay with; paying with bitcoin directly comes with a network upgrade.`,
   payWith: (t) => `Pay with ${t}`,
@@ -339,8 +345,26 @@ export const RESTRICTED_WORDS = Object.freeze({
 // exists; never an empty name or a dead link. `elig` is GET /v1/eligibility's answer; `asset`:
 // { ticker, entity: { name, url } | null, domain }; `code` the approval code (the account id).
 // -> { text, reason, code, link: { text, url } | null }
-export function approvalCard (elig, asset, code) {
+// Only a refusal that approval cures asks for it (APPROVAL_CODES); any other (a lock-in, a holder
+// cap, a receive window, vesting, a limit, the issuer's rules, the seller's own state) is said in
+// its own words, with the date it ends where the policy server's reason names a height, and
+// carries no code and no link. `opts`: { blockSeconds, now() in ms }.
+export const APPROVAL_CODES = Object.freeze(new Set(['unregistered', 'not_whitelisted', 'category', 'category_denied', 'frozen']))
+export function approvalCard (elig, asset, code, { blockSeconds = 60, now = Date.now } = {}) {
   const ticker = asset.ticker
+  const why = elig && elig.code
+  if (why && !APPROVAL_CODES.has(why)) {
+    const W = RESTRICTED_WORDS.waits
+    if (/^sender_/.test(why)) return { text: RESTRICTED_WORDS.sellerHeld, reason: null, code: null, link: null }
+    let date = null
+    const until = /until height (\d+)/.exec(String(elig.reason || ''))
+    const at = Number(elig.height)
+    if (until && at > 0 && Number(until[1]) > at) {
+      date = new Date(now() + (Number(until[1]) - at) * blockSeconds * 1000).toUTCString().slice(5, 16)
+    }
+    const f = W[why] || W.other
+    return { text: f(ticker, date), reason: null, code: null, link: null }
+  }
   const ob = (elig && elig.onboarding) || null
   const op = (elig && elig.operator_onboarding) || null
   const url = (u) => (typeof u === 'string' && /^https:\/\/[^\s/]+/.test(u) ? u : null)
@@ -391,11 +415,12 @@ export function btcRoute (ticker, buyers, btcBuys, name = (a) => a, sell = false
 //   signDigest(hex32)      -> a BIP340 signature by its enclave key
 //   courier(entry)         -> { send(msg), recv(type, ms), close() } to the entry's maker
 //   now()                  -> seconds
+//   chainTime()            -> the chain tip's median time, seconds (optional)
 // -> { txid }
 
 // A maker's quote: the trade, one transaction. `entry` from restrictedEntries; `feeAsset` the
 // asset the taker pays the fee in (never the restricted one).
-export async function takeDvP (host, entry, { feeAsset }) {
+export async function takeDvP (host, entry, { feeAsset, onTxid }) {
   const o = entry.raw; const r = rt(o)
   const asset = baseOf(o)
   const assetB = quoteOf(o)
@@ -463,26 +488,27 @@ export async function takeDvP (host, entry, { feeAsset }) {
     const offeredIdx = indicesOf(unsigned.inputs, side.offered)
     let txid
     if (makerSells) {
-      if (!(Number(sm.expires_at) > host.now())) throw refusal('the maker\'s signatures have already expired')
+      if (!(Number(sm.expires_at) > await chainNow(host))) throw refusal('the maker\'s signatures have already expired')
       const signed = await host.signWallet(hex, unsigned.inputs)
       const bad = checkSigned(tx, readTx(signed), offeredIdx)
       if (bad) { await c.fail('bad_terms', bad); throw refusal(bad) }
-      txid = (await policy.cosign({ ...body, tx: signed, broadcast: true, user_sigs: sm.user_sigs, expires_at: Number(sm.expires_at), expiry_sig: sm.expiry_sig })).txid
+      txid = await broadcast(policy, { ...body, tx: signed, broadcast: true, user_sigs: sm.user_sigs, expires_at: Number(sm.expires_at), expiry_sig: sm.expiry_sig }, tx.txid, onTxid)
     } else {
       const theirsSigned = readTx(sm.dvp_tx)
       if (theirsSigned.txid !== tx.txid) throw refusal('the maker signed another transaction')
       // The maker's witnesses, on the maker's inputs only.
       const makerIdx = new Set(indicesOf(unsigned.inputs, theirs))
-      const merged = withWitnesses(hex, theirsSigned, makerIdx)
-      const signed = await host.signWallet(merged, unsigned.inputs)
-      const bad = checkSigned(readTx(merged), readTx(signed), offeredIdx.filter((i) => !sellerIns.includes(i)))
+      // The wallet library signs from a PSET that carries no witness: it signs the unsigned trade,
+      // is checked against it, and only then are the maker's witnesses laid on the maker's inputs.
+      const ours = await host.signWallet(hex, unsigned.inputs)
+      const bad = checkSigned(tx, readTx(ours), offeredIdx.filter((i) => !sellerIns.includes(i)))
       if (bad) { await c.fail('bad_terms', bad); throw refusal(bad) }
-      const exp = host.now() + EXPIRY_S
+      const signed = withWitnesses(ours, theirsSigned, makerIdx)
+      const exp = await chainNow(host) + EXPIRY_S
       const sigs = await host.signEnclave(signed, unsigned.inputs, sellerIns, mine)
       const es = await host.signDigest(expiryDigest(tx.txid, exp))
-      txid = (await policy.cosign({ ...body, tx: signed, broadcast: true, user_sigs: sigs, expires_at: exp, expiry_sig: es })).txid
+      txid = await broadcast(policy, { ...body, tx: signed, broadcast: true, user_sigs: sigs, expires_at: exp, expiry_sig: es }, tx.txid, onTxid)
     }
-    if (!txid) throw new Error('the policy server broadcast nothing')
     await c.send({ type: 'dvp_done', settle_txid: txid }).catch(() => {})
     return { txid }
   } finally { try { c.close() } catch {} }
@@ -503,7 +529,7 @@ function sharedLayout (d) {
 
 // A gated order: the fill, the taker's inputs signed, co-signed and broadcast by the policy
 // server in one step. `receive` the atoms of the restricted asset taken.
-export async function takeGated (host, entry, { receive, feeAsset }) {
+export async function takeGated (host, entry, { receive, feeAsset, onTxid }) {
   const g = gated(entry.raw)
   const asset = rev(g.asset_a || g.assetA); const assetB = rev(g.asset_b || g.assetB)
   if (!feeAsset || feeAsset === asset) throw refusal('the fee is paid in an asset other than the one bought')
@@ -553,9 +579,28 @@ export async function takeGated (host, entry, { receive, feeAsset }) {
   const signed = await host.signWallet(hex, inputs)
   const bad = checkSigned(tx, readTx(signed), inputs.map((_, i) => i).filter((i) => i > 0))
   if (bad) throw refusal(bad)
-  const r = await policy.cosign({ ...body, tx: signed, broadcast: true })
-  if (!r || !r.txid) throw new Error('the policy server broadcast nothing')
-  return { txid: r.txid }
+  return { txid: await broadcast(policy, { ...body, tx: signed, broadcast: true }, tx.txid, onTxid) }
+}
+
+// The trade sent through its policy server, which co-signs and broadcasts it. The trade's own txid
+// is told first (`onTxid`), so an answer that never arrives leaves the trade followed by it, never
+// called "nothing moved" while it is mined; an answer naming another transaction is not taken for
+// this trade's. -> the trade's txid.
+async function broadcast (policy, body, txid, onTxid) {
+  if (onTxid) { try { onTxid(txid) } catch {} }
+  const r = await policy.cosign(body)
+  const named = r && r.txid ? String(r.txid).toLowerCase() : ''
+  if (!named) throw new Error(`the policy server named no transaction; the trade ${txid} is followed`)
+  if (named !== txid) throw new Error(`the policy server named another transaction (${named}); the trade ${txid} is followed`)
+  return txid
+}
+
+// Now for an expiry: the later of the device's clock and the chain's median time, as the policy
+// server reads it (a device clock behind the chain would sign an expiry already past).
+async function chainNow (host) {
+  let mtp = 0
+  if (host.chainTime) { try { mtp = Number(await host.chainTime()) || 0 } catch {} }
+  return Math.max(Number(host.now()), mtp)
 }
 
 // The policy key a policy server lists for an asset it co-signs (GET /v1/assets/{id}). An asset
