@@ -41,6 +41,7 @@ function standIn () {
         case 'lightning_receive_preimage': s.receives[a.hash].preimage = a.preimage; s.receives[a.hash].state = 'received'; s.receives[a.hash].leaf = 'r1'; s.coins.push({ leaf_id: 'r1', asset: X, value: '99384', state: 'live' }); return {}
         case 'quote': return { coins: (a.leaves || []).map((l) => ({ leaf_id: l, fee: '3' })) }
         case 'participate': s.parts = a.leaves.map((l, i) => ({ participation: 'p' + i, state: 'pending' })); return { participations: s.parts }
+        case 'settle_first': s.settleAsked = (s.settleAsked || 0) + 1; return { ready: true }
         default: throw new Error('no command ' + cmd)
       }
     },
@@ -156,6 +157,28 @@ test('the second step goes only at the ticket\'s terms; until then the person ho
   assert.equal(h.takes.length, 1, 'the offer is back: the step goes by itself')
   h.status[steps(eng)[1].txid] = 'confirmed'
   t += 1000; await eng.resume(); await eng.resume()
+  assert.equal(composed(eng).state, 'settled')
+})
+
+test('a second step answered settle-first settles, goes ahead by itself as the same step, and the trade settles', async () => {
+  const s = standIn(); const h = restrictedHost()
+  let deep = true
+  const take = h.R.take
+  h.R.take = async (...a) => { if (deep) { deep = false; const e = new Error('settle them first (settle_first)'); e.kind = 'settle_first'; e.coins = ['x1']; throw e } return take(...a) }
+  const eng = engine(s, h)
+  const q = await eng.quote({ payAsset: 'BTC', receiveAsset: RA, amount: '50000' })
+  const c = await eng.confirm(q.choice, q.ticket)
+  await settleFirst(eng, s, h)
+  const two = () => steps(eng).find((r) => r.source === 'restricted')
+  assert.equal(two().state, 'settling', 'the second step waits for its coins to go through a round')
+  assert.equal(two().partOf, c.id)
+  for (let i = 0; i < 4 && h.takes.length === 0; i++) await eng.resume()
+  assert.equal(h.takes.length, 1, 'then goes ahead by itself')
+  assert.ok(s.settleAsked >= 1)
+  assert.equal(steps(eng).filter((r) => r.source === 'restricted').length, 1, 'as the same step, never a second one')
+  assert.equal(two().partOf, c.id, 'still the composed trade\'s step')
+  h.status[two().txid] = 'confirmed'
+  await eng.resume(); await eng.resume()
   assert.equal(composed(eng).state, 'settled')
 })
 

@@ -40,6 +40,10 @@ function readyWords (minutes) {
 
 export const DEFAULT_WORDS = Object.freeze({
   arriving: (amount, ticker) => `${amount} ${ticker} arriving`,
+  // Default mode, under an asset's figure: a payment received and still arriving, with how long.
+  arrivingIn: (amount, ticker) => `${amount} ${ticker} arriving, in about a minute`,
+  // The figure of an asset held only in a payment still arriving: never a bare 0.
+  arrivingFigure: 'Arriving',
   // Activity's row for a payment that is not in the balance yet, and when it will be, in words.
   rowArriving: 'Arriving',
   rowComingBack: 'Coming back',
@@ -153,9 +157,9 @@ export const DEFAULT_WORDS = Object.freeze({
   // leaves a little of the asset for the fees of the transactions the payment keeps ready.
   sendUpTo: (amount, ticker) => `You can send up to ${amount} ${ticker}: the fee comes out of your balance.`,
   sendNoneNow: (ticker) => `None of your ${ticker} can be sent this way right now: try again in a moment.`,
-  // Held, not arriving, and none of it spendable: the wallet is moving it in a round (a refresh, or
-  // part of it kept for instant payments), which is final with the next block.
-  movingNow: (ticker, time) => `Your ${ticker} is being moved by the wallet's automatic maintenance in the current block: you can send it in ${time}.`,
+  // What is sent waits only for the next settlement (the wallet's own upkeep is moving it, or the
+  // library names coins to settle first): the payment goes ahead by itself after it (D96).
+  settling: 'Goes through in about a minute',
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
   stillArrivingWithin: (ticker, minutes) => minutes

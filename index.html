@@ -2884,12 +2884,26 @@ function afterClose(e, atoms, said){
 }
 
 // Nothing of an asset can be sent now: still arriving, or held but being moved in a round by the
-// wallet's own maintenance (a refresh, or part of it kept for instant payments), or truly none.
+// wallet's own upkeep (then the payment goes through after it), or truly none.
+// Whether a refusal of a payment's quote only waits for the next settlement: the library's
+// `settle_first`, or a shortfall of coins while the wallet holds the asset, none of it arriving
+// (its own upkeep is moving it in a round). The payment is then reviewed and goes ahead by itself
+// once that settlement is through (leaves.js paying), never refused (D96).
+function settlesFirst(e, atoms, hex){
+  if(e && e.kind === 'settle_first') return true;
+  const said = String(e?.message??e);
+  if(!/in live coins|smallest leaf/.test(said)) return false;
+  let held = 0n, arriving = 0n;
+  try{ held = leavesApi.leafAtoms(hex) || 0n; arriving = leavesApi.arriving(hex) || 0n; }catch{}
+  const most = sendableNow(atoms, said);
+  return held > 0n && arriving <= 0n && (most == null || most <= 0n);
+}
 function noneNowWords(hex, m0){
   let held = 0n, arriving = 0n;
   try{ held = leavesApi.leafAtoms(hex) || 0n; arriving = leavesApi.arriving(hex) || 0n; }catch{}
   if(arriving > 0n) return DEFAULT_WORDS.stillArriving(m0.ticker);
-  if(held > 0n) return DEFAULT_WORDS.movingNow(m0.ticker, waitFor(hex));
+  // Held, and moved by the wallet's own upkeep now: the payment waits for it and goes (D96).
+  if(held > 0n) return DEFAULT_WORDS.settling;
   return DEFAULT_WORDS.sendNoneNow(m0.ticker);
 }
 
@@ -2936,6 +2950,8 @@ async function treeQuoteFor(addr, atoms, hex){
     return { most: atoms, text: DEFAULT_WORDS.hintSeconds(feeText(fee)) };
   }catch(e){
     const said = String(e?.message??e);
+    // Waits only for the next settlement: it goes, in about a minute.
+    if(e && e.kind === 'settle_first') return { most: atoms, text: DEFAULT_WORDS.settling };
     if(e && e.kind === 'in_channel'){
       const most = afterClose(e, atoms, said).most;
       if(most != null && most < atoms) return upTo(most);
@@ -2951,8 +2967,10 @@ async function treeSendReview(r, onDone, note){
   const m0 = r.asset==='BTC' ? { precision:8, ticker:'BTC' } : assetMeta(r.asset);
   const atoms = parseAtoms(r.amtS, m0.precision||0);
   if(atoms<=0n) throw new Error('amount must be greater than zero');
-  const held = leavesApi.leafAtoms(r.asset) || 0n, arriving = leavesApi.arriving(r.asset) || 0n;
-  if(atoms > held - arriving) throw new Error(atoms <= held ? DEFAULT_WORDS.stillArriving(m0.ticker) : `You can send up to ${fmtAtoms(held - arriving, m0.precision||0)} ${m0.ticker} this way now.`);
+  // What is still arriving goes too: the library answers settle_first for it, and the payment goes
+  // through after the next settlement (leaves.js paying). Only more than the wallet holds is said here.
+  const all = (leavesApi.leafAtoms(r.asset) || 0n) + onItsWay(r.asset);
+  if(atoms > all) throw new Error(DEFAULT_WORDS.sendUpTo(fmtAtoms(all, m0.precision||0), m0.ticker));
   const amt = fmtAtoms(atoms, m0.precision||0);
   // The fee is the library's (`send_quote`): what the payment keeps back for the fees of the
   // transactions it keeps ready, or none over a channel. A refusal of the quote is the payment's:
@@ -2960,10 +2978,11 @@ async function treeSendReview(r, onDone, note){
   // library that has no quote says a little is kept back, never that there is no fee.
   // A payment the wallet's channel side would cover is quoted from the library's refusal: its fee,
   // and, when more is asked than can go once the fee is taken out, the review is for the most.
-  let quote = null, freeing = false, refused = '', closing = null;
+  let quote = null, freeing = false, refused = '', closing = null, settling = false;
   try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
   catch(e){
     if(e && e.kind === 'in_channel'){ freeing = true; refused = String(e.message||''); closing = afterClose(e, atoms, refused); }
+    else if(settlesFirst(e, atoms, r.asset)){ settling = true; console.warn('[send] settles first:', String(e?.message??e)); }
     else if(!/\bno command send_quote\b/.test(String(e?.message??e))) throw new Error(shortWords(e, atoms, r.asset, m0));
   }
   if(freeing){
@@ -2983,7 +3002,7 @@ async function treeSendReview(r, onDone, note){
   // the most that would go instantly.
   const instant = freeing ? sendableNow(atoms, refused) : null;
   const waitLine = DEFAULT_WORDS.waitBlock(waitFor(r.asset), instant != null && instant > 0n ? fmtAtoms(instant, m0.precision||0) : '', m0.ticker);
-  say(freeing ? waitLine : DEFAULT_WORDS.sendLine);
+  say(settling ? DEFAULT_WORDS.settling : freeing ? waitLine : DEFAULT_WORDS.sendLine);
   ok.textContent = DEFAULT_WORDS.send;
   // The wallet's own channel reads wait while the review is open, so Send never waits for one.
   try{ leavesApi.holdReads(120_000); }catch{}
@@ -2993,7 +3012,7 @@ async function treeSendReview(r, onDone, note){
     const t0=performance.now();
     try{
       // While a channel's side is set free first, the wait says so.
-      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'round'){
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; else if(w && w.why === 'round'){
         // The time true for the operator's finality rule, and past it, that it takes longer.
         let d=null; try{ d=leavesApi.anchorDepth(); }catch{}
         const rm=roundMinutes(d), late=w.since!=null && Date.now()-w.since > statedSeconds('round', 5, rm)*1000;
@@ -3096,25 +3115,40 @@ async function offboardReview(r, onDone){
   const atoms = parseAtoms(r.amtS, m0.precision||0);
   if(atoms<=0n) throw new Error('amount must be greater than zero');
   const address = r.addr.trim();
-  let q;
+  // Part of it still arriving (the library's `settle_first`): reviewed at once, and the payment
+  // settles it first and then goes (leaves.js paying), with no quote to hold it to: its fee is
+  // shown once it is sent, within the wallet's own bound, and it takes one settlement longer.
+  // A library that answers it plainly says when it can go, never "can't be sent".
+  let q = null, settling = false;
   try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }
-  catch(e){ console.warn('[offboard] quote:', e?.message??e); throw new Error(DEFAULT_WORDS.addressShort); }
+  catch(e){
+    console.warn('[offboard] quote:', e?.message??e);
+    if(e && e.kind === 'settle_first') settling = true;
+    else if(onItsWay(r.asset) > 0n && /live coins of asset/.test(String(e?.message??e))) throw new Error(DEFAULT_WORDS.stillArrivingWithin(m0.ticker, arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds())));
+    else throw new Error(DEFAULT_WORDS.addressShort);
+  }
   const amt = fmtAtoms(atoms, m0.precision||0);
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
-  const minutes = arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
+  const round = leavesApi.roundInterval();
+  const minutes = arrivalMinutes(settling && round ? 2 * round : round, leavesApi.blockSeconds());
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, settling ? DEFAULT_WORDS.feeKeptSome : fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
+    // While what it needs settles first, the wait says so.
+    const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; }catch{} }, 1000);
     let v;
-    try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, shown: q }); }
+    try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, ...(q ? { shown: q } : {}) }); }
     catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; return; }
+    finally{ clearInterval(tell); }
     // The same payment asked again while the first is on its way is that first one: nothing more
     // is sent, nothing more is written down, and the person is told so (offboardOutcome).
     const out = offboardOutcome(v, amt, m0.ticker, minutes, leavesApi.blockSeconds());
     const id = v && v.offboard ? String(v.offboard) : null;
-    if(out.sent) try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: fee>0n ? { asset: r.asset, atoms: fee } : null, later: true, offboard: id, address }); }catch{}
+    // Settled first, the fee is the one the offboard answers (it was made on no quote).
+    let paid = fee; try{ if(!q && v && v.fee) paid = BigInt(v.fee.amount||0); }catch{}
+    if(out.sent) try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: paid>0n ? { asset: r.asset, atoms: paid } : null, later: true, offboard: id, address }); }catch{}
     console.log('[offboard]', id, v && v.state, out.sent ? '' : 'already on its way');
     ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
     if(onDone) onDone(); renderBalance(); try{ renderHistory(); }catch{}
@@ -4318,7 +4352,8 @@ function followArriving(){
     for(;;){
       await new Promise(ok=> setTimeout(ok, 5_000));
       if(!leavesApi || !leavesApi.isOpen()) continue;
-      let arriving = 0n; try{ for(const h of leavesApi.leafAssets()) arriving += leavesApi.arriving(h) || 0n; }catch{ continue; }
+      // Once the library's places are read, what is arriving is in no figure: onItsWay counts it.
+      let arriving = 0n; try{ for(const h of new Set([...leavesApi.leafAssets(), ...onItsWayAssets()])) arriving += (leavesApi.arriving(h) || 0n) + onItsWay(h); }catch{ continue; }
       if(arriving <= 0n){ since = null; continue; }
       if(since == null) since = Date.now();
       if(!arrivingSyncDue({ arriving, nowMs: Date.now(), since, lastSyncMs: syncedAt,
@@ -4434,9 +4469,9 @@ function siteDeps(){
       try{ if(!devMode()) for(const [h, v] of chainArriving()){ const n=BigInt(assets[h]||0)-v; assets[h]=(n>0n?n:0n).toString(); } }catch{}
       // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
       const total = {}, arriving = {}, by_place = {};
-      for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves)])){
+      for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves), ...onItsWayAssets()])){
         const t = userHeld(h); if(t > 0n || h === 'BTC') total[h] = t.toString();
-        try{ const a = h !== 'BTC' && leavesApi ? (leavesApi.arriving(h) || 0n) : 0n; if(a > 0n) arriving[h] = a.toString(); }catch{}
+        try{ const a = h !== 'BTC' && leavesApi ? (leavesApi.arriving(h) || 0n) + onItsWay(h) : 0n; if(a > 0n) arriving[h] = a.toString(); }catch{}
         if(devMode()){
           const chain = h === 'BTC' ? (btcBalance || 0n) : BigInt(assets[h] || 0);
           let lv = 0n; try{ if(h !== 'BTC' && leavesApi) lv = leavesApi.leafAtoms(h) || 0n; }catch{}
@@ -4672,6 +4707,7 @@ function userKnownAssets(){
   try { for(const k of Object.keys(balObj())) s.add(k); } catch {}
   try { if(leavesApi) for(const k of leavesApi.leafAssets()) s.add(k); } catch {}
   try { if(leavesApi && leavesApi.vestingAssets) for(const k of leavesApi.vestingAssets()) s.add(k); } catch {}
+  for(const k of onItsWayAssets()) s.add(k);
   try { for(const k of Object.keys(REGISTRY_ASSETS || {})) s.add(k); } catch {}
   try { for(const k of Object.keys(oampAssets || {})) if(isRestrictedAsset(k)) s.add(k); } catch {}
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
@@ -4683,11 +4719,11 @@ function userKnownAssets(){
 // composer when it is on, switching with the mode. A page that sets window.SEQ_USER_TRADE = false
 // keeps the full composer in both modes. user-trade-switch.test.mjs holds the rule.
 function userTradeOn(){ return window.SEQ_USER_TRADE !== false; }
-function applyTradeMode(){
+function applyTradeMode({ follow = true } = {}){
   const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
   const user = !devMode() && userTradeOn();
   for(const c of sec.children){ if(c.id === 'userComposerRoot') c.classList.toggle('hide', !user); else c.classList.toggle('uc-dev-hidden', user); }
-  if(user && userComposer){ userComposer.render(); userComposer.follow(); }
+  if(user && userComposer){ userComposer.render(); if(follow) userComposer.follow(); }
 }
 // The wallet's own hosted Bitcoin node, as the composer's BTC trades drive it: holds under the
 // wallet's own hash, payments capped at the ticket's route.
@@ -5321,8 +5357,9 @@ function initUserComposer(){
       feeRateFor, feerate: DEFAULT_FEERATE, rateScale: EXCHANGE_RATE_SCALE,
     }),
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
-    // as none; and default mode's board of coins on the chain, asked for at once.
-    held: (a)=> userHeld(a),
+    // as none; and default mode's board of coins on the chain, asked for at once. What is on its
+    // way counts too: a trade of it settles first and then goes (D96), as a payment of it does.
+    held: (a)=> userHeld(a) + onItsWay(a),
     // What vests later: a trade that needs it is refused with its date.
     vesting: (a)=> vestingLotsFor(a),
     // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
@@ -5338,7 +5375,7 @@ function initUserComposer(){
   userComposer = mountUserComposer({
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
     session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
-    knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor,
+    knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor, onItsWay: (a)=> onItsWay(a),
     isHidden: isAssetHidden, refValue: refValueStr,
     // The confirmations the Bitcoin ark's server waits for before a board's BTC can be traded.
     btcMoveBlocks: ()=> (btcArk && btcArk.info() && Number(btcArk.info().required_board_confirmations)) || null,
@@ -5352,8 +5389,9 @@ function initUserComposer(){
     openHistory: ()=> tab('history'),
   });
   // The pairs and the chain are read once; the composer draws when they are in.
+  // Drawn at once; its open trades are followed once the pairs are read (one follow, never two).
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
-  applyTradeMode();
+  applyTradeMode({ follow: false });
 }
 
 // ---------- developer mode: the composer's Ark rail ----------
@@ -7880,6 +7918,8 @@ function refreshComposerHeld(){
     if(!userComposer || devMode() || !userTradeOn()) return;
     const panel = document.querySelector('[data-panel=swap]');
     if(!panel || panel.classList.contains('hide')) return;
+    // The balance line under You pay follows every change of the figure, not only of the assets held (#674).
+    if(userComposer.paintHave) userComposer.paintHave();
     if(userComposer.state.ticket || userComposer.state.busy) return;
     const sig = userKnownAssets().filter(a=> userHeld(a) + vestingFor(a) > 0n).sort().join(',');
     if(sig === _ucHeldSig) return;
@@ -7951,7 +7991,12 @@ function renderBalance(){
     // Equal standing: a Sequentia asset with ZERO total (on-chain AND own-Lightning) is not shown —
     // no asset gets a privileged always-visible 0 row, tSEQ included. Only BTC (the parent chain) is
     // always shown (dual-chain), via alwaysShow. A fresh wallet therefore shows ONLY a 0 BTC row.
-    if(!alwaysShow && totalAtoms <= 0n) return;
+    // Default mode: a payment received and still arriving (past the instant limit, until its round)
+    // is shown at once, as arriving, with about how long; never as a part of the balance, and the
+    // asset's row never reads 0 while one is on its way.
+    // (Once the library's places are read, what is on its way is in no figure: onItsWay.)
+    let arrivingIn = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arrivingIn = (leavesApi.arriving(kind) || 0n) + onItsWay(kind); } catch {}
+    if(!alwaysShow && totalAtoms <= 0n && arrivingIn <= 0n) return;
     const amt=(x)=> known ? fmtAmount(x, precision) : (BigInt(x).toString()+' atoms');
     const a=el('div');
     const head=el('div','bt-tk');
@@ -7976,6 +8021,7 @@ function renderBalance(){
     for(const l of vestAll) if(l.arriving && parts) arriving += BigInt(l.atoms);
     if(arriving - redoing > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arriving(amt(arriving - redoing), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     if(redoing > 0n){ const rd=el('div','bt-redoing', DEFAULT_WORDS.redoing(amt(redoing), ticker)); rd.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(rd); }
+    if(!parts && arrivingIn > 0n){ const ar=el('div','bt-arriving', DEFAULT_WORDS.arrivingIn(amt(arrivingIn), ticker)); ar.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ar); }
     let keptSafe = 0n; try { if(kind!=='BTC' && leavesApi && parts && leavesApi.keptSafe) keptSafe = leavesApi.keptSafe(kind) || 0n; } catch {}
     if(keptSafe > 0n){ const ks=el('div','bt-kept-safe', DEFAULT_WORDS.keptSafe(amt(keptSafe), ticker)); ks.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(ks); }
     if(parts && movingAtoms > 0n){ const mv=el('div','bt-moving', DEFAULT_WORDS.moving(amt(movingAtoms), ticker)); mv.style.cssText='color:var(--dim);font-size:12px;margin-top:2px'; a.appendChild(mv); }
@@ -8052,7 +8098,7 @@ function renderBalance(){
     if(foot){ const f=el('div','bt-foot'); f.appendChild(foot); det.appendChild(f); }
     const open=_splitOpen.has(kind), tappable=det.children.length>0;
     if(tappable) head.appendChild(el('span','bt-tog', open ? 'hide details' : 'details'));
-    const row = balRow({ a, onchain: balAmt(amt(on)), ln: el('div'), total: balTotalCell(amt(totalAtoms), ticker),
+    const row = balRow({ a, onchain: balAmt(amt(on)), ln: el('div'), total: (totalAtoms <= 0n && arrivingIn > 0n) ? (()=>{ const d=el('div','bt-amt'); d.appendChild(el('b',null,DEFAULT_WORDS.arrivingFigure)); return d; })() : balTotalCell(amt(totalAtoms), ticker),
       value: balValueCell(known ? refKey : null, totalAtoms), extra: (tappable && open) ? det : null });
     if(tappable){
       row.classList.add('tappable'); row.title = open ? 'Hide the details' : 'Show the details';
@@ -8066,6 +8112,8 @@ function renderBalance(){
   const seqKeys = new Set(Object.keys(b));
   // An asset held only as leaves still has its row, in both modes.
   if(leavesApi) for(const h of leavesApi.leafAssets()) seqKeys.add(h);
+  // And one with a payment on its way and nothing else yet: its row reads Arriving, never nothing.
+  for(const h of onItsWayAssets()) seqKeys.add(h);
   // So does the Sequence token when all of it is staked.
   if(POLICY_HEX && stakedFor(POLICY_HEX)>0n) seqKeys.add(POLICY_HEX);
   // And an asset held only as what vests later.
@@ -8712,6 +8760,8 @@ function ownedOptions(sel){
   // included, is listed for being the network's own (default-arca.js heldAssetList).
   const others=[];
   try{ if(leavesApi) for(const h of leavesApi.leafAssets()) others.push([h, leavesApi.leafAtoms(h)]); }catch{}
+  // Money still arriving can be sent (it settles first): its asset is listed while nothing else of it is held.
+  try{ for(const h of onItsWayAssets()) others.push([h, onItsWay(h)]); }catch{}
   try{ for(const c of ((lnLastStatus && lnLastStatus.channels) || [])) if(c.asset && c.leg!=='btc') others.push([c.asset, lnBalanceFor(c.asset)]); }catch{}
   // What vests later: listed, so a send of it says from when it can be.
   try{ if(leavesApi && leavesApi.vestingAssets) for(const h of leavesApi.vestingAssets()) others.push([h, vestingFor(h)]); }catch{}
@@ -9289,11 +9339,11 @@ async function confidentialReview(r, reset){
     while(!leavesApi.isOpen() && !findingStalled() && (Date.now()<until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
     st.textContent='';
   }
+  let plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h) + onItsWay(h), minLeaf:least, precision:prec });
   // The service holding the wallet's coins for instant payments did not answer, so the wallet has
   // not found them: what it holds elsewhere still pays; past that it says so, and nothing moves.
-  let plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h), minLeaf:least, precision:prec });
-  // Short only by what is still arriving: said so, rather than that the wallet holds too little.
   if(plan.short && findingStalled()) throw new Error(DEFAULT_WORDS.findingStalledPay);
+  // Short only by what is still arriving: said so, rather than that the wallet holds too little.
   if(plan.short){ let all=0n; try{ all = leavesApi && !devMode() ? (leavesApi.leafAtoms(h)||0n) : 0n; }catch{}
     if(availableFor(h)+all >= a+margin) throw new Error(DEFAULT_WORDS.stillArriving(m.ticker)); }
   // Part of what is held for instant payments may not be movable now (a channel's balance, a coin
@@ -9301,7 +9351,8 @@ async function confidentialReview(r, reset){
   if(plan.move>0n && leavesApi && leavesApi.isOpen()){
     try{ await leavesApi.offboardQuote({ asset:h, amount:String(plan.move), address: wollet.address(undefined).address().toUnconfidential().toString() }); }
     catch(e){
-      const live=liveFromRefusal(e?.message??e);
+      // Part of it is still arriving: the move settles it first and goes (ensureOnChain).
+      const live=e && e.kind === 'settle_first' ? null : liveFromRefusal(e?.message??e);
       if(live!=null){ console.warn('[send] what can move now:', String(live)); plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:live, minLeaf:least, precision:prec });
         if(plan.short) throw new Error(DEFAULT_WORDS.notMoved); }
     }
@@ -10377,7 +10428,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     for(const r of rows){ const p=recipientProblem(r.addr, r.asset); if(p) throw new Error(p); }
     // Default mode: more than can be spent now, the rest vesting later, is refused with its date.
     { const want=new Map(); for(const r of rows) if(r.asset!=='BTC'){ const a=parseAtoms(r.amtS, sendPrecision(r.asset)); want.set(r.asset, (want.get(r.asset)||0n)+a); }
-      for(const [h, a] of want) refuseIfVesting(h, a, sendableFor(h)); }
+      for(const [h, a] of want) refuseIfVesting(h, a, sendableFor(h) + onItsWay(h)); }
     // A receive code of another operator, with an invoice in the asset that the rule lets through,
     // is paid over Lightning out of the tree; when the way cannot carry it, at the code's address.
     if(rows.some(r=>r.lightning)){
@@ -10411,7 +10462,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
         const tree = leavesApi && leavesApi.isOpen() ? (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n) : 0n;
         // What is arriving, less what this wallet's payments still on their way give up: that
         // comes back only as their change.
-        let comingBack = 0n; if(leavesApi && leavesApi.isOpen()){ comingBack = (leavesApi.arriving(h)||0n) - pendingOut(localStorage, walletTag(), h); if(comingBack < 0n) comingBack = 0n; }
+        let comingBack = 0n; if(leavesApi && leavesApi.isOpen()){ comingBack = (leavesApi.arriving(h)||0n) + onItsWay(h) - pendingOut(localStorage, walletTag(), h); if(comingBack < 0n) comingBack = 0n; }
         // The fee's margin in the asset itself, which default mode pays it in; none when the node
         // prices no fee in it (the chain's coins then pay none of it).
         let margin=0n; try{ margin=feeMarginAtoms(h); }catch{}
@@ -10420,9 +10471,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
         // right after a board never signs a spent coin.
         let onchain = availableFor(h); try{ if(leavesApi && leavesApi.onchainLessBoards) onchain = leavesApi.onchainLessBoards(h, onchain); }catch{}
         const route = addressRoute(a, onchain, tree, margin, comingBack);
-        // Coins of this payment still arriving: said, with when they can go, never "Not enough".
-        if(route === 'arriving' && !devMode()) throw new Error(DEFAULT_WORDS.stillArrivingWithin(assetMeta(h).ticker, arrivalMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds())));
-        if(route !== 'tree') continue;
+        // Coins of this payment still arriving: it goes after the next settlement, never refused
+        // for them (offboardReview, settle_first).
+        if(route !== 'tree' && !(route === 'arriving' && !devMode())) continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
         await offboardReview(rows[0], reset);
         return;
@@ -11968,6 +12019,13 @@ let _keepOnChainUntil = 0;
 const KEEP_ON_CHAIN_MS = 15 * 60_000, MOVE_WAIT_MS = 45 * 60_000, OPEN_WAIT_MS = 3 * 60_000;
 function onChainAtoms(hex){ try{ return BigInt(balObj()[hex]||0); }catch{ return 0n; } }
 function instantAtoms(hex){ try{ return (leavesApi && !devMode()) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n; }catch{ return 0n; } }
+// Default mode: what of an asset is on its way to the wallet and in no figure yet (leaves.js
+// onItsWay). A payment or a move of it goes through after the next settlement, never refused for it
+// (D96), so every pre-check counts it beside what can be sent now.
+function onItsWay(hex){ try{ return (hex!=='BTC' && leavesApi && !devMode() && leavesApi.onItsWay) ? (leavesApi.onItsWay(hex)||0n) : 0n; }catch{ return 0n; } }
+// The assets something is on its way in (leaves.js arrivingPayments): each has its row on Balance,
+// though nothing of it is in a figure yet.
+function onItsWayAssets(){ try{ return (leavesApi && !devMode() && leavesApi.arrivingPayments) ? [...new Set(leavesApi.arrivingPayments().map(p=>p.asset).filter(Boolean))] : []; }catch{ return []; } }
 // A margin for the network fees of `vbytes` of transactions, in atoms of `hex`, at the wallet's
 // default rate, twice over: what is moved for them is never short, and what is left stays the wallet's.
 function feeMarginAtoms(hex, vbytes = 1000){
@@ -11999,7 +12057,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   if(!missing.length) return false;
   if(devMode()){ const m = missing[0]; throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
   // More than can be used now, the rest vesting later: refused with its date, before anything moves.
-  for(const n of needs) refuseIfVesting(n.hex, n.atoms, have(n.hex) + instantAtoms(n.hex));
+  for(const n of needs) refuseIfVesting(n.hex, n.atoms, have(n.hex) + instantAtoms(n.hex) + onItsWay(n.hex));
   // What the wallet holds for instant payments is read once it has opened: wait for that, saying so.
   if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
     say(DEFAULT_WORDS.waitOpening);
@@ -12015,7 +12073,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   missing = missing.map(m=>({ hex:m.hex, atoms: m.atoms - coming(m.hex) })).filter(m=> m.atoms > 0n);
   // The operator pays nothing below its smallest leaf of the asset: a smaller need moves that much.
   for(const m of missing){ let least = 0n; try{ least = leavesApi.minLeaf ? leavesApi.minLeaf(m.hex) : 0n; }catch{} if(m.atoms < least) m.atoms = least; }
-  for(const m of missing){ const can = instantAtoms(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
+  for(const m of missing){ const can = instantAtoms(m.hex) + onItsWay(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
   const address = wollet.address(undefined).address().toUnconfidential().toString();
   _keepOnChainUntil = Date.now() + MOVE_WAIT_MS + KEEP_ON_CHAIN_MS;
   let minutes = moveOutMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
@@ -12025,7 +12083,10 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   const quotes = [];
   for(const m of missing){
     let q; try{ q = await leavesApi.offboardQuote({ asset: m.hex, amount: String(m.atoms), address }); }
-    catch(e){ console.warn('[on chain] quote:', e?.message??e); _keepOnChainUntil = Date.now();
+    catch(e){ console.warn('[on chain] quote:', e?.message??e);
+      // Part of it is still arriving: the move settles it first and goes, unquoted (null).
+      if(e && e.kind === 'settle_first'){ quotes.push(null); continue; }
+      _keepOnChainUntil = Date.now();
       // The library pays out only coins it holds final: a coin just received counts in the figure
       // before it is, and is then still arriving for this.
       if(/live coins of asset/.test(String(e?.message??e))) throw new Error(DEFAULT_WORDS.stillArriving(assetMeta(m.hex).ticker));
@@ -12038,7 +12099,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   try{
     for(const [i, m] of missing.entries()){
       const q = quotes[i];
-      const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, shown: q });
+      const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, ...(q ? { shown: q } : {}) });
       minutes = moveOutMinutes(v && v.round_within_seconds, leavesApi.blockSeconds()) || minutes;
       try{ noteSent(localStorage, walletTag(), { asset: m.hex, atoms: m.atoms, fee: q && q.fee ? { asset: m.hex, atoms: BigInt(q.fee.amount||0) } : null, later: true }); }catch{}
     }
