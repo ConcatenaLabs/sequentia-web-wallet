@@ -160,39 +160,45 @@ export async function findUnrecordedLocks (io, { known, stable, checked } = {}) 
 //   open(noteHex)  -> terms | null: order-note.js openNote under the wallet's note key
 //   makerAt(index) -> { index, program, internalKey }: the wallet's maker key at that index
 //   known          Set of script hex the wallet's records (kept or archived) account for
-//   checked        optional { has(txid), add(txid) }: transactions without a note, never read again
-//                  (a transaction with a note is read each time: its record may go again)
+//   checked        optional { has(txid), add(txid) }: transactions never read again: those without a
+//                  note, and those whose every taproot output is accounted for (known, or rebuilt
+//                  here and kept by the caller)
+// A read that fails skips its transaction only: it is left unchecked, so the next scan asks again,
+// and what this scan found is kept.
 // -> [rec], each with the funding's outpoint in covTxid/covVout and fundTxid
 export async function ordersFromNotes (io, { open, makerAt, known, checked } = {}) {
   const out = []
   for (const { txid } of await io.ownSpends()) {
     if (checked && checked.has(txid)) continue
-    const tx = await io.get(`/tx/${txid}`)
-    if (!tx) continue
-    const vout = Array.isArray(tx.vout) ? tx.vout : []
-    const notes = vout.map((o) => noteOfScript(o.scriptpubkey)).filter(Boolean)
-    if (!notes.length) { if (checked) checked.add(txid); continue }
-    const locks = []
-    vout.forEach((o, n) => {
-      const spk = lc(o.scriptpubkey)
-      if (/^5120[0-9a-f]{64}$/.test(spk) && o.value != null && o.asset && !(known && known.has(spk))) {
-        locks.push({ txid, vout: n, spkHex: spk, asset: lc(o.asset), value: BigInt(o.value) })
+    try {
+      const tx = await io.get(`/tx/${txid}`)
+      if (!tx) continue
+      const vout = Array.isArray(tx.vout) ? tx.vout : []
+      const notes = vout.map((o) => noteOfScript(o.scriptpubkey)).filter(Boolean)
+      if (!notes.length) { if (checked) checked.add(txid); continue }
+      const locks = []
+      vout.forEach((o, n) => {
+        const spk = lc(o.scriptpubkey)
+        if (/^5120[0-9a-f]{64}$/.test(spk) && o.value != null && o.asset && !(known && known.has(spk))) {
+          locks.push({ txid, vout: n, spkHex: spk, asset: lc(o.asset), value: BigInt(o.value) })
+        }
+      })
+      for (const note of notes) {
+        if (!locks.length) break
+        const terms = await open(note)
+        if (!terms) continue
+        let m
+        try { m = makerAt(terms.makerIndex) } catch { continue }
+        for (let i = 0; i < locks.length; i++) {
+          const res = await searchOrder({ lock: locks[i], candidates: [{ asset: terms.receive, recv: terms.recvAtoms }], makers: [m], expiries: [terms.expiry] })
+          if (!res.rec) continue
+          out.push({ ...res.rec, fundTxid: txid, fromNote: true })
+          locks.splice(i, 1)
+          break
+        }
       }
-    })
-    for (const note of notes) {
-      if (!locks.length) break
-      const terms = await open(note)
-      if (!terms) continue
-      let m
-      try { m = makerAt(terms.makerIndex) } catch { continue }
-      for (let i = 0; i < locks.length; i++) {
-        const res = await searchOrder({ lock: locks[i], candidates: [{ asset: terms.receive, recv: terms.recvAtoms }], makers: [m], expiries: [terms.expiry] })
-        if (!res.rec) continue
-        out.push({ ...res.rec, fundTxid: txid, fromNote: true })
-        locks.splice(i, 1)
-        break
-      }
-    }
+      if (!locks.length && checked) checked.add(txid)
+    } catch { /* this transaction is read again next time */ }
   }
   return out
 }

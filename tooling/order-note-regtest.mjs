@@ -17,7 +17,9 @@
 // N2  a restore from the phrase alone (every record gone) rebuilds, exactly, an unfilled order, a
 //     part-filled one at its remainder, and one the relay no longer lists, in default mode
 // N3  an old order without a note is not rebuilt by notes, and the search by what was asked finds it
-// N4  Reclaim takes back each of the four
+// N4  Reclaim takes back each of them
+// N5  a page whose wallet kit has no data output places an order without a note, records it so,
+//     says so once in the console; a restore finds it by the search, never by a note
 import { readFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
@@ -202,6 +204,16 @@ try {
   const o2 = await place(SELL + 7n, 2n * BigInt(COIN) + 777n)       // to be filled in part
   const o3 = await place(SELL + 11n, 4n * BigInt(COIN) + 1n)        // listed once, then no longer
   const o4 = await place(SELL + 13n, 5n * BigInt(COIN), { noNote: true })   // an old order: no note
+  // N5: the same page with a kit that lacks the data output (an older pkg/ on the server).
+  const warned = []
+  let o5
+  {
+    const realTx = lwk.Network.prototype.txBuilder, realWarn = console.warn
+    const hide = (b) => new Proxy(b, { get: (t, k) => (k === 'addDataOutput' ? undefined : (typeof t[k] === 'function' ? t[k].bind(t) : t[k])) })
+    lwk.Network.prototype.txBuilder = function () { return hide(realTx.call(this)) }
+    console.warn = (...a) => { warned.push(a.join(' ')) }
+    try { o5 = await place(SELL + 17n, 6n * BigInt(COIN)) } finally { lwk.Network.prototype.txBuilder = realTx; console.warn = realWarn }
+  }
   const funding = (r) => json('decoderawtransaction', json('getrawtransaction', r.covTxid, 'true').hex)
   for (const [n, r] of [['o1', o1], ['o2', o2], ['o3', o3]]) {
     const d = funding(r), data = d.vout.filter((o) => o.scriptPubKey.type === 'nulldata')
@@ -221,6 +233,11 @@ try {
     ok(wt && JSON.stringify(Object.keys(bal).sort()) === JSON.stringify(Object.keys(want).sort()) && Object.entries(want).every(([a, v]) => BigInt(bal[a]) === v),
       `N1 the wallet reads o1's funding as ${Object.entries(bal).map(([a, v]) => v + ' ' + (tick[a] || a)).join(', ')}: the order and the fee, nothing for the note`)
   }
+  {
+    const d5 = funding(o5)
+    ok(o5.noted === false && !d5.vout.some((o) => o.scriptPubKey.type === 'nulldata'), `N5 with a kit lacking the data output, o5 is placed with no note and recorded so (noted: ${o5.noted})`)
+    ok(warned.filter((w) => /no data output/.test(w)).length === 1, 'N5 the console says so once: ' + (warned[0] || '(nothing)').slice(0, 120))
+  }
   // o3 was listed and is no longer: on the chain it is an order like any other; its record said posted.
   { const all = records(); const r = all.find((x) => x.offerId === o3.offerId); r.posted = true; store.set(PLACED, JSON.stringify(all)); SW.loadPlaced() }
   const half = SELL / 2n
@@ -228,7 +245,7 @@ try {
   ok((await utxosAt(o2.spkHex)).length === 1, `o2 filled in part (${fill2.slice(0, 10)}); its remainder rests at the same script`)
 
   // ---- N2: restore from the phrase alone, in default mode
-  const before = Object.fromEntries([o1, o2, o3, o4].map((r) => [r.spkHex, r]))
+  const before = Object.fromEntries([o1, o2, o3, o4, o5].map((r) => [r.spkHex, r]))
   store = new Map()   // the site's data cleared: no record, no archive, no scan memory
   SW.loadPlaced()
   wollet = new lwk.Wollet(network, signer.wpkhSlip77Descriptor()); C.wollet = wollet; await sync()
@@ -244,6 +261,7 @@ try {
     ok(same && BigInt(r.restAtoms) === rest, `N2 ${n} rebuilt from its note with its exact terms (asked ${r && r.recvAtoms}, lock ${r && r.expiry}, key ${r && r.makerIndex}), resting ${r && r.restAtoms} at ${r && (r.covTxid.slice(0, 10) + ':' + r.covVout)}`)
   }
   ok(!back.some((x) => x.spkHex === o4.spkHex), 'N3 o4, placed without a note, is not rebuilt by notes')
+  ok(!back.some((x) => x.spkHex === o5.spkHex), 'N5 o5 (a kit without the data output) is not rebuilt by notes')
   await SW.scanLostOrders(true)
   ok(SW.placed().length === 3, 'N2 a second scan rebuilds nothing twice (' + SW.placed().length + ' orders)')
 
@@ -251,15 +269,17 @@ try {
   C.devMode = () => true
   SW.askLostOrders()
   await SW.scanLostOrders(true)
-  const l4 = SW.lostLocks().find((l) => l.spkHex === o4.spkHex)
-  ok(!!l4 && SW.lostLocks().length === 1, `N3 the search lists o4's coin as paid to a script without an order (${SW.lostLocks().length} listed)`)
+  const l4 = SW.lostLocks().find((l) => l.spkHex === o4.spkHex), l5 = SW.lostLocks().find((l) => l.spkHex === o5.spkHex)
+  ok(!!l4 && !!l5 && SW.lostLocks().length === 2, `N3/N5 the search lists o4's and o5's coins as paid to a script without an order (${SW.lostLocks().length} listed)`)
   const found = l4 && await SW.recoverLostOrder(l4, Y, '5', 0)
   ok(found && found.rec && found.rec.makerIndex === o4.makerIndex, `N3 "I asked for 5 YASK" rebuilds o4 (${found && found.tried} candidates)`)
+  const found5 = l5 && await SW.recoverLostOrder(l5, Y, '6', 0)
+  ok(found5 && found5.rec && found5.rec.makerIndex === o5.makerIndex, `N5 "I asked for 6 YASK" rebuilds o5 (${found5 && found5.tried} candidates)`)
 
   // ---- N4: Reclaim each, once its lock opens
-  const maxExp = Math.max(...[o1, o2, o3, o4].map((r) => Number(r.expiry)))
+  const maxExp = Math.max(...[o1, o2, o3, o4, o5].map((r) => Number(r.expiry)))
   mock = maxExp + 120; cli('setmocktime', String(mock)); mine(12); await sync()
-  for (const [n, o] of [['o1', o1], ['o2', o2], ['o3', o3], ['o4', o4]]) {
+  for (const [n, o] of [['o1', o1], ['o2', o2], ['o3', o3], ['o4', o4], ['o5', o5]]) {
     const r = SW.placed().find((x) => x.spkHex === o.spkHex)
     let e = '', out = null
     try { const mtp = json('getblockchaininfo').mediantime; out = await SW.reclaimPlaced(r, { height: Number(cli('getblockcount')), medianTime: mtp }, async () => true) } catch (x) { e = String(x && x.message || x) }

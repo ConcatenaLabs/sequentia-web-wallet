@@ -6762,6 +6762,20 @@ function nextMakerIndex(){
   let mx = -1; for (const r of PLACED.concat(loadArchived())){ if (typeof r.makerIndex === 'number' && r.makerIndex > mx) mx = r.makerIndex; }
   return mx + 1;   // a fresh taproot payout per order, so credits never collide
 }
+// Whether the wallet kit writes a data output (SWK TxBuilder.addDataOutput). A page served with an
+// older kit places its orders without a note, records them so, and says so once in the console:
+// such an order is found again by the searches, not by a note.
+let _noDataOutputSaid = false;
+export function kitWritesNotes(network, warn = (m) => console.warn(m)){
+  let b = null, ok = false;
+  try { b = network.txBuilder(); ok = typeof b.addDataOutput === 'function'; } catch { ok = false; }
+  try { b && b.free && b.free(); } catch {}
+  if (!ok && !_noDataOutputSaid){
+    _noDataOutputSaid = true;
+    warn('[order note] the wallet kit has no data output: resting orders are placed without a note of their terms, and a restore finds them only by search');
+  }
+  return ok;
+}
 // The key of this wallet's order notes (order-note.js), from its own key tree; null without one.
 let _noteKey = null, _noteRoot = null;
 async function orderNoteKey(){
@@ -6801,7 +6815,7 @@ async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset, onSigned
   // prices any asset — tSEQ included — from the feed, so the fee the user is shown ("Fee paid in: X") is
   // the fee actually charged. Falls back to the pay asset if no fee asset was resolved.
   let b = C.network.txBuilder().addExplicitRecipient(addr, BigInt(atoms), new C.wasm.AssetId(assetHex));
-  if (note && typeof b.addDataOutput === 'function') b = b.addDataOutput(note, new C.wasm.AssetId(feeAsset || assetHex));
+  if (note) b = b.addDataOutput(note, new C.wasm.AssetId(feeAsset || assetHex));   // placeCovenant asked the kit first (kitWritesNotes)
   const exec = async () => {
     const pset = C.applyFee(b, feeAsset || assetHex).finish(C.wollet);
     const signed = C.signer.sign(pset);
@@ -6895,7 +6909,7 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
   // from the phrase alone rebuilds the order from them. Without a key or a note the order still goes;
   // the searches by price and by the person's answer remain for it.
   let note = null;
-  if (!opts.noNote){
+  if (!opts.noNote && kitWritesNotes(C.network)){
     try { const k = await orderNoteKey(); if (k) note = await sealNote(k, { receive, recvAtoms, expiry: params.expiryLocktime, makerIndex: idx, idsInternal: true }); }
     catch (e) { console.warn('[order note]', (e && e.message) || e); }
   }
@@ -10651,18 +10665,19 @@ async function restoreFromNotes(){
     open: (n) => openNote(key, n), known, checked: { has: (t) => seen.has(t), add: (t) => seen.add(t) },
     makerAt: (i) => { const p = makerPayout(C.signer, C.network, i); return { index: i, program: p.program, internalKey: p.internalKey }; },
   });
-  writeList(NOTE_CHECKED_KEY, [...seen], 5000);
   let restored = 0, put = 0;
   for (const rec of recs){
-    let res; try { res = await restingCoin(rec, { get: explorerGet }); } catch { continue; }
+    let res = null; try { res = await restingCoin(rec, { get: explorerGet }); } catch {}
     rec.offerId = seqob.randHex(16);
-    if (res.coin){
+    if (res && res.coin){
       rec.covTxid = res.coin.txid; rec.covVout = res.coin.vout; rec.restAtoms = String(res.coin.value);
       PLACED.push(rec); restored++;
-    } else if (res.done && res.settled){ archived.push({ ...rec, archivedAt: Date.now(), archivedWhy: 'done' }); put++; }
+    } else if (res && res.done && res.settled){ archived.push({ ...rec, archivedAt: Date.now(), archivedWhy: 'done' }); put++; }
+    else seen.delete(rec.fundTxid);   // not kept this time (a read failed, or a spend not yet in a block): read again next scan
   }
   if (restored){ savePlaced(); ensureCovenantRelay(); }
   if (put) saveArchived(archived);
+  writeList(NOTE_CHECKED_KEY, [...seen], 5000);
   return restored;
 }
 async function scanLostOrders(force){
