@@ -127,6 +127,9 @@ export const USER_WORDS = Object.freeze({
   enter: 'Enter how much you pay.',
   tooSmall: 'That amount is too small to trade.',
   noFirmOffer: 'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',
+  // The wallet's own refusal: what it holds of the asset, less the fees the trade keeps back, does
+  // not cover the amount (nothing more is on its way). `most`: what can be traded now, as Max fills it.
+  ownShort: (most) => `You can trade up to ${most} now: the fees of this trade come out of what you hold. Nothing has moved.`,
   // The wallet's own library was busy finishing something it started for longer than a quote waits.
   walletBusy: 'Your wallet is still finishing something it started, so it could not get a price in time. Nothing has moved: try again in a moment.',
   noFunds: (pay) => `You have no ${pay} to trade.`,
@@ -352,6 +355,20 @@ export function shortBy (message) {
   if (s) return BigInt(s[2]) > BigInt(s[1]) ? BigInt(s[2]) - BigInt(s[1]) : 0n
   const d = m.match(/change would be below the operator's smallest leaf in asset \S+ \((\d+) atoms\)/)
   return d ? BigInt(d[1]) : 0n
+}
+
+// The most the wallet can pay now of what a payment of `paying` atoms was refused for, by the
+// library's own refusal of it: short of what it takes with its margins ("the wallet holds H … in live
+// coins, and paying P takes T with the margins": P less what it is short), or leaving change below the
+// operator's smallest leaf ("… smallest leaf in asset … (M atoms): pay a little less, or that much
+// more": P less M). -> atoms (0n when nothing can go), or null for any other refusal.
+export function ownShortMost (message, paying) {
+  const short = shortBy(message)
+  if (!(short > 0n)) return null
+  const m = String(message || '').match(/paying (\d+) takes/)
+  const p = m ? BigInt(m[1]) : big(paying)
+  if (!(p > 0n)) return null
+  return p > short ? p - short : 0n
 }
 
 // The indicative entries worth asking for firm terms, best first: a source whose coin waits on
@@ -677,7 +694,7 @@ export function createEngine (deps) {
     // not hold.
     const size = sizeEntry(entry, pay < have ? pay : have)
     if (!size) return null
-    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep, (e) => { if (refusalSeen) refusalSeen(e) })
+    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep, (e, at) => { if (refusalSeen) refusalSeen(e, at) })
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size, hard)
     if (entry.source === 'onchain-fill') return firmOnchain(entry, payAsset, receiveAsset, pay, have)
     if (entry.source === 'covenant-round') {
@@ -1058,7 +1075,14 @@ export function createEngine (deps) {
   // coins at the operator's depth limit, too deep to give part of, arriving, or of a format the other
   // side does not read), with the coins it named: the trade settles them first, and goes.
   let settleSeen = null
-  const noteLiveShort = (e) => {
+  // The wallet's own shortfall a source's check met (`ownShortMost`): what it could pay at most.
+  let ownMost = null, ownLive = null
+  const noteLiveShort = (e, at = {}) => {
+    const most = ownShortMost(e && e.message, at.paying)
+    if (most != null && (ownMost == null || most > ownMost)) ownMost = most
+    // What the refusal says the wallet holds in live coins (absent for the change's refusal).
+    const h = String(e && e.message).match(/holds (\d+) of asset \S+ in live coins/)
+    if (h) ownLive = BigInt(h[1])
     if (/ in live coins/.test(String(e && e.message))) liveShort = true
     if (e && e.kind === 'settle_first') settleSeen = { coins: [...new Set([...(settleSeen ? settleSeen.coins : []), ...(e.coins || [])])] }
   }
@@ -1183,6 +1207,7 @@ export function createEngine (deps) {
     quoteStep = onStep
     tooOldFrom = null
     liveShort = false
+    ownMost = null; ownLive = null
     settleSeen = null
     makerReads = new Set()
     const reads = makerReads
@@ -1321,6 +1346,15 @@ export function createEngine (deps) {
     }
     // Nobody gave firm terms because what the wallet holds of the asset is not live now (given up in
     // a refresh, received and not yet settled): it is being made ready, never "nobody could confirm".
+    // Nobody gave firm terms because the wallet itself cannot pay this much with the fees, and the
+    // balance shows nothing more of it on its way: what can be traded now, never "nobody could
+    // confirm" nor "try again" (#666).
+    // (Coins it holds that are not live now, held in a refresh or just received, are being made ready
+    // instead: the refusal's live figure is short of what it holds.)
+    if (!best && ownMost != null && payAsset !== 'BTC' && (ownLive == null || ownLive >= haveLeaf)) {
+      const shown = deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : 0n
+      if (shown <= haveLeaf) return { ok: false, why: 'own-short', most: String(ownMost) }
+    }
     if (!best && liveShort && payAsset !== 'BTC') return settleFirst(payAsset, [], haveLeaf)
     // A maker gave firm terms in time and the wallet's library was still reading them when the
     // quote's time ran out (held by a long command of its own): the wallet was busy, nobody refused.

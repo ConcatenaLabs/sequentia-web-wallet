@@ -2,7 +2,7 @@
 // Bitcoin Lightning wallet: the order of the one hash-lock, and what a ticket counts.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn } from './user-trade.js'
+import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn, ownShortMost } from './user-trade.js'
 import { MAKER_LOCK_MS, needSeconds } from './user-trade-btc.js'
 
 const X = 'aa'.repeat(32)
@@ -435,6 +435,31 @@ test('selling for BTC: the wallet\'s own coins falling short is said as such, ne
   const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
   assert.equal(q.ok, false)
-  assert.equal(q.why, 'settle-first', 'the wallet\'s own shortfall: ' + q.why)
+  // Nothing more of it is on its way: what can be traded now, the library's own figure.
+  assert.equal(q.why, 'own-short', 'the wallet\'s own shortfall: ' + q.why)
+  assert.equal(q.most, String(999931875n - (999932651n - 999647047n)))
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the maker\'s offer is released')
+  const w = USER_WORDS.ownShort('9.99646271 X')
+  assert.equal(w, 'You can trade up to 9.99646271 X now: the fees of this trade come out of what you hold. Nothing has moved.')
+  assert.ok(!/try again|nobody|something went wrong/i.test(w))
+})
+
+test('the wallet\'s own refusals, as the library words them, give what can be traded now (#666)', () => {
+  // As recorded on the testnet (2026-11-12 07:32 UTC): short with the margins, then change below the smallest leaf.
+  assert.equal(ownShortMost('refused: the wallet holds 983379745 of asset ' + X + ' in live coins, and paying 999964423 takes 999965503 with the margins its transactions leave for their fees', 999964423n),
+    999964423n - (999965503n - 983379745n))
+  assert.equal(ownShortMost('refused: the change would be below the operator\'s smallest leaf in asset ' + X + ' (1000000 atoms): pay a little less, or that much more', 983000000n), 982000000n)
+  assert.equal(ownShortMost('refused: the server is busy', 1000n), null)
+})
+
+test('the wallet\'s own shortfall while more of it is on its way: settled first, then the whole amount (#666)', async () => {
+  const s = standIn()
+  const lib = s.lib
+  const short = { command (cmd, a) {
+    if (cmd === 'lightning_pay_quote') throw new Error('refused: the wallet holds 999647047 of asset ' + X + ' in live coins, and paying 999931875 takes 999932651 with the margins its transactions leave for their fees')
+    return lib.command(cmd, a)
+  } }
+  const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc, held: () => 5_000_000_000n })
+  const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
+  assert.equal(q.why, 'settle-first', q.why)
 })
