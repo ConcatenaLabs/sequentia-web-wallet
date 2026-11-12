@@ -330,8 +330,15 @@ Match them; do not invent a new pattern.
 - **Persist before broadcast.** Every path that broadcasts something reclaimable persists the full
   reclaim material first — refund key, redeem script, secret, locktime, amounts — and only then
   broadcasts, so a crash or tab close in that window leaves recoverable funds rather than stranded
-  ones. Where the outpoint is not yet known, the record is written with a null txid and the resume
-  pass locates it by scriptPubKey.
+  ones. Where the outpoint is not yet known, the record is written with a null txid (and the
+  transaction's own id, known once it is signed) and the resume pass locates it by scriptPubKey.
+- **A record of coins is never dropped on one empty answer.** A record is the only copy of what it
+  takes to get its coins back. It is put away only when two different reads agree the coins never
+  left (the script's index and the transaction by its id, or the wallet's own history), twice, ten
+  minutes apart, and then it is archived, never deleted (`covenant-recovery.js`).
+- **The explorer is asked by a script's hash through `explorerScriptHash`** (`explorer-script-hash.js`):
+  the SHA-256 of the script as computed. Electrum's reversed form is answered with an empty list here,
+  which reads as "nothing there".
 - **Never serve key material to a client.** The LSP scrubs job objects before every response,
   dropping anything matching `priv|secret|seed|mnemonic` and any underscore-prefixed internal
   handle. This exists because a polling client once received the key to sweep a fronted HTLC's

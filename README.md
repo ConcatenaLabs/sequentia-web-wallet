@@ -48,7 +48,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Trade tab in developer mode: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
   self-enforcing SeqOB covenants and fill without the wallet being open. An order's locked coins
   come back through Reclaim once its lock has passed: a median time a day after it is placed (a
-  block height a day ahead when the explorer gives no median time)
+  block height a day ahead when the explorer gives no median time). An order whose record this browser lost
+  (cleared, or written while the page closed) is found again: the wallet lists what it paid to a
+  script it holds no order for, and rebuilds the order from what you asked for in return
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
 - BTC on a Bitcoin ark in default mode: native bitcoin held in Bark's wallet of the same phrase
   on the ark the page names (the testnet's own Bark server on testnet4), paid in seconds between
