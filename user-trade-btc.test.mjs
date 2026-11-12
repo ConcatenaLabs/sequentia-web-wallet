@@ -461,5 +461,7 @@ test('the wallet\'s own shortfall while more of it is on its way: settled first,
   } }
   const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc, held: () => 5_000_000_000n })
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
-  assert.equal(q.why, 'settle-first', q.why)
+  // Answered with the engine's ticket to wait and go (#565), never a refusal.
+  assert.ok(q.ok && q.ticket.indicative, JSON.stringify(q))
+  assert.equal(q.ticket.amountIn, '200680', 'the whole amount')
 })

@@ -113,33 +113,36 @@ test('the words of settling first name no rail and no part of a balance', () => 
   assert.ok(!/why: 'part-ready'[^\n]*\n[^\n]*\n/.test(''))
 })
 
-test('engine: a quote whose coins wait for a round answers settle-first, settles them, and prices once through', async () => {
+test('engine: a quote whose coins wait for a round is a ticket to accept now; the coins go into a round once it is accepted, and it goes once through', async () => {
   const s = standIn({ deepAt: 'read' })
   const eng = engineOf(s)
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
-  assert.equal(q.ok, false)
-  assert.equal(q.why, 'settle-first', 'never "nobody could confirm a price" for coins the balance shows')
-  assert.deepEqual(q.coins, ['c1'])
+  assert.equal(q.ok, true, 'never "nobody could confirm a price" for coins the balance shows: ' + q.why)
+  assert.equal(q.ticket.indicative, true)
+  assert.deepEqual(q.choice.coins, ['c1'])
+  assert.deepEqual(s.settleAsks, [], 'a price request gives nothing to a round')
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the maker\'s firm offer is let go of')
-  const through = await eng.settle({ payAsset: X, coins: q.coins })
-  assert.equal(through, true)
-  assert.ok(s.settleAsks.length >= 2 && s.settleAsks.every((a) => a.coins.join() === 'c1'), 'asked again, after a sync, until through')
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.deepEqual(s.settleAsks, [{ coins: ['c1'] }], 'accepted: the coins the library named go into the next round')
+  assert.equal(rec.state, 'settling')
+  let r = rec
+  for (let i = 0; i < 8 && r.state !== 'settled'; i++) r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled', JSON.stringify(r))
   assert.ok(s.calls.indexOf('sync') > s.calls.indexOf('settle_first'), 'the round is looked for before it is called through')
-  const again = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
-  assert.ok(again.ok, again.why)
-  const rec = await eng.confirm(again.choice, again.ticket)
-  assert.equal(rec.state, 'sent')
 })
 
-test('engine: part of what the balance shows waiting for a round settles first, never "Only X of your Y"', async () => {
+test('engine: part of what the balance shows waiting for a round is a ticket to wait and go, never "Only X of your Y"', async () => {
   const s = standIn({ deepAt: 'none' })
   // 100,000 live, the rest given up in a refresh that the wallet's own round runs.
   s.coins[0].value = '100000'
   s.coins.push({ leaf_id: 'r1', asset: X, value: '2900000', state: 'given', kind: 'transfer' })
   const eng = engineOf(s, { held: () => 3000000n })
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
-  assert.equal(q.why, 'settle-first', JSON.stringify(q, (k, v) => typeof v === 'bigint' ? String(v) : v))
-  assert.deepEqual(q.coins, [], 'the engine names no coins: the library settles what of the asset waits')
+  assert.equal(q.ok, true, JSON.stringify(q, (k, v) => typeof v === 'bigint' ? String(v) : v))
+  assert.equal(q.ticket.indicative, true)
+  assert.deepEqual(s.settleAsks, [], 'a price request gives nothing to a round')
+  await eng.confirm(q.choice, q.ticket)
+  assert.deepEqual(s.settleAsks, [{ asset: X }], 'the engine names no coins: the library settles what of the asset waits')
 })
 
 async function confirmedWhileDeep (s, eng) {
@@ -237,28 +240,23 @@ function fakeDoc () {
   return doc
 }
 
-test('composer: a trade answered settle-first says only how long, settles, is priced again by itself, and completes', async () => {
+test('composer: a trade answered settle-first shows its ticket and how long at once; one Trade, and it completes by itself', async () => {
   const s = standIn({ deepAt: 'read' })
   const eng = engineOf(s)
   const doc = fakeDoc()
   const root = doc.createElement('div')
-  const seen = []
-  const watched = { ...eng, settle: async (...a) => { seen.push(root.querySelector('#ucReview') && root.querySelector('#ucReview').textContent); return eng.settle(...a) } }
   const ui = mountUserComposer({
-    root, engine: watched, held: (a) => (a === X ? 3000000n : 0n), knownAssets: () => [X, Y], assetMeta: (h) => ({ ticker: h === X ? 'XT' : 'YT', precision: 0 }),
+    root, engine: eng, held: (a) => (a === X ? 3000000n : 0n), knownAssets: () => [X, Y], assetMeta: (h) => ({ ticker: h === X ? 'XT' : 'YT', precision: 0 }),
     fmtAtoms: (a) => String(a), parseAtoms: (t) => BigInt(t), admittedReceives: () => [Y], market: null, refValue: () => null,
     session: null, notify: () => {}, links: () => ({}), openHistory: () => {}, followMs: 1e9, followSlowMs: 1e9, confirmShownMs: 50,
   })
   Object.assign(ui.state, { pay: X, get: Y, amount: '400000', payChosen: true, getChosen: true })
   try { ui.render() } catch (e) { assert.fail('the composer renders on the stand-in document: ' + e.stack) }
-  const review = root.querySelector('#ucReview')
-  assert.ok(review, 'Review is shown')
-  await review.onclick()
-  for (let i = 0; i < 50 && !ui.state.ticket; i++) await wait(10)
-  assert.deepEqual(seen, [USER_WORDS.settling], 'while it settles the person reads only how long')
-  assert.ok(ui.state.ticket, 'priced again by itself once through: ' + (ui.state.error || ui.state.note))
+  await root.querySelector('#ucReview').onclick()
+  assert.ok(ui.state.ticket && ui.state.ticket.indicative, 'a ticket at once: ' + (ui.state.error || ui.state.note))
+  assert.equal(root.querySelector('#ucWait').textContent, USER_WORDS.settling, 'how long, in the words of settling')
   assert.equal(ui.state.error, '')
-  assert.ok(!s.calls.includes('swap_accept'), 'nothing is traded before the person confirms the price')
+  assert.ok(!s.calls.includes('swap_accept'), 'nothing is traded before the person accepts')
   await root.querySelector('#ucConfirm').onclick()
   for (let i = 0; i < 50 && !eng.records().length; i++) await wait(10)
   // The composer's own follow may be moving the trade on: an advance asked meanwhile answers the
@@ -266,6 +264,7 @@ test('composer: a trade answered settle-first says only how long, settles, is pr
   let r = await eng.advance(eng.records()[0])
   for (let i = 0; i < 50 && r.state !== 'settled'; i++) { await wait(10); r = await eng.advance(eng.records()[0]) }
   assert.equal(r.state, 'settled', JSON.stringify(r))
+  assert.equal(eng.records().length, 1)
 })
 
 test('composer: two follows asked at once run one after the other, never side by side (RV38 W1)', async () => {
@@ -312,9 +311,10 @@ test('composer: money still arriving can be traded: its asset is offered to pay,
   await root.querySelector('#ucReview').onclick()
   for (let i = 0; i < 50 && !ui.state.ticket; i++) await wait(10)
   assert.ok(ui.state.ticket, 'priced once settled: ' + (ui.state.error || ui.state.note))
-  assert.ok(s.settleAsks.length > 0, 'settled first')
+  assert.equal(s.settleAsks.length, 0, 'nothing settled before the person accepts')
   await root.querySelector('#ucConfirm').onclick()
   for (let i = 0; i < 50 && !eng.records().length; i++) await wait(10)
+  assert.ok(s.settleAsks.length > 0, 'accepted: settled first')
   let r = await eng.advance(eng.records()[0])
   for (let i = 0; i < 50 && r.state !== 'settled'; i++) { await wait(10); r = await eng.advance(eng.records()[0]) }
   assert.equal(r.state, 'settled', JSON.stringify(r))

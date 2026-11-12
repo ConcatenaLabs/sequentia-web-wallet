@@ -253,6 +253,54 @@ test('a refusal that names no coin of the wallet\'s returns the fill as before',
   assert.equal(eng.records()[0].state, 'failed')
 })
 
+test('a fill refused for coins too many payments from a round waits for a round and goes, never "Returned" with nothing offered (#746)', async () => {
+  const s = standIn()
+  const lib = s.lib.command.bind(s.lib)
+  let deep = true, given = false, through = false, fills = 0
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting' && deep) {
+      s.calls.push(cmd)
+      const e = new Error('refused: the server refused order_fill (409 depth_limit): leaf c1 is 5 reassignments from its round, the operator\'s limit')
+      e.kind = 'server_refused'; e.code = 'depth_limit'
+      throw e
+    }
+    if (cmd === 'order_fill_resting') fills++
+    if (cmd === 'settle_first') {
+      s.calls.push(cmd)
+      assert.deepEqual(a, { asset: X }, 'the coins of the asset paid that wait for a round')
+      if (!given) { given = true; s.coins[0].state = 'given'; return { settling: ['c1'], waiting: [], done: [], left: [], ready: false, final_in_seconds: 300, usual_in_seconds: 120, waiting_for: 'round' } }
+      if (!through) return { settling: [], waiting: ['c1'], done: [], left: [], ready: false, final_in_seconds: 300, usual_in_seconds: 120, waiting_for: 'round' }
+      return { settling: [], waiting: [], done: ['c1'], left: [], ready: true }
+    }
+    // The library's quote gives the wallet's live coin of X (the round's, once through).
+    if (cmd === 'order_fill_resting_quote') { const q = lib(cmd, a); q.gives = [s.coins[0].leaf_id]; return q }
+    if (cmd === 'sync' && through && s.coins[0].state === 'given') {
+      s.coins[0] = { leaf_id: 'c2', asset: X, value: '2000000', state: 'live', expiry: 1800000000 }
+      deep = false
+    }
+    return lib(cmd, a)
+  }
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: async () => ({}), makers: () => [], relayBook: s.relayBook, relayFills: s.relayFills, admitted, store: s.store, now: () => t, log: (...a) => { if (process.env.DBG) console.log(...a) } })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(q.ok, q.why)
+  assert.equal(q.ticket.source, 'leaf-resting')
+  let r
+  try { r = await eng.confirm(q.choice, q.ticket) } catch (e) { assert.fail('the trade is never ended by a refusal a round cures: ' + e.message) }
+  assert.equal(r.state, 'settling', 'it waits for a round, with the ticket accepted as its bound')
+  assert.deepEqual(r.accepted, q.ticket)
+  // The engine syncs at most every ten seconds: each follow is eleven after the last.
+  t += 11_000
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settling')
+  through = true
+  for (let i = 0; i < 8 && !['sent', 'settled', 'returned', 'failed'].includes(r.state); i++) { t += 11_000; r = await eng.advance(eng.records()[0]) }
+  assert.equal(r.state, 'sent', JSON.stringify(r))
+  assert.equal(eng.records().length, 1, 'the same trade')
+  assert.equal(fills, 1, 'filled once')
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut), 'at the price accepted or better')
+})
+
 test('a fill refused while the other device\'s round is not final waits for the library\'s catch-up, then goes (RV46 P6)', async () => {
   // The second device's round is broadcast, not final: the library's catch-up after the refusal
   // finds nothing yet, so it holds the coin out of every spend and answers a quote `settle_first`
