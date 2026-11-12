@@ -66,7 +66,7 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
   // A live maker selling Y for X at 5 X per 4 Y.
   const lwk = await lwkFrom(LWK)
   const maker = await startMaker(H, st, join(dir, 'maker'), { pairs: [{ give: Y, want: X, rate_num: '5', rate_den: '4', min_give: '10000' }],
-    fund: [[Y, 6000000], [X, 1000000]], port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, coinSize: 2000000, exitDelayUnits: 300 })   // within what the page's wallet accepts (254 to 338 units)
+    fund: [[Y, 6000000], [X, 1000000]], port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, coinSize: 2000000, exitDelayUnits: 254 })   // as the page's wallet's coins, within what it accepts (254 to 338 units)
   t.after(() => maker.stop())
   await makerReady(H, maker, Y, 400000)
   await H.c('/fund_server', { asset: X, amount: 200000000 }); await H.c('/fund_server', { asset: Y, amount: 200000000 }); await H.produce()
