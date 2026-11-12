@@ -26,13 +26,7 @@
 // }
 
 import { buildTx, psetOf, readTx } from './restricted-trade.js'
-import { sha256 } from './btc.js'
-import { bytesToHex, hexToBytes } from './seqob.js'
-
-// The explorer's id of a script: its SHA-256, in the order it is computed. The Electrum protocol
-// reverses it; this Esplora does not, and answers the reversed form with an empty list (as
-// stake-records.js notes), which reads as an enclave holding nothing.
-export const scriptHash = (script) => bytesToHex(sha256(hexToBytes(script)))
+import { explorerScriptHash } from './explorer-script-hash.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const key = (c) => `${c.txid}:${c.vout}`
@@ -87,7 +81,7 @@ export function makeRestrictedHost (ctx) {
     // The coins at the wallet's enclave, from the chain (the policy server counts them only).
     async enclaveCoins (asset, url = null) {
       const e = await host.enclave(asset, url)
-      const us = (await ctx.esplora(`/scripthash/${scriptHash(e.script)}/utxo`)) || []
+      const us = (await ctx.esplora(`/scripthash/${await explorerScriptHash(e.script)}/utxo`)) || []
       const out = []
       for (const u of us) { const o = { txid: u.txid, vout: Number(u.vout) }; if (held.has(key(o))) continue; try { const c = await coinAt(o); if (c.asset === asset) out.push(c) } catch {} }
       return out
