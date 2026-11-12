@@ -5381,6 +5381,8 @@ function initUserComposer(){
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
     session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
     knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor, onItsWay: (a)=> onItsWay(a),
+    // A trade asked while the wallet is still opening waits for it, as a payment does (walletOpening).
+    opening: walletOpening,
     isHidden: isAssetHidden, refValue: refValueStr,
     // The confirmations the Bitcoin ark's server waits for before a board's BTC can be traded.
     btcMoveBlocks: ()=> (btcArk && btcArk.info() && Number(btcArk.info().required_board_confirmations)) || null,
@@ -9331,6 +9333,20 @@ function collectRows(){
 // payments answers: a payment asked meanwhile waits for it to open, for as long as that takes.
 function findingStalled(){ try{ return !!leavesApi && !leavesApi.isOpen() && !!(leavesApi.restoreStalled && leavesApi.restoreStalled()); }catch{ return false; } }
 function findingOn(){ try{ return !!leavesApi && leavesApi.restoring() && !findingStalled(); }catch{ return false; } }
+// The one wait of everything asked while the wallet is still opening (Send's payments, a trade's
+// price): until it has opened, for as long as a restore finding what it holds runs, else up to
+// OPEN_WAIT_MS, `say` showing "Your wallet is still opening; this goes on by itself once it has."
+// meanwhile. -> null once it is open (or when there is nothing to open), else why it cannot go on:
+// the service that holds its coins for instant payments does not answer, or it has not opened in
+// that time.
+async function walletOpening(say){
+  if(!leavesApi || leavesApi.isOpen() || !leavesApi.expected()) return null;
+  if(say) say(DEFAULT_WORDS.waitOpening);
+  const until = Date.now() + OPEN_WAIT_MS;
+  while(!leavesApi.isOpen() && !findingStalled() && (Date.now() < until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
+  if(leavesApi.isOpen()) return null;
+  return findingStalled() ? DEFAULT_WORDS.findingStalledPay : DEFAULT_WORDS.stillOpening;
+}
 async function confidentialReview(r, reset){
   const h=r.asset, m=assetMeta(h), prec=sendPrecision(h);
   const a=parseAtoms(r.amtS, prec);
@@ -9338,12 +9354,9 @@ async function confidentialReview(r, reset){
   let margin; try{ margin=confidentialMargin(feeRateFor(h)); }catch{ throw new Error(DEFAULT_WORDS.addressShort); }
   let least=0n; try{ least = leavesApi && leavesApi.minLeaf ? leavesApi.minLeaf(h) : 0n; }catch{}
   // What is held for instant payments is read once the wallet has opened: wait for that, saying so.
-  if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
-    const st=$('sendErr'); st.className='status'; st.textContent=DEFAULT_WORDS.waitOpening;
-    const until=Date.now()+OPEN_WAIT_MS;
-    while(!leavesApi.isOpen() && !findingStalled() && (Date.now()<until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
-    st.textContent='';
-  }
+  { const st=$('sendErr'); let said=false;
+    await walletOpening((t)=>{ said=true; st.className='status'; st.textContent=t; });
+    if(said) st.textContent=''; }
   let plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h) + onItsWay(h), minLeaf:least, precision:prec });
   // The service holding the wallet's coins for instant payments did not answer, so the wallet has
   // not found them: what it holds elsewhere still pays; past that it says so, and nothing moves.
@@ -12064,11 +12077,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   // More than can be used now, the rest vesting later: refused with its date, before anything moves.
   for(const n of needs) refuseIfVesting(n.hex, n.atoms, have(n.hex) + instantAtoms(n.hex) + onItsWay(n.hex));
   // What the wallet holds for instant payments is read once it has opened: wait for that, saying so.
-  if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
-    say(DEFAULT_WORDS.waitOpening);
-    const until = Date.now() + OPEN_WAIT_MS;
-    while(!leavesApi.isOpen() && !findingStalled() && (Date.now() < until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
-  }
+  { const why = await walletOpening(say); if(why) throw new Error(why); }
   if(findingStalled()) throw new Error(DEFAULT_WORDS.findingStalledPay);
   if(!leavesApi || !leavesApi.isOpen()) throw new Error(DEFAULT_WORDS.stillOpening);
   // A move asked before (this page earlier, or before a reload) counts: it is waited for, never asked twice.
