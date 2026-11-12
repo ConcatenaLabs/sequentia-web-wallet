@@ -576,6 +576,8 @@ export class LeafError extends Error {
     // (`live`).
     if (e && e.most != null) this.most = String(e.most)
     if (e && e.live != null) this.live = String(e.live)
+    // And the exact amount that pays with nothing left over (`all`), above `most`.
+    if (e && e.all != null) this.all = String(e.all)
     if (e && e.fee != null) this.fee = String(e.fee)
     // What the command cost before it was refused, where the library says (its `cost`).
     if (e && e.cost) this.cost = e.cost

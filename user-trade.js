@@ -450,6 +450,12 @@ export function refusalMost (e, paying) {
   if (e && e.most != null && /^\d+$/.test(String(e.most))) return BigInt(e.most)
   return ownShortMost(e && e.message, paying)
 }
+// The exact amount that pays with nothing left over, by the library's refusal (its `all`): above
+// `most`, and the amounts between the two leave change too small to keep, so it is offered only as
+// "all of it" (the Max button), never as "up to". -> atoms, or null when it does not say.
+export function refusalAll (e) {
+  return e && e.all != null && /^\d+$/.test(String(e.all)) ? BigInt(e.all) : null
+}
 // What the wallet holds in live coins, by the library's refusal of a payment short of its margins:
 // its own figure (`live`), else from its words. -> atoms, or null when it does not say.
 export function refusalLive (e) {
@@ -1185,10 +1191,12 @@ export function createEngine (deps) {
   // side does not read), with the coins it named: the trade settles them first, and goes.
   let settleSeen = null
   // The wallet's own shortfall a source's check met (`ownShortMost`): what it could pay at most.
-  let ownMost = null, ownLive = null
+  let ownMost = null, ownLive = null, ownAll = null
   const noteLiveShort = (e, at = {}) => {
     const most = refusalMost(e, at.paying)
     if (most != null && (ownMost == null || most > ownMost)) ownMost = most
+    const all = refusalAll(e)
+    if (all != null && (ownAll == null || all > ownAll)) ownAll = all
     // What the refusal says the wallet holds in live coins (absent for the change's refusal).
     const live = refusalLive(e)
     if (live != null) ownLive = live
@@ -1396,7 +1404,7 @@ export function createEngine (deps) {
     quoteStep = onStep
     tooOldFrom = null
     liveShort = false
-    ownMost = null; ownLive = null
+    ownMost = null; ownLive = null; ownAll = null
     settleSeen = null
     makerReads = new Set()
     const reads = makerReads
@@ -1553,7 +1561,10 @@ export function createEngine (deps) {
     // instead: the refusal's live figure is short of what it holds.)
     if (!best && ownMost != null && payAsset !== 'BTC' && (ownLive == null || ownLive >= haveLeaf)) {
       const shown = deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : 0n
-      if (shown <= haveLeaf) return { ok: false, why: 'own-short', most: String(ownMost) }
+      // With the exact amount that empties the coins (`all`), when it is more: what Max trades.
+      if (shown <= haveLeaf) {
+        return Object.assign({ ok: false, why: 'own-short', most: String(ownMost) }, ownAll != null && ownAll > ownMost ? { all: String(ownAll) } : {})
+      }
     }
     if (!best && liveShort && payAsset !== 'BTC') return settleFirst(payAsset, [], haveLeaf)
     // A maker gave firm terms in time and the wallet's library was still reading them when the

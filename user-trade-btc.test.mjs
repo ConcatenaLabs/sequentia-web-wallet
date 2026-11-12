@@ -2,7 +2,7 @@
 // Bitcoin Lightning wallet: the order of the one hash-lock, and what a ticket counts.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn, ownShortMost, refusalMost, refusalLive } from './user-trade.js'
+import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn, ownShortMost, refusalMost, refusalLive, refusalAll } from './user-trade.js'
 import { MAKER_LOCK_MS, needSeconds } from './user-trade-btc.js'
 
 const X = 'aa'.repeat(32)
@@ -493,4 +493,10 @@ test('the wallet\'s own refusal carries what can be traded now as a value: the p
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
   assert.equal(q.why, 'own-short', q.why)
   assert.equal(q.most, '998646271', 'the library\'s figure, not one read out of its words (' + String(999931875n - (999932651n - 999647047n)) + ')')
+  // With the exact amount that empties the coins, above it: what Max trades.
+  assert.equal(q.all, '999646271')
+  assert.equal(refusalAll(e), 999646271n)
+  assert.equal(refusalAll({ message: e.message }), null, 'never read out of the words')
+  const le2 = new LeafError({ kind: 'refused', message: e.message, most: '1', all: '2' })
+  assert.equal(le2.all, '2')
 })
