@@ -358,7 +358,13 @@ modes (`asset-picker.js`):
   is typed ("It arrives after the next block, in about a minute." or "Goes through within about
   <N> minutes. Keep this page open."). **Max** to a receive code fills in all of it, what is on the
   chain included, less the margin for the fees, and a larger amount is refused naming that same
-  figure: "You can send up to <Max> <TICKER>: the fee comes out of your balance."
+  figure: "You can send up to <Max> <TICKER>: the fee comes out of your balance." Money on the chain
+  that cannot be moved in (an asset the network does not take in, or too little of it to move once
+  the move's fee is paid) is paid at the code's address when it names one; to a code with no
+  address: "This <TICKER> can be sent only to an address. Ask for an address to pay, or paste one."
+  Coins of a supervised asset its issuer froze are never moved and never offered: a payment short
+  for them says "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts
+  the freeze."
 - A payment name (`name@domain`, also read as `lightning:name@domain` or `₿name@domain`, typed or
   scanned) is paid as what it stands for. A name at the site's own domain is paid at a receive code
   its wallet left signed with the name service, any asset, as any code is. The code must carry the
@@ -666,7 +672,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   fee in its fees. It waits the N minutes its ticket says, then "Returned: nothing traded.", the
   money in the wallet; if the network will not take the money in: "Returned: nothing traded. This
   money cannot be moved for a trade." Once the trade has gone ahead or been returned, the wallet
-  stops moving money in for it. Coins too deep for
+  stops moving money in for it. Money on the chain that cannot be moved in is never waited
+  on: an order on the chain that takes it goes, and otherwise the ticket says why, at once: "This
+  <TICKER> arrived in too small an amount to trade yet. You can send it, and once more arrives you
+  can trade it." or "Nobody offers to trade this <TICKER> now. You can send it." Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,
   at a settlement's fee each, so the next trade from them goes at once.
 - A trade whose other side cannot complete it after all (the other side says the offer is gone:
