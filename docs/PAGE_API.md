@@ -188,6 +188,13 @@ seconds, whichever is first. In the second case the answer is the trade under wa
 `under_way: 1`, its `state` as `getOrders` gives it, and `gave` and `got` of `'0'`. Nothing of it
 is a fill; the site follows the trade through `getOrders`.
 
+When what the trade pays must first go through the operator's next settlement (money still
+arriving, a coin too many payments deep), the dialog shows the book's price now, the least the
+trade goes for after its fees (for a limit order, at least the limit), and how long it waits.
+Once approved, the site is answered at once with the trade under way (`state` `sending`, its
+`note` saying how long). The wallet prices it again once the coins are through and sends it by
+itself only at that least or better; otherwise it ends `failed` with nothing traded.
+
 `getOrders` lists each trade the site made with a `state` and a `note`. The state is `sending`
 while the wallet is still taking its step, `sent` once
 the wallet has paid or signed its side, and `received` as soon as what the trade brings is the

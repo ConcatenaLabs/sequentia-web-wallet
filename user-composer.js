@@ -26,8 +26,8 @@
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
-import { USER_WORDS, QUOTE_FIRM_MS, OFFERED_AGAIN_EVERY_MS, SETTLE_MOST_MS, settleBound, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
-import { SETTLE_LATE_MS } from './default-arca.js'
+import { USER_WORDS, QUOTE_FIRM_MS, OFFERED_AGAIN_EVERY_MS, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
+import { settleWords } from './default-arca.js'
 import { mountMarketView } from './market-view.js'
 import { openPicker, PICKER_WORDS } from './asset-picker.js'
 import { RESTRICTED_WORDS } from './restricted-trade.js'
@@ -324,17 +324,21 @@ export function mountUserComposer (ctx) {
     const btn = (text, id, f, cls) => { const b = el('button', cls || '', text); b.type = 'button'; b.id = id; b.disabled = S.busy; b.onclick = f; return b }
     if (!S.ticket && S.card) { paintAnswerCard(t, act, btn); return }
     if (!S.ticket) {
-      act.appendChild(btn(S.settling ? settleWord() : S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
+      act.appendChild(btn(S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
       return
     }
     const k = S.ticket
     const line = (label, value, id) => { const d = el('div', 'kv'); d.id = id; d.appendChild(el('span', 'k', label)); d.appendChild(el('span', 'v', value)); t.appendChild(d) }
     line(USER_WORDS.amountIn, amt(k.payAsset, k.amountIn), 'ucIn')
-    line(USER_WORDS.amountOut, amt(k.receiveAsset, k.amountOut), 'ucOut')
+    // What is paid waits for a round first (the engine's ticket to wait and go): the book's price
+    // now, the least it goes for with its fees, and how long it waits. Trade accepts that; the
+    // trade then goes by itself, or comes back with nothing traded.
+    line(USER_WORDS.amountOut, k.indicative ? USER_WORDS.about + ' ' + amt(k.receiveAsset, k.about) : amt(k.receiveAsset, k.amountOut), 'ucOut')
     const cost = el('div', 'sub uc-cost'); cost.id = 'ucCost'
-    const costText = costLine(k.fees, amt, k.payAsset)
+    const costText = k.indicative ? USER_WORDS.atLeast(amt(k.receiveAsset, k.amountOut)) : costLine(k.fees, amt, k.payAsset)
     cost.textContent = costText
     t.appendChild(cost)
+    if (k.indicative) { const w = el('div', 'sub', settleWords(k.finalBy, 1, Date.now(), USER_WORDS)); w.id = 'ucWait'; t.appendChild(w) }
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
     if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }
     if (k.keep && k.via) { const kp = el('div', 'sub', RESTRICTED_WORDS.viaKeep(amt(k.via, k.keep))); kp.id = 'ucKeep'; t.appendChild(kp) }
@@ -371,9 +375,6 @@ export function mountUserComposer (ctx) {
       if (q.ok) { S.ticket = q.ticket; S.choice = q.choice; S.moving = !!q.moving }
       // A restricted asset: whom to ask for approval, or what to pay with; never an error.
       else if (q.card) S.card = q.card
-      // What is paid waits only for a round: the wallet settles it and prices the trade again by
-      // itself, saying only how long it takes (D96).
-      else if (q.why === 'settle-first') { settleThenReview(q); return }
       else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
         : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
@@ -391,7 +392,7 @@ export function mountUserComposer (ctx) {
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
-    } finally { clearTimeout(longTimer); S.busy = !!S.settling; S.pricingLong = false; closeProgress(); paintTicket() }
+    } finally { clearTimeout(longTimer); S.busy = false; S.pricingLong = false; closeProgress(); paintTicket() }
   }
 
   // ---- The price's progress ----
@@ -445,39 +446,6 @@ export function mountUserComposer (ctx) {
   }
 
   let readyTimer = null, readyTries = 0
-  // A quote answered 'settle-first': the coins it waits on go through the next round (the engine's
-  // settle), the person told only how long, and the trade is priced again by itself once they are
-  // through, while nothing they typed changed. It waits by time, not by tries: as long as the
-  // library says the coins take (`finalBy`, from its `final_in_seconds`), twice over with a margin
-  // (settleBound), and never less than SETTLE_MOST_MS from the first settle of the same ask; only
-  // past that does it say the trade takes longer than usual. Past what the library said, the words
-  // say it takes longer and goes by itself.
-  let settleAsk = null
-  const settleWord = () => {
-    if (S.settleBy == null) return USER_WORDS.settling
-    const t = Date.now()
-    return t > S.settleBy + SETTLE_LATE_MS ? USER_WORDS.goesThroughLate : USER_WORDS.goesThrough(Math.max(1, Math.ceil((S.settleBy - t) / 60_000)))
-  }
-  async function settleThenReview (q) {
-    const asked = `${S.pay}|${S.get}|${S.amount}`
-    const stale = () => `${S.pay}|${S.get}|${S.amount}` !== asked
-    if (!settleAsk || settleAsk.asked !== asked) settleAsk = { asked, since: Date.now(), most: SETTLE_MOST_MS }
-    if (Date.now() - settleAsk.since > settleAsk.most) { settleAsk = null; S.settleBy = null; S.error = USER_WORDS.settleLate; S.busy = false; paintTicket(); return }
-    S.busy = true; S.settling = true; S.note = settleWord(); paintTicket()
-    let through = false
-    const onWait = (finalBy) => {
-      S.settleBy = finalBy
-      settleAsk.most = Math.max(settleAsk.most, settleBound((finalBy - settleAsk.since) / 1000))
-      S.note = settleWord(); paintTicket()
-    }
-    try { through = await ctx.engine.settle({ payAsset: q.payAsset || S.pay, coins: q.coins }, { stop: stale, onWait }) } catch (e) { console.warn('[user composer] settle:', e && e.message) }
-    S.settling = false; S.busy = false
-    if (stale()) { settleAsk = null; S.settleBy = null; S.note = ''; paintTicket(); return }
-    if (!through) { settleAsk = null; S.settleBy = null; S.note = ''; S.error = USER_WORDS.settleLate; paintTicket(); return }
-    await review()
-    if (S.ticket || S.error) { settleAsk = null; S.settleBy = null }
-  }
-
   function readyAgain (ms = READY_RETRY_MS, counted = true) {
     const asked = `${S.pay}|${S.get}|${S.amount}`
     clearTimeout(readyTimer)

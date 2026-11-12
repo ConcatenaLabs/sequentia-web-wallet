@@ -638,22 +638,26 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   fills both, and the trade settles it first. When part of what is paid waits only
   for the operator's next settlement (a coin too many payments from one to give part of, a
   payment still arriving, coins the wallet's own upkeep is settling, a coin of a format the other
-  side's older build does not read), the wallet puts it through that settlement by itself, the
-  button reads "Goes through within about <N> minutes" (as for a payment, counted down to when
-  the wallet expects the coins through), and the price is asked again by itself once they can be
-  spent. If that is found only at **Trade**, the trade is kept under Your trades with the same
-  words, and the price the person accepted as its bound: once through it
-  is priced again and goes ahead by itself only at that price or better: it receives no less
-  than the ticket showed, pays at most the price of one received atom more than the ticket
-  showed (never more than the amount typed), and gets no less for what it pays than the
+  side's older build does not read), the wallet puts it through that settlement at once, and
+  Review shows a ticket the person can accept now: You pay, You receive "about <amount>" at the
+  price now, "You receive at least <amount> after fees, or the trade comes back and nothing is
+  traded.", and how long it waits, "Goes through within about <N> minutes" (as for a payment,
+  counted down to when the wallet expects the coins through). The least is the price now less
+  the fees the wallet last paid in that asset and a hundredth of it; an order's limit raises it.
+  **Trade** keeps the trade under Your trades with the same words; once through it
+  is priced again and goes ahead by itself only at that bound or better: it receives no less
+  than the ticket's least, pays no more than it, and gets no less for what it pays than the
   ticket's price; otherwise
-  "Returned: nothing traded. The price moved while it waited." A page closed or reloaded
+  "Returned: nothing traded. The price moved while it waited." The same holds when that is found
+  only at **Trade**, with the exact ticket as its bound. A site's order (SeqDEX) is the same
+  trade: its **Trade?** shows the same rows, and once approved the site is answered with the
+  trade under way. When the book shows no price for the pair before the coins are through, the
+  wallet says it is getting them ready and asks again by itself. A page closed or reloaded
   meanwhile finds the trade again and goes on with it, never twice, however many times the page
   follows it at once. It waits twice the most the wallet says it can take, and at least ten minutes;
   while it waits past what the wallet expected, a confirmed trade reads "Taking longer than usual:
-  this goes ahead by itself, or is returned with nothing traded"; past the bound a trade not yet
-  confirmed reads "This is taking longer than usual. Nothing has moved,
-  and your money stays in your wallet.", and one confirmed is "Returned: nothing traded."
+  this goes ahead by itself, or is returned with nothing traded"; past the bound it is
+  "Returned: nothing traded."
   Payments wait for that settlement the same way and then go. Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,
   at a settlement's fee each, so the next trade from them goes at once.
@@ -897,7 +901,9 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   approval in the wallet…".
 - The wallet's side, in every wallet: a site asks once to connect ("Connect SeqDEX?", with the
   site's address; on a phone, the address is what the site says it is, shown as that), then
-  each order shows **Trade?** (You pay, You receive, Fees, Asked by) or **Place an order?** (You
+  each order shows **Trade?** (You pay, You receive, Fees, Asked by; for a trade whose coins are
+  settled first, You receive "about <amount>", the least it goes for and how long it waits, as on
+  the Trade tab) or **Place an order?** (You
   sell, For, Price, Smallest part filled, Fees, What is left can be taken back from, Asked by),
   and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
   request".

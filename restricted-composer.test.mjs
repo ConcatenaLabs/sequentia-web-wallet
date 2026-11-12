@@ -87,17 +87,26 @@ test('composer: a quote answered with a card shows the card and never settles an
   }
 })
 
-test('composer: settle-first for the asset paying for a restricted asset settles it, then prices again by itself', async () => {
-  const ticket = { payAsset: X, receiveAsset: R, amountIn: '800', amountOut: '400', fees: [{ asset: X, atoms: '7' }], source: 'restricted' }
-  const { engine, seen } = scripted([{ ok: false, why: 'settle-first', payAsset: X, coins: ['c1'], held: '3000000' }, { ok: true, ticket, choice: { source: 'restricted' } }])
+test('composer: a restricted trade whose payment waits for a round shows the engine\'s ticket to wait and go; Trade accepts it', async () => {
+  // The engine answers what pays waiting for a round with a ticket to accept now (its one
+  // wait-and-go path): the price, the least it goes for, and the wait. The composer shows it and
+  // hands Trade back to the engine; it settles nothing of its own.
+  const finalBy = Date.now() + 150_000
+  const ticket = { payAsset: X, receiveAsset: R, amountIn: '800', amountOut: '396', about: '400', fees: [], source: 'settling', asked: '800', indicative: true, finalBy }
+  const choice = { source: 'settling', payAsset: X, coins: ['c1'] }
+  const { engine, seen } = scripted([{ ok: true, ticket, choice }])
+  const confirmed = []
+  engine.confirm = async (c, t) => { confirmed.push([c, t]); return { id: 'r1', state: 'settling', ticket: t, finalBy } }
   const { ui, root } = mount(engine)
   await root.querySelector('#ucReview').onclick()
-  for (let i = 0; i < 50 && !ui.state.ticket; i++) await wait(10)
-  assert.deepEqual(seen.settles.map((a) => [a.payAsset, a.coins]), [[X, ['c1']]], 'what pays is settled first')
-  assert.equal(seen.quotes.length, 2, 'then priced again by itself')
+  assert.equal(seen.quotes.length, 1)
+  assert.equal(seen.settles.length, 0, 'the composer settles nothing itself')
   assert.equal(ui.state.ticket, ticket)
-  assert.equal(ui.state.error, '')
-  assert.ok(root.querySelector('#ucConfirm'), 'the ticket is shown with Confirm')
+  assert.equal(root.querySelector('#ucOut').textContent, USER_WORDS.amountOut + USER_WORDS.about + ' 400 RSB')
+  assert.equal(root.querySelector('#ucCost').textContent, USER_WORDS.atLeast('396 RSB'))
+  assert.equal(root.querySelector('#ucWait').textContent, USER_WORDS.goesThrough(3))
+  await root.querySelector('#ucConfirm').onclick()
+  assert.deepEqual(confirmed, [[choice, ticket]], 'Trade is the engine\'s confirmation of that ticket')
 })
 
 test('composer: a pair offered a moment ago is asked again until the engine stops saying so, then said plainly', async () => {
