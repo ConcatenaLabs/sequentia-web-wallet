@@ -57,6 +57,20 @@ In practice:
   again. Its line says "usually within <N> minutes", N from the operator's anchor depth (a Sequentia
   block, and ten minutes for each Bitcoin block that must bury the move's anchor, rounded up to
   five). The wallet's own change from a payment it made counts at once.
+- A wallet opened in a browser for the first time (a restored phrase, a new device, a cleared
+  profile) first finds what it holds. Until it has, the line under the total reads "Syncing…
+  finding everything this wallet holds." rather than any figure as of a time, Receive shows the
+  address with "Your address, the same tb1 address on both chains. Your receive code shows here
+  once the wallet has found everything it holds.", and a payment asked meanwhile reads "Your wallet
+  is still opening; this goes on by itself once it has." and goes on once it has, however long
+  that takes. If the service that holds its coins for instant payments does not answer, the
+  wallet is never shown empty: the line reads "Syncing… the service that holds your coins for
+  instant payments is not answering, so this wallet has not found them yet. They are still
+  yours, and show here once it answers.", the wallet asks again every half minute, and a
+  payment that what it holds elsewhere does not cover reads "The service that holds your coins
+  for instant payments is not answering, so this wallet has not found them yet. Nothing has
+  moved. They are still yours: they show in your balance once it answers, and can be sent from
+  then."
 - The wallet keeps its money in ordinary coins: it opens no channel, names none in its receive
   code, and closes any it holds into a coin at the next settlement. Until then what it held there
   (its own side alone) is in History as **Coming back**, "about a minute", not in the figure.

@@ -108,6 +108,8 @@ export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
 export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
+// A first restore the operator did not answer is asked again this often, until it answers.
+export const RESTORE_RETRY_MS = 30_000
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 export const PLACES_KEY = 'swk.leaves.places'        // + '.' + tag: the library's last coin_places, with that balance
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
@@ -1229,15 +1231,40 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // The join's restore, run to its end once: a page closed while it ran restores again when it
   // next opens, so a phrase's coins are never left behind by a tab closed too soon.
+  // While it runs the wallet is finding what it holds (`restoring`): the page says so, rather than
+  // showing what it has read so far as all there is, and a payment asked meanwhile waits for it.
+  // Every request the library makes in it is bounded (the operator's at 60 s, the node's at
+  // 120 s), so it returns. When it returns because the operator does not answer, the wallet has
+  // found nothing: it is not opened empty, as if it held nothing, but stays finding, says why
+  // (`stalled`), and restores again every RESTORE_RETRY_MS until the operator answers.
   async function restoreOnce () {
     const key = tagged(RESTORED_KEY, tag())
     try { if (ctx.store.getItem(key)) return } catch {}
     const t0 = now()
+    S.restoring = { since: t0, stalled: null }
+    emit('restoring', { since: t0 })
     try {
-      S.restored = await run('restore')
-      try { ctx.store.setItem(key, String(now())) } catch {}
-      log(`[leaves] restore: ${now() - t0} ms`)
-    } catch (e) { S.restored = { error: e.message }; log('[leaves] restore: ' + e.message) }
+      for (;;) {
+        try {
+          S.restored = await run('restore')
+          try { ctx.store.setItem(key, String(now())) } catch {}
+          log(`[leaves] restore: ${now() - t0} ms`)
+          return
+        } catch (e) {
+          S.restored = { error: e.message }
+          log('[leaves] restore: ' + e.message)
+          if (!(e && e.kind === 'unreachable') || S.stopped) return
+          const first = !S.restoring.stalled
+          S.restoring = { ...S.restoring, stalled: { why: e.message, since: (S.restoring.stalled && S.restoring.stalled.since) || now() } }
+          if (first) emit('restoring', { since: t0, stalled: true })
+          await sleep(RESTORE_RETRY_MS)
+          if (S.stopped) return
+        }
+      }
+    } finally {
+      // The caller opens the wallet next and the page is drawn again once it has read the balance.
+      S.restoring = null
+    }
   }
 
   // A person reviewing a payment the wallet is about to make (`holdReads`): the wallet's own upkeep
@@ -2672,6 +2699,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Whether the library has given its balance this session (the figures are its own, not the
     // last ones kept), or the wallet has nothing with an operator to read.
     balanceRead: () => !!S.balance,
+    // Whether the wallet is finding what it holds: the restore of a wallet opened in this browser
+    // for the first time (or whose first restore was cut short), until it returns.
+    restoring: () => !!S.restoring,
+    // While restoring, since when the operator has not answered the restore (it is tried again
+    // every RESTORE_RETRY_MS): { why, since }, else null.
+    restoreStalled: () => (S.restoring && S.restoring.stalled) || null,
     // Whether this wallet has, or joins by itself, a wallet with an operator whose balance is to be read.
     expected: () => !!(S.open || S.starting || joinedOperator(ctx.store, tag()) || (!dev() && pinned())),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its
