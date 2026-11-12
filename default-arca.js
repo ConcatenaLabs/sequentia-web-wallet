@@ -114,6 +114,9 @@ export const DEFAULT_WORDS = Object.freeze({
   // Its value beside it, when the asset has a price, so "a little" is never left to guess.
   feeKept: (amount, ticker, value) => `${amount} ${ticker}` + (value ? ` (${value})` : ''),
   feeKeptSome: 'A small part of what you send, shown once it is sent',
+  // A payment whose money is moved in first: its fees (the move's and the payment's) are known only
+  // once the money is in, so the review shows the most they can be, which the payment then keeps to.
+  feeAtMost: (amount, ticker, value) => `At most ${amount} ${ticker}` + (value ? ` (${value})` : ''),
   // What leaves the wallet: the amount and the fee on top of it.
   totalLabel: 'Total',
   // Part of what is sent is on the wallet's side of an Arca channel with the operator (instant
@@ -167,6 +170,24 @@ export const DEFAULT_WORDS = Object.freeze({
   // What is sent waits only for the next settlement (the wallet's own upkeep is moving it, or the
   // library names coins to settle first): the payment goes ahead by itself after it (D96).
   settling: 'Goes through in about a minute',
+  // What is sent is held on the chain (all of it, or the part the rest does not cover), and is moved
+  // in first: the payment goes ahead by itself once it is, `n` minutes at most as the network says
+  // (the move's, and the settle after it of what else pays when part of that is on its way). A page
+  // closed meanwhile makes it when the wallet is next open (pending-sends.js), so it is one wait.
+  bringIn: (n) => (n <= 1 ? 'Goes through in about a minute' : `Goes through within about ${n} minutes`),
+  // Moving it in did not start in that time (its coin is not in a block yet): nothing was sent.
+  bringLate: 'This is taking longer than usual. Nothing was sent, and your money is still yours.',
+  // The network would not take the money in for it (too little of it to move once its fee is paid,
+  // or not taken at all): nothing was sent.
+  bringRefused: 'Nothing was sent, and your money is still yours. It can go to an address: ask for one, or paste one.',
+  // What is held is less than the fee of sending it (the fee is paid in what is sent): nothing can go.
+  belowFee: (ticker) => `This ${ticker} is less than the fee to send it, so it cannot be sent yet. Once more arrives, it can.`,
+  // Money held on the chain that cannot be moved in (too little of it, or an asset taken in only on
+  // the chain), to a receive code that names no address: it goes only to an address.
+  toAddressOnly: (ticker) => `This ${ticker} can be sent only to an address. Ask for an address to pay, or paste one.`,
+  // Once the money was in, the payment's fees came to more than the review showed: nothing was
+  // sent, and the review shows the payment again with its fee now.
+  feeMoved: 'The fee changed while your money was moved in, so nothing was sent. Here it is with the fee now.',
   // The same, with the true wait: the library's (`settle_first`'s `final_in_seconds`) once it has
   // said, the operator's round, block and anchor depth before (settleMinutes); past it, that it
   // takes longer and still goes by itself.
@@ -536,13 +557,49 @@ export function receiveCodeRetry (failures) {
 // `treeArriving`: what the tree holds of the asset that is not spendable yet (the change of a
 // payment just made, a coin just received); when the tree would cover the amount with it, the
 // payment is 'arriving': refused as still arriving, never as not enough.
-export function addressRoute (amount, onchain, treeSpendable, feeMargin = 0n, treeArriving = 0n) {
+// `movable`: of the chain's coins, what the wallet can move into the tree (`moveMargin` kept back for
+// the move's and the payment's fees): an amount that needs both the chain's coins and the tree's is
+// 'bring-in', the chain's moved in first and the whole then paid out of the tree, one payment.
+export function addressRoute (amount, onchain, treeSpendable, feeMargin = 0n, treeArriving = 0n, movable = 0n, moveMargin = feeMargin) {
   const a = big(amount)
   if (a + big(feeMargin) <= big(onchain)) return 'chain'
   if (a <= big(treeSpendable)) return 'tree'
   if (a <= big(onchain)) return 'chain'
   if (big(treeArriving) > 0n && a <= big(treeSpendable) + big(treeArriving)) return 'arriving'
+  if (big(movable) > 0n && a + big(moveMargin) <= big(treeSpendable) + big(treeArriving) + big(movable)) return 'bring-in'
   return null
+}
+
+// How default mode pays an asset to a receive code of its own operator, by the rule that one balance
+// is spendable whichever way completes soonest:
+//   'tree'     in the tree: what it holds there and can send now (`tree`), with what is on its way
+//              there (`onItsWay`, settled first, about a minute), covers the amount and `margin`;
+//   'chain'    otherwise at the code's address (`address`: the code names one), from the wallet's
+//              coins on the chain (`chain`), when they cover it with the network fee's `margin`:
+//              after the next block, about a minute;
+//   'bring-in' otherwise, when the tree and what can be moved in from the chain (`movable`, less
+//              `moveMargin` for the move's and the payment's fees) cover it together: moved in first,
+//              then paid in the tree, one payment;
+//   'tree'     when nothing covers it: the tree's refusal says what can go.
+export function codeRoute ({ amount, tree = 0n, onItsWay = 0n, chain = 0n, movable = 0n, margin = 0n, moveMargin = margin, address = false }) {
+  const a = big(amount)
+  const inTree = big(tree) + big(onItsWay)
+  if (a + big(margin) <= inTree) return 'tree'
+  if (address && a + big(margin) <= big(chain)) return 'chain'
+  if (big(movable) > 0n && a + big(moveMargin) <= inTree + big(movable)) return 'bring-in'
+  return 'tree'
+}
+
+// The most a payment of an asset to a receive code of its own operator can be, by the routes
+// codeRoute takes (the same arguments, but no amount): from the chain alone at the code's address
+// less the network fee's `margin`; the tree's and the chain's together, the chain's moved in first,
+// less `moveMargin`; or what the tree holds and has on its way. Max fills it in, and a payment of
+// more is refused naming it, so the two never disagree.
+export function codeMost ({ tree = 0n, onItsWay = 0n, chain = 0n, movable = 0n, margin = 0n, moveMargin = margin, address = false }) {
+  const inTree = big(tree) + big(onItsWay)
+  const fromChain = address ? big(chain) - big(margin) : 0n
+  const together = big(movable) > 0n ? inTree + big(movable) - big(moveMargin) : 0n
+  return [fromChain, together, inTree].reduce((a, b) => (b > a ? b : a), 0n)
 }
 
 // The coin states a balance counts as arriving: held, not yet spendable (a board not yet final,
@@ -775,7 +832,8 @@ export async function boardAll (run, c, tries = 3) {
     if (v + f <= c.onchain) {
       const r = await run('board', { asset: c.asset, amount: String(v), shown: q.fee })
       // What the board took off the chain (its amount and its fee), for onchainLessBoards.
-      return r && typeof r === 'object' ? { ...r, spent: String(v + f) } : r
+      // Its fee and the amount boarded too, so a payment that asked for the move counts its fee.
+      return r && typeof r === 'object' ? { ...r, spent: String(v + f), fee: String(f), amount: String(v) } : r
     }
     fee = f
   }
