@@ -150,11 +150,12 @@ test('the room is read from the coins as they are: open offers and a completed s
   assert.equal(budgetedSpendable(new Map([['G', 2n * size]]), offered, roomNow(budget, offered, rates), rates).get('G'), 0n)
   // The swap completed: w1 is gone; its change (a crumb) and what the taker paid (USDX worth w1)
   // are out of round. The next reading of the coins gives no room for w2: no price is shown that
-  // swap_offer would then refuse.
+  // swap_offer would then refuse. The change, out of round already, is still offered: a swap
+  // paying from it puts nothing more out of round.
   const after = [coins[1], coins[2], coin('chg', 10n, 'G', 'transfer'), coin('in', worth, 'U', 'transfer')]
   const room = roomNow(budget, after, rates)
   assert.ok(room < worth, String(room))
-  assert.equal(budgetedSpendable(new Map([['G', 2n * size]]), after, room, rates).get('G'), 0n)
+  assert.equal(budgetedSpendable(new Map([['G', 2n * size + 10n]]), after, room, rates).get('G'), 10n)
   // A coin held out of round in an asset the node does not price leaves no room at all.
   assert.equal(roomNow(budget, [coin('x', 1n, 'X', 'transfer')], rates), 0n)
   // No budget: no bound.
