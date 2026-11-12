@@ -110,6 +110,11 @@ export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 // A first restore the operator did not answer is asked again this often, until it answers.
 export const RESTORE_RETRY_MS = 30_000
+// A first restore still running after RESTORE_SLOW_MS is a long history being checked: the page
+// says it takes a few minutes. One still running after RESTORE_LONG_MS takes far longer than any
+// history should: the page says so, and a payment waiting for it stops waiting.
+export const RESTORE_SLOW_MS = 120_000
+export const RESTORE_LONG_MS = 1_800_000
 export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library's last balance, shown until it opens
 export const PLACES_KEY = 'swk.leaves.places'        // + '.' + tag: the library's last coin_places, with that balance
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
@@ -1255,8 +1260,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
     const key = tagged(RESTORED_KEY, tag())
     try { if (ctx.store.getItem(key)) return } catch {}
     const t0 = now()
-    S.restoring = { since: t0, stalled: null }
+    S.restoring = { since: t0, stalled: null, slow: null }
     emit('restoring', { since: t0 })
+    // How long it has run, said as it goes (`restoreSlow`): never a spinner with no end in sight.
+    const slowAfter = (ms, level) => setTimeout(() => {
+      if (!S.restoring || S.restoring.since !== t0) return
+      S.restoring = { ...S.restoring, slow: level }
+      log(`[leaves] restore still running after ${Math.round((now() - t0) / 1000)} s (${level})`)
+      emit('restoring', { since: t0, slow: level })
+    }, ms)
+    const timers = [slowAfter(ctx.restoreSlowMs ?? RESTORE_SLOW_MS, 'slow'), slowAfter(ctx.restoreLongMs ?? RESTORE_LONG_MS, 'long')]
     try {
       for (;;) {
         try {
@@ -1277,6 +1290,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         }
       }
     } finally {
+      for (const t of timers) clearTimeout(t)
       // The caller opens the wallet next and the page is drawn again once it has read the balance.
       S.restoring = null
     }
@@ -2812,6 +2826,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // While restoring, since when the operator has not answered the restore (it is tried again
     // every RESTORE_RETRY_MS): { why, since }, else null.
     restoreStalled: () => (S.restoring && S.restoring.stalled) || null,
+    // While restoring, how long it has run: 'slow' past RESTORE_SLOW_MS (a long history), 'long'
+    // past RESTORE_LONG_MS (far longer than any history should take), else null.
+    restoreSlow: () => (S.restoring && S.restoring.slow) || null,
     // Whether this wallet has, or joins by itself, a wallet with an operator whose balance is to be read.
     expected: () => !!(S.open || S.starting || joinedOperator(ctx.store, tag()) || (!dev() && pinned())),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its

@@ -96,7 +96,7 @@ test('#365: the page says it, in default mode\'s words, and both payment waits f
   assert.ok(status.indexOf('DEFAULT_WORDS.finding') < status.indexOf('showing your wallet as of'), 'the finding line comes first')
   // The one wait for an opening wallet (Send's two paths and the trade's price) goes on while it
   // finds what it holds, and ends at once when the operator does not answer it.
-  const waits = html.match(/while\(!leavesApi\.isOpen\(\) && !findingStalled\(\) && \(Date\.now\(\) ?< ?until \|\| findingOn\(\)\)\)/g) || []
+  const waits = html.match(/while\(!leavesApi\.isOpen\(\) && !findingStalled\(\) && !findingTooLong\(\) && \(Date\.now\(\) ?< ?until \|\| findingOn\(\)\)\)/g) || []
   assert.equal(waits.length, 1, 'one wait, run past its cap while the wallet finds what it holds')
   assert.equal((html.match(/await walletOpening\(/g) || []).length, 2, 'Send\'s two paths wait with it')
   assert.match(html, /opening: walletOpening,/)
@@ -116,7 +116,7 @@ function page (leavesApi) {
   const waitTo = fn('ensureOnChain').split('\n')
   const cut = waitTo.findIndex((l) => l.includes('DEFAULT_WORDS.stillOpening'))
   const ensure = waitTo.slice(0, cut + 1).join('\n') + "\n  return 'went on'\n}"
-  const src = [fn('findingStalled'), fn('findingOn'), fn('walletOpening'), fn('setSyncStatus'), ensure,
+  const src = [fn('findingStalled'), fn('findingTooLong'), fn('findingOn'), fn('walletOpening'), fn('setSyncStatus'), ensure,
     'return { setSyncStatus, ensureOnChain, line: () => $("syncStatus").innerHTML.replace(/<[^>]*>/g, "") }'].join('\n')
   // eslint-disable-next-line no-new-func
   return new Function('leavesApi', 'DEFAULT_WORDS', '$', 'esc', 'whenText', 'OPEN_WAIT_MS', 'devMode', 'refuseIfVesting', 'instantAtoms', 'onItsWay', 'fmtAmount', 'assetMeta',
@@ -220,4 +220,40 @@ test('a restore that leaves the watchtowers\' deposits owed has them made at onc
     releaseDeposits()
     await started
   } finally { api.stop() }
+})
+
+test('#694: a restore that runs long says so as it goes, and one far past any history ends a waiting payment in words', async () => {
+  for (const t of [DEFAULT_WORDS.findingSlow, DEFAULT_WORDS.findingLong, DEFAULT_WORDS.findingLongPay]) {
+    assert.deepEqual(forbiddenIn(t), [], t)
+    assert.doesNotMatch(t, /try again/i)
+  }
+  const w = slowRestoreWorker()
+  const events = []
+  const api = mountWith(w, { restoreSlowMs: 30, restoreLongMs: 120, onEvent: (n, d) => events.push([n, d]) })
+  const p = page(api)
+  try {
+    const started = api.start()
+    await until(() => asksRestore(w) === 1)
+    assert.equal(api.restoreSlow(), null, 'a restore just started is not slow')
+    p.setSyncStatus('ok'); assert.equal(p.line(), DEFAULT_WORDS.finding)
+    await until(() => api.restoreSlow() === 'slow')
+    assert.ok(events.some(([n, d]) => n === 'restoring' && d && d.slow === 'slow'), 'the page is told, so it draws the line again')
+    p.setSyncStatus('ok'); assert.equal(p.line(), DEFAULT_WORDS.findingSlow, 'a long history: a few minutes, in words')
+    // A payment asked now waits while the restore is only slow, and stops waiting, in words, once
+    // it has run far longer than any history should take.
+    const said = []
+    let ended = null
+    const paying = p.ensureOnChain([{ hex: 'aa', atoms: 10n }], (t) => said.push(t), 'send', () => 0n).then((v) => { ended = v }, (e) => { ended = e.message })
+    await new Promise((r) => setTimeout(r, 10))
+    assert.deepEqual(said, [DEFAULT_WORDS.waitOpening])
+    assert.equal(ended, null, 'it waits while the restore is only slow')
+    await until(() => api.restoreSlow() === 'long', 3000)
+    p.setSyncStatus('ok'); assert.equal(p.line(), DEFAULT_WORDS.findingLong, 'far longer than any history: said, never a spinner alone')
+    await paying
+    assert.equal(ended, DEFAULT_WORDS.findingLongPay, 'the waiting payment ends in true words')
+    w.release()
+    await started
+    assert.equal(api.restoreSlow(), null)
+    assert.equal(api.isOpen(), true, 'it still opens once the restore returns')
+  } finally { api.stop && api.stop() }
 })

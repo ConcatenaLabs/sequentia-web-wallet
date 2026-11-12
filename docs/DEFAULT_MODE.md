@@ -62,8 +62,14 @@ In practice:
   finding everything this wallet holds." rather than any figure as of a time, Receive shows the
   address with "Your address, the same tb1 address on both chains. Your receive code shows here
   once the wallet has found everything it holds.", and a payment or a trade asked meanwhile reads "Your wallet
-  is still opening; this goes on by itself once it has." and goes on once it has, however long
-  that takes. If the service that holds its coins for instant payments does not answer, the
+  is still opening; this goes on by itself once it has." and goes on once it has. A wallet with a
+  long history takes a few minutes: after two, the line reads "Syncing… this wallet has a long
+  history, so finding everything it holds takes a few minutes. Nothing has moved, and it opens by
+  itself once it has." After thirty, far longer than any history should take, it reads "Syncing…
+  finding everything this wallet holds is taking far longer than it should. Nothing has moved,
+  and your coins are still yours. Reload the page to start again.", and a payment or trade still
+  waiting reads "Your wallet is taking far longer than it should to find everything it holds, so
+  nothing has moved. Reload the page to start again; your coins are still yours." If the service that holds its coins for instant payments does not answer, the
   wallet is never shown empty: the line reads "Syncing… the service that holds your coins for
   instant payments is not answering, so this wallet has not found them yet. They are still
   yours, and show here once it answers.", the wallet asks again every half minute, and a trade,
