@@ -467,13 +467,16 @@ test('the wallet\'s own shortfall while more of it is on its way: settled first,
 test('the wallet\'s own refusal carries what can be traded now as a value: the page takes it, never its words (#666)', async () => {
   // The library's refusal with its figures (`most`, `live`): they are the ones taken, whatever the words say.
   const e = Object.assign(new Error('refused: the wallet holds 999647047 of asset ' + X + ' in live coins, and paying 999931875 takes 999932651 with the margins its transactions leave for their fees'),
-    { kind: 'refused', most: '999640000', live: '999647047' })
-  assert.equal(refusalMost(e, 999931875n), 999640000n)
+    { kind: 'refused', most: '998646271', all: '999646271', live: '999647047' })
+  // The library's `most` is the ceiling below which every amount pays (what it holds less the margins and
+  // the smallest coin of 1,000,000); the words give only the exact amount that empties the coins (`all`).
+  assert.equal(refusalMost(e, 999931875n), 998646271n)
   assert.equal(refusalLive(e), 999647047n)
   // The change's refusal, its figure only.
   const c = Object.assign(new Error('refused: the change would be below the operator\'s smallest leaf in asset ' + X + ' (1000000 atoms): pay a little less, or that much more'),
-    { kind: 'refused', most: '981500000' })
-  assert.equal(refusalMost(c, 983000000n), 981500000n)
+    { kind: 'refused', most: '982400000', all: '983400000' })
+  // Change of 400,000 under a smallest coin of 1,000,000: the ceiling is 982,400,000, above the words' 982,000,000.
+  assert.equal(refusalMost(c, 983000000n), 982400000n)
   assert.equal(refusalLive(c), null)
   // A library that does not carry them yet: read from its words, as before.
   assert.equal(refusalMost({ message: c.message }, 983000000n), 982000000n)
@@ -489,5 +492,5 @@ test('the wallet\'s own refusal carries what can be traded now as a value: the p
   const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
   assert.equal(q.why, 'own-short', q.why)
-  assert.equal(q.most, '999640000', 'the library\'s figure, not one read out of its words (' + String(999931875n - (999932651n - 999647047n)) + ')')
+  assert.equal(q.most, '998646271', 'the library\'s figure, not one read out of its words (' + String(999931875n - (999932651n - 999647047n)) + ')')
 })
