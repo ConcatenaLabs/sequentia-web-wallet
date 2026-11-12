@@ -32,9 +32,11 @@ import { restrictedEntries, btcRoute, RESTRICTED_WORDS } from './restricted-trad
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const BTC = 'BTC'
 
-// A restricted pair's price for `amount` paid. -> null (not a restricted pair: the engine goes
-// on) | the engine's quote answer, with `card` for the approval and bitcoin answers.
-export async function restrictedQuote (R, { payAsset, receiveAsset, amount }) {
+// A restricted pair's price for `amount` paid. `arriving`: atoms of the asset paid that a trade
+// under way brings first (a composed purchase's first step), counted as held. -> null (not a
+// restricted pair: the engine goes on) | the engine's quote answer, with `card` for the approval
+// and bitcoin answers.
+export async function restrictedQuote (R, { payAsset, receiveAsset, amount, arriving = 0n }) {
   if (!R || !(await R.available())) return null
   const rPay = payAsset !== BTC && R.isRestricted(payAsset)
   const rGet = receiveAsset !== BTC && R.isRestricted(receiveAsset)
@@ -84,7 +86,7 @@ export async function restrictedQuote (R, { payAsset, receiveAsset, amount }) {
   if (!feeAsset) return { ok: false, why: 'no-funds' }
   const fee = big(await R.fee(feeAsset))
   const need = best.give + (feeAsset === payAsset ? fee : 0n)
-  if (big(await R.held(payAsset)) < need) return { ok: false, why: 'no-funds' }
+  if (big(await R.held(payAsset)) + big(arriving) < need) return { ok: false, why: 'no-funds' }
   if (feeAsset !== payAsset && big(await R.held(feeAsset)) < fee) return { ok: false, why: 'no-funds' }
   const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
     fees: [{ asset: feeAsset, atoms: String(fee) }], source: 'restricted' }

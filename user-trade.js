@@ -60,6 +60,7 @@ import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
 import { DEFAULT_WORDS, vestingShort } from './default-arca.js'
 import { restrictedQuote, restrictedConfirm, restrictedAdvance } from './restricted-engine.js'
+import { composedQuote, composedAdvance } from './restricted-composed.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -359,6 +360,8 @@ const TRADES_KEY = 'swk.usertrade'
 export const KEEP_ENDED = 200
 export const KEEP_BYTES = 1_000_000
 const ENDED_STATES = ['settled', 'returned', 'failed', 'undone']
+// A composed purchase whose bitcoin step cannot be paid now says why, as any bitcoin purchase does.
+const FIRST_STEP_SAYS = ['no-funds', 'btc-moving', 'wallet-busy', 'too-small', 'part-ready', 'not-ready']
 // The library's states of a swap that settled and is dead: its coin coming home (`returning`), and
 // home (`returned`). The page reads them; it infers nothing.
 export const UNDOING_STATES = Object.freeze(['returning'])
@@ -911,6 +914,7 @@ export function createEngine (deps) {
   // Bitcoin invoice for it.
   function drop (c) {
     if (!c) return
+    if (c.source === 'composed') { drop(c.first); return }
     if (c.offer) release(c.entry.maker, c.offer.swap)
     if (c.btc) {
       btcT.release(c.entry.maker, c.btc.offer && c.btc.offer.swap)
@@ -1093,6 +1097,15 @@ export function createEngine (deps) {
     // A pair with a restricted asset trades on the chain under its policy server
     // (restricted-engine.js), or, without what that needs, as before.
     const rq = await restrictedQuote(deps.restricted, { payAsset, receiveAsset, amount: A })
+    // Bitcoin for a restricted asset: one trade through the asset that bitcoin buys and that buys
+    // it (restricted-composed.js), one ticket and one confirmation. Bitcoin the wallet cannot pay
+    // now is said as for any purchase; otherwise, the card names the asset to go through.
+    if (rq && rq.why === 'btc-route' && payAsset === 'BTC' && rq.card && rq.card.side === 'get' && (rq.card.choices || []).length) {
+      const cq = await composedQuote(deps.restricted, { receiveAsset, vias: rq.card.choices, drop,
+        quoteFirst: (via) => quoteOnce({ payAsset: 'BTC', receiveAsset: via, amount: A, onStep, cap }) })
+      if (cq.ok) return cq
+      if (cq.first && FIRST_STEP_SAYS.includes(cq.first.why)) return cq.first
+    }
     if (rq) return rq
     // More than the wallet holds to spend, the rest vesting later: refused with the date from
     // which all of it can be used (default-arca.js vestingShort), whatever the pair. Nothing is
@@ -1219,12 +1232,22 @@ export function createEngine (deps) {
 
   // Confirms a ticket's choice: writes the trade's record, then takes the one step. Answers the
   // record; `advance` follows it.
-  async function confirm (choice, ticket) {
+  // `extra`: fields the record carries from the start (a composed trade's step: `partOf`).
+  async function confirm (choice, ticket, extra = {}) {
     // What the wallet can pay changes with this trade: the next quote reads it afresh.
     holdings = null
     const id = `${now()}-${Math.random().toString(16).slice(2, 10)}`
-    const rec = put({ id, at: now(), source: choice.source, state: 'confirming', ticket })
+    const rec = put({ id, at: now(), source: choice.source, state: 'confirming', ticket, ...extra })
     try {
+      if (choice.source === 'composed') {
+        // The composed record first, then its first step's own record, marked as its.
+        rec.via = choice.via; rec.viaAtoms = choice.viaAtoms; rec.firstFees = choice.firstTicket.fees || []
+        put(rec)
+        const one = await confirm(choice.first, choice.firstTicket, { partOf: rec.id })
+        rec.first = one.id
+        if (one.state !== 'confirming') { rec.state = one.state === 'waiting' ? 'waiting' : 'sent'; rec.sentAt = now(); if (rec.state === 'waiting') rec.waitingSince = now() }
+        return put(rec)
+      }
       if (choice.source === 'covenant-round') {
         rec.order = choice.entry.id
         rec.orderJson = choice.entry.raw._relayJson || choice.entry.raw
@@ -1328,6 +1351,7 @@ export function createEngine (deps) {
 
   async function advanceOnce (rec) {
     if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
+    if (rec.source === 'composed') return composedAdvance(deps.restricted, rec, { records, put, now, confirm })
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an
       // acceptance the library made is in its own store; read it there. A step that did not answer

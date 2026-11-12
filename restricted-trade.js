@@ -338,6 +338,8 @@ export const RESTRICTED_WORDS = Object.freeze({
   noneSelling: (ticker) => `No one is selling ${ticker} right now. Check back later.`,
   noneBuying: (ticker) => `No one is buying ${ticker} right now. Check back later.`,
   viaHeld: (via) => `Your bitcoin bought ${via}; it is yours to trade or send.`,
+  viaWaiting: (via, ticker) => `Your bitcoin bought ${via}. It buys ${ticker} by itself as soon as an offer allows; until then the ${via} is yours.`,
+  viaKeep: (amount) => `You also keep ${amount}.`,
 })
 
 // The approval card of a refusal (RA1 design 5.2): whom to ask, taking the first of the asset's

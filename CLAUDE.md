@@ -188,6 +188,10 @@ Root is flat: production modules and tests sit side by side.
   engine asks it first and gets null for any pair without a restricted asset, or when the policy
   server does not answer `/v1/eligibility`. Its words are `RESTRICTED_WORDS`, tested against
   `USER_MODE_FORBIDDEN_WORDS`; none says such an asset cannot be traded.
+  `restricted-composed.js` makes bitcoin for a restricted asset one trade: the engine's own
+  bitcoin purchase of an asset X, then X for the restricted asset at the ticket's terms or better.
+  The composed record (source `composed`) is what the Trade tab shows; each step keeps the engine's
+  usual record marked `partOf` it, and History shows the steps, never the composed record.
 - `lnaddr.js` and `tooling/lsp/lnaddr.mjs` — the wallet's payment name, `name@SEQ_LNADDR_DOMAIN`, a
   Lightning address (LNURL-pay). The name is held by a BIP340 key of the phrase (`NAME_KEY_PATH`),
   and every message to the service is signed over `signedDigest` (action, domain, name, request),
