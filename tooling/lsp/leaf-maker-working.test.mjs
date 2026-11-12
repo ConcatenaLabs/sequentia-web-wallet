@@ -184,9 +184,10 @@ test('after a firm offer or an acceptance the coins are read again ahead of the 
   const { readFileSync } = await import('node:fs')
   const { nextJob } = await import('../leaf-node.mjs')
   const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
-  // Both places that make the reading stale read the coins again with `first`.
+  // Every place that makes the reading stale (a firm offer, an acceptance, a refused one's new
+  // offer) reads the coins again with `first`.
   const stale = src.split('holdings.stale = true').slice(1).map((s) => s.split('\n').slice(0, 3).join('\n'))
-  assert.equal(stale.length, 2)
+  assert.equal(stale.length, 3)
   for (const s of stale) assert.match(s, /readHoldings\(true\)/)
   // A `first` command runs during a quote's 90 s hold; a queued one does not.
   const t = 1000, hold = t + 90_000

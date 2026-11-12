@@ -59,7 +59,7 @@ const store = {
 const fetchJson = async (url, init) => {
   const r = await fetch(url, init ? { ...init, headers: { 'content-type': 'application/json' } } : undefined)
   const j = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status))
+  if (!r.ok) { const e = new Error(j.error || ('HTTP ' + r.status)); e.status = r.status; e.body = j; throw e }
   return j
 }
 const log = (...a) => console.log(new Date().toISOString(), ...a)

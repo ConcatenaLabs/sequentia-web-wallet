@@ -5329,7 +5329,8 @@ function initUserComposer(){
     fetchJson: async (url, init)=>{
       const r = await fetch(url, init ? { ...init, headers: { 'content-type':'application/json' } } : { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) });
       const j = await r.json().catch(()=>({}));
-      if(!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      // A refusal carries the answer whole (a maker's "offer gone" names what it made instead).
+      if(!r.ok){ const e = new Error(j.error || ('HTTP ' + r.status)); e.status = r.status; e.body = j; throw e; }
       return j;
     },
     // The live makers: the one of in-tree swaps, and the one of BTC (its own Bitcoin node).
