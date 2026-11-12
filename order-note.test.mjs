@@ -145,10 +145,14 @@ test('a funding with a note rebuilds its order exactly; nothing else is taken fo
   assert.equal(r1.sellAtoms, '10000000000'); assert.equal(r1.recvAtoms, '9000000'); assert.equal(r1.receive, B); assert.equal(r1.pay, A)
   assert.equal(r1.makerIndex, 3); assert.equal(r1.expiry, TERMS.expiry); assert.equal(r1.idsInternal, true); assert.equal(r1.fromNote, true)
   assert.equal(r2.makerIndex, 4); assert.equal(r2.recvAtoms, '7000')
-  assert.deepEqual([...seen].sort(), ['f1', 'f4', 'f5'], 'never read again: no note, or every taproot output accounted for')
+  assert.deepEqual([...seen], ['f4'], 'only a transaction without a note is never read again')
   // An order the records hold is not rebuilt twice.
-  const again = await ordersFromNotes(io, { open, makerAt, known: new Set([p1.spkHex]), checked: null })
-  assert.deepEqual(again.map((r) => r.fundTxid), ['f5'])
+  const again = await ordersFromNotes(io, { open, makerAt, known: new Set([p1.spkHex, p2.spkHex]), checked })
+  assert.deepEqual(again, [])
+  // Its record deleted by hand after that scan: the next scan rebuilds it from the note.
+  const third = await ordersFromNotes(io, { open, makerAt, known: new Set([p2.spkHex]), checked })
+  assert.deepEqual(third.map((r) => r.fundTxid), ['f1'])
+  assert.equal(third[0].spkHex, p1.spkHex)
   // A read that fails skips its transaction only: what was found is kept, and it is read again next time.
   let fails = 1
   const flaky = { ownSpends: io.ownSpends, get: async (p) => { if (p.includes('f3') && fails-- > 0) throw new Error('503'); return io.get(p) } }

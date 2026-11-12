@@ -264,6 +264,12 @@ try {
   ok(!back.some((x) => x.spkHex === o5.spkHex), 'N5 o5 (a kit without the data output) is not rebuilt by notes')
   await SW.scanLostOrders(true)
   ok(SW.placed().length === 3, 'N2 a second scan rebuilds nothing twice (' + SW.placed().length + ' orders)')
+  // A record deleted by hand after scans have read its funding (the scan's memory kept): the next scan
+  // rebuilds it from the note, which is read at every scan.
+  store.set(PLACED, JSON.stringify(records().filter((r) => r.spkHex !== o1.spkHex))); SW.loadPlaced()
+  ok(!SW.placed().some((x) => x.spkHex === o1.spkHex), 'N2 o1\'s record deleted by hand')
+  await SW.scanLostOrders(true)
+  ok(SW.placed().some((x) => x.spkHex === o1.spkHex && x.recvAtoms === o1.recvAtoms) && SW.placed().length === 3, 'N2 the next scan rebuilds o1 from its note')
 
   // ---- N3: the old order still gets the search (developer mode, the person's answer)
   C.devMode = () => true

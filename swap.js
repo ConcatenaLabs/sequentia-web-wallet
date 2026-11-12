@@ -10673,7 +10673,6 @@ async function restoreFromNotes(){
       rec.covTxid = res.coin.txid; rec.covVout = res.coin.vout; rec.restAtoms = String(res.coin.value);
       PLACED.push(rec); restored++;
     } else if (res && res.done && res.settled){ archived.push({ ...rec, archivedAt: Date.now(), archivedWhy: 'done' }); put++; }
-    else seen.delete(rec.fundTxid);   // not kept this time (a read failed, or a spend not yet in a block): read again next scan
   }
   if (restored){ savePlaced(); ensureCovenantRelay(); }
   if (put) saveArchived(archived);

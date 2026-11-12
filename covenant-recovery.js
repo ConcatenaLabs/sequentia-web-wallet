@@ -160,9 +160,9 @@ export async function findUnrecordedLocks (io, { known, stable, checked } = {}) 
 //   open(noteHex)  -> terms | null: order-note.js openNote under the wallet's note key
 //   makerAt(index) -> { index, program, internalKey }: the wallet's maker key at that index
 //   known          Set of script hex the wallet's records (kept or archived) account for
-//   checked        optional { has(txid), add(txid) }: transactions never read again: those without a
-//                  note, and those whose every taproot output is accounted for (known, or rebuilt
-//                  here and kept by the caller)
+//   checked        optional { has(txid), add(txid) }: transactions without a note, never read again.
+//                  A transaction with a note is read each time, whatever explains its outputs now:
+//                  the record that does may go, and the note is then what rebuilds the order.
 // A read that fails skips its transaction only: it is left unchecked, so the next scan asks again,
 // and what this scan found is kept.
 // -> [rec], each with the funding's outpoint in covTxid/covVout and fundTxid
@@ -197,7 +197,6 @@ export async function ordersFromNotes (io, { open, makerAt, known, checked } = {
           break
         }
       }
-      if (!locks.length && checked) checked.add(txid)
     } catch { /* this transaction is read again next time */ }
   }
   return out
