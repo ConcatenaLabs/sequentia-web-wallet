@@ -171,6 +171,9 @@ export const DEFAULT_WORDS = Object.freeze({
   // The network would not take the money in for it (too little of it to move once its fee is paid,
   // or not taken at all): nothing was sent.
   bringRefused: 'This money cannot be moved for this payment. Nothing was sent, and your money is still yours.',
+  // Money held on the chain that cannot be moved in (too little of it, or an asset taken in only on
+  // the chain), to a receive code that names no address: it goes only to an address.
+  toAddressOnly: (ticker) => `This ${ticker} can be sent only to an address. Ask for an address to pay, or paste one.`,
   // Once the money was in, the payment's fees came to more than the review showed: nothing was
   // sent, and the review shows the payment again with its fee now.
   feeMoved: 'The fee changed while your money was moved in, so nothing was sent. Here it is with the fee now.',

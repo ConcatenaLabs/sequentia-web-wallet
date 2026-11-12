@@ -288,3 +288,19 @@ test('a move the network refuses returns the trade at once, with words, nothing 
   assert.ok(!/try again|something went wrong/i.test(USER_WORDS.returnedRefused))
   assert.equal(s.accepts.length, 0)
 })
+
+test('money on the chain that cannot be moved in (too little, or an asset not taken in): a plain reason at once, never settled first', async () => {
+  for (const stays of ['dust', 'unserved']) {
+    const s = standIn({ onchain: 900n })
+    s.chainDep = () => ({ atoms: s.chain, movable: 0n, margin: 2000n, minutes: 5, stays })
+    const eng = engineOf(s, { chain: s.chainDep })
+    const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '800' })
+    console.log(stays, '->', JSON.stringify(q))
+    assert.deepEqual([q.ok, q.why, q.stays], [false, 'chain-stays', stays])
+    assert.equal(s.brings, 0)
+    assert.ok(!s.lib.command('swaps').length)
+  }
+  for (const w of [USER_WORDS.chainDust('XT'), USER_WORDS.chainStays('XT')]) {
+    assert.ok(!/try again|something went wrong|ark|leaf|board|round|operator|limit|chain/i.test(w), w)
+  }
+})

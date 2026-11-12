@@ -46,7 +46,8 @@
 //   chain(asset)               -> the wallet's money of an asset held on the chain, for a trade that
 //                                 needs it: { atoms (all of it on the chain), movable (what the wallet
 //                                 can move in to trade from), margin (kept back for the move's fee),
-//                                 minutes (how long moving it in takes) }; optional: with it and
+//                                 minutes (how long moving it in takes), stays ('dust' or 'unserved'
+//                                 when none of it can be moved in, else null) }; optional: with it and
 //                                 bringIn, money on the chain that no fill on the chain takes is
 //                                 moved in first and then traded, the ticket saying how long
 //   bringIn(asset, want, opts) -> moves what the wallet holds of an asset on the chain in, by itself
@@ -218,6 +219,11 @@ export const USER_WORDS = Object.freeze({
   // A trade paid with money moved in first, whose move the network would not take (too little of
   // it to move once its fee is paid, or not taken at all): nothing traded.
   returnedRefused: 'Returned: nothing traded. This money cannot be moved for a trade.',
+  // Paid with money that arrived on the chain and cannot be moved to trade: too little of it to move
+  // once its fee is paid (`dust`), or an asset traded only on the chain, where nobody offers it now.
+  // It can be sent all the same.
+  chainDust: (pay) => `This ${pay} arrived in too small an amount to trade yet. You can send it, and once more arrives you can trade it.`,
+  chainStays: (pay) => `Nobody offers to trade this ${pay} now. You can send it.`,
   sent: 'Sent',
   // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
   sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
@@ -1188,6 +1194,13 @@ export function createEngine (deps) {
   async function quoteOnce (args) {
     const plan = await bringPlan(args)
     if (!plan) return quoteHeld(args)
+    if (plan.stays) {
+      // Never settled first and then "taking longer": the money cannot come in. An order on the chain
+      // that takes it, or anything else the sources price, goes; otherwise the plain reason.
+      const q = await quoteHeld(args)
+      if (q.ok) return q
+      return ['settle-first', 'no-funds', 'not-ready', 'part-ready', 'readying'].includes(q.why) ? { ok: false, why: 'chain-stays', stays: plan.stays } : q
+    }
     if (plan.chainFill) {
       const q = await quoteHeld({ ...args, only: 'onchain-fill' })
       if (q.ok && !q.ticket.upTo) return q
@@ -1209,7 +1222,13 @@ export function createEngine (deps) {
     const chain = big(c.atoms)
     const tree = shown > chain ? shown - chain : 0n
     if (tree >= A) return null
-    if (A + big(c.margin) > tree + big(c.movable)) return null
+    if (A + big(c.margin) > tree + big(c.movable)) {
+      // The balance covers it only with money on the chain that cannot be moved in (`c.stays`: 'dust',
+      // too little of it once the move's fee is paid; 'unserved', an asset the network does not take
+      // in): said so, unless an order on the chain takes it (quoteOnce).
+      if (c.stays && A <= tree + chain) return { stays: c.stays, chainFill: chain >= A }
+      return null
+    }
     return { tree, chain, movable: big(c.movable), margin: big(c.margin), minutes: Number(c.minutes) || 5, chainFill: chain >= A }
   }
 

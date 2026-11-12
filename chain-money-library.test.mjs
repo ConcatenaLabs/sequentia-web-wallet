@@ -97,7 +97,7 @@ function page (leavesApi, ticker, chain) {
     assetMeta: () => ({ ticker, precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
     fmtAtoms: (a, p) => (Number(a) / 10 ** p).toFixed(p).replace(/\.?0+$/, ''),
-    esc: (s) => String(s), feeValueStr: () => '', prettyErr: (e) => String(e?.message ?? e), roundMinutes: () => 1, causeWhen: () => 'about a minute', statedSeconds: () => 60,
+    frozenSentence: (a, t) => `${a} ${t} is frozen by its issuer: it can't be sent until the issuer lifts the freeze.`, esc: (s) => String(s), feeValueStr: () => '', prettyErr: (e) => String(e?.message ?? e), roundMinutes: () => 1, causeWhen: () => 'about a minute', statedSeconds: () => 60,
     el: node,
     modalRows: (rows) => {
       const m = node('div', 'modal'); const c = m.appendChild(node('div', 'card'))
@@ -113,10 +113,10 @@ function page (leavesApi, ticker, chain) {
     document: { body: { contains: () => false } }, performance: { now: () => Date.now() },
   }
   // A page before this change has none of the chain's helpers: they stand in as counting nothing.
-  const stub = { codeWay: 'function codeWay(full){ return { dest: full, byAddress: false }; }', chainHeld: 'function chainHeld(h){ return availableFor(h); }',
+  const stub = { chainSpendable: 'function chainSpendable(h){ return chainHeld(h); }', codeWay: 'function codeWay(full){ return { dest: full, byAddress: false }; }', chainHeld: 'function chainHeld(h){ return availableFor(h); }',
     chainMovable: 'function chainMovable(){ return 0n; }', bringMargin: 'function bringMargin(){ return 0n; }', bringMinutes: 'function bringMinutes(){ return 5; }', bringWant: 'function bringWant(){ return 0n; }' }
   const names = ['onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview',
-    'chainHeld', 'chainMovable', 'bringMargin', 'bringWant', 'bringMinutes', 'codeWay', 'payCodeRoute']
+    'chainHeld', 'chainSpendable', 'chainMovable', 'bringMargin', 'bringWant', 'bringMinutes', 'codeWay', 'payCodeRoute']
   // The fee's margin stands in last: an extracted one-line function brings the page's own after it.
   const src = names.map((n) => (!has(n) && stub[n]) ? stub[n] : fn(n)).join('\n') + '\nfunction feeMarginAtoms(){ return 2000n; }\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))

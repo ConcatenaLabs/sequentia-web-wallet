@@ -188,7 +188,7 @@ function page (leavesApi, at) {
     assetMeta: () => ({ ticker: 'XT', precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
     fmtAtoms: (a, p) => (Number(a) / 10 ** p).toFixed(p).replace(/\.?0+$/, ''),
-    esc: (s) => String(s), feeValueStr: () => '', prettyErr: (e) => String(e?.message ?? e), roundMinutes: () => 1, causeWhen: () => 'about a minute', statedSeconds: () => 60,
+    frozenSentence: (a, t) => `${a} ${t} is frozen by its issuer: it can't be sent until the issuer lifts the freeze.`, esc: (s) => String(s), feeValueStr: () => '', prettyErr: (e) => String(e?.message ?? e), roundMinutes: () => 1, causeWhen: () => 'about a minute', statedSeconds: () => 60,
     el: node,
     modalRows: (rows) => {
       const m = node('div', 'modal'); const c = m.appendChild(node('div', 'card'))
@@ -202,7 +202,7 @@ function page (leavesApi, at) {
     noteSent: () => {}, walletTag: () => 't', localStorage: memStore(), renderBalance: () => {},
     performance: { now: () => Date.now() }, waitFor: () => 'about a minute',
     onItsWay: () => 0n, settlesFirst: () => false, shortWords: (e) => String(e?.message ?? e), afterClose: () => ({}),
-    chainHeld: () => at.chain, chainMovable: () => at.movable, feeMarginAtoms: () => at.margin, bringMargin: () => at.bound,
+    chainHeld: () => at.chain, chainSpendable: () => at.chain, chainMovable: () => at.movable, feeMarginAtoms: () => at.margin, bringMargin: () => at.bound,
     bringWant: (h, atoms) => atoms + at.bound, bringMinutes: () => 5,
   }
   const names = ['codeWay', 'treeSendReview']

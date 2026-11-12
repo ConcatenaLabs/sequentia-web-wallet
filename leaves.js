@@ -2833,6 +2833,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     },
     // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
     frozenAtoms: (hex) => frozenAtoms(S.coins, S.balance).get(hex) || 0n,
+    // Of the wallet's coins of an asset on the chain, what its issuer has frozen (the library's
+    // last reading): nothing moves them, on the chain or into the tree.
+    frozenOnchain: (hex) => big(((S.balance && S.balance.sequentia_onchain_frozen) || {})[hex]),
     // The assets the operator serves supervised.
     supervisedAssets: () => supervisedAssets(S.info),
     address,

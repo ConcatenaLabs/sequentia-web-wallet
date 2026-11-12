@@ -2977,7 +2977,13 @@ async function treeSendReview(r, onDone, note){
   // More than any way covers (codeWay): the most that can go, the figure Max fills in, never the
   // tree's part alone ("up to 0" over a balance held on the chain).
   if(r.most != null && BigInt(r.most) > all) all = BigInt(r.most);
-  if(atoms > all) throw new Error(DEFAULT_WORDS.sendUpTo(fmtAtoms(all, m0.precision||0), m0.ticker));
+  if(atoms > all){
+    // Short because its issuer froze part of it: that is the reason, said as the balance says it.
+    let frozen = 0n; try{ frozen = (r.asset!=='BTC' && leavesApi.frozenAtoms) ? (leavesApi.frozenAtoms(r.asset) || 0n) : 0n; }catch{}
+    if(frozen > 0n && atoms <= all + frozen) throw new Error(frozenSentence(fmtAtoms(frozen, m0.precision||0), m0.ticker));
+    if(r.onlyAddress) throw new Error(DEFAULT_WORDS.toAddressOnly(m0.ticker));
+    throw new Error(DEFAULT_WORDS.sendUpTo(fmtAtoms(all, m0.precision||0), m0.ticker));
+  }
   const amt = fmtAtoms(atoms, m0.precision||0);
   // The fee is the library's (`send_quote`): what the payment keeps back for the fees of the
   // transactions it keeps ready, or none over a channel. A refusal of the quote is the payment's:
@@ -5421,7 +5427,7 @@ function initUserComposer(){
       // Transparent by default: the order's asset comes to the usual address.
       receiveAddress: ()=> { const a = wollet.address(addrIndex == null ? undefined : addrIndex).address(); return (a.toUnconfidential ? a.toUnconfidential() : a).toString(); },
       // What the chain holds of it now, a payment received there included, less what a board took.
-      balance: (a)=> { try { return chainHeld(a); } catch { return 0n; } },
+      balance: (a)=> { try { return chainSpendable(a); } catch { return 0n; } },
       feeRateFor, feerate: DEFAULT_FEERATE, rateScale: EXCHANGE_RATE_SCALE,
     }),
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
@@ -5435,7 +5441,8 @@ function initUserComposer(){
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
     // Money held on the chain that no order on the chain takes: moved in first, then traded, the
     // ticket saying how long (default mode only: developer mode moves nothing by itself).
-    chain: (a)=> devMode() ? null : ({ atoms: chainHeld(a), movable: chainMovable(a), margin: bringMargin(a), minutes: bringMinutes() }),
+    // A restricted asset stays on the chain and trades by its own way (D98): none of this.
+    chain: (a)=> devMode() || isOampAsset(a) ? null : ({ atoms: chainHeld(a), movable: chainMovable(a), margin: bringMargin(a), minutes: bringMinutes(), stays: chainStays(a) }),
     bringIn: (a, want, o={})=> (leavesApi && !devMode() && leavesApi.bringIn) ? leavesApi.bringIn(a, { want: want || 0n, until: o.until, since: o.since, stop: o.stop }) : null,
     // The fees of the moves in made since a trade was confirmed: in what it paid (the ticket is all-in).
     movedFees: (a, since)=> (leavesApi && leavesApi.movedFees) ? leavesApi.movedFees(a, since) : 0n,
@@ -7945,17 +7952,38 @@ function chainHeld(hex){
   try{ if(hex!=='BTC' && leavesApi && leavesApi.onchainLessBoards) n = leavesApi.onchainLessBoards(hex, n); }catch{}
   return n > 0n ? n : 0n;
 }
+// Of it, what can move at all: less what its issuer has frozen for this wallet (a supervised asset),
+// which stays in the figure, said apart, and moves nowhere.
+function chainSpendable(hex){
+  let n = chainHeld(hex);
+  try{ if(hex!=='BTC' && leavesApi && leavesApi.frozenOnchain) n -= leavesApi.frozenOnchain(hex) || 0n; }catch{}
+  return n > 0n ? n : 0n;
+}
 // Of it, what the wallet can move into the tree now (the operator takes the asset, at least its
 // smallest coin, within the page's limit on what the tree holds); 0n otherwise and in developer mode.
 function chainMovable(hex){
   if(hex==='BTC' || devMode() || !leavesApi || !leavesApi.isOpen() || !leavesApi.bringIn) return 0n;
-  const n = chainHeld(hex);
+  const n = chainSpendable(hex);
   try{
     if(!(n > 0n) || !leavesApi.boardable(hex, n)) return 0n;
     const room = arkRoom(hex);
     if(room != null && BigInt(room) < n) return BigInt(room) > 0n ? BigInt(room) : 0n;
   }catch{ return 0n; }
   return n;
+}
+// Why none of what the wallet holds of an asset on the chain can be moved in, when none can: 'dust'
+// (the network takes the asset in, but not this little once its fee is paid) or 'unserved' (it takes
+// none of it in); null when some can, or nothing is there, or in developer mode.
+function chainStays(hex){
+  try{
+    if(hex==='BTC' || devMode() || !leavesApi || !leavesApi.isOpen() || !leavesApi.boardable) return null;
+    const n = chainSpendable(hex);
+    if(!(n > 0n) || chainMovable(hex) > bringMargin(hex)) return null;
+    if(!leavesApi.boardable(hex, 10n ** 30n)) return 'unserved';
+    // Below the smallest coin the network takes in, or too little to be left once the move's fee is
+    // paid. (Kept out by the page's own room in the tree instead: none of these.)
+    return (!leavesApi.boardable(hex, n) || n <= bringMargin(hex)) ? 'dust' : null;
+  }catch{ return null; }
 }
 // What a payment or a trade moved in first keeps back for its fees: the move's, and the payment's
 // or the trade's own in the tree (twice what transactions of 4,000 vB pay at the default rate).
@@ -8639,17 +8667,20 @@ const _lnPassedOver = new Set();
 // what is on the chain moved in first (`bringIn`), when there is no address or the amount needs both.
 function codeWay(full, asset, atoms, address){
   if(atoms != null && atoms > 0n && !devMode() && !isOampAsset(asset) && asset !== 'BTC'){
-    let way = 'tree', most = null;
+    let way = 'tree', most = null, onlyAddress = false;
     try{
       const at = { tree: (leavesApi.leafAtoms(asset)||0n) - (leavesApi.arriving(asset)||0n), onItsWay: onItsWay(asset),
-        chain: chainHeld(asset), movable: chainMovable(asset), margin: feeMarginAtoms(asset), moveMargin: bringMargin(asset), address: !!address };
+        chain: chainSpendable(asset), movable: chainMovable(asset), margin: feeMarginAtoms(asset), moveMargin: bringMargin(asset), address: !!address };
       way = codeRoute({ amount: atoms, ...at });
       // Nothing covers it: the most that can go (what Max fills in), which the review's refusal names.
       if(way === 'tree' && atoms > at.tree + at.onItsWay) most = codeMost(at);
+      // What covers it is on the chain and cannot be moved in, and the code names no address: it can
+      // go only to an address, which is said rather than a figure that leaves it out.
+      if(most != null && !address && at.movable === 0n && atoms <= at.tree + at.onItsWay + at.chain) onlyAddress = true;
     }catch(e){ console.warn('[send] route:', e?.message??e); }
     if(way === 'chain' && address) return { dest: address, byAddress: true };
     if(way === 'bring-in') return { dest: full, byAddress: false, bringIn: true };
-    if(most != null) return { dest: full, byAddress: false, most };
+    if(most != null) return { dest: full, byAddress: false, most, ...(onlyAddress ? { onlyAddress } : {}) };
   }
   return { dest: full, byAddress: false };
 }
@@ -9325,7 +9356,7 @@ async function fillMax(r){
       // code's address, or with it moved in first. The tree alone would leave the chain's part out.
       const code=(!devMode() && typed && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? payCodeRoute(typed, hex, null).dest : null;
       const codeInTree=!!code && !!leavesApi.treeRoute(code);
-      const onChain=codeInTree && others===0n ? chainHeld(hex) : 0n;
+      const onChain=codeInTree && others===0n ? chainSpendable(hex) : 0n;
       if(onChain > 0n){
         const inT=tree + onItsWay(hex);
         let c=null; try{ c=readPayCode(typed); }catch{}
@@ -10566,7 +10597,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     for(const r of rows){
       let atoms=null; if(!isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{} }
       const d = payCodeRoute(r.addr, r.asset, atoms);
-      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn; r.most = d.most ?? null;
+      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn; r.most = d.most ?? null; r.onlyAddress = !!d.onlyAddress;
     }
     const byAddressNote = (btc) => { const w = rows.find(r=>r.byAddress); if(!w) return [];
       const arrives = btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock;

@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mountLeaves, JOINED_KEY } from './leaves.js'
 import { boardMinutes } from './default-arca.js'
-import { createEngine, USER_WORDS, tradeStateWord } from './user-trade.js'
+import { createEngine, USER_WORDS, tradeStateWord, costLine } from './user-trade.js'
 
 const CONTROL = process.env.SEQ_LEAF_HARNESS
 const PKG = process.env.LEAVES_PKG || new URL('./leaves/pkg', import.meta.url).pathname
@@ -93,7 +93,8 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
     admitted: () => ({ pairs: { chains: { [st.genesis_hash]: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: st.genesis_hash }),
     held: (a) => onChain(a) + (api.leafAtoms(a) || 0n) + (api.onItsWay(a) || 0n),
     chain: (a) => ({ atoms: onChain(a), movable: onChain(a), margin: 4000n, minutes: boardMinutes(api.anchorDepth()) }),
-    bringIn: (a, want) => api.bringIn(a, { want }),
+    bringIn: (a, want, o = {}) => api.bringIn(a, { want, until: o.until, since: o.since, stop: o.stop }),
+    movedFees: (a, since) => api.movedFees(a, since),
     store: memStore(), tag: () => 't', log: (...a) => console.log(...a),
   })
 
@@ -102,6 +103,11 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
   console.log('quote of 400,000 X held on the chain:', q.ok ? JSON.stringify(q.ticket) : q.why)
   assert.ok(q.ok, 'priced at once, not ' + q.why)
   assert.equal(q.ticket.bringIn, boardMinutes(api.anchorDepth()))
+  // All-in (RV43 B1): the fee line is the most the fees can be, never "No fees".
+  const feeLine = costLine(q.ticket.fees, (a, n) => `${n} ${a === X ? 'X' : 'Y'}`, X)
+  console.log('the ticket\'s fee line:', feeLine)
+  assert.notEqual(feeLine, USER_WORDS.noFees)
+  assert.equal(feeLine, 'Fees at most 4000 X, included above')
   const rec = await eng.confirm(q.choice, q.ticket)
   assert.equal(rec.state, 'settling')
   assert.equal(tradeStateWord(rec), USER_WORDS.bringIn(q.ticket.bringIn))
@@ -122,13 +128,30 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
   assert.equal(asked.filter((c) => c === 'swap_accept').length, 1, 'accepted once: ' + asked.join(','))
   assert.equal(asked[0], 'board', 'moved in first')
   assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut), 'no less received than the ticket')
-  assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'no more paid than the ticket')
+  assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'no more paid than the ticket, the move\'s fee counted')
+  const mf = api.movedFees(X, 0)
+  console.log(`the record: pay ${r.ticket.amountIn} (the move's fee ${mf} counted), fees ${JSON.stringify(r.ticket.fees.map((f) => f.atoms))}`)
+  assert.ok(mf > 0n && r.ticket.fees.some((f) => f.atoms === String(mf)), 'the move\'s fee is in the record\'s fees')
+  // Once it has gone ahead, nothing keeps moving money in (RV43 B2): no reads of the chain for it.
+  const sentAt = Date.now(), mark = worker.asked.length
   // The Y arrives in the wallet.
   for (let i = 0; i < 60; i++) {
     try { await api.syncNow() } catch {}
     const got = (A.command('coins') || []).filter((c) => c.asset === Y && !/^(spent|given_up)$/.test(c.state)).reduce((n, c) => n + BigInt(c.value), 0n)
     if (i % 10 === 0) console.log('waiting for the Y: record', eng.records().find((x) => x.id === rec.id).state, 'swaps', JSON.stringify((A.command('swaps') || []).map((x) => x.state)), 'Y coins', String(got))
-    if (got >= BigInt(r.ticket.amountOut)) { console.log('the wallet holds', String(got), 'Y'); return }
+    if (got >= BigInt(r.ticket.amountOut)) {
+      console.log('the wallet holds', String(got), 'Y')
+      const after = worker.asked.slice(mark)
+      console.log(`after the trade went ahead (${Math.round((Date.now() - sentAt) / 1000)} s): moving in ${api.bringing()}, balance reads ${after.filter((c) => c === 'balance').length}, boards ${after.filter((c) => c === 'board').length}`)
+      assert.equal(api.bringing(), false, 'no move in runs once the trade has gone ahead')
+      // What the wallet's X fell by, against the ticket (RV43 P1; the part beyond the record is #706's).
+      const coins = A.command('coins') || []
+      const xHeld = coins.filter((c) => c.asset === X && !/^(spent|given_up|forfeited)$/.test(c.state)).reduce((n, c) => n + BigInt(c.value), 0n)
+      const onc = BigInt(((A.command('balance').sequentia_onchain) || {})[X] || 0)
+      const fell = 3000000n - xHeld - onc
+      console.log(`the wallet's X fell by ${fell}: the ticket said ${q.ticket.amountIn}, the record ${r.ticket.amountIn}; beyond the record ${fell - BigInt(r.ticket.amountIn)} (margins of the trade's coins, #706)`)
+      return
+    }
     try { await H.c('/build'); await H.c('/pass'); await H.produce(); await H.bury() } catch {}
     await eng.resume(); await sleep(2000)
   }
