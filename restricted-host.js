@@ -29,8 +29,10 @@ import { buildTx, psetOf, readTx } from './restricted-trade.js'
 import { sha256 } from './btc.js'
 import { bytesToHex, hexToBytes } from './seqob.js'
 
-// The explorer's id of a script: its SHA-256, reversed.
-export const scriptHash = (script) => bytesToHex(sha256(hexToBytes(script)).reverse())
+// The explorer's id of a script: its SHA-256, in the order it is computed. The Electrum protocol
+// reverses it; this Esplora does not, and answers the reversed form with an empty list (as
+// stake-records.js notes), which reads as an enclave holding nothing.
+export const scriptHash = (script) => bytesToHex(sha256(hexToBytes(script)))
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const key = (c) => `${c.txid}:${c.vout}`
