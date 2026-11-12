@@ -362,6 +362,8 @@ modes (`asset-picker.js`):
   that cannot be moved in (an asset the network does not take in, or too little of it to move once
   the move's fee is paid) is paid at the code's address when it names one; to a code with no
   address: "This <TICKER> can be sent only to an address. Ask for an address to pay, or paste one."
+  Money held that is less than the fee of sending it (the fee is paid in what is sent): "This
+  <TICKER> is less than the fee to send it, so it cannot be sent yet. Once more arrives, it can."
   Coins of a supervised asset its issuer froze are never moved and never offered: a payment short
   for them says "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts
   the freeze."
