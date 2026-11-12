@@ -43,7 +43,7 @@ test('the wait is said in its true minutes, never "try again"', () => {
   assert.equal(settleMinutes(60, 60, 0), 5, 'rounds not held')
   assert.equal(settleMinutes(60, 60, 2), 25, 'two Bitcoin blocks more at depth 2')
   assert.equal(settleMinutes(null, null, null), 5)
-  assert.equal(settleMinutes(60, 60, 0, true, 3), 5, 'an operator that publishes 3 s passes: (60 + 3 + 60 + 120 + 6) / 60, up')
+  assert.equal(settleMinutes(60, 60, 0, true, 3), 5, 'an operator that publishes 3 s passes: (60 + 3 + 60 + 120 + 9) / 60, up')
   assert.equal(DEFAULT_WORDS.goesThrough(1), 'Goes through in about a minute')
   assert.equal(DEFAULT_WORDS.goesThrough(3), 'Goes through within about 3 minutes')
   const now = 1_800_000_000_000

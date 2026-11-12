@@ -985,8 +985,8 @@ export function roundMinutes (anchorDepth) {
 // round; a round interval more for the other participations' forfeits when the operator holds its
 // rounds for them (`held`: its batches have no sweep); a block for the round and one more for its
 // certificate; a Bitcoin block (about ten minutes) for each block of anchor depth the operator
-// counts finality at; and the operator's release: two of its passes over the rounds when it
-// publishes how long they take (`passSeconds`, its `fills.round_pass_seconds`, one more pass then
+// counts finality at; and the operator's release: three of its passes over the rounds when it
+// publishes how long one takes (`passSeconds`, its `fills.round_pass_seconds`, one more pass then
 // to build the round), else a round interval and a block. 6 on the testnet (rounds and blocks a
 // minute apart, rounds held, depth 0, no pass time published).
 export function settleMinutes (roundSeconds, blockSeconds, anchorDepth, held = false, passSeconds = null) {
@@ -994,7 +994,7 @@ export function settleMinutes (roundSeconds, blockSeconds, anchorDepth, held = f
   const b = Number(blockSeconds) > 0 ? Number(blockSeconds) : 60
   const d = Number.isFinite(Number(anchorDepth)) && Number(anchorDepth) > 0 ? Number(anchorDepth) : 0
   const p = Number(passSeconds) > 0 ? Number(passSeconds) : null
-  const release = p != null ? 2 * p : r + b
+  const release = p != null ? 3 * p : r + b
   return Math.max(1, Math.ceil((r + (p ?? 0) + (held ? r : 0) + 2 * b + d * 600 + release) / 60))
 }
 // The time a payment settling first is told it goes by, from each answer of the library's
