@@ -107,6 +107,8 @@ export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf ad
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
 export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
+const NOT_LIVE_EVERY_MS = 3_000
+const NOT_LIVE_MS = 120_000
 export const MOVES_KEY = 'swk.leaves.moves'   // + '.' + tag: each board's fee by asset, for an hour (bringIn)
 const MOVES_KEPT_MS = 60 * 60_000
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
@@ -1863,8 +1865,20 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // the next round for leaves no plan names: plan_release, then sync until that round is
   // final and the new leaves are held. Every other answer and refusal is the library's.
   async function paying (command, args) {
+    let notLive = 0
     for (let i = 0; ; i++) {
       try { return await run(command, args) } catch (e) {
+        // A coin just moved in that the wallet reads final and the operator does not yet ("pending,
+        // not live": its view of the chain a block behind the wallet's, at anchor depth 0): asked
+        // again every few seconds, up to NOT_LIVE_MS, after reading the wallet again. Never shown.
+        if (e instanceof LeafError && /\bnot_live\b/.test(String(e.code || '') + ' ' + String(e.message || '')) && notLive * NOT_LIVE_EVERY_MS < NOT_LIVE_MS) {
+          notLive++
+          if (notLive === 1) log(`[leaves] ${command}: the operator does not call the coin live yet; asked again in a moment`)
+          await sleep(NOT_LIVE_EVERY_MS)
+          try { synced(await run('sync')) } catch {}
+          i--
+          continue
+        }
         // Coins too many payments from a round (the operator's `depth_limit`) are refreshed in the
         // next round, by themselves, and the payment asked again once that round is final: the
         // same wait as a release, which a person in user mode never has to ask for.
