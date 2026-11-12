@@ -23,7 +23,13 @@
 //                                  the ladder's levels: never above ceil(give × the rate of any quote
 //                                  whose max_give carries `give`)
 //   POST /v1/accept {swap, accept} -> { swap, state: 'done' }: completes the swap (`swap_complete`, the
-//                                  operator co-signing); asked again it answers the same
+//                                  operator co-signing); asked again it answers the same. When the
+//                                  operator refuses the completion, nothing is co-signed and the offer
+//                                  is gone: 409 { error, swap, gone: true, code, whose, coin, offer? },
+//                                  `whose` naming the side whose coin the operator refused ('taker' when
+//                                  the wallet's coin was spent elsewhere), `offer` a new firm offer at the
+//                                  same give, at the live price when it asks no more than before (the shape of
+//                                  /v1/firm's answer) when it can make one; asked again, the same answer
 //   POST /v1/release {swap}       -> { swap, state: 'releasing' }: cancels a firm offer nobody took; answered
 //                                  at once, the cancel ahead of the upkeep and of any later firm
 //   GET  /v1/swap/<id>            -> { swap, state }
@@ -662,6 +668,40 @@ export function slicesFor (p0, spendable, held, margin, rates = new Map(), cfg =
   return slices.length ? { slices, min, pair: p } : null
 }
 
+// A completion the operator refused (`swap_complete`): the library's `swap_refused`, or, from a
+// library that leaves such an offer open, the server's own refusal. Nothing was co-signed. Any
+// other answer (the operator not reached, the request standing to be posted again) is not one.
+export function completionRefused (e) {
+  return !!e && (e.kind === 'swap_refused' || e.kind === 'server_refused')
+}
+
+// What the offer made in place of a gone one asks, from the live price `live` (what a firm offer
+// of the same give asks now): the live price when it asks no more than the gone offer did
+// (`before`), else none, so the taker asks for a new price.
+export function againWant (before, live) {
+  return live != null && big(live) <= big(before) ? big(live) : null
+}
+
+// The answer to an acceptance of a swap that is not open here and was never refused: its state
+// only, never `gone`, which says nothing was co-signed. A swap the maker cancelled at its lapse
+// may still have been co-signed (an answer that never came back, taken by a later sync).
+export function notOpenAnswer (st) {
+  return { error: `the swap is ${st || 'unknown'} here`, state: st || null }
+}
+
+// How long the answer to an acceptance whose completion was refused is kept for the same
+// acceptance handed over again.
+export const GONE_KEEP_MS = 15 * 60 * 1000
+
+// The answer to an acceptance whose completion the operator refused: the offer is gone (`gone`),
+// whose coin the operator named (`whose`: 'taker' when the wallet's own coin was spent elsewhere,
+// which it learns by cancelling its acceptance), and the offer made in its place at the same
+// price (`offer`, the shape of a firm offer's answer), or none.
+export function goneAnswer (swap, e, again) {
+  return { error: String((e && e.message) || 'the operator refused the completion'), swap: String(swap), gone: true,
+    code: (e && e.code) || null, whose: (e && e.whose) || null, coin: (e && e.coin) || null, ...(again ? { offer: again } : {}) }
+}
+
 async function main () {
   const cfgPath = arg('--config')
   if (!cfgPath) { console.error('usage: leaf-maker.mjs --config maker.json [--init]'); process.exit(2) }
@@ -875,6 +915,7 @@ async function main () {
   if (desk) log('the BTC desk is open')
 
   const firm = new Map()   // swap -> { give_asset, give, expires }
+  const gone = new Map()   // swap whose completion the operator refused -> { body, at }
   const gaveUp = new Map()    // leaf -> when the maker gave it up in a round (a cut or a settle)
   let noPieces = false        // the library answered a refresh in pieces with one leaf: no cuts
   const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
@@ -926,6 +967,31 @@ async function main () {
     const h = holdings && !holdings.stale && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true)
     firmReading = h
     return budgetedSpendable(h.sp, h.coins, roomOf(h), ratesNow)
+  }
+  // The terms of a firm offer of `give` of `give_asset` for `want_asset`, with every check a firm
+  // offer passes: the pair quoted, its want asset taken now (not capped), the maker holding that
+  // much, the price walked on the ladder at the live rate, and what it takes in within its room.
+  // -> { pair, give, want }, or { refused: [status, body] }.
+  async function firmTerms (b) {
+    if (b.want_asset && capped.has(b.want_asset)) return { refused: [409, { error: cappedRefusal(tickerOf(b.want_asset)), capped: true }] }
+    const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
+    if (!pair0) return { refused: [404, { error: 'the maker quotes no such pair' }] }
+    const give = big(b.give)
+    // Sized on the holdings the upkeep read last (each library command can take tens of seconds
+    // on a wallet of a hundred coins): the library refuses an offer it cannot pay, and the
+    // reading is renewed after the offer.
+    const sl = slicesFor(pair0, await firmHoldings(), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
+    const w = sl && give >= sl.min ? walkWant(sl.slices, give) : null
+    if (!w) return { refused: [409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null }] }
+    const pair = sl.pair
+    // More than the room left in its instant budget, from the same reading: the rest after its
+    // next round.
+    const wantRoom = firmReading ? wantRoomOf(firmReading) : room
+    if (wantRoom && wantRoom.has(pair.want) && w.want > wantRoom.get(pair.want)) {
+      return { refused: [409, { error: 'the maker takes this much after its next round', after_next_round: true,
+        quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), wantRoom).quotes.pop() || null }] }
+    }
+    return { pair, give, want: w.want }
   }
   const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
   async function tick () {
@@ -1101,24 +1167,9 @@ async function main () {
       }
       if (p === '/v1/firm') {
         const asked = Date.now()
-        const pair0 = (cfg.pairs || []).find((x) => x.give === b.give_asset && x.want === b.want_asset)
-        if (!pair0) return send(res, 404, { error: 'the maker quotes no such pair' })
-        const give = big(b.give)
-        // Sized on the holdings the upkeep read last (each library command can take tens of seconds
-        // on a wallet of a hundred coins): the library refuses an offer it cannot pay, and the
-        // reading is renewed after the offer.
-        const sl = slicesFor(pair0, await firmHoldings(), new Map(), cfg.fee_margin || 0, liveRates(), cfg)
-        const w = sl && give >= sl.min ? walkWant(sl.slices, give) : null
-        if (!w) return send(res, 409, { error: 'the maker does not hold that much now', quote: sl ? ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min).pop() : null })
-        const pair = sl.pair
-        const want = w.want
-        // More than the room left in its instant budget, from the same reading: the rest after its
-        // next round.
-        const wantRoom = firmReading ? wantRoomOf(firmReading) : room
-        if (wantRoom && wantRoom.has(pair.want) && want > wantRoom.get(pair.want)) {
-          return send(res, 409, { error: 'the maker takes this much after its next round', after_next_round: true,
-            quote: capQuotes(ladderQuotes(pair0.give, pair0.want, sl.slices, sl.min), wantRoom).quotes.pop() || null })
-        }
+        const t = await firmTerms(b)
+        if (t.refused) return send(res, t.refused[0], t.refused[1])
+        const { pair, give, want } = t
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
         firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
@@ -1133,8 +1184,45 @@ async function main () {
       if (p === '/v1/accept') {
         const st = await swapState(b.swap, true)
         if (st === 'done') return send(res, 200, { swap: b.swap, state: 'done' })
-        if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st })
-        const r = await cmd('swap_complete', { accept: String(b.accept || '') }, true)
+        // An offer whose completion the operator refused is gone: asked again, the same answer, at
+        // once, with the offer made in its place (`gone`).
+        if (gone.has(b.swap)) return send(res, 409, gone.get(b.swap).body)
+        if (st !== 'open') return send(res, 409, notOpenAnswer(st))
+        let r
+        try { r = await cmd('swap_complete', { accept: String(b.accept || '') }, true) } catch (e) {
+          if (!completionRefused(e)) throw e
+          // The operator refused it: nothing was co-signed and the offer is withdrawn, its coins the
+          // maker's again (a library that leaves it open has it cancelled here). The taker is told at
+          // once, with a new offer at the same price from what the maker holds now when it can make
+          // one, so the wallet goes ahead in seconds rather than handing the acceptance over again.
+          if (e.kind !== 'swap_refused') await cmd('swap_cancel', { swap: String(b.swap) }, true).catch((x) => log('cancel', String(b.swap).slice(0, 12), x.message))
+          const f = firm.get(b.swap)
+          firm.delete(b.swap)
+          let again = null
+          if (f) {
+            try {
+              // Priced as a firm offer is now, with its checks; made only when the live price asks
+              // no more than the gone offer did, so a refused acceptance never holds a price.
+              const t = await firmTerms({ give_asset: f.give_asset, want_asset: f.want_asset, give: String(f.give) })
+              const want = t.refused ? null : againWant(f.want, t.want)
+              if (want == null) log('no new offer for', String(b.swap).slice(0, 12) + ':', t.refused ? t.refused[1].error : `the price moved (${t.want} for ${f.want} asked before)`)
+              else {
+                const o = await cmd('swap_offer', { give_asset: f.give_asset, give: String(f.give), want_asset: f.want_asset, want: String(want) }, true)
+                const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
+                firm.set(o.swap, { ...f, want, expires })
+                again = { swap: o.swap, offer: o.offer, give: String(f.give), want: String(want), expires_at: Math.floor(expires / 1000) }
+              }
+            } catch (x) { log('no new offer for', String(b.swap).slice(0, 12) + ':', x.message) }
+          }
+          if (holdings) holdings.stale = true
+          readHoldings(true).catch(() => {})
+          const body = goneAnswer(b.swap, e, again)
+          gone.set(b.swap, { body, at: Date.now() })
+          for (const [k, v] of gone) if (Date.now() - v.at > GONE_KEEP_MS) gone.delete(k)
+          log('refused completion', String(b.swap).slice(0, 12), (e.whose ? `(the ${e.whose}'s coin)` : '') + ':', e.message,
+            again ? '; offered again as ' + again.swap.slice(0, 12) : '; no new offer')
+          return send(res, 409, body)
+        }
         const f = firm.get(b.swap)
         if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)
