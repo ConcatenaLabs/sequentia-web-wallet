@@ -70,7 +70,9 @@ In practice:
   or a payment that what it holds elsewhere does not cover, reads "The service that holds your coins
   for instant payments is not answering, so this wallet has not found them yet. Nothing has
   moved. They are still yours: they show in your balance once it answers, and can be sent from
-  then."
+  then." A wallet that is not finding what it holds and has not opened within three minutes reads
+  "Your wallet has not finished opening, so nothing has moved. If it does not open, reload the
+  page."
 - The wallet keeps its money in ordinary coins: it opens no channel, names none in its receive
   code, and closes any it holds into a coin at the next settlement. Until then what it held there
   (its own side alone) is in History as **Coming back**, "about a minute", not in the figure.

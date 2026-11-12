@@ -24,13 +24,14 @@ for (const k of ['setTimeout', 'setInterval']) {
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
 const fn = (name) => { const i = html.search(new RegExp('\\n(async )?function ' + name + '\\(')); return i < 0 ? null : html.slice(i + 1, html.indexOf('\n}', i + 1) + 2) }
 
-// The page's wait, over a stand-in of its wallet (leaves.js): `w.open` once it has opened,
-// `w.stalled` while its restore gets no answer.
-function pageOpening (w) {
-  const src = [fn('findingStalled'), fn('findingOn'), fn('tradeOpening')]
+// The page's one wait (walletOpening, which Send's payments use too), over a stand-in of its
+// wallet (leaves.js): `w.open` once it has opened, `w.restoring` while it finds what it holds,
+// `w.stalled` while that restore gets no answer; its cap OPEN_WAIT_MS shortened to `capMs`.
+function pageOpening (w, capMs = 180000) {
+  const src = [fn('findingStalled'), fn('findingOn'), fn('walletOpening')]
   if (!src[2]) return null   // a page without the wait
-  const leavesApi = { isOpen: () => w.open, expected: () => true, restoring: () => !w.open, restoreStalled: () => (w.stalled ? { since: 0 } : null), joinError: () => null }
-  return new Function('leavesApi', 'devMode', 'DEFAULT_WORDS', 'setTimeout', src.join('\n') + '\nreturn tradeOpening')(leavesApi, () => false, DEFAULT_WORDS, realSetTimeout)
+  const leavesApi = { isOpen: () => w.open, expected: () => true, restoring: () => !w.open && w.restoring !== false, restoreStalled: () => (w.stalled ? { since: 0 } : null) }
+  return new Function('leavesApi', 'DEFAULT_WORDS', 'setTimeout', 'OPEN_WAIT_MS', src.join('\n') + '\nreturn walletOpening')(leavesApi, DEFAULT_WORDS, realSetTimeout, capMs)
 }
 // The engine as the page's behaves while the wallet is not open: every command of the library
 // refuses ("this wallet holds no leaves"), so a quote finds only what the figure shows and is
@@ -83,7 +84,7 @@ function mount (w, opening) {
     root, engine, held: (a) => (a === X ? 3000000n : 0n), knownAssets: () => [X, Y], assetMeta: (h) => ({ ticker: h === X ? 'XT' : 'YT', precision: 0 }),
     fmtAtoms: (a) => String(a), parseAtoms: (t) => BigInt(t), admittedReceives: () => [Y], market: null, refValue: () => null,
     session: null, notify: () => {}, links: () => ({}), openHistory: () => {}, followMs: 1e9, followSlowMs: 1e9,
-    ...(opening ? { opening, openingNote: DEFAULT_WORDS.waitOpening } : {}),
+    ...(opening ? { opening } : {}),
   })
   Object.assign(ui.state, { pay: X, get: Y, amount: '400', payChosen: true, getChosen: true })
   ui.render()
@@ -119,6 +120,20 @@ test('a wallet whose service does not answer says so, in a payment\'s words, and
   clearTimeout(ui.state.timer)
 })
 
-test('the page gives the composer its wait', () => {
-  assert.match(html, /opening: tradeOpening, openingNote: DEFAULT_WORDS\.waitOpening,/)
+test('a wallet that neither opens nor finds what it holds: past the wait, the page\'s words, never "try again"', async () => {
+  const w = { open: false, restoring: false, stalled: false }
+  const { ui, root, engine } = mount(w, pageOpening(w, 1500))
+  const t0 = Date.now()
+  await root.querySelector('#ucReview').onclick()
+  for (let i = 0; i < 300 && !ui.state.error; i++) await wait(10)
+  console.log('never opened: after', Date.now() - t0, 'ms:', JSON.stringify(ui.state.error))
+  assert.ok(Date.now() - t0 >= 1400, 'it waited its time first')
+  assert.equal(ui.state.error, DEFAULT_WORDS.stillOpening)
+  assert.ok(!/try again/i.test(ui.state.error), ui.state.error)
+  assert.deepEqual(engine.quotes, [])
+  clearTimeout(ui.state.timer)
+})
+
+test('the page gives the composer the one wait its payments use', () => {
+  assert.match(html, /opening: walletOpening,/)
 })

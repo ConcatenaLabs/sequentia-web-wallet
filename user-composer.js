@@ -345,12 +345,12 @@ export function mountUserComposer (ctx) {
     if (!(big(atoms) > 0n)) { S.error = USER_WORDS.enter; paintTicket(); return }
     if (!S.get) { S.error = USER_WORDS.nothingOffered(name(S.pay)); paintTicket(); return }
     // A wallet still opening (a restore finding what it holds) is waited for, saying so, as a
-    // payment waits for it (ctx.opening, the page's): the trade is priced once it has opened. One
-    // that cannot open says why, in the page's words; never "try again".
+    // payment waits for it (ctx.opening(say), the page's one wait): the trade is priced once it has
+    // opened. One that cannot open says why, in the page's words.
     if (ctx.opening) {
-      S.busy = true; S.note = ctx.openingNote || ''; paintTicket()
+      S.busy = true; paintTicket()
       let why = null
-      try { why = await ctx.opening() } catch (e) { console.warn('[user composer] opening:', e && e.message) }
+      try { why = await ctx.opening((t) => { S.note = t; paintTicket() }) } catch (e) { console.warn('[user composer] opening:', e && e.message) }
       S.note = ''
       if (why) { S.busy = false; S.error = why; paintTicket(); return }
     }
