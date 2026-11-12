@@ -1231,26 +1231,32 @@ export function createEngine (deps) {
 
   // A quote whose coins wait only for a round (`settle-first`) is answered with a ticket the person
   // can accept now, on every surface alike (the Trade tab, a site's order): the book's price for
-  // the amount, the least it goes for (SETTLE_SLACK_BP under it, after the fees last seen), and the
-  // wait the library gives for those coins. The coins are put through the operator's next round at
-  // once (`settle_first`, which gives up nothing twice), so the wait runs while the person reads
-  // the ticket. Accepting it (`confirm`) writes a trade that waits for them, is priced again once
-  // they are through, and goes by itself at that price or better, or comes back with the new
-  // price (advanceSettling, repriceWithin). Coins found through already are priced at once, firm.
+  // the amount, the least it goes for (SETTLE_SLACK_BP under it, after the fees last seen and the
+  // refresh's fee), and the wait the library's refusal gave for those coins. A price request moves
+  // and commits nothing: no coin is given to a round until the person accepts (`confirm`, which
+  // writes a trade that waits for the coins, has them settled, is priced again once they are
+  // through, and goes by itself at that price or better, or comes back with the new price:
+  // advanceSettling, repriceWithin). Where the operator charges for a refresh, its fee (the
+  // library's read-only `quote` of those coins) is in the ticket accepted.
   // -> as quote: { ok: true, ticket: { …, about, indicative, finalBy }, choice: { source: 'settling' } },
   //    or the book's own answer when it offers nothing for the pair.
   async function waitAndGo (q, { payAsset, receiveAsset, amount }) {
     const A = big(amount)
-    let v = null
-    try { v = await run('settle_first', settleArgs(payAsset, q.coins)) } catch (e) { log('[user trade] settle_first:', e && e.message) }
-    if (v && v.settling && v.settling.length) log('[user trade] settling first for a quote:', v.settling.length, 'coin(s) of', String(payAsset).slice(0, 8))
-    if (v && v.ready) {
-      await syncShared()
-      const again = await quoteOnce({ payAsset, receiveAsset, amount })
-      if (again.ok || again.why !== 'settle-first') return again
-      q = again
-    }
-    const wait = v && !v.ready && v.final_in_seconds != null ? v : q.wait || null
+    const wait = q.wait || null
+    // What settling those coins costs, read only: the coins the library named, else every live coin
+    // of the asset (what `settle_first` of the asset may give up). Nothing is asked of a coin
+    // already in a round.
+    let refresh = 0n
+    try {
+      const named = q.coins && q.coins.length ? q.coins
+        : ((await run('coins').catch(() => [])) || []).filter((c) => c && c.asset === payAsset && c.state === 'live').map((c) => c.leaf_id)
+      const live = new Set(((await run('coins').catch(() => [])) || []).filter((c) => c && c.state === 'live').map((c) => c.leaf_id))
+      const leaves = named.filter((l) => live.has(l))
+      if (leaves.length) {
+        const r = await run('quote', { leaves })
+        for (const c of (r && r.coins) || []) refresh += big(c.fee)
+      }
+    } catch (e) { log('[user trade] the refresh\'s fee:', e && e.message) }
     // The price now: a restricted pair's from its own book, counting what waits for the round as
     // there (`arriving`), else the book's estimate for what is paid less the fees last seen.
     let about = null
@@ -1258,10 +1264,10 @@ export function createEngine (deps) {
       [payAsset, receiveAsset].some((a) => a !== 'BTC' && deps.restricted.isRestricted(a))
     if (restricted) {
       const on = deps.restricted.onItsWay ? big(await Promise.resolve(deps.restricted.onItsWay(payAsset)).catch(() => 0n)) : 0n
-      const rq = await restrictedQuote(deps.restricted, { payAsset, receiveAsset, amount: A, arriving: on > A ? on : A }).catch(() => null)
+      const rq = await restrictedQuote(deps.restricted, { payAsset, receiveAsset, amount: A - refresh, arriving: on > A ? on : A }).catch(() => null)
       if (rq && rq.ok) about = big(rq.ticket.amountOut)
     } else {
-      const fees = marginsSeen.get(payAsset) || 0n
+      const fees = (marginsSeen.get(payAsset) || 0n) + refresh
       const e = await estimate({ payAsset, receiveAsset, pay: String(fees > 0n && fees < A ? A - fees : A) }).catch(() => null)
       // Nobody offers the pair now: said so, as for any trade.
       if (e && !e.ok && ['not-listed', 'too-small', 'not-offered', 'soon'].includes(e.why)) {
@@ -1269,15 +1275,15 @@ export function createEngine (deps) {
       }
       if (e && e.ok) about = big(e.receive)
     }
-    // No price to show before the round: the coins are on their way through it, and the trade is
-    // priced again by itself once they are (`readying`), never refused.
+    // No price to show before the round: said so, in the words of coins being made ready, and asked
+    // again by the caller; nothing moved.
     if (about == null) return { ok: false, why: 'readying', held: q.held, soon: soon() }
     const least = about - (about * SETTLE_SLACK_BP + 9999n) / 10000n
     if (least <= 0n) return { ok: false, why: 'too-small' }
     const fb = nextFinalBy(null, wait, now())
-    const ticket = { payAsset, receiveAsset, amountIn: String(A), amountOut: String(least), about: String(about), fees: [], source: 'settling',
-      asked: String(A), indicative: true, finalBy: fb ? fb.finalBy : null }
-    const choice = { source: 'settling', payAsset, coins: q.coins || [], since: now(), finalBy: fb ? fb.finalBy : null, finalStep: fb ? fb.step : null,
+    const ticket = { payAsset, receiveAsset, amountIn: String(A), amountOut: String(least), about: String(about),
+      fees: refresh > 0n ? [{ asset: payAsset, atoms: String(refresh) }] : [], source: 'settling', asked: String(A), indicative: true, finalBy: fb ? fb.finalBy : null }
+    const choice = { source: 'settling', payAsset, coins: q.coins || [], finalBy: fb ? fb.finalBy : null, finalStep: fb ? fb.step : null,
       settleMost: wait ? settleBound(wait.final_in_seconds) : null }
     return { ok: true, ticket, choice }
   }
@@ -1486,7 +1492,7 @@ export function createEngine (deps) {
     // (advanceSettling). Nothing is signed to anyone until then.
     if (choice.source === 'settling') {
       const rec = put({ id, at: now(), source: 'settling', state: 'settling', ticket, accepted: ticket, settledFirst: true,
-        settleCoins: choice.coins || [], settleSince: choice.since || now(), finalBy: choice.finalBy ?? null, finalStep: choice.finalStep ?? null,
+        settleCoins: choice.coins || [], settleSince: now(), finalBy: choice.finalBy ?? null, finalStep: choice.finalStep ?? null,
         ...(choice.settleMost ? { settleMost: choice.settleMost } : {}), ...extra })
       settleAsk(rec).catch(() => {})
       return rec

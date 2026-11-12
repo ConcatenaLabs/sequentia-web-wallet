@@ -259,7 +259,8 @@ export function makeSiteOrders (d) {
       // fees, and how long it waits; the trade then goes by itself, or comes back.
       const rows = t.indicative
         ? [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, USER_WORDS.about + ' ' + fmt(t.receiveAsset, t.about)],
-            ['', USER_WORDS.atLeast(fmt(t.receiveAsset, t.amountOut))], ['', settleWords(t.finalBy, 1, now(), USER_WORDS)]]
+            ['', USER_WORDS.atLeast(fmt(t.receiveAsset, t.amountOut))], ...((t.fees || []).length ? [feeRow(t.fees, t.payAsset)] : []),
+            ['', settleWords(t.finalBy, 1, now(), USER_WORDS)]]
         : [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, fmt(t.receiveAsset, t.amountOut)],
             feeRow(t.fees, t.payAsset)]
       if (t.upTo) rows.push(['', USER_WORDS.upTo(fmt(t.payAsset, t.upTo))])

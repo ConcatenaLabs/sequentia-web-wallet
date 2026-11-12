@@ -338,6 +338,8 @@ export function mountUserComposer (ctx) {
     const costText = k.indicative ? USER_WORDS.atLeast(amt(k.receiveAsset, k.amountOut)) : costLine(k.fees, amt, k.payAsset)
     cost.textContent = costText
     t.appendChild(cost)
+    // A refresh the operator charges for is paid out of what is paid: its fee, on its own line.
+    if (k.indicative && (k.fees || []).length) { const f = el('div', 'sub', costLine(k.fees, amt, k.payAsset)); f.id = 'ucFees'; t.appendChild(f) }
     if (k.indicative) { const w = el('div', 'sub', settleWords(k.finalBy, 1, Date.now(), USER_WORDS)); w.id = 'ucWait'; t.appendChild(w) }
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
     if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }

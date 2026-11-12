@@ -113,16 +113,17 @@ test('the words of settling first name no rail and no part of a balance', () => 
   assert.ok(!/why: 'part-ready'[^\n]*\n[^\n]*\n/.test(''))
 })
 
-test('engine: a quote whose coins wait for a round is a ticket to accept now; the coins go into the round at once, and it goes once through', async () => {
+test('engine: a quote whose coins wait for a round is a ticket to accept now; the coins go into a round once it is accepted, and it goes once through', async () => {
   const s = standIn({ deepAt: 'read' })
   const eng = engineOf(s)
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   assert.equal(q.ok, true, 'never "nobody could confirm a price" for coins the balance shows: ' + q.why)
   assert.equal(q.ticket.indicative, true)
   assert.deepEqual(q.choice.coins, ['c1'])
-  assert.deepEqual(s.settleAsks, [{ coins: ['c1'] }], 'the coins the library named go into the next round')
+  assert.deepEqual(s.settleAsks, [], 'a price request gives nothing to a round')
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the maker\'s firm offer is let go of')
   const rec = await eng.confirm(q.choice, q.ticket)
+  assert.deepEqual(s.settleAsks, [{ coins: ['c1'] }], 'accepted: the coins the library named go into the next round')
   assert.equal(rec.state, 'settling')
   let r = rec
   for (let i = 0; i < 8 && r.state !== 'settled'; i++) r = await eng.advance(eng.records()[0])
@@ -139,6 +140,8 @@ test('engine: part of what the balance shows waiting for a round is a ticket to 
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   assert.equal(q.ok, true, JSON.stringify(q, (k, v) => typeof v === 'bigint' ? String(v) : v))
   assert.equal(q.ticket.indicative, true)
+  assert.deepEqual(s.settleAsks, [], 'a price request gives nothing to a round')
+  await eng.confirm(q.choice, q.ticket)
   assert.deepEqual(s.settleAsks, [{ asset: X }], 'the engine names no coins: the library settles what of the asset waits')
 })
 
@@ -308,9 +311,10 @@ test('composer: money still arriving can be traded: its asset is offered to pay,
   await root.querySelector('#ucReview').onclick()
   for (let i = 0; i < 50 && !ui.state.ticket; i++) await wait(10)
   assert.ok(ui.state.ticket, 'priced once settled: ' + (ui.state.error || ui.state.note))
-  assert.ok(s.settleAsks.length > 0, 'settled first')
+  assert.equal(s.settleAsks.length, 0, 'nothing settled before the person accepts')
   await root.querySelector('#ucConfirm').onclick()
   for (let i = 0; i < 50 && !eng.records().length; i++) await wait(10)
+  assert.ok(s.settleAsks.length > 0, 'accepted: settled first')
   let r = await eng.advance(eng.records()[0])
   for (let i = 0; i < 50 && r.state !== 'settled'; i++) { await wait(10); r = await eng.advance(eng.records()[0]) }
   assert.equal(r.state, 'settled', JSON.stringify(r))

@@ -31,7 +31,7 @@ function settleFirst (coins) {
 // The wallet's one coin of X (`c1`) is too deep to give part of: `swap_read` answers settle_first
 // naming it. `settle_first` gives it up once; its round goes through only once the test calls
 // `through()`, and the next sync then brings the round's coin `c2`, which trades.
-function standIn ({ rateNum = 4n, rateDen = 3n } = {}) {
+function standIn ({ rateNum = 4n, rateDen = 3n, refreshFee = 0n } = {}) {
   const coins = [{ leaf_id: 'c1', asset: X, value: '3000000', state: 'live', kind: 'transfer', hops: 3 }]
   const swaps = [], calls = [], settleAsks = []
   let open = false, last = null
@@ -65,6 +65,8 @@ function standIn ({ rateNum = 4n, rateDen = 3n } = {}) {
           return {}
         }
         case 'settle_quote': return { asset: a.asset, value: a.value, fee: '0', after: a.value }
+        // The operator's refresh, read only: free unless the test charges for it.
+        case 'quote': return { coins: a.leaves.map((l) => ({ leaf_id: l, fee: String(refreshFee) })) }
         default: throw new Error('no command ' + cmd)
       }
     },
@@ -91,7 +93,7 @@ function standIn ({ rateNum = 4n, rateDen = 3n } = {}) {
     return {}
   }
   const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
-  return { lib, fetchJson, store, calls, posts, settleAsks, through () { open = true }, setRate (n, d) { rateNum = n; rateDen = d } }
+  return { lib, fetchJson, store, calls, posts, settleAsks, coins, through () { open = true }, setRate (n, d) { rateNum = n; rateDen = d } }
 }
 
 const admitted = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
@@ -121,10 +123,11 @@ test('engine: coins that wait for a round are answered with a ticket to accept n
   assert.equal(q.ticket.about, ABOUT, 'the book\'s price now')
   assert.equal(q.ticket.amountOut, LEAST, 'the least it goes for')
   assert.ok(q.ticket.finalBy === t0 + 120_000, 'the library\'s own usual wait: ' + (q.ticket.finalBy - t0))
-  assert.deepEqual(s.settleAsks.map((a) => a.coins), [['c1']], 'the coins the library named go into the next round at once')
+  assert.deepEqual(s.settleAsks, [], 'a price request gives nothing to a round')
   assert.ok(!s.calls.includes('swap_accept'), 'nothing traded before the person accepts')
   assert.equal(tradeStateWord({ state: 'settling', finalBy: q.ticket.finalBy }, clock), USER_WORDS.goesThrough(2))
   const rec = await eng.confirm(q.choice, q.ticket)
+  assert.deepEqual(s.settleAsks.map((a) => a.coins), [['c1']], 'accepted: the coins the library named go into the next round')
   assert.equal(rec.state, 'settling', 'one trade, waiting for its coins')
   assert.equal(rec.accepted.amountOut, LEAST)
   // Still in its round: it waits, saying so, and nothing is traded.
@@ -277,4 +280,46 @@ test('the words of a ticket that waits name no rail, never "try again", never "c
     assert.deepEqual(forbiddenIn(w), [], w)
     assert.ok(!/try again|could not be made/i.test(w), w)
   }
+})
+
+test('SeqDEX: a site\'s quote the person rejects leaves every coin where it was; nothing went into a round', { timeout: 20_000 }, async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const S = makeSiteOrders({ engine: eng, leaves: { command: async () => { throw new Error('nothing rests here') } }, assetMeta: meta,
+    fmtAtoms: (a) => String(a), store: mem(), tag: () => 't', answerMs: 1000 })
+  const before = JSON.stringify(s.coins)
+  for (let i = 0; i < 3; i++) {
+    const q = await S.quote({ type: 'market', base: X, quote: Y, side: 'sell', amount: A }, 'https://dex.example/')
+    assert.equal(q.kind, 'take')
+    S.drop(q.id)
+  }
+  assert.equal(JSON.stringify(s.coins), before, 'every coin where it was')
+  assert.deepEqual(s.settleAsks, [], 'nothing asked into a round')
+  assert.ok(!s.calls.some((c) => ['settle_first', 'participate', 'swap_accept'].includes(c)), s.calls.join(','))
+  assert.equal(eng.records().length, 0)
+})
+
+test('an operator that charges for the refresh: its fee is in the ticket accepted, on both surfaces', { timeout: 20_000 }, async () => {
+  const s = standIn({ refreshFee: 500n })
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: A })
+  assert.ok(q.ok && q.ticket.indicative, JSON.stringify(q))
+  assert.deepEqual(q.ticket.fees, [{ asset: X, atoms: '500' }], 'the refresh\'s fee, in the asset paid')
+  // The price of what is left once the fee is paid: 399,500 X at 4 for 3 is 299,625 Y; less a hundredth.
+  assert.equal(q.ticket.about, '299625')
+  assert.equal(q.ticket.amountOut, '296628')
+  assert.deepEqual(s.settleAsks, [])
+  const S = makeSiteOrders({ engine: eng, leaves: { command: async () => { throw new Error('nothing rests here') } }, assetMeta: meta,
+    fmtAtoms: (a) => String(a), store: mem(), tag: () => 't', answerMs: 1000 })
+  const site = await S.quote({ type: 'market', base: X, quote: Y, side: 'sell', amount: A }, 'o')
+  assert.ok(site.display.rows.some(([k, v]) => k === USER_WORDS.fees && /500 XT/.test(v)), JSON.stringify(site.display.rows))
+  S.drop(site.id)
+  const doc = fakeDoc()
+  const root = doc.createElement('div')
+  const ui = composerOf(eng, root)
+  Object.assign(ui.state, { pay: X, get: Y, amount: A, payChosen: true, getChosen: true })
+  ui.render()
+  await root.querySelector('#ucReview').onclick()
+  assert.match(root.querySelector('#ucFees').textContent, /500 XT/)
+  clearTimeout(ui.state.timer)
 })

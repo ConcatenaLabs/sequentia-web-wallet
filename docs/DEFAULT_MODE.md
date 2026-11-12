@@ -640,13 +640,14 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   fills both, and the trade settles it first. When part of what is paid waits only
   for the operator's next settlement (a coin too many payments from one to give part of, a
   payment still arriving, coins the wallet's own upkeep is settling, a coin of a format the other
-  side's older build does not read), the wallet puts it through that settlement at once, and
-  Review shows a ticket the person can accept now: You pay, You receive "about <amount>" at the
-  price now, "You receive at least <amount> after fees, or the trade comes back and nothing is
-  traded.", and how long it waits, "Goes through within about <N> minutes" (as for a payment,
-  counted down to when the wallet expects the coins through). The least is the price now less
-  the fees the wallet last paid in that asset and a hundredth of it; an order's limit raises it.
-  **Trade** keeps the trade under Your trades with the same words; once through it
+  side's older build does not read), Review shows a ticket the person can accept now, and
+  moves nothing: You pay, You receive "about <amount>" at the price now, "You receive at least
+  <amount> after fees, or the trade comes back and nothing is traded.", a fee line when the
+  operator charges for the settlement, and how long it waits, "Goes through within about <N>
+  minutes" (as for a payment, counted down to when the wallet expects the coins through). The
+  least is the price now, less the fees the wallet last paid in that asset and the settlement's,
+  and less a hundredth of it; an order's limit raises it. Only **Trade** puts the coins through the settlement,
+  and keeps the trade under Your trades with the same words; once through it
   is priced again and goes ahead by itself only at that bound or better: it receives no less
   than the ticket's least, pays no more than it, and gets no less for what it pays than the
   ticket's price; otherwise

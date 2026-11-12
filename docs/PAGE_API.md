@@ -190,8 +190,10 @@ is a fill; the site follows the trade through `getOrders`.
 
 When what the trade pays must first go through the operator's next settlement (money still
 arriving, a coin too many payments deep), the dialog shows the book's price now, the least the
-trade goes for after its fees (for a limit order, at least the limit), and how long it waits.
-Once approved, the site is answered at once with the trade under way (`state` `sending`, its
+trade goes for after its fees (for a limit order, at least the limit), the settlement's fee when
+the operator charges for it, and how long it waits. Pricing it moves nothing: the coins go
+through the settlement only once the person approves, and a rejected dialog leaves them where
+they were. Once approved, the site is answered at once with the trade under way (`state` `sending`, its
 `note` saying how long). The wallet prices it again once the coins are through and sends it by
 itself only at that least or better; otherwise it ends `failed` with nothing traded.
 
