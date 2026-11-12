@@ -69,6 +69,7 @@ import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
 import { DEFAULT_WORDS, vestingShort } from './default-arca.js'
+import { restrictedQuote, restrictedConfirm, restrictedAdvance } from './restricted-engine.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -978,6 +979,13 @@ export function createEngine (deps) {
   async function estimate ({ payAsset, receiveAsset, pay, receive }) {
     // While the amount is typed, what the wallet can pay is read behind it, so Review finds it.
     if (payAsset !== 'BTC' && (!holdings || now() - holdings.at > 10_000)) readHoldingsSoon()
+    // A pair with a restricted asset: its price for what is paid, else nothing said while typing
+    // (Review says what the trade needs: an approval, another asset to pay with).
+    if (deps.restricted && (await deps.restricted.available()) && [payAsset, receiveAsset].some((a) => a !== 'BTC' && deps.restricted.isRestricted(a))) {
+      if (!pay) return { ok: false, why: 'restricted' }
+      const rq = await restrictedQuote(deps.restricted, { payAsset, receiveAsset, amount: pay }).catch(() => null)
+      return rq && rq.ok ? { ok: true, pay: rq.ticket.amountIn, receive: rq.ticket.amountOut, short: null } : { ok: false, why: 'restricted' }
+    }
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
     const sources = admittedSources(ad.pairs, ad.genesis, payAsset, receiveAsset)
     if (!sources.length) return { ok: false, why: 'not-listed' }
@@ -1207,6 +1215,10 @@ export function createEngine (deps) {
     const reads = makerReads
     const A = big(amount)
     if (A <= 0n) return { ok: false, why: 'too-small' }
+    // A pair with a restricted asset trades on the chain under its policy server
+    // (restricted-engine.js), or, without what that needs, as before.
+    const rq = await restrictedQuote(deps.restricted, { payAsset, receiveAsset, amount: A })
+    if (rq) return rq
     // More than the wallet holds to spend, the rest vesting later: refused with the date from
     // which all of it can be used (default-arca.js vestingShort), whatever the pair. Nothing is
     // asked of a maker.
@@ -1416,6 +1428,7 @@ export function createEngine (deps) {
         return put(rec)
       }
       if (choice.source === 'btc-gateway') return await btcT.confirm(choice, rec)
+      if (choice.source === 'restricted') return await restrictedConfirm(deps.restricted, choice, rec, put)
       if (choice.source === 'onchain-fill') {
         rec.order = choice.entry.id
         rec.fee = { asset: choice.fee.asset, atoms: String(choice.fee.atoms) }
@@ -1598,6 +1611,10 @@ export function createEngine (deps) {
         await syncShared()
         const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
         if (got) { rec.state = 'sent'; rec.sentAt = now() } else notFound('not filled')
+      } else if (rec.source === 'restricted') {
+        // A trade whose broadcast did not answer: it was made once the chain knows it.
+        const st = rec.txid ? await Promise.resolve(deps.restricted.status(rec.txid)).catch(() => 'unknown') : 'unknown'
+        if (st !== 'unknown') { rec.state = 'sent'; rec.sentAt = now() } else notFound('not made')
       } else if (rec.source === 'onchain-fill') {
         // A FILL whose broadcast did not answer: it is the wallet's once the node knows it.
         const st = rec.txid ? await Promise.resolve(deps.onchain.status(rec.txid)).catch(() => 'unknown') : 'unknown'
@@ -1615,6 +1632,7 @@ export function createEngine (deps) {
     if (rec.source === 'btc-gateway') return btcT.advance(rec)
     if (rec.source === 'leaf-resting') return advanceResting(rec)
     if (rec.source === 'onchain-fill') return advanceOnchain(rec)
+    if (rec.source === 'restricted') return restrictedAdvance(deps.restricted, rec, put, { now, uncertainMs: UNCERTAIN_MS })
     return rec
   }
 

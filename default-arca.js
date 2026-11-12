@@ -204,7 +204,8 @@ export const DEFAULT_WORDS = Object.freeze({
   movingWaits: (what, purpose) => `${what} cannot be moved out of the Ark yet: the network moves it as soon as it can, and it stays yours meanwhile. It is ${purpose} then, while this page is open; or come back later and press the button again.`,
   cannotMoveNow: (what) => `${what} cannot be moved out of the Ark right now: the network has too little of it free. Nothing has moved: try again later.`,
   notEnough: (amount, ticker) => `Not enough ${ticker}: ${amount} ${ticker} short.`,
-  stillOpening: 'Your wallet is still opening: try again in a moment.',
+  // The wallet did not open within the wait (and is not finding what it holds): nothing moved.
+  stillOpening: 'Your wallet has not finished opening, so nothing has moved. If it does not open, reload the page.',
   waitOpening: 'Your wallet is still opening; this goes on by itself once it has.',
   notMoved: 'This could not be moved out of the Ark just now. Nothing was spent: try again in a moment.',
   notReady: 'What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes.',

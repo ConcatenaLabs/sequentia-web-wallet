@@ -178,6 +178,16 @@ JavaScript. The browser extension copies this file into its `vendor/`; change it
 Root is flat: production modules and tests sit side by side.
 
 - `index.html` — the wallet core: boot, balances, send/receive, fees, staking, history, OpenAMP, QR.
+- `restricted-trade.js`, `restricted-engine.js`, `restricted-host.js` — restricted (OpenAMP) assets
+  in the Trade tab, on the chain only. `restricted-trade.js` is the taker's side, with no DOM and
+  no wasm: a maker's quote (offer member 29) is one transaction whose layout and checks
+  (`checkTrade`) are the port of seqdex `pkg/restricted` and must stay the same as it; a gated order
+  (member 30) is a fill the policy server co-signs and broadcasts. The wallet library signs the
+  page's own inputs from a PSET the module writes (`psetOf`), and the trade is refused when it
+  signed any input not offered (`checkSigned`). `restricted-engine.js` is the composer's seam: the
+  engine asks it first and gets null for any pair without a restricted asset, or when the policy
+  server does not answer `/v1/eligibility`. Its words are `RESTRICTED_WORDS`, tested against
+  `USER_MODE_FORBIDDEN_WORDS`; none says such an asset cannot be traded.
 - `lnaddr.js` and `tooling/lsp/lnaddr.mjs` — the wallet's payment name, `name@SEQ_LNADDR_DOMAIN`, a
   Lightning address (LNURL-pay). The name is held by a BIP340 key of the phrase (`NAME_KEY_PATH`),
   and every message to the service is signed over `signedDigest` (action, domain, name, request),
