@@ -18,6 +18,7 @@
 //                           (restricted-trade.js approvalCard)
 //   held(asset)          -> what the wallet holds of an asset, wherever it is (a restricted one:
 //                           at its enclave)
+//   onItsWay(asset)      -> what of it is still on its way in (a payment the wallet settles first)
 //   feeAsset(pay, receive) -> the asset the fee is paid in (the asset paid, never the restricted
 //                           one; selling a restricted asset, the asset received, else another held)
 //   fee(asset)           -> the fee of one trade in that asset
@@ -89,8 +90,17 @@ export async function restrictedQuote (R, { payAsset, receiveAsset, amount, arri
   if (!feeAsset) return { ok: false, why: 'no-funds' }
   const fee = big(await R.fee(feeAsset))
   const need = best.give + (feeAsset === payAsset ? fee : 0n)
-  if (big(await R.held(payAsset)) + big(arriving) < need) return { ok: false, why: 'no-funds' }
-  if (feeAsset !== payAsset && big(await R.held(feeAsset)) < fee) return { ok: false, why: 'no-funds' }
+  // Money still on its way in (a payment above the wallet's instant limit) counts: it is settled
+  // first, as for any trade, and the trade priced again once it is through. Never "you have none".
+  const onWay = async (x) => (R.onItsWay ? big(await R.onItsWay(x)) : 0n)
+  const short = async (x, n, more = 0n) => {
+    const h = big(await R.held(x)) + more
+    if (h >= n) return null
+    return h + (await onWay(x)) >= n ? { ok: false, why: 'settle-first', payAsset: x, coins: [], held: String(h) } : { ok: false, why: 'no-funds' }
+  }
+  const s1 = await short(payAsset, need, big(arriving))
+  if (s1) return s1
+  if (feeAsset !== payAsset) { const s2 = await short(feeAsset, fee); if (s2) return s2 }
   // Approved for one atom is not approved for the amount (an issuer's rules can bound what one
   // account receives): asked again for what this trade brings, before anything moves.
   if (rGet) {

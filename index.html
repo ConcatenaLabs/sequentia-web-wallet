@@ -4654,6 +4654,7 @@ function restrictedDeps(){
       return approvalCard(j, { ticker: name(hex), entity: c.entity || reg.entity || null, domain: (c.entity && c.entity.domain) || assetDomain(hex) }, aid);
     },
     held: (hex)=> isRestrictedAsset(hex) ? ((oampBalances[hex] && oampBalances[hex].atoms) || 0n) : userHeld(hex),
+    onItsWay: (hex)=> isRestrictedAsset(hex) ? 0n : onItsWay(hex),
     // The fee is paid in the asset paid; selling a restricted asset, in the asset received, else in
     // another asset the wallet holds that the network takes fees in; never by default in one asset.
     feeAsset: async (pay, receive)=>{

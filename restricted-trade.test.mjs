@@ -365,3 +365,12 @@ test('bitcoin and a restricted asset: each leg read in the trade\'s own directio
   assert.equal(buy.card.text, 'Bitcoin buys USDX, and USDX buys RSB. Get USDX first, then trade it for RSB.')
   assert.deepEqual(asked, [['sellers', true], ['sellers', false], ['btcBuys', false]])
 })
+
+test('the engine: money still on its way in is settled first and the trade priced again, never "you have none" (#691)', async () => {
+  const { a, b, R } = fakeR({ held: async () => 0n, onItsWay: async (x) => (x === 'bb'.repeat(32) ? 0n : 10n ** 12n) })
+  const q = await restrictedQuote(R, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.deepEqual(q, { ok: false, why: 'settle-first', payAsset: b, coins: [], held: '0' })
+  // Less on its way than the trade needs: none to trade.
+  const poor = fakeR({ held: async () => 0n, onItsWay: async () => 10n })
+  assert.deepEqual(await restrictedQuote(poor.R, { payAsset: poor.b, receiveAsset: poor.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
+})
