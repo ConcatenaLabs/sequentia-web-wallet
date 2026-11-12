@@ -324,3 +324,75 @@ test('composer: money still arriving can be traded: its asset is offered to pay,
   assert.match(html, /held: \(a\)=> userHeld\(a\) \+ onItsWay\(a\),/)
   assert.match(html, /onItsWay: \(a\)=> onItsWay\(a\),/)
 })
+
+test('composer: Max trades all of it, the exact amount the library says empties the coins; a typed amount above what goes is told "up to" (#858)', async () => {
+  // The library's refusal of the whole balance: every amount up to 998,994 goes, and 999,998 exactly
+  // (nothing left over); amounts between leave change too small to keep.
+  const asked = []
+  const ticket = (a) => ({ payAsset: X, receiveAsset: Y, amountIn: a, amountOut: String(BigInt(a) / 2n), fees: [], source: 'leaf-maker', asked: a })
+  const eng = {
+    async quote ({ amount }) {
+      asked.push(amount)
+      const a = BigInt(amount)
+      if (a === 999998n || a <= 998994n) return { ok: true, ticket: ticket(amount), choice: 'c' + asked.length }
+      return Object.assign({ ok: false, why: 'own-short', most: '998994' }, withAll ? { all: '999998' } : {})
+    },
+    drop () {}, records: () => [],
+  }
+  let withAll = true
+  const mount = () => {
+    const doc = fakeDoc()
+    const root = doc.createElement('div')
+    const ui = mountUserComposer({
+      root, engine: eng, held: (a) => (a === X ? 1000000n : 0n), knownAssets: () => ['BTC', X, Y],
+      assetMeta: (h) => ({ ticker: h === X ? 'XT' : h === Y ? 'YT' : 'BTC', precision: 0 }),
+      fmtAtoms: (a) => String(a), parseAtoms: (t) => BigInt(t), admittedReceives: () => [Y], market: null, refValue: () => null,
+      session: null, notify: () => {}, links: () => ({}), openHistory: () => {}, followMs: 1e9, followSlowMs: 1e9, confirmShownMs: 50,
+    })
+    ui.render()
+    Object.assign(ui.state, { pay: X, get: Y, getChosen: true })
+    ui.render()
+    return { root, ui }
+  }
+  // Max, then review: the balance is refused, and the exact amount that empties the coins is priced.
+  let { root, ui } = mount()
+  root.querySelector('#ucMax').onclick()
+  assert.equal(ui.state.amount, '1000000')
+  await root.querySelector('#ucReview').onclick()
+  assert.deepEqual(asked, ['1000000', '999998'])
+  assert.ok(ui.state.ticket, ui.state.error)
+  assert.equal(ui.state.ticket.amountIn, '999998')
+  assert.equal(ui.state.amount, '999998', 'the amount shown is what is traded')
+  assert.equal(root.querySelector('#ucAmount').value, '999998')
+  clearTimeout(ui.state.timer)
+  // An amount typed between the two: the one figure every amount below goes for.
+  asked.length = 0
+  ;({ root, ui } = mount())
+  ui.state.amount = '999500'
+  ui.state.maxed = false
+  await root.querySelector('#ucReview').onclick()
+  assert.deepEqual(asked, ['999500'], 'priced once, never moved to another amount')
+  assert.equal(ui.state.error, USER_WORDS.ownShort('998994 XT'))
+  assert.ok(!ui.state.ticket)
+  clearTimeout(ui.state.timer)
+  // Max with no exact figure from the library (an older one, or a Lightning payment whose fee no
+  // amount makes exact): the "up to" sentence, priced once.
+  asked.length = 0
+  withAll = false
+  ;({ root, ui } = mount())
+  root.querySelector('#ucMax').onclick()
+  await root.querySelector('#ucReview').onclick()
+  assert.deepEqual(asked, ['1000000'])
+  assert.equal(ui.state.error, USER_WORDS.ownShort('998994 XT'))
+  // Max, then an amount typed over it: no longer all of it.
+  asked.length = 0
+  withAll = true
+  ;({ root, ui } = mount())
+  root.querySelector('#ucMax').onclick()
+  root.querySelector('#ucAmount').value = '999999'
+  root.querySelector('#ucAmount').oninput()
+  await root.querySelector('#ucReview').onclick()
+  assert.deepEqual(asked, ['999999'])
+  assert.equal(ui.state.error, USER_WORDS.ownShort('998994 XT'))
+  clearTimeout(ui.state.timer)
+})

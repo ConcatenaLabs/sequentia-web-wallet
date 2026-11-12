@@ -154,6 +154,9 @@ export const USER_WORDS = Object.freeze({
   // A ticket whose fees are known only once its money is moved in: the most they can be.
   feesAtMost: 'Fees at most',
   upTo: (x) => `Up to ${x} can be traded now.`,
+  // After Max, what this trade cannot take of the asset paid (one trade takes so many coins, or no
+  // offer pays exactly the rest): it stays, the person's to trade or send after.
+  stays: (x) => `${x} stays in your wallet, to trade or send after this one.`,
   notOffered: (get, pay) => `Not offered right now: nobody offers ${get} for ${pay} in one step.`,
   notListed: (get, pay) => `${get} for ${pay} is not offered.`,
   // Nothing to choose under You receive: no pair admitted for what is paid, or none read yet.
@@ -445,6 +448,37 @@ export function ownShortMost (message, paying) {
   const p = m ? BigInt(m[1]) : big(paying)
   if (!(p > 0n)) return null
   return p > short ? p - short : 0n
+}
+
+// The same from the refusal itself: the library's own figure (`most`, which it gives with both
+// refusals) when it carries one; else, from a library that does not carry it yet, read from its words.
+export function refusalMost (e, paying) {
+  if (e && e.most != null && /^\d+$/.test(String(e.most))) return BigInt(e.most)
+  return ownShortMost(e && e.message, paying)
+}
+// The exact amount that pays with nothing left over, by the library's refusal (its `all`): above
+// `most`, and the amounts between the two leave change too small to keep, so it is offered only as
+// "all of it" (the Max button), never as "up to". -> atoms, or null when it does not say.
+export function refusalAll (e) {
+  return e && e.all != null && /^\d+$/.test(String(e.all)) ? BigInt(e.all) : null
+}
+// What the margins of the coins a payment takes come to, by the library's refusal of it for want of
+// them ("paying P takes T with the margins": T less P). -> atoms, or null when it does not say.
+export function refusalMargins (e) {
+  const m = String(e && e.message).match(/paying (\d+) takes (\d+)/)
+  return m && BigInt(m[2]) >= BigInt(m[1]) ? BigInt(m[2]) - BigInt(m[1]) : null
+}
+// The give asked of a maker for its want to be `want` at the entry's rate: the most whose want
+// (ceil(give × rate_num / rate_den), as the maker prices it) is not above `want`. -> atoms.
+export function giveFor (entry, want) {
+  return (big(want) * entry.rateDen) / entry.rateNum
+}
+// What the wallet holds in live coins, by the library's refusal of a payment short of its margins:
+// its own figure (`live`), else from its words. -> atoms, or null when it does not say.
+export function refusalLive (e) {
+  if (e && e.live != null && /^\d+$/.test(String(e.live))) return BigInt(e.live)
+  const h = String(e && e.message).match(/holds (\d+) of asset \S+ in live coins/)
+  return h ? BigInt(h[1]) : null
 }
 
 // The indicative entries worth asking for firm terms, best first: a source whose coin waits on
@@ -866,7 +900,22 @@ export function createEngine (deps) {
     // as the maker's firm offer here, at its own size, rather than asking again.
     const made = madeAgain.get(entry.maker)
     if (made && made.give_asset === receiveAsset && made.want_asset === payAsset) { madeAgain.delete(entry.maker); give = big(made.give) }
-    for (let i = 0; i < 4; i++) {
+    // Asked for at least all the coins it takes, margins in, the trade empties them: the swap pays
+    // exactly what they keep past their margins (`aim`, the library's `all`), never sized down to
+    // leave change. Learnt from the library's refusal (its `all`) or from terms it read (what they
+    // give plus their change). When no give of the maker's answers that exactly (`aimed` tries),
+    // the trade goes as it would have, and what stays is the ticket's to name.
+    // `back`: the give asked again when no give pays exactly (the terms read before aiming, or, after
+    // a refusal, one that pays the library's `most`, below which every amount pays).
+    let aim = null, aimed = 0, back = null, tries = 4
+    const aimAt = (all, margins) => {
+      if (all == null || margins == null || all <= 0n || all + margins > lim || aimed > 0) return null
+      const g = giveFor(entry, all)
+      return g >= entry.minReceive && g <= entry.maxReceive && g > 0n ? all : null
+    }
+    const startAim = (all, fallback) => { back = fallback; aim = all; aimed = 1; tries += 3; give = giveFor(entry, all) }
+    const dropAim = () => { aim = null; give = back }
+    for (let i = 0; i < tries; i++) {
       let o
       // A maker that does not answer a firm offer by the quote's deadline is left out of it; an
       // offer asked again for less, after the wallet's check, is given the makers' time again,
@@ -886,15 +935,37 @@ export function createEngine (deps) {
         return null
       }
       answered()
+      // Aiming at the exact amount: a maker's want off it by its rounding (or its ladder) is asked
+      // again with the give moved by the difference, twice at most; then the trade goes as it would.
+      if (aim != null && o.want != null && big(o.want) !== aim) {
+        await releaseNow(entry.maker, o.swap)
+        const d = aim - big(o.want)
+        if (aimed >= 3) { log('[user trade] no give of this maker pays exactly', String(aim)); dropAim() } else {
+          aimed++
+          give = d > 0n ? give + ((d * entry.rateDen) / entry.rateNum || 1n) : give - ((-d * entry.rateDen + entry.rateNum - 1n) / entry.rateNum || 1n)
+          if (give < entry.minReceive || give <= 0n || give > entry.maxReceive) dropAim()
+        }
+        if (give < entry.minReceive || give <= 0n) return null
+        continue
+      }
       let t
       try { t = await run('swap_read', { offer: o.offer }) } catch (e) {
         log('[user trade] swap_read:', e.message)
         noteLiveShort(e)
+        // The amount asked takes all the coins it can and more: the swap pays what they keep (`all`).
+        const all = aimAt(refusalAll(e), refusalMargins(e) ?? ownMargins)
+        if (all != null) {
+          await releaseNow(entry.maker, o.swap)
+          const most = refusalMost(e)
+          startAim(all, most != null && most > 0n ? giveFor(entry, most) : give - 1n)
+          continue
+        }
+        if (aim != null) { await releaseNow(entry.maker, o.swap); dropAim(); if (give < entry.minReceive || give <= 0n) return null; continue }
         // Paying that much would take all the wallet holds, with the margins its transactions leave
         // for their fees, or leave change below the operator's smallest leaf: ask again for less, by
         // what is missing (a site's probe sizes on all the wallet can pay).
         const over = shortBy(e.message)
-        if (over > 0n && i < 3) {
+        if (over > 0n && i < tries - 1) {
           await releaseNow(entry.maker, o.swap)
           give = give - (over * entry.rateDen + entry.rateNum - 1n) / entry.rateNum - 1n
           if (give < entry.minReceive) return null
@@ -911,6 +982,15 @@ export function createEngine (deps) {
       const spend = big(t.gives.value) + big(t.pays.margins)
       marginsSeen.set(payAsset, big(t.pays.margins))
       const limit = pay < have ? pay : have
+      // Terms that leave change while what was asked covers the coins they take whole: the swap
+      // pays them all instead (what it gives plus its change), with nothing left behind.
+      const kept = big(t.change && t.change.value)
+      const whole = kept > 0n ? aimAt(big(t.gives.value) + kept, big(t.pays.margins)) : null
+      if (whole != null) {
+        await releaseNow(entry.maker, o.swap)
+        startAim(whole, give)
+        continue
+      }
       if (spend > limit) {
         await releaseNow(entry.maker, o.swap)
         const over = spend - limit
@@ -1181,13 +1261,19 @@ export function createEngine (deps) {
   // side does not read), with the coins it named: the trade settles them first, and goes.
   let settleSeen = null
   // The wallet's own shortfall a source's check met (`ownShortMost`): what it could pay at most.
-  let ownMost = null, ownLive = null
+  // `ownAll`: what the trade pays in all, the margins in, when it pays the library's `all` (the
+  // exact amount that empties the coins it takes): the person's figure is all-in everywhere.
+  let ownMost = null, ownLive = null, ownAll = null, ownMargins = null
   const noteLiveShort = (e, at = {}) => {
-    const most = ownShortMost(e && e.message, at.paying)
+    const most = refusalMost(e, at.paying)
     if (most != null && (ownMost == null || most > ownMost)) ownMost = most
+    const m = refusalMargins(e)
+    if (m != null) ownMargins = m
+    const all = refusalAll(e)
+    if (all != null && ownMargins != null && (ownAll == null || all + ownMargins > ownAll)) ownAll = all + ownMargins
     // What the refusal says the wallet holds in live coins (absent for the change's refusal).
-    const h = String(e && e.message).match(/holds (\d+) of asset \S+ in live coins/)
-    if (h) ownLive = BigInt(h[1])
+    const live = refusalLive(e)
+    if (live != null) ownLive = live
     if (/ in live coins/.test(String(e && e.message))) liveShort = true
     if (e && e.kind === 'settle_first') {
       settleSeen = { coins: [...new Set([...(settleSeen ? settleSeen.coins : []), ...(e.coins || [])])],
@@ -1425,7 +1511,7 @@ export function createEngine (deps) {
     quoteStep = onStep
     tooOldFrom = null
     liveShort = false
-    ownMost = null; ownLive = null
+    ownMost = null; ownLive = null; ownAll = null; ownMargins = null
     settleSeen = null
     makerReads = new Set()
     const reads = makerReads
@@ -1582,7 +1668,11 @@ export function createEngine (deps) {
     // instead: the refusal's live figure is short of what it holds.)
     if (!best && ownMost != null && payAsset !== 'BTC' && (ownLive == null || ownLive >= haveLeaf)) {
       const shown = deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : 0n
-      if (shown <= haveLeaf) return { ok: false, why: 'own-short', most: String(ownMost) }
+      // With what emptying the coins pays in all (`all`, the margins in), when it is more: what Max
+      // asks for then.
+      if (shown <= haveLeaf) {
+        return Object.assign({ ok: false, why: 'own-short', most: String(ownMost) }, ownAll != null && ownAll > ownMost ? { all: String(ownAll) } : {})
+      }
     }
     if (!best && liveShort && payAsset !== 'BTC') return settleFirst(payAsset, [], haveLeaf)
     // A maker gave firm terms in time and the wallet's library was still reading them when the

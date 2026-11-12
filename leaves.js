@@ -571,7 +571,13 @@ export class LeafError extends Error {
     for (const k of ['final_in_seconds', 'usual_in_seconds', 'waiting_for']) if (e && e[k] != null) this[k] = e[k]
     // And, for a payment to a receive code, the most it can pay once they are closed and that
     // payment's fee, with the leaves the close gives back counted (the library's `most`, `fee`).
+    // And for a payment the wallet's own coins fall short of, nothing more on its way: the most it
+    // can pay now (`most`), and what it holds in live coins when the margins are what it is short by
+    // (`live`).
     if (e && e.most != null) this.most = String(e.most)
+    if (e && e.live != null) this.live = String(e.live)
+    // And the exact amount that pays with nothing left over (`all`), above `most`.
+    if (e && e.all != null) this.all = String(e.all)
     if (e && e.fee != null) this.fee = String(e.fee)
     // What the command cost before it was refused, where the library says (its `cost`).
     if (e && e.cost) this.cost = e.cost

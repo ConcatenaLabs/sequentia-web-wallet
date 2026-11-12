@@ -2,7 +2,7 @@
 // Bitcoin Lightning wallet: the order of the one hash-lock, and what a ticket counts.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn, ownShortMost } from './user-trade.js'
+import { createEngine, tradeStateWord, USER_WORDS, forbiddenIn, ownShortMost, refusalMost, refusalLive, refusalAll } from './user-trade.js'
 import { MAKER_LOCK_MS, needSeconds } from './user-trade-btc.js'
 
 const X = 'aa'.repeat(32)
@@ -464,4 +464,42 @@ test('the wallet\'s own shortfall while more of it is on its way: settled first,
   // Answered with the engine's ticket to wait and go (#565), never a refusal.
   assert.ok(q.ok && q.ticket.indicative, JSON.stringify(q))
   assert.equal(q.ticket.amountIn, '200680', 'the whole amount')
+})
+
+test('the wallet\'s own refusal carries what can be traded now as a value: the page takes it, never its words (#666)', async () => {
+  // The library's refusal with its figures (`most`, `live`): they are the ones taken, whatever the words say.
+  const e = Object.assign(new Error('refused: the wallet holds 999647047 of asset ' + X + ' in live coins, and paying 999931875 takes 999932651 with the margins its transactions leave for their fees'),
+    { kind: 'refused', most: '998646271', all: '999646271', live: '999647047' })
+  // The library's `most` is the ceiling below which every amount pays (what it holds less the margins and
+  // the smallest coin of 1,000,000); the words give only the exact amount that empties the coins (`all`).
+  assert.equal(refusalMost(e, 999931875n), 998646271n)
+  assert.equal(refusalLive(e), 999647047n)
+  // The change's refusal, its figure only.
+  const c = Object.assign(new Error('refused: the change would be below the operator\'s smallest leaf in asset ' + X + ' (1000000 atoms): pay a little less, or that much more'),
+    { kind: 'refused', most: '982400000', all: '983400000' })
+  // Change of 400,000 under a smallest coin of 1,000,000: the ceiling is 982,400,000, above the words' 982,000,000.
+  assert.equal(refusalMost(c, 983000000n), 982400000n)
+  assert.equal(refusalLive(c), null)
+  // A library that does not carry them yet: read from its words, as before.
+  assert.equal(refusalMost({ message: c.message }, 983000000n), 982000000n)
+  assert.equal(refusalMost({ message: 'refused: the server is busy' }, 1000n), null)
+  // The page's error from the library keeps both figures.
+  const { LeafError } = await import('./leaves.js')
+  const le = new LeafError({ kind: 'refused', message: e.message, asset: X, most: '999640000', live: '999647047' })
+  assert.deepEqual([le.most, le.live], ['999640000', '999647047'])
+  // Through the engine: the quote's `most` is the library's value.
+  const s = standIn()
+  const lib = s.lib
+  const short = { command (cmd, a) { if (cmd === 'lightning_pay_quote') throw e; return lib.command(cmd, a) } }
+  const eng = createEngine({ leaves: short, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
+  assert.equal(q.why, 'own-short', q.why)
+  assert.equal(q.most, '998646271', 'the library\'s figure, not one read out of its words (' + String(999931875n - (999932651n - 999647047n)) + ')')
+  // With what emptying the coins pays in all, above it: the library's `all` plus the margins its
+  // words name (999932651 - 999931875 = 776), the person's figure being all-in.
+  assert.equal(q.all, '999647047')
+  assert.equal(refusalAll(e), 999646271n)
+  assert.equal(refusalAll({ message: e.message }), null, 'never read out of the words')
+  const le2 = new LeafError({ kind: 'refused', message: e.message, most: '1', all: '2' })
+  assert.equal(le2.all, '2')
 })

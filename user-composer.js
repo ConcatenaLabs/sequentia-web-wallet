@@ -175,7 +175,7 @@ export function mountUserComposer (ctx) {
     return b
   }
 
-  function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = ''; S.moving = false; S.card = null }
+  function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = ''; S.moving = false; S.card = null; S.stays = 0n }
 
   // "about" beside the amount that follows the price, while it is an estimate.
   function paintAbout () {
@@ -210,10 +210,10 @@ export function mountUserComposer (ctx) {
     // You pay
     const row1 = el('div', 'uc-row')
     row1.appendChild(el('label', 'lbl', USER_WORDS.pay))
-    row1.appendChild(chooser('ucPay', payList(), S.pay, (v) => { S.pay = v; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
+    row1.appendChild(chooser('ucPay', payList(), S.pay, (v) => { S.pay = v; S.maxed = false; S.payChosen = true; S.getChosen = false; S.get = null; reset(); render() }))
     const inp = el('input', 'uc-amount'); inp.id = 'ucAmount'; inp.inputMode = 'decimal'; inp.placeholder = USER_WORDS.amount; inp.value = S.amount
     const payAbout = el('span', 'sub uc-about'); payAbout.id = 'ucPayAbout'
-    inp.oninput = () => { S.amount = inp.value; S.fixed = 'pay'; S.error = ''; keep(); if (S.ticket) { reset(); paintTicket() } paintValues(); schedule() }
+    inp.oninput = () => { S.amount = inp.value; S.fixed = 'pay'; S.maxed = false; S.error = ''; keep(); if (S.ticket) { reset(); paintTicket() } paintValues(); schedule() }
     row1.appendChild(payAbout)
     row1.appendChild(inp)
     const payValue = el('div', 'sub uc-value'); payValue.id = 'ucPayValue'
@@ -223,7 +223,11 @@ export function mountUserComposer (ctx) {
     have.appendChild(haveLine)
     const max = el('button', 'ghost uc-max', USER_WORDS.max); max.type = 'button'; max.id = 'ucMax'
     // What can be traded: the balance, and a payment on its way, which the trade settles first.
-    max.onclick = () => { const a = big(ctx.held(S.pay) || 0n) + onWay(S.pay); if (a <= 0n) return; S.amount = ctx.fmtAtoms(a, prec(S.pay)); inp.value = S.amount; S.fixed = 'pay'; if (S.ticket) { reset(); paintTicket() } schedule(0) }
+    // Max asks for all of it, the fees in (the person's figure is all-in): the trade empties the
+    // coins, and the ticket's You pay is that same figure. When one trade cannot take all of it, the
+    // amount becomes what goes, and the ticket names what stays (S.maxed and S.maxOf, cleared by
+    // anything typed or chosen).
+    max.onclick = () => { const a = big(ctx.held(S.pay) || 0n) + onWay(S.pay); if (a <= 0n) return; S.amount = ctx.fmtAtoms(a, prec(S.pay)); inp.value = S.amount; S.fixed = 'pay'; S.maxed = true; S.maxOf = a; S.maxAgain = false; if (S.ticket) { reset(); paintTicket() } schedule(0) }
     have.appendChild(max)
     row1.appendChild(have)
     box.appendChild(row1)
@@ -234,7 +238,7 @@ export function mountUserComposer (ctx) {
     flip.onclick = () => {
       if (!S.get) return
       ;[S.pay, S.get] = [S.get, S.pay]; [S.amount, S.recv] = [S.recv, S.amount]
-      S.fixed = S.fixed === 'pay' ? 'receive' : 'pay'; S.payChosen = true; S.getChosen = true
+      S.fixed = S.fixed === 'pay' ? 'receive' : 'pay'; S.payChosen = true; S.getChosen = true; S.maxed = false
       reset(); render(); schedule(0)
     }
     flipRow.appendChild(flip)
@@ -250,7 +254,7 @@ export function mountUserComposer (ctx) {
     // one ("about"); Review's ticket gives the exact amounts.
     const recvAbout = el('span', 'sub uc-about'); recvAbout.id = 'ucRecvAbout'
     row2.appendChild(recvAbout)
-    rin.oninput = () => { S.recv = rin.value; S.fixed = 'receive'; S.error = ''; keep(); if (S.ticket) { reset(); paintTicket() } paintValues(); schedule() }
+    rin.oninput = () => { S.recv = rin.value; S.fixed = 'receive'; S.maxed = false; S.error = ''; keep(); if (S.ticket) { reset(); paintTicket() } paintValues(); schedule() }
     row2.appendChild(rin)
     const recvValue = el('div', 'sub uc-value'); recvValue.id = 'ucRecvValue'
     row2.appendChild(recvValue)
@@ -342,6 +346,8 @@ export function mountUserComposer (ctx) {
     if (k.indicative && (k.fees || []).length) { const f = el('div', 'sub', costLine(k.fees, amt, k.payAsset)); f.id = 'ucFees'; t.appendChild(f) }
     if (k.indicative) { const w = el('div', 'sub', settleWords(k.finalBy, 1, Date.now(), USER_WORDS)); w.id = 'ucWait'; t.appendChild(w) }
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
+    // After Max, what one trade could not take: named, never left unsaid.
+    if (S.stays > 0n) { const st = el('div', 'sub', USER_WORDS.stays(amt(k.payAsset, S.stays))); st.id = 'ucStays'; t.appendChild(st) }
     // Paid with money the wallet moves in first: how long it takes, said before it is confirmed.
     if (k.bringIn) { const w = el('div', 'sub', USER_WORDS.bringIn(k.bringIn)); w.id = 'ucBringIn'; t.appendChild(w) }
     if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }
@@ -368,6 +374,7 @@ export function mountUserComposer (ctx) {
       if (why) { S.busy = false; S.error = why; paintTicket(); return }
     }
     S.busy = true; S.pricingLong = false; paintTicket()
+    let allOf = null
     // Past the makers' window the wallet may still be checking the price it was given: said so.
     const longTimer = setTimeout(() => { if (S.busy && !S.ticket) { S.pricingLong = true; paintTicket() } }, QUOTE_FIRM_MS + 1000)
     const withBtc = S.pay === 'BTC' || S.get === 'BTC'
@@ -376,9 +383,24 @@ export function mountUserComposer (ctx) {
       const q = await ctx.engine.quote({ payAsset: S.pay, receiveAsset: S.get, amount: String(atoms),
         onStep: withBtc ? (k) => paintProgress(k) : null })
       if (withBtc && q.ok) paintProgress('priced')
-      if (q.ok) { S.ticket = q.ticket; S.choice = q.choice; S.moving = !!q.moving }
+      if (q.ok) {
+        S.ticket = q.ticket; S.choice = q.choice; S.moving = !!q.moving
+        // After Max: the amount is what the trade pays in all, and what it could not take stays,
+        // named on the ticket.
+        if (S.maxed && S.fixed === 'pay' && S.maxOf != null && q.ticket.payAsset === S.pay) {
+          const paid = big(q.ticket.amountIn)
+          if (paid < S.maxOf) {
+            S.stays = S.maxOf - paid
+            S.amount = ctx.fmtAtoms(paid, prec(S.pay))
+            const i = ctx.root.querySelector('#ucAmount'); if (i) i.value = S.amount
+          }
+        }
+      }
       // A restricted asset: whom to ask for approval, or what to pay with; never an error.
       else if (q.card) S.card = q.card
+      // Max asked for all of it and no trade takes that much: what emptying the coins the wallet
+      // can pay from pays in all (the engine's `all`, the fees in) is priced, once.
+      else if (q.why === 'own-short' && q.all && S.maxed && !S.maxAgain && S.fixed === 'pay' && big(q.all) < big(atoms)) { S.maxAgain = true; allOf = big(q.all) }
       else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
         : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
@@ -398,6 +420,11 @@ export function mountUserComposer (ctx) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
     } finally { clearTimeout(longTimer); S.busy = false; S.pricingLong = false; closeProgress(); paintTicket() }
+    if (allOf != null) {
+      S.amount = ctx.fmtAtoms(allOf, prec(S.pay))
+      const i = ctx.root.querySelector('#ucAmount'); if (i) i.value = S.amount
+      return review()
+    }
   }
 
   // ---- The price's progress ----
