@@ -45,15 +45,23 @@ test('the wallet\'s own money moved in stays in the figure: a board is not arriv
   assert.equal(arrivingByAsset(places).get(X), 500n)
 })
 
-test('the page counts a payment received on the chain in what can be sent and traded, and its History row says no wait', () => {
-  // No figure leaves out what was received on the chain, and no row calls it arriving.
-  assert.ok(!/chainArriving|chainDeposits|_depositWhen/.test(html), 'the page no longer keeps deposits on the chain out of what can be spent')
+test('the page counts a payment received on the chain in what can be sent and traded once it is in a block; until then it is arriving, marked', () => {
   const body = (name) => { const i = html.search(new RegExp('\\nfunction ' + name + '\\(')); return html.slice(i, html.indexOf('\n}', i + 1)) }
-  assert.match(body('availableFor'), /return BigInt\(b\[hex\]\|\|0n\);/)
+  // Only a payment from someone else that is not in a block yet stays out of what can be spent.
+  assert.match(body('chainDeposits'), /if\(u\.height\(\)!=null\) continue;/)
+  assert.match(body('chainDeposits'), /if\(own\.has\(id\)\) continue;/)
+  assert.ok(!/boardable/.test(body('chainDeposits')), 'a coin in a block counts whether or not it can be moved in')
+  assert.match(body('availableFor'), /chainUnconfirmed\(\)\.get\(hex\)/)
   assert.match(body('userHeld'), /chainHeld\(a\)/)
   assert.match(body('assetFigure'), /chainHeld\(v\)/)
+  // Said: arriving under the figure, and marked in History, in about a minute.
+  assert.match(html, /arrivingIn \+= chainUnconfirmed\(\)\.get\(kind\)/)
+  assert.match(html, /_depositTx\.has\(txid\)\) mid\.appendChild\(el\('div','sub unconf', DEFAULT_WORDS\.rowArriving\+' · '\+DEFAULT_WORDS\.arrivingSoon\)\)/)
   // The words: how long, never "try again", no rail named.
   assert.equal(DEFAULT_WORDS.bringIn(5), 'Goes through within about 5 minutes. Keep this page open.')
-  assert.ok(!/try again/i.test(DEFAULT_WORDS.bringIn(5) + DEFAULT_WORDS.bringLate))
-  for (const w of [DEFAULT_WORDS.bringIn(5), DEFAULT_WORDS.bringLate]) assert.ok(!/ark|arca|leaf|board|round|operator|lightning|chain/i.test(w), w)
+  const words = [DEFAULT_WORDS.bringIn(5), DEFAULT_WORDS.bringLate, DEFAULT_WORDS.bringRefused, DEFAULT_WORDS.feeMoved, DEFAULT_WORDS.feeAtMost('1', 'X', '')]
+  for (const w of words) {
+    assert.ok(!/try again|something went wrong/i.test(w), w)
+    assert.ok(!/ark|arca|leaf|board|round|operator|lightning|chain|limit/i.test(w), w)
+  }
 })

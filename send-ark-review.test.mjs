@@ -40,7 +40,8 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   assert.equal(DEFAULT_WORDS.noFee, 'No fees');
   // A payment in the tree shows the fee the library quotes for it (`send_quote`): what it keeps back
   // for its transfer, "No fees" only over a channel, and "a little" from a library that quotes none.
-  assert.match(fn('treeSendReview'), /const kv = \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\) : DEFAULT_WORDS\.noFee\]\]/);
+  // Moved in first (`bring`), the most the fees can be, said so ("At most").
+  assert.match(fn('treeSendReview'), /const kv = \[\[DEFAULT_WORDS\.feeLabel, fee == null \? DEFAULT_WORDS\.feeKeptSome\s+: bring \? DEFAULT_WORDS\.feeAtMost\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\)\s+: fee > 0n \? DEFAULT_WORDS\.feeKept\(fmtAtoms\(fee, m0\.precision\|\|0\), m0\.ticker, feeValue\) : DEFAULT_WORDS\.noFee\]\]/);
   // Refused for the channel side, the fee is read from the refusal, and its value shown beside it.
   assert.match(fn('treeSendReview'), /: freeing \? closing\.fee : null;/);
   assert.match(fn('treeSendReview'), /feeValue = feeValueStr\(r\.asset, fee\);/);
@@ -48,14 +49,17 @@ test('every payment out of the Ark shows its fee line, "No fees" when there is n
   assert.match(fn('feeValueStr'), /if\(rv\.v < 0\.01\) return '< 0\.01 ' \+ refName\(rv\.ref\);/);
   assert.match(fn('feeValueStr'), /maximumFractionDigits:2/);
   // What leaves the wallet, the fee on top of the amount; no "the recipient gets the whole amount".
-  assert.match(fn('treeSendReview'), /if\(fee != null && fee > 0n\) kv\.push\(\[DEFAULT_WORDS\.totalLabel, fmtAtoms\(atoms \+ fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker\]\);/);
+  assert.match(fn('treeSendReview'), /if\(fee != null && fee > 0n\) kv\.push\(\[DEFAULT_WORDS\.totalLabel, bring \? DEFAULT_WORDS\.feeAtMost\(fmtAtoms\(atoms \+ fee, m0\.precision\|\|0\), m0\.ticker, ''\)\s+: fmtAtoms\(atoms \+ fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker\]\);/);
   assert.ok(!('feeWhy' in DEFAULT_WORDS));
   assert.match(fn('treeSendReview'), /leavesApi\.sendQuote\(r\.addr\.trim\(\), atoms, r\.asset\)/);
   assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX'), '0.00000704 EURX');
   assert.equal(DEFAULT_WORDS.feeKept('0.00000704', 'EURX', '< 0.01 USD'), '0.00000704 EURX (< 0.01 USD)');
   assert.ok(!/a little/i.test(DEFAULT_WORDS.feeKeptSome), 'no "a little" left to guess');
-  for (const name of ['assetLightningReview', 'offboardReview'])
-    assert.match(fn(name), /kv: \[\[DEFAULT_WORDS\.feeLabel, (settling \? DEFAULT_WORDS\.feeKeptSome : )?fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee\]\]/, name);
+  assert.match(fn('assetLightningReview'), /kv: \[\[DEFAULT_WORDS\.feeLabel, fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee\]\]/);
+  assert.match(fn('offboardReview'), /: settling \? DEFAULT_WORDS\.feeKeptSome : fee>0n \? fmtAtoms\(fee, m0\.precision\|\|0\) \+ ' ' \+ m0\.ticker : DEFAULT_WORDS\.noFee;/);
+  // A payment moved in first: the most its fees can be, and the total, never "A small part of what you send".
+  assert.match(fn('offboardReview'), /const feeRow = bring \? DEFAULT_WORDS\.feeAtMost\(/);
+  assert.match(fn('offboardReview'), /if\(bring\) kv\.push\(\[DEFAULT_WORDS\.totalLabel, DEFAULT_WORDS\.feeAtMost\(fmtAtoms\(atoms \+ bound/);
   assert.ok(!/kv: fee>0n \?/.test(html), 'no review hides a zero fee');
   assert.ok(DEFAULT_WORDS.maxArkElsewhere.length > 0);
 });

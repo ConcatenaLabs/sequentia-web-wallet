@@ -11,7 +11,7 @@
 //   node --test chain-trade.test.mjs
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createEngine, USER_WORDS, tradeStateWord } from './user-trade.js'
+import { createEngine, USER_WORDS, tradeStateWord, costLine } from './user-trade.js'
 import { planPlaceOrder, buildCovenantTerms } from './covenant-order.js'
 
 const X = 'aa'.repeat(31) + '01', Y = 'bb'.repeat(31) + '02'
@@ -77,14 +77,17 @@ function standIn ({ onchain = 3000000n, rateNum = 4n, rateDen = 3n } = {}) {
     return {}
   }
   s.store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
-  s.wants = []
-  s.bringIn = async (asset, want) => {
-    s.brings++; s.wants.push(want)
+  s.wants = []; s.opts = []; s.refuse = null
+  s.bringIn = async (asset, want, opts) => {
+    s.brings++; s.wants.push(want); s.opts.push(opts)
+    if (s.refuse) return { refused: s.refuse }
     if (asset !== X || board() || s.chain <= 0n) return board() ? { already: true } : null
     s.coins.push({ leaf_id: 'b1', asset: X, value: String(s.chain - 39n), state: 'pending', kind: 'board' })
-    s.chain = 0n
-    return { boarded: true }
+    s.chain = 0n; s.movedAt = s.t
+    return { boarded: { fee: '39' } }
   }
+  // The move's fee, as the wallet keeps it (leaves.js movedFees).
+  s.movedFees = (asset, since) => (asset === X && s.movedAt != null && s.movedAt >= since ? 39n : 0n)
   s.credit = () => { board().state = 'live' }
   s.rollBack = () => { board().state = 'pending' }
   // What the page tells the engine: the balance (the chain, and what the tree holds), and the chain.
@@ -95,7 +98,7 @@ function standIn ({ onchain = 3000000n, rateNum = 4n, rateDen = 3n } = {}) {
 
 const admitted = (sources = ['leaf-maker']) => () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources }] } } }, genesis: 'g' })
 const engineOf = (s, extra = {}) => createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(), store: s.store,
-  sleep: async () => {}, quoteFirmMs: 2000, now: () => s.t, held: s.held, chain: s.chainDep, bringIn: s.bringIn, ...extra })
+  sleep: async () => {}, quoteFirmMs: 2000, now: () => s.t, held: s.held, chain: s.chainDep, bringIn: s.bringIn, movedFees: s.movedFees, ...extra })
 
 async function confirmed (s, eng, amount = '400000') {
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount })
@@ -220,4 +223,68 @@ test('more than the balance: said at once, nothing moved in', async () => {
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '5000000' })
   assert.deepEqual([q.ok, q.why], [false, 'part-ready'])
   assert.equal(s.brings, 0)
+})
+
+test('B1: the ticket is all-in: its fee line is the most the fees can be, and the move\'s fee is inside what it pays', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { q, rec } = await confirmed(s, eng)
+  const line = costLine(q.ticket.fees, (a, n) => `${n} ${a === X ? 'X' : 'Y'}`, X)
+  console.log('fee line the person reads:', line)
+  assert.notEqual(line, USER_WORDS.noFees, 'never "No fees" while the move and the trade pay fees')
+  assert.equal(line, 'Fees at most 2000 X, included above')
+  await tick()
+  s.credit(); s.t += 30_000
+  const r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'sent')
+  // The record says what the wallet paid: the trade and the move's fee, never more than the ticket.
+  const paidTrade = BigInt(s.accepts[0].split(':')[2])
+  console.log('trade paid', String(paidTrade), '+ move fee 39 =', r.ticket.amountIn, 'against a ticket of', q.ticket.amountIn, '; fees', JSON.stringify(r.ticket.fees))
+  assert.ok(paidTrade + 39n <= BigInt(q.ticket.amountIn), `the trade paid ${paidTrade} and the move 39 against a ticket of ${q.ticket.amountIn}`)
+  assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'the record pays no more than the ticket, the move\'s fee counted')
+  assert.ok(r.ticket.fees.some((f) => f.asset === X && f.atoms === '39'), 'the move\'s fee is in the record\'s fees')
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut))
+})
+
+test('B2: the move is asked once per trade, and ends once the trade no longer waits for it', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  // A move that never answers while the trade waits (its coin not in a block yet).
+  let release
+  s.bringIn = async (asset, want, opts) => { s.brings++; s.opts.push(opts); await new Promise((r) => { release = r }); return null }
+  const e2 = engineOf(s, { bringIn: s.bringIn })
+  const { rec } = await confirmed(s, e2)
+  for (let i = 0; i < 5; i++) { s.t += 10_000; await e2.advance(recOf(e2, rec)) }
+  assert.equal(s.brings, 1, 'one ask, however many follows')
+  assert.equal(s.opts[0].stop(), false, 'the trade still waits for it')
+  assert.equal(s.opts[0].until, rec.settleSince + 5 * 60_000, 'it is asked for as long as the ticket says, no longer')
+  s.t += 6 * 60_000
+  const r = await e2.advance(recOf(e2, rec))
+  assert.equal(r.state, 'returned')
+  assert.equal(s.opts[0].stop(), true, 'the move stops asking once the trade has left its wait')
+  release()
+  void eng
+})
+
+test('B2: once the trade went ahead, the move it asked for is told to stop', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  await tick()
+  s.credit(); s.t += 30_000
+  assert.equal((await eng.advance(recOf(eng, rec))).state, 'sent')
+  assert.equal(s.opts[0].stop(), true)
+})
+
+test('a move the network refuses returns the trade at once, with words, nothing traded', async () => {
+  const s = standIn()
+  s.refuse = 'the board amount is below the smallest leaf'
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  await tick(); await tick()
+  const r = recOf(eng, rec)
+  assert.equal(r.state, 'returned')
+  assert.equal(tradeStateWord(r), USER_WORDS.returnedRefused)
+  assert.ok(!/try again|something went wrong/i.test(USER_WORDS.returnedRefused))
+  assert.equal(s.accepts.length, 0)
 })

@@ -107,6 +107,8 @@ export const ADDRESS_KEY = 'swk.leaves.address'      // + '.' + tag: the leaf ad
 export const NODE_PASSWORD_KEY = 'swk.leaves.nodePassword'
 export const CODE_KEY = 'swk.leaves.code'            // + '.' + tag: the receive code default mode shows
 export const BOARDS_KEY = 'swk.leaves.boardSpent'   // + '.' + tag: what a board just made spent on the chain
+export const MOVES_KEY = 'swk.leaves.moves'   // + '.' + tag: each board's fee by asset, for an hour (bringIn)
+const MOVES_KEPT_MS = 60 * 60_000
 export const RESTORED_KEY = 'swk.leaves.restored'    // + '.' + tag: the join's restore has run to its end
 // A first restore the operator did not answer is asked again this often, until it answers.
 export const RESTORE_RETRY_MS = 30_000
@@ -1318,7 +1320,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // goes into the next round now, not after the timer's first turn.
     if (!S.needTimer) needSoon(0)
     await new Promise((r) => setTimeout(r, 0))   // the page paints what it holds first
-    if (S.busy || S.asked || reviewing()) { S.upkeepLater = true; if (!S.asked) upkeepSoon(1000); return }
+    // A person's payment waiting for its money to be moved in (bringIn) goes first too: upkeep runs
+    // once it is done.
+    if (S.busy || S.asked || reviewing() || S.bringWaits) { S.upkeepLater = true; if (!S.asked && !S.bringWaits) upkeepSoon(1000); return }
     // In user mode on the page's operator, upkeep also leaves room between the steps of what a
     // person asked (a trade's quote asks the library several times, with the network between).
     if (!dev() && pinned()) { const quiet = Math.min(now() - (S.lastAsked || 0), now() - (S.openedAt || 0)); if (quiet < MAILBOX_QUIET_MS) { S.upkeepLater = true; upkeepSoon(MAILBOX_QUIET_MS - quiet + 500); return } }
@@ -1452,6 +1456,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         const v = await boardAll(run, c)
         if (v) {
           boarded = true; S.lastBoard = { at: now(), asset: c.asset, value: v }
+          noteMove(c.asset, v)
           // Until the page's reading of the chain shows the board's coins spent, they are taken off
           // it: the board's leaf counts as arriving from now (onchainLessBoards).
           if (v.spent) keepBoard(c.asset, boardSpent(c.onchain, v.spent, now(), v.txid))
@@ -1471,61 +1476,118 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- money on the chain moved in because a person needs it there now ----
   // A payment or a trade that needs what the wallet holds of an asset on the chain: boarded at once,
   // as a person asked (never put off for the person's own waiting), whole less its fee, as upkeep
-  // would. The library reads a coin on the chain only once it is in a block, so a coin still in
-  // the mempool is boarded once it is, the wallet asking again every BRING_EVERY_MS until `until`:
-  // with `want`, only once the library reads at least that much of it on the chain (what the
+  // would. The library reads a coin on the chain only once it is in a block, so a coin still in the
+  // mempool is boarded once it is: the wallet reads the chain again every BRING_EVERY_MS until
+  // `until`, and boards only once the library reads at least `want` atoms of it there (what the
   // payment needs from there), so a coin read first is never boarded alone while the one the
   // payment needs is still on its way.
-  // One move per asset at a time: a second ask meanwhile answers the first one's.
-  // -> { boarded } (the library's answer), { already: true } (nothing left on the chain to board:
-  // upkeep or an earlier ask boarded it), or null (still nothing to board at `until`).
+  // Each asker is answered on its own terms (`want`, `until`, `since`, `stop`); the board itself is
+  // made once at a time per asset, and an asker whose coins another ask or upkeep boarded meanwhile
+  // is answered { already }.
+  // While it waits, only the reads of the chain take the wallet (never as a person's ask), so the
+  // mailbox is still read; the wallet's own upkeep waits for it (S.bringWaits). Never within a
+  // minute of the page's own on-chain payment (ctx.onchainQuiet), as for upkeep's boards: both
+  // spend the same keys' coins.
+  // -> { boarded } (the library's answer, with its `fee`), { already: true } (a move of the asset
+  // made since `since`, or a board still pending: nothing of it left to board), { refused } (the
+  // library would not board it, or nothing is left after the fee: not asked again), or null
+  // (`stop()` became true, or still nothing to board at `until`).
   // `final`: resolves only once what was moved in is final too (the library's settle_first), for a
   // payment the library makes only from final coins (an offboard).
   const BRING_EVERY_MS = 10_000
-  function bringIn (asset, { until = now() + 10 * 60_000, final = false, want = 0n } = {}) {
+  function movesKept () {
+    try { return JSON.parse(ctx.store.getItem(tagged(MOVES_KEY, tag())) || '{}') || {} } catch { return {} }
+  }
+  // Each board's fee, by asset, for an hour: what a payment that asked for the move counts it paid.
+  function noteMove (asset, b) {
+    const all = movesKept()
+    const t = now()
+    const list = (all[asset] || []).filter((m) => t - Number(m.at) < MOVES_KEPT_MS)
+    list.push({ at: t, fee: String(b && b.fee != null ? b.fee : 0), spent: String(b && b.spent != null ? b.spent : 0), txid: (b && b.txid) || null })
+    all[asset] = list.slice(-10)
+    try { ctx.store.setItem(tagged(MOVES_KEY, tag()), JSON.stringify(all)) } catch {}
+  }
+  function movesSince (asset, since) {
+    return (movesKept()[asset] || []).filter((m) => Number(m.at) >= Number(since || 0))
+  }
+  async function bringIn (asset, { until = now() + 10 * 60_000, final = false, want = 0n, since = now(), stop = null } = {}) {
     if (final) {
-      return bringIn(asset, { until, want }).then(async (v) => {
-        if (!v) return v
-        await asking(() => roundWait(() => waitSettled({ asset })))
-        return v
-      })
+      const v = await bringIn(asset, { until, want, since, stop })
+      if (!v || v.refused) return v
+      await asking(() => roundWait(() => waitSettled({ asset })))
+      return v
     }
-    const going = S.bringing || (S.bringing = new Map())
-    if (going.has(asset)) return going.get(asset)
-    const p = (async () => {
-      while (S.open && !S.stopped) {
-        const v = await asking(async () => {
+    const locks = S.bringLocks || (S.bringLocks = new Map())
+    const gone = () => { try { return !!(stop && stop()) } catch { return false } }
+    S.bringWaits = (S.bringWaits || 0) + 1
+    try {
+      // What the moves made since this ask began took off the chain: an ask whose `want` they cover
+      // (another ask's move, or upkeep's) is answered { already }; otherwise it waits for the rest.
+      const moved = () => movesSince(asset, since).reduce((n, m) => n + big(m.spent), 0n)
+      const covered = () => { const m = moved(); return m > 0n && m >= big(want) }
+      const rest = () => { const r = big(want) - moved(); return r > 0n ? r : 0n }
+      while (S.open && !S.stopped && !gone()) {
+        if (covered()) return { already: true }
+        let quiet = false
+        try { quiet = !!(ctx.onchainQuiet && ctx.onchainQuiet()) } catch {}
+        let c0 = null, pending = 0n
+        if (!quiet) {
           while (S.busy) await sleep(50)
-          await coverReceiveKeys()
-          try { await run('sync') } catch (e) { log('[leaves] sync before moving in: ' + (e && e.message)) }
-          try { S.balance = await run('balance') } catch (e) { log('[leaves] balance before moving in: ' + (e && e.message)); return null }
-          const c0 = boardCandidates(S.balance, S.info).find((x) => x.asset === asset)
-          if (c0 && c0.onchain < big(want)) return null
-          if (!c0) {
-            // Nothing of it on the chain the library reads: boarded already, or not in a block yet.
-            const pending = ((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).pending
-            return big(pending) > 0n ? { already: true } : null
-          }
-          let room = null; try { room = ctx.boardRoom ? ctx.boardRoom(asset) : null } catch {}
-          const c = room != null && room < c0.onchain ? { ...c0, onchain: room } : c0
-          const b = await boardAll(run, c)
-          if (!b) return null
-          S.lastBoard = { at: now(), asset, value: b }
-          if (b.spent) keepBoard(asset, boardSpent(c.onchain, b.spent, now(), b.txid))
-          log(`[leaves] moved in ${asset.slice(0, 8)} for a person: boarded ${b.value || ''}`)
-          emit('leafArrived', { asset, value: String(c.onchain), kind: 'board' })
-          try { await reload() } catch {}
-          if (ctx.onBoarded) try { ctx.onBoarded() } catch {}
-          return { boarded: b }
-        }).catch((e) => { log('[leaves] moving in refused: ' + (e && e.message)); return null })
-        if (v) return v
+          S.busy = true
+          try {
+            await coverReceiveKeys()
+            S.balance = await run('balance')
+          } catch (e) { log('[leaves] balance before moving in: ' + (e && e.message)) } finally { S.busy = false }
+          c0 = boardCandidates(S.balance, S.info).find((x) => x.asset === asset) || null
+          pending = big(((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).pending)
+        }
+        if (c0 && c0.onchain >= rest()) {
+          // One board of the asset at a time: a second asker waits for the first, then reads again.
+          while (locks.has(asset)) await locks.get(asset).catch(() => {})
+          if (covered()) return { already: true }
+          let done
+          const p = new Promise((resolve) => { done = resolve })
+          locks.set(asset, p)
+          try {
+            const v = await asking(async () => {
+              while (S.busy) await sleep(50)
+              S.balance = await run('balance')
+              const c1 = boardCandidates(S.balance, S.info).find((x) => x.asset === asset)
+              if (!c1 || c1.onchain < rest()) return null
+              let room = null; try { room = ctx.boardRoom ? ctx.boardRoom(asset) : null } catch {}
+              const c = room != null && room < c1.onchain ? { ...c1, onchain: room } : c1
+              const b = await boardAll(run, c)
+              if (!b) return { refused: 'nothing to board after the fee' }
+              S.lastBoard = { at: now(), asset, value: b }
+              noteMove(asset, b)
+              if (b.spent) keepBoard(asset, boardSpent(c.onchain, b.spent, now(), b.txid))
+              log(`[leaves] moved in ${asset.slice(0, 8)} for a person: boarded ${b.value || b.amount || ''}, fee ${b.fee || '?'}`)
+              emit('leafArrived', { asset, value: String(c.onchain), kind: 'board' })
+              try { await reload() } catch {}
+              if (ctx.onBoarded) try { ctx.onBoarded() } catch {}
+              return { boarded: b }
+            }).catch((e) => {
+              // The network out of reach for a moment: read again at the next turn. Any other answer
+              // is the library's refusal, said at once, never asked again for minutes.
+              if (['unreachable', 'node', 'io'].includes(e && e.kind)) { log('[leaves] moving in: ' + (e && e.message)); return null }
+              return { refused: String((e && e.message) || e) }
+            })
+            if (v && v.refused) { log('[leaves] moving in refused: ' + v.refused); return v }
+            if (v) return v
+          } finally { locks.delete(asset); done() }
+        } else if (!c0 && !quiet && pending > 0n && !(big(want) > 0n)) {
+          // Nothing of it on the chain the library reads, none asked for in particular, and a board
+          // of it still pending: moved in.
+          return { already: true }
+        }
         if (now() >= until) return null
         await sleep(BRING_EVERY_MS)
       }
       return null
-    })().finally(() => going.delete(asset))
-    going.set(asset, p)
-    return p
+    } finally {
+      S.bringWaits--
+      if (!S.bringWaits && S.upkeepLater) upkeepSoon(0)
+    }
   }
 
   // The leaf wallet finds its on-chain coins by a gap of 20 unused keys past the last key it
@@ -2895,11 +2957,15 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     // Moves what the wallet holds of an asset on the chain in now, for a payment or a trade that
-    // needs it (bringIn): resolves once boarded, or with null when nothing could be by `until`.
+    // needs it (bringIn): resolves { boarded }, { already }, { refused }, or null when nothing could
+    // be by `until` or `stop()` said the asker no longer waits.
+    // `opts.want`: the atoms the payment needs from the chain (it waits until the library reads them);
+    // `opts.since`: a move made since then counts as this one's.
     bringIn: (asset, opts) => (S.open && !dev() ? bringIn(asset, opts) : Promise.resolve(null)),
-    // `opts.want`: the atoms the payment needs from the chain (it waits until the library reads them).
-    // Whether a move in of the asset runs now.
-    bringing: (asset) => !!(S.bringing && S.bringing.has(asset)),
+    // The fees of the moves in of an asset made since `since` (ms), in its atoms.
+    movedFees: (asset, since) => movesSince(asset, since).reduce((n, m) => n + big(m.fee), 0n),
+    // Whether a person's payment waits for money to be moved in now.
+    bringing: () => (S.bringWaits || 0) > 0,
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
     // What a payment to a receive code would cost, paying nothing (the library's `send_quote`): its
     // route, its fee in the asset paid and the coins it gives up, or the payment's own refusal.

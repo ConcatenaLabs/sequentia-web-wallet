@@ -1859,7 +1859,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, arrivingRows, boardMinutes, roundMinutes, causeWhen, statedSeconds, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, codeRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
+import { DEFAULT_WORDS, arrivingRows, boardMinutes, roundMinutes, causeWhen, statedSeconds, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, codeRoute, codeMost, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2974,6 +2974,9 @@ async function treeSendReview(r, onDone, note){
   const bring = !!r.bringIn && !devMode();
   let all = (leavesApi.leafAtoms(r.asset) || 0n) + onItsWay(r.asset);
   if(bring){ const more = chainMovable(r.asset) - bringMargin(r.asset); if(more > 0n) all += more; }
+  // More than any way covers (codeWay): the most that can go, the figure Max fills in, never the
+  // tree's part alone ("up to 0" over a balance held on the chain).
+  if(r.most != null && BigInt(r.most) > all) all = BigInt(r.most);
   if(atoms > all) throw new Error(DEFAULT_WORDS.sendUpTo(fmtAtoms(all, m0.precision||0), m0.ticker));
   const amt = fmtAtoms(atoms, m0.precision||0);
   // The fee is the library's (`send_quote`): what the payment keeps back for the fees of the
@@ -2983,8 +2986,10 @@ async function treeSendReview(r, onDone, note){
   // A payment the wallet's channel side would cover is quoted from the library's refusal: its fee,
   // and, when more is asked than can go once the fee is taken out, the review is for the most.
   let quote = null, freeing = false, refused = '', closing = null, settling = false;
-  // Moved in first: no quote yet (the library holds none of it until it is in), so the fee is the
-  // part it keeps back, shown once it is sent.
+  // Moved in first: no quote yet (the library holds none of it until it is in). The review shows the
+  // most the fees can be (the move's and the payment's: `bound`), and the payment keeps to it: once
+  // the money is in, it is quoted, and paid only when the move's fee and the quote's fit the bound.
+  const bound = bring ? bringMargin(r.asset) : null;
   if(!bring) try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
   catch(e){
     if(e && e.kind === 'in_channel'){ freeing = true; refused = String(e.message||''); closing = afterClose(e, atoms, refused); }
@@ -2995,12 +3000,15 @@ async function treeSendReview(r, onDone, note){
     const most = closing.most;
     if(most != null && most > 0n && most < atoms) return treeSendReview({...r, amtS: fmtAtoms(most, m0.precision||0)}, onDone, DEFAULT_WORDS.feeOutOfAll(m0.ticker));
   }
-  const fee = quote && quote.fee != null ? BigInt(quote.fee) : freeing ? closing.fee : null;
+  const fee = bring ? bound : quote && quote.fee != null ? BigInt(quote.fee) : freeing ? closing.fee : null;
   let feeValue = ''; try{ if(fee > 0n) feeValue = feeValueStr(r.asset, fee); }catch{}
   const kv = [[DEFAULT_WORDS.feeLabel, fee == null ? DEFAULT_WORDS.feeKeptSome
+    : bring ? DEFAULT_WORDS.feeAtMost(fmtAtoms(fee, m0.precision||0), m0.ticker, feeValue)
     : fee > 0n ? DEFAULT_WORDS.feeKept(fmtAtoms(fee, m0.precision||0), m0.ticker, feeValue) : DEFAULT_WORDS.noFee]];
-  // What leaves the wallet: the recipient gets the amount, the fee is on top of it.
-  if(fee != null && fee > 0n) kv.push([DEFAULT_WORDS.totalLabel, fmtAtoms(atoms + fee, m0.precision||0) + ' ' + m0.ticker]);
+  // What leaves the wallet: the recipient gets the amount, the fee is on top of it (at most so much,
+  // for a payment moved in first).
+  if(fee != null && fee > 0n) kv.push([DEFAULT_WORDS.totalLabel, bring ? DEFAULT_WORDS.feeAtMost(fmtAtoms(atoms + fee, m0.precision||0), m0.ticker, '')
+    : fmtAtoms(atoms + fee, m0.precision||0) + ' ' + m0.ticker]);
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv});
   const say = (t)=>{ const line=el('p','sub', t); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); };
   if(note) say(note);
@@ -3027,10 +3035,25 @@ async function treeSendReview(r, onDone, note){
       } }catch{} }, 1000);
       if(bring){
         st.innerHTML='<span class="spin"></span>' + bringLine;
-        // What is on the chain is moved in first; the payment then waits for the move to be final
-        // (the library's settle_first) and goes. Nothing moved in: nothing sent, said so.
-        const moved = await leavesApi.bringIn(r.asset, { want: bringWant(r.asset, atoms) }).catch((e)=>{ console.warn('[send] moving in:', e?.message??e); return null; });
-        if(!moved){ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} st.className='status err'; st.textContent=DEFAULT_WORDS.bringLate; ok.disabled=false; return; }
+        // What is on the chain is moved in first, for as long as the words say and no longer, and
+        // until it is final; the payment is then quoted, and goes only within the fee shown. Nothing
+        // moved in: nothing sent, said so.
+        const since = Date.now();
+        const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms), since, until: since + bringMinutes()*60_000 }).catch((e)=>{ console.warn('[send] moving in:', e?.message??e); return null; });
+        const stopped = (words)=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} st.className='status err'; st.textContent=words; ok.disabled=false; };
+        if(!moved){ stopped(DEFAULT_WORDS.bringLate); return; }
+        if(moved.refused){ console.warn('[send] moving in refused:', moved.refused); stopped(DEFAULT_WORDS.bringRefused); return; }
+        let q = null; try{ q = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }catch(e){ console.warn('[send] quote once moved in:', e?.message??e); }
+        const paid = (q && q.fee != null ? BigInt(q.fee) : null), movedFee = BigInt(leavesApi.movedFees ? leavesApi.movedFees(r.asset, since) : 0n);
+        console.log('[send] moved in; fees: move', String(movedFee), 'payment', String(paid), 'shown at most', String(bound));
+        if(paid == null || paid + movedFee > bound){
+          // The fee is not what was shown: nothing is sent, and the payment is shown again with its
+          // fee now (the money is in, so its quote is exact), to be confirmed or not.
+          clearInterval(tell); try{ leavesApi.holdReads(0); }catch{}
+          try{ await treeSendReview({ ...r, bringIn: false }, onDone, DEFAULT_WORDS.feeMoved); m.remove(); }
+          catch(err){ st.className='status err'; st.textContent=String(err?.message??err); ok.classList.add('hide'); }
+          return;
+        }
       }
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
@@ -3134,8 +3157,10 @@ async function offboardReview(r, onDone){
   // shown once it is sent, within the wallet's own bound, and it takes one settlement longer.
   // A library that answers it plainly says when it can go, never "can't be sent".
   // Part of it held on the chain, moved in first (`r.bringIn`, addressRoute 'bring-in'): no quote
-  // either; the payment goes once the move is final, one settlement later.
+  // yet; the review shows the most the fees can be (the move's and the payment's: `bound`). Once the
+  // move is final the payment is quoted, and made only on that quote and within the bound.
   const bring = !!r.bringIn && !devMode();
+  const bound = bring ? bringMargin(r.asset) : null;
   let q = null, settling = bring;
   if(!bring) try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }
   catch(e){
@@ -3148,7 +3173,11 @@ async function offboardReview(r, onDone){
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
   const round = leavesApi.roundInterval();
   const minutes = (bring ? bringMinutes() : 0) + arrivalMinutes(settling && round ? 2 * round : round, leavesApi.blockSeconds());
-  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, settling ? DEFAULT_WORDS.feeKeptSome : fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
+  const feeRow = bring ? DEFAULT_WORDS.feeAtMost(fmtAtoms(bound, m0.precision||0), m0.ticker, (()=>{ try{ return feeValueStr(r.asset, bound); }catch{ return ''; } })())
+    : settling ? DEFAULT_WORDS.feeKeptSome : fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee;
+  const kv = [[DEFAULT_WORDS.feeLabel, feeRow]];
+  if(bring) kv.push([DEFAULT_WORDS.totalLabel, DEFAULT_WORDS.feeAtMost(fmtAtoms(atoms + bound, m0.precision||0), m0.ticker, '')]);
+  const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv});
   { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
@@ -3156,9 +3185,22 @@ async function offboardReview(r, onDone){
     // While what it needs settles first, the wait says so.
     const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(bring) st.innerHTML='<span class="spin"></span>' + esc(DEFAULT_WORDS.arrivesWithin(minutes)); else if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; }catch{} }, 1000);
     if(bring){
-      // An offboard is made only from final coins: the move in is waited for until it is.
-      const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms, true) }).catch((e)=>{ console.warn('[offboard] moving in:', e?.message??e); return null; });
+      // An offboard is made only from final coins: the move in is waited for until it is, as long as
+      // the words say and no longer; then quoted, and made only within the fee shown.
+      const since = Date.now();
+      const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms, true), since, until: since + bringMinutes()*60_000 }).catch((e)=>{ console.warn('[offboard] moving in:', e?.message??e); return null; });
       if(!moved){ clearInterval(tell); st.className='status err'; st.textContent=DEFAULT_WORDS.bringLate; ok.disabled=false; return; }
+      if(moved.refused){ console.warn('[offboard] moving in refused:', moved.refused); clearInterval(tell); st.className='status err'; st.textContent=DEFAULT_WORDS.bringRefused; ok.disabled=false; return; }
+      try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }catch(e){ console.warn('[offboard] quote once moved in:', e?.message??e); q = null; }
+      const paid = q && q.fee ? BigInt(q.fee.amount||0) : null, movedFee = BigInt(leavesApi.movedFees ? leavesApi.movedFees(r.asset, since) : 0n);
+      console.log('[offboard] moved in; fees: move', String(movedFee), 'payment', String(paid), 'shown at most', String(bound));
+      if(paid == null || paid + movedFee > bound){
+        // Not the fee shown: nothing is sent; the payment is shown again with its fee now.
+        clearInterval(tell);
+        try{ await offboardReview({ ...r, bringIn: false, why: DEFAULT_WORDS.feeMoved }, onDone); m.remove(); }
+        catch(err){ st.className='status err'; st.textContent=String(err?.message??err); ok.classList.add('hide'); }
+        return;
+      }
     }
     let v;
     try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, ...(q ? { shown: q } : {}) }); }
@@ -3169,7 +3211,7 @@ async function offboardReview(r, onDone){
     const out = offboardOutcome(v, amt, m0.ticker, minutes, leavesApi.blockSeconds());
     const id = v && v.offboard ? String(v.offboard) : null;
     // Settled first, the fee is the one the offboard answers (it was made on no quote).
-    let paid = fee; try{ if(!q && v && v.fee) paid = BigInt(v.fee.amount||0); }catch{}
+    let paid = q && q.fee ? BigInt(q.fee.amount||0) : fee; try{ if(!q && v && v.fee) paid = BigInt(v.fee.amount||0); }catch{}
     if(out.sent) try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms, fee: paid>0n ? { asset: r.asset, atoms: paid } : null, later: true, offboard: id, address }); }catch{}
     console.log('[offboard]', id, v && v.state, out.sent ? '' : 'already on its way');
     ok.classList.add('hide'); { const no=m.querySelector('button.ghost'); if(no) no.textContent='Close'; }
@@ -4487,6 +4529,8 @@ function siteDeps(){
       try{ if(leavesApi && leavesApi.isOpen()) for(const h of leavesApi.leafAssets()){ const n = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n); if(n > 0n) leaves[h] = n.toString(); } }catch{}
       let assets = {};
       try{ assets = balObj(); }catch{}
+      // A payment to the address not in a block yet is in no figure the wallet shows (chainDeposits).
+      try{ if(!devMode()) for(const [h, v] of chainUnconfirmed()){ const n=BigInt(assets[h]||0)-v; assets[h]=(n>0n?n:0n).toString(); } }catch{}
       // What a board just took off the chain is in the tree already: counted there, not twice.
       try{ if(leavesApi && leavesApi.onchainLessBoards) for(const h of Object.keys(assets)) assets[h]=leavesApi.onchainLessBoards(h, assets[h]).toString(); }catch{}
       // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
@@ -5392,7 +5436,9 @@ function initUserComposer(){
     // Money held on the chain that no order on the chain takes: moved in first, then traded, the
     // ticket saying how long (default mode only: developer mode moves nothing by itself).
     chain: (a)=> devMode() ? null : ({ atoms: chainHeld(a), movable: chainMovable(a), margin: bringMargin(a), minutes: bringMinutes() }),
-    bringIn: (a, want)=> (leavesApi && !devMode() && leavesApi.bringIn) ? leavesApi.bringIn(a, { want: want || 0n }) : null,
+    bringIn: (a, want, o={})=> (leavesApi && !devMode() && leavesApi.bringIn) ? leavesApi.bringIn(a, { want: want || 0n, until: o.until, since: o.since, stop: o.stop }) : null,
+    // The fees of the moves in made since a trade was confirmed: in what it paid (the ticket is all-in).
+    movedFees: (a, since)=> (leavesApi && leavesApi.movedFees) ? leavesApi.movedFees(a, since) : 0n,
     // Coins an open refresh plan keeps are freed for a trade in the wallet's next round.
     release: (a, leaves)=> leavesApi ? leavesApi.releaseFor(a, leaves) : null,
     // A trade that brought coins in: the balance, and so the Trade tab's Pay list, read again.
@@ -7866,10 +7912,34 @@ let _onchainSeen = null;   // the on-chain balance the last sync read, to board 
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
 function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkPays() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
-  const b=balObj(); return BigInt(b[hex]||0n); }
+  const b=balObj(); return BigInt(b[hex]||0n) - (chainUnconfirmed().get(hex) || 0n); }
+// Default mode: a payment someone else made to the wallet's address on the chain that is not in a
+// block yet. It is not the wallet's until it is (its sender can still replace it), so it is in no
+// figure that can be spent: the balance says it is arriving, in about a minute (a block), and
+// History marks it so. Once in a block it counts, and can be sent and traded at once. The wallet's
+// own change counts at once. -> [{ asset, atoms, leaf_id: 'chain:txid:vout', txid }]
+function chainDeposits(){
+  const out=[];
+  if(!wollet || devMode()) return out;
+  const own=new Set();
+  try{ for(const t of wollet.transactions()){ if(Object.values(t.balance().toJSON()).some(v=>BigInt(v)<0n)) own.add(t.txid().toString()); } }catch{}
+  try{ for(const u of wollet.utxos()){
+    if(u.height()!=null) continue;
+    const op=u.outpoint(), id=op.txid().toString();
+    if(own.has(id)) continue;
+    const st=u.unblinded();
+    out.push({ asset:st.asset().toString(), atoms:BigInt(st.value()), leaf_id:'chain:'+id+':'+op.vout(), txid:id });
+  } }catch{}
+  return out;
+}
+function chainUnconfirmed(){
+  const m=new Map();
+  for(const d of chainDeposits()) m.set(d.asset,(m.get(d.asset)||0n)+d.atoms);
+  return m;
+}
 // Default mode: what the wallet holds of an asset on the chain, which a payment or a trade can use
 // at once (paid there, or moved in first): the page's reading, less what a board just took off it.
-// A payment received on the chain counts from the moment the wallet sees it, as the balance shows it.
+// A payment received on the chain counts from the moment it is in a block (chainDeposits).
 function chainHeld(hex){
   let n = availableFor(hex);
   try{ if(hex!=='BTC' && leavesApi && leavesApi.onchainLessBoards) n = leavesApi.onchainLessBoards(hex, n); }catch{}
@@ -8065,6 +8135,8 @@ function renderBalance(){
     // asset's row never reads 0 while one is on its way.
     // (Once the library's places are read, what is on its way is in no figure: onItsWay.)
     let arrivingIn = 0n; try { if(kind!=='BTC' && leavesApi && !devMode()) arrivingIn = (leavesApi.arriving(kind) || 0n) + onItsWay(kind); } catch {}
+    // A payment to the address not in a block yet: arriving, in about a minute (chainDeposits).
+    try { if(kind!=='BTC' && !devMode()) arrivingIn += chainUnconfirmed().get(kind) || 0n; } catch {}
     if(!alwaysShow && totalAtoms <= 0n && arrivingIn <= 0n) return;
     const amt=(x)=> known ? fmtAmount(x, precision) : (BigInt(x).toString()+' atoms');
     const a=el('div');
@@ -8567,12 +8639,17 @@ const _lnPassedOver = new Set();
 // what is on the chain moved in first (`bringIn`), when there is no address or the amount needs both.
 function codeWay(full, asset, atoms, address){
   if(atoms != null && atoms > 0n && !devMode() && !isOampAsset(asset) && asset !== 'BTC'){
-    let way = 'tree';
-    try{ way = codeRoute({ amount: atoms, tree: (leavesApi.leafAtoms(asset)||0n) - (leavesApi.arriving(asset)||0n), onItsWay: onItsWay(asset),
-      chain: chainHeld(asset), movable: chainMovable(asset), margin: feeMarginAtoms(asset), moveMargin: bringMargin(asset), address: !!address }); }
-    catch(e){ console.warn('[send] route:', e?.message??e); }
+    let way = 'tree', most = null;
+    try{
+      const at = { tree: (leavesApi.leafAtoms(asset)||0n) - (leavesApi.arriving(asset)||0n), onItsWay: onItsWay(asset),
+        chain: chainHeld(asset), movable: chainMovable(asset), margin: feeMarginAtoms(asset), moveMargin: bringMargin(asset), address: !!address };
+      way = codeRoute({ amount: atoms, ...at });
+      // Nothing covers it: the most that can go (what Max fills in), which the review's refusal names.
+      if(way === 'tree' && atoms > at.tree + at.onItsWay) most = codeMost(at);
+    }catch(e){ console.warn('[send] route:', e?.message??e); }
     if(way === 'chain' && address) return { dest: address, byAddress: true };
     if(way === 'bring-in') return { dest: full, byAddress: false, bringIn: true };
+    if(most != null) return { dest: full, byAddress: false, most };
   }
   return { dest: full, byAddress: false };
 }
@@ -9250,11 +9327,10 @@ async function fillMax(r){
       const codeInTree=!!code && !!leavesApi.treeRoute(code);
       const onChain=codeInTree && others===0n ? chainHeld(hex) : 0n;
       if(onChain > 0n){
-        const inT=tree + onItsWay(hex), mov=chainMovable(hex);
+        const inT=tree + onItsWay(hex);
         let c=null; try{ c=readPayCode(typed); }catch{}
-        const fromChain=c && c.address ? onChain - feeMarginAtoms(hex) : 0n;
-        const together=mov > 0n ? inT + mov - bringMargin(hex) : 0n;
-        const best=[fromChain, together, inT].reduce((a,b)=> b>a ? b : a, 0n);
+        // The same figure a payment of more is refused with (codeWay).
+        const best=codeMost({ tree, onItsWay: onItsWay(hex), chain: onChain, movable: chainMovable(hex), margin: feeMarginAtoms(hex), moveMargin: bringMargin(hex), address: !!(c && c.address) });
         if(best > 0n && best > inT){
           const v=fmtAtoms(best, m.precision).replace(/,/g,'');
           if(amt._refMode){ const rv=refValue(hex, best); amt.value = rv ? String(Math.floor(rv.v*1e8)/1e8) : v; } else amt.value=v;
@@ -10490,7 +10566,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     for(const r of rows){
       let atoms=null; if(!isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{} }
       const d = payCodeRoute(r.addr, r.asset, atoms);
-      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn;
+      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn; r.most = d.most ?? null;
     }
     const byAddressNote = (btc) => { const w = rows.find(r=>r.byAddress); if(!w) return [];
       const arrives = btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock;
@@ -10950,6 +11026,8 @@ function renderHistory(){
   // that is still arriving says so itself. Each line's first sighting is kept for the wallet, so a
   // line past its time says it is taking longer.
   let arrivingNow=[]; try{ if(leavesApi && leavesApi.arrivingPayments) arrivingNow=leavesApi.arrivingPayments(); }catch{}
+  // A payment to the address not in a block yet is marked arriving, in about a minute.
+  _depositTx=new Set(chainDeposits().map(d=>d.txid));
   const seenKey='swk.arrivingSeen.'+walletTag(), nowMs=Date.now();
   let seen={}; try{ seen=JSON.parse(localStorage.getItem(seenKey)||'{}')||{}; }catch{}
   const ids=new Set(arrivingNow.map(a=>a.leaf_id).filter(Boolean));
@@ -11044,8 +11122,8 @@ function renderHistory(){
     if(dropped){}
     else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
     // Default mode: a payment received on the chain is in the balance, and can be sent and traded,
-    // from the moment the wallet sees it: its row says nothing of a wait.
-    else if(!devRows){}
+    // from the moment it is in a block; until then its row says it is arriving, and when.
+    else if(!devRows){ if(_depositTx.has(txid)) mid.appendChild(el('div','sub unconf', DEFAULT_WORDS.rowArriving+' · '+DEFAULT_WORDS.arrivingSoon)); }
     else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -11109,7 +11187,7 @@ async function refreshBtcArkHistory(){
 // <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
 // What default mode shows as arriving, and when in words, as the last history drawing read it: by
 // leaf id, and the deposits on the chain by transaction.
-let _arrivingWhen=new Map();
+let _arrivingWhen=new Map(), _depositTx=new Set();
 function instantItem(r){
   const metaOf=(h)=> h==='BTC' ? { ticker:'BTC', precision:8 } : assetMeta(h);
   const fmtLeg=(l)=>{ const m=metaOf(l.asset), a=BigInt(l.atoms); return fmtAtoms(a<0n?-a:a, m.precision)+' '+m.ticker; };

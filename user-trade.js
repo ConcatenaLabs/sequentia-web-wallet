@@ -49,10 +49,16 @@
 //                                 minutes (how long moving it in takes) }; optional: with it and
 //                                 bringIn, money on the chain that no fill on the chain takes is
 //                                 moved in first and then traded, the ticket saying how long
-//   bringIn(asset, want)       -> moves what the wallet holds of an asset on the chain in, by itself
+//   bringIn(asset, want, opts) -> moves what the wallet holds of an asset on the chain in, by itself
 //                                 (default mode boards it now, as a person asked), once at least
-//                                 `want` atoms of it are there to move; asked again by the trade
-//                                 while it waits; optional
+//                                 `want` atoms of it are there to move; `opts`: { until (ms), stop()
+//                                 (true once the trade no longer waits for it) }; resolves with
+//                                 { boarded }, { already }, { refused } or null (nothing by
+//                                 `until`); asked once per trade, and again only after a reload;
+//                                 optional
+//   movedFees(asset, since)    -> the fees, in atoms of the asset, of the moves in of it made since
+//                                 `since` (ms): a trade paid with money moved in counts them in what
+//                                 it pays; optional (none counted)
 //   prepare(asset)             -> asks the wallet to make an asset held but not payable ready (default
 //                                 mode boards it); optional
 //   release(asset, leaves)     -> asks the wallet to free `leaves`, live coins of `asset` kept by an open
@@ -129,6 +135,8 @@ export const USER_WORDS = Object.freeze({
   fees: 'Fees',
   included: 'included above',
   noFees: 'No fees',
+  // A ticket whose fees are known only once its money is moved in: the most they can be.
+  feesAtMost: 'Fees at most',
   upTo: (x) => `Up to ${x} can be traded now.`,
   notOffered: (get, pay) => `Not offered right now: nobody offers ${get} for ${pay} in one step.`,
   notListed: (get, pay) => `${get} for ${pay} is not offered.`,
@@ -207,6 +215,9 @@ export const USER_WORDS = Object.freeze({
   // A trade confirmed while what it pays was settled first, whose price then moved past what was
   // accepted: nothing traded, said as an expired price is.
   returnedMoved: 'Returned: nothing traded. The price moved while it waited.',
+  // A trade paid with money moved in first, whose move the network would not take (too little of
+  // it to move once its fee is paid, or not taken at all): nothing traded.
+  returnedRefused: 'Returned: nothing traded. This money cannot be moved for a trade.',
   sent: 'Sent',
   // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
   sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
@@ -309,6 +320,7 @@ export function tradeStateWord (r, now = Date.now()) {
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' && r.whyKind === 'moved') return W.returnedMoved
+  if (r.state === 'returned' && r.whyKind === 'refused') return W.returnedRefused
   // Confirmed, and what it pays being settled first: it goes ahead by itself once through.
   if (r.state === 'settling') return r.bringIn && r.bringMinutes ? W.bringIn(r.bringMinutes) : W.settling
   if (r.state === 'returned' || r.state === 'failed') return W.returned
@@ -333,7 +345,9 @@ export function costLine (fees, fmt, payAsset) {
   if (!per.size) return USER_WORDS.noFees
   const order = [...per.keys()].sort((a, b) => (a === payAsset ? -1 : b === payAsset ? 1 : 0))
   const parts = order.map((a) => fmt(a, per.get(a)))
-  return `${USER_WORDS.fees} ${parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0]}, ${USER_WORDS.included}`
+  // A fee known only as a bound (`most`): said as the most it can be.
+  const head = (fees || []).some((f) => f && f.most && big(f.atoms) > 0n) ? USER_WORDS.feesAtMost : USER_WORDS.fees
+  return `${head} ${parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0]}, ${USER_WORDS.included}`
 }
 
 // The pickers' order: BTC first whatever is held, then what the wallet holds, then the rest,
@@ -1202,8 +1216,10 @@ export function createEngine (deps) {
   // The ticket of a trade paid with money moved in first: the amount, all of it paid, for what the
   // best price the sources show now gives for it less `plan.margin` (the fees of the move and of the
   // trade, which the firm terms take out of what is paid), held to as a bound (no less received, no
-  // more paid), and how long it takes. Nothing is asked of a maker yet: a firm price is asked once
-  // the money is in (advanceSettling), and the trade goes only within that bound.
+  // more paid, the move's fee counted in what is paid), and how long it takes. The fee line is that
+  // margin, as the most the fees can be: they are known only once the money is in. Nothing is
+  // asked of a maker yet: a firm price is asked once the money is in (advanceSettling), and the
+  // trade goes only within that bound.
   async function bringInTicket ({ payAsset, receiveAsset, amount }, plan) {
     const A = big(amount)
     const net = A - big(plan.margin)
@@ -1216,7 +1232,8 @@ export function createEngine (deps) {
       .sort((a, b) => (b.s.receive > a.s.receive ? 1 : b.s.receive < a.s.receive ? -1 : 0))
     if (!ind.length) return { ok: false, why: all.length ? 'too-small' : 'not-offered' }
     const best = ind[0]
-    const ticket = { payAsset, receiveAsset, amountIn: String(A), amountOut: String(best.s.receive), fees: [],
+    const ticket = { payAsset, receiveAsset, amountIn: String(A), amountOut: String(best.s.receive),
+      fees: [{ asset: payAsset, atoms: String(plan.margin), most: true }],
       source: best.e.source, asked: String(A), bringIn: plan.minutes }
     const want = A + big(plan.margin) - plan.tree
     return { ok: true, ticket, choice: { source: 'bring-in', payAsset, entry: best.e, minutes: plan.minutes, want: want > 0n ? want : 0n } }
@@ -1407,10 +1424,16 @@ export function createEngine (deps) {
     if (cf > 0n) {
       ticket = { ...ticket, amountIn: String(big(ticket.amountIn) + cf), fees: [...(ticket.fees || []), { asset: ticket.payAsset, atoms: String(cf) }] }
     }
+    // A trade paid with money moved in first: the move's fee (`moveFee`, repriceWithin) is part of
+    // what it cost, in what is paid and in its fees, so the record says what the wallet paid.
+    const mf = prior ? big(prior.moveFee) : 0n
+    if (mf > 0n) {
+      ticket = { ...ticket, amountIn: String(big(ticket.amountIn) + mf), fees: [...(ticket.fees || []), { asset: ticket.payAsset, atoms: String(mf) }] }
+    }
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
       ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: prior.state === 'settling' || !!prior.settledFirst, settleSince: prior.settleSince,
         ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}),
-        ...(prior.bringIn ? { bringIn: prior.bringIn, bringMinutes: prior.bringMinutes, settleMost: prior.settleMost } : {}) } : {}) })
+        ...(prior.bringIn ? { bringIn: prior.bringIn, bringMinutes: prior.bringMinutes, settleMost: prior.settleMost, ...(prior.moveFee ? { moveFee: prior.moveFee } : {}) } : {}) } : {}) })
     try {
       if (choice.source === 'covenant-round') {
         rec.order = choice.entry.id
@@ -1544,12 +1567,28 @@ export function createEngine (deps) {
     } finally { advancing.delete(rec.id) }
   }
 
-  // The longest a trade paid with money moved in waits: as long as the move takes, and the wait
-  // of any trade that settles first besides.
-  function bringMost (minutes) { return Math.max(SETTLE_MOST_MS, (Number(minutes) || 5) * 60_000 + SETTLE_MOST_MS) }
-  // Asks the wallet to move a waiting trade's money in (the wallet runs one move at a time).
+  // The longest a trade paid with money moved in waits: the minutes its ticket says, no more (the
+  // move takes most of them; the trade itself goes within seconds of the money being in).
+  function bringMost (minutes) { return (Number(minutes) || 5) * 60_000 }
+  // Asks the wallet to move a waiting trade's money in: once per trade (`bringing`; asked again only
+  // when the page opened again), until the trade's own time is up, and no longer than the trade waits
+  // for it. A move the network refuses returns the trade at once, with words.
+  const bringing = new Map()
   function bringIn (rec) {
-    try { Promise.resolve(deps.bringIn(rec.bringIn, big(rec.bringWant))).catch((e) => log('[user trade] moving in:', e && e.message)) } catch (e) { log('[user trade] moving in:', e && e.message) }
+    if (bringing.has(rec.id) || !deps.bringIn) return
+    const stop = () => { const cur = records().find((r) => r.id === rec.id); return !cur || cur.state !== 'settling' }
+    const until = (rec.settleSince || rec.at || now()) + (rec.settleMost || bringMost(rec.bringMinutes))
+    let p
+    try { p = Promise.resolve(deps.bringIn(rec.bringIn, big(rec.bringWant), { until, stop, since: rec.settleSince || rec.at })) } catch (e) { p = Promise.reject(e) }
+    bringing.set(rec.id, p)
+    p.then((v) => {
+      if (!v || !v.refused) return
+      // Refused by the network (too little to move once its fee is paid, or not taken): nothing traded.
+      const cur = records().find((r) => r.id === rec.id)
+      if (!cur || cur.state !== 'settling') return
+      cur.state = 'returned'; cur.whyKind = 'refused'; cur.error = 'moving in refused: ' + v.refused
+      put(cur)
+    }).catch((e) => log('[user trade] moving in:', e && e.message)).finally(() => bringing.delete(rec.id))
   }
 
   // A trade whose maker answered that its offer is gone: the operator refused the completion, so
@@ -1609,8 +1648,8 @@ export function createEngine (deps) {
   async function advanceSettling (rec) {
     const late = () => { rec.state = 'returned'; rec.whyKind = 'late'; rec.error = 'settling first took too long'; return put(rec) }
     const most = rec.settleMost || SETTLE_MOST_MS
-    // Money being moved in for it: asked again (the wallet does it once), so a page closed meanwhile
-    // goes on with it when it is open again.
+    // Money being moved in for it: asked once (bringIn), so a page closed meanwhile goes on with it
+    // when it is open again.
     if (rec.bringIn) bringIn(rec)
     let v = null
     try { v = await settleAsk(rec) } catch (e) {
@@ -1635,7 +1674,18 @@ export function createEngine (deps) {
     // and a ticket the maker's depth capped goes at its own size, never at the whole amount typed.
     const aIn = big(accepted.amountIn), aOut = big(accepted.amountOut)
     const step = aOut > 0n ? (aIn + aOut - 1n) / aOut : 0n
-    const upTo = accepted.asked && big(accepted.asked) < aIn + step ? (big(accepted.asked) > aIn ? big(accepted.asked) : aIn) : aIn + step
+    let upTo = accepted.asked && big(accepted.asked) < aIn + step ? (big(accepted.asked) > aIn ? big(accepted.asked) : aIn) : aIn + step
+    // Paid with money moved in first: the move's fee was paid out of what the ticket pays, so the
+    // trade itself pays at most the rest (the ticket is all-in), and the record counts it (confirm).
+    if (rec.bringIn && deps.movedFees) {
+      let mf = 0n
+      try { mf = big(await Promise.resolve(deps.movedFees(rec.bringIn, rec.settleSince || rec.at))) } catch {}
+      if (mf > 0n) {
+        rec.moveFee = String(mf)
+        const cap = aIn - mf
+        if (upTo > cap) upTo = cap > 0n ? cap : 0n
+      }
+    }
     // At the price accepted or better: no less received, no more paid than `upTo`, and what is
     // received for what is paid at least the ticket's.
     const within = (x) => x && x.ok && big(x.ticket.amountOut) >= aOut && big(x.ticket.amountIn) <= upTo &&
@@ -1678,6 +1728,7 @@ export function createEngine (deps) {
     // The record as stored now: another follow may have moved it on meanwhile.
     const cur = records().find((r) => r.id === rec.id)
     if (!cur || cur.state !== state) { drop(q.choice); return cur || rec }
+    if (rec.moveFee) cur.moveFee = rec.moveFee
     log(state === 'settling' ? '[user trade] settled first; going ahead at the price accepted:' : '[user trade] priced again; going ahead at the price accepted:', rec.id)
     try { return await confirm(q.choice, q.ticket, cur) } catch (e) {
       log('[user trade] going ahead again:', e && e.message)
