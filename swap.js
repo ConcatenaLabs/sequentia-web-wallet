@@ -7236,7 +7236,7 @@ function refundFee(lockedAsset, locked){
   for (const h of [S.feeAsset, lockedAsset, ...feeAssetOptions().map(o => o.hex)]){
     const atoms = can(h); if (atoms != null) return { asset: h, atoms };
   }
-  throw new Error(`No asset this wallet holds can pay the network fee for taking ${lockedAsset ? 'back these ' + C.assetMeta(lockedAsset).ticker : 'the coins back'}: receive a little of an asset the network accepts for fees, then try again.`);
+  throw new Error(`No asset this wallet holds can pay the network fee for taking ${lockedAsset ? 'back these ' + C.assetMeta(lockedAsset).ticker : 'the coins back'}: receive a little of an asset the network accepts for fees, and Reclaim can take them back at once. The coins stay in the order until then.`);
 }
 function refundHooksFor(fee){
   fee = fee || refundFee(null, 0n);
@@ -10593,18 +10593,23 @@ function makerIndexCeiling(){
 // Developer mode only: default mode has no resting orders of this kind and says nothing of them.
 const devModeNow = () => !C.devMode || !!C.devMode();
 let _lostAsked = false;   // the person asked to look for an order missing from the list
-// An archived record whose coin rests on the chain again (a block that spent it left the chain, or a
-// record put away too early) comes back by itself: its script says it exactly.
-async function restoreArchived(){
+// An archived record whose coin rests on the chain again comes back by itself: its script says it
+// exactly. That is a block that spent it leaving the chain (the chain follows its Bitcoin anchor),
+// a record put away too early, or a refund that never reached a block: Reclaim puts its record away
+// at broadcast, and a refund dropped from the mempool leaves the coin resting (web wallet #722).
+// A refund just sent is given RECLAIM_SEEN_MS for the explorer to see it spend the coin.
+const RECLAIM_SEEN_MS = 5 * 60_000;
+async function restoreArchived(now = Date.now()){
   const archived = loadArchived();
   let restored = 0;
   for (let i = archived.length - 1; i >= 0; i--){
     const r = archived[i];
-    if (!r.spkHex || r.archivedWhy === 'reclaimed') continue;
+    if (!r.spkHex) continue;
+    if (r.archivedWhy === 'reclaimed' && now - Number(r.archivedAt || 0) < RECLAIM_SEEN_MS) continue;
     let res; try { res = await restingCoin(r, { get: explorerGet }); } catch { continue; }
     if (!res.coin || PLACED.some(x => String(x.spkHex).toLowerCase() === String(r.spkHex).toLowerCase())) continue;
     const rec = { ...r, covTxid: res.coin.txid, covVout: res.coin.vout, restAtoms: String(res.coin.value) };
-    delete rec._orphan; delete rec.archivedAt; delete rec.absentAt; delete rec.archivedWhy;
+    delete rec._orphan; delete rec.archivedAt; delete rec.absentAt; delete rec.archivedWhy; delete rec.refundTxid;
     PLACED.push(rec); archived.splice(i, 1); restored++;
   }
   if (restored){ savePlaced(); saveArchived(archived); ensureCovenantRelay(); }
@@ -10612,10 +10617,15 @@ async function restoreArchived(){
 }
 async function scanLostOrders(force){
   if (_lostScanning || (!force && Date.now() - _lostScanAt < LOST_SCAN_MS)) return;
-  if (!devModeNow()){ _lostLocks = []; return; }
   _lostScanning = true;
   try {
+    // In every mode: an order Reclaim did not in the end take back is the person's to see again.
     const restored = await restoreArchived();
+    if (!devModeNow()){
+      _lostLocks = []; _lostScanAt = Date.now();
+      if (restored) renderMyOrders();
+      return;
+    }
     // What the wallet paid to a taproot script it holds no order for is listed only when the person
     // asks: without its terms an order's coin looks like any payment to such a script (a deposit, a
     // payment to someone else), and a wallet that never left an order must see nothing.
@@ -10762,9 +10772,9 @@ async function followPlaced(rec){
   if (res.done) return res.settled ? 'done' : 'spending';
   return 'unknown';
 }
-function archivePlaced(rec, why){
+function archivePlaced(rec, why, live = rec){
   saveArchived(loadArchived().concat([{ ...rec, archivedAt: Date.now(), archivedWhy: why }]));
-  PLACED = PLACED.filter(r => r !== rec); savePlaced();
+  PLACED = PLACED.filter(r => r !== live); savePlaced();
 }
 async function followPlacedCoins(){
   let changed = false;
@@ -10786,7 +10796,7 @@ async function reclaimPlaced(rec, tipNow, confirm){
   for (let attempt = 0; attempt < 2; attempt++){
     const st = await followPlaced(rec); savePlaced();
     if (st === 'done' || st === 'spending'){ if (st === 'done') archivePlaced(rec, 'done'); return { done: true }; }
-    if (st !== 'resting') throw new Error('The order\'s coins could not be read just now. Try again in a minute.');
+    if (st !== 'resting') throw new Error('The order\'s coins could not be read just now. Nothing was sent: they stay in the order, and Reclaim reads them afresh each time it is pressed.');
     const locked = BigInt(rec.restAtoms);
     const fee = refundFee(rec.pay, locked);
     if (attempt === 0 && confirm && !(await confirm({ ...fee, locked }))) return { cancelled: true };
@@ -10801,7 +10811,7 @@ async function reclaimPlaced(rec, tipNow, confirm){
     try {
       const out = await covCancel(rec.offerId, { recipe, tipHeight: tipNow.height, tipTime: tipNow.medianTime, expiryLocktime: Number(rec.expiry) },
         { relayCancel: async (offerId) => seqob.signAndCancel(offerId, makerPriv()), ...refundHooksFor(fee) });
-      if (out.refundTxid){ archivePlaced(rec, 'reclaimed'); return { refundTxid: out.refundTxid, locked }; }
+      if (out.refundTxid){ archivePlaced({ ...rec, refundTxid: out.refundTxid }, 'reclaimed', rec); return { refundTxid: out.refundTxid, locked }; }
       return out;
     } catch (e){
       if (attempt === 0 && /missingorspent|missing-inputs|txn-mempool-conflict/.test(String(e && e.message || e))) continue;   // filled meanwhile: look again
@@ -10893,7 +10903,7 @@ function stripBip32(b64){
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
 export const __test__ = {
   // #708: a resting order's record and the way back for one whose record is gone.
-  askLostOrders: () => { _lostAsked = true; }, reconcileUnfundedPlaced, scanLostOrders, recoverLostOrder, autoRecoverLostOrder, reclaimPlaced, followPlacedCoins, refundFee, orderFromPlaced, refundHooksFor, placeCovenant,
+  askLostOrders: () => { _lostAsked = true; }, reconcileUnfundedPlaced, scanLostOrders, restoreArchived, recoverLostOrder, autoRecoverLostOrder, reclaimPlaced, followPlacedCoins, refundFee, orderFromPlaced, refundHooksFor, placeCovenant,
   lostLocks: () => _lostLocks, placed: () => PLACED, loadPlaced, archived: () => loadArchived(),
   crossableDepthAtoms, ratioRecvPerPay, stripBip32, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,
