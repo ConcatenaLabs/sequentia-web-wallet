@@ -324,7 +324,7 @@ export const RESTRICTED_WORDS = Object.freeze({
     lockin: (t, date) => (date ? `${t} can change hands from about ${date}, as its issuer set.` : `${t} cannot change hands yet: its issuer set a date from which it can.`),
     vesting: (t, date) => (date ? `Part of this ${t} is still vesting, until about ${date}. Try a smaller amount, or come back then.` : `Part of this ${t} is still vesting. Try a smaller amount, or come back later.`),
     holder_cap: (t) => `${t} has as many holders as its issuer allows right now. Come back later.`,
-    receive_window: (t) => `This wallet can receive ${t} from a later date, as its issuer set.`,
+    receive_window: (t, date) => (date ? `This wallet can receive ${t} from about ${date}, as its issuer set.` : `This wallet can receive ${t} from a later date, as its issuer set.`),
     limit: () => 'That is more than this asset allows in one trade: try a smaller amount.',
     velocity: () => 'That is more of this asset than can change hands today: try a smaller amount, or come back later.',
     other: (t) => `${t}'s issuer does not allow this trade right now. Come back later.`,
@@ -357,7 +357,7 @@ export function approvalCard (elig, asset, code, { blockSeconds = 60, now = Date
     const W = RESTRICTED_WORDS.waits
     if (/^sender_/.test(why)) return { text: RESTRICTED_WORDS.sellerHeld, reason: null, code: null, link: null }
     let date = null
-    const until = /until height (\d+)/.exec(String(elig.reason || ''))
+    const until = /(?:until|from) height (\d+)/.exec(String(elig.reason || ''))
     const at = Number(elig.height)
     if (until && at > 0 && Number(until[1]) > at) {
       date = new Date(now() + (Number(until[1]) - at) * blockSeconds * 1000).toUTCString().slice(5, 16)

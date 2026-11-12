@@ -341,6 +341,7 @@ test('only a refusal approval cures asks for approval; the others say what holds
   assert.equal(vest.text, 'Part of this BOND is still vesting, until about 13 Nov 2026. Try a smaller amount, or come back then.')
   assert.equal(card('holder_cap', 'holder cap 5 would be exceeded (5 holders)').text, 'BOND has as many holders as its issuer allows right now. Come back later.')
   assert.equal(card('receive_window').text, 'This wallet can receive BOND from a later date, as its issuer set.')
+  assert.equal(card('receive_window', 'this key may receive the asset from height 2440', 1000).text, 'This wallet can receive BOND from about 13 Nov 2026, as its issuer set.')
   assert.equal(card('rules', 'any').text, 'BOND\'s issuer does not allow this trade right now. Come back later.')
   assert.equal(card('sender_frozen').text, m.RESTRICTED_WORDS.sellerHeld)
   for (const code of ['lockin', 'vesting', 'holder_cap', 'receive_window', 'rules', 'limit', 'velocity', 'sender_frozen', 'sender_locked']) {
