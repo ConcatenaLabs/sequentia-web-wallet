@@ -2065,22 +2065,22 @@ export function createEngine (deps) {
   }
 
   // The participation of the wallet's own that took coin `c`: named on a coin given up to it
-  // (`refresh_waiting`, or the library's note "participation <id>"), and on one it spent once
-  // released (`spent_by`). -> id | null
+  // (`refresh_waiting`, or the library's note "participation <id>"), on one whose forfeit it signed
+  // for that round (the note "participation <id>: its forfeit … is signed"), and on one it spent
+  // once released (`spent_by`). -> id | null
   function roundOf (c) {
     if (!c) return null
-    const named = (v) => ((/^participation ([0-9a-f]{64})$/.exec(String(v || '')) || [])[1]) || null
+    const named = (v) => ((/^participation ([0-9a-f]{64})(?::|$)/.exec(String(v || '')) || [])[1]) || null
     if (c.state === 'given') return c.refresh_waiting || named(c.note)
+    if (c.state === 'forfeited') return named(c.note)
     if (c.state === 'spent') return named(c.spent_by)
     return null
   }
-  // A coin the wallet paid on, or put into an order, a distribution or an offboard of its own,
-  // after the trade brought it.
-  const movedOn = (c) => c.state === 'spent' || c.state === 'given'
-  // A new leaf of a settle's round that is the wallet's for good: live, or already moved on by the
-  // wallet (paid on, given up again, offered in a swap, on its way home). The trade after this one
-  // often pays on it at once; the settle was done all the same.
-  const SETTLED_LEAF = new Set(['live', 'spent', 'given', 'offered', 'sending', 'exiting', 'exited'])
+  // A coin the wallet paid on, offered in a trade, sent, put into an order, a distribution or an
+  // offboard of its own, or took home, after the trade brought it: spending it onward proves it
+  // arrived, so nothing of the trade waits on it.
+  const ONWARD = new Set(['spent', 'given', 'offered', 'sending', 'exiting', 'exited'])
+  const movedOn = (c) => ONWARD.has(c.state)
 
   // The operator's limit on reassignments since a round (`info.depth_limit`); null when unknown.
   async function depthLimit () {
@@ -2143,10 +2143,10 @@ export function createEngine (deps) {
         if (pid) { taken.push({ coin: c.leaf_id, participation: pid }); continue }
         if (c && c.state === 'live') { coins.push(c); targetOf.set(c.leaf_id, t); continue }
         if (c && t.leaf_id && movedOn(c)) continue
-        // A coin looked for by its value that the wallet has already paid on (the change of a sale
-        // spent by the next trade) leaves nothing of the trade to settle either.
+        // A coin looked for by its value that the wallet has already moved on (the change of a sale
+        // spent by the next trade, or offered in it) leaves nothing of the trade to settle either.
         if (!c && !t.leaf_id) {
-          const gone = all.find((x) => !used.has(x) && x.asset === t.asset && String(x.value) === String(t.value) && x.state === 'spent')
+          const gone = all.find((x) => !used.has(x) && x.asset === t.asset && String(x.value) === String(t.value) && movedOn(x))
           if (gone) { used.add(gone); continue }
         }
         const why = t.leaf_id ? `coin ${t.leaf_id} is not live yet` : `no live coin of ${t.value} of ${t.asset} yet`
@@ -2180,7 +2180,10 @@ export function createEngine (deps) {
     }
     const ps = await Promise.all(rec.settle.participations.map((id) => participation(id)))
     rec.settleState = ps.map((p) => p && p.state)
-    if (ps.every((p) => p && p.state === 'released' && (p.new_leaves || []).every((n) => SETTLED_LEAF.has(n.state)))) return 'settled'
+    // Settled once every round is final (released), whatever became of its new coins afterwards:
+    // the next trade often pays them on at once, gives them to a round of its own (one that may
+    // never run, the coin then kept under its forfeit), or the wallet has not taken them yet.
+    if (ps.every((p) => p && p.state === 'released')) return 'settled'
     // Said once each time it changes: what the settle waits on.
     const why = rec.settle.participations.map((id, i) => `${id.slice(0, 12)} ${ps[i] ? ps[i].state + ' [' + (ps[i].new_leaves || []).map((n) => n.state).join(',') + ']' : 'not in the library'}`).join('; ')
     if (rec.settleWhy !== why) { rec.settleWhy = why; put(rec); log('[user trade] settle waits on its round:', why) }
