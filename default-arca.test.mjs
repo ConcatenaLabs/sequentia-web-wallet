@@ -160,17 +160,21 @@ test('an address is paid on the chain while the chain covers it, else out of the
 })
 
 test('the arrival time covers the whole way to the other wallet, or none is said (#574)', () => {
-  // The whole way to the other wallet's figure, at most: the settlement, four blocks and four
-  // minutes, rounded up to five minutes.
-  assert.equal(arrivalMinutes(60), 10)
-  assert.equal(arrivalMinutes(60, 60), 10)
-  assert.equal(arrivalMinutes(600), 20)
-  assert.equal(arrivalMinutes(5), 10)
-  assert.equal(arrivalMinutes(60, 600), 45)
+  // The whole way to the other wallet's figure, at most: the settlement, its block and certificate,
+  // the operator's unlock of the payment (its `offboards.unlock_within_seconds`, ten minutes when it
+  // publishes none) and two minutes of reads, rounded up to five minutes.
+  assert.equal(arrivalMinutes(60), 15)
+  assert.equal(arrivalMinutes(60, 60), 15)
+  assert.equal(arrivalMinutes(600), 25)
+  assert.equal(arrivalMinutes(5), 15)
+  assert.equal(arrivalMinutes(60, 600), 35)
+  // An operator that publishes a faster unlock: said without a new build.
+  assert.equal(arrivalMinutes(60, 60, 120), 10)
+  assert.equal(arrivalMinutes(60, 60, 0), 15, 'none published: the ten minutes stand')
   // Every payment measured on the testnet (189 to 356 s from Send) is within what is stated.
   for (const s of [189, 223, 231, 313, 317, 340, 356]) assert.ok(s <= arrivalMinutes(60, 60) * 60)
-  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(60, 60)), 'It arrives within 10 minutes. Keep this page open meanwhile.')
-  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(600, 60)), 'It arrives within 20 minutes. Keep this page open meanwhile.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(60, 60)), 'It arrives within 15 minutes. Keep this page open meanwhile.')
+  assert.equal(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(600, 60)), 'It arrives within 25 minutes. Keep this page open meanwhile.')
   assert.equal(DEFAULT_WORDS.arrivesWithin(null), 'It arrives shortly. Keep this page open meanwhile.')
   assert.equal(arrivalMinutes(null), null)
   assert.equal(arrivalMinutes(0), null)
@@ -250,7 +254,8 @@ test('the same payment to an address asked again while the first is on its way i
   const first = { offboard: 'ab'.repeat(32), state: 'pending', round_within_seconds: 60 }
   const again = { offboard: 'ab'.repeat(32), state: 'pending', already: true }
   // Asked, not made yet: "Sending", never "Sent" (web wallet #604).
-  assert.deepEqual(offboardOutcome(first, '1', 'OILX', 10, 60), { text: 'Sending 1 OILX. Keep this page open until it is sent.', sent: true, minutes: 10 })
+  assert.deepEqual(offboardOutcome(first, '1', 'OILX', 10, 60), { text: 'Sending 1 OILX. Keep this page open until it is sent.', sent: true, minutes: 15 })
+  assert.equal(offboardOutcome(first, '1', 'OILX', 10, 60, 120).minutes, 10, 'with the unlock time the operator publishes')
   const o = offboardOutcome(again, '1', 'OILX', 10, 60)
   assert.equal(o.sent, false)
   assert.match(o.text, /already on its way, so nothing more was sent/)
@@ -340,16 +345,15 @@ test('amountFits: the fee on top of the amount, out of what can be spent', () =>
 })
 
 // Coins moved out of the tree to the wallet's own address (to stake them, say) wait for one
-// settlement and its block, not for another wallet: measured on the testnet, request to final on
-// the chain in 4 min 45 s, of which 97 s was this wallet handing over its part late.
-test('moveOutMinutes: a settlement, its block, the operator\'s unlock and its block, as the testnet takes them', () => {
-  // An operator that publishes no unlock time: counted at what the testnet's took (600 s).
+// settlement, its block and the operator's unlock, not for another wallet: measured on the testnet,
+// request to final on the chain in 4 min 45 s, of which 97 s was this wallet handing over its part
+// late.
+test('moveOutMinutes: a settlement, its block and the unlock, not another wallet', () => {
   assert.equal(moveOutMinutes(60, 60), 14)
   assert.equal(moveOutMinutes(60), 14)
   assert.equal(moveOutMinutes(600, 60), 23)
-  // One that publishes it: its own time, which holds the unlock's block; 0 included.
-  assert.equal(moveOutMinutes(60, 60, 150), 5)
-  assert.equal(moveOutMinutes(60, 60, 0), 3)
+  assert.equal(moveOutMinutes(60, 60, 120), 6, 'a faster unlock, as the operator publishes it')
+  assert.ok(285 <= moveOutMinutes(60, 60) * 60, 'the move out measured on the testnet is within what is said')
   assert.equal(moveOutMinutes(null), null)
   assert.equal(DEFAULT_WORDS.movingOut('40,000 tSEQ', 'staked', moveOutMinutes(60, 60)),
     'Getting 40,000 tSEQ ready to be staked. Ready within 14 minutes. Keep this page open.')

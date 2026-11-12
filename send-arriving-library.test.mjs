@@ -15,6 +15,8 @@ import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mountLeaves, JOINED_KEY } from './leaves.js'
+import { settleWords } from './default-arca.js'
+import { stageWriter, dropPending, samePending } from './pending-sends.js'
 import { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute } from './default-arca.js'
 
 const CONTROL = process.env.SEQ_LEAF_HARNESS
@@ -83,7 +85,7 @@ const textOf = (n) => [n.textContent, ...n.children.map(textOf)].filter(Boolean)
 function page (leavesApi, ticker) {
   const modals = []
   const deps = {
-    leavesApi, DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes,
+    leavesApi, DEFAULT_WORDS, settleWords, stageWriter, dropPending, samePending, sendableNow, offboardOutcome, arrivalMinutes,
     devMode: () => false,
     assetMeta: () => ({ ticker, precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
@@ -103,7 +105,7 @@ function page (leavesApi, ticker) {
     followAddressPayments: async () => 'made', markTold: () => {}, offboardNewsText: () => '', OFFBOARD_FOLLOW_MS: 0,
     document: { body: { contains: () => false } }, performance: { now: () => Date.now() },
   }
-  const names = ['onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
+  const names = ['settleAhead', 'settleLine', 'sendStage', 'sendEnded', 'sameOnItsWay', 'onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
   const src = names.map(fn).join('\n') + '\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))
   return { ...f, modals }
@@ -177,7 +179,7 @@ test('W5: a send to an address of money still arriving, on the real library: rev
   try { await ok.onclick() } finally { sent = true; clearInterval(watch); await pump }
   console.log(`W5: Send to the end of the page's part: ${Date.now() - tSend} ms; the status said: ${JSON.stringify(said)}; finally: ${status.className} ${status.textContent}`)
   assert.ok(!/err/.test(status.className), status.className + ' ' + status.textContent)
-  assert.ok(said.includes(DEFAULT_WORDS.settling) || said.some((s) => s.includes(DEFAULT_WORDS.settling)), 'it said it goes through in about a minute: ' + JSON.stringify(said))
+  assert.ok(said.some((s) => /Goes through (in about a minute|within about \d+ minutes)/.test(s)), 'it said how long it takes: ' + JSON.stringify(said))
   // The library was asked to settle first, then for the offboard, in that order.
   // The library refused the offboard with settle_first (nothing signed), the page settled the coin,
   // and the offboard asked again went.
