@@ -26,7 +26,7 @@
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
-import { USER_WORDS, QUOTE_FIRM_MS, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
+import { USER_WORDS, QUOTE_FIRM_MS, OFFERED_AGAIN_EVERY_MS, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
 import { mountMarketView } from './market-view.js'
 import { openPicker, PICKER_WORDS } from './asset-picker.js'
 import { RESTRICTED_WORDS } from './restricted-trade.js'
@@ -137,8 +137,11 @@ export function mountUserComposer (ctx) {
     if (!e.ok && e.why === 'restricted') { S.note = ''; paintNote(); return }
     if (!e.ok) {
       S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall
-        : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
+        : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay))
+        : e.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       if (other && doc.activeElement !== other) other.value = ''
+      // Offered a moment ago: estimated again shortly, by itself (#698).
+      if (e.again) schedule(OFFERED_AGAIN_EVERY_MS)
       paintNote(); return
     }
     const fill = S.fixed === 'pay' ? ctx.fmtAtoms(big(e.receive), prec(S.get)) : ctx.fmtAtoms(big(e.pay), prec(S.pay))
@@ -373,10 +376,14 @@ export function mountUserComposer (ctx) {
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
         : q.why === 'btc-moving' ? USER_WORDS.btcMoving(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)
-        : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
+        : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay))
+        : q.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       // Coins being made ready for this trade: priced again by itself while the person waits,
-      // every READY_RETRY_MS, as long as nothing they typed changed.
+      // every READY_RETRY_MS, as long as nothing they typed changed. A pair offered a moment ago
+      // that nobody offers now (a maker reading its coins again after a trade, #698): every
+      // OFFERED_AGAIN_EVERY_MS, while it was offered within OFFERED_AGAIN_MS.
       if (!q.ok && (q.why === 'readying' || q.why === 'btc-moving')) readyAgain()
+      else if (!q.ok && q.again) readyAgain(OFFERED_AGAIN_EVERY_MS)
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
@@ -453,14 +460,14 @@ export function mountUserComposer (ctx) {
     if (S.ticket || S.error) settleTries = 0
   }
 
-  function readyAgain () {
+  function readyAgain (ms = READY_RETRY_MS) {
     const asked = `${S.pay}|${S.get}|${S.amount}`
     clearTimeout(readyTimer)
     if (++readyTries > READY_TRIES) { readyTries = 0; return }
     readyTimer = setTimeout(() => {
       if (`${S.pay}|${S.get}|${S.amount}` !== asked || S.busy || S.ticket) { readyTries = 0; return }
       review()
-    }, READY_RETRY_MS)
+    }, ms)
   }
 
   // Trade: the step is taken in the background. If it is not done within CONFIRM_SHOWN_MS, the
