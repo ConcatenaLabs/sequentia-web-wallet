@@ -74,6 +74,12 @@ export const DEFAULT_WORDS = Object.freeze({
   addressTip: 'Your address, the same tb1 address on both chains. For BTC, and for senders that ask for an address.',
   // While a wallet opened in this browser for the first time finds what it holds.
   finding: 'Syncing… finding everything this wallet holds.',
+  // The same, once it has run a few minutes (a wallet with a long history), and once it has run
+  // far longer than any history should take.
+  findingSlow: 'Syncing… this wallet has a long history, so finding everything it holds takes a few minutes. Nothing has moved, and it opens by itself once it has.',
+  findingLong: 'Syncing… finding everything this wallet holds is taking far longer than it should. Nothing has moved, and your coins are still yours. Reload the page to start again.',
+  // A payment asked then.
+  findingLongPay: 'Your wallet is taking far longer than it should to find everything it holds, so nothing has moved. Reload the page to start again; your coins are still yours.',
   findingTip: 'Your address, the same tb1 address on both chains. Your receive code shows here once the wallet has found everything it holds.',
   // The same, while the service that holds the wallet's coins for instant payments does not answer:
   // the wallet asks again by itself every half minute.
