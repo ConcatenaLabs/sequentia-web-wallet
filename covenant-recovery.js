@@ -17,7 +17,11 @@
 //    that is still there: an order whose record is gone looks exactly like that (so does a
 //    payment to someone's taproot address; the wallet cannot tell them apart until terms match).
 //
-//  * searchOrder takes back such an order: first from terms the page derives itself (the
+//  * ordersFromNotes rebuilds an order exactly from the note the wallet wrote to itself in the
+//    order's funding transaction (order-note.js): every order placed with a note comes back from
+//    the phrase alone, filled in part or not, listed or not.
+//
+//  * searchOrder takes back an order without a note: first from terms the page derives itself (the
 //    market's prices around the funding), then from what the person says they asked for in
 //    return, exactly or within a range. Everything else is the wallet's or the chain's: the asset and amount locked (the output),
 //    the maker key and payout (the wallet's key at an index), the lock (the median time or the
@@ -30,6 +34,7 @@
 import { explorerScriptHash } from './explorer-script-hash.js'
 import { computeRate, covenantMinLot, covenantDerivationIds, orderExpiry, orderExpiryTime, leafProductFits, isTimeLock } from './covenant-flow.js'
 import { spkMatcher, leafHash, buildFillLeaf, buildRefundLeaf } from './covenant.js'
+import { noteOfScript } from './order-note.js'
 
 export const FUNDING_GRACE_MS = 10 * 60 * 1000      // a record younger than this may still be funding
 export const ABSENT_RECHECK_MS = 10 * 60 * 1000     // a funding seen absent is put away only when absent again this much later
@@ -142,6 +147,57 @@ export async function findUnrecordedLocks (io, { known, stable, checked } = {}) 
         time: tx.status && tx.status.block_time ? Number(tx.status.block_time) : null })
     }
     if (!open && checked) checked.add(txid)
+  }
+  return out
+}
+
+// The orders the wallet's notes rebuild (order-note.js). For each transaction the wallet paid from
+// that carries a note, the note's terms are tried against every taproot output beside it; an order
+// is kept only when they derive that output's very script. A part-filled order rests at the same
+// script, so its funding output (spent by the fill) still rebuilds it: `sellAtoms` is what the
+// funding locked, and restingCoin says where its coin is now.
+//   io             as for findUnrecordedLocks
+//   open(noteHex)  -> terms | null: order-note.js openNote under the wallet's note key
+//   makerAt(index) -> { index, program, internalKey }: the wallet's maker key at that index
+//   known          Set of script hex the wallet's records (kept or archived) account for
+//   checked        optional { has(txid), add(txid) }: transactions without a note, never read again.
+//                  A transaction with a note is read each time, whatever explains its outputs now:
+//                  the record that does may go, and the note is then what rebuilds the order.
+// A read that fails skips its transaction only: it is left unchecked, so the next scan asks again,
+// and what this scan found is kept.
+// -> [rec], each with the funding's outpoint in covTxid/covVout and fundTxid
+export async function ordersFromNotes (io, { open, makerAt, known, checked } = {}) {
+  const out = []
+  for (const { txid } of await io.ownSpends()) {
+    if (checked && checked.has(txid)) continue
+    try {
+      const tx = await io.get(`/tx/${txid}`)
+      if (!tx) continue
+      const vout = Array.isArray(tx.vout) ? tx.vout : []
+      const notes = vout.map((o) => noteOfScript(o.scriptpubkey)).filter(Boolean)
+      if (!notes.length) { if (checked) checked.add(txid); continue }
+      const locks = []
+      vout.forEach((o, n) => {
+        const spk = lc(o.scriptpubkey)
+        if (/^5120[0-9a-f]{64}$/.test(spk) && o.value != null && o.asset && !(known && known.has(spk))) {
+          locks.push({ txid, vout: n, spkHex: spk, asset: lc(o.asset), value: BigInt(o.value) })
+        }
+      })
+      for (const note of notes) {
+        if (!locks.length) break
+        const terms = await open(note)
+        if (!terms) continue
+        let m
+        try { m = makerAt(terms.makerIndex) } catch { continue }
+        for (let i = 0; i < locks.length; i++) {
+          const res = await searchOrder({ lock: locks[i], candidates: [{ asset: terms.receive, recv: terms.recvAtoms }], makers: [m], expiries: [terms.expiry] })
+          if (!res.rec) continue
+          out.push({ ...res.rec, fundTxid: txid, fromNote: true })
+          locks.splice(i, 1)
+          break
+        }
+      }
+    } catch { /* this transaction is read again next time */ }
   }
   return out
 }

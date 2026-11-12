@@ -106,6 +106,7 @@ const pages = []
 async function openWallet (who, { fresh = false, phrase = null, at = base } = {}) {
   const profile = join(work, 'profiles', who)
   const page = new Page(chromium(), { profile })
+  if (process.env.DRIVE_CONSOLE_LOG) page.logTo(join(work, 'evidence', who + '-console.log'), who)
   pages.push(page)
   await page.open()
   // A browser stopped by an earlier run reopens its tabs: a wallet tab among them holds the
@@ -247,7 +248,7 @@ async function main () {
       const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); if(!o) throw new Error('no option ${ticker}: '+[...s.options].map(o=>o.textContent).join(',')); s.value=o.value; s.dispatchEvent(new Event('change'));
       r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
     await click(pa, '#btnReview')
-    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving |cannot be moved out of the Ark yet/.test(e) ? 'ERR '+e : false })()", 1500000)
+    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Getting |is not ready to be [a-z ]* yet/.test(e) ? 'ERR '+e : false })()", 1500000)
     // A payment on the chain (an address the wallet's coins there cover, a confidential address)
     // has the chain's own review.
     const chainReview = /^Confirm Sequentia payment/i.test(title.trim())
@@ -274,15 +275,17 @@ async function main () {
     await page.waitFor("document.querySelector('#ucPay') && document.querySelector('#userComposer').offsetParent !== null", 120000)
     const words = forbiddenIn(await page.eval("document.querySelector('section[data-panel=\"swap\"]').innerText"))
     check('the Trade tab is three inputs and a button, none of the words', !words.length, words)
-    const pick = async (id, tk) => { if (!(await page.eval(pickExpr(id, tk)))) throw new Error('no ' + tk + ' in #' + id) }
+    // An asset the wallet holds is listed once its balances are read: picked as soon as it is, up to a minute.
+    const pick = async (id, tk) => { const t = Date.now(); while (!(await page.eval(pickExpr(id, tk)))) { if (Date.now() - t > 60000) throw new Error('no ' + tk + ' in #' + id); await sleep(1000) } if (Date.now() - t > 1500) note(`${tk} listed in #${id} ${secs(Date.now() - t)} after the tab opened`) }
     await pick('ucPay', pay); await sleep(500); await pick('ucGet', get)
     await page.eval(`(()=>{ const i=document.querySelector('#ucAmount'); i.value=${JSON.stringify(amount)}; i.dispatchEvent(new Event('input')); return true })()`)
     const tQ = Date.now()
     await click(page, '#ucReview')
-    const tk = await page.waitFor("(()=>{ if(document.querySelector('#ucConfirm')) return document.querySelector('#ucTicket').innerText; const n=document.querySelector('#ucNote'); return n && n.classList.contains('err') && n.textContent ? 'ERR '+n.textContent : false })()", 300000)
-    check(`a ticket for ${amount} ${pay} → ${get}`, !/^ERR/.test(tk), `${tk.replace(/\n+/g, ' | ')} (${secs(Date.now() - tQ)})`)
+    const tk = await page.waitFor("(()=>{ const k=document.querySelector('#ucCard'); if(k) return 'CARD '+k.innerText+' | '+[...document.querySelectorAll('#ucCopyCode,#ucOpenPage')].map(b=>b.textContent).join(' | '); if(document.querySelector('#ucConfirm')) return document.querySelector('#ucTicket').innerText; const n=document.querySelector('#ucNote'); return n && n.classList.contains('err') && n.textContent ? 'ERR '+n.textContent : false })()", 300000)
+    if (/^CARD /.test(tk)) { note(`the answer is a card, nothing to confirm: ${tk.replace(/\n+/g, ' | ')} (${secs(Date.now() - tQ)})`); await shot(page, `${name}-trade-${pay}-${get}-card.png`) }
+    else check(`a ticket for ${amount} ${pay} → ${get}`, !/^ERR/.test(tk), `${tk.replace(/\n+/g, ' | ')} (${secs(Date.now() - tQ)})`)
     await shot(page, `${name}-trade-${pay}-${get}-ticket.png`)
-    if (!/^ERR/.test(tk)) {
+    if (!/^(ERR|CARD)/.test(tk)) {
       const tC = Date.now()
       const rows0 = await page.eval("document.querySelectorAll('#ucTrades .uc-trade').length")
       await click(page, '#ucConfirm')
@@ -729,7 +732,7 @@ async function main () {
         r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
       const before = (await heldNow(n)).length
       await click(pa, '#btnReview')
-      const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving /.test(e) ? 'ERR '+e : false })()", 600000)
+      const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Getting /.test(e) ? 'ERR '+e : false })()", 600000)
       if (/^ERR /.test(title)) return { refused: title.slice(4), before }
       await shot(pa, `${payer}-name-${what}-review.png`)
       const tClick = Date.now()

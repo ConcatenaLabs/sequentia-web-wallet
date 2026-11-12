@@ -4735,6 +4735,27 @@ function restrictedDeps(){
       return approvalCard(j, { ticker: name(hex), entity: c.entity || reg.entity || null, domain: (c.entity && c.entity.domain) || assetDomain(hex) }, aid);
     },
     held: (hex)=> isRestrictedAsset(hex) ? ((oampBalances[hex] && oampBalances[hex].atoms) || 0n) : userHeld(hex),
+    onItsWay: (hex)=> isRestrictedAsset(hex) ? 0n : onItsWay(hex),
+    // What a trade on the chain must first move there, priced and timed before the person
+    // confirms: its fee from the library's offboard quote, its wait from the operator's round.
+    // -> null when the chain already holds it; { fees, minutes }; throws the library's
+    // settle_first when the coins must go through a round first.
+    moveQuote: async (needs)=>{
+      const fees = []; let move = false;
+      for(const n of needs){
+        if(isRestrictedAsset(n.hex)) continue;
+        const missing = n.atoms - onChainAtoms(n.hex);
+        if(missing <= 0n) continue;
+        move = true;
+        if(!leavesApi || !leavesApi.isOpen()) continue;
+        let least = 0n; try{ least = leavesApi.minLeaf ? leavesApi.minLeaf(n.hex) : 0n; }catch{}
+        const amount = missing < least ? least : missing;
+        const q = await leavesApi.offboardQuote({ asset: n.hex, amount: String(amount), address: wollet.address(undefined).address().toUnconfidential().toString() });
+        fees.push({ asset: n.hex, atoms: BigInt((q && q.fee && q.fee.amount) || 0) });
+      }
+      if(!move) return null;
+      return { fees, minutes: moveOutMinutes(leavesApi && leavesApi.roundInterval(), leavesApi && leavesApi.blockSeconds(), leavesApi && leavesApi.unlockSeconds ? leavesApi.unlockSeconds() : null) || 5 };
+    },
     // The fee is paid in the asset paid; selling a restricted asset, in the asset received, else in
     // another asset the wallet holds that the network takes fees in; never by default in one asset.
     feeAsset: async (pay, receive)=>{
@@ -4746,9 +4767,16 @@ function restrictedDeps(){
     },
     fee: async (hex)=> restrictedFeeAtoms(hex, TRADE_VBYTES),
     ensure: (needs, say)=> ensureOnChain(needs, say, 'traded'),
+    // Whether a move of this wallet's to its own address is under way (a trade's, after a reload).
+    moving: async ()=> (await movesUnderWay()).length > 0,
+    // A composed purchase moves its coin to this address, and pays its trade on the chain from what
+    // landed there alone.
+    address: async ()=> wollet.address(undefined).address().toUnconfidential().toString(),
+    unspent: async (op)=>{ try{ await restrictedHost().coinsAt([op]); return true; }catch(e){ return !/ is spent$/.test(String(e?.message??e)); } },
     take: async (entry, opts)=>{
       const host = restrictedHost();
       try{
+        if(opts && opts.only) host.onlyFrom(opts.only);
         const r = entry.kind === 'gated' ? await takeGated(host, entry, opts) : await takeDvP(host, entry, opts);
         try{ await sync(); }catch{} try{ await oampRefreshBalances(); }catch{}
         return r;
@@ -7609,6 +7637,7 @@ function initSwapTab(){
     // Transaction rides along for the covenant fill host's post-broadcast applyTransaction —
     // it guarded on ctx.wasm.Transaction, which was missing here, so that apply silently never ran.
     devMode,   // the Swap tab looks for an order missing from its list only in developer mode
+    keyRoot: () => btcRoot,   // the wallet's key tree: its resting orders' notes are sealed to a key of it (order-note.js)
     // buildCovenantRefundTx is what Reclaim builds a resting order's refund with (covenant-fill-host.js).
     wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction, scriptToAddress, buildCovenantFillTx, buildCovenantRefundTx, buildSeqHtlcRedeemScript, generateSwapSecret },
     noteOwnTx,   // spend-tracking ring: own broadcasts survive a stale scan Update (see reapplyOwnTxs)
