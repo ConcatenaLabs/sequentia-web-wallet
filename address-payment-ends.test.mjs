@@ -29,7 +29,7 @@ test('the answer to Send is "Sending", never "Sent", until the payment is made',
   const o = offboardOutcome({ offboard: ID, state: 'pending', round_within_seconds: 60 }, '1', 'OILX', 10, 60)
   assert.doesNotMatch(o.text, /^Sent/)
   assert.equal(o.text, 'Sending 1 OILX. Keep this page open until it is sent.')
-  assert.equal(DEFAULT_WORDS.sentLater('1', 'OILX', o.minutes), 'Sent 1 OILX. It arrives within 10 minutes.')
+  assert.equal(DEFAULT_WORDS.sentLater('1', 'OILX', o.minutes), 'Sent 1 OILX. It arrives within 15 minutes.')
 })
 
 test('the live case: a payment whose page closed 7 s after Send ends not made, and is said once', () => {

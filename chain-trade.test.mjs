@@ -11,7 +11,7 @@
 //   node --test chain-trade.test.mjs
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createEngine, USER_WORDS, tradeStateWord, costLine } from './user-trade.js'
+import { createEngine, USER_WORDS, tradeStateWord, costLine, settlingBy } from './user-trade.js'
 import { planPlaceOrder, buildCovenantTerms } from './covenant-order.js'
 
 const X = 'aa'.repeat(31) + '01', Y = 'bb'.repeat(31) + '02'
@@ -47,6 +47,8 @@ function standIn ({ onchain = 3000000n, rateNum = 4n, rateDen = 3n } = {}) {
         case 'sync': return {}
         case 'settle_first': {
           const b = board()
+          // Coins of the tree that settle first as well (s.treeWait): the library says how long.
+          if (s.treeWait) return { settling: [], waiting: ['t1', ...(b && b.state === 'pending' ? ['b1'] : [])], done: [], left: [], ready: false, ...s.treeWait }
           if (b && b.state === 'pending') return { settling: [], waiting: ['b1'], done: [], left: [], ready: false }
           return { settling: [], waiting: [], done: [], left: [], ready: true }
         }
@@ -303,4 +305,47 @@ test('money on the chain that cannot be moved in (too little, or an asset not ta
   for (const w of [USER_WORDS.chainDust('XT'), USER_WORDS.chainStays('XT')]) {
     assert.ok(!/try again|something went wrong|ark|leaf|board|round|operator|limit|chain/i.test(w), w)
   }
+})
+
+test('money on the chain moved in and coins that settle first, in one trade: one wait, the later of the two, never a second one', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  assert.equal(tradeStateWord(recOf(eng, rec), s.t), 'Goes through within about 5 minutes', 'the ticket\'s minutes, before the library has said')
+  // The library says the coins it settles first take about 10 minutes (at most 15).
+  s.treeWait = { final_in_seconds: 900, usual_in_seconds: 600, waiting_for: 'round' }
+  let r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'settling')
+  assert.equal(settlingBy(r), s.t + 600_000, 'the later of the move (5 minutes) and the settle (10)')
+  assert.equal(tradeStateWord(r, s.t), 'Goes through within about 10 minutes', 'one figure: never 5 and then 10')
+  // Past the move's 5 minutes it still waits: the settle the library named extends the bound.
+  s.credit()
+  s.t += 7 * 60_000
+  r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'settling', 'not returned at the move\'s minutes while the library says its coins take longer')
+  assert.equal(tradeStateWord(r, s.t), 'Goes through within about 3 minutes', 'counted down')
+  s.t += 6 * 60_000
+  assert.equal(tradeStateWord(recOf(eng, rec), s.t), USER_WORDS.goesThroughLate, 'past the time said by two minutes: it says it takes longer, and goes by itself')
+  assert.ok(!/try again/i.test(USER_WORDS.goesThroughLate))
+  // Through: it goes ahead once, at the ticket's price.
+  s.treeWait = null
+  s.t += 30_000
+  r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'sent')
+  assert.equal(s.accepts.length, 1)
+  // And it is held to twice what the library said, with the margin, from when it said it.
+  assert.equal(r.settleMost, 2 * 900_000 + 120_000)
+})
+
+test('the settle\'s bound is kept: past twice what the library said, returned with nothing traded', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  s.treeWait = { final_in_seconds: 900, usual_in_seconds: 600, waiting_for: 'round' }
+  await eng.advance(recOf(eng, rec))
+  s.t += 2 * 900_000 + 120_000 + 1000
+  const r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'returned')
+  assert.equal(r.whyKind, 'late')
+  assert.equal(s.accepts.length, 0)
 })

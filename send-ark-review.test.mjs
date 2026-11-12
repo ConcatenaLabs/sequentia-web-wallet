@@ -72,7 +72,7 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.match(fn('treeSendReview'), /await treeSendReview\(\{\.\.\.r, amtS: less\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\); m\.remove\(\);/);
   assert.equal(DEFAULT_WORDS.sendInstead('0.30502601', 'EURX'), 'Send 0.30502601 EURX');
   // Never "It arrives in seconds." beside "takes about a minute".
-  assert.match(fn('treeSendReview'), /say\(bring \? bringLine : settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
+  assert.match(fn('treeSendReview'), /say\(bring \? DEFAULT_WORDS\.bringIn\(bringM\) : settling \? settleAhead\(\) : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
   assert.match(fn('treeSendReview'), /const instant = freeing \? sendableNow\(atoms, refused\) : null;/);
   // The channel side named plainly: no "set free", no "channel", no "Lightning".
   // The wait says why, how long by the chain, and the most that goes without it.
@@ -107,7 +107,8 @@ test('under the amount, the fee, how soon and the most, before the review', () =
 test('nothing sendable while held by the wallet\'s own upkeep: the payment goes through after it, said only as how long', () => {
   assert.equal(DEFAULT_WORDS.settling, 'Goes through in about a minute')
   assert.equal(DEFAULT_WORDS.movingNow, undefined, 'the wallet never names its maintenance')
-  assert.match(fn('noneNowWords'), /if\(arriving > 0n\) return DEFAULT_WORDS\.stillArriving\(m0\.ticker\);[\s\S]*if\(held > 0n\) return DEFAULT_WORDS\.settling;/)
+  assert.match(fn('noneNowWords'), /if\(arriving > 0n\) return DEFAULT_WORDS\.stillArriving\(m0\.ticker\);[\s\S]*if\(held > 0n\) return settleAhead\(\);/)
+  assert.match(fn('settleAhead'), /return DEFAULT_WORDS\.goesThrough\(m\|\|1\);/)
   assert.match(fn('shortWords'), /return noneNowWords\(hex, m0\);/)
   assert.match(fn('treeQuoteFor'), /: noneNowWords\(hex, m0\) \}\);/)
   // The review of a payment whose quote waits only for a settlement goes on, saying how long, and
@@ -115,8 +116,9 @@ test('nothing sendable while held by the wallet\'s own upkeep: the payment goes 
   assert.match(fn('settlesFirst'), /if\(e && e\.kind === 'settle_first'\) return true;/)
   assert.match(fn('settlesFirst'), /return held > 0n && arriving <= 0n && \(most == null \|\| most <= 0n\);/)
   assert.match(fn('treeSendReview'), /else if\(settlesFirst\(e, atoms, r\.asset\)\)\{ settling = true;/)
-  assert.match(fn('treeSendReview'), /say\(bring \? bringLine : settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/)
-  assert.match(fn('treeSendReview'), /w\.why === 'settle'\) st\.innerHTML='<span class="spin"><\/span>' \+ DEFAULT_WORDS\.settling/)
+  assert.match(fn('treeSendReview'), /say\(bring \? DEFAULT_WORDS\.bringIn\(bringM\) : settling \? settleAhead\(\) : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/)
+  assert.match(fn('treeSendReview'), /w\.why === 'settle'\) st\.innerHTML='<span class="spin"><\/span>' \+ esc\(settleLine\(\)\)/)
+  assert.match(fn('settleLine'), /return settleWords\(w && w\.why === 'settle' \? w\.finalBy : null, m\);/)
 })
 
 test('care opens no channel in an asset being sent, nor in one held for under CHANNEL_MIN_USD', () => {

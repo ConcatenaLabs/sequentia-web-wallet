@@ -15,7 +15,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { mountLeaves, JOINED_KEY } from './leaves.js'
-import { DEFAULT_WORDS, sendableNow, codeRoute, codeMost, boardMinutes } from './default-arca.js'
+import { DEFAULT_WORDS, sendableNow, codeRoute, codeMost, boardMinutes, settleWords } from './default-arca.js'
+import { putPending, dropPending, stageWriter, samePending, pendingSends, takePending } from './pending-sends.js'
 
 const X = '75'.repeat(32)
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
@@ -182,8 +183,11 @@ const textOf = (n) => [n.textContent, ...n.children.map(textOf)].filter(Boolean)
 
 function page (leavesApi, at) {
   const modals = []
+  const store = at.store || memStore()
   const deps = {
-    leavesApi, DEFAULT_WORDS, sendableNow, codeRoute, codeMost,
+    leavesApi, DEFAULT_WORDS, sendableNow, codeRoute, codeMost, settleWords,
+    putPending, dropPending, stageWriter, samePending, renderHistory: () => {},
+    settleLine: () => DEFAULT_WORDS.settling, settleAhead: () => DEFAULT_WORDS.settling,
     devMode: () => false, isOampAsset: () => false,
     assetMeta: () => ({ ticker: 'XT', precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
@@ -199,16 +203,16 @@ function page (leavesApi, at) {
       modals.push({ m, ok, st, rows })
       return { m, ok, st }
     },
-    noteSent: () => {}, walletTag: () => 't', localStorage: memStore(), renderBalance: () => {},
+    noteSent: () => {}, walletTag: () => 't', localStorage: store, renderBalance: () => {},
     performance: { now: () => Date.now() }, waitFor: () => 'about a minute',
-    onItsWay: () => 0n, settlesFirst: () => false, shortWords: (e) => String(e?.message ?? e), afterClose: () => ({}),
+    onItsWay: () => at.onItsWay || 0n, settlesFirst: () => false, shortWords: (e) => String(e?.message ?? e), afterClose: () => ({}),
     chainHeld: () => at.chain, chainSpendable: () => at.chain, chainMovable: () => at.movable, feeMarginAtoms: () => at.margin, bringMargin: () => at.bound,
     bringWant: (h, atoms) => atoms + at.bound, bringMinutes: () => 5,
   }
-  const names = ['codeWay', 'treeSendReview']
+  const names = ['codeWay', 'treeSendReview', 'movedInWithin', 'bringWait', 'sendStage', 'sendEnded', 'sameOnItsWay']
   const src = names.map(fn).join('\n') + '\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))
-  return { ...f, modals }
+  return { ...f, modals, store }
 }
 
 test('B1: a send moved in first shows the most its fees can be and the total, then pays within them', async (t) => {
@@ -264,4 +268,70 @@ test('B3: the whole balance typed to a receive code is refused naming what Max f
   assert.deepEqual(p.codeWay('request', X, most, 'tb1qaddress'), { dest: 'tb1qaddress', byAddress: true })
   // Max fills in the same figure.
   assert.match(fn('fillMax'), /const best=codeMost\(\{ tree, onItsWay: onItsWay\(hex\), chain: onChain, movable: chainMovable\(hex\), margin: feeMarginAtoms\(hex\), moveMargin: bringMargin\(hex\), address: !!\(c && c\.address\) \}\);/)
+})
+
+// ---- with #703's waits: one wait, and a payment written down while it is moved in ----
+test('a send moved in first is one wait: the move, and the settle after it only when part of what pays is on its way', async (t) => {
+  const { api } = await mount(t)
+  const settle = api.settleMinutes()
+  assert.ok(settle > 0, 'the operator\'s settle minutes are known')
+  assert.equal(page(api, { chain: 1n, movable: 1n, margin: 1n, bound: 1n }).bringWait(X), 5)
+  assert.equal(page(api, { chain: 1n, movable: 1n, margin: 1n, bound: 1n, onItsWay: 7n }).bringWait(X), 5 + settle)
+  // The review says that one figure, counted down after Send (settleWords), and nothing else.
+  assert.match(fn('treeSendReview'), /const bringM = bring \? bringWait\(r\.asset\) : 0;/)
+  assert.match(fn('treeSendReview'), /if\(bringBy != null && !\(w && w\.why === 'settle'\)\) st\.innerHTML='<span class="spin"><\/span>' \+ esc\(settleWords\(bringBy, bringM\)\)/)
+  assert.equal(settleWords(Date.now() + 5 * 60_000, 5), 'Goes through within about 5 minutes')
+  assert.equal(settleWords(Date.now() - 3 * 60_000, 5), DEFAULT_WORDS.goesThroughLate)
+})
+
+test('a send moved in first is written down as moving while its money comes in, shown as Sending, and ended once paid', async (t) => {
+  const { api, lib } = await mount(t)
+  lib.chain = 3_000_000n
+  const p = page(api, { chain: 3_000_000n, movable: 3_000_000n, margin: 2_000n, bound: 16_000n })
+  await p.treeSendReview({ asset: X, amtS: '0.01', addr: 'request', bringIn: true }, () => {})
+  const seen = []
+  const orig = api.bringIn
+  api.bringIn = async (...a) => { seen.push(pendingSends(p.store, 't').map((r) => ({ state: r.state, bound: r.bound, to: r.to }))); return orig(...a) }
+  await p.modals[0].ok.onclick()
+  api.bringIn = orig
+  assert.deepEqual(seen, [[{ state: 'moving', bound: '16000', to: 'request' }]], 'written down before the move, with the bound shown')
+  assert.equal(pendingSends(p.store, 't').length, 0, 'ended once paid')
+  assert.equal(p.modals[0].st.className, 'status ok', p.modals[0].st.textContent)
+  // The same payment asked again while it moves in is said to be on its way.
+  putPending(p.store, 't', { id: 'x', kind: 'code', asset: X, atoms: '1000000', to: 'request', at: Date.now(), state: 'moving', bound: '16000' })
+  assert.equal(p.sameOnItsWay(X, 1_000_000n, 'request'), DEFAULT_WORDS.sameOnItsWay)
+})
+
+test('a page closed while a payment\'s money is moved in finds it again, moves it in, and pays it within the fee shown, once', async (t) => {
+  const { api, lib } = await mount(t)
+  lib.chain = 3_000_000n
+  const p = page(api, { chain: 3_000_000n, movable: 3_000_000n, margin: 2_000n, bound: 16_000n })
+  const at = Date.now() - 60_000
+  putPending(p.store, 't', { id: 'code-1', kind: 'code', asset: X, atoms: '1000000', to: 'request', at, state: 'moving', bound: '16000' })
+  const got = takePending(p.store, 't')
+  assert.equal(got.resume.length, 1, 'a moving payment signed nothing: it is resumable')
+  assert.equal(got.dropped.length, 0)
+  const ends = []
+  const resume = new Function('leavesApi', 'takePending', 'noteEnd', 'noteSent', 'sendStage', 'sendEnded', 'movedInWithin', 'walletTag', 'localStorage', 'renderBalance', 'renderHistory', '_sendsResumed',
+    fn('resumeSends') + '\nreturn resumeSends;')(api, () => got, (s, tag, rec, why) => ends.push(why), () => {}, p.sendStage, p.sendEnded, p.movedInWithin, () => 't', p.store, () => {}, () => {}, false)
+  await resume()
+  assert.deepEqual(ends, [], 'nothing refused')
+  assert.equal(lib.calls.filter((c) => c === 'send').length, 1, 'paid once')
+  assert.equal(pendingSends(p.store, 't').length, 0)
+  assert.equal(3_000_000n - lib.chain - lib.live - lib.pending, 1_000_000n + 39n + 10n)
+})
+
+test('a payment found again after the page closed while its money moved in is not made past the fee shown', async (t) => {
+  const { api, lib } = await mount(t)
+  lib.chain = 3_000_000n; lib.sendFee = 20_000n
+  const p = page(api, { chain: 3_000_000n, movable: 3_000_000n, margin: 2_000n, bound: 16_000n })
+  putPending(p.store, 't', { id: 'code-2', kind: 'code', asset: X, atoms: '1000000', to: 'request', at: Date.now(), state: 'moving', bound: '16000' })
+  const got = takePending(p.store, 't')
+  const ends = []
+  const resume = new Function('leavesApi', 'takePending', 'noteEnd', 'noteSent', 'sendStage', 'sendEnded', 'movedInWithin', 'walletTag', 'localStorage', 'renderBalance', 'renderHistory', '_sendsResumed',
+    fn('resumeSends') + '\nreturn resumeSends;')(api, () => got, (s, tag, rec, why) => ends.push(why), () => {}, p.sendStage, p.sendEnded, p.movedInWithin, () => 't', p.store, () => {}, () => {}, false)
+  await resume()
+  assert.deepEqual(ends, ['refused'], 'said once on Balance: not sent')
+  assert.ok(!lib.calls.includes('send'))
+  assert.equal(pendingSends(p.store, 't').length, 0)
 })

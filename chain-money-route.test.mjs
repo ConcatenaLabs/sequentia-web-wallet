@@ -58,7 +58,7 @@ test('the page counts a payment received on the chain in what can be sent and tr
   assert.match(html, /arrivingIn \+= chainUnconfirmed\(\)\.get\(kind\)/)
   assert.match(html, /_depositTx\.has\(txid\)\) mid\.appendChild\(el\('div','sub unconf', DEFAULT_WORDS\.rowArriving\+' · '\+DEFAULT_WORDS\.arrivingSoon\)\)/)
   // The words: how long, never "try again", no rail named.
-  assert.equal(DEFAULT_WORDS.bringIn(5), 'Goes through within about 5 minutes. Keep this page open.')
+  assert.equal(DEFAULT_WORDS.bringIn(5), 'Goes through within about 5 minutes')
   const words = [DEFAULT_WORDS.bringIn(5), DEFAULT_WORDS.bringLate, DEFAULT_WORDS.bringRefused, DEFAULT_WORDS.feeMoved, DEFAULT_WORDS.feeAtMost('1', 'X', '')]
   for (const w of words) {
     assert.ok(!/try again|something went wrong/i.test(w), w)
