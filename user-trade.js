@@ -1363,7 +1363,7 @@ export function createEngine (deps) {
         put(rec)
         try {
           const a = await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) })
-          if (a && a.state === 'done') rec.makerDone = true
+          if (a && a.state === 'done') { rec.makerDone = true; rec.makerDoneAt = now() }
         } catch (e) {
           log('[user trade] the maker did not take the acceptance yet:', e.message)
           // The operator refused the maker's completion: the offer is gone, and the next advance
@@ -1483,7 +1483,7 @@ export function createEngine (deps) {
     // Offers gone GONE_MOST times over: the trade comes back with words rather than ask again.
     if (rec.gave.length >= GONE_MOST) {
       if (gone.offer && gone.offer.swap && rec.maker) release(rec.maker, gone.offer.swap)
-      rec.gone = null; rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'the makers\' offers were gone ' + rec.gave.length + ' times'
+      rec.gone = null; rec.state = 'returned'; rec.whyKind = null; rec.error = 'the makers\' offers were gone ' + rec.gave.length + ' times'
       if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
       return put(rec)
     }
@@ -1782,10 +1782,13 @@ export function createEngine (deps) {
       if (!rec.makerDone) {
         try {
           const a = await deps.fetchJson(rec.maker + '/v1/accept', { method: 'POST', body: JSON.stringify({ swap: rec.swap, accept: rec.accept }) })
-          if (a && a.state === 'done') rec.makerDone = true
+          if (a && a.state === 'done') { rec.makerDone = true; rec.makerDoneAt = rec.makerDoneAt || now() }
         } catch (e) { if (e.body && e.body.gone) { rec.gone = e.body; return advanceGone(rec) } }
       }
-      if (rec.makerDone) {
+      // A done answer is waited on for MAKER_COMPLETE_MS more, then the coins are taken back as
+      // before: a maker that says done and never completes holds no price of the person's for
+      // good, and a cancel after a real completion reads done (the library's swap_cancel).
+      if (rec.makerDone && now() - (rec.makerDoneAt || 0) <= MAKER_COMPLETE_MS) {
         try { await run('mailbox') } catch (e) { log('[user trade] mailbox:', e && e.message) }
         const s2 = ((await run('swaps')) || []).find((x) => x.swap === rec.swap)
         rec.swapState = s2 && s2.state

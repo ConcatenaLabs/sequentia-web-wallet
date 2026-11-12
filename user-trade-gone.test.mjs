@@ -142,6 +142,7 @@ test('a maker whose offers are gone again and again: the trade comes back with w
   for (let i = 0; i < 6; i++) r = await eng.advance(eng.records()[0])
   assert.equal(r.state, 'returned', JSON.stringify(r))
   assert.equal(r.gave.length, 3)
+  assert.notEqual(r.whyKind, 'moved', 'not said as a price that moved: it may not have')
   assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 0, 'nothing traded')
   assert.ok(s.posts.some(([p]) => p === 'release'), 'the last offer made in place of a gone one is let go of')
 })
