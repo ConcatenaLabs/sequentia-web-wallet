@@ -113,7 +113,10 @@ In practice:
 - A coin another wallet paid this one is made the wallet's own in the operator's next settlement,
   by itself, which ends what its senders could still do with it. One that is arriving goes into
   the very next settlement, ahead of others; one that counted goes when the wallet has been left
-  alone two minutes, or holds more than half of what counts at once. A counted coin given to a
+  alone two minutes, or holds more than half of what counts at once. A wallet holding more than
+  one coin of an asset never gives them all to a settlement at once: when those it would give are
+  all of the asset it can spend now, it keeps one back (the largest that can still be traded
+  from), and gives it in a later settlement. A counted coin given to a
   settlement still pays: a settlement that waits for the operator is taken back after two
   minutes, and a payment or a trade that needs the coin takes it back first. Nothing is said about
   it. A page can turn this off (`window.SEQ_REFRESH_RECEIVED = false`).
@@ -654,9 +657,19 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   this goes ahead by itself, or is returned with nothing traded"; past the bound a trade not yet
   confirmed reads "This is taking longer than usual. Nothing has moved,
   and your money stays in your wallet.", and one confirmed is "Returned: nothing traded."
-  Payments wait for that settlement the same way and then go. Coins too deep for
-  part of them to be traded are settled by the wallet once it has been left alone two minutes,
-  at a settlement's fee each, so the next trade from them goes at once.
+  Payments wait for that settlement the same way and then go. Every trade that
+  gives part of a coin makes what is left of it one step deeper, and a coin can be traded from
+  three times before a settlement must renew it. So a trade takes the coin that has been traded
+  from most and still has room, when one covers it, and the wallet settles a coin with no room
+  left at once while it holds another coin of that asset to trade from, when the settlement
+  costs nothing; otherwise, or for the last coin of an asset, once it has been left alone two
+  minutes, at a settlement's fee each. A settlement the wallet makes, whether for upkeep or
+  before a trade or payment, keeps up to half of what the wallet holds of the asset in up to
+  three working coins and the rest in one reserve coin: at most four coins of the asset, none
+  smaller than ten of the operator's smallest coins or a hundred times what taking one coin home
+  on the chain costs, and a small holding stays one coin. So someone trading again and again,
+  holding more than one coin of what they trade, waits for no settlement, and a trade of up to
+  half of what they hold still pays from one coin.
 - A trade whose other side cannot complete it after all (the other side says the offer is gone:
   the network refused it, for example because another device of the same wallet had already
   spent the coin it named) is not waited on: the wallet takes its coins back at once, learning

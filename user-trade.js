@@ -1181,7 +1181,9 @@ export function createEngine (deps) {
   // settleBound of the library's first answer), when `stop()` says so, or with a library that has
   // no such command.
   async function settle ({ payAsset, coins }, { until = null, stop = null, onWait = null } = {}) {
-    const ask = coins && coins.length ? { coins } : { asset: payAsset }
+    // `spread`: the round cuts what it settles into a few coins of the asset, so the trades after
+    // this one trade on from one while another is in a round (the fee is the same).
+    const ask = coins && coins.length ? { coins, spread: true } : { asset: payAsset, spread: true }
     const start = now()
     let wait = null
     for (let first = true; ; first = false) {
@@ -1644,7 +1646,7 @@ export function createEngine (deps) {
   // Puts a settling trade's coins through the next round (the library gives up nothing twice).
   async function settleAsk (rec) {
     const t = rec.ticket
-    return run('settle_first', rec.settleCoins && rec.settleCoins.length ? { coins: rec.settleCoins } : { asset: t.payAsset })
+    return run('settle_first', rec.settleCoins && rec.settleCoins.length ? { coins: rec.settleCoins, spread: true } : { asset: t.payAsset, spread: true })
   }
 
   // A confirmed trade whose coins are settled first: once through, priced again for the amount
