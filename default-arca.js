@@ -32,10 +32,11 @@ function arrivesWords (minutes) {
 
 const KEEP_OPEN = 'Keep this page open meanwhile.'
 
-// When coins moved out of the Ark are ready, from the operator's interval in minutes.
+// When coins moved out of the Ark are ready, in minutes. Default mode names no rail: the words say
+// the money is made ready for its use, never where it moves from.
 function readyWords (minutes) {
-  if (!minutes) return 'They are ready shortly.'
-  return `They are ready within ${minutes} minute${minutes === 1 ? '' : 's'}.`
+  if (!minutes) return 'Ready shortly.'
+  return `Ready within ${minutes} minute${minutes === 1 ? '' : 's'}.`
 }
 
 export const DEFAULT_WORDS = Object.freeze({
@@ -195,15 +196,15 @@ export const DEFAULT_WORDS = Object.freeze({
   faucetOnItsWay: (what) => `The faucet sent ${what}. It shows in your balance as soon as your wallet has taken it in, usually within a few minutes.`,
   // A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain: what
   // they need is moved out of the Ark first, by the wallet itself.
-  movingOut: (what, purpose, minutes) => `Moving ${what} out of the Ark so it can be ${purpose}. ${readyWords(minutes)} Keep this page open.`,
-  movingWaits: (what, purpose) => `${what} cannot be moved out of the Ark yet: the network moves it as soon as it can, and it stays yours meanwhile. It is ${purpose} then, while this page is open; or come back later and press the button again.`,
-  cannotMoveNow: (what) => `${what} cannot be moved out of the Ark right now: the network has too little of it free. Nothing has moved: try again later.`,
+  movingOut: (what, purpose, minutes) => `Getting ${what} ready to be ${purpose}. ${readyWords(minutes)} Keep this page open.`,
+  movingWaits: (what, purpose) => `${what} is not ready to be ${purpose} yet: the network makes it ready as soon as it can, and it stays yours meanwhile. It is ${purpose} then, while this page is open; or come back later and press the button again.`,
+  cannotMoveNow: (what) => `${what} cannot be made ready right now: the network has too little of it free. Nothing has moved: try again later.`,
   notEnough: (amount, ticker) => `Not enough ${ticker}: ${amount} ${ticker} short.`,
   // The wallet did not open within the wait (and is not finding what it holds): nothing moved.
   stillOpening: 'Your wallet has not finished opening, so nothing has moved. If it does not open, reload the page.',
   waitOpening: 'Your wallet is still opening; this goes on by itself once it has.',
-  notMoved: 'This could not be moved out of the Ark just now. Nothing was spent: try again in a moment.',
-  notReady: 'What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes.',
+  notMoved: 'This could not be made ready just now. Nothing was spent: try again in a moment.',
+  notReady: 'What was being made ready has not arrived yet. It stays yours: try again in a few minutes.',
   stakeFeeOther: (ticker) => `Not enough tSEQ for the stake and its fee: the fee is paid in ${ticker} instead, chosen below. Press Review stake again.`,
   stakeFeeShort: 'Not enough tSEQ for the stake and its fee: stake a little less, or hold an asset that can pay the fee.',
   // What the wallet holds that nothing can move before a date (a vesting allocation): part of the

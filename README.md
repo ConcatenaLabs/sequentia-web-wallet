@@ -804,7 +804,9 @@ default mode the Trade tab simply trades it against other assets. The wallet tak
 quote in one transaction that moves both sides at once, or fills a resting order whose coin
 only the asset's policy server can release; either way the wallet checks the whole transaction
 before it signs anything, and the policy server checks it again and broadcasts it. A buyer the
-issuer has not approved is shown whom to ask and the approval code to give them. Bitcoin buys a
+issuer has not approved is shown whom to ask and the approval code to give them. A trade the
+other side declines before anything is sent ends at once with nothing traded; one whose page was
+closed while what it pays from was being made ready is followed until that is done. Bitcoin buys a
 restricted asset as one trade with one ticket and one confirmation: the bitcoin buys an asset that
 buys the restricted one, and once that has settled the wallet makes the rest by itself, moving
 exactly what the bitcoin bought to the chain and trading it there, only at terms giving at least

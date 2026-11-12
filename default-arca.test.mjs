@@ -348,7 +348,7 @@ test('moveOutMinutes: a settlement and its block, not the ten minutes of a payme
   assert.equal(moveOutMinutes(600, 60), 13)
   assert.equal(moveOutMinutes(null), null)
   assert.equal(DEFAULT_WORDS.movingOut('40,000 tSEQ', 'staked', moveOutMinutes(60, 60)),
-    'Moving 40,000 tSEQ out of the Ark so it can be staked. They are ready within 4 minutes. Keep this page open.')
+    'Getting 40,000 tSEQ ready to be staked. Ready within 4 minutes. Keep this page open.')
 })
 
 // A coin given up in the next round (the wallet's own refresh of what it received, a move out of

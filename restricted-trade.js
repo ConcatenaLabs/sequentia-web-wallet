@@ -445,7 +445,18 @@ export async function takeDvP (host, entry, { feeAsset, onTxid }) {
   const fee = big(await host.feeAtoms(feeAsset, TRADE_VBYTES))
   const owns = await host.walletOwns()
   const c = await host.courier(entry)
+  // Until the trade goes to its broadcast, nothing of the wallet's has left it signed: a maker that
+  // refuses, does not answer or answers out of turn before then has moved nothing, and the trade
+  // is refused at once, never followed as one that may have been made (#697).
+  let sent = false
   try {
+    return await dvpSteps()
+  } catch (e) {
+    if (sent || (e && e.kind === 'refused')) throw e
+    throw refusal(String((e && e.message) || e))
+  } finally { try { c.close() } catch {} }
+
+  async function dvpSteps () {
     await c.send({ type: 'dvp_request', taker_aid: aid, seq_amount: Number(value) })
     const m = await c.recv('dvp_coins', STEP_MS)
     const theirs = await host.coinsAt((m.dvp_coins || []).map((x) => ({ txid: x.Txid ?? x.txid, vout: x.Vout ?? x.vout })))
@@ -497,6 +508,7 @@ export async function takeDvP (host, entry, { feeAsset, onTxid }) {
       const signed = await host.signWallet(hex, unsigned.inputs)
       const bad = checkSigned(tx, readTx(signed), offeredIdx)
       if (bad) { await c.fail('bad_terms', bad); throw refusal(bad) }
+      sent = true
       txid = await broadcast(policy, { ...body, tx: signed, broadcast: true, user_sigs: sm.user_sigs, expires_at: Number(sm.expires_at), expiry_sig: sm.expiry_sig }, tx.txid, onTxid)
     } else {
       const theirsSigned = readTx(sm.dvp_tx)
@@ -512,11 +524,12 @@ export async function takeDvP (host, entry, { feeAsset, onTxid }) {
       const exp = await chainNow(host) + EXPIRY_S
       const sigs = await host.signEnclave(signed, unsigned.inputs, sellerIns, mine)
       const es = await host.signDigest(expiryDigest(tx.txid, exp))
+      sent = true
       txid = await broadcast(policy, { ...body, tx: signed, broadcast: true, user_sigs: sigs, expires_at: exp, expiry_sig: es }, tx.txid, onTxid)
     }
     await c.send({ type: 'dvp_done', settle_txid: txid }).catch(() => {})
     return { txid }
-  } finally { try { c.close() } catch {} }
+  }
 }
 
 // The layout when the buyer pays the price and the fee in one asset from one set of coins: the

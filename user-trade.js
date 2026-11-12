@@ -76,6 +76,9 @@ export const GONE_MOST = 3
 // A step whose outcome is unknown (the operator did not answer, so the library may still complete
 // it at its next sync) is looked for this long before the trade is called returned.
 export const UNCERTAIN_MS = 10 * 60 * 1000
+// The longest a restricted trade's move to the chain is followed after its page closed: the page's
+// own wait for a move (index.html MOVE_WAIT_MS, 45 minutes) and five minutes more.
+export const RESTRICTED_MOVE_MOST_MS = 50 * 60 * 1000
 // A maker's firm offer is accepted only while at least this long is left before it lapses.
 export const FIRM_MARGIN_MS = 20_000
 // The most the operator's fee may be of a price, in millionths, for a trade in user mode.
@@ -1637,9 +1640,14 @@ export function createEngine (deps) {
         const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
         if (got) { rec.state = 'sent'; rec.sentAt = now() } else notFound('not filled')
       } else if (rec.source === 'restricted') {
-        // A trade whose broadcast did not answer: it was made once the chain knows it.
+        // A trade whose broadcast did not answer: it was made once the chain knows it. One whose page
+        // closed while what it pays from was moving to the chain is followed while that move runs
+        // (#697), up to RESTRICTED_MOVE_MOST_MS: it is never ended as not made meanwhile.
         const st = rec.txid ? await Promise.resolve(deps.restricted.status(rec.txid)).catch(() => 'unknown') : 'unknown'
-        if (st !== 'unknown') { rec.state = 'sent'; rec.sentAt = now() } else notFound('not made')
+        const moving = !rec.txid && rec.movingSince && now() - rec.movingSince < RESTRICTED_MOVE_MOST_MS && deps.restricted.moving &&
+          await Promise.resolve(deps.restricted.moving()).catch(() => true)
+        if (st !== 'unknown') { rec.state = 'sent'; rec.sentAt = now() } else if (moving) return rec
+        else { delete rec.movingSince; notFound('not made') }
       } else if (rec.source === 'onchain-fill') {
         // A FILL whose broadcast did not answer: it is the wallet's once the node knows it.
         const st = rec.txid ? await Promise.resolve(deps.onchain.status(rec.txid)).catch(() => 'unknown') : 'unknown'

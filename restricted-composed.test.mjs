@@ -438,3 +438,31 @@ test('the words a composed purchase uses name no rail or protocol', () => {
     assert.doesNotMatch(t, /can(no|')t be traded|not tradable|cannot trade/i, t)
   }
 })
+
+test('a restricted trade whose page closed while its move ran is followed while the move runs, never ended as not made (#697)', async () => {
+  const { RESTRICTED_MOVE_MOST_MS } = await import('./user-trade.js')
+  const s = standIn(); s.t = 10_000_000
+  let moving = true
+  const h = restrictedHost({ moving: async () => moving })
+  const rec = { id: 'r1', at: s.t, source: 'restricted', state: 'confirming', entry: 'e1', movingSince: s.t,
+    ticket: { payAsset: X, receiveAsset: RA, amountIn: '800', amountOut: '400', fees: [{ asset: X, atoms: '7' }], source: 'restricted' } }
+  s.store.setItem('swk.usertrade.default', JSON.stringify([rec]))
+  // The page opens again 20 minutes later, the move still under way: the trade is followed.
+  s.t += 20 * 60_000
+  const eng = engine(s, h)
+  await eng.resume()
+  let r = eng.records().find((x) => x.id === 'r1')
+  assert.equal(r.state, 'confirming', 'a trade whose move still runs is not ended')
+  // The move over and nothing traded: ended then, as nothing traded.
+  moving = false
+  await eng.resume()
+  r = eng.records().find((x) => x.id === 'r1')
+  assert.equal(r.state, 'failed'); assert.equal(r.error, 'not made'); assert.equal(r.movingSince, undefined)
+  // A move followed past its longest wait ends too, whatever the library says.
+  const s2 = standIn(); s2.t = 10_000_000
+  s2.store.setItem('swk.usertrade.default', JSON.stringify([{ ...rec, at: s2.t, movingSince: s2.t }]))
+  s2.t += RESTRICTED_MOVE_MOST_MS + 1
+  const eng2 = engine(s2, restrictedHost({ moving: async () => true }))
+  await eng2.resume()
+  assert.equal(eng2.records().find((x) => x.id === 'r1').state, 'failed')
+})

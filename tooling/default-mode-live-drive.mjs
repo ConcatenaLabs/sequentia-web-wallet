@@ -106,6 +106,7 @@ const pages = []
 async function openWallet (who, { fresh = false, phrase = null, at = base } = {}) {
   const profile = join(work, 'profiles', who)
   const page = new Page(chromium(), { profile })
+  if (process.env.DRIVE_CONSOLE_LOG) page.logTo(join(work, 'evidence', who + '-console.log'), who)
   pages.push(page)
   await page.open()
   // A browser stopped by an earlier run reopens its tabs: a wallet tab among them holds the
@@ -247,7 +248,7 @@ async function main () {
       const s=r.querySelector('.rasset'); const o=[...s.options].find(o=>o.textContent.trim().split(/\s/)[0]===${JSON.stringify(ticker)}); if(!o) throw new Error('no option ${ticker}: '+[...s.options].map(o=>o.textContent).join(',')); s.value=o.value; s.dispatchEvent(new Event('change'));
       r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
     await click(pa, '#btnReview')
-    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving |cannot be moved out of the Ark yet/.test(e) ? 'ERR '+e : false })()", 1500000)
+    const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Getting |is not ready to be [a-z ]* yet/.test(e) ? 'ERR '+e : false })()", 1500000)
     // A payment on the chain (an address the wallet's coins there cover, a confidential address)
     // has the chain's own review.
     const chainReview = /^Confirm Sequentia payment/i.test(title.trim())
@@ -730,7 +731,7 @@ async function main () {
         r.querySelector('.ramt').value=${JSON.stringify(amount)}; r.querySelector('.ramt').dispatchEvent(new Event('input')); return true })()`)
       const before = (await heldNow(n)).length
       await click(pa, '#btnReview')
-      const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Moving /.test(e) ? 'ERR '+e : false })()", 600000)
+      const title = await pa.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendErr')?.textContent; return e && !/^Getting /.test(e) ? 'ERR '+e : false })()", 600000)
       if (/^ERR /.test(title)) return { refused: title.slice(4), before }
       await shot(pa, `${payer}-name-${what}-review.png`)
       const tClick = Date.now()

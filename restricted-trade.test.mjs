@@ -396,3 +396,44 @@ test('the engine: what the trade must first move to the chain is on the ticket, 
   const tight = fakeR({ held: async () => 807n, moveQuote: async () => ({ fees: [{ asset: 'x', atoms: 0n }, { asset: b, atoms: 88n }], minutes: 4 }) })
   assert.deepEqual(await restrictedQuote(tight.R, { payAsset: tight.b, receiveAsset: tight.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
 })
+
+test('a maker that refuses or goes quiet before the trade is sent ends it at once: nothing moved, never followed as maybe made (#697)', async () => {
+  // The courier as xcourier.js reads a maker's refusal: an error, not a refusal of the wallet's.
+  const failing = (why) => (rig) => {
+    rig.host.courier = async () => ({ send: async () => {}, recv: async () => { throw new Error(why) }, fail: async () => {}, close () {} })
+    return rig
+  }
+  for (const why of ['peer failed the lift: stale_offer this maker process serves offer 423c, not 40cf',
+    'timed out waiting for "dvp_coins" — no frames arrived at all']) {
+    const { host, entry, seen } = failing(why)(dvpRig(() => []))
+    let told = null
+    const e = await m.takeDvP(host, entry, { feeAsset: F, onTxid: (t) => { told = t } }).then(() => null, (x) => x)
+    assert.equal(e && e.kind, 'refused', why)
+    assert.match(e.message, /^refused: /)
+    assert.equal(told, null); assert.equal(seen.signed, 0); assert.equal(seen.cosigned, 0)
+  }
+  // The same after the maker's signatures, before the broadcast: the policy server's check refuses.
+  const late = dvpRig(makerSells(99999))
+  late.host.policy = ((p) => () => ({ ...p(), check: async () => { throw new Error('velocity limit') } }))(late.host.policy)
+  const e2 = await m.takeDvP(late.host, late.entry, { feeAsset: F }).then(() => null, (x) => x)
+  assert.equal(e2 && e2.kind, 'refused')
+  // Once the trade went to its broadcast, a lost answer is still followed, never refused.
+  const lost = dvpRig(makerSells(99999))
+  lost.host.policy = ((p) => () => ({ ...p(), cosign: async () => { throw new Error('Failed to fetch') } }))(lost.host.policy)
+  const e3 = await m.takeDvP(lost.host, lost.entry, { feeAsset: F }).then(() => null, (x) => x)
+  assert.notEqual(e3 && e3.kind, 'refused')
+})
+
+test('a restricted trade marks the record while what it pays from moves to the chain, and clears it after', async () => {
+  const marks = []
+  const rec = { ticket: { payAsset: 'p', receiveAsset: 'r' } }
+  const R = { isRestricted: () => false,
+    ensure: async (_n, say) => { marks.push(rec.movingSince != null); say('moving'); marks.push(rec.note) },
+    take: async (_e, o) => { marks.push(rec.movingSince != null); o.onTxid('ab'.repeat(32)); return { txid: 'ab'.repeat(32) } } }
+  await restrictedConfirm(R, { entry: { id: 'x' }, give: 1n, receive: 1n, feeAsset: 'p', fee: 1n }, rec, (r) => r)
+  assert.deepEqual(marks, [true, 'moving', false])
+  // A move that fails clears the mark too.
+  const rec2 = { ticket: { payAsset: 'p', receiveAsset: 'r' } }
+  await assert.rejects(restrictedConfirm({ ...R, ensure: async () => { throw new Error('not ready') } }, { entry: { id: 'x' }, give: 1n, receive: 1n, feeAsset: 'p', fee: 1n }, rec2, (r) => r))
+  assert.equal(rec2.movingSince, undefined)
+})

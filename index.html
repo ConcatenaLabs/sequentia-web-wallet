@@ -4686,6 +4686,8 @@ function restrictedDeps(){
     },
     fee: async (hex)=> restrictedFeeAtoms(hex, TRADE_VBYTES),
     ensure: (needs, say)=> ensureOnChain(needs, say, 'traded'),
+    // Whether a move of this wallet's to its own address is under way (a trade's, after a reload).
+    moving: async ()=> (await movesUnderWay()).length > 0,
     // A composed purchase moves its coin to this address, and pays its trade on the chain from what
     // landed there alone.
     address: async ()=> wollet.address(undefined).address().toUnconfidential().toString(),

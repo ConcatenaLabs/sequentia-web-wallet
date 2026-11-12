@@ -22,6 +22,8 @@
 //   moveQuote(needs)     -> what moving `needs` ([{ hex, atoms }]) to the chain costs and takes, before
 //                           anything moves: null when the chain holds them, else { fees, minutes };
 //                           throws the library's settle_first
+//   moving()             -> whether a move of the wallet's to its own address is under way (a
+//                           trade's, followed after its page opened again)
 //   feeAsset(pay, receive) -> the asset the fee is paid in (the asset paid, never the restricted
 //                           one; selling a restricted asset, the asset received, else another held)
 //   fee(asset)           -> the fee of one trade in that asset
@@ -147,8 +149,11 @@ export async function restrictedConfirm (R, choice, rec, put) {
   if (!R.isRestricted(ticket.payAsset)) needs.push({ hex: ticket.payAsset, atoms: choice.give + (choice.feeAsset === ticket.payAsset ? choice.fee : 0n) })
   if (choice.feeAsset !== ticket.payAsset) needs.push({ hex: choice.feeAsset, atoms: choice.fee })
   rec.entry = choice.entry.id
+  // While what it pays from is moved to the chain, the record says so (`movingSince`): a page that
+  // opens again meanwhile follows the move, and never ends the trade as not made while it runs.
+  rec.movingSince = Date.now()
   put(rec)
-  await R.ensure(needs, (text) => { rec.note = text; put(rec) })
+  try { await R.ensure(needs, (text) => { rec.note = text; put(rec) }) } finally { delete rec.movingSince }
   rec.note = null
   // The trade's txid is recorded before the broadcast: a broadcast whose answer is lost is
   // followed by it (the engine's uncertain step), never reported as nothing moved.
