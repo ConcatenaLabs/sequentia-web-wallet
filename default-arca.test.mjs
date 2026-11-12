@@ -356,7 +356,7 @@ test('moveOutMinutes: a settlement, its block and the unlock, not another wallet
   assert.ok(285 <= moveOutMinutes(60, 60) * 60, 'the move out measured on the testnet is within what is said')
   assert.equal(moveOutMinutes(null), null)
   assert.equal(DEFAULT_WORDS.movingOut('40,000 tSEQ', 'staked', moveOutMinutes(60, 60)),
-    'Moving 40,000 tSEQ out of the Ark so it can be staked. They are ready within 14 minutes. Keep this page open.')
+    'Getting 40,000 tSEQ ready to be staked. Ready within 14 minutes. Keep this page open.')
 })
 
 // A coin given up in the next round (the wallet's own refresh of what it received, a move out of

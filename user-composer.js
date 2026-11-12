@@ -31,6 +31,7 @@ import { SETTLE_LATE_MS } from './default-arca.js'
 import { mountMarketView } from './market-view.js'
 import { openPicker, PICKER_WORDS } from './asset-picker.js'
 import { RESTRICTED_WORDS } from './restricted-trade.js'
+import { isStep } from './restricted-composed.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 // The chooser button's marks (no words): what nothing chosen shows, and the arrow.
@@ -335,6 +336,8 @@ export function mountUserComposer (ctx) {
     cost.textContent = costText
     t.appendChild(cost)
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
+    if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }
+    if (k.keep && k.via) { const kp = el('div', 'sub', RESTRICTED_WORDS.viaKeep(amt(k.via, k.keep))); kp.id = 'ucKeep'; t.appendChild(kp) }
     if (S.moving) { const mv = el('div', 'sub', USER_WORDS.btcMore(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)); mv.id = 'ucMoving'; t.appendChild(mv) }
     act.appendChild(btn(S.busy ? USER_WORDS.sending : USER_WORDS.confirm, 'ucConfirm', confirm, 'primary'))
     act.appendChild(btn(USER_WORDS.cancel, 'ucCancel', () => { ctx.engine.drop(S.choice); reset(); paintTicket() }, 'ghost'))
@@ -515,12 +518,33 @@ export function mountUserComposer (ctx) {
   }
 
   function stateWord (r) {
+    // A purchase with bitcoin whose second step has not gone: what the person now holds.
+    // A restricted trade moving what it pays from to the chain: what the move says, with its wait.
+    if (r.source === 'restricted' && r.state === 'confirming' && r.note) return r.note
+    // Not approved now: says so, and the card shows how to get approved.
+    if (r.source === 'composed' && r.viaHeld && r.via) {
+      if (r.state === 'settled') return RESTRICTED_WORDS.viaHeld(name(r.via))
+      return (r.card ? RESTRICTED_WORDS.viaApproval : RESTRICTED_WORDS.viaWaiting)(name(r.via), name(r.ticket.receiveAsset))
+    }
     if (r.state === 'returned' && (r.feesPaid || []).length) return USER_WORDS.returnedFees(r.feesPaid.map((f) => amt(f.asset, f.atoms)).join(' and '))
     return tradeStateWord(r, Date.now())
   }
 
   const ENDED = ['settled', 'returned', 'failed', 'undone']
-  const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`
+  // A trade's transactions on a chain: a composed trade's are its steps'.
+  function linksOf (r) {
+    if (!ctx.links) return []
+    const all = ctx.engine.records()
+    const recs = r.source === 'composed' ? [r.first, r.second].map((id) => all.find((x) => x.id === id)).filter(Boolean) : [r]
+    return recs.flatMap((x) => ctx.links(x))
+  }
+  // What a trade brought: a composed purchase that ended at its first step brought that step's asset.
+  // What it holds of that asset: what the move put on the chain once it has, else the coin itself.
+  const got = (r) => (r.source === 'composed' && r.ended === 'via' ? amt(r.via, r.viaOut ? r.viaOut.value : r.viaAtoms) : amt(r.ticket.receiveAsset, r.ticket.amountOut))
+  // The fees a trade paid: a composed purchase that ended holding its first step's asset, that
+  // step's and, once made, the move's.
+  const feesOf = (r) => (r.ended !== 'via' ? r.ticket.fees : [...(r.firstFees || []), ...(r.viaOut && r.move ? [{ asset: r.via, atoms: r.move.fee }] : [])])
+  const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${got(r)}`
 
   function paintTrades () {
     noteEnds()
@@ -533,7 +557,8 @@ export function mountUserComposer (ctx) {
     // An ended trade stays here only while the page that saw it end is open; after a reload it is
     // in History alone, so trades never push the market down the page.
     const endedAt = (r) => r.settledAt || r.returnedAt || r.failedAt || r.at || 0
-    const recs = ctx.engine.records().filter((r) => (r.state !== 'confirming' || r.uncertain || Date.now() - (r.at || 0) < 10 * 60_000) && r.ticket)
+    // A step of a composed trade is shown as the trade it is part of.
+    const recs = ctx.engine.records().filter((r) => !isStep(r) && (r.state !== 'confirming' || r.uncertain || Date.now() - (r.at || 0) < 10 * 60_000) && r.ticket)
       .filter((r) => !ENDED.includes(r.state) || endedAt(r) >= S.openedAt).slice(-12).reverse()
     list.classList.toggle('uc-has-open', recs.some((r) => !ENDED.includes(r.state)))
     if (!recs.length) return
@@ -584,14 +609,28 @@ export function mountUserComposer (ctx) {
     head.appendChild(ht); c.appendChild(head)
     const line = (label, value, cls) => { const d = el('div', 'kv'); d.appendChild(el('span', 'k', label)); const v = el('span', 'v' + (cls ? ' ' + cls : '')); if (typeof value === 'string') v.textContent = value; else v.appendChild(value); d.appendChild(v); c.appendChild(d); return d }
     line(USER_WORDS.amountIn, amt(r.ticket.payAsset, r.ticket.amountIn))
-    line(USER_WORDS.amountOut, amt(r.ticket.receiveAsset, r.ticket.amountOut))
-    c.appendChild(el('div', 'sub uc-cost', costLine(r.ticket.fees, amt, r.ticket.payAsset)))
+    line(USER_WORDS.amountOut, got(r))
+    // A composed purchase that ended at its first step paid that step's fees alone.
+    c.appendChild(el('div', 'sub uc-cost', costLine(feesOf(r), amt, r.ticket.payAsset)))
     line(USER_WORDS.cardState, stateWord(r), 'uc-card-state').dataset.state = r.state
+    // A composed purchase waiting on the issuer's approval: whom to ask, as before a purchase.
+    let cardAct = null
+    if (r.source === 'composed' && r.card && !ended) {
+      const k = r.card
+      const box = el('div', 'uc-card'); box.id = 'ucCardApproval'
+      box.appendChild(el('div', '', k.text))
+      if (k.reason) box.appendChild(el('div', 'sub', k.reason))
+      c.appendChild(box)
+      cardAct = el('div', 'row')
+      if (k.code) { const b = el('button', 'ghost', RESTRICTED_WORDS.copyCode); b.type = 'button'; b.id = 'ucCopyCodeCard'; b.onclick = () => { try { navigator.clipboard.writeText(k.code) } catch {} }; cardAct.appendChild(b) }
+      if (k.link) { const a = el('a', 'btn ghost', k.link.text); a.id = 'ucOpenPageCard'; a.href = k.link.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; cardAct.appendChild(a) }
+      c.appendChild(cardAct)
+    }
     if (r.source === 'btc-gateway') {
       const steps = tradeSteps({ r, name })
       if (steps) { c.appendChild(el('div', 'lbl uc-steps-title', USER_WORDS.stepsTitle)); stepList(c, steps) }
     }
-    for (const k of (ctx.links ? ctx.links(r) : [])) {
+    for (const k of linksOf(r)) {
       const a = el('a', null, k.text); a.href = k.href; a.target = '_blank'; a.rel = 'noopener'
       line(USER_WORDS.txOn(k.chain), a, 'mono')
     }
@@ -603,15 +642,15 @@ export function mountUserComposer (ctx) {
 
   // A trade that ends while its card is closed is said wherever the person is (ctx.notify), once.
   // The trades ended before the page looked are not said again.
-  function endedIds () { return ctx.engine.records().filter((r) => r.ticket && ENDED.includes(r.state)).map((r) => r.id) }
+  function endedIds () { return ctx.engine.records().filter((r) => r.ticket && !isStep(r) && ENDED.includes(r.state)).map((r) => r.id) }
   function seenEnds () { S.ended = new Set(endedIds()) }
   function noteEnds () {
     if (!S.ended) { seenEnds(); return }
     for (const r of ctx.engine.records()) {
-      if (!r.ticket || !ENDED.includes(r.state) || S.ended.has(r.id)) continue
+      if (!r.ticket || isStep(r) || !ENDED.includes(r.state) || S.ended.has(r.id)) continue
       S.ended.add(r.id)
       if ((S.card && S.card.id === r.id) || !ctx.notify) continue
-      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: (ctx.links ? ctx.links(r) : [])[0] || null })
+      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: linksOf(r)[0] || null })
     }
   }
 

@@ -35,6 +35,7 @@ export function makeRestrictedHost (ctx) {
   // Coins handed to a trade under way are not handed to another.
   const held = new Set()
   const policies = new Map()
+  let only = null
 
   function policy (url) {
     const base = ctx.policyBase(url)
@@ -86,9 +87,14 @@ export function makeRestrictedHost (ctx) {
       for (const u of us) { const o = { txid: u.txid, vout: Number(u.vout) }; if (held.has(key(o))) continue; try { const c = await coinAt(o); if (c.asset === asset) out.push(c) } catch {} }
       return out
     },
+    // The trade pays the asset of these outpoints from them alone (a composed purchase's second
+    // step: what its move put on the chain), never from another coin of that asset.
+    // `ops`: [{ txid, vout, asset }].
+    onlyFrom (ops) { only = (ops || []).length ? { asset: ops[0].asset, keys: new Set(ops.map(key)) } : null },
     async walletCoins (asset, atoms) {
       const want = big(atoms)
-      const cs = (await ctx.utxos()).filter((u) => u.asset === asset && !held.has(key(u)))
+      const pinned = only && only.asset === asset ? only.keys : null
+      const cs = (await ctx.utxos()).filter((u) => u.asset === asset && !held.has(key(u)) && (!pinned || pinned.has(key(u))))
         .sort((a, b) => (big(b.value) > big(a.value) ? 1 : -1))
       const pick = []; let sum = 0n
       for (const c of cs) { if (sum >= want) break; pick.push(c); sum += big(c.value) }
@@ -131,7 +137,7 @@ export function makeRestrictedHost (ctx) {
     },
     // The coins a trade held, given back when it ends without spending them.
     release (coins) { for (const c of coins || []) held.delete(key(c)) },
-    releaseAll () { held.clear() },
+    releaseAll () { held.clear(); only = null },
     // A transaction's state on the chain: 'confirmed' once in a block, 'pending' while the
     // explorer holds it unconfirmed, 'unknown' otherwise.
     async status (txid) {
