@@ -1857,7 +1857,7 @@ import { accountDescriptors } from './descriptor.js';
 import * as stakeRecords from './stake-records.js';
 import { mountLeaves, devModeOn, frozenSentence, servedPairs } from './leaves.js';
 import { REPORT_WORDS, REPORT_URL, createErrorLog, buildReport, refusal, sendReport, sentWords } from './problem-report.js';
-import { DEFAULT_WORDS, arrivingRows, boardMinutes, roundMinutes, causeWhen, statedSeconds, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
+import { DEFAULT_WORDS, arrivingRows, boardMinutes, roundMinutes, causeWhen, statedSeconds, BOARD_QUIET_MS, sendableNow, sendableAfterFreeing, feeFromRefusal, addressRoute, codeRoute, arrivalMinutes, offboardOutcome, offboardEnds, offboardNewsText, heldAssetList, vestingShort, homeSummary, homeOnWay, homeHours, receiveCodeRetry, treeSendMax, amountFits, moveOutMinutes, arrivingSyncDue } from './default-arca.js';
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
@@ -2963,8 +2963,12 @@ async function treeSendReview(r, onDone, note){
   const atoms = parseAtoms(r.amtS, m0.precision||0);
   if(atoms<=0n) throw new Error('amount must be greater than zero');
   // What is still arriving goes too: the library answers settle_first for it, and the payment goes
-  // through after the next settlement (leaves.js paying). Only more than the wallet holds is said here.
-  const all = (leavesApi.leafAtoms(r.asset) || 0n) + onItsWay(r.asset);
+  // through after the next settlement (leaves.js paying). So does what is held on the chain, moved in
+  // first (`r.bringIn`, payCodeRoute), less what that keeps back for its fees. Only more than the
+  // wallet holds is said here.
+  const bring = !!r.bringIn && !devMode();
+  let all = (leavesApi.leafAtoms(r.asset) || 0n) + onItsWay(r.asset);
+  if(bring){ const more = chainMovable(r.asset) - bringMargin(r.asset); if(more > 0n) all += more; }
   if(atoms > all) throw new Error(DEFAULT_WORDS.sendUpTo(fmtAtoms(all, m0.precision||0), m0.ticker));
   const amt = fmtAtoms(atoms, m0.precision||0);
   // The fee is the library's (`send_quote`): what the payment keeps back for the fees of the
@@ -2974,7 +2978,9 @@ async function treeSendReview(r, onDone, note){
   // A payment the wallet's channel side would cover is quoted from the library's refusal: its fee,
   // and, when more is asked than can go once the fee is taken out, the review is for the most.
   let quote = null, freeing = false, refused = '', closing = null, settling = false;
-  try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
+  // Moved in first: no quote yet (the library holds none of it until it is in), so the fee is the
+  // part it keeps back, shown once it is sent.
+  if(!bring) try{ quote = await leavesApi.sendQuote(r.addr.trim(), atoms, r.asset); }
   catch(e){
     if(e && e.kind === 'in_channel'){ freeing = true; refused = String(e.message||''); closing = afterClose(e, atoms, refused); }
     else if(settlesFirst(e, atoms, r.asset)){ settling = true; console.warn('[send] settles first:', String(e?.message??e)); }
@@ -2997,7 +3003,8 @@ async function treeSendReview(r, onDone, note){
   // the most that would go instantly.
   const instant = freeing ? sendableNow(atoms, refused) : null;
   const waitLine = DEFAULT_WORDS.waitBlock(waitFor(r.asset), instant != null && instant > 0n ? fmtAtoms(instant, m0.precision||0) : '', m0.ticker);
-  say(settling ? DEFAULT_WORDS.settling : freeing ? waitLine : DEFAULT_WORDS.sendLine);
+  const bringLine = bring ? DEFAULT_WORDS.bringIn(bringMinutes()) : '';
+  say(bring ? bringLine : settling ? DEFAULT_WORDS.settling : freeing ? waitLine : DEFAULT_WORDS.sendLine);
   ok.textContent = DEFAULT_WORDS.send;
   // The wallet's own channel reads wait while the review is open, so Send never waits for one.
   try{ leavesApi.holdReads(120_000); }catch{}
@@ -3007,12 +3014,19 @@ async function treeSendReview(r, onDone, note){
     const t0=performance.now();
     try{
       // While a channel's side is set free first, the wait says so.
-      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; else if(w && w.why === 'round'){
+      const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(bring) st.innerHTML='<span class="spin"></span>' + bringLine; else if(w && w.why === 'channel') st.innerHTML='<span class="spin"></span>' + waitLine; else if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; else if(w && w.why === 'round'){
         // The time true for the operator's finality rule, and past it, that it takes longer.
         let d=null; try{ d=leavesApi.anchorDepth(); }catch{}
         const rm=roundMinutes(d), late=w.since!=null && Date.now()-w.since > statedSeconds('round', 5, rm)*1000;
         st.innerHTML='<span class="spin"></span>' + (late ? DEFAULT_WORDS.waitRound(DEFAULT_WORDS.takingLonger) : DEFAULT_WORDS.waitRound(causeWhen('round', 5, rm)));
       } }catch{} }, 1000);
+      if(bring){
+        st.innerHTML='<span class="spin"></span>' + bringLine;
+        // What is on the chain is moved in first; the payment then waits for the move to be final
+        // (the library's settle_first) and goes. Nothing moved in: nothing sent, said so.
+        const moved = await leavesApi.bringIn(r.asset, { want: bringWant(r.asset, atoms) }).catch((e)=>{ console.warn('[send] moving in:', e?.message??e); return null; });
+        if(!moved){ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} st.className='status err'; st.textContent=DEFAULT_WORDS.bringLate; ok.disabled=false; return; }
+      }
       await leavesApi.payCode(r.addr.trim(), atoms, r.asset).finally(()=>{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} });
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
@@ -3114,8 +3128,11 @@ async function offboardReview(r, onDone){
   // settles it first and then goes (leaves.js paying), with no quote to hold it to: its fee is
   // shown once it is sent, within the wallet's own bound, and it takes one settlement longer.
   // A library that answers it plainly says when it can go, never "can't be sent".
-  let q = null, settling = false;
-  try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }
+  // Part of it held on the chain, moved in first (`r.bringIn`, addressRoute 'bring-in'): no quote
+  // either; the payment goes once the move is final, one settlement later.
+  const bring = !!r.bringIn && !devMode();
+  let q = null, settling = bring;
+  if(!bring) try{ q = await leavesApi.offboardQuote({ asset: r.asset, amount: String(atoms), address }); }
   catch(e){
     console.warn('[offboard] quote:', e?.message??e);
     if(e && e.kind === 'settle_first') settling = true;
@@ -3125,14 +3142,19 @@ async function offboardReview(r, onDone){
   const amt = fmtAtoms(atoms, m0.precision||0);
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
   const round = leavesApi.roundInterval();
-  const minutes = arrivalMinutes(settling && round ? 2 * round : round, leavesApi.blockSeconds());
+  const minutes = (bring ? bringMinutes() : 0) + arrivalMinutes(settling && round ? 2 * round : round, leavesApi.blockSeconds());
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, settling ? DEFAULT_WORDS.feeKeptSome : fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
     // While what it needs settles first, the wait says so.
-    const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; }catch{} }, 1000);
+    const tell = setInterval(()=>{ try{ const w = leavesApi.releasing(); if(bring) st.innerHTML='<span class="spin"></span>' + esc(DEFAULT_WORDS.arrivesWithin(minutes)); else if(w && w.why === 'settle') st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.settling; }catch{} }, 1000);
+    if(bring){
+      // An offboard is made only from final coins: the move in is waited for until it is.
+      const moved = await leavesApi.bringIn(r.asset, { final: true, want: bringWant(r.asset, atoms, true) }).catch((e)=>{ console.warn('[offboard] moving in:', e?.message??e); return null; });
+      if(!moved){ clearInterval(tell); st.className='status err'; st.textContent=DEFAULT_WORDS.bringLate; ok.disabled=false; return; }
+    }
     let v;
     try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, ...(q ? { shown: q } : {}) }); }
     catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; return; }
@@ -4460,8 +4482,8 @@ function siteDeps(){
       try{ if(leavesApi && leavesApi.isOpen()) for(const h of leavesApi.leafAssets()){ const n = (leavesApi.leafAtoms(h)||0n) - (leavesApi.arriving(h)||0n); if(n > 0n) leaves[h] = n.toString(); } }catch{}
       let assets = {};
       try{ assets = balObj(); }catch{}
-      // Default mode: a deposit still arriving is in no figure the wallet shows, so a site sees none.
-      try{ if(!devMode()) for(const [h, v] of chainArriving()){ const n=BigInt(assets[h]||0)-v; assets[h]=(n>0n?n:0n).toString(); } }catch{}
+      // What a board just took off the chain is in the tree already: counted there, not twice.
+      try{ if(leavesApi && leavesApi.onchainLessBoards) for(const h of Object.keys(assets)) assets[h]=leavesApi.onchainLessBoards(h, assets[h]).toString(); }catch{}
       // One figure per asset wherever it is held (the composer's own, userHeld), and what of it is arriving.
       const total = {}, arriving = {}, by_place = {};
       for(const h of new Set(['BTC', ...Object.keys(assets), ...Object.keys(leaves), ...onItsWayAssets()])){
@@ -4580,7 +4602,7 @@ async function relayPairBook(base, quote){
 }
 function userHeld(a){
   let n = 0n;
-  try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0) - (chainArriving().get(a) || 0n)); } catch {}
+  try { n += a==='BTC' ? (btcBalance || 0n) : chainHeld(a); } catch {}
   try { if(leavesApi) n += leavesApi.leafAtoms(a) || 0n; } catch {}
   try { n += BigInt(Math.round(lnSpendableFor(a).units || 0)); } catch {}
   // BTC on the Bitcoin ark, which default mode's trades pay from.
@@ -5234,7 +5256,8 @@ function initUserComposer(){
       esploraFetch: (path, opts)=> fetch(ESPLORA + path, opts), noteOwnTx,
       // Transparent by default: the order's asset comes to the usual address.
       receiveAddress: ()=> { const a = wollet.address(addrIndex == null ? undefined : addrIndex).address(); return (a.toUnconfidential ? a.toUnconfidential() : a).toString(); },
-      balance: (a)=> { try { return BigInt(balObj()[a] || 0); } catch { return 0n; } },
+      // What the chain holds of it now, a payment received there included, less what a board took.
+      balance: (a)=> { try { return chainHeld(a); } catch { return 0n; } },
       feeRateFor, feerate: DEFAULT_FEERATE, rateScale: EXCHANGE_RATE_SCALE,
     }),
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
@@ -5246,6 +5269,10 @@ function initUserComposer(){
     // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
     anchorDepth: ()=> leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null,
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
+    // Money held on the chain that no order on the chain takes: moved in first, then traded, the
+    // ticket saying how long (default mode only: developer mode moves nothing by itself).
+    chain: (a)=> devMode() ? null : ({ atoms: chainHeld(a), movable: chainMovable(a), margin: bringMargin(a), minutes: bringMinutes() }),
+    bringIn: (a, want)=> (leavesApi && !devMode() && leavesApi.bringIn) ? leavesApi.bringIn(a, { want: want || 0n }) : null,
     // Coins an open refresh plan keeps are freed for a trade in the wallet's next round.
     release: (a, leaves)=> leavesApi ? leavesApi.releaseFor(a, leaves) : null,
     // A trade that brought coins in: the balance, and so the Trade tab's Pay list, read again.
@@ -7717,7 +7744,46 @@ let _onchainSeen = null;   // the on-chain balance the last sync read, to board 
 // Spendable balance (atoms) of an asset for the Send tab: BTC parent-chain or a Sequentia asset.
 function availableFor(hex){ if(hex==='BTC') return ((typeof btcBalance!=='undefined' && btcBalance) ? btcBalance : 0n) + (btcArkPays() ? btcArk.figures().spendable : 0n);
   if(isOampAsset(hex)) return (oampBalances[oampId(hex)]?.atoms) || 0n;
-  const b=balObj(); return BigInt(b[hex]||0n) - (chainArriving().get(hex) || 0n); }
+  const b=balObj(); return BigInt(b[hex]||0n); }
+// Default mode: what the wallet holds of an asset on the chain, which a payment or a trade can use
+// at once (paid there, or moved in first): the page's reading, less what a board just took off it.
+// A payment received on the chain counts from the moment the wallet sees it, as the balance shows it.
+function chainHeld(hex){
+  let n = availableFor(hex);
+  try{ if(hex!=='BTC' && leavesApi && leavesApi.onchainLessBoards) n = leavesApi.onchainLessBoards(hex, n); }catch{}
+  return n > 0n ? n : 0n;
+}
+// Of it, what the wallet can move into the tree now (the operator takes the asset, at least its
+// smallest coin, within the page's limit on what the tree holds); 0n otherwise and in developer mode.
+function chainMovable(hex){
+  if(hex==='BTC' || devMode() || !leavesApi || !leavesApi.isOpen() || !leavesApi.bringIn) return 0n;
+  const n = chainHeld(hex);
+  try{
+    if(!(n > 0n) || !leavesApi.boardable(hex, n)) return 0n;
+    const room = arkRoom(hex);
+    if(room != null && BigInt(room) < n) return BigInt(room) > 0n ? BigInt(room) : 0n;
+  }catch{ return 0n; }
+  return n;
+}
+// What a payment or a trade moved in first keeps back for its fees: the move's, and the payment's
+// or the trade's own in the tree (twice what transactions of 4,000 vB pay at the default rate).
+function bringMargin(hex){
+  try{ return feeMarginAtoms(hex, 4000); }catch{ return 0n; }
+}
+// What a payment of `atoms` needs from the chain when what the wallet holds in the tree (and what is
+// on its way there; for an offboard, `final`, only what it can spend now) falls short: the rest, and
+// the margin for the fees. Moving in waits until the wallet's coins on the chain hold that much.
+function bringWant(hex, atoms, final = false){
+  let inTree = 0n;
+  try{ inTree = (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) + (final ? 0n : onItsWay(hex)); }catch{}
+  const w = BigInt(atoms) + bringMargin(hex) - inTree;
+  return w > 0n ? w : 0n;
+}
+// How long moving money in takes, in minutes: a block, and its anchor buried as the operator asks.
+function bringMinutes(){
+  let d=null; try{ d=leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null; }catch{}
+  return boardMinutes(d);
+}
 // What the Send tab says can be sent of an asset: on the chain, and, in default mode, what the
 // tree holds spendable now (one figure, as the balance shows it).
 function sendableFor(hex){ let n=availableFor(hex);
@@ -8373,9 +8439,25 @@ const _lnPassedOver = new Set();
 // `why` its own sentence when the code's invoice was passed over. Anything that is not a code is
 // returned as it is. `atoms` is the amount sent, when known.
 // -> { dest, byAddress, lightning?, address?, why? }
+// A payment in the tree to `full` (a receive request of this operator), in default mode, paid
+// whichever way completes soonest (default-arca.js codeRoute): in the tree; at `address` (the code's
+// address, when it names one) from the wallet's coins on the chain, when only they cover it; or with
+// what is on the chain moved in first (`bringIn`), when there is no address or the amount needs both.
+function codeWay(full, asset, atoms, address){
+  if(atoms != null && atoms > 0n && !devMode() && !isOampAsset(asset) && asset !== 'BTC'){
+    let way = 'tree';
+    try{ way = codeRoute({ amount: atoms, tree: (leavesApi.leafAtoms(asset)||0n) - (leavesApi.arriving(asset)||0n), onItsWay: onItsWay(asset),
+      chain: chainHeld(asset), movable: chainMovable(asset), margin: feeMarginAtoms(asset), moveMargin: bringMargin(asset), address: !!address }); }
+    catch(e){ console.warn('[send] route:', e?.message??e); }
+    if(way === 'chain' && address) return { dest: address, byAddress: true };
+    if(way === 'bring-in') return { dest: full, byAddress: false, bringIn: true };
+  }
+  return { dest: full, byAddress: false };
+}
 function payCodeRoute(text, asset, atoms){
   let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
-  if(!c) return { dest: text, byAddress: false };
+  // A receive request alone (no address): in the tree, or moved in first.
+  if(!c) return (leavesApi && leavesApi.treeRoute && leavesApi.treeRoute(text)) ? codeWay(text, asset, atoms, null) : { dest: text, byAddress: false };
   // One payment of hold - board or more (ark-limits.js) goes to the address straight away: the
   // receiving wallet would only move it out of the Ark again.
   if(c.address && !isOampAsset(asset)){ const why = arkDirectWhy(asset, atoms); if(why) return { dest: c.address, byAddress: true, why }; }
@@ -8386,7 +8468,7 @@ function payCodeRoute(text, asset, atoms){
     return { dest: c.address || text, byAddress: !!c.address };
   }
   const full = c.sequentia && leavesApi && leavesApi.payable ? leavesApi.payable(c.sequentia) : null;
-  if(full && leavesApi.treeRoute(full)) return { dest: full, byAddress: false };
+  if(full && leavesApi.treeRoute(full)) return codeWay(full, asset, atoms, c.address);
   if(c.lightning && atoms != null && !devMode() && leavesApi && leavesApi.isOpen()){
     // The page's limit in USD, or the fallback when the operator publishes no limit in the asset.
     const limitUsd = lnMaxKnown(asset, 'out') == null ? lightningLimitUsd(window.SEQ_LN_FALLBACK_USD) : lightningLimitUsd(window.SEQ_ASSET_LN_MAX_USD);
@@ -8574,34 +8656,10 @@ function walletAssetRow(v, text){
 }
 // What the wallet holds of an asset, wherever it holds it (the figure Balance shows for it): on the
 // chain, for instant payments, on Lightning, staked; BTC also on the Bitcoin ark.
-// In default mode a deposit to the wallet's address on Sequentia (a coin from someone else) is
-// arriving from the moment the wallet sees it until it is a coin the wallet can use: while it waits
-// in the mempool, and, for an asset the wallet boards by itself, until its board is final (the
-// board's own coin is then arriving in the library's places). It counts once. The wallet's own
-// change from a payment it made counts at once. -> [{ asset, atoms, deposit, leaf_id: 'chain:txid:vout', txid }]
-function chainDeposits(){
-  const out=[];
-  if(!wollet || devMode()) return out;
-  const own=new Set();
-  try{ for(const t of wollet.transactions()){ if(Object.values(t.balance().toJSON()).some(v=>BigInt(v)<0n)) own.add(t.txid().toString()); } }catch{}
-  try{ for(const u of wollet.utxos()){
-    const op=u.outpoint(), id=op.txid().toString();
-    if(own.has(id)) continue;
-    const s=u.unblinded(), a=s.asset().toString(), v=BigInt(s.value());
-    if(u.height()!=null && !(leavesApi && leavesApi.boardable && leavesApi.boardable(a, v))) continue;
-    out.push({ asset:a, atoms:v, deposit:true, leaf_id:'chain:'+id+':'+op.vout(), txid:id });
-  } }catch{}
-  return out;
-}
-function chainArriving(){
-  const m=new Map();
-  for(const d of chainDeposits()) m.set(d.asset,(m.get(d.asset)||0n)+d.atoms);
-  return m;
-}
 function assetFigure(v){
   if(String(v).startsWith('oamp:')) return (oampBalances[String(v).slice(5)]?.atoms) || 0n;
   let n = 0n;
-  try{ n += v==='BTC' ? btcOnchainShown(btcBalance || 0n) : BigInt(balObj()[v] || 0) - (chainArriving().get(v) || 0n); }catch{}
+  try{ n += v==='BTC' ? btcOnchainShown(btcBalance || 0n) : chainHeld(v); }catch{}
   try{ if(v!=='BTC' && leavesApi) n += leavesApi.leafAtoms(v) || 0n; }catch{}
   try{ if(v==='BTC') n += btcArkAtoms(); }catch{}
   try{ n += lnBalanceFor(v) || 0n; }catch{}
@@ -9057,6 +9115,25 @@ async function fillMax(r){
       // the chain's coins alone read 0 there and said "nothing left to send after the fee".
       const typed=r.querySelector('.raddr').value.trim();
       const tree=(!devMode() && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? (leavesApi.leafAtoms(hex)||0n) - (leavesApi.arriving(hex)||0n) : 0n;
+      // Default mode, a receive code of this operator, with money of the asset on the chain: Max is
+      // all of it, less the fees' margin (default-arca.js codeRoute): from the chain alone at the
+      // code's address, or with it moved in first. The tree alone would leave the chain's part out.
+      const code=(!devMode() && typed && leavesApi && leavesApi.isOpen() && !isOampAsset(hex)) ? payCodeRoute(typed, hex, null).dest : null;
+      const codeInTree=!!code && !!leavesApi.treeRoute(code);
+      const onChain=codeInTree && others===0n ? chainHeld(hex) : 0n;
+      if(onChain > 0n){
+        const inT=tree + onItsWay(hex), mov=chainMovable(hex);
+        let c=null; try{ c=readPayCode(typed); }catch{}
+        const fromChain=c && c.address ? onChain - feeMarginAtoms(hex) : 0n;
+        const together=mov > 0n ? inT + mov - bringMargin(hex) : 0n;
+        const best=[fromChain, together, inT].reduce((a,b)=> b>a ? b : a, 0n);
+        if(best > 0n && best > inT){
+          const v=fmtAtoms(best, m.precision).replace(/,/g,'');
+          if(amt._refMode){ const rv=refValue(hex, best); amt.value = rv ? String(Math.floor(rv.v*1e8)/1e8) : v; } else amt.value=v;
+          amt.dispatchEvent(new Event('input'));
+          return;
+        }
+      }
       const inTree=tree > 0n && (!typed || !!leavesApi.treeRoute(payCodeDestination(typed, hex)));
       max = (inTree ? tree : BigInt(availableFor(hex))) - others;
       // To a receive code in the tree, Max is what the library would pay: the fee it keeps back
@@ -9160,9 +9237,13 @@ function addRecipientRow(){
       if(!hex || hex==='BTC' || !typed || !s || !leavesApi || !leavesApi.isOpen()) return;
       // A receive code is quoted at its part in the tree, as Review & send pays it (payCodeRoute):
       // the code as typed is no tree route, and the hint never showed for one.
-      const addr=payCodeDestination(typed, hex);
-      if(!leavesApi.treeRoute(addr)) return;
       const atoms=parseAtoms(s, assetMeta(hex).precision||0); if(atoms<=0n) return;
+      const d=payCodeRoute(typed, hex, atoms);
+      // Paid from the chain at the code's address, or with what is on the chain moved in first: when.
+      if(!devMode() && d.byAddress && d.dest!==typed){ if(seq===quoteSeq) quoteLine.textContent=DEFAULT_WORDS.arrivesNextBlock; return; }
+      if(d.bringIn){ if(seq===quoteSeq) quoteLine.textContent=DEFAULT_WORDS.bringIn(bringMinutes()); return; }
+      const addr=d.dest;
+      if(!leavesApi.treeRoute(addr)) return;
       const q=await treeQuoteFor(addr, atoms, hex);
       if(seq===quoteSeq && q){ quoteLine.textContent=q.text; quoteLine.classList.toggle('err', !!q.over); }
     }catch{} }, 500); };
@@ -10270,7 +10351,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     for(const r of rows){
       let atoms=null; if(!isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{} }
       const d = payCodeRoute(r.addr, r.asset, atoms);
-      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null;
+      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn;
     }
     const byAddressNote = (btc) => { const w = rows.find(r=>r.byAddress); if(!w) return [];
       const arrives = btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock;
@@ -10342,12 +10423,14 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
         // still list it: the chain is only tried with what is left beside the board, so a payment
         // right after a board never signs a spent coin.
         let onchain = availableFor(h); try{ if(leavesApi && leavesApi.onchainLessBoards) onchain = leavesApi.onchainLessBoards(h, onchain); }catch{}
-        const route = addressRoute(a, onchain, tree, margin, comingBack);
+        // An amount that needs both the chain's coins and the tree's: the chain's are moved in first,
+        // and the whole is paid out of the tree, one payment.
+        const route = addressRoute(a, onchain, tree, margin, comingBack, chainMovable(h), bringMargin(h));
         // Coins of this payment still arriving: it goes after the next settlement, never refused
         // for them (offboardReview, settle_first).
-        if(route !== 'tree' && !(route === 'arriving' && !devMode())) continue;
+        if(route !== 'tree' && route !== 'bring-in' && !(route === 'arriving' && !devMode())) continue;
         if(rows.length!==1) throw new Error(DEFAULT_WORDS.codeMixed.replace('A receive code', 'A payment of what the wallet holds for instant payments'));
-        await offboardReview(rows[0], reset);
+        await offboardReview({ ...rows[0], bringIn: route === 'bring-in' }, reset);
         return;
       } }
     const btcRows=rows.filter(r=>r.asset==='BTC');
@@ -10725,17 +10808,15 @@ function renderHistory(){
   // that is still arriving says so itself. Each line's first sighting is kept for the wallet, so a
   // line past its time says it is taking longer.
   let arrivingNow=[]; try{ if(leavesApi && leavesApi.arrivingPayments) arrivingNow=leavesApi.arrivingPayments(); }catch{}
-  const deposits=chainDeposits();
   const seenKey='swk.arrivingSeen.'+walletTag(), nowMs=Date.now();
   let seen={}; try{ seen=JSON.parse(localStorage.getItem(seenKey)||'{}')||{}; }catch{}
-  const ids=new Set([...arrivingNow, ...deposits].map(a=>a.leaf_id).filter(Boolean));
+  const ids=new Set(arrivingNow.map(a=>a.leaf_id).filter(Boolean));
   for(const id of ids) if(seen[id]==null) seen[id]=nowMs;
   for(const k of Object.keys(seen)) if(!ids.has(k)) delete seen[k];
   try{ localStorage.setItem(seenKey, JSON.stringify(seen)); }catch{}
   let depth=null; try{ depth=leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null; }catch{}
   const opts={ firstSeen: seen, nowMs, boardMin: boardMinutes(depth), roundMin: roundMinutes(depth) };
   _arrivingWhen=new Map(arrivingRows(arrivingNow, [], opts).map(r=>[r.leaf, r.when]));
-  _depositWhen=new Map(arrivingRows(deposits, [], opts).map((r, i)=>[deposits[i].txid, r.when]));
   const arrRows=arrivingRows(arrivingNow, instant.filter(r=>r.kind==='in' && r.leaf).map(r=>r.leaf), opts);
   _histCounts.seq=rows.length+pending.length+instant.length+arrRows.length; arrangeHistory();
   if(!rows.length && !pending.length && !instant.length && !arrRows.length){ list.appendChild(el('div','muted','No transactions yet.')); return; }
@@ -10820,7 +10901,9 @@ function renderHistory(){
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
     if(dropped){}
     else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
-    else if(!devRows){ if(_depositWhen.has(txid)) mid.appendChild(el('div','sub unconf', DEFAULT_WORDS.rowArriving+' · '+_depositWhen.get(txid))); }
+    // Default mode: a payment received on the chain is in the balance, and can be sent and traded,
+    // from the moment the wallet sees it: its row says nothing of a wait.
+    else if(!devRows){}
     else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -10884,7 +10967,7 @@ async function refreshBtcArkHistory(){
 // <get>", a payment "Received" or "Sent"; the time, and a trade's status while it is not settled.
 // What default mode shows as arriving, and when in words, as the last history drawing read it: by
 // leaf id, and the deposits on the chain by transaction.
-let _arrivingWhen=new Map(), _depositWhen=new Map();
+let _arrivingWhen=new Map();
 function instantItem(r){
   const metaOf=(h)=> h==='BTC' ? { ticker:'BTC', precision:8 } : assetMeta(h);
   const fmtLeg=(l)=>{ const m=metaOf(l.asset), a=BigInt(l.atoms); return fmtAtoms(a<0n?-a:a, m.precision)+' '+m.ticker; };

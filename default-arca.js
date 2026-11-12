@@ -160,6 +160,11 @@ export const DEFAULT_WORDS = Object.freeze({
   // What is sent waits only for the next settlement (the wallet's own upkeep is moving it, or the
   // library names coins to settle first): the payment goes ahead by itself after it (D96).
   settling: 'Goes through in about a minute',
+  // What is sent is held on the chain (all of it, or the part the rest does not cover), and is moved
+  // in first: the payment goes ahead by itself once it is, `n` minutes at most as the network says.
+  bringIn: (n) => `Goes through within about ${n} minutes. Keep this page open.`,
+  // Moving it in did not start in that time (its coin is not in a block yet): nothing was sent.
+  bringLate: 'This is taking longer than usual. Nothing was sent, and your money is still yours.',
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
   stillArrivingWithin: (ticker, minutes) => minutes
@@ -510,13 +515,37 @@ export function receiveCodeRetry (failures) {
 // `treeArriving`: what the tree holds of the asset that is not spendable yet (the change of a
 // payment just made, a coin just received); when the tree would cover the amount with it, the
 // payment is 'arriving': refused as still arriving, never as not enough.
-export function addressRoute (amount, onchain, treeSpendable, feeMargin = 0n, treeArriving = 0n) {
+// `movable`: of the chain's coins, what the wallet can move into the tree (`moveMargin` kept back for
+// the move's and the payment's fees): an amount that needs both the chain's coins and the tree's is
+// 'bring-in', the chain's moved in first and the whole then paid out of the tree, one payment.
+export function addressRoute (amount, onchain, treeSpendable, feeMargin = 0n, treeArriving = 0n, movable = 0n, moveMargin = feeMargin) {
   const a = big(amount)
   if (a + big(feeMargin) <= big(onchain)) return 'chain'
   if (a <= big(treeSpendable)) return 'tree'
   if (a <= big(onchain)) return 'chain'
   if (big(treeArriving) > 0n && a <= big(treeSpendable) + big(treeArriving)) return 'arriving'
+  if (big(movable) > 0n && a + big(moveMargin) <= big(treeSpendable) + big(treeArriving) + big(movable)) return 'bring-in'
   return null
+}
+
+// How default mode pays an asset to a receive code of its own operator, by the rule that one balance
+// is spendable whichever way completes soonest:
+//   'tree'     in the tree: what it holds there and can send now (`tree`), with what is on its way
+//              there (`onItsWay`, settled first, about a minute), covers the amount and `margin`;
+//   'chain'    otherwise at the code's address (`address`: the code names one), from the wallet's
+//              coins on the chain (`chain`), when they cover it with the network fee's `margin`:
+//              after the next block, about a minute;
+//   'bring-in' otherwise, when the tree and what can be moved in from the chain (`movable`, less
+//              `moveMargin` for the move's and the payment's fees) cover it together: moved in first,
+//              then paid in the tree, one payment;
+//   'tree'     when nothing covers it: the tree's refusal says what can go.
+export function codeRoute ({ amount, tree = 0n, onItsWay = 0n, chain = 0n, movable = 0n, margin = 0n, moveMargin = margin, address = false }) {
+  const a = big(amount)
+  const inTree = big(tree) + big(onItsWay)
+  if (a + big(margin) <= inTree) return 'tree'
+  if (address && a + big(margin) <= big(chain)) return 'chain'
+  if (big(movable) > 0n && a + big(moveMargin) <= inTree + big(movable)) return 'bring-in'
+  return 'tree'
 }
 
 // The coin states a balance counts as arriving: held, not yet spendable (a board not yet final,

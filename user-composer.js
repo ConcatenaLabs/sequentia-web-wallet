@@ -307,6 +307,8 @@ export function mountUserComposer (ctx) {
     cost.textContent = costText
     t.appendChild(cost)
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
+    // Paid with money the wallet moves in first: how long it takes, said before it is confirmed.
+    if (k.bringIn) { const w = el('div', 'sub', USER_WORDS.bringIn(k.bringIn)); w.id = 'ucBringIn'; t.appendChild(w) }
     if (S.moving) { const mv = el('div', 'sub', USER_WORDS.btcMore(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)); mv.id = 'ucMoving'; t.appendChild(mv) }
     act.appendChild(btn(S.busy ? USER_WORDS.sending : USER_WORDS.confirm, 'ucConfirm', confirm, 'primary'))
     act.appendChild(btn(USER_WORDS.cancel, 'ucCancel', () => { ctx.engine.drop(S.choice); reset(); paintTicket() }, 'ghost'))

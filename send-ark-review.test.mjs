@@ -68,7 +68,7 @@ test('asking for more than can go once the fee is out, the review offers the mos
   assert.match(fn('treeSendReview'), /await treeSendReview\(\{\.\.\.r, amtS: less\}, onDone, DEFAULT_WORDS\.feeOutOfAll\(m0\.ticker\)\); m\.remove\(\);/);
   assert.equal(DEFAULT_WORDS.sendInstead('0.30502601', 'EURX'), 'Send 0.30502601 EURX');
   // Never "It arrives in seconds." beside "takes about a minute".
-  assert.match(fn('treeSendReview'), /say\(settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
+  assert.match(fn('treeSendReview'), /say\(bring \? bringLine : settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/);
   assert.match(fn('treeSendReview'), /const instant = freeing \? sendableNow\(atoms, refused\) : null;/);
   // The channel side named plainly: no "set free", no "channel", no "Lightning".
   // The wait says why, how long by the chain, and the most that goes without it.
@@ -111,7 +111,7 @@ test('nothing sendable while held by the wallet\'s own upkeep: the payment goes 
   assert.match(fn('settlesFirst'), /if\(e && e\.kind === 'settle_first'\) return true;/)
   assert.match(fn('settlesFirst'), /return held > 0n && arriving <= 0n && \(most == null \|\| most <= 0n\);/)
   assert.match(fn('treeSendReview'), /else if\(settlesFirst\(e, atoms, r\.asset\)\)\{ settling = true;/)
-  assert.match(fn('treeSendReview'), /say\(settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/)
+  assert.match(fn('treeSendReview'), /say\(bring \? bringLine : settling \? DEFAULT_WORDS\.settling : freeing \? waitLine : DEFAULT_WORDS\.sendLine\);/)
   assert.match(fn('treeSendReview'), /w\.why === 'settle'\) st\.innerHTML='<span class="spin"><\/span>' \+ DEFAULT_WORDS\.settling/)
 })
 

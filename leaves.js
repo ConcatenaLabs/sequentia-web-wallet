@@ -296,11 +296,13 @@ export function arrivingByAsset (places) {
   for (const c of arrivingCoins(places)) m.set(c.asset, (m.get(c.asset) || 0n) + c.atoms)
   return m
 }
-// The coins arriving, each { leaf_id, asset, atoms }, in the library's order.
+// The coins arriving, each { leaf_id, asset, atoms }, in the library's order. A board is not one:
+// it is the wallet's own money, in the figure from the moment it reached the address on the chain,
+// moved in and spendable all along (a payment from it settles it first).
 export function arrivingCoins (places, claims = {}) {
   const out = []
   for (const c of (places && Array.isArray(places.coins)) ? places.coins : []) {
-    if (c && c.place === 'arriving') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, kind: c.kind, channel: c.channel === true, claimFrom: claims[c.leaf_id] || null })
+    if (c && c.place === 'arriving' && c.kind !== 'board') out.push({ leaf_id: c.leaf_id, asset: c.asset, atoms: bigOf(c.value), state: c.state, kind: c.kind, channel: c.channel === true, claimFrom: claims[c.leaf_id] || null })
   }
   return out
 }
@@ -1464,6 +1466,66 @@ export function mountLeaves (ctx, root, settingsRoot) {
       // The page's own reading of the chain still counts the coins the board spent: it reads again.
       if (ctx.onBoarded) try { ctx.onBoarded() } catch {}
     }
+  }
+
+  // ---- money on the chain moved in because a person needs it there now ----
+  // A payment or a trade that needs what the wallet holds of an asset on the chain: boarded at once,
+  // as a person asked (never put off for the person's own waiting), whole less its fee, as upkeep
+  // would. The library reads a coin on the chain only once it is in a block, so a coin still in
+  // the mempool is boarded once it is, the wallet asking again every BRING_EVERY_MS until `until`:
+  // with `want`, only once the library reads at least that much of it on the chain (what the
+  // payment needs from there), so a coin read first is never boarded alone while the one the
+  // payment needs is still on its way.
+  // One move per asset at a time: a second ask meanwhile answers the first one's.
+  // -> { boarded } (the library's answer), { already: true } (nothing left on the chain to board:
+  // upkeep or an earlier ask boarded it), or null (still nothing to board at `until`).
+  // `final`: resolves only once what was moved in is final too (the library's settle_first), for a
+  // payment the library makes only from final coins (an offboard).
+  const BRING_EVERY_MS = 10_000
+  function bringIn (asset, { until = now() + 10 * 60_000, final = false, want = 0n } = {}) {
+    if (final) {
+      return bringIn(asset, { until, want }).then(async (v) => {
+        if (!v) return v
+        await asking(() => roundWait(() => waitSettled({ asset })))
+        return v
+      })
+    }
+    const going = S.bringing || (S.bringing = new Map())
+    if (going.has(asset)) return going.get(asset)
+    const p = (async () => {
+      while (S.open && !S.stopped) {
+        const v = await asking(async () => {
+          while (S.busy) await sleep(50)
+          await coverReceiveKeys()
+          try { await run('sync') } catch (e) { log('[leaves] sync before moving in: ' + (e && e.message)) }
+          try { S.balance = await run('balance') } catch (e) { log('[leaves] balance before moving in: ' + (e && e.message)); return null }
+          const c0 = boardCandidates(S.balance, S.info).find((x) => x.asset === asset)
+          if (c0 && c0.onchain < big(want)) return null
+          if (!c0) {
+            // Nothing of it on the chain the library reads: boarded already, or not in a block yet.
+            const pending = ((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).pending
+            return big(pending) > 0n ? { already: true } : null
+          }
+          let room = null; try { room = ctx.boardRoom ? ctx.boardRoom(asset) : null } catch {}
+          const c = room != null && room < c0.onchain ? { ...c0, onchain: room } : c0
+          const b = await boardAll(run, c)
+          if (!b) return null
+          S.lastBoard = { at: now(), asset, value: b }
+          if (b.spent) keepBoard(asset, boardSpent(c.onchain, b.spent, now(), b.txid))
+          log(`[leaves] moved in ${asset.slice(0, 8)} for a person: boarded ${b.value || ''}`)
+          emit('leafArrived', { asset, value: String(c.onchain), kind: 'board' })
+          try { await reload() } catch {}
+          if (ctx.onBoarded) try { ctx.onBoarded() } catch {}
+          return { boarded: b }
+        }).catch((e) => { log('[leaves] moving in refused: ' + (e && e.message)); return null })
+        if (v) return v
+        if (now() >= until) return null
+        await sleep(BRING_EVERY_MS)
+      }
+      return null
+    })().finally(() => going.delete(asset))
+    going.set(asset, p)
+    return p
   }
 
   // The leaf wallet finds its on-chain coins by a gap of 20 unused keys past the last key it
@@ -2832,6 +2894,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     blockSeconds: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.block_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
+    // Moves what the wallet holds of an asset on the chain in now, for a payment or a trade that
+    // needs it (bringIn): resolves once boarded, or with null when nothing could be by `until`.
+    bringIn: (asset, opts) => (S.open && !dev() ? bringIn(asset, opts) : Promise.resolve(null)),
+    // `opts.want`: the atoms the payment needs from the chain (it waits until the library reads them).
+    // Whether a move in of the asset runs now.
+    bringing: (asset) => !!(S.bringing && S.bringing.has(asset)),
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
     // What a payment to a receive code would cost, paying nothing (the library's `send_quote`): its
     // route, its fee in the asset paid and the coins it gives up, or the payment's own refusal.

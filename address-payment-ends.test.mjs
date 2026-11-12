@@ -128,6 +128,6 @@ test('the page says "Sent" for a payment to an address only from the stage the l
   // And #607: the arriving route never refuses for want of what is still arriving.
   // Coins still arriving are settled first and the payment goes (send-arriving.test.mjs); a library
   // that answers that plainly gets when it can go, never "can't be sent".
-  assert.match(html, /if\(route !== 'tree' && !\(route === 'arriving' && !devMode\(\)\)\) continue;/)
+  assert.match(html, /if\(route !== 'tree' && route !== 'bring-in' && !\(route === 'arriving' && !devMode\(\)\)\) continue;/)
   assert.match(html, /throw new Error\(DEFAULT_WORDS\.stillArrivingWithin\(m0\.ticker, arrivalMinutes\(/)
 })
