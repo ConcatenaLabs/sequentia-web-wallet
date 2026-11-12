@@ -53,6 +53,9 @@ export function arkShape ({ payAsset, receiveAsset, payRail, recvRail, mode }) {
   return { kind: 'trade', side: btcLeg === 'pay' ? 'buy' : 'sell' }
 }
 
+// How long after no firm price (or a busy wallet) the price is asked again by itself.
+const ASK_AGAIN_MS = 20_000
+
 // Why the engine priced nothing, in the words the user composer says it in.
 export function refusalWords (q, name, amt) {
   const W = USER_WORDS, p = name(q.payAsset), g = name(q.receiveAsset)
@@ -67,6 +70,7 @@ export function refusalWords (q, name, amt) {
     case 'part-ready': return W.partReady(amt(q.payAsset, q.ready), p, q.soon)
     case 'too-small': return W.tooSmall
     case 'no-firm-offer': return W.noFirmOffer
+    case 'wallet-busy': return W.walletBusy
     case 'not-listed': return W.notListed(g, p)
     default: return q.again ? W.offeredAgain(g, p) : W.notOffered(g, p)
   }
@@ -211,7 +215,16 @@ export function mountArkRail (ctx) {
     S.busy = true; render()
     try {
       const q = await ctx.engine().quote({ payAsset: c.payAsset, receiveAsset: c.receiveAsset, amount: String(atoms) })
-      if (!q.ok) S.error = refusalWords({ ...q, payAsset: c.payAsset, receiveAsset: c.receiveAsset }, tick, fmt)
+      if (!q.ok) {
+        S.error = refusalWords({ ...q, payAsset: c.payAsset, receiveAsset: c.receiveAsset }, tick, fmt)
+        // No maker confirmed in time, or the wallet was busy: asked again by itself while nothing
+        // typed changed, as the words say.
+        if (q.why === 'no-firm-offer' || q.why === 'wallet-busy') {
+          const asked = `${c.payAsset}|${c.receiveAsset}|${c.payText}`
+          clearTimeout(S.again)
+          S.again = setTimeout(() => { const n = ctx.composer(); if (`${n.payAsset}|${n.receiveAsset}|${n.payText}` === asked && !S.busy && !S.ticket && S.error) review() }, ASK_AGAIN_MS)
+        }
+      }
       else if (q.ticket.source !== 'btc-gateway') { ctx.engine().drop(q.choice); S.error = ARK_WORDS.notArk }
       else { S.ticket = q.ticket; S.choice = q.choice }
     } catch (e) { S.error = (e && e.message) || String(e) } finally { S.busy = false; render() }
