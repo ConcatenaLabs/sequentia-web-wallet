@@ -806,7 +806,12 @@ export function createEngine (deps) {
         }
         release(entry.maker, o.swap); return null
       }
-      if (t.gets.asset !== receiveAsset || t.gives.asset !== payAsset || big(t.gets.value) !== give) { release(entry.maker, o.swap); return null }
+      // What the wallet gets: what the offer gives, less what the wallet adds to the swap's margin
+      // when it pays from more coins than the maker's margin covers (the library's `tops_up`, #693),
+      // shown on the ticket and in its fees.
+      const topUp = big(t.tops_up && t.tops_up.asset === receiveAsset ? t.tops_up.margin : 0)
+      if (t.gets.asset !== receiveAsset || t.gives.asset !== payAsset || big(t.gets.value) + topUp !== give || big(t.gets.value) <= 0n) { release(entry.maker, o.swap); return null }
+      const gets = big(t.gets.value)
       const spend = big(t.gives.value) + big(t.pays.margins)
       marginsSeen.set(payAsset, big(t.pays.margins))
       const limit = pay < have ? pay : have
@@ -823,11 +828,11 @@ export function createEngine (deps) {
       // What settling costs, when it is needed, comes from the library.
       const most = await depthLimit()
       const settles = t.hops == null || most == null || Number(t.hops) >= most - 1
-      let s = { asset: receiveAsset, value: String(give), fee: '0', after: String(give) }, sc = null
+      let s = { asset: receiveAsset, value: String(gets), fee: '0', after: String(gets) }, sc = null
       const change = big(t.change && t.change.value)
       if (settles) {
         try {
-          s = await run('settle_quote', { asset: receiveAsset, value: String(give), expiry: t.dates && t.dates.expiry })
+          s = await run('settle_quote', { asset: receiveAsset, value: String(gets), expiry: t.dates && t.dates.expiry })
           if (change > 0n) sc = await run('settle_quote', { asset: payAsset, value: String(change), expiry: t.dates && t.dates.expiry })
         } catch (e) { log('[user trade] settle_quote:', e.message); release(entry.maker, o.swap); return null }
       }
@@ -841,6 +846,7 @@ export function createEngine (deps) {
         continue
       }
       const fees = [{ asset: payAsset, atoms: big(t.pays.margins) }]
+      if (topUp > 0n) fees.push({ asset: receiveAsset, atoms: topUp })
       if (settles) fees.push({ asset: receiveAsset, atoms: big(s.fee) })
       if (sc) fees.push({ asset: payAsset, atoms: big(sc.fee) })
       return { source: entry.source, id: entry.id, entry, receive: big(s.after), give: total, offer: o, terms: t,

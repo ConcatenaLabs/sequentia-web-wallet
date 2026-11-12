@@ -742,3 +742,31 @@ test('engine: what the wallet can pay is read from the store alone, and in full 
   assert.equal(asked.length, 3, 'a given coin: read again in full')
   assert.doesNotMatch(asked[2], /brief/)
 })
+
+test('a swap paid from many coins: what the wallet adds to the margin is on the ticket, received less and in the fees (#693)', async () => {
+  const s = standIn()
+  const lib = s.lib.command.bind(s.lib)
+  s.lib.command = (cmd, a) => {
+    const v = lib(cmd, a)
+    // The library's quote: the wallet pays from more coins than the maker's margin covers, and tops
+    // the margin up by 58 out of what the offer gives it.
+    if (cmd === 'swap_read') { v.tops_up = { asset: Y, margin: '58' }; v.gets = { asset: Y, value: String(BigInt(v.gets.value) - 58n) } }
+    return v
+  }
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => (t += 1000) })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  const give = BigInt(q.choice.offer.give)
+  // What it receives: what the offer gives, less the top-up and the fee of settling what it gets.
+  assert.equal(q.ticket.amountOut, String(give - 58n - 3n), 'the wallet is shown what it receives')
+  assert.ok(q.ticket.fees.some((f) => f.asset === Y && f.atoms === '58'), JSON.stringify(q.ticket.fees))
+  // A top-up the offer's terms do not account for is not taken.
+  s.lib.command = (cmd, a) => {
+    const v = lib(cmd, a)
+    if (cmd === 'swap_read') { v.tops_up = { asset: Y, margin: '58' }; v.gets = { asset: Y, value: String(BigInt(v.gets.value) - 59n) } }
+    return v
+  }
+  const bad = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.equal(bad.ok, false)
+})
