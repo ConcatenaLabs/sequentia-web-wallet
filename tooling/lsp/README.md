@@ -246,6 +246,18 @@ Every coin it receives is refreshed in the operator's next round once it has res
 it holds more than half its instant budget out of round. Each asset is settled in a participation
 of its own, its new value cut into working coins (below).
 
+It never gives the last free coin of an asset it quotes to a round, so the asset stays offered
+while the rest settles. Of each asset, what stays free beside the coins given must fill the
+smaller of its largest quote (a swap pays from one coin: its largest free coin whose worth fits
+the room left in its budget) and a working coin. Otherwise the coin its largest quote is sized on
+stays out and the rest goes now; that coin goes in a later turn, once nothing of the asset is in a
+round and something else free of it quotes. An asset whose only free coin is itself due cannot
+both keep it and settle it, so the maker splits it first: it pays itself half of the coin out of
+round, then settles one half and keeps the other until the first is back. A taker meets half the
+quote for that minute, never none. (A coin smaller than twice the smallest quote of its asset is
+kept whole; a coin whose worth fits no room left quotes nothing and settles with the rest.) A cut into
+working coins follows the same rule: it waits while its coin is the only one that would quote.
+
 It takes in no asset whose refreshes the operator holds back. It reads the operator's
 `/v1/info` every minute, straight from the operator rather than through the library. An asset
 showing `in_flight` at or past its `in_flight_cap` gets no quote and no firm offer (in-tree or

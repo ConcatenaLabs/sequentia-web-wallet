@@ -461,6 +461,87 @@ export function settleGroups (coins, due, sizes) {
   return [...by].map(([asset, leaves]) => ({ asset, leaves, piece: sizes && sizes.has(asset) ? String(sizes.get(asset)) : null }))
 }
 
+// What of an asset stays in the book once the upkeep gives `giving` (leaf ids) to a round: `need`,
+// the largest quote it publishes now (a swap pays from one coin, so its largest free coin whose
+// whole worth fits the room left, `roomValue` reference atoms at `rates`; any coin without a
+// budget); `target`, the smaller of that and a working coin (`sizes`), an ordinary trade; and
+// `best`, the largest coin that would stay free and fit. A coin smaller than `least` (the smallest
+// quote of the asset, its pairs' `min_give`) quotes nothing and counts for nothing. Free means
+// live, not a resting order, not held as spent elsewhere.
+export function bookAfter (coins, asset, giving, { roomValue = null, rates = null, sizes = null, least = null } = {}) {
+  const gone = new Set(giving || [])
+  const r = rates && rates.get(asset)
+  const min = big(perAsset(least, asset, '1'))
+  const fits = (c) => big(c.value) >= min && (roomValue == null || (r != null && big(r) > 0n && worthOf(c.value, r) <= big(roomValue)))
+  const free = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live' && !isOrderCoin(c) && c.spent_elsewhere_until == null)
+  let need = 0n, best = 0n
+  for (const c of free) {
+    if (!fits(c)) continue
+    const v = big(c.value)
+    if (v > need) need = v
+    if (!gone.has(c.leaf_id) && v > best) best = v
+  }
+  const size = sizes && sizes.get(asset)
+  const target = size != null && big(size) > 0n && big(size) < need ? big(size) : need
+  return { need, target, best, free, fits }
+}
+
+// The coins the upkeep gives to a round this pass, of those due (`due`, leaf ids), so that it
+// never gives the last free coin of an asset it quotes (sequentia-testnet-ops #235). Of each
+// asset, what stays free must fill at least `target` (bookAfter); else the due coin its largest
+// quote is sized on stays out and the rest go now. That coin goes in a later turn: once no coin of
+// the asset is in a round, it goes when what is free beside it quotes (the asset then stays in the
+// book at that smaller quote). An asset whose only free coin is itself due, with none in a round,
+// cannot both keep it and settle it: that coin is split first, the maker paying itself half of it
+// out of round, and the next passes give one half to the round and keep the other until the first
+// is back. So the asset stays in the book at half its quote rather than none for the minute (or
+// three) its round takes. A coin smaller than twice `least` is kept whole instead: halved, neither
+// half would quote. -> { give: [leaf ids], keep: [{ leaf, asset }], split: [{ leaf, asset, value,
+// pay }] } (`pay`, atoms, what the maker pays itself from `leaf`).
+export function keepFree (coins, due, opts = {}) {
+  const of = new Map((coins || []).map((c) => [c && c.leaf_id, c]))
+  const byAsset = new Map()
+  for (const id of due || []) {
+    const c = of.get(id)
+    const a = c ? c.asset : ''
+    if (!byAsset.has(a)) byAsset.set(a, [])
+    byAsset.get(a).push(id)
+  }
+  const give = [], keep = [], split = []
+  for (const [asset, ids] of byAsset) {
+    const b = bookAfter(coins, asset, ids, opts)
+    if (b.need === 0n || b.best >= b.target) { give.push(...ids); continue }
+    // The due coin the largest quote is sized on: the largest that fits.
+    const mine = ids.map((id) => of.get(id)).filter((c) => c && b.free.includes(c) && b.fits(c))
+      .sort((x, y) => (big(y.value) > big(x.value) ? 1 : big(y.value) < big(x.value) ? -1 : 0))
+    if (!mine.length) { give.push(...ids); continue }
+    const top = mine[0]
+    const others = ids.filter((id) => id !== top.leaf_id)
+    // The other due coins go now and the top one stays; it stays too while coins of the asset are
+    // in a round, whose coins come back to fill its place.
+    const inRound = (coins || []).some((c) => c && c.asset === asset && c.state === 'given' && !isOrderCoin(c))
+    if (others.length || inRound) { give.push(...others); keep.push({ leaf: top.leaf_id, asset }); continue }
+    // Alone, beside smaller free coins: it goes, and the asset stays in the book at the smaller.
+    if (b.best > 0n) { give.push(top.leaf_id); continue }
+    const pay = big(top.value) / 2n
+    if (pay >= big(perAsset(opts.least, asset, '1'))) split.push({ leaf: top.leaf_id, asset, value: String(top.value), pay: String(pay) })
+    else keep.push({ leaf: top.leaf_id, asset })
+  }
+  return { give, keep, split }
+}
+
+// The smallest quote of each asset the maker gives, in-tree and at its BTC desk (its pairs'
+// `min_give`): asset -> atoms.
+export function leastGives (cfg) {
+  const out = {}
+  for (const p of [...((cfg && cfg.pairs) || []), ...((cfg && cfg.btc && cfg.btc.pairs) || [])]) {
+    if (!p || p.give === 'BTC') continue
+    const m = big(p.min_give || 1)
+    if (out[p.give] == null || m < big(out[p.give])) out[p.give] = String(m)
+  }
+  return out
+}
+
 // The room left in the maker's instant budget, in atoms of each asset its node prices, from the
 // library's `bond` answer: null when no budget is set or the bond does not stand (then the
 // library's own refusals are the only bound).
@@ -925,6 +1006,7 @@ async function main () {
   let firstPass = true
   let busy = false
   let lastBoardRefusal = null
+  let keptLog = ''   // the coins kept out of a settle, as last logged
   // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
   // quotes are served from the last reading (`holdings`), which every pass of the upkeep and every
   // offer and completion renew, so a quote never waits on the library: with a hundred coins and
@@ -1074,9 +1156,27 @@ async function main () {
         .filter((id) => t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS)
       firstPass = false
       for (const [id, at] of gaveUp) if (t - at > 6 * GIVE_UP_AGAIN_MS) gaveUp.delete(id)
+      // Never the last free coin of an asset it quotes (keepFree): of each asset, the coin its
+      // largest quote is sized on stays out while nothing else free fills a working coin's trade,
+      // and goes in a later turn; an asset's only free coin, due itself, is split first.
+      const book = { roomValue: roomNow(budgetValue, coins, ratesNow), rates: ratesNow, sizes, least: leastGives(cfg) }
+      const plan = keepFree(coins, due, book)
+      const gave = new Set()   // the leaves this pass gave up or spent: given, as the next pass reads them
+      const asNow = () => coins.map((c) => (c && gave.has(c.leaf_id) ? { ...c, state: 'given' } : c))
+      const settling = [...plan.give]
+      for (const s of plan.split) {
+        try {
+          const req = await cmd('receive', { asset: s.asset, amount: s.pay })
+          await cmd('send', { request: req.request, amount: s.pay })
+          seen.delete(s.leaf); gave.add(s.leaf)
+          log('splitting its only free coin of', tickerOf(s.asset), `(${s.value}), due to settle: it pays itself ${s.pay} of it, so one half settles and the other stays offered`)
+        } catch (e) { log('split:', e.message, '; the coin settles whole'); settling.push(s.leaf) }
+      }
+      const keptText = plan.keep.map((k) => tickerOf(k.asset) + ' ' + k.leaf.slice(0, 12)).sort().join(', ')
+      if (keptText !== keptLog) { if (keptText) log('keeps out of its round, so the asset stays offered (it settles in a later turn):', keptText); keptLog = keptText }
       // Each asset in its own participation, its new value cut into working coins (a refresh in
       // pieces), so settling never makes a coin larger than a working coin but a reserve of the rest.
-      for (const g of settleGroups(coins, due, sizes)) {
+      for (const g of settleGroups(coins, settling, sizes)) {
         try {
           const args = { leaves: g.leaves, ...(g.piece ? { piece: g.piece } : {}) }
           const q = await cmd('quote', args)
@@ -1084,7 +1184,7 @@ async function main () {
           log('settling', g.leaves.length, 'received coins of', tickerOf(g.asset) + (g.piece ? ' in pieces of ' + g.piece : '') +
             (outOfRoundFull ? ' (offers refused for what it holds out of round)' : half ? ' (past half its budget out of round)' : '') + ':',
             JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
-          for (const d of g.leaves) { seen.delete(d); gaveUp.set(d, t) }
+          for (const d of g.leaves) { seen.delete(d); gaveUp.set(d, t); gave.add(d) }
         } catch (e) { log('settle:', e.message) }
       }
       if (due.length) outOfRoundFull = false
@@ -1098,6 +1198,7 @@ async function main () {
         try {
           const q = await cmd('quote', { leaves: merge })
           const r = await cmd('participate', { leaves: merge, shown: q.coins })
+          for (const d of merge) gave.add(d)
           log('merging', merge.length, 'coins of', a.slice(0, 8), `(${n} held, at most ${cap(a)}):`, JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
         } catch (e) { log('merge:', e.message) }
       }
@@ -1106,6 +1207,10 @@ async function main () {
       for (const a of givesOf()) {
         const s = shapeFor(coins, a, sizes.get(a) ?? null, gaveUp)
         if (!s) continue
+        // A cut gives its coin to a round too: not while nothing else free of the asset would
+        // fill a working coin's trade (keepFree's rule); it is cut in a later turn.
+        const after = bookAfter(asNow(), a, [s.leaf], book)
+        if (after.need > 0n && after.best < after.target) continue
         try {
           const args = { leaves: [s.leaf], piece: s.piece, pieces: s.pieces }
           const q = await cmd('quote', args)
@@ -1113,10 +1218,13 @@ async function main () {
           // coin back whole, and the next pass would cut it again, so nothing is given up.
           if (!q || !q.pieces) { if (!noPieces) log('working coins: this leaf library does not cut a refresh into pieces; coins are left as they are'); noPieces = true; continue }
           const r = await cmd('participate', { ...args, shown: q.coins })
-          gaveUp.set(s.leaf, Date.now())
+          gaveUp.set(s.leaf, Date.now()); gave.add(s.leaf)
           log('cutting a coin of', tickerOf(a), 'into', s.pieces, 'working coins of', s.piece, 'and a reserve:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
         } catch (e) { log('working coins:', e.message) }
       }
+      // What it gave up this pass is no longer quoted: the coins read again now, not at the next
+      // pass, so a quote read meanwhile names only coins a firm offer can still pay from.
+      if (gave.size) { try { await readHoldings() } catch (e) { log('holdings:', e.message) } }
     }
   }
 
@@ -1237,9 +1345,13 @@ async function main () {
         // Answered at once: the cancel goes into the library's queue ahead of the upkeep, and a
         // taker's next firm, also ahead of the upkeep, queues behind it, so the coins this offer
         // held are free by the time that firm runs. Waiting for the cancel here made a taker
-        // wait out whatever upkeep command was running (a sync can take tens of seconds).
+        // wait out whatever upkeep command was running (a sync can take tens of seconds). Once
+        // cancelled, the coins are read again ahead of the queue, so the coin the offer held is
+        // quoted again at once rather than at the upkeep's next pass.
         firm.delete(b.swap)
-        cmd('swap_cancel', { swap: String(b.swap || '') }, true).catch((e) => { if (!/not open|no such|unknown/i.test(e.message)) log('release', e.message) })
+        cmd('swap_cancel', { swap: String(b.swap || '') }, true)
+          .then(() => readHoldings(true).catch(() => {}))
+          .catch((e) => { if (!/not open|no such|unknown/i.test(e.message)) log('release', e.message) })
         return send(res, 200, { swap: b.swap, state: 'releasing' })
       }
       return send(res, 404, { error: 'no such path' })
