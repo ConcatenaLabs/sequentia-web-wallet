@@ -81,7 +81,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         step('check')
         // The wallet's own refusal (its coins of the asset fall short now) is told to the quote, which
         // then says so, never that the other side gave no price (#666).
-        try { q = await run('lightning_pay_quote', { invoice: o.invoice, asset: payAsset, max_fee_ppm: maxFeePpm }) } catch (e) { log('[user trade] lightning_pay_quote:', e.message); if (onRefused) try { onRefused(e) } catch {} drop(); return null }
+        try { q = await run('lightning_pay_quote', { invoice: o.invoice, asset: payAsset, max_fee_ppm: maxFeePpm }) } catch (e) { log('[user trade] lightning_pay_quote:', e.message); if (onRefused) try { onRefused(e, { paying: big(o.want) }) } catch {} drop(); return null }
         // The maker's invoice is under the wallet's own hash, for the asset paid, at the price quoted.
         const fair = ceilDiv(sats * entry.rateNum, entry.rateDen)
         if (q.payment_hash !== inv.payment_hash || q.asset !== payAsset || big(q.amount) !== big(o.want) || big(o.want) > fair) { log('[user trade] the maker\'s btc terms are not the quote\'s'); drop(); return null }

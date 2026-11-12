@@ -704,7 +704,11 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   again while the person waits, taking the next order if that one went); "That is more than your
   <amount>." (more than the wallet holds, nothing of it on its way); "Your <pay> is held by an order
   you placed, and can be traded once it is filled or cancelled. Nothing has moved." (only a coin of
-  an order the person placed); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
+  an order the person placed); "You can trade up to <most> now: the fees of this trade come out of
+  what you hold. Nothing has moved." (the wallet's own payment would not cover the amount with the
+  fees it keeps back, or would leave change below the network's smallest coin, and nothing more of
+  it is on its way: <most> is what it can pay, the figure Max fills in; with more on its way, the
+  trade waits for it and the whole amount goes); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
   moment."; "Your wallet is still finishing something it started, so it could not get a price in
   time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
   wallet was busy, or a maker gave a price in time and the wallet was still checking it when the
