@@ -334,6 +334,7 @@ export function mountUserComposer (ctx) {
     cost.textContent = costText
     t.appendChild(cost)
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
+    if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }
     if (k.keep && k.via) { const kp = el('div', 'sub', RESTRICTED_WORDS.viaKeep(amt(k.via, k.keep))); kp.id = 'ucKeep'; t.appendChild(kp) }
     if (S.moving) { const mv = el('div', 'sub', USER_WORDS.btcMore(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)); mv.id = 'ucMoving'; t.appendChild(mv) }
     act.appendChild(btn(S.busy ? USER_WORDS.sending : USER_WORDS.confirm, 'ucConfirm', confirm, 'primary'))
@@ -496,6 +497,8 @@ export function mountUserComposer (ctx) {
 
   function stateWord (r) {
     // A purchase with bitcoin whose second step has not gone: what the person now holds.
+    // A restricted trade moving what it pays from to the chain: what the move says, with its wait.
+    if (r.source === 'restricted' && r.state === 'confirming' && r.note) return r.note
     // Not approved now: says so, and the card shows how to get approved.
     if (r.source === 'composed' && r.viaHeld && r.via) {
       if (r.state === 'settled') return RESTRICTED_WORDS.viaHeld(name(r.via))

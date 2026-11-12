@@ -279,10 +279,11 @@ async function main () {
     await page.eval(`(()=>{ const i=document.querySelector('#ucAmount'); i.value=${JSON.stringify(amount)}; i.dispatchEvent(new Event('input')); return true })()`)
     const tQ = Date.now()
     await click(page, '#ucReview')
-    const tk = await page.waitFor("(()=>{ if(document.querySelector('#ucConfirm')) return document.querySelector('#ucTicket').innerText; const n=document.querySelector('#ucNote'); return n && n.classList.contains('err') && n.textContent ? 'ERR '+n.textContent : false })()", 300000)
-    check(`a ticket for ${amount} ${pay} → ${get}`, !/^ERR/.test(tk), `${tk.replace(/\n+/g, ' | ')} (${secs(Date.now() - tQ)})`)
+    const tk = await page.waitFor("(()=>{ const k=document.querySelector('#ucCard'); if(k) return 'CARD '+k.innerText+' | '+[...document.querySelectorAll('#ucCopyCode,#ucOpenPage')].map(b=>b.textContent).join(' | '); if(document.querySelector('#ucConfirm')) return document.querySelector('#ucTicket').innerText; const n=document.querySelector('#ucNote'); return n && n.classList.contains('err') && n.textContent ? 'ERR '+n.textContent : false })()", 300000)
+    if (/^CARD /.test(tk)) { note(`the answer is a card, nothing to confirm: ${tk.replace(/\n+/g, ' | ')} (${secs(Date.now() - tQ)})`); await shot(page, `${name}-trade-${pay}-${get}-card.png`) }
+    else check(`a ticket for ${amount} ${pay} → ${get}`, !/^ERR/.test(tk), `${tk.replace(/\n+/g, ' | ')} (${secs(Date.now() - tQ)})`)
     await shot(page, `${name}-trade-${pay}-${get}-ticket.png`)
-    if (!/^ERR/.test(tk)) {
+    if (!/^(ERR|CARD)/.test(tk)) {
       const tC = Date.now()
       const rows0 = await page.eval("document.querySelectorAll('#ucTrades .uc-trade').length")
       await click(page, '#ucConfirm')

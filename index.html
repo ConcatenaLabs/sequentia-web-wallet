@@ -4655,6 +4655,26 @@ function restrictedDeps(){
     },
     held: (hex)=> isRestrictedAsset(hex) ? ((oampBalances[hex] && oampBalances[hex].atoms) || 0n) : userHeld(hex),
     onItsWay: (hex)=> isRestrictedAsset(hex) ? 0n : onItsWay(hex),
+    // What a trade on the chain must first move there, priced and timed before the person
+    // confirms: its fee from the library's offboard quote, its wait from the operator's round.
+    // -> null when the chain already holds it; { fees, minutes }; throws the library's
+    // settle_first when the coins must go through a round first.
+    moveQuote: async (needs)=>{
+      const fees = []; let move = false;
+      for(const n of needs){
+        if(isRestrictedAsset(n.hex)) continue;
+        const missing = n.atoms - onChainAtoms(n.hex);
+        if(missing <= 0n) continue;
+        move = true;
+        if(!leavesApi || !leavesApi.isOpen()) continue;
+        let least = 0n; try{ least = leavesApi.minLeaf ? leavesApi.minLeaf(n.hex) : 0n; }catch{}
+        const amount = missing < least ? least : missing;
+        const q = await leavesApi.offboardQuote({ asset: n.hex, amount: String(amount), address: wollet.address(undefined).address().toUnconfidential().toString() });
+        fees.push({ asset: n.hex, atoms: BigInt((q && q.fee && q.fee.amount) || 0) });
+      }
+      if(!move) return null;
+      return { fees, minutes: moveOutMinutes(leavesApi && leavesApi.roundInterval(), leavesApi && leavesApi.blockSeconds()) || 5 };
+    },
     // The fee is paid in the asset paid; selling a restricted asset, in the asset received, else in
     // another asset the wallet holds that the network takes fees in; never by default in one asset.
     feeAsset: async (pay, receive)=>{

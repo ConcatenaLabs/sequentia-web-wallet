@@ -340,6 +340,8 @@ export const RESTRICTED_WORDS = Object.freeze({
   viaHeld: (via) => `Your bitcoin bought ${via}; it is yours to trade or send.`,
   viaWaiting: (via, ticker) => `Your bitcoin bought ${via}. It buys ${ticker} by itself as soon as an offer allows; until then the ${via} is yours.`,
   viaKeep: (amount) => `You also get ${amount}.`,
+  // The true wait, on the ticket before the person confirms: what it pays from is moved to the chain first.
+  takes: (minutes) => `Takes about ${minutes} minutes, as what you pay is first moved to where this trade is made. Keep this page open.`,
   viaApproval: (via, ticker) => `Your bitcoin bought ${via}. It buys ${ticker} once its issuer approves this wallet; until then the ${via} is yours.`,
 })
 

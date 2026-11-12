@@ -19,6 +19,9 @@
 //   held(asset)          -> what the wallet holds of an asset, wherever it is (a restricted one:
 //                           at its enclave)
 //   onItsWay(asset)      -> what of it is still on its way in (a payment the wallet settles first)
+//   moveQuote(needs)     -> what moving `needs` ([{ hex, atoms }]) to the chain costs and takes, before
+//                           anything moves: null when the chain holds them, else { fees, minutes };
+//                           throws the library's settle_first
 //   feeAsset(pay, receive) -> the asset the fee is paid in (the asset paid, never the restricted
 //                           one; selling a restricted asset, the asset received, else another held)
 //   fee(asset)           -> the fee of one trade in that asset
@@ -35,6 +38,9 @@ import { restrictedEntries, btcRoute, RESTRICTED_WORDS } from './restricted-trad
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const BTC = 'BTC'
+// The minutes the trade itself takes once what it pays from is on the chain: the policy server's
+// co-signature and a block.
+export const TRADE_MINUTES = 2
 
 // A restricted pair's price for `amount` paid. `arriving`: atoms of the asset paid that a trade
 // under way brings first (a composed purchase's first step), counted as held. -> null (not a
@@ -107,9 +113,30 @@ export async function restrictedQuote (R, { payAsset, receiveAsset, amount, arri
     const card = await R.eligible(receiveAsset, best.receive)
     if (card) return { ok: false, why: 'approval', card }
   }
+  // What the trade pays from must be on the chain: when it is not, its move there is priced and
+  // timed now, so the ticket shows every fee and the true wait before the person confirms. A move
+  // whose coins must go through a round first is settled first, as any trade.
+  const needs = []
+  if (!rPay) needs.push({ hex: payAsset, atoms: need })
+  if (feeAsset !== payAsset) needs.push({ hex: feeAsset, atoms: fee })
+  let mv = null
+  // A composed purchase's second step (`arriving`) prices its own move (restricted-composed.js).
+  if (R.moveQuote && needs.length && !(big(arriving) > 0n)) {
+    try { mv = await R.moveQuote(needs) } catch (e) {
+      if (e && e.kind === 'settle_first') return { ok: false, why: 'settle-first', payAsset, coins: e.coins || [], held: '0' }
+      return { ok: false, why: 'no-funds' }
+    }
+  }
+  const moveFees = ((mv && mv.fees) || []).filter((f) => big(f.atoms) > 0n)
+  for (const f of moveFees) {
+    const s3 = await short(f.asset, (f.asset === payAsset ? need : f.asset === feeAsset ? fee : 0n) + big(f.atoms))
+    if (s3) return s3
+  }
   const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
-    fees: [{ asset: feeAsset, atoms: String(fee) }], source: 'restricted' }
-  return { ok: true, ticket, choice: { source: 'restricted', entry: best.e, give: best.give, receive: best.receive, feeAsset, fee } }
+    fees: [{ asset: feeAsset, atoms: String(fee) }, ...moveFees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) }))], source: 'restricted',
+    ...(mv ? { minutes: mv.minutes + TRADE_MINUTES } : {}) }
+  return { ok: true, ticket, choice: { source: 'restricted', entry: best.e, give: best.give, receive: best.receive, feeAsset, fee,
+    moveFees: moveFees.map((f) => ({ asset: f.asset, atoms: big(f.atoms) })) } }
 }
 
 // Confirms a restricted choice into `rec`: what it pays from is put on the chain, then the

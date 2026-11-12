@@ -374,3 +374,25 @@ test('the engine: money still on its way in is settled first and the trade price
   const poor = fakeR({ held: async () => 0n, onItsWay: async () => 10n })
   assert.deepEqual(await restrictedQuote(poor.R, { payAsset: poor.b, receiveAsset: poor.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
 })
+
+test('the engine: what the trade must first move to the chain is on the ticket, its fee and its wait, before anything moves', async () => {
+  const asked = []
+  const { a, b, R } = fakeR({ moveQuote: async (needs) => { asked.push(needs); return { fees: [{ asset: needs[0].hex, atoms: 88n }], minutes: 4 } } })
+  const q = await restrictedQuote(R, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.equal(q.ok, true)
+  assert.deepEqual(asked, [[{ hex: b, atoms: 807n }]], 'the move of what the trade pays, its fee included')
+  assert.deepEqual(q.ticket.fees, [{ asset: b, atoms: '7' }, { asset: b, atoms: '88' }])
+  assert.equal(q.ticket.minutes, 6)
+  assert.deepEqual(q.choice.moveFees, [{ asset: b, atoms: 88n }])
+  const { forbiddenIn } = await import('./user-trade.js')
+  assert.deepEqual(forbiddenIn(m.RESTRICTED_WORDS.takes(6)), [])
+  // Nothing to move: no wait on the ticket.
+  const none = await restrictedQuote({ ...R, moveQuote: async () => null }, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.equal(none.ticket.minutes, undefined); assert.equal(none.ticket.fees.length, 1)
+  // Coins that must go through a round before they can move: settled first, as any trade.
+  const sf = await restrictedQuote({ ...R, moveQuote: async () => { const e = new Error('settle first'); e.kind = 'settle_first'; e.coins = ['c1']; throw e } }, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.deepEqual(sf, { ok: false, why: 'settle-first', payAsset: b, coins: ['c1'], held: '0' })
+  // A move whose fee the wallet cannot also pay: none to trade.
+  const tight = fakeR({ held: async () => 807n, moveQuote: async () => ({ fees: [{ asset: 'x', atoms: 0n }, { asset: b, atoms: 88n }], minutes: 4 }) })
+  assert.deepEqual(await restrictedQuote(tight.R, { payAsset: tight.b, receiveAsset: tight.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
+})
