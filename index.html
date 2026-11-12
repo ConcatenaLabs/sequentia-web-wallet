@@ -2982,6 +2982,7 @@ async function treeSendReview(r, onDone, note){
     let frozen = 0n; try{ frozen = (r.asset!=='BTC' && leavesApi.frozenAtoms) ? (leavesApi.frozenAtoms(r.asset) || 0n) : 0n; }catch{}
     if(frozen > 0n && atoms <= all + frozen) throw new Error(frozenSentence(fmtAtoms(frozen, m0.precision||0), m0.ticker));
     if(r.onlyAddress) throw new Error(DEFAULT_WORDS.toAddressOnly(m0.ticker));
+    if(r.belowFee) throw new Error(DEFAULT_WORDS.belowFee(m0.ticker));
     throw new Error(DEFAULT_WORDS.sendUpTo(fmtAtoms(all, m0.precision||0), m0.ticker));
   }
   const amt = fmtAtoms(atoms, m0.precision||0);
@@ -8667,7 +8668,7 @@ const _lnPassedOver = new Set();
 // what is on the chain moved in first (`bringIn`), when there is no address or the amount needs both.
 function codeWay(full, asset, atoms, address){
   if(atoms != null && atoms > 0n && !devMode() && !isOampAsset(asset) && asset !== 'BTC'){
-    let way = 'tree', most = null, onlyAddress = false;
+    let way = 'tree', most = null, onlyAddress = false, belowFee = false;
     try{
       const at = { tree: (leavesApi.leafAtoms(asset)||0n) - (leavesApi.arriving(asset)||0n), onItsWay: onItsWay(asset),
         chain: chainSpendable(asset), movable: chainMovable(asset), margin: feeMarginAtoms(asset), moveMargin: bringMargin(asset), address: !!address };
@@ -8677,10 +8678,12 @@ function codeWay(full, asset, atoms, address){
       // What covers it is on the chain and cannot be moved in, and the code names no address: it can
       // go only to an address, which is said rather than a figure that leaves it out.
       if(most != null && !address && at.movable === 0n && atoms <= at.tree + at.onItsWay + at.chain) onlyAddress = true;
+      // Held, and less than the fee of any way to send it: said so, never "up to 0".
+      if(most === 0n && at.chain > 0n && !onlyAddress) belowFee = true;
     }catch(e){ console.warn('[send] route:', e?.message??e); }
     if(way === 'chain' && address) return { dest: address, byAddress: true };
     if(way === 'bring-in') return { dest: full, byAddress: false, bringIn: true };
-    if(most != null) return { dest: full, byAddress: false, most, ...(onlyAddress ? { onlyAddress } : {}) };
+    if(most != null) return { dest: full, byAddress: false, most, ...(onlyAddress ? { onlyAddress } : {}), ...(belowFee ? { belowFee } : {}) };
   }
   return { dest: full, byAddress: false };
 }
@@ -10597,7 +10600,7 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
     for(const r of rows){
       let atoms=null; if(!isOampAsset(r.asset)){ try{ atoms=parseAtoms(r.amtS, r.asset==='BTC' ? 8 : sendPrecision(r.asset)); }catch{} }
       const d = payCodeRoute(r.addr, r.asset, atoms);
-      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn; r.most = d.most ?? null; r.onlyAddress = !!d.onlyAddress;
+      r.addr = d.dest; r.byAddress = d.byAddress && !devMode(); r.why = d.why || null; r.lightning = !!d.lightning; r.codeAddress = d.address || null; r.bringIn = !!d.bringIn; r.most = d.most ?? null; r.onlyAddress = !!d.onlyAddress; r.belowFee = !!d.belowFee;
     }
     const byAddressNote = (btc) => { const w = rows.find(r=>r.byAddress); if(!w) return [];
       const arrives = btc ? BTC_WORDS.arrivesBlock : DEFAULT_WORDS.arrivesNextBlock;

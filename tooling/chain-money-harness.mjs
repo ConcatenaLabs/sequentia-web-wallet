@@ -10,6 +10,10 @@ import * as arca from '../default-arca.js'
 const { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute, codeRoute, codeMost, boardMinutes } = arca
 import { readPayCode, buildPayCode } from '../pay-code.js'
 
+// Amounts are BigInts: the cases' log lines print them as strings.
+// eslint-disable-next-line no-extend-native
+if (!BigInt.prototype.toJSON) BigInt.prototype.toJSON = function () { return this.toString() }
+
 export const CONTROL = process.env.SEQ_LEAF_HARNESS
 export const PKG = process.env.LEAVES_PKG || new URL('../leaves/pkg', import.meta.url).pathname
 export const skip = !process.env.LWK_PKG ? 'needs LWK_PKG (fresh phrases)' : !CONTROL ? 'needs the operator harness: SEQ_LEAF_HARNESS=<its control address>'

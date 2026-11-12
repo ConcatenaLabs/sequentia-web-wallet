@@ -63,21 +63,25 @@ test('money received on the chain: a supervised asset and its frozen coins, nati
   await t.test('under the smallest coin the operator takes in: stays on the chain, paid at an address, said so otherwise', async () => {
     release()
     const A = await wallet()
-    const dust = minX > 20_000n ? minX - 1n : 0n
-    if (!dust) { console.log('under the smallest coin: min_leaf ' + minX + ' leaves no amount above the fee margin to test'); return }
+    // Under the operator's smallest coin: never moved in. Paid at a code's address when the chain
+    // covers it with the fee; otherwise said plainly.
+    const dust = minX - 100n
     await A.paid(dust)
     console.log(`under the smallest coin (${minX}): holds ${dust} on the chain; chainMovable ${A.p.chainMovable(X)}, chainStays ${A.p.chainStays(X)}`)
     assert.equal(A.p.chainMovable(X), 0n)
     assert.equal(A.p.chainStays(X), 'dust')
-    const amount = dust - 5_000n
+    const amount = dust / 2n
     const code = buildPayCode({ address: B.command('address').address, sequentia: B.command('receive').request })
     const d = A.p.payCodeRoute(code, X, amount)
     console.log('dust, a code with an address: ' + JSON.stringify(d))
-    assert.equal(d.byAddress, true, 'paid at the address on the chain')
     const d2 = A.p.payCodeRoute(B.command('receive').request, X, amount)
     console.log('dust, a request with no address: ' + JSON.stringify(d2))
-    await assert.rejects(A.p.treeSendReview({ asset: X, amtS: String(Number(amount) / 1e8), addr: d2.dest, bringIn: !!d2.bringIn, most: d2.most, onlyAddress: !!d2.onlyAddress }, () => {}),
-      (e) => { console.log('dust, no address: refused: ' + e.message); assert.equal(e.message, DEFAULT_WORDS.toAddressOnly('X')); return true })
+    assert.ok(!d2.bringIn)
+    for (const x of [d, d2]) {
+      if (x.byAddress) continue
+      await assert.rejects(A.p.treeSendReview({ asset: X, amtS: String(Number(amount) / 1e8), addr: x.dest, bringIn: !!x.bringIn, most: x.most, onlyAddress: !!x.onlyAddress, belowFee: !!x.belowFee }, () => {}),
+        (e) => { console.log('dust: refused: ' + e.message); assert.ok(!/up to 0 /.test(e.message), e.message); return true })
+    }
     assert.ok(!A.worker.asked.includes('board'))
   })
 

@@ -69,7 +69,11 @@ test('money received on the chain: an asset the operator does not serve, a restr
     const bs = A.W.command('boards') || []
     console.log('boards: ' + JSON.stringify(bs.map((b) => ({ leaf_id: b.leaf_id, state: b.state }))))
     let boardTx = null
-    for (const b of bs) { const m = String(b.leaf_id || '').match(/[0-9a-f]{64}/); if (m) boardTx = m[0] }
+    // The board's transaction, as the move log keeps it (leaves.js noteMove).
+    for (let i = 0; i < 20 && !boardTx; i++) {
+      try { const all = JSON.parse(A.store.getItem('swk.leaves.moves.' + A.tag) || '{}'); boardTx = ((all[X] || []).pop() || {}).txid || null } catch {}
+      if (!boardTx) await sleep(500)
+    }
     if (!boardTx) { const pool = await H.rpc('getrawmempool', []); boardTx = pool[pool.length - 1] }
     await H.produce()
     try {

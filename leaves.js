@@ -1495,6 +1495,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // `final`: resolves only once what was moved in is final too (the library's settle_first), for a
   // payment the library makes only from final coins (an offboard).
   const BRING_EVERY_MS = 10_000
+  const BRING_FINAL_MS = 3_000
   function movesKept () {
     try { return JSON.parse(ctx.store.getItem(tagged(MOVES_KEY, tag())) || '{}') || {} } catch { return {} }
   }
@@ -1516,6 +1517,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (final) {
       const v = await bringIn(asset, { until, want, need, since, stop })
       if (!v || v.refused) return v
+      // The moved coin is spendable once the operator calls it live (its transaction final by the
+      // operator's rule); until then a payment from it is refused ("pending, not live"). The
+      // library's settle_first can answer ready before that (at anchor depth 0), so the coin's own
+      // state is read until no board of the asset is pending, then settle_first as before.
+      for (;;) {
+        if (stop && (() => { try { return stop() } catch { return false } })()) return null
+        while (S.busy) await sleep(50)
+        S.busy = true
+        let coins = null
+        try { try { synced(await run('sync')) } catch {} coins = await run('coins') } catch {} finally { S.busy = false }
+        if (Array.isArray(coins)) S.coins = coins
+        const pending = (coins || []).filter((c) => c && c.asset === asset && c.kind === 'board' && c.state === 'pending')
+        if (Array.isArray(coins) && !pending.length) break
+        if (now() >= until) return null
+        await sleep(BRING_FINAL_MS)
+      }
       await asking(() => roundWait(() => waitSettled({ asset })))
       return v
     }
