@@ -237,7 +237,7 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 | `GET` | `/health` | `{ok, operator, genesis_hash}` |
 | `GET` | `/v1/quotes` | `{quotes: [{give_asset, want_asset, rate_num, rate_den, min_give, max_give}]}`: it gives `give_asset` and wants `ceil(give × rate_num / rate_den)` of `want_asset` |
 | `POST` | `/v1/firm` `{give_asset, want_asset, give}` | an in-tree swap offer of the library's, its coins held until it is completed, released or lapses (`offer_ttl_seconds`, 300 by default): `{swap, offer, give, want, expires_at}` |
-| `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again |
+| `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again. When the operator refuses the completion, nothing is co-signed and the offer is gone: `409 {error, swap, gone: true, code, whose, coin, offer?}`, where `whose` names the side whose coin the operator refused (`"taker"` when the wallet's own coin was spent elsewhere) and `offer` is a new firm offer of the same give, priced and checked as `/v1/firm` prices and checks one and made only when the live price asks no more than the gone offer did, shaped as `/v1/firm`'s answer; without it the taker asks for a new price. The same answer when asked again |
 | `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took; answers `{swap, state: "releasing"}` at once and cancels ahead of the maker's upkeep and of any later firm offer |
 | `GET` | `/v1/swap/<id>` | where a swap stands |
 

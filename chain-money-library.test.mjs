@@ -24,7 +24,8 @@ import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mountLeaves, JOINED_KEY } from './leaves.js'
-import { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute, codeRoute, boardMinutes } from './default-arca.js'
+import * as arca from './default-arca.js'
+const { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute, codeRoute, boardMinutes } = arca   // codeRoute: absent before this change
 import { readPayCode, buildPayCode } from './pay-code.js'
 
 const CONTROL = process.env.SEQ_LEAF_HARNESS
