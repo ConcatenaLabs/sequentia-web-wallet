@@ -396,11 +396,19 @@ modes (`asset-picker.js`):
   every participant and for no Bitcoin block; "Goes through in about a minute" at 1). **Send**
   then waits for that settlement, counting down to the time the wallet expects it through (read
   again from the wallet once it has given the coins up), and the payment goes ahead by itself
-  once the coins it made can be spent. Past that time by two minutes it reads "Taking longer than
-  usual: this goes ahead by itself", and keeps waiting, for up to three hours. It is never refused for it: what is still arriving counts in what can be sent, to a
-  receive code, to an address, and in a move out of the Ark. A page closed while the payment
-  waits makes it when the wallet is next open, with what was reviewed; one closed at the moment
-  the wallet was making it is never made a second time.
+once the coins it made can be spent. Past that time by two minutes it reads "Taking longer than
+  usual: this goes ahead by itself, or nothing is sent", and keeps waiting, for up to three hours;
+  past that it ends "This payment could not go through yet: nothing was sent, and your money stays
+  in your wallet." What is still arriving counts in what can be sent, to a receive code, to an
+  address, and in a move out of the Ark. While it waits, Activity shows it as **Sending**
+  (Pending). A page closed while the payment waits makes it when the wallet is next open, with
+  what was reviewed, and Activity shows it the same way meanwhile; one closed at the moment the
+  wallet was making it is never made a second time, and Balance says once "A payment of <amount>
+  <TICKER> may have gone before the page closed: check Activity before sending it again." One
+  made after the page reopened that does not go is said once on Balance: "<amount> <TICKER> was not
+  sent: nothing left your wallet." The review of the same payment (asset, amount, recipient) asked
+  again while one waits says "The same payment is already on its way: sending this pays it
+  twice."
 - The wallet's maintenance puts no part of an asset into a channel while a payment of it is being
   written (a recipient or an amount typed), for ten minutes after a payment closed a channel to
   spend its side (an hour for BTC; kept across reloads), nor while it holds less than 10 USD of it.
@@ -451,7 +459,7 @@ modes (`asset-picker.js`):
     send once it has arrived." When the wallet's coins of the asset are still arriving (the change
     of a payment just made, a coin just received) and would cover the payment once they are in,
     the review opens all the same, its fee line "A small part of what you send, shown once it is
-    sent" and <N> one settlement longer; **Send** reads "Goes through within about <N> minutes"
+    sent" and <N> longer by the settle it waits for first (what "Goes through within about <N> minutes" says); **Send** reads "Goes through within about <N> minutes"
     (as above) while the wallet settles them, then the payment is made as above. What a payment still on its way
     gives up counts only as its change. The sentence above is for when even that cannot be made.
   - "<amount> <TICKER> of this vests on <date>, and can be used from then. Nothing has moved."
@@ -637,7 +645,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   "Returned: nothing traded. The price moved while it waited." A page closed or reloaded
   meanwhile finds the trade again and goes on with it, never twice, however many times the page
   follows it at once. It waits twice the most the wallet says it can take, and at least ten minutes;
-  past that a trade not yet confirmed reads "This is taking longer than usual. Nothing has moved,
+  while it waits past what the wallet expected, a confirmed trade reads "Taking longer than usual:
+  this goes ahead by itself, or is returned with nothing traded"; past the bound a trade not yet
+  confirmed reads "This is taking longer than usual. Nothing has moved,
   and your money stays in your wallet.", and one confirmed is "Returned: nothing traded."
   Payments wait for that settlement the same way and then go. Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,

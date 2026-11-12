@@ -88,7 +88,7 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { settleMinutes, nextFinalBy, pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen,
+import { DEFAULT_WORDS, settleMinutes, nextFinalBy, pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen,
   homeCoins, unreachableOf, homeQuote as quoteHome, homeTake, homeUnderWay as underWay } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
@@ -1735,6 +1735,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
         // once it is through, about a minute later. Nothing is refused for it.
         // An offboard's quote answers at once, as the library gave it: the page reviews the payment
         // then, and the offboard made on that review settles first.
+        // Past RELEASE_TRIES settles that each ended ready while the payment still waited: said in
+        // plain words, never the library's own text (it names the asset by its id).
+        if (e instanceof LeafError && e.kind === 'settle_first' && i >= RELEASE_TRIES && command !== 'offboard_quote') {
+          throw new LeafError({ kind: 'refused', code: 'settle_gave_up', message: DEFAULT_WORDS.settleGaveUp })
+        }
         if (e instanceof LeafError && e.kind === 'settle_first' && i < RELEASE_TRIES && command !== 'offboard_quote') {
           const coins = e.coins && e.coins.length ? e.coins : null
           const ask = coins ? { coins } : { asset: e.asset }
@@ -1845,7 +1850,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         if (S.releasing) { const n = nextFinalBy(S.releasing.wait || null, v, now()); if (n) { S.releasing.wait = n; S.releasing.finalBy = n.finalBy } }
       } finally { S.busy = false }
       if (!v || v.ready) { try { S.coins = (await run('coins')) || S.coins } catch {}; return v }
-      if (now() >= until) throw new LeafError({ kind: 'refused', message: 'the next round did not settle the coins this needs in time; nothing was paid, and it can be asked again' })
+      if (now() >= until) throw new LeafError({ kind: 'refused', code: 'settle_gave_up', message: DEFAULT_WORDS.settleGaveUp })
       await sleep(ROUND_POLL_MS)
     }
   }

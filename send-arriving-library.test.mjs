@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mountLeaves, JOINED_KEY } from './leaves.js'
 import { settleWords } from './default-arca.js'
-import { stageWriter, dropPending } from './pending-sends.js'
+import { stageWriter, dropPending, samePending } from './pending-sends.js'
 import { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute } from './default-arca.js'
 
 const CONTROL = process.env.SEQ_LEAF_HARNESS
@@ -85,7 +85,7 @@ const textOf = (n) => [n.textContent, ...n.children.map(textOf)].filter(Boolean)
 function page (leavesApi, ticker) {
   const modals = []
   const deps = {
-    leavesApi, DEFAULT_WORDS, settleWords, stageWriter, dropPending, sendableNow, offboardOutcome, arrivalMinutes,
+    leavesApi, DEFAULT_WORDS, settleWords, stageWriter, dropPending, samePending, sendableNow, offboardOutcome, arrivalMinutes,
     devMode: () => false,
     assetMeta: () => ({ ticker, precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
@@ -105,7 +105,7 @@ function page (leavesApi, ticker) {
     followAddressPayments: async () => 'made', markTold: () => {}, offboardNewsText: () => '', OFFBOARD_FOLLOW_MS: 0,
     document: { body: { contains: () => false } }, performance: { now: () => Date.now() },
   }
-  const names = ['settleAhead', 'settleLine', 'onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
+  const names = ['settleAhead', 'settleLine', 'sendStage', 'sendEnded', 'sameOnItsWay', 'onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
   const src = names.map(fn).join('\n') + '\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))
   return { ...f, modals }

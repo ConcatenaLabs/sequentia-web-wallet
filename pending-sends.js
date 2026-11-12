@@ -13,11 +13,15 @@
 // A record ends (is removed) once the payment is made or refused, and lapses after PENDING_MOST_MS.
 
 export const PENDING_SENDS_KEY = 'swk.leaves.pendingSends'
+// The ends of payments made after the page was closed that did not go (refused, lapsed), or that
+// the page cannot tell went (closed while the library was asked): each said once, on Balance.
+export const PENDING_ENDS_KEY = 'swk.leaves.pendingEnds'
 // The longest a payment waits to be made after its review: the longest leaves.js waits for a
 // round (RELEASE_WAIT_MS).
 export const PENDING_MOST_MS = 3 * 3600_000
 
 const keyOf = (tag) => PENDING_SENDS_KEY + '.' + tag
+const endsKey = (tag) => PENDING_ENDS_KEY + '.' + tag
 
 export function pendingSends (store, tag) {
   try { const v = JSON.parse(store.getItem(keyOf(tag)) || '[]'); return Array.isArray(v) ? v : [] } catch { return [] }
@@ -51,5 +55,27 @@ export function takePending (store, tag, nowMs = Date.now()) {
     else dropped.push({ ...r, why: 'asking' })
   }
   save(store, tag, resume)
+  for (const d of dropped) noteEnd(store, tag, d, d.why === 'asking' ? 'unknown' : 'lapsed', nowMs)
   return { resume, dropped }
+}
+
+// The same payment (asset, amount, recipient) written down and not ended: a second one asked
+// while it is open would pay it twice. -> the record, or null.
+export function samePending (store, tag, { asset, atoms, to }) {
+  return pendingSends(store, tag).find((r) => r.asset === asset && String(r.atoms) === String(atoms) && r.to === to) || null
+}
+
+// The ends to say: `why` is 'refused' or 'lapsed' (nothing left the wallet), or 'unknown' (the
+// page closed while the library was asked; it may have gone).
+export function pendingEnds (store, tag) {
+  try { const v = JSON.parse(store.getItem(endsKey(tag)) || '[]'); return Array.isArray(v) ? v : [] } catch { return [] }
+}
+export function noteEnd (store, tag, rec, why, nowMs = Date.now()) {
+  const list = pendingEnds(store, tag).filter((e) => e.id !== rec.id)
+  list.push({ id: rec.id, kind: rec.kind, asset: rec.asset, atoms: String(rec.atoms), to: rec.to, why, at: nowMs })
+  try { store.setItem(endsKey(tag), JSON.stringify(list.slice(-20))) } catch {}
+}
+export function markEndTold (store, tag, id) {
+  const list = pendingEnds(store, tag).filter((e) => e.id !== id)
+  try { if (list.length) store.setItem(endsKey(tag), JSON.stringify(list)); else if (store.removeItem) store.removeItem(endsKey(tag)); else store.setItem(endsKey(tag), '[]') } catch {}
 }

@@ -4,7 +4,9 @@
 // user-trade.js settleBound).
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { putPending, dropPending, stageWriter, takePending, pendingSends, PENDING_MOST_MS } from './pending-sends.js'
+import { putPending, dropPending, stageWriter, takePending, pendingSends, samePending, pendingEnds, noteEnd, markEndTold, PENDING_MOST_MS } from './pending-sends.js'
+import { readFileSync } from 'node:fs'
+import { arrivalMinutes } from './default-arca.js'
 import { DEFAULT_WORDS, settleMinutes, settleWords, nextFinalBy, SETTLE_LATE_MS } from './default-arca.js'
 import { USER_WORDS, settleBound, SETTLE_MOST_MS, tradeStateWord, forbiddenIn } from './user-trade.js'
 
@@ -85,4 +87,46 @@ test('the time told stays while the step waited for stands or moves on, and is s
   w = nextFinalBy(w, { ready: false, final_in_seconds: 120, waiting_for: 'block' }, t + 410_000)
   assert.deepEqual(w, { finalBy: t + 530_000, step: 'block' })
   assert.equal(nextFinalBy(w, { ready: true }, t + 600_000), w)
+})
+
+test('a payment made after the page reopened is shown while it waits, its end is said once, and the same payment asked again is warned of (W1)', () => {
+  const store = memStore(), t0 = 1_800_000_000_000
+  const rec = { id: 'w', kind: 'address', asset: 'x', atoms: '500', to: 'tb1qdest', at: t0, state: 'asking' }
+  stageWriter(store, 't', rec)('waiting')
+  assert.ok(samePending(store, 't', { asset: 'x', atoms: '500', to: 'tb1qdest' }), 'the same payment while the first waits')
+  assert.equal(samePending(store, 't', { asset: 'x', atoms: '501', to: 'tb1qdest' }), null)
+  // One the page closed while asking, one lapsed: each noted as an end to say.
+  putPending(store, 't', { id: 'a', kind: 'code', asset: 'x', atoms: '7', to: 'arca:…', at: t0, state: 'asking' })
+  putPending(store, 't', { id: 'l', kind: 'code', asset: 'x', atoms: '9', to: 'arca:…', at: t0 - PENDING_MOST_MS - 1, state: 'waiting' })
+  takePending(store, 't', t0 + 1000)
+  assert.deepEqual(pendingEnds(store, 't').map((e) => [e.id, e.why]), [['a', 'unknown'], ['l', 'lapsed']])
+  // A resumed one refused: noted too; each told once, then gone.
+  noteEnd(store, 't', rec, 'refused')
+  assert.equal(pendingEnds(store, 't').length, 3)
+  for (const e of pendingEnds(store, 't')) markEndTold(store, 't', e.id)
+  assert.deepEqual(pendingEnds(store, 't'), [])
+  assert.equal(DEFAULT_WORDS.pendingNotSent('5', 'USDX'), '5 USDX was not sent: nothing left your wallet.')
+  assert.match(DEFAULT_WORDS.pendingMaybeSent('5', 'USDX'), /may have gone before the page closed: check Activity before sending it again/)
+  assert.equal(DEFAULT_WORDS.sameOnItsWay, 'The same payment is already on its way: sending this pays it twice.')
+  // The page: a waiting payment is an Activity row ("Sending", pending), the ends are on Balance's
+  // card with OK, and both reviews say when the same payment is on its way.
+  const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
+  assert.match(html, /pendingSends\(localStorage, walletTag\(\)\)\.map\(p=> \(\{ kind:'out', at:p\.at, legs:\[\{ asset:p\.asset, atoms:String\(p\.atoms\) \}\], pending:true, waitingSend:true \}\)\)/)
+  assert.match(html, /r\.waitingSend \? DEFAULT_WORDS\.rowSending/)
+  assert.match(html, /e\.why === 'unknown' \? DEFAULT_WORDS\.pendingMaybeSent\(amount, mm\.ticker\) : DEFAULT_WORDS\.pendingNotSent\(amount, mm\.ticker\)/)
+  assert.match(html, /try\{ noteEnd\(localStorage, tag, rec, 'refused'\); \}catch\{\}/)
+  assert.equal((html.match(/const same = sameOnItsWay\(/g) || []).length, 2, 'both reviews')
+})
+
+test('the address review counts the settle and the whole way after it (W2), and no wait promises what may not come (W3, W4)', () => {
+  // The testnet: the settle usually 6 minutes, the address path 15; the review says at least their sum.
+  const settle = settleMinutes(60, 60, 0, true)
+  const said = arrivalMinutes(settle * 60 + 60, 60)
+  assert.ok(said >= settle + arrivalMinutes(60, 60), `${said} >= ${settle} + ${arrivalMinutes(60, 60)}`)
+  assert.equal(said, 25)
+  assert.match(DEFAULT_WORDS.goesThroughLate, /or nothing is sent$/)
+  assert.match(USER_WORDS.goesThroughLate, /or is returned with nothing traded$/)
+  assert.ok(!/settle_first|[0-9a-f]{64}/.test(DEFAULT_WORDS.settleGaveUp), DEFAULT_WORDS.settleGaveUp)
+  const leaves = readFileSync(new URL('./leaves.js', import.meta.url), 'utf8')
+  assert.equal((leaves.match(/message: DEFAULT_WORDS\.settleGaveUp/g) || []).length, 2, 'past the tries and past the longest wait, in words')
 })

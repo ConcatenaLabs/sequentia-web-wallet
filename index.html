@@ -1877,7 +1877,7 @@ import { mountBtcArk, arkConfig, BTC_WORDS, splitPay, heldBesideBoard, boardSeen
 import { dueNow, markRaised, raiseRate, btcChildPlan, SPEED_WORDS } from './speed-up.js';
 import { createEngine as createUserTrade, tradeStateWord, USER_WORDS } from './user-trade.js';
 import { noteArrival, noteSent, instantLog, instantRows, addressPayments, setStages, untoldEnds, markTold, pendingOut } from './instant-history.js';
-import { putPending, dropPending, stageWriter, takePending } from './pending-sends.js';
+import { putPending, dropPending, stageWriter, takePending, pendingSends, samePending, pendingEnds, noteEnd, markEndTold } from './pending-sends.js';
 import { arkMovementRows, keptMovements } from './btc-ark-history.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
@@ -2907,6 +2907,17 @@ function settleLine(){
   let w=null, m=null; try{ w=leavesApi.releasing(); }catch{} try{ m=leavesApi.settleMinutes(); }catch{}
   return settleWords(w && w.why === 'settle' ? w.finalBy : null, m);
 }
+// The stage hook of a payment written down while it waits (pending-sends.js): each stage written
+// before the library is asked, and Activity drawn again, where the payment reads "Sending" until
+// it ends.
+function sendStage(rec){
+  const w = stageWriter(localStorage, walletTag(), rec);
+  return (x)=>{ w(x); try{ renderHistory(); }catch{} };
+}
+function sendEnded(rec){ try{ dropPending(localStorage, walletTag(), rec.id); }catch{} try{ renderHistory(); }catch{} }
+// The review of a payment the same as one still on its way (written down, not ended): said, since
+// sending it again pays it twice.
+function sameOnItsWay(asset, atoms, to){ try{ return samePending(localStorage, walletTag(), { asset, atoms: String(atoms), to }) ? DEFAULT_WORDS.sameOnItsWay : ''; }catch{ return ''; } }
 function noneNowWords(hex, m0){
   let held = 0n, arriving = 0n;
   try{ held = leavesApi.leafAtoms(hex) || 0n; arriving = leavesApi.arriving(hex) || 0n; }catch{}
@@ -3007,6 +3018,7 @@ async function treeSendReview(r, onDone, note){
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv});
   const say = (t)=>{ const line=el('p','sub', t); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); };
   if(note) say(note);
+  { const same = sameOnItsWay(r.asset, atoms, r.addr.trim()); if(same) say(same); }
   // It arrives in seconds, or after the next block when part of it is on the channel side, with
   // the most that would go instantly.
   const instant = freeing ? sendableNow(atoms, refused) : null;
@@ -3029,8 +3041,8 @@ async function treeSendReview(r, onDone, note){
       } }catch{} }, 1000);
       // Written down while it waits, so a page closed meanwhile makes it when the wallet is next open.
       const rec = { id: 'code-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8), kind: 'code', asset: r.asset, atoms: String(atoms), to: r.addr.trim(), at: Date.now(), state: 'asking' };
-      try{ await leavesApi.payCode(r.addr.trim(), atoms, r.asset, stageWriter(localStorage, walletTag(), rec)); }
-      finally{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} try{ dropPending(localStorage, walletTag(), rec.id); }catch{} }
+      try{ await leavesApi.payCode(r.addr.trim(), atoms, r.asset, sendStage(rec)); }
+      finally{ clearInterval(tell); try{ leavesApi.holdReads(0); }catch{} sendEnded(rec); }
       try{ noteSent(localStorage, walletTag(), { asset: r.asset, atoms }); }catch{}
       const ms=Math.round(performance.now()-t0);
       console.log('[tree send] paid in', ms, 'ms');
@@ -3142,9 +3154,13 @@ async function offboardReview(r, onDone){
   const amt = fmtAtoms(atoms, m0.precision||0);
   const fee = q && q.fee ? BigInt(q.fee.amount||0) : 0n;
   const round = leavesApi.roundInterval();
-  const minutes = arrivalMinutes(settling && round ? 2 * round : round, leavesApi.blockSeconds(), leavesApi.unlockSeconds());
+  // Settled first, the wait is the settle (what the page says it usually takes) and then the whole
+  // way of the payment from its own settlement on.
+  let settleS = 0; if(settling){ try{ settleS = (leavesApi.settleMinutes() || 0) * 60; }catch{} }
+  const minutes = arrivalMinutes(round ? settleS + round : round, leavesApi.blockSeconds(), leavesApi.unlockSeconds());
   const {m, ok, st} = modalRows({title: DEFAULT_WORDS.sendTitle(amt, m0.ticker), kv: [[DEFAULT_WORDS.feeLabel, settling ? DEFAULT_WORDS.feeKeptSome : fee>0n ? fmtAtoms(fee, m0.precision||0) + ' ' + m0.ticker : DEFAULT_WORDS.noFee]]});
   { const line=el('p','sub', (r.why ? r.why + ' ' : '') + DEFAULT_WORDS.arrivesWithin(minutes)); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); }
+  { const same = sameOnItsWay(r.asset, atoms, address); if(same){ const line=el('p','sub', same); m.querySelector('.card').insertBefore(line, m.querySelector('.card .row')); } }
   ok.textContent = DEFAULT_WORDS.send;
   ok.onclick=async()=>{
     ok.disabled=true; st.className='status'; st.innerHTML='<span class="spin"></span>' + DEFAULT_WORDS.sending;
@@ -3154,9 +3170,9 @@ async function offboardReview(r, onDone){
     const rec = { id: 'address-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8), kind: 'address', asset: r.asset, atoms: String(atoms), to: address,
       ...(q ? { shown: q } : {}), at: Date.now(), state: 'asking' };
     let v;
-    try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, ...(q ? { shown: q } : {}) }, stageWriter(localStorage, walletTag(), rec)); }
+    try{ v = await leavesApi.offboard({ asset: r.asset, amount: String(atoms), address, ...(q ? { shown: q } : {}) }, sendStage(rec)); }
     catch(e){ st.className='status err'; st.textContent=prettyErr(e); ok.disabled=false; return; }
-    finally{ clearInterval(tell); try{ dropPending(localStorage, walletTag(), rec.id); }catch{} }
+    finally{ clearInterval(tell); sendEnded(rec); }
     // The same payment asked again while the first is on its way is that first one: nothing more
     // is sent, nothing more is written down, and the person is told so (offboardOutcome).
     const out = offboardOutcome(v, amt, m0.ticker, minutes, leavesApi.blockSeconds(), leavesApi.unlockSeconds());
@@ -3195,8 +3211,10 @@ async function resumeSends(){
   const tag = walletTag();
   let got; try{ got = takePending(localStorage, tag); }catch{ return; }
   for(const d of got.dropped) console.log('[send] not asked again (' + d.why + '):', d.kind, String(d.asset).slice(0, 8), d.atoms);
+  if(got.dropped.length){ try{ renderBalance(); }catch{} }
+  try{ renderHistory(); }catch{}
   for(const rec of got.resume){
-    const atoms = BigInt(rec.atoms), stage = stageWriter(localStorage, tag, rec);
+    const atoms = BigInt(rec.atoms), stage = sendStage(rec);
     console.log('[send] made after the page was closed while it waited:', rec.kind, String(rec.asset).slice(0, 8), rec.atoms);
     try{
       if(rec.kind === 'code'){
@@ -3208,8 +3226,12 @@ async function resumeSends(){
         let paid = 0n; try{ paid = BigInt((v && v.fee && v.fee.amount) || (rec.shown && rec.shown.fee && rec.shown.fee.amount) || 0); }catch{}
         noteSent(localStorage, tag, { asset: rec.asset, atoms, fee: paid > 0n ? { asset: rec.asset, atoms: paid } : null, later: true, offboard: id, address: rec.to });
       }
-    }catch(e){ console.warn('[send] the payment made after the page was closed was refused:', e?.message??e); }
-    finally{ dropPending(localStorage, tag, rec.id); }
+    }catch(e){
+      console.warn('[send] the payment made after the page was closed was refused:', e?.message??e);
+      // Said once, on Balance: nothing left the wallet.
+      try{ noteEnd(localStorage, tag, rec, 'refused'); }catch{}
+    }
+    finally{ sendEnded(rec); }
     try{ renderBalance(); }catch{} try{ renderHistory(); }catch{}
   }
 }
@@ -3249,8 +3271,17 @@ function renderNewsCard(list){
   if(!box){ box=el('div','card news-card'); box.id='newsCard'; list.parentNode.insertBefore(box, list); }
   box.innerHTML='';
   let ends=[]; try{ ends = untoldEnds(localStorage, walletTag()); }catch{}
-  if(!ends.length){ box.classList.add('hide'); return; }
+  // A payment made after the page was reopened that did not go, or one the page cannot tell went.
+  let sendEnds=[]; try{ sendEnds = pendingEnds(localStorage, walletTag()); }catch{}
+  if(!ends.length && !sendEnds.length){ box.classList.add('hide'); return; }
   box.classList.remove('hide');
+  for(const e of sendEnds){
+    const mm = assetMeta(e.asset), amount = fmtAmount(BigInt(e.atoms), mm.precision||0);
+    const line = el('div','news-line'); line.dataset.pending = e.id;
+    line.appendChild(el('p','news-text', e.why === 'unknown' ? DEFAULT_WORDS.pendingMaybeSent(amount, mm.ticker) : DEFAULT_WORDS.pendingNotSent(amount, mm.ticker)));
+    const b = el('button','ghost', DEFAULT_WORDS.newsOk); b.onclick=()=>{ markEndTold(localStorage, walletTag(), e.id); renderNewsCard(list); };
+    line.appendChild(b); box.appendChild(line);
+  }
   for(const r of ends){
     const l = r.legs[0], mm = assetMeta(l.asset);
     const line = el('div','news-line'); line.dataset.offboard = r.offboard;
@@ -11043,7 +11074,9 @@ function instantHistoryRows(){
   let recs=[];
   try{ recs = userTrade ? userTrade.records() : JSON.parse(localStorage.getItem('swk.usertrade.'+walletTag())||'[]'); }catch{}
   const ark = btcArkHistoryRows(recs);
-  try{ return instantRows([...instantLog(localStorage, walletTag()), ...ark], recs); }catch(e){ console.warn('[history] instant rows:', e?.message??e); return []; }
+  // A payment in the tree written down while it waits (pending-sends.js): "Sending" until it ends.
+  let waiting=[]; try{ waiting = pendingSends(localStorage, walletTag()).map(p=> ({ kind:'out', at:p.at, legs:[{ asset:p.asset, atoms:String(p.atoms) }], pending:true, waitingSend:true })); }catch{}
+  try{ return instantRows([...instantLog(localStorage, walletTag()), ...ark, ...waiting], recs); }catch(e){ console.warn('[history] instant rows:', e?.message??e); return []; }
 }
 // The Bitcoin ark's payments (btc-ark-history.js), from the ark wallet's own record of its
 // movements as last read, kept per wallet so History shows them before the ark opens. A Lightning
@@ -11083,7 +11116,7 @@ function instantItem(r){
   if(r.kind==='swap'){ const tk=r.trade.ticket||{}; const leg=(a, n)=>fmtLeg({ asset:a, atoms:n });
     head=(r.trade.state==='undone' ? 'Trade undone: '+leg(tk.payAsset, tk.amountIn)+' for '+leg(tk.receiveAsset, tk.amountOut) : 'Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1])); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
   else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
-  else head = r.kind==='in' ? (r.leaf && _arrivingWhen.has(r.leaf) ? DEFAULT_WORDS.rowArriving : 'Received') : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
+  else head = r.kind==='in' ? (r.leaf && _arrivingWhen.has(r.leaf) ? DEFAULT_WORDS.rowArriving : 'Received') : r.waitingSend ? DEFAULT_WORDS.rowSending : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
   mid.appendChild(el('div',null, head));
   const when = r.at ? whenText(r.at) : '';
   // A payment to an address is pending until the library says it is made (its `stage`); one that

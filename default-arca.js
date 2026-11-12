@@ -164,7 +164,16 @@ export const DEFAULT_WORDS = Object.freeze({
   // said, the operator's round, block and anchor depth before (settleMinutes); past it, that it
   // takes longer and still goes by itself.
   goesThrough: (minutes) => (minutes <= 1 ? 'Goes through in about a minute' : `Goes through within about ${minutes} minutes`),
-  goesThroughLate: 'Taking longer than usual: this goes ahead by itself',
+  goesThroughLate: 'Taking longer than usual: this goes ahead by itself, or nothing is sent',
+  // A payment the page made after it was closed and opened again (pending-sends.js): while it
+  // waits, its Activity row; how it ended, said once on Balance; and the review of the same payment
+  // asked again while it waits.
+  rowSending: 'Sending',
+  pendingNotSent: (amount, ticker) => `${amount} ${ticker} was not sent: nothing left your wallet.`,
+  pendingMaybeSent: (amount, ticker) => `A payment of ${amount} ${ticker} may have gone before the page closed: check Activity before sending it again.`,
+  sameOnItsWay: 'The same payment is already on its way: sending this pays it twice.',
+  // A payment that waited for its money and still could not go: nothing was sent.
+  settleGaveUp: 'This payment could not go through yet: nothing was sent, and your money stays in your wallet.',
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
   stillArrivingWithin: (ticker, minutes) => minutes

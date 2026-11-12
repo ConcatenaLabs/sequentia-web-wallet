@@ -191,7 +191,7 @@ export const USER_WORDS = Object.freeze({
   // What is paid waits for the network to settle it first: the trade goes ahead by itself after.
   settling: 'Goes through in about a minute',
   goesThrough: (minutes) => (minutes <= 1 ? 'Goes through in about a minute' : `Goes through within about ${minutes} minutes`),
-  goesThroughLate: 'Taking longer than usual: this goes ahead by itself',
+  goesThroughLate: 'Taking longer than usual: this goes ahead by itself, or is returned with nothing traded',
   settleLate: 'This is taking longer than usual. Nothing has moved, and your money stays in your wallet.',
   // A trade confirmed while what it pays was settled first, whose price then moved past what was
   // accepted: nothing traded, said as an expired price is.

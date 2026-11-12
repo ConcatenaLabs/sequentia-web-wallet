@@ -14,6 +14,8 @@
 // Each must end in the trade or the send made, never "try again" or "Something went wrong".
 //
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 node --test settle-window-library.test.mjs
+//
+// Both cases run in one process on one harness (the library runs once per process).
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
@@ -21,7 +23,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mountLeaves, JOINED_KEY } from './leaves.js'
 import { settleWords } from './default-arca.js'
-import { stageWriter, dropPending } from './pending-sends.js'
+import { stageWriter, dropPending, samePending } from './pending-sends.js'
 import { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes } from './default-arca.js'
 import { createEngine, USER_WORDS } from './user-trade.js'
 import { mountUserComposer } from './user-composer.js'
@@ -117,6 +119,22 @@ async function arrivingPayee (H, lib, cfg, X, S, phrase) {
   return A
 }
 
+// The leaf library runs once per process, on one store: both cases share it, each with wallets
+// of its own phrases.
+let libraryOnce = null
+function sharedLibrary () {
+  if (!libraryOnce) {
+    libraryOnce = (async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sfw-'))
+      process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+      process.env.LEAVES_PKG = PKG
+      const { leafLibrary } = await import('./tooling/leaf-node.mjs')
+      return leafLibrary(join(dir, 'store'))
+    })()
+  }
+  return libraryOnce
+}
+
 async function setup (t, tag) {
   // The page's own timers are unreferenced below: this keeps the test running while it waits.
   const keep = realSetInterval(() => {}, 1000)
@@ -125,12 +143,7 @@ async function setup (t, tag) {
   const st = await H.state()
   const cfg = { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password }
   try { await H.bond() } catch (e) { if (!/bond/.test(e.message)) throw e }
-  const dir = mkdtempSync(join(tmpdir(), tag + '-'))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
-  process.env.LEAVES_PKG = PKG
-  const { leafLibrary } = await import('./tooling/leaf-node.mjs')
-  const lib = await leafLibrary(join(dir, 'store'))
-  return { H, st, cfg, lib, X: st.x, Y: st.y }
+  return { H, st, cfg, lib: await sharedLibrary(), X: st.x, Y: st.y }
 }
 
 // --- 1. A trade of money still arriving, asked at once -------------------------------------------
@@ -274,7 +287,7 @@ function libraryWorker (lib, opened) {
 function page (leavesApi, ticker) {
   const modals = []
   const deps = {
-    leavesApi, DEFAULT_WORDS, settleWords, stageWriter, dropPending, sendableNow, offboardOutcome, arrivalMinutes,
+    leavesApi, DEFAULT_WORDS, settleWords, stageWriter, dropPending, samePending, sendableNow, offboardOutcome, arrivalMinutes,
     devMode: () => false,
     assetMeta: () => ({ ticker, precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
@@ -294,7 +307,7 @@ function page (leavesApi, ticker) {
     followAddressPayments: async () => 'made', markTold: () => {}, offboardNewsText: () => '', OFFBOARD_FOLLOW_MS: 0,
     document: { body: { contains: () => false } }, performance: { now: () => Date.now() },
   }
-  const names = ['settleAhead', 'settleLine', 'onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
+  const names = ['settleAhead', 'settleLine', 'sendStage', 'sendEnded', 'sameOnItsWay', 'onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
   const src = names.map(fn).join('\n') + '\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))
   return { ...f, modals }
