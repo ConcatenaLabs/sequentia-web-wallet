@@ -279,3 +279,40 @@ for (const gones of [1, 2]) {
     assert.deepEqual(row.legs, [{ asset: X, atoms: '-' + q.ticket.amountIn }], 'what comes back is the swap\'s amount')
   })
 }
+
+test('an acceptance refused before it is signed, its coin spent elsewhere, is priced again into the same record (#710)', async () => {
+  // The wallet shapes its coin first by paying itself; the operator refuses that payment because a
+  // second device gave the coin to a round. The library catches up: the coin is spent, the round's
+  // coin held. The trade is priced again, as a maker's gone offer is, not returned.
+  const s = standIn({ refusals: 0 })
+  const DEAD = 'd0'.repeat(32)
+  s.coins[0].leaf_id = DEAD
+  s.markRefused()
+  const lib = s.lib.command.bind(s.lib)
+  let once = false
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'swap_accept' && !once) {
+      once = true
+      s.coins[0].state = 'spent'
+      s.coins.push({ leaf_id: 'roundcoin', asset: X, value: '3000000', state: 'live', kind: 'batch' })
+      const e = new Error(`refused: the server refused cosign_transfer (409 double_spend): leaf ${DEAD} is already spent: the server co-signs one spend of a leaf`)
+      e.kind = 'server_refused'; throw e
+    }
+    return lib(cmd, a)
+  }
+  const t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.equal(rec.state, 'repricing', 'not returned: priced again')
+  assert.equal(rec.gave.length, 1)
+  assert.ok(s.posts.some(([p, b]) => p === 'release' && b.swap === q.choice.offer.swap), 'the refused offer is let go of')
+  let r = await eng.advance(eng.records()[0])
+  assert.equal(eng.records().length, 1, 'one record')
+  assert.equal(r.state, 'sent', JSON.stringify(r))
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'settled', JSON.stringify(r))
+  assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 1, 'exactly one swap done')
+  assert.equal(tradeStateWord(r), tradeStateWord({ state: 'settled' }))
+})

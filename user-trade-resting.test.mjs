@@ -203,3 +203,52 @@ test('a resting fill refused the same way twice is not asked a third time', asyn
   assert.deepEqual(asked, ['order_fill_resting_quote:200251', 'order_fill_resting_quote:100124', 'order_fill_resting_quote:200251',
     'order_fill_resting_quote:100124'], 'asked once more after the first refusal, not again: ' + s.calls.join(','))
 })
+
+test('a fill refused because its coin was spent elsewhere is priced again into the same record (#710)', async () => {
+  const s = standIn()
+  const DEAD = 'e1'.repeat(32)
+  s.coins[0].leaf_id = DEAD
+  const lib = s.lib.command.bind(s.lib)
+  let refusedOnce = false
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting' && !refusedOnce) {
+      refusedOnce = true
+      // The operator refuses: a second device gave the coin to a round. The library caught up: the
+      // coin is spent, and the round's coin is held in its place.
+      s.coins[0].state = 'spent'
+      s.coins.push({ leaf_id: 'r1', asset: X, value: '2000000', state: 'live', expiry: 1800000000 })
+      const e = new Error(`refused: the server refused order_fill (409 double_spend): leaf ${DEAD} is already spent: the server co-signs one spend of a leaf`)
+      e.kind = 'server_refused'; throw e
+    }
+    if (cmd === 'order_fill_resting') { s.calls.push(cmd); s.shownCoin = a.shown.coin; s.coins.find((c) => c.leaf_id === 'r1').state = 'spent'
+      s.coins.push({ leaf_id: 'got', asset: Y, value: a.amount, state: 'live', expiry: 1790000000 })
+      return { order: ORDER, filled: a.amount, paid: a.shown.paid, fee: '300', change: a.shown.change, gives: ['r1'], answer: { transfer_id: 'tr2', coins: [] } } }
+    const v = lib(cmd, a)
+    if (cmd === 'order_fill_resting_quote') v.gives = s.coins.filter((c) => c.state === 'live' && c.asset === X).map((c) => c.leaf_id)
+    return v
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(q.ok, q.why)
+  let r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'repricing', 'not returned: priced again')
+  assert.equal(r.gave.length, 1); assert.equal(r.gave[0].whose, 'taker')
+  r = await eng.advance(eng.records()[0])
+  assert.equal(eng.records().length, 1, 'the same record')
+  assert.equal(r.state, 'sent', JSON.stringify(r))
+  assert.equal(r.transfer, 'tr2')
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut) && BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'at the price accepted or better')
+})
+
+test('a refusal that names no coin of the wallet\'s returns the fill as before', async () => {
+  const s = standIn()
+  const lib = s.lib.command.bind(s.lib)
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting') { const e = new Error('refused: the server refused order_fill (409 double_spend): leaf ' + 'f0'.repeat(32) + ' is already spent'); e.kind = 'server_refused'; throw e }
+    return lib(cmd, a)
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  await assert.rejects(eng.confirm(q.choice, q.ticket))
+  assert.equal(eng.records()[0].state, 'failed')
+})

@@ -72,6 +72,14 @@ export const MAKER_COMPLETE_MS = 120_000
 export const REPRICE_MOST_MS = 60_000
 // How many offers of one trade may be gone (each priced again at once) before it is returned.
 export const GONE_MOST = 3
+// Whether refusal `e` says a coin the wallet held (`held`, the leaf ids it held before the step)
+// is spent already: the operator's `double_spend`, naming the coin.
+export function spentElsewhere (e, held) {
+  const m = String((e && e.message) || '')
+  if (!/double_spend/.test(m)) return false
+  const named = (m.match(/\b[0-9a-f]{64}\b/i) || [])[0]
+  return !!named && (held || []).includes(named.toLowerCase())
+}
 // A step whose outcome is unknown (the operator did not answer, so the library may still complete
 // it at its next sync) is looked for this long before the trade is called returned.
 export const UNCERTAIN_MS = 10 * 60 * 1000
@@ -1433,6 +1441,25 @@ export function createEngine (deps) {
         rec.accepted = rec.accepted || ticket
         rec.error = null
         settleAsk(rec).catch(() => {})
+        return put(rec)
+      }
+      // A step refused, before anything was signed to the other side, because a coin of the
+      // wallet's it paid from is spent elsewhere (a second device gave it to a round): a fill of an
+      // order resting in the tree, a take of a covenant order, or an acceptance of a maker's offer
+      // whose coin the wallet first shapes by paying itself. The library has caught up and holds
+      // what replaced it, so the trade is priced again into the same record under what was
+      // accepted, as a maker's gone offer is (advanceGone, #710). A person does not know which kind
+      // of offer was the best price, so all behave the same.
+      if (rec.state === 'confirming' && refused && spentElsewhere(e, rec.before) && ['leaf-resting', 'covenant-round', 'leaf-maker'].includes(choice.source)) {
+        drop(choice)
+        rec.gave = [...(rec.gave || []), { ...(rec.order ? { order: rec.order } : { swap: rec.swap }), why: String(e.message || '').slice(0, 300), whose: 'taker' }]
+        log('[user trade] a coin it paid from was spent elsewhere; pricing again:', rec.id)
+        if (rec.gave.length >= GONE_MOST) {
+          rec.state = 'returned'; rec.whyKind = null; rec.error = 'the offers were gone ' + rec.gave.length + ' times'
+          if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
+          return put(rec)
+        }
+        rec.state = 'repricing'; rec.repriceSince = now(); rec.accepted = rec.accepted || ticket; rec.error = null
         return put(rec)
       }
       if (rec.state === 'confirming') {
