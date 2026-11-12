@@ -965,7 +965,10 @@ node --test
 This runs every `*.test.mjs` file, at the root and under `tooling/`. GitHub Actions runs the same
 command on Node 22 for every pull request and every push to `main`
 (`.github/workflows/unit-tests.yml`), with nothing built; a test that needs `pkg/`, the live
-testnet or a browser skips itself there. Most register
+testnet or a browser skips itself there. `send-arriving-library.test.mjs` runs the page's Send on
+the leaf wallet library in `leaves/pkg` against a real operator: start the operator repository's
+harness (`bark-cli/tests/arca_operator_for_browsers.rs`) and give its control address as
+`SEQ_LEAF_HARNESS`; without it the test skips itself. Most register
 `node:test` cases. The rest are standalone scripts with their own `check()` harness, which
 `node --test` runs as one test each, among them `seqln.test.mjs`, `xcourier.test.mjs`,
 `xmaker.test.mjs`, `ln-rail.test.mjs`, `submarine.test.mjs`, `swap-mixed.test.mjs` and the

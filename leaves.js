@@ -1261,6 +1261,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           S.restored = await run('restore')
           try { ctx.store.setItem(key, String(now())) } catch {}
           log(`[leaves] restore: ${now() - t0} ms`)
+          depositsOwed(S.restored)
           return
         } catch (e) {
           S.restored = { error: e.message }
@@ -1277,6 +1278,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
       // The caller opens the wallet next and the page is drawn again once it has read the balance.
       S.restoring = null
     }
+  }
+
+  // A restore leaves the watchtowers' deposits of what it found owed (`deposits.owed`): they are
+  // made at once, not awaited, so the wallet opens without them. A page closed first has the next
+  // sync make them first.
+  function depositsOwed (restored) {
+    if (!(restored && restored.deposits && restored.deposits.owed)) return
+    run('deposits').then(() => log('[leaves] deposits after the restore: made'), (e) => log('[leaves] deposits after the restore: ' + ((e && e.message) || e)))
   }
 
   // A person reviewing a payment the wallet is about to make (`holdReads`): the wallet's own upkeep
@@ -1933,7 +1942,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           setJoined(ctx.store, tag())
           // A phrase that already holds leaves with this operator (another browser, Ambra, the
           // extension) finds them under its mailbox key: restore once, as Ambra's join does.
-          try { S.restored = (await S.client.run('restore')).result } catch (e) { S.restored = { error: e.message } }
+          try { S.restored = (await S.client.run('restore')).result; depositsOwed(S.restored) } catch (e) { S.restored = { error: e.message } }
           try { if (config.node_password) ctx.store.setItem(NODE_PASSWORD_KEY, config.node_password); else ctx.store.removeItem(NODE_PASSWORD_KEY) } catch {}
           S.open = true
           S.joined = info.result
@@ -2448,6 +2457,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     c.id = 'leafCoins'
     const s = S.schedule || {}
     const held = heldCoins(S.coins)
+    // After a restore the library checks the wallet's earlier leaves a few at each sync; what it
+    // holds now is whole meanwhile (`balance.history`).
+    const hist = S.balance && S.balance.history
+    if (hist && hist.loading) { const h = el('div', 'sub leaf-history-loading', `Earlier leaves still being checked after the restore: ${hist.left} left, a few at each sync. What the wallet holds now is complete.`); h.id = 'leafHistoryLoading'; c.appendChild(h) }
     if (!held.length) c.appendChild(el('div', 'muted', 'No leaves held.'))
     for (const co of held) c.appendChild(coinCard(co, s))
     if (S.quote) {
