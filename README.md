@@ -262,7 +262,7 @@ and no asset comes first. User mode shows one figure per asset and no rail.
 In user mode the wallet holds its Sequentia assets in the tree of the operator the page names
 (`window.SEQ_ARCA`, its key pinned) without a step: a new or restored wallet joins it by itself
 once the operator's server shows the pinned key (a restored phrase finds the coins it holds
-there), and one that cannot (the server unreachable, or showing another key) works as it would
+there, and the page says it is finding them until it has), and one that cannot (the server unreachable, or showing another key) works as it would
 without and tries again every two minutes. If the operator stops answering, the coins are still
 the wallet's: Balance says so in plain words and offers **Take my coins home**, which sends every
 coin to the wallet's own address from what the wallet holds and the chain alone, its fees shown

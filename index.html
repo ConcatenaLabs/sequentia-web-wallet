@@ -4339,7 +4339,7 @@ function initLeaves(){
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
     onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
-    onEvent: (name, data)=>{ if(name==='codeUsed' || name==='channelsChanged'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} try{ faucetArrived(data); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
+    onEvent: (name, data)=>{ if(name==='codeUsed' || name==='channelsChanged'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} try{ faucetArrived(data); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='restoring'){ try{ if(_syncState) setSyncStatus(_syncState[0], _syncState[1]); else setSyncStatus('syncing'); }catch{} try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{ const j=await askFaucetFor(body); try{ markFaucet(); }catch{} return j; },
     tickMs: (typeof window!=='undefined' && Number(window.SEQ_LEAVES_TICK_MS)) || undefined,
@@ -7499,7 +7499,11 @@ function setSyncStatus(state, err){
   let leavesWait = false; try{ leavesWait = state==='ok' && !!leavesApi && leavesApi.expected() && !leavesApi.balanceRead(); }catch{}
   if(leavesWait) state='syncing';
   const snapAt = (!_scannedOnce || leavesWait) && _snap && _snap.at ? _snap.at : 0;
-  if(state==='syncing'){
+  // A wallet opened in this browser for the first time: what is shown is not all it holds yet.
+  let finding = false; try{ finding = state!=='err' && !!leavesApi && leavesApi.restoring(); }catch{}
+  let stalled = null; try{ stalled = finding && leavesApi.restoreStalled ? leavesApi.restoreStalled() : null; }catch{}
+  if(finding){ state='syncing'; html='<span class="spin"></span>'+esc(stalled ? DEFAULT_WORDS.findingStalled : DEFAULT_WORDS.finding); }
+  else if(state==='syncing'){
     html='<span class="spin"></span>'+(snapAt ? 'Syncing… showing your wallet as of '+esc(whenText(snapAt))+'.' : 'Syncing…');
   } else if(state==='ok'){ cls='status ok'; html='Up to date.'; }
   else {
@@ -8468,7 +8472,8 @@ function renderReceive(){
   if(showXpub) renderXpubForm();
   $('recvTip').textContent = showConf
     ? 'Blinded address (tsqb1…): what it receives on Sequentia has its amount and asset hidden on the chain. BTC always arrives at your usual tb1 address.'
-    : (codeOn ? DEFAULT_WORDS.addressTip : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.');
+    : (codeOn ? DEFAULT_WORDS.addressTip : (!devMode() && leavesApi && leavesApi.restoring && leavesApi.restoring()) ? DEFAULT_WORDS.findingTip
+      : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.');
   renderOampReceive();
 }
 // Restricted-asset (OpenAMP) receive panel: show the wallet's AID plus the enclave deposit address
@@ -9142,6 +9147,10 @@ function collectRows(){
 // moved out of the Ark first, a round amount rather than the payment's own. A confidential coin of
 // another asset spent to the wallet's own confidential address in the same transaction hides which
 // asset was paid; without one, the review says the asset can be seen.
+// Whether the wallet is finding what it holds and the service holding its coins for instant
+// payments answers: a payment asked meanwhile waits for it to open, for as long as that takes.
+function findingStalled(){ try{ return !!leavesApi && !leavesApi.isOpen() && !!(leavesApi.restoreStalled && leavesApi.restoreStalled()); }catch{ return false; } }
+function findingOn(){ try{ return !!leavesApi && leavesApi.restoring() && !findingStalled(); }catch{ return false; } }
 async function confidentialReview(r, reset){
   const h=r.asset, m=assetMeta(h), prec=sendPrecision(h);
   const a=parseAtoms(r.amtS, prec);
@@ -9152,11 +9161,14 @@ async function confidentialReview(r, reset){
   if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
     const st=$('sendErr'); st.className='status'; st.textContent=DEFAULT_WORDS.waitOpening;
     const until=Date.now()+OPEN_WAIT_MS;
-    while(!leavesApi.isOpen() && Date.now()<until) await new Promise(r=>setTimeout(r, 1000));
+    while(!leavesApi.isOpen() && !findingStalled() && (Date.now()<until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
     st.textContent='';
   }
+  // The service holding the wallet's coins for instant payments did not answer, so the wallet has
+  // not found them: what it holds elsewhere still pays; past that it says so, and nothing moves.
   let plan=confidentialPlan({ amount:a, margin, onchain:availableFor(h), instant:instantAtoms(h), minLeaf:least, precision:prec });
   // Short only by what is still arriving: said so, rather than that the wallet holds too little.
+  if(plan.short && findingStalled()) throw new Error(DEFAULT_WORDS.findingStalledPay);
   if(plan.short){ let all=0n; try{ all = leavesApi && !devMode() ? (leavesApi.leafAtoms(h)||0n) : 0n; }catch{}
     if(availableFor(h)+all >= a+margin) throw new Error(DEFAULT_WORDS.stillArriving(m.ticker)); }
   // Part of what is held for instant payments may not be movable now (a channel's balance, a coin
@@ -11864,8 +11876,9 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   if(leavesApi && !leavesApi.isOpen() && leavesApi.expected()){
     say(DEFAULT_WORDS.waitOpening);
     const until = Date.now() + OPEN_WAIT_MS;
-    while(!leavesApi.isOpen() && Date.now() < until) await new Promise(r=>setTimeout(r, 1000));
+    while(!leavesApi.isOpen() && !findingStalled() && (Date.now() < until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
   }
+  if(findingStalled()) throw new Error(DEFAULT_WORDS.findingStalledPay);
   if(!leavesApi || !leavesApi.isOpen()) throw new Error(DEFAULT_WORDS.stillOpening);
   // A move asked before (this page earlier, or before a reload) counts: it is waited for, never asked twice.
   const under = await movesUnderWay();
