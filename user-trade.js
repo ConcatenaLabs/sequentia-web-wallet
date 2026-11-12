@@ -371,6 +371,20 @@ export function ownShortMost (message, paying) {
   return p > short ? p - short : 0n
 }
 
+// The same from the refusal itself: the library's own figure (`most`, which it gives with both
+// refusals) when it carries one; else, from a library that does not carry it yet, read from its words.
+export function refusalMost (e, paying) {
+  if (e && e.most != null && /^\d+$/.test(String(e.most))) return BigInt(e.most)
+  return ownShortMost(e && e.message, paying)
+}
+// What the wallet holds in live coins, by the library's refusal of a payment short of its margins:
+// its own figure (`live`), else from its words. -> atoms, or null when it does not say.
+export function refusalLive (e) {
+  if (e && e.live != null && /^\d+$/.test(String(e.live))) return BigInt(e.live)
+  const h = String(e && e.message).match(/holds (\d+) of asset \S+ in live coins/)
+  return h ? BigInt(h[1]) : null
+}
+
 // The indicative entries worth asking for firm terms, best first: a source whose coin waits on
 // Bitcoin blocks is chosen over one handed over in seconds only when it gives SLOW_PREMIUM_BPS
 // more (chooseCandidate), so one that does not give that much more than the best such indicative
@@ -1078,11 +1092,11 @@ export function createEngine (deps) {
   // The wallet's own shortfall a source's check met (`ownShortMost`): what it could pay at most.
   let ownMost = null, ownLive = null
   const noteLiveShort = (e, at = {}) => {
-    const most = ownShortMost(e && e.message, at.paying)
+    const most = refusalMost(e, at.paying)
     if (most != null && (ownMost == null || most > ownMost)) ownMost = most
     // What the refusal says the wallet holds in live coins (absent for the change's refusal).
-    const h = String(e && e.message).match(/holds (\d+) of asset \S+ in live coins/)
-    if (h) ownLive = BigInt(h[1])
+    const live = refusalLive(e)
+    if (live != null) ownLive = live
     if (/ in live coins/.test(String(e && e.message))) liveShort = true
     if (e && e.kind === 'settle_first') settleSeen = { coins: [...new Set([...(settleSeen ? settleSeen.coins : []), ...(e.coins || [])])] }
   }
