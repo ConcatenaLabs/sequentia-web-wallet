@@ -742,3 +742,30 @@ test('engine: what the wallet can pay is read from the store alone, and in full 
   assert.equal(asked.length, 3, 'a given coin: read again in full')
   assert.doesNotMatch(asked[2], /brief/)
 })
+
+test('a pair offered a moment ago that nobody offers now is asked again, not called not offered (#698)', async () => {
+  const s = standIn()
+  let quiet = false
+  const fetchJson = async (url, init) => (quiet && url.endsWith('/v1/quotes') ? { quotes: [] } : s.fetchJson(url, init))
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson, makers: () => ['http://m'], admitted: admitted(['leaf-maker']), store: s.store, now: () => t })
+  const first = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '400000' })
+  assert.equal(first.ok, true, JSON.stringify(first))
+  // The maker reads its coins again after a trade: it quotes nothing for a while.
+  quiet = true
+  t += 30_000
+  const e = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '400000' })
+  assert.deepEqual([e.ok, e.why, e.again], [false, 'not-offered', true])
+  t += 30_000
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([q.ok, q.why, q.again], [false, 'not-offered', true])
+  assert.equal(USER_WORDS.offeredAgain('YT', 'XT'), 'Getting a price for YT for XT: it takes a moment. Nothing has moved.')
+  // Long after it was last offered: not offered, said so.
+  t += 4 * 60_000
+  const late = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.deepEqual([late.why, late.again], ['not-offered', undefined])
+  // Offered again: priced.
+  quiet = false
+  t += 10_000
+  assert.equal((await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })).ok, true)
+})

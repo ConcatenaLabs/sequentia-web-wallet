@@ -119,6 +119,9 @@ export const USER_WORDS = Object.freeze({
   bookUpToSoon: (x) => `The book can fill up to ${x} now, and more in a few minutes.`,
   // Nothing to fill now for that reason alone.
   notOfferedSoon: (get, pay) => `${get} for ${pay} can be traded again in a few minutes.`,
+  // Nobody offers the pair this moment, though it was offered a moment ago: the price is asked
+  // again by itself.
+  offeredAgain: (get, pay) => `Getting a price for ${get} for ${pay}: it takes a moment. Nothing has moved.`,
   review: 'Review',
   confirm: 'Trade',
   cancel: 'Cancel',
@@ -477,6 +480,11 @@ export const BTC_ONLY_FIRM_MS = 60000
 // How long a refresh asked to get coins ready for a resting order is waited on before it is asked
 // again: its round, and the round's block being certified.
 export const READYING_MS = 10 * 60_000
+// A pair offered within this long that nobody offers now: a maker reading its coins again after a
+// trade quotes nothing for up to about 90 s (#698), so the wallet asks again rather than saying the
+// pair is not offered, every OFFERED_AGAIN_EVERY_MS.
+export const OFFERED_AGAIN_MS = 3 * 60_000
+export const OFFERED_AGAIN_EVERY_MS = 5000
 // How often a trade that settles first asks whether its coins are through (each ask after a sync),
 // and the longest it waits for them before it says the trade takes longer than usual.
 export const SETTLE_POLL_MS = 5000
@@ -636,6 +644,10 @@ export function createEngine (deps) {
     }
     const near = out.filter((e) => nearFeed(e, payAsset, receiveAsset))
     if (out.soon) near.soon = true
+    // A pair offered a moment ago that nobody offers now is offered again shortly (#698).
+    const key = payAsset + '>' + receiveAsset
+    if (near.length) offeredAt.set(key, now())
+    else if (offeredAt.has(key) && now() - offeredAt.get(key) < OFFERED_AGAIN_MS) near.again = true
     return near
   }
 
@@ -1017,6 +1029,8 @@ export function createEngine (deps) {
   //       now; `soon` when a maker takes more after its next round) }
   //  | { ok: false, why: 'not-listed'|'not-offered'|'soon'|'too-small' }
   const estimates = new Map()
+  // When each directed pair (pay>receive) last had an entry: see OFFERED_AGAIN_MS.
+  const offeredAt = new Map()
   async function estimate ({ payAsset, receiveAsset, pay, receive }) {
     // While the amount is typed, what the wallet can pay is read behind it, so Review finds it.
     if (payAsset !== 'BTC' && (!holdings || now() - holdings.at > 10_000)) readHoldingsSoon()
@@ -1039,7 +1053,7 @@ export function createEngine (deps) {
     const es = c.es.filter((e) => (e.source !== 'btc-gateway' || deps.btc) && big(e.maxReceive) > 0n)
     // A maker that takes more only after its next round (its instant budget is spent for now).
     const soon = !!c.es.soon || es.some((e) => e.soon)
-    if (!es.length) return { ok: false, why: soon ? 'soon' : 'not-offered' }
+    if (!es.length) return { ok: false, why: soon ? 'soon' : 'not-offered', ...(c.es.again ? { again: true } : {}) }
     const cdiv = (a, b) => (a + b - 1n) / b
     let most = null
     for (const e of es) { const r = big(e.maxReceive); if (!most || r > most.receive) most = { receive: r, pay: cdiv(r * e.rateNum, e.rateDen) } }
@@ -1367,7 +1381,7 @@ export function createEngine (deps) {
     // A maker gave firm terms in time and the wallet's library was still reading them when the
     // quote's time ran out (held by a long command of its own): the wallet was busy, nobody refused.
     if (!best && reads.size > 0) return { ok: false, why: 'wallet-busy' }
-    if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
+    if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small', ...(!es.length && all.again ? { again: true } : {}) }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source, asked: String(A) }
     const have = haveOf(best.entry)

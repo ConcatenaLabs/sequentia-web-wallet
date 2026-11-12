@@ -68,7 +68,7 @@ export function refusalWords (q, name, amt) {
     case 'too-small': return W.tooSmall
     case 'no-firm-offer': return W.noFirmOffer
     case 'not-listed': return W.notListed(g, p)
-    default: return W.notOffered(g, p)
+    default: return q.again ? W.offeredAgain(g, p) : W.notOffered(g, p)
   }
 }
 
