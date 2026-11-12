@@ -117,9 +117,9 @@ function page (leavesApi) {
   const src = [fn('findingStalled'), fn('findingOn'), fn('setSyncStatus'), ensure,
     'return { setSyncStatus, ensureOnChain, line: () => $("syncStatus").innerHTML.replace(/<[^>]*>/g, "") }'].join('\n')
   // eslint-disable-next-line no-new-func
-  return new Function('leavesApi', 'DEFAULT_WORDS', '$', 'esc', 'whenText', 'OPEN_WAIT_MS', 'devMode', 'refuseIfVesting', 'instantAtoms', 'fmtAmount', 'assetMeta',
+  return new Function('leavesApi', 'DEFAULT_WORDS', '$', 'esc', 'whenText', 'OPEN_WAIT_MS', 'devMode', 'refuseIfVesting', 'instantAtoms', 'onItsWay', 'fmtAmount', 'assetMeta',
     'let _syncState = null, _scannedOnce = true, _snap = { at: 1 }, _lastSyncOk = 0;\n' + src)(
-    leavesApi, DEFAULT_WORDS, $, (x) => String(x), () => 'just now', 50, () => false, () => {}, () => 0n, String, () => ({ precision: 8, ticker: 'X' }))
+    leavesApi, DEFAULT_WORDS, $, (x) => String(x), () => 'just now', 50, () => false, () => {}, () => 0n, () => 0n, String, () => ({ precision: 8, ticker: 'X' }))
 }
 const mountWith = (w, extra = {}) => mountLeaves({ makeWorker: () => w, store: memStore(), walletTag: () => 't', mnemonic: () => 'abandon', el: () => ({}),
   pinned: () => ({ server: 'https://op', node_url: 'https://node', operator: OP }), serverInfo: async () => ({ operator: OP }), tickMs: 3_600_000, ...extra }, null, null)
@@ -194,5 +194,28 @@ test('#365: a restore refused for another reason ends the finding: the wallet op
     assert.equal(asksRestore(w), 1, 'asked once, not again and again')
     assert.equal(api.restoring(), false)
     assert.equal(api.isOpen(), true)
+  } finally { api.stop() }
+})
+
+test('a restore that leaves the watchtowers\' deposits owed has them made at once, and the wallet opens without waiting for them', async () => {
+  const w = slowRestoreWorker()
+  const post = w.postMessage
+  let releaseDeposits
+  const depositsDone = new Promise((r) => { releaseDeposits = r })
+  w.postMessage = (m) => {
+    const c = m.args && m.args.command
+    if (c === 'restore') { w.posted.push(m); return queueMicrotask(() => w.onmessage({ data: { id: m.id, ok: true, value: { result: { restored: [], history: { left: 3, loading: true }, deposits: { owed: true } }, start: {} } } })) }
+    if (c === 'deposits') { w.posted.push(m); depositsDone.then(() => w.onmessage({ data: { id: m.id, ok: true, value: { result: { made: 2 }, start: {} } } })); return }
+    return post(m)
+  }
+  const api = mountWith(w)
+  try {
+    const started = api.start()
+    await until(() => w.posted.some((m) => m.args && m.args.command === 'deposits'))
+    const cmds = w.posted.filter((m) => m.op === 'run').map((m) => m.args.command)
+    assert.equal(cmds[cmds.indexOf('restore') + 1], 'deposits', 'the deposits are asked right after the restore: ' + cmds.join(','))
+    assert.equal(api.isOpen(), true, 'open while the deposits are being made')
+    releaseDeposits()
+    await started
   } finally { api.stop() }
 })
