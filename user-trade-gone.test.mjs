@@ -6,19 +6,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createEngine, tradeStateWord } from './user-trade.js'
+import { tradeRows } from './instant-history.js'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32)
 
 // A stand-in library and maker. The maker's first completion is refused by the operator: it
 // answers 409 gone, with an offer made in its place at `again` (null: none), and later asks of the
 // same acceptance get the same answer.
-function standIn ({ again = 'same', rateNum = 4n, always = false, respend = 0n, whose = 'taker', unknown = 0 } = {}) {
+function standIn ({ again = 'same', rateNum = 4n, always = false, respend = 0n, whose = 'taker', unknown = 0, refusals = 1 } = {}) {
   const coins = [{ leaf_id: 'dead', asset: X, value: '3000000', state: 'live', kind: 'transfer' }]
   const swaps = new Map()
   const calls = []
   const posts = []
   let n = 0
   let refusedOnce = false
+  let refusedN = 0
   const lib = {
     command (cmd, a) {
       calls.push(cmd)
@@ -83,8 +85,9 @@ function standIn ({ again = 'same', rateNum = 4n, always = false, respend = 0n, 
     if (url.endsWith('/v1/release')) return {}
     if (url.endsWith('/v1/accept')) {
       const s = swaps.get(b.swap)
-      if (!refusedOnce || s.gone || always) {
-        refusedOnce = true
+      if (!refusedOnce || refusedN < refusals || s.gone || always) {
+        if (!s.gone) refusedN++
+        refusedOnce = refusedN >= refusals
         if (!s.gone) {
           const first = made.get(b.swap)
           s.gone = { error: 'refused: the operator refused the swap\'s completion (409 double_spend): leaf dead… is already spent; the offer is withdrawn',
@@ -101,7 +104,7 @@ function standIn ({ again = 'same', rateNum = 4n, always = false, respend = 0n, 
   }
   const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
   return { lib, fetchJson: async (u, i) => (silent.on && u.endsWith('/v1/quotes') ? { quotes: [] } : fetchJson(u, i)), store, calls, posts, swaps, coins, silent,
-    markRefused: () => { refusedOnce = true } }
+    markRefused: () => { refusedOnce = true; refusedN = refusals } }
 }
 
 const admitted = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
@@ -249,3 +252,30 @@ test('a cancel whose answer has not come: the trade waits, says so in words, and
   assert.equal(done.state, 'settled', JSON.stringify(done))
   assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 1, 'exactly one swap done')
 })
+
+// An undone trade's history row shows what was paid coming back: the swap's own amount, never the
+// respend margins a cancel left (they are spent, and counted in the record's ticket once it was
+// priced again). Whether the margins came before the ticket of the trade that settled (one gone) or
+// over two gones of the same record, the row is the last swap's amount.
+for (const gones of [1, 2]) {
+  test(`an undone trade after ${gones} gone offer(s) with respends: its row shows the swap's amount coming back, not the margins`, async () => {
+    const s = standIn({ again: 'same', respend: 500n, whose: 'maker', refusals: gones })
+    const t = 1_000_000
+    const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+    const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+    await eng.confirm(q.choice, q.ticket)
+    let r = null
+    for (let i = 0; i < 6 && (!r || r.state !== 'settled'); i++) r = await eng.advance(eng.records()[0])
+    assert.equal(r.state, 'settled', JSON.stringify(r))
+    assert.equal(r.gave.length, gones)
+    assert.equal(r.cancelFees, String(500n * BigInt(gones)))
+    assert.equal(BigInt(r.ticket.amountIn), BigInt(q.ticket.amountIn) + 500n * BigInt(gones), 'the ticket counts every respend once')
+    // The swap that settled is dead (a rollback of its anchor): the trade is undone.
+    s.swaps.get(r.swap).state = 'returning'
+    await eng.resume()
+    const u = eng.records()[0]
+    assert.equal(u.state, 'undone')
+    const row = tradeRows([u])[0]
+    assert.deepEqual(row.legs, [{ asset: X, atoms: '-' + q.ticket.amountIn }], 'what comes back is the swap\'s amount')
+  })
+}
