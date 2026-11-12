@@ -5,7 +5,7 @@
 // the next 163 s was refused "coin … is live now, not held for the swap".
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { completionRefused, goneAnswer } from './leaf-maker.mjs'
+import { completionRefused, goneAnswer, againWant } from './leaf-maker.mjs'
 
 test('a refusal of the operator is a refused completion; the operator not reached is not', () => {
   assert.equal(completionRefused({ kind: 'swap_refused', message: 'refused: the operator refused the swap\'s completion' }), true)
@@ -27,4 +27,15 @@ test('the gone answer names whose coin, and carries the offer made in its place'
   assert.equal(none.gone, true)
   assert.equal(none.whose, null)
   assert.equal('offer' in none, false, 'no offer when the maker cannot make one')
+})
+
+test('the offer made in place of a gone one asks the live price, and only when that asks no more than before', () => {
+  // The live price asks less: the taker gets the better price.
+  assert.equal(againWant('9999992', '9999000'), 9999000n)
+  assert.equal(againWant('9999992', '9999992'), 9999992n)
+  // The price moved against the taker since: no offer, so a refused acceptance never holds a
+  // stale price; the taker asks for a new one.
+  assert.equal(againWant('9999992', '10000001'), null)
+  // The maker cannot price it now (it does not hold that much, the asset is capped, no room).
+  assert.equal(againWant('9999992', null), null)
 })
