@@ -12,7 +12,7 @@ const X = 'aa'.repeat(32), Y = 'bb'.repeat(32)
 // A stand-in library and maker. The maker's first completion is refused by the operator: it
 // answers 409 gone, with an offer made in its place at `again` (null: none), and later asks of the
 // same acceptance get the same answer.
-function standIn ({ again = 'same', rateNum = 4n } = {}) {
+function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
   const coins = [{ leaf_id: 'dead', asset: X, value: '3000000', state: 'live', kind: 'transfer' }]
   const swaps = new Map()
   const calls = []
@@ -47,10 +47,10 @@ function standIn ({ again = 'same', rateNum = 4n } = {}) {
           s.state = 'cancelled'
           // The library's cancel: the respend is refused for the dead coin, the wallet catches up
           // (the dead coin spent, the round's coin taken), and the acceptance is cancelled.
-          const d = coins.find((x) => x.leaf_id === 'dead')
+          const d = coins.find((x) => x.note === 'swap ' + a.swap)
           d.state = 'spent'
-          coins.push({ leaf_id: 'round', asset: X, value: '3000000', state: 'live', kind: 'batch' })
-          return { swap: a.swap, cancelled: true, spent_elsewhere: ['dead'], freed: [] }
+          coins.push({ leaf_id: 'round' + (++n), asset: X, value: '3000000', state: 'live', kind: 'batch' })
+          return { swap: a.swap, cancelled: true, spent_elsewhere: [d.leaf_id], freed: [] }
         }
         default: throw new Error('no command ' + cmd)
       }
@@ -71,7 +71,7 @@ function standIn ({ again = 'same', rateNum = 4n } = {}) {
     if (url.endsWith('/v1/release')) return {}
     if (url.endsWith('/v1/accept')) {
       const s = swaps.get(b.swap)
-      if (!refusedOnce || s.gone) {
+      if (!refusedOnce || s.gone || always) {
         refusedOnce = true
         if (!s.gone) {
           const first = made.get(b.swap)
@@ -130,4 +130,18 @@ test('a gone offer with no offer in its place, and the maker now asking more: re
   assert.equal(t - rec.sentAt, 0, 'at once: the clock stood still')
   assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 0, 'nothing traded')
   assert.ok(!s.posts.some(([p, b]) => p === 'accept' && b.swap !== rec.swap), 'no other offer was accepted')
+})
+
+test('a maker whose offers are gone again and again: the trade comes back with words after three, never asking on and on', async () => {
+  const s = standIn({ again: 'same', always: true })
+  const t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  await eng.confirm(q.choice, q.ticket)
+  let r = null
+  for (let i = 0; i < 6; i++) r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned', JSON.stringify(r))
+  assert.equal(r.gave.length, 3)
+  assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 0, 'nothing traded')
+  assert.ok(s.posts.some(([p]) => p === 'release'), 'the last offer made in place of a gone one is let go of')
 })

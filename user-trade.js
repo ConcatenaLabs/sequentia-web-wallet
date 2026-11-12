@@ -70,6 +70,8 @@ export const MAKER_COMPLETE_MS = 120_000
 // How long a trade whose maker's offer is gone keeps asking for a price within what was accepted
 // (the wallet busy, no firm offer yet) before it is returned with words.
 export const REPRICE_MOST_MS = 60_000
+// How many offers of one trade may be gone (each priced again at once) before it is returned.
+export const GONE_MOST = 3
 // A step whose outcome is unknown (the operator did not answer, so the library may still complete
 // it at its next sync) is looked for this long before the trade is called returned.
 export const UNCERTAIN_MS = 10 * 60 * 1000
@@ -1476,6 +1478,13 @@ export function createEngine (deps) {
     }
     log('[user trade] the maker\'s offer is gone (' + (gone.whose ? `the ${gone.whose}'s coin` : String(gone.code || '')) + '); pricing again:', rec.id)
     rec.gave = [...(rec.gave || []), { swap: rec.swap, why: String(gone.error || '').slice(0, 300), whose: gone.whose || null }]
+    // Offers gone GONE_MOST times over: the trade comes back with words rather than ask again.
+    if (rec.gave.length >= GONE_MOST) {
+      if (gone.offer && gone.offer.swap && rec.maker) release(rec.maker, gone.offer.swap)
+      rec.gone = null; rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'the makers\' offers were gone ' + rec.gave.length + ' times'
+      if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
+      return put(rec)
+    }
     if (gone.offer && gone.offer.swap && rec.maker) madeAgain.set(rec.maker, { ...gone.offer, give_asset: rec.ticket.receiveAsset, want_asset: rec.ticket.payAsset })
     rec.gone = null
     rec.state = 'repricing'; rec.repriceSince = now(); rec.accepted = rec.accepted || rec.ticket
