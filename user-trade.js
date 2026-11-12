@@ -1751,6 +1751,9 @@ export function createEngine (deps) {
       log('[user trade] settle_first:', e && e.message)
       if (/no command|unknown command/i.test(String(e && e.message))) { rec.state = 'failed'; rec.error = e.message; return put(rec) }
     }
+    // The record as stored now: never written back over a state another follow moved it to.
+    const stored = records().find((r) => r.id === rec.id)
+    if (!stored || stored.state !== 'settling') return stored || rec
     // How long it may wait: what the library first said it takes, twice, with a margin (settleBound),
     // kept on the record so a page opened later holds it to the same bound.
     if (v && !v.ready && v.final_in_seconds != null) {
@@ -1795,6 +1798,9 @@ export function createEngine (deps) {
       drop(q.choice)
       q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: String(aIn) })
     }
+    // The record as stored now: never written back over a state another follow moved it to.
+    const stored = records().find((r) => r.id === rec.id)
+    if (!stored || stored.state !== state) { if (q.ok) drop(q.choice); return stored || rec }
     if (!q.ok) {
       if (q.why === 'settle-first' && (state !== 'settling' || now() - since <= mostMs)) {
         rec.settleCoins = q.coins || []
@@ -1824,8 +1830,18 @@ export function createEngine (deps) {
 
   async function advanceOnce (rec) {
     if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
-    if (rec.state === 'settling') return advanceSettling(rec)
-    if (rec.state === 'repricing') return repriceWithin(rec, REPRICE_MOST_MS, rec.repriceSince || rec.at)
+    // A trade waiting to be priced again moves on under a claim no other page of this wallet holds
+    // at the same time (as a composed trade does), from its record as stored then: two tabs never
+    // settle, price or accept it twice, and one never writes back a copy the other moved past.
+    if (rec.state === 'settling' || rec.state === 'repricing') {
+      const done = await claimOnce(rec.id, async () => {
+        const cur = records().find((r) => r.id === rec.id) || rec
+        if (cur.state === 'settling') return advanceSettling(cur)
+        if (cur.state === 'repricing') return repriceWithin(cur, REPRICE_MOST_MS, cur.repriceSince || cur.at)
+        return cur
+      }, deps.locks)
+      return done || records().find((r) => r.id === rec.id) || rec
+    }
     // A composed trade moves on under a claim no other page of this wallet holds at the same time,
     // from its record as stored then: two pages never move or take for one trade.
     if (rec.source === 'composed') {

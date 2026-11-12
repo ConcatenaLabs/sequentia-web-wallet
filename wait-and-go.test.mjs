@@ -323,3 +323,39 @@ test('an operator that charges for the refresh: its fee is in the ticket accepte
   assert.match(root.querySelector('#ucFees').textContent, /500 XT/)
   clearTimeout(ui.state.timer)
 })
+
+test('two tabs of one wallet: one moves a waiting trade on at a time, from the record as stored; it is accepted once, never written back (RV53 W1)', { timeout: 30_000 }, async () => {
+  const s = standIn()
+  let clock = Date.now()
+  const tabA = engineOf(s, { now: () => clock })
+  // Tab B shares the store and the library; its settle_first answers late, from before the round.
+  let release = null
+  const libB = { command (cmd, a) {
+    if (cmd === 'settle_first' && !release) return new Promise((ok) => { release = () => ok({ settling: [], waiting: ['c1'], done: [], left: [], ready: false, ...WAIT }) })
+    return s.lib.command(cmd, a)
+  } }
+  const tabB = engineOf({ ...s, lib: libB }, { now: () => clock })
+  const of = (t, id) => t.records().find((r) => r.id === id)
+  const accepts = () => s.calls.filter((c) => c === 'swap_accept').length
+  const q = await tabA.quote({ payAsset: X, receiveAsset: Y, amount: A })
+  const rec = await tabA.confirm(q.choice, q.ticket)
+  clock += 11_000
+  const bFollow = tabB.advance(of(tabB, rec.id))
+  await wait(5)
+  s.through()
+  // While tab B moves it on, tab A leaves it be.
+  for (let i = 0; i < 5; i++) { clock += 11_000; await wait(5); await tabA.advance(of(tabA, rec.id)) }
+  assert.equal(accepts(), 0, 'nothing accepted while the other tab holds the trade')
+  release()
+  await bFollow
+  for (let i = 0; i < 40 && of(tabA, rec.id).state !== 'settled'; i++) {
+    clock += 11_000; await wait(5)
+    for (const t of [tabA, tabB]) { const x = of(t, rec.id); if (x && !['settled', 'returned', 'failed'].includes(x.state)) await t.advance(x) }
+  }
+  const end = of(tabA, rec.id)
+  assert.equal(end.state, 'settled', JSON.stringify(end))
+  for (let i = 0; i < 10; i++) { clock += 11_000; await wait(5); for (const t of [tabA, tabB]) await t.advance(of(t, rec.id)) }
+  assert.equal(accepts(), 1, 'accepted once')
+  assert.equal(of(tabA, rec.id).state, 'settled', 'never written back')
+  assert.equal(tabA.records().length, 1)
+})
