@@ -381,9 +381,10 @@ export function mountUserComposer (ctx) {
       // Coins being made ready for this trade: priced again by itself while the person waits,
       // every READY_RETRY_MS, as long as nothing they typed changed. A pair offered a moment ago
       // that nobody offers now (a maker reading its coins again after a trade, #698): every
-      // OFFERED_AGAIN_EVERY_MS, while it was offered within OFFERED_AGAIN_MS.
+      // OFFERED_AGAIN_EVERY_MS, while it was offered within OFFERED_AGAIN_MS: the engine's window
+      // bounds it, not a count of tries, so the last answer, once past it, is the words shown.
       if (!q.ok && (q.why === 'readying' || q.why === 'btc-moving')) readyAgain()
-      else if (!q.ok && q.again) readyAgain(OFFERED_AGAIN_EVERY_MS)
+      else if (!q.ok && q.again) readyAgain(OFFERED_AGAIN_EVERY_MS, false)
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
@@ -474,10 +475,10 @@ export function mountUserComposer (ctx) {
     if (S.ticket || S.error) { settleAsk = null; S.settleBy = null }
   }
 
-  function readyAgain (ms = READY_RETRY_MS) {
+  function readyAgain (ms = READY_RETRY_MS, counted = true) {
     const asked = `${S.pay}|${S.get}|${S.amount}`
     clearTimeout(readyTimer)
-    if (++readyTries > READY_TRIES) { readyTries = 0; return }
+    if (counted && ++readyTries > READY_TRIES) { readyTries = 0; return }
     readyTimer = setTimeout(() => {
       if (`${S.pay}|${S.get}|${S.amount}` !== asked || S.busy || S.ticket) { readyTries = 0; return }
       review()
