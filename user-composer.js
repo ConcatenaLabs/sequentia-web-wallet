@@ -81,6 +81,9 @@ export function mountUserComposer (ctx) {
   const listed = (a) => big(ctx.held(a)) + (ctx.vestingAtoms ? big(ctx.vestingAtoms(a)) : 0n) + (ctx.onItsWay ? big(ctx.onItsWay(a) || 0n) : 0n)
   function payList () { return payAssets(ctx.knownAssets(), listed, S.pay, name) }
   // What is paid starts as the first asset held, in the pickers' order (BTC first when held).
+  // What the balance shows of `a`, which a sentence about "your" amount names (#757); `fallback`
+  // when the page gives no balance.
+  function heldShown (a, fallback) { const h = ctx.held ? big(ctx.held(a) || 0n) : 0n; return h > 0n ? h : big(fallback || 0n) }
   function defaultPay () { const l = payList(); return l.find((a) => big(ctx.held(a)) > 0n) || l.find((a) => ctx.onItsWay && big(ctx.onItsWay(a) || 0n) > 0n) || l[0] }
   function offeredNow () { return S.offered.pay === S.pay ? S.offered.list.filter((a) => a !== S.pay) : [] }
   function getList () {
@@ -379,7 +382,7 @@ export function mountUserComposer (ctx) {
       if (q.ok) { S.ticket = q.ticket; S.choice = q.choice; S.moving = !!q.moving }
       // A restricted asset: whom to ask for approval, or what to pay with; never an error.
       else if (q.card) S.card = q.card
-      else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
+      else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, heldShown(S.pay, q.ready))) : q.why === 'too-small' ? USER_WORDS.tooSmall
         : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
@@ -394,6 +397,9 @@ export function mountUserComposer (ctx) {
       // bounds it, not a count of tries, so the last answer, once past it, is the words shown.
       if (!q.ok && (q.why === 'readying' || q.why === 'btc-moving')) readyAgain()
       else if (!q.ok && q.again) readyAgain(OFFERED_AGAIN_EVERY_MS, false)
+      // No maker confirmed a price in time, or the wallet was finishing something it started: asked
+      // again by itself, for as long as the screen is open and nothing typed changed, as its words say.
+      else if (!q.ok && (q.why === 'no-firm-offer' || q.why === 'wallet-busy')) readyAgain(READY_RETRY_MS, false)
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
@@ -607,8 +613,21 @@ export function mountUserComposer (ctx) {
       const a = el('a', null, k.text); a.href = k.href; a.target = '_blank'; a.rel = 'noopener'
       line(USER_WORDS.txOn(k.chain), a, 'mono')
     }
+    // A trade that came back because the price moved while it waited: the price now, which the
+    // person can take from here (the composer asks firm terms for it, as Review does) (#758).
+    const nt = r.state === 'returned' && r.newTicket && r.newTicket.amountOut ? r.newTicket : null
+    if (nt) line(USER_WORDS.priceNow, `${amt(nt.payAsset, nt.amountIn)} → ${amt(nt.receiveAsset, nt.amountOut)}`, 'uc-new-price').id = 'ucNewPrice'
     const act = el('div', 'row'); act.style.marginTop = '16px'
-    const close = el('button', 'primary', USER_WORDS.done); close.type = 'button'; close.onclick = closeCard; act.appendChild(close)
+    if (nt) {
+      const b = el('button', 'primary', USER_WORDS.takeNewPrice); b.type = 'button'; b.id = 'ucTakeNewPrice'
+      b.onclick = () => {
+        closeCard(); reset()
+        Object.assign(S, { pay: nt.payAsset, get: nt.receiveAsset, payChosen: true, getChosen: true, fixed: 'pay', amount: ctx.fmtAtoms(big(nt.amountIn), prec(nt.payAsset)), recv: '', error: '' })
+        render(); review()
+      }
+      act.appendChild(b)
+    }
+    const close = el('button', nt ? 'ghost' : 'primary', USER_WORDS.done); close.type = 'button'; close.onclick = closeCard; act.appendChild(close)
     if (ctx.openHistory) { const h = el('button', 'ghost', USER_WORDS.viewHistory); h.type = 'button'; h.onclick = () => { closeCard(); ctx.openHistory() }; act.appendChild(h) }
     c.appendChild(act)
   }

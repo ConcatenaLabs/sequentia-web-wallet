@@ -284,7 +284,8 @@ test('default mode asks every trade for the exit only once its operator offers i
   assert.deepEqual(requireExitArgs(false, { server_info: {} }), { on: false }, 'an operator without the exit: trades as before, nothing refused')
   assert.deepEqual(requireExitArgs(false, null), { on: false })
   assert.deepEqual(requireExitArgs(true, { server_info: { checkpoint_exit: true } }), { on: false }, 'developer mode: its own choice, off')
-  assert.equal(USER_WORDS.notYet, 'This trade isn\'t available right now. Nothing moved; try again in a few minutes.')
+  assert.equal(USER_WORDS.notYet, 'This trade isn\'t available right now. It usually is again within a few minutes. Nothing moved.')
+  assert.ok(!/try again/i.test(USER_WORDS.notYet), 'the wait in the words, never an instruction to repeat it (#755)')
   for (const w of ['exit', 'checkpoint', 'maker', 'operator', 'coin', 'round']) assert.ok(!new RegExp('\\b' + w).test(USER_WORDS.notYet), w)
 })
 

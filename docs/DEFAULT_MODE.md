@@ -690,7 +690,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   is priced again and goes ahead by itself only at that bound or better: it receives no less
   than the ticket's least, pays no more than it, and gets no less for what it pays than the
   ticket's price; otherwise
-  "Returned: nothing traded. The price moved while it waited." The same holds when that is found
+  "Returned: nothing traded. The price moved while it waited." Its card then shows "Price now"
+  with what the amount gets now, and **Trade at the price now**, which asks firm terms for it as
+  **Review** does. The same holds when that is found
   only at **Trade**, with the exact ticket as its bound. A site's order (SeqDEX) is the same
   trade: its **Trade?** shows the same rows, and once approved the site is answered with the
   trade under way. When the book shows no price for the pair before the coins are through, the
@@ -717,10 +719,14 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   follows it, and an anchor rollback meanwhile only makes it wait longer; otherwise "Returned:
   nothing traded. The price moved while it waited." The trade then lists what it paid, the move's
   fee in its fees. When the rest of what it pays must settle first as well, that is the same
-  wait, not a second one: the words count down to whichever ends later, the move or the settlement
-  the wallet expects, and past that by two minutes read "Taking longer than usual: this goes ahead
-  by itself, or is returned with nothing traded". It waits the N minutes its ticket says, longer
-  only when the wallet says the settlement takes longer (then twice that, as above), then
+  wait, not a second one: the ticket's <N> is already the later of the move's minutes and the
+  settlement's usual wait (the part in the tree is priced alone first, which only reads, to learn
+  it), the trade's bound is fixed when it is accepted, the move's minutes or twice the settlement's
+  most and two minutes, whichever is longer, and the words count down to whichever ends later, the
+  move or the settlement the wallet expects, and past that by two minutes read "Taking longer than usual: this goes ahead
+  by itself, or is returned with nothing traded". It waits the N minutes its ticket says (or the
+  bound fixed when the ticket named a settlement), longer only when the wallet says the settlement
+  takes longer and the ticket named none (then twice that, as above), then
   "Returned: nothing traded.", the money in the wallet; if the network will not take the money in: "Returned: nothing traded, and
   your money stays in your wallet. You can send it to an address." Once the trade has gone ahead or been returned, the wallet
   stops moving money in for it. Money on the chain that cannot be moved in is never waited
@@ -769,7 +775,8 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 - Once its operator offers it, default mode trades only with its owner's exit on every checkpoint
   of the trade, so what a trade gives always comes home if the trade dies. An offer that cannot
   have it is left out of the prices ("Not offered right now…"); a trade refused for it when sent
-  says "This trade isn't available right now. Nothing moved; try again in a few minutes." Before
+  says "This trade isn't available right now. It usually is again within a few minutes. Nothing
+  moved." Before
   the operator first offers it, the wallet trades as it always has; once it has, the wallet keeps
   asking that operator for it, also when a later answer no longer offers it. Only the page's own
   operator, answering in default mode, sets this, and it holds for that operator alone.
@@ -808,11 +815,14 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   what you hold. Nothing has moved." (the wallet's own payment would not cover the amount with the
   fees it keeps back, or would leave change below the network's smallest coin, and nothing more of
   it is on its way: <most> is what it can pay, the figure Max fills in; with more on its way, the
-  trade waits for it and the whole amount goes); "Nobody could confirm a price for this just now. Nothing has moved: try again in a
-  moment."; "Your wallet is still finishing something it started, so it could not get a price in
-  time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
-  wallet was busy, or a maker gave a price in time and the wallet was still checking it when the
-  time ran out; a price that comes later is let go).
+  trade waits for it and the whole amount goes); "No one has confirmed a price for this yet. Your
+  wallet asks again by itself while this is open. Nothing has moved."; "Your wallet is still
+  finishing something it started. It asks for a price again by itself while this is open. Nothing
+  has moved." (no price within 45 seconds of Review while the wallet was busy, or a maker gave a
+  price in time and the wallet was still checking it when the time ran out; a price that comes
+  later is let go). After either, the price is asked again by itself every 20 seconds while the
+  screen is open and nothing typed changed. "That is more than your <amount>." names the balance
+  the person sees.
 - A price comes within seconds: the best few offers are asked at once (the next few when none of
   them answers), and one that has not answered within eight seconds of being asked is left out of
   the price rather than waited for. What the wallet itself checks of a price it was given in time
@@ -978,6 +988,17 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   sell, For, Price, Smallest part filled, Fees, What is left can be taken back from, Asked by),
   and **Approve** or **Reject**. A rejection reaches the site as "the user rejected the
   request".
+- Before a site's order shows **Trade?**, a price that nobody gave just now (the pair offered a
+  moment ago and not again yet, no one confirming a price in time, the wallet finishing something
+  it started) is asked again by itself every five seconds for up to 30 seconds. Only then does the
+  site get the reason, in words that say what happened: "Nobody offers <get> for <pay> at this
+  moment. It is usually offered again within a few minutes. Nothing has moved.", "No one confirmed
+  a price for this within 30 seconds. Nothing has moved." or "Your wallet was finishing something
+  it started and could not price this within 30 seconds. Nothing has moved." An approved trade
+  whose price no longer holds when it is sent is priced again at once and sent when the new price
+  is what was approved or better; otherwise nothing is sent and the site gets "The price moved
+  before this was sent: it is now <pay> for <get>. Nothing has moved." A review the wallet no
+  longer knows reads "This review is no longer current. Nothing has moved."
 - A site that only needs to know the wallet is yours (Emissio, to link a wallet to an account)
   asks it to sign a message instead, with no connection: **Connect your web wallet** on the site
   (**Connect your wallet** where it offers more than one), then in the wallet **Sign a message for

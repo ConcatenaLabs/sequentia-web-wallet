@@ -2,7 +2,7 @@
 // placement, against fakes; the engine and the library are driven live by the browser drives.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { makeSiteOrders, readParams, readOptions, restTerms, meetsLimit, SITE_WORDS, ORDER_FEATURES } from './site-orders.js'
+import { makeSiteOrders, readParams, readOptions, restTerms, meetsLimit, SITE_WORDS, ORDER_FEATURES, SITE_PRICE_AGAIN_MS } from './site-orders.js'
 import { forbiddenIn, USER_WORDS } from './user-trade.js'
 
 const B = 'bb'.repeat(32), Q = 'cc'.repeat(32)
@@ -292,4 +292,61 @@ test('a trade whose record the wallet no longer keeps reads as it ended, never a
   assert.equal(st[unseen], 'ended', 'ended unseen: never "sent"')
   assert.ok(o.trades.find((t) => t.trade === seen).note, 'the kept note')
   assert.ok(!Object.values(st).includes('sent'))
+})
+
+// A pair offered a moment ago, or a price nobody confirmed in time: the site's order asks again by
+// itself and goes, never ending on words that tell the person to repeat it (#755; the box's
+// DX-TRADE-BTC-USDX-SELL, a maker not offering again yet after the trade before).
+const clock = () => { const c = { t: 1_000_000 }; c.now = () => c.t; c.sleep = async (ms) => { c.t += ms }; return c }
+test('a site\'s order that nobody offers a moment after a trade is asked again by itself, and goes once offered', async () => {
+  for (const why of ['not-offered', 'no-firm-offer', 'wallet-busy']) {
+    const E = fakeEngine(), c = clock(); const inner = E.quote; let n = 0
+    E.quote = async (a) => (++n <= 2 ? { ok: false, why, ...(why === 'not-offered' ? { again: true } : {}) } : inner(a))
+    const S = makeSiteOrders({ engine: E, leaves: fakeLeaves(), assetMeta: meta, fmtAtoms, store: mem(), now: c.now, sleep: c.sleep })
+    const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'sell', amount: '5' }, 'o')
+    assert.ok(q.id, why + ': a review to approve')
+    assert.equal(n, 3, why + ': asked three times')
+    assert.ok(c.t - 1_000_000 <= SITE_PRICE_AGAIN_MS, why + ': within the bound')
+  }
+})
+
+test('a site\'s order nobody offers for the whole bound ends in words that name the wait, never "try again"', async () => {
+  for (const [why, re] of [['not-offered', /Nobody offers USDX for GOLD at this moment\. It is usually offered again within a few minutes\. Nothing has moved\./],
+    ['no-firm-offer', /No one confirmed a price for this within 30 seconds\. Nothing has moved\./],
+    ['wallet-busy', /Your wallet was finishing something it started and could not price this within 30 seconds\. Nothing has moved\./]]) {
+    const E = fakeEngine(), c = clock(); let n = 0
+    E.quote = async () => { n++; return { ok: false, why, ...(why === 'not-offered' ? { again: true } : {}) } }
+    const S = makeSiteOrders({ engine: E, leaves: fakeLeaves(), assetMeta: meta, fmtAtoms, store: mem(), now: c.now, sleep: c.sleep })
+    await assert.rejects(S.quote({ type: 'market', base: B, quote: Q, side: 'sell', amount: '5' }, 'o'), (e) => { assert.match(e.message, re); assert.ok(!/try again|again later|place the order again/i.test(e.message), e.message); return true })
+    assert.ok(n >= 2 && c.t - 1_000_000 <= SITE_PRICE_AGAIN_MS, `${why}: asked ${n} times within the bound`)
+  }
+})
+
+test('an approved trade whose price lapsed is priced again at once and sent when it is what was approved or better', async () => {
+  const E = fakeEngine(); const inner = E.confirm; let lapsed = 0
+  E.confirm = async (ch, t) => { if (lapsed++ === 0) { const e = new Error('the price is no longer held'); e.code = 'lapsed'; throw e } return inner(ch, t) }
+  const S = makeSiteOrders({ engine: E, leaves: fakeLeaves(), assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't' })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'sell', amount: '5' }, 'o')
+  const r = await S.confirm(q.id)
+  assert.equal(r.filled, 1, JSON.stringify(r))
+  assert.equal(E.quotes.length, 2, 'priced again once')
+})
+
+test('an approved trade whose price lapsed and moved against it sends nothing and says the price now', async () => {
+  const E = fakeEngine(); const inner = E.quote; let n = 0
+  E.quote = async (a) => { const q = await inner(a); if (++n > 1) q.ticket.amountOut = String(BigInt(q.ticket.amountOut) - 1n); return q }
+  E.confirm = async () => { const e = new Error('the price is no longer held'); e.code = 'lapsed'; throw e }
+  const S = makeSiteOrders({ engine: E, leaves: fakeLeaves(), assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't' })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'sell', amount: '5' }, 'o')
+  await assert.rejects(S.confirm(q.id), /The price moved before this was sent: it is now 0\.00000005 GOLD for 0\.00019499 USDX\. Nothing has moved\./)
+  assert.equal(E.dropped.length, 1, 'the new price let go')
+})
+
+test('no trade sentence of a site\'s order or the Trade tab tells the person to repeat it (#755)', () => {
+  const words = [SITE_WORDS.lapsed, SITE_WORDS.priceMoved('1 A', '2 B'), SITE_WORDS.offeredSoon('A', 'B'), SITE_WORDS.noFirmOffer(30), SITE_WORDS.walletBusy(30),
+    USER_WORDS.noFirmOffer, USER_WORDS.walletBusy, USER_WORDS.notYet]
+  for (const w of words) {
+    assert.ok(!/try again|place the order again|again later/i.test(w), w)
+    assert.deepEqual(forbiddenIn(w), [], w)
+  }
 })

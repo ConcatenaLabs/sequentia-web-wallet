@@ -39,7 +39,7 @@
 //                     trade under way (SITE_ANSWER_MS); optional
 //   log(...)          optional
 
-import { USER_WORDS, costLine, heldAlready, tradeStateWord } from './user-trade.js'
+import { USER_WORDS, costLine, heldAlready, tradeStateWord, OFFERED_AGAIN_EVERY_MS } from './user-trade.js'
 import { settleWords } from './default-arca.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -57,6 +57,11 @@ export const ORDER_FEATURES = Object.freeze(['order-post-only', 'order-no-rest',
 // long has passed, whichever is first: then with the trade under way (`under_way`, `filled: 0`),
 // which getOrders follows, never with a fill that has not happened.
 export const SITE_ANSWER_MS = 20_000
+// A price the site asks for that nobody gave just now (a pair offered a moment ago and not again
+// yet, no maker confirming firm terms in time, the wallet finishing something it started) is asked
+// again by itself every OFFERED_AGAIN_EVERY_MS, for up to SITE_PRICE_AGAIN_MS, before the site is
+// answered: a maker that offers again after a fill does so within seconds.
+export const SITE_PRICE_AGAIN_MS = 30_000
 
 export const SITE_WORDS = Object.freeze({
   tradeTitle: 'Trade?',
@@ -78,7 +83,14 @@ export const SITE_WORDS = Object.freeze({
   wouldTrade: 'This order would trade at once. Nothing was placed.',
   neverRests: 'An order against BTC trades at once and never rests on the book. Nothing was placed.',
   minFillTooBig: 'The smallest fill is more than the order. Nothing was placed.',
-  lapsed: 'This review is no longer current: place the order again.',
+  lapsed: 'This review is no longer current. Nothing has moved.',
+  // An approved trade whose price no longer held when it was sent, priced again at once: worse than
+  // what was approved, so nothing was sent; the price now, in the site's terms.
+  priceMoved: (pay, get) => `The price moved before this was sent: it is now ${pay} for ${get}. Nothing has moved.`,
+  // Nobody offers the pair after the wallet asked again for SITE_PRICE_AGAIN_MS.
+  offeredSoon: (get, pay) => `Nobody offers ${get} for ${pay} at this moment. It is usually offered again within a few minutes. Nothing has moved.`,
+  noFirmOffer: (secs) => `No one confirmed a price for this within ${secs} seconds. Nothing has moved.`,
+  walletBusy: (secs) => `Your wallet was finishing something it started and could not price this within ${secs} seconds. Nothing has moved.`,
 })
 
 // The order's terms from the site's params; refuses what is not a market of two assets, a side,
@@ -181,7 +193,9 @@ export function makeSiteOrders (d) {
   function refusal (q, pay, get) {
     const W = USER_WORDS
     if (q.why === 'not-listed') return W.notListed(tick(get), tick(pay))
-    if (q.why === 'not-offered') return q.again ? W.offeredAgain(tick(get), tick(pay)) : W.notOffered(tick(get), tick(pay))
+    // Asked again by itself already (SITE_PRICE_AGAIN_MS): what happened, with the wait it has.
+    const secs = Math.round(SITE_PRICE_AGAIN_MS / 1000)
+    if (q.why === 'not-offered') return q.again ? SITE_WORDS.offeredSoon(tick(get), tick(pay)) : W.notOffered(tick(get), tick(pay))
     if (q.why === 'no-funds') return W.noFunds(tick(pay))
     if (q.why === 'not-ready') return W.notReady(tick(pay), q.soon)
     if (q.why === 'redoing') return W.redoing(tick(pay))
@@ -191,8 +205,8 @@ export function makeSiteOrders (d) {
     if (q.why === 'part-ready') return W.partReady(fmt(pay, q.ready), tick(pay), q.soon)
     if (q.why === 'too-small') return W.tooSmall
     if (q.why === 'own-short') return W.ownShort(fmt(pay, q.most))
-    if (q.why === 'no-firm-offer') return W.noFirmOffer
-    if (q.why === 'wallet-busy') return W.walletBusy
+    if (q.why === 'no-firm-offer') return SITE_WORDS.noFirmOffer(secs)
+    if (q.why === 'wallet-busy') return SITE_WORDS.walletBusy(secs)
     // A reason this list does not know is never told as the amount's fault.
     return W.failed
   }
@@ -228,6 +242,40 @@ export function makeSiteOrders (d) {
     return { pay, get, q: await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: want }) }
   }
 
+  // tradeQuote, asked again by itself every OFFERED_AGAIN_EVERY_MS while the answer is one that a
+  // moment cures (offered a moment ago, no firm terms in time, the wallet busy), for up to
+  // SITE_PRICE_AGAIN_MS. -> tradeQuote's answer, or null when it threw.
+  async function quoteAgainWhileNone (o) {
+    const t0 = now()
+    for (;;) {
+      let tq = null
+      try { tq = await tradeQuote(o) } catch (e) { log('[site orders] no price:', e && e.message) }
+      const q = tq && tq.q
+      const cured = q && !q.ok && ((q.why === 'not-offered' && q.again) || q.why === 'no-firm-offer' || q.why === 'wallet-busy')
+      if (!cured || now() - t0 + OFFERED_AGAIN_EVERY_MS > SITE_PRICE_AGAIN_MS) return tq
+      log(`[site orders] no price yet (${q.why}): asked again`)
+      await (d.sleep ? d.sleep(OFFERED_AGAIN_EVERY_MS) : new Promise((r) => setTimeout(r, OFFERED_AGAIN_EVERY_MS)))
+    }
+  }
+
+  // An approved trade whose review lapsed, or whose price no longer held when it was sent: priced
+  // again at once, and sent only when the new price is what was approved or better (no less
+  // received, no more paid). -> the pending trade with the new price; throws the price now
+  // otherwise, nothing sent.
+  async function repriceApproved (p) {
+    let tq = null
+    try { tq = await tradeQuote(p.o) } catch (e) { log('[site orders] priced again:', e && e.message) }
+    const q = tq && tq.q
+    if (!q || !q.ok) throw new Error(q ? refusal(q, tq.pay, tq.get) : SITE_WORDS.lapsed)
+    const t = q.ticket
+    if (!t.indicative && !p.ticket.indicative && t.payAsset === p.ticket.payAsset && big(t.amountOut) >= big(p.ticket.amountOut) && big(t.amountIn) <= big(p.ticket.amountIn)) {
+      log(`[site orders] priced again within what was approved: ${t.amountIn} -> ${t.amountOut}`)
+      return { ...p, choice: q.choice, ticket: t, at: now() }
+    }
+    try { d.engine.drop(q.choice) } catch {}
+    throw new Error(SITE_WORDS.priceMoved(fmt(t.payAsset, t.amountIn), fmt(t.receiveAsset, t.indicative ? t.about : t.amountOut)))
+  }
+
   // While a review is priced or settled, the page's own follow of its trades waits.
   const busy = (fn) => async (...a) => { try { d.busy && d.busy(true) } catch {} try { return await fn(...a) } finally { try { d.busy && d.busy(false) } catch {} } }
 
@@ -238,7 +286,7 @@ export function makeSiteOrders (d) {
     const asked = [SITE_WORDS.askedBy, String(origin || '')]
     let tq = null
     const t0 = now()
-    try { tq = await tradeQuote(o) } catch (e) { log('[site orders] no price:', e && e.message); tq = null }
+    tq = await quoteAgainWhileNone(o)
     log(`[site orders] ${o.type} ${o.side}: priced in ${now() - t0} ms:`, tq && tq.q ? (tq.q.ok ? `${tq.q.ticket.amountIn} -> ${tq.q.ticket.amountOut}` : tq.q.why) : 'no price')
     const unit = unitOf(o.base)
     const opts = o.opts || {}
@@ -313,10 +361,22 @@ export function makeSiteOrders (d) {
 
   // Settles an approved review. -> placeOrder's answer.
   async function confirm (id) {
-    const p = pending.get(id); pending.delete(id)
-    if (!p || now() - p.at > QUOTE_TTL_MS) { if (p) drop(id); throw new Error(SITE_WORDS.lapsed) }
+    let p = pending.get(id); pending.delete(id)
+    if (!p) throw new Error(SITE_WORDS.lapsed)
+    if (now() - p.at > QUOTE_TTL_MS) {
+      if (p.kind !== 'take') { throw new Error(SITE_WORDS.lapsed) }
+      try { d.engine.drop(p.choice) } catch {}
+      p = await repriceApproved(p)
+    }
     const market = { base: p.o.base, quote: p.o.quote }
-    if (p.kind === 'take') {
+    if (p.kind === 'take') return await placeTake(p, market)
+    return await busy(placeRest)(p, market)
+  }
+
+  // Sends an approved trade; once more, priced again within what was approved, when its price no
+  // longer held (`lapsed`). -> placeOrder's answer.
+  async function placeTake (p, market, again = false) {
+    {
       const gave = p.ticket.amountIn, got = p.ticket.amountOut
       // In the market's terms: base and quote atoms of the one fill.
       const fill = p.o.side === 'sell' ? { base: String(gave), quote: String(got) } : { base: String(got), quote: String(gave) }
@@ -332,8 +392,11 @@ export function makeSiteOrders (d) {
       const later = Symbol('later')
       let rec
       // The price no longer held (the offer lapsed, or what it spends changed since it was shown):
-      // nothing was signed, and the site asks for the review again.
-      try { rec = await Promise.race([done, new Promise((r) => setTimeout(() => r(later), d.answerMs ?? SITE_ANSWER_MS))]) } catch (e) { if (e && e.code === 'lapsed') throw new Error(SITE_WORDS.lapsed); throw e }
+      // nothing was signed. It is priced again at once and sent only within what was approved.
+      try { rec = await Promise.race([done, new Promise((r) => setTimeout(() => r(later), d.answerMs ?? SITE_ANSWER_MS))]) } catch (e) {
+        if (e && e.code === 'lapsed') { if (again) throw new Error(SITE_WORDS.lapsed); return placeTake(await repriceApproved(p), market, true) }
+        throw e
+      }
       if (rec === later) {
         const r = (d.engine.records ? d.engine.records() : []).find((x) => !before.has(x.id))
         // No record yet: nothing was signed or sent, and the site is told only that much.
@@ -348,7 +411,6 @@ export function makeSiteOrders (d) {
       if (rec.state === 'settling') return { trade: rec.id, filled: 0, under_way: 1, state: tradeState(rec), failed: [], order: null, order_error: null, gave: '0', got: '0' }
       return { trade: rec.id, filled: 1, failed: [], order: null, order_error: null, gave, got }
     }
-    return await busy(placeRest)(p, market)
   }
 
   // Places an approved resting order. -> placeOrder's answer.

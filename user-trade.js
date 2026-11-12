@@ -160,12 +160,12 @@ export const USER_WORDS = Object.freeze({
   nothingOffered: (pay) => `Not offered right now: nobody offers anything for ${pay}.`,
   enter: 'Enter how much you pay.',
   tooSmall: 'That amount is too small to trade.',
-  noFirmOffer: 'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',
+  noFirmOffer: 'No one has confirmed a price for this yet. Your wallet asks again by itself while this is open. Nothing has moved.',
   // The wallet's own refusal: what it holds of the asset, less the fees the trade keeps back, does
   // not cover the amount (nothing more is on its way). `most`: what can be traded now, as Max fills it.
   ownShort: (most) => `You can trade up to ${most} now: the fees of this trade come out of what you hold. Nothing has moved.`,
   // The wallet's own library was busy finishing something it started for longer than a quote waits.
-  walletBusy: 'Your wallet is still finishing something it started, so it could not get a price in time. Nothing has moved: try again in a moment.',
+  walletBusy: 'Your wallet is still finishing something it started. It asks for a price again by itself while this is open. Nothing has moved.',
   noFunds: (pay) => `You have no ${pay} to trade.`,
   // More than can be traded now, the rest vesting later (the wallet's one sentence for it).
   notVested: DEFAULT_WORDS.notVested,
@@ -280,7 +280,7 @@ export const USER_WORDS = Object.freeze({
   failed: 'This trade could not be made. Nothing moved.',
   // A trade whose other side cannot yet give what default mode asks of every trade (that what it
   // gives comes home if the trade dies): nothing moved, and the other sides offer it again shortly.
-  notYet: 'This trade isn\'t available right now. Nothing moved; try again in a few minutes.',
+  notYet: 'This trade isn\'t available right now. It usually is again within a few minutes. Nothing moved.',
   recent: 'Your trades',
   openTrades: 'Open',
   pastTrades: 'Past',
@@ -289,6 +289,9 @@ export const USER_WORDS = Object.freeze({
   cardSent: 'Trade sent',
   cardSettled: 'Trade complete',
   cardReturned: 'Trade returned',
+  // A returned trade's card: the price now, and the button that takes it (#758).
+  priceNow: 'Price now',
+  takeNewPrice: 'Trade at the price now',
   cardState: 'Status',
   markDone: '✓',
   markBack: '↩',
@@ -615,6 +618,19 @@ export function createEngine (deps) {
   const NOT_FINAL_MS = 15 * 60 * 1000
   const nfKey = () => key() + '.notfinal'
   function notFinal () { try { const m = JSON.parse(deps.store.getItem(nfKey()) || '{}'); for (const k of Object.keys(m)) if (m[k] <= now()) delete m[k]; return m } catch { return {} } }
+  // The wait the library last gave for coins that wait for a round (`final_in_seconds`, the most;
+  // `usual_in_seconds`), kept for this wallet: an operator's rounds take as long whichever coins wait,
+  // so a ticket can name that wait before anything is asked of the library (bringInTicket).
+  const rwKey = () => key() + '.roundwait'
+  function roundWaitSeen (w) {
+    if (!w || w.final_in_seconds == null) return
+    try { deps.store.setItem(rwKey(), JSON.stringify({ final_in_seconds: Number(w.final_in_seconds), usual_in_seconds: Number(w.usual_in_seconds ?? w.final_in_seconds) })) } catch {}
+  }
+  // -> { final_in_seconds, usual_in_seconds }: the last seen, else SETTLE_MOST_MS for both.
+  function roundWait () {
+    try { const w = JSON.parse(deps.store.getItem(rwKey()) || 'null'); if (w && w.final_in_seconds > 0) return w } catch {}
+    return { final_in_seconds: SETTLE_MOST_MS / 1000, usual_in_seconds: SETTLE_MOST_MS / 1000 }
+  }
   function markNotFinal (id) { const m = notFinal(); m[id] = now() + NOT_FINAL_MS; try { deps.store.setItem(nfKey(), JSON.stringify(m)) } catch {} }
 
   function records () { try { return JSON.parse(deps.store.getItem(key()) || '[]') } catch { return [] } }
@@ -1190,6 +1206,7 @@ export function createEngine (deps) {
     if (h) ownLive = BigInt(h[1])
     if (/ in live coins/.test(String(e && e.message))) liveShort = true
     if (e && e.kind === 'settle_first') {
+      roundWaitSeen(e)
       settleSeen = { coins: [...new Set([...(settleSeen ? settleSeen.coins : []), ...(e.coins || [])])],
         // How long the library says those coins wait (its refusal's own reading), the longest seen.
         wait: e.final_in_seconds != null && (!settleSeen || !settleSeen.wait || Number(e.final_in_seconds) > Number(settleSeen.wait.final_in_seconds))
@@ -1360,7 +1377,17 @@ export function createEngine (deps) {
       if (q.ok && !q.ticket.upTo) return q
       if (q.ok) drop(q.choice)
     }
-    return bringInTicket(args, plan)
+    // Part of what is paid already in the tree may first wait for a round (a coin the library will
+    // not pay from until a round refreshes it): the part in the tree is priced alone, which only
+    // reads, and a `settle-first` answer gives the round's wait. The ticket then names the later of
+    // the move's minutes and that wait (#756).
+    let round = null
+    if (plan.tree > 0n) {
+      const t = await quoteHeld({ ...args, amount: String(plan.tree) }).catch(() => null)
+      if (t && t.ok) drop(t.choice)
+      else if (t && t.why === 'settle-first') round = t.wait || roundWait()
+    }
+    return bringInTicket(args, plan, round)
   }
 
   // Whether paying `amount` needs money the wallet holds on the chain, and it can be moved in: what
@@ -1402,7 +1429,11 @@ export function createEngine (deps) {
   // margin, as the most the fees can be: they are known only once the money is in. Nothing is
   // asked of a maker yet: a firm price is asked once the money is in (advanceSettling), and the
   // trade goes only within that bound.
-  async function bringInTicket ({ payAsset, receiveAsset, amount }, plan) {
+  // `round`: the wait of the part already in the tree that waits for a round, when one does
+  // (roundWait): the ticket's minutes are then the later of the two waits, and the trade's bound,
+  // fixed when it is confirmed, the one that ticket names (the move's minutes, or the round's bound,
+  // settleBound, as a ticket that only waits for a round has).
+  async function bringInTicket ({ payAsset, receiveAsset, amount }, plan, round = null) {
     const A = big(amount)
     const net = A - big(plan.margin)
     if (net <= 0n) return { ok: false, why: 'too-small' }
@@ -1418,7 +1449,10 @@ export function createEngine (deps) {
       fees: [{ asset: payAsset, atoms: String(plan.margin), most: true }],
       source: best.e.source, asked: String(A), bringIn: plan.minutes }
     const want = A + big(plan.margin) - plan.tree
-    return { ok: true, ticket, choice: { source: 'bring-in', payAsset, entry: best.e, minutes: plan.minutes, want: want > 0n ? want : 0n } }
+    const minutes = round ? Math.max(plan.minutes, Math.ceil(Number(round.usual_in_seconds) / 60)) : plan.minutes
+    ticket.bringIn = minutes
+    return { ok: true, ticket, choice: { source: 'bring-in', payAsset, entry: best.e, minutes, want: want > 0n ? want : 0n,
+      ...(round ? { settleMost: Math.max(bringMost(minutes), settleBound(round.final_in_seconds)), roundNamed: true } : {}) } }
   }
 
   async function quoteHeld ({ payAsset, receiveAsset, amount, onStep = null, cap = null, only = null }) {
@@ -1618,7 +1652,8 @@ export function createEngine (deps) {
     if (choice.source === 'bring-in') {
       if (prior) return prior
       const rec = put({ id, at: now(), source: ticket.source, state: 'settling', ticket, accepted: ticket, settleSince: now(),
-        bringIn: choice.payAsset, bringWant: String(choice.want || 0n), bringMinutes: choice.minutes, settleMost: bringMost(choice.minutes), ...extra })
+        bringIn: choice.payAsset, bringWant: String(choice.want || 0n), bringMinutes: choice.minutes, settleMost: choice.settleMost || bringMost(choice.minutes),
+        ...(choice.roundNamed ? { roundNamed: true } : {}), ...extra })
       bringIn(rec)
       return rec
     }
@@ -1649,7 +1684,7 @@ export function createEngine (deps) {
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
       ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: prior.state === 'settling' || !!prior.settledFirst, settleSince: prior.settleSince,
         ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}),
-        ...(prior.bringIn ? { bringIn: prior.bringIn, bringMinutes: prior.bringMinutes, settleMost: prior.settleMost, ...(prior.moveFee ? { moveFee: prior.moveFee } : {}) } : {}),
+        ...(prior.bringIn ? { bringIn: prior.bringIn, bringMinutes: prior.bringMinutes, settleMost: prior.settleMost, ...(prior.roundNamed ? { roundNamed: true } : {}), ...(prior.moveFee ? { moveFee: prior.moveFee } : {}) } : {}),
         ...(prior.shapeFees ? { shapeFees: prior.shapeFees, shaped: prior.shaped } : {}) } : {}),
       ...extra })
     try {
@@ -1937,9 +1972,11 @@ export function createEngine (deps) {
     // moved in first already waits its ticket's minutes (bringMost): the library's word, counted from
     // when it first spoke, extends that bound, never shortens it, so the move and the settle are one
     // wait, the later of the two.
+    // A trade whose ticket named the round's wait already (`roundNamed`) keeps the bound it named.
     if (v && !v.ready && v.final_in_seconds != null) {
+      roundWaitSeen(v)
       if (rec.settleMost == null) rec.settleMost = settleBound(v.final_in_seconds)
-      else if (rec.bringIn && !rec.settleHeard) {
+      else if (rec.bringIn && !rec.settleHeard && !rec.roundNamed) {
         const since = rec.settleSince || rec.at || now()
         rec.settleMost = Math.max(rec.settleMost, now() - since + settleBound(v.final_in_seconds))
       }
