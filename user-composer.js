@@ -336,6 +336,8 @@ export function mountUserComposer (ctx) {
     cost.textContent = costText
     t.appendChild(cost)
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
+    // Paid with money the wallet moves in first: how long it takes, said before it is confirmed.
+    if (k.bringIn) { const w = el('div', 'sub', USER_WORDS.bringIn(k.bringIn)); w.id = 'ucBringIn'; t.appendChild(w) }
     if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }
     if (k.keep && k.via) { const kp = el('div', 'sub', RESTRICTED_WORDS.viaKeep(amt(k.via, k.keep))); kp.id = 'ucKeep'; t.appendChild(kp) }
     if (S.moving) { const mv = el('div', 'sub', USER_WORDS.btcMore(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)); mv.id = 'ucMoving'; t.appendChild(mv) }
@@ -379,6 +381,7 @@ export function mountUserComposer (ctx) {
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
         : q.why === 'btc-moving' ? USER_WORDS.btcMoving(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)
+        : q.why === 'chain-stays' ? (q.stays === 'frozen' ? USER_WORDS.chainFrozen(amt(S.pay, q.frozen), big(q.most) > 0n ? amt(S.pay, q.most) : '') : q.stays === 'dust' ? USER_WORDS.chainDust(name(S.pay)) : USER_WORDS.chainStays(name(S.pay)))
         : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay))
         : q.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       // Coins being made ready for this trade: priced again by itself while the person waits,

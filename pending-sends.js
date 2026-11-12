@@ -2,11 +2,13 @@
 // `send`, an address's `offboard`) is written down while it waits, so that a page closed meanwhile
 // makes it when the wallet is next open, once and only once.
 //
-// Each record is { id, kind: 'code' | 'address', asset, atoms, to, shown?, at, state }. Its state is
-// what the library was last told (leaves.js `stage`): 'asking' while the library is asked to pay it
-// (it may sign), 'waiting' after an answer that signed nothing (it waits for a round). A page that
-// opens finds:
-//   - 'waiting': nothing of it was signed: asked again (resumable);
+// Each record is { id, kind: 'code' | 'address', asset, atoms, to, shown?, bound?, at, state }. Its
+// state is what the library was last told (leaves.js `stage`): 'moving' while the money it pays is
+// moved in from the chain first (nothing of the payment signed yet; `bound`, the most its fees can
+// be, as its review showed), 'asking' while the library is asked to pay it (it may sign), 'waiting'
+// after an answer that signed nothing (it waits for a round). A page that opens finds:
+//   - 'waiting' or 'moving': nothing of it was signed: asked again (resumable; one 'moving' is moved
+//     in first, and made only within its `bound`);
 //   - 'asking': the page closed while the library was being asked, and it may have paid: never
 //     asked again (dropped, and said in the console); what it became shows in Balance and Activity
 //     as any payment's does.
@@ -51,7 +53,7 @@ export function takePending (store, tag, nowMs = Date.now()) {
   for (const r of pendingSends(store, tag)) {
     if (!r || !r.id) continue
     if (nowMs - Number(r.at || 0) > PENDING_MOST_MS) dropped.push({ ...r, why: 'lapsed' })
-    else if (r.state === 'waiting') resume.push(r)
+    else if (r.state === 'waiting' || r.state === 'moving') resume.push(r)
     else dropped.push({ ...r, why: 'asking' })
   }
   save(store, tag, resume)

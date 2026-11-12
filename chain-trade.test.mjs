@@ -1,0 +1,378 @@
+// A trade paid with money the wallet holds on the chain (a payment received there a moment ago):
+// taken by an order on the chain at once when a book offers one for the pair and the whole amount;
+// otherwise priced at once, the ticket saying how long it takes, and, once confirmed, the money is
+// moved in first and the trade goes ahead by itself at the ticket's price or better (user-trade.js
+// bringPlan, bringInTicket, advanceSettling). Never "try again".
+//
+// The engine on a stand-in library, maker and chain. The library behaves as the real one does
+// (chain-money-library.test.mjs shows it): it reads no coin on the chain; after the move in, the
+// board's coin is pending, `settle_first` waits on it until it is final, and a swap pays from it then.
+//
+//   node --test chain-trade.test.mjs
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createEngine, USER_WORDS, tradeStateWord, costLine, settlingBy } from './user-trade.js'
+import { planPlaceOrder, buildCovenantTerms } from './covenant-order.js'
+
+const X = 'aa'.repeat(31) + '01', Y = 'bb'.repeat(31) + '02'
+const rev = (h) => h.match(/../g).reverse().join('')
+
+const realSetTimeout = globalThis.setTimeout
+for (const k of ['setTimeout', 'setInterval']) {
+  const orig = globalThis[k]
+  globalThis[k] = (f, ms, ...a) => { const t = orig(f, ms, ...a); if (t && t.unref) t.unref(); return t }
+}
+const tick = () => new Promise((r) => realSetTimeout(r, 0))
+
+function settleFirst (coins) {
+  const e = new Error('refused: the wallet\'s coins of asset ' + X + ' that pay this now hold 0 … not final yet … settle them first (settle_first)')
+  e.kind = 'settle_first'; e.asset = X; e.coins = coins
+  return e
+}
+
+// The wallet holds `onchain` of X on the chain and nothing in the tree. `bringIn` boards it (less a
+// fee of 39): a pending coin, final once `credit()` is called; `rollBack()` makes it pending again,
+// as an anchor rollback does. The maker sells Y for X at rateNum/rateDen X per Y.
+function standIn ({ onchain = 3000000n, rateNum = 4n, rateDen = 3n } = {}) {
+  const s = { coins: [], accepts: [], brings: 0, posts: [], swaps: [], chain: onchain, rateNum, rateDen, t: 1_000_000 }
+  const board = () => s.coins.find((c) => c.leaf_id === 'b1')
+  s.lib = {
+    command (cmd, a) {
+      switch (cmd) {
+        case 'coins': return s.coins.map((c) => ({ ...c }))
+        case 'plans': return { plans: [] }
+        case 'info': return { server_info: { depth_limit: 5 } }
+        case 'participations': return []
+        case 'swaps': return s.swaps.map((x) => ({ ...x }))
+        case 'sync': return {}
+        case 'settle_first': {
+          const b = board()
+          // Coins of the tree that settle first as well (s.treeWait): the library says how long.
+          if (s.treeWait) return { settling: [], waiting: ['t1', ...(b && b.state === 'pending' ? ['b1'] : [])], done: [], left: [], ready: false, ...s.treeWait }
+          if (b && b.state === 'pending') return { settling: [], waiting: ['b1'], done: [], left: [], ready: false }
+          return { settling: [], waiting: [], done: [], left: [], ready: true }
+        }
+        case 'swap_read':
+          if (board() && board().state === 'pending') throw settleFirst(['b1'])
+          if (!board()) { const e = new Error('refused: the wallet holds 0 of asset ' + X + ' in live coins'); e.kind = 'refused'; throw e }
+          return { swap: 's1', gets: { asset: Y, value: a.offer.split(':')[1] }, gives: { asset: X, value: a.offer.split(':')[2] }, pays: { asset: X, margins: '192' },
+            change: { asset: X, value: '1000' }, hops: 1, dates: { expiry: 1800000000 } }
+        case 'swap_accept': {
+          if (!board() || board().state === 'pending') throw settleFirst(['b1'])
+          s.accepts.push(a.offer); s.swaps.push({ swap: 's' + s.accepts.length, role: 'taker', state: 'accepted' })
+          return { swap: 's' + s.accepts.length, accept: 'swap-accept:xyz' }
+        }
+        case 'settle_quote': return { asset: a.asset, value: a.value, fee: '0', after: a.value }
+        default: throw new Error('no command ' + cmd)
+      }
+    },
+  }
+  s.fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: String(s.rateNum), rate_den: String(s.rateDen), max_give: '5000000', min_give: '10000' }] }
+    const b = init && init.body ? JSON.parse(init.body) : {}
+    s.posts.push(url.split('/v1/')[1])
+    if (url.endsWith('/v1/firm')) {
+      const want = (BigInt(b.give) * s.rateNum + s.rateDen - 1n) / s.rateDen
+      return { swap: 's1', offer: `swap-offer:${b.give}:${want}`, give: b.give, want: String(want) }
+    }
+    if (url.endsWith('/v1/accept')) { for (const x of s.swaps) x.state = 'done'; return { state: 'done' } }
+    return {}
+  }
+  s.store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
+  s.wants = []; s.opts = []; s.refuse = null
+  s.bringIn = async (asset, want, opts) => {
+    s.brings++; s.wants.push(want); s.opts.push(opts)
+    if (s.refuse) return { refused: s.refuse }
+    if (asset !== X || board() || s.chain <= 0n) return board() ? { already: true } : null
+    s.coins.push({ leaf_id: 'b1', asset: X, value: String(s.chain - 39n), state: 'pending', kind: 'board' })
+    s.chain = 0n; s.movedAt = s.t
+    return { boarded: { fee: '39' } }
+  }
+  // The move's fee, as the wallet keeps it (leaves.js movedFees).
+  s.movedFees = (asset, since) => (asset === X && s.movedAt != null && s.movedAt >= since ? 39n : 0n)
+  s.credit = () => { board().state = 'live' }
+  s.rollBack = () => { board().state = 'pending' }
+  // What the page tells the engine: the balance (the chain, and what the tree holds), and the chain.
+  s.held = () => s.chain + s.coins.filter((c) => c.asset === X).reduce((n, c) => n + BigInt(c.value), 0n)
+  s.chainDep = () => ({ atoms: s.chain, movable: s.chain, margin: 2000n, minutes: 5 })
+  return s
+}
+
+const admitted = (sources = ['leaf-maker']) => () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources }] } } }, genesis: 'g' })
+const engineOf = (s, extra = {}) => createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(), store: s.store,
+  sleep: async () => {}, quoteFirmMs: 2000, now: () => s.t, held: s.held, chain: s.chainDep, bringIn: s.bringIn, movedFees: s.movedFees, ...extra })
+
+async function confirmed (s, eng, amount = '400000') {
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount })
+  assert.ok(q.ok, 'priced at once, not ' + q.why)
+  const rec = await eng.confirm(q.choice, q.ticket)
+  return { q, rec }
+}
+const recOf = (eng, rec) => eng.records().find((x) => x.id === rec.id)
+
+test('money only on the chain, no order on the chain: priced at once, the ticket says how long, never "try again"', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  console.log('quote of 400,000 X held only on the chain ->', q.ok ? JSON.stringify(q.ticket) : q.why)
+  assert.notEqual(q.why, 'settle-first', 'settled first (nothing to settle), then "This is taking longer than usual … try again"')
+  assert.ok(q.ok, q.why)
+  assert.equal(q.ticket.bringIn, 5, 'the ticket says it goes through within about 5 minutes')
+  assert.equal(USER_WORDS.bringIn(q.ticket.bringIn), 'Goes through within about 5 minutes')
+  assert.equal(q.ticket.amountIn, '400000')
+  assert.equal(q.ticket.amountOut, '298500', 'at the maker\'s price, 4 X per 3 Y, for what is paid less 2,000 kept for the fees')
+  assert.equal(s.brings, 0, 'nothing is moved before the person confirms')
+})
+
+test('confirmed: moved in once, the trade waits, then goes ahead once at the ticket\'s price', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { q, rec } = await confirmed(s, eng)
+  assert.equal(rec.state, 'settling')
+  assert.equal(tradeStateWord(rec, s.t), 'Goes through within about 5 minutes')
+  await tick()
+  assert.equal(s.brings, 1, 'the money is moved in when the trade is confirmed')
+  assert.equal(s.wants[0], 402000n, 'once the chain holds what it pays and the 2,000 kept for the fees')
+  // Not final yet: the trade waits, and asks for nothing.
+  for (let i = 0; i < 3; i++) { s.t += 30_000; assert.equal((await eng.advance(recOf(eng, rec))).state, 'settling') }
+  assert.equal(s.accepts.length, 0)
+  s.credit()
+  s.t += 30_000
+  const r = await eng.advance(recOf(eng, rec))
+  console.log('after the move in is final:', r.state, 'pay', r.ticket.amountIn, 'receive', r.ticket.amountOut, 'accepts', s.accepts.length)
+  assert.equal(r.state, 'sent')
+  assert.equal(s.accepts.length, 1)
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut))
+  assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn) + 2n)
+})
+
+test('two follows overlapping once the money is in accept the trade once', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  await eng.advance(recOf(eng, rec))
+  s.credit()
+  await Promise.all([eng.resume(), eng.resume(), eng.advance(recOf(eng, rec))])
+  for (let i = 0; i < 3; i++) await eng.resume()
+  console.log('overlapping follows: accepts', s.accepts.length, 'records', eng.records().map((x) => x.state).join(','))
+  assert.equal(s.accepts.length, 1)
+  assert.equal(eng.records().length, 1)
+})
+
+test('a price that moved while the money came in: returned with the words, nothing traded', async () => {
+  const s = standIn({ rateNum: 400n, rateDen: 300n })
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  s.rateNum = 400n * 1009n; s.rateDen = 300n * 1000n
+  s.credit()
+  let r = recOf(eng, rec)
+  for (let i = 0; i < 4 && r.state === 'settling'; i++) { s.t += 30_000; r = await eng.advance(recOf(eng, rec)) }
+  assert.equal(r.state, 'returned')
+  assert.equal(tradeStateWord(r), USER_WORDS.returnedMoved)
+  assert.equal(s.accepts.length, 0)
+  assert.equal(s.held(), 3000000n - 39n, 'the money is the wallet\'s, in the tree now, less the move\'s fee')
+})
+
+test('an anchor rollback while it waits: the moved coin is pending again; the trade waits and goes once, the wallet whole', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  s.credit(); s.rollBack()
+  for (let i = 0; i < 3; i++) { s.t += 30_000; assert.equal((await eng.advance(recOf(eng, rec))).state, 'settling') }
+  assert.equal(s.accepts.length, 0, 'nothing is accepted from a coin that is not final')
+  assert.equal(s.held(), 3000000n - 39n, 'still held, counted once')
+  s.credit()
+  s.t += 30_000
+  assert.equal((await eng.advance(recOf(eng, rec))).state, 'sent')
+  assert.equal(s.accepts.length, 1)
+})
+
+test('the money never comes in within the wait: returned, nothing traded, never accepted', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  s.t += 16 * 60_000
+  const r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'returned')
+  assert.equal(r.whyKind, 'late')
+  assert.equal(s.accepts.length, 0)
+})
+
+test('an order on the chain that takes the whole amount: taken at once from the chain, nothing moved in', async () => {
+  const params = { assetA: rev(Y), assetB: rev(X), sellAtoms: 1000000n, rateNum: 4n, rateDen: 3n, minLot: 10000n,
+    expiryLocktime: 1900000000, makerProg: '11'.repeat(32), makerX: '22'.repeat(32) }
+  const plan = planPlaceOrder(params)
+  const terms = buildCovenantTerms(plan.order, 'cd'.repeat(32), 0, plan.tap)
+  const offer = { offer_id: 'o1', offer_asset: Y, want_asset: X, offer_amount: '1000000', covenant: terms, _verified: true, _status: { active_amount: '1000000' } }
+  const s = standIn()
+  const taken = []
+  const eng = engineOf(s, { admitted: admitted(['leaf-maker', 'onchain-fill']), relayBook: async () => [offer],
+    onchain: { balance: () => s.chain, fee: () => ({ asset: X, atoms: 50n }), take: async (m, { onTxid }) => { taken.push(m); onTxid('f1'.repeat(32)); return { txid: 'f1'.repeat(32) } }, status: () => 'pending' } })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400050' })
+  console.log('with an order on the chain ->', q.ok ? q.ticket.source + ' ' + q.ticket.amountOut : q.why)
+  assert.ok(q.ok, q.why)
+  assert.equal(q.ticket.source, 'onchain-fill')
+  assert.equal(q.ticket.bringIn, undefined)
+  const r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'sent')
+  assert.equal(taken.length, 1)
+  assert.equal(s.brings, 0)
+})
+
+test('more than the balance: said at once, nothing moved in', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '5000000' })
+  assert.deepEqual([q.ok, q.why], [false, 'part-ready'])
+  assert.equal(s.brings, 0)
+})
+
+test('B1: the ticket is all-in: its fee line is the most the fees can be, and the move\'s fee is inside what it pays', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { q, rec } = await confirmed(s, eng)
+  const line = costLine(q.ticket.fees, (a, n) => `${n} ${a === X ? 'X' : 'Y'}`, X)
+  console.log('fee line the person reads:', line)
+  assert.notEqual(line, USER_WORDS.noFees, 'never "No fees" while the move and the trade pay fees')
+  assert.equal(line, 'Fees at most 2000 X, included above')
+  await tick()
+  s.credit(); s.t += 30_000
+  const r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'sent')
+  // The record says what the wallet paid: the trade and the move's fee, never more than the ticket.
+  const paidTrade = BigInt(s.accepts[0].split(':')[2])
+  console.log('trade paid', String(paidTrade), '+ move fee 39 =', r.ticket.amountIn, 'against a ticket of', q.ticket.amountIn, '; fees', JSON.stringify(r.ticket.fees))
+  assert.ok(paidTrade + 39n <= BigInt(q.ticket.amountIn), `the trade paid ${paidTrade} and the move 39 against a ticket of ${q.ticket.amountIn}`)
+  assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'the record pays no more than the ticket, the move\'s fee counted')
+  assert.ok(r.ticket.fees.some((f) => f.asset === X && f.atoms === '39'), 'the move\'s fee is in the record\'s fees')
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut))
+})
+
+test('B2: the move is asked once per trade, and ends once the trade no longer waits for it', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  // A move that never answers while the trade waits (its coin not in a block yet).
+  let release
+  s.bringIn = async (asset, want, opts) => { s.brings++; s.opts.push(opts); await new Promise((r) => { release = r }); return null }
+  const e2 = engineOf(s, { bringIn: s.bringIn })
+  const { rec } = await confirmed(s, e2)
+  for (let i = 0; i < 5; i++) { s.t += 10_000; await e2.advance(recOf(e2, rec)) }
+  assert.equal(s.brings, 1, 'one ask, however many follows')
+  assert.equal(s.opts[0].stop(), false, 'the trade still waits for it')
+  assert.equal(s.opts[0].until, rec.settleSince + 5 * 60_000, 'it is asked for as long as the ticket says, no longer')
+  s.t += 6 * 60_000
+  const r = await e2.advance(recOf(e2, rec))
+  assert.equal(r.state, 'returned')
+  assert.equal(s.opts[0].stop(), true, 'the move stops asking once the trade has left its wait')
+  release()
+  void eng
+})
+
+test('B2: once the trade went ahead, the move it asked for is told to stop', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  await tick()
+  s.credit(); s.t += 30_000
+  assert.equal((await eng.advance(recOf(eng, rec))).state, 'sent')
+  assert.equal(s.opts[0].stop(), true)
+})
+
+test('a move the network refuses returns the trade at once, with words, nothing traded', async () => {
+  const s = standIn()
+  s.refuse = 'the board amount is below the smallest leaf'
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  await tick(); await tick()
+  const r = recOf(eng, rec)
+  assert.equal(r.state, 'returned')
+  assert.equal(tradeStateWord(r), USER_WORDS.returnedRefused)
+  assert.ok(!/try again|something went wrong/i.test(USER_WORDS.returnedRefused))
+  assert.equal(s.accepts.length, 0)
+})
+
+test('money on the chain that cannot be moved in (too little, or an asset not taken in): a plain reason at once, never settled first', async () => {
+  for (const stays of ['dust', 'unserved']) {
+    const s = standIn({ onchain: 900n })
+    s.chainDep = () => ({ atoms: s.chain, movable: 0n, margin: 2000n, minutes: 5, stays })
+    const eng = engineOf(s, { chain: s.chainDep })
+    const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '800' })
+    console.log(stays, '->', JSON.stringify(q))
+    assert.deepEqual([q.ok, q.why, q.stays], [false, 'chain-stays', stays])
+    assert.equal(s.brings, 0)
+    assert.ok(!s.lib.command('swaps').length)
+  }
+  for (const w of [USER_WORDS.chainDust('XT'), USER_WORDS.chainStays('XT')]) {
+    assert.ok(!/try again|something went wrong|ark|leaf|board|round|operator|limit|chain/i.test(w), w)
+  }
+})
+
+test('money on the chain moved in and coins that settle first, in one trade: one wait, the later of the two, never a second one', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  assert.equal(tradeStateWord(recOf(eng, rec), s.t), 'Goes through within about 5 minutes', 'the ticket\'s minutes, before the library has said')
+  // The library says the coins it settles first take about 10 minutes (at most 15).
+  s.treeWait = { final_in_seconds: 900, usual_in_seconds: 600, waiting_for: 'round' }
+  let r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'settling')
+  assert.equal(settlingBy(r), s.t + 600_000, 'the later of the move (5 minutes) and the settle (10)')
+  assert.equal(tradeStateWord(r, s.t), 'Goes through within about 10 minutes', 'one figure: never 5 and then 10')
+  // Past the move's 5 minutes it still waits: the settle the library named extends the bound.
+  s.credit()
+  s.t += 7 * 60_000
+  r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'settling', 'not returned at the move\'s minutes while the library says its coins take longer')
+  assert.equal(tradeStateWord(r, s.t), 'Goes through within about 3 minutes', 'counted down')
+  s.t += 6 * 60_000
+  assert.equal(tradeStateWord(recOf(eng, rec), s.t), USER_WORDS.goesThroughLate, 'past the time said by two minutes: it says it takes longer, and goes by itself')
+  assert.ok(!/try again/i.test(USER_WORDS.goesThroughLate))
+  // Through: it goes ahead once, at the ticket's price.
+  s.treeWait = null
+  s.t += 30_000
+  r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'sent')
+  assert.equal(s.accepts.length, 1)
+  // And it is held to twice what the library said, with the margin, from when it said it.
+  assert.equal(r.settleMost, 2 * 900_000 + 120_000)
+})
+
+test('the settle\'s bound is kept: past twice what the library said, returned with nothing traded', async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  const { rec } = await confirmed(s, eng)
+  s.treeWait = { final_in_seconds: 900, usual_in_seconds: 600, waiting_for: 'round' }
+  await eng.advance(recOf(eng, rec))
+  s.t += 2 * 900_000 + 120_000 + 1000
+  const r = await eng.advance(recOf(eng, rec))
+  assert.equal(r.state, 'returned')
+  assert.equal(r.whyKind, 'late')
+  assert.equal(s.accepts.length, 0)
+})
+
+test('money on the chain its issuer froze for this wallet: said at once with the freeze, never moved in nor settled first', async () => {
+  // All of it frozen.
+  const s = standIn({ onchain: 1_000_000n })
+  s.chainDep = () => ({ atoms: s.chain, movable: 0n, margin: 2000n, minutes: 5, frozen: s.chain })
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  console.log('all frozen ->', JSON.stringify(q))
+  assert.deepEqual([q.ok, q.why, q.stays, q.frozen, q.most], [false, 'chain-stays', 'frozen', '1000000', '0'])
+  assert.equal(s.brings, 0, 'nothing moved in')
+  assert.equal(USER_WORDS.chainFrozen('0.01 Z', ''), '0.01 Z is frozen by its issuer and stays where it is until the issuer lifts the freeze. Nothing has moved.')
+  assert.equal(USER_WORDS.chainFrozen('0.006 Z', '0.00398 Z'), '0.006 Z is frozen by its issuer and stays where it is until the issuer lifts the freeze. You can trade up to 0.00398 Z now. Nothing has moved.')
+  for (const w of [USER_WORDS.chainFrozen('0.01 Z', ''), USER_WORDS.chainFrozen('0.01 Z', '0.002 Z')]) {
+    assert.ok(!/try again|can't be traded|cannot be traded|ark|arca|leaf|board|round|operator|chain/i.test(w), w)
+  }
+  // Part of it frozen, and the amount needs that part.
+  const p = standIn({ onchain: 1_000_000n })
+  p.chainDep = () => ({ atoms: p.chain, movable: 400_000n, margin: 2000n, minutes: 5, frozen: 600_000n })
+  const q2 = await engineOf(p).quote({ payAsset: X, receiveAsset: Y, amount: '800000' })
+  // The rest trades now: what can be moved in less the fees kept back (400,000 − 2,000).
+  assert.deepEqual([q2.ok, q2.why, q2.stays, q2.frozen, q2.most], [false, 'chain-stays', 'frozen', '600000', '398000'])
+  assert.equal(p.brings, 0)
+  // What is not frozen still trades: moved in, the ticket at once.
+  const q3 = await engineOf(p).quote({ payAsset: X, receiveAsset: Y, amount: '300000' })
+  assert.ok(q3.ok, q3.why)
+  assert.equal(q3.ticket.bringIn, 5)
+})
