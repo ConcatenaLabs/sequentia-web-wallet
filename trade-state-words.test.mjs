@@ -6,12 +6,12 @@ import { tradeStateWord, heldAlready, USER_WORDS, forbiddenIn } from './user-tra
 
 const T0 = 1793230206810, min = 60000
 
-test('a purchase with BTC: waiting for the other side, then sent, then received and settling, then settled', () => {
+test('a purchase with BTC: keep the page open, then paying, then received and settling, then settled', () => {
   const r = { source: 'btc-gateway', dir: 'buy', at: T0, state: 'waiting', waitingSince: T0 + 10000 }
   assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.waitingOther)
-  assert.equal(tradeStateWord(r, T0 + 10000 + 25 * min), 'Waiting for the other side. Nothing has left your wallet yet. (25 min)')
+  assert.equal(tradeStateWord(r, T0 + 10000 + 25 * min), USER_WORDS.waitingOther + ' (25 min)')
   Object.assign(r, { state: 'sent', sentAt: T0 + 26 * min, paying: true })
-  assert.equal(tradeStateWord(r, T0 + 26 * min + 5000), 'Sent', 'the BTC is being paid')
+  assert.equal(tradeStateWord(r, T0 + 26 * min + 5000), USER_WORDS.btcPaying, 'the BTC is being paid')
   Object.assign(r, { preimage: 'ab', receiveState: 'received' })
   assert.ok(heldAlready(r))
   assert.equal(tradeStateWord(r, T0 + 26 * min + 30000), USER_WORDS.received)
