@@ -1816,7 +1816,7 @@
 <script type="module">
 import init, { Mnemonic, Network, Signer, Wollet, Update, EsploraClient, Address, AssetId, Txid, Contract, Pset, Transaction,
   generateSwapSecret, buildSeqHtlcRedeemScript, buildSeqHtlcClaimTx, buildSeqHtlcRefundTx,
-  scriptToAddress, buildCovenantFillTx,
+  scriptToAddress, buildCovenantFillTx, buildCovenantRefundTx,
   openampComputeAid, enclaveSighash, decodeEnclaveSpend, stringToQr }
   from './pkg/lwk_wasm.js';
 // The two coinjoin helpers are read off the module NAMESPACE rather than imported by name. A named
@@ -7608,7 +7608,9 @@ function initSwapTab(){
     // cross-chain reverse path (xrswap.js/fundSeq) uses.
     // Transaction rides along for the covenant fill host's post-broadcast applyTransaction —
     // it guarded on ctx.wasm.Transaction, which was missing here, so that apply silently never ran.
-    wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction, scriptToAddress, buildCovenantFillTx, buildSeqHtlcRedeemScript, generateSwapSecret },
+    devMode,   // the Swap tab looks for an order missing from its list only in developer mode
+    // buildCovenantRefundTx is what Reclaim builds a resting order's refund with (covenant-fill-host.js).
+    wasm: { Wollet, Signer, AssetId, Address, Pset, Txid, Transaction, scriptToAddress, buildCovenantFillTx, buildCovenantRefundTx, buildSeqHtlcRedeemScript, generateSwapSecret },
     noteOwnTx,   // spend-tracking ring: own broadcasts survive a stale scan Update (see reapplyOwnTxs)
     withWollet,  // single-file queue for wollet/client wasm ops (see its definition) — wrap every build→broadcast
     // The SEQ-leg HTLC bridge (fund/waitConf/refundKey/refund) — the bridged SELL funds + (on a stall)
