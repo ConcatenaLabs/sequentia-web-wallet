@@ -375,6 +375,31 @@ test('the engine: money still on its way in is settled first and the trade price
   assert.deepEqual(await restrictedQuote(poor.R, { payAsset: poor.b, receiveAsset: poor.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
 })
 
+test('the engine: a restricted trade whose payment waits for a round is a ticket to accept now, held to its least (#565)', async () => {
+  const { createEngine, USER_WORDS: W } = await import('./user-trade.js')
+  // Nothing held yet, all of it on its way: the library names its coin and the wait for it.
+  const { a, b, R } = fakeR({ held: async () => 0n, onItsWay: async (x) => (x === 'bb'.repeat(32) ? 0n : 10n ** 12n) })
+  const asks = []
+  const leaves = { command (cmd, x) {
+    if (cmd === 'settle_first') { asks.push(x); return { settling: [], waiting: ['c1'], done: [], left: [], ready: false, final_in_seconds: 300, usual_in_seconds: 90, waiting_for: 'round' } }
+    if (cmd === 'coins') return []
+    return {}
+  } }
+  let clock = 1_000_000
+  const eng = createEngine({ leaves, restricted: R, now: () => clock, sleep: async () => {}, store: { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } } })
+  const q = await eng.quote({ payAsset: b, receiveAsset: a, amount: '800' })
+  assert.equal(q.ok, true, JSON.stringify(q))
+  assert.equal(q.ticket.indicative, true)
+  assert.equal(q.ticket.about, '400', 'its own book\'s price, counting what is on its way')
+  assert.equal(q.ticket.amountOut, '396')
+  assert.deepEqual(asks, [], 'a price request gives nothing to a round')
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.deepEqual(asks, [{ asset: b }], 'accepted: what pays goes into the next round')
+  assert.equal(rec.state, 'settling')
+  assert.equal(rec.accepted.amountOut, '396')
+  assert.equal(W.goesThrough(2), 'Goes through within about 2 minutes')
+})
+
 test('the engine: what the trade must first move to the chain is on the ticket, its fee and its wait, before anything moves', async () => {
   const asked = []
   const { a, b, R } = fakeR({ moveQuote: async (needs) => { asked.push(needs); return { fees: [{ asset: needs[0].hex, atoms: 88n }], minutes: 4 } } })

@@ -40,6 +40,7 @@
 //   log(...)          optional
 
 import { USER_WORDS, costLine, heldAlready, tradeStateWord } from './user-trade.js'
+import { settleWords } from './default-arca.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
@@ -241,14 +242,27 @@ export function makeSiteOrders (d) {
     log(`[site orders] ${o.type} ${o.side}: priced in ${now() - t0} ms:`, tq && tq.q ? (tq.q.ok ? `${tq.q.ticket.amountIn} -> ${tq.q.ticket.amountOut}` : tq.q.why) : 'no price')
     const unit = unitOf(o.base)
     const opts = o.opts || {}
-    const takes = tq && tq.q && tq.q.ok && (o.type === 'market' || meetsLimit(o, tq.q.ticket, unit))
+    // A ticket whose coins settle first (the engine's ticket to wait and go) meets a limit at the
+    // book's price now, and then goes only at the limit or better: its least is raised to it.
+    const ind = tq && tq.q && tq.q.ok && tq.q.ticket.indicative ? tq.q.ticket : null
+    const takes = tq && tq.q && tq.q.ok && (o.type === 'market' || meetsLimit(o, ind ? { ...ind, amountOut: ind.about } : tq.q.ticket, unit))
+    if (takes && ind && o.type === 'limit') {
+      const need = o.side === 'sell' ? ceilDiv(o.price * big(ind.amountIn), unit) : ceilDiv(big(ind.amountIn) * unit, o.price)
+      if (need > big(ind.amountOut)) tq.q.ticket = { ...ind, amountOut: String(need) }
+    }
     if (takes && opts.postOnly) { try { d.engine.drop(tq.q.choice) } catch {} throw new Error(SITE_WORDS.wouldTrade) }
     if (takes) {
       const t = tq.q.ticket
       const id = nid()
       pending.set(id, { kind: 'take', o, origin, choice: tq.q.choice, ticket: t, at: now() })
-      const rows = [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, fmt(t.receiveAsset, t.amountOut)],
-        feeRow(t.fees, t.payAsset)]
+      // What it pays waits for a round first: the book's price now, the least it goes for after its
+      // fees, and how long it waits; the trade then goes by itself, or comes back.
+      const rows = t.indicative
+        ? [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, USER_WORDS.about + ' ' + fmt(t.receiveAsset, t.about)],
+            ['', USER_WORDS.atLeast(fmt(t.receiveAsset, t.amountOut))], ...((t.fees || []).length ? [feeRow(t.fees, t.payAsset)] : []),
+            ['', settleWords(t.finalBy, 1, now(), USER_WORDS)]]
+        : [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, fmt(t.receiveAsset, t.amountOut)],
+            feeRow(t.fees, t.payAsset)]
       if (t.upTo) rows.push(['', USER_WORDS.upTo(fmt(t.payAsset, t.upTo))])
       rows.push(asked)
       return { id, kind: 'take', display: { title: SITE_WORDS.tradeTitle, text: SITE_WORDS.tradeText, rows } }
@@ -330,6 +344,8 @@ export function makeSiteOrders (d) {
       }
       if (rec.state === 'failed') throw new Error(USER_WORDS.failed)
       mark(rec.id)
+      // Accepted to go once what it pays is settled: under way, never a fill yet.
+      if (rec.state === 'settling') return { trade: rec.id, filled: 0, under_way: 1, state: tradeState(rec), failed: [], order: null, order_error: null, gave: '0', got: '0' }
       return { trade: rec.id, filled: 1, failed: [], order: null, order_error: null, gave, got }
     }
     return await busy(placeRest)(p, market)
@@ -381,6 +397,8 @@ export function makeSiteOrders (d) {
     if (!r) return 'sent'
     // The wallet has not paid or signed its side yet: the step is being taken.
     if (r.state === 'confirming' && !r.uncertain) return 'sending'
+    // Waiting for what it pays to settle, then priced again and sent by itself.
+    if (r.state === 'settling') return 'sending'
     if (r.state === 'settled') return 'settled'
     if (r.state === 'failed' || r.state === 'returned') return 'failed'
     return heldAlready(r) ? 'received' : 'sent'
