@@ -180,6 +180,9 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
   const mod = await import(join(pkgDir, 'leaf_wallet.js'))
   await mod.default({ module_or_path: readFileSync(join(pkgDir, 'leaf_wallet_bg.wasm')) })
   await mod.installStore('.leaf-wallet')
+  // The library's pauses wait on a shared buffer, which blocks this thread at no processor cost,
+  // rather than on the clock (a build of the library before setPause has only the clock).
+  if (typeof mod.setPause === 'function') mod.setPause((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) })
   const parse = (s) => JSON.parse(s)
   const call = (f) => {
     try { return f() } catch (e) {
@@ -210,6 +213,8 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
     exists: (mnemonic) => call(() => mod.arcaWalletExists(mnemonic)),
     create: (mnemonic, config) => wrap(call(() => mod.ArcaWallet.create(mnemonic, JSON.stringify(config || {})))),
     open: (mnemonic, nodePassword) => wrap(call(() => mod.ArcaWallet.open(mnemonic, nodePassword || undefined))),
+    // One pause as the library makes it, through this module's wait (null: a library without one).
+    pause: typeof mod.pause === 'function' ? (ms) => mod.pause(ms) : null,
   }
   loaded = { root: storeRoot, api }
   return api

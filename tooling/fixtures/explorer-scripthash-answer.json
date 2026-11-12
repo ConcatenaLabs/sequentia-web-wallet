@@ -1,0 +1,23 @@
+{
+ "_": "The testnet explorer's answer to /api/scripthash/<id>/utxo for one taproot script, asked by the SHA-256 of the script as computed and by its byte-reversed form, read 2026-11-12. explorer-script-hash.test.mjs pins the helper to it.",
+ "script": "5120795339b740b8c2927fde9aa4a9d920519693b491b88be2439e0a7052a6d59173",
+ "forward": "5ff65f73fff93a0594e568828104d63972d1eb4b692dd4c9586c8605b8f7df2d",
+ "reversed": "2ddff7b805866c58c9d42d694bebd17239d604818268e594053af9ff735ff65f",
+ "utxo": {
+  "5ff65f73fff93a0594e568828104d63972d1eb4b692dd4c9586c8605b8f7df2d": [
+   {
+    "txid": "e815cfd4f99c05eb69e3b9f1bc02c5865aeb3b020bf559555daf6a67d58dc62b",
+    "vout": 0,
+    "status": {
+     "confirmed": true,
+     "block_height": 209119,
+     "block_hash": "ece46e0b468ad18656f34bfe47527d4068c9a608edc65898a0fd0aef20fc2b14",
+     "block_time": 1794465542
+    },
+    "value": 13269745555823,
+    "asset": "2a515539da5e6a60caa7766ecd65bac0c10d15717ddd2088844ba58f4d04b9de"
+   }
+  ],
+  "2ddff7b805866c58c9d42d694bebd17239d604818268e594053af9ff735ff65f": []
+ }
+}

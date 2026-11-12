@@ -1,6 +1,7 @@
 // stake-records.js against fakes: the rules that decide what the wallet signs
 // and when. tooling/stake-records-regtest.mjs runs the same module against a
 // real node; this runs without one.
+import { explorerScriptHash } from './explorer-script-hash.js';
 import { test } from 'node:test';
 import assert from 'node:assert';
 import * as SR from './stake-records.js';
@@ -113,7 +114,7 @@ test('a join in flight: rebroadcast, retired once confirmed, abandoned when it c
 
 test('the record created from the staking key coin is found through that key history', async () => {
   const spk = '0014' + 'ab'.repeat(20);
-  const sh = await SR.scriptHash(spk);
+  const sh = await explorerScriptHash(spk);
   const createHex = JSON.stringify({ records: [{ controller: ME, signer: P, vout: 0, value: '99480' }] });
   const c = ctx({ esplora: explorer({
     [`/scripthash/${sh}/txs`]: [
@@ -132,8 +133,8 @@ test('the record created from the staking key coin is found through that key his
 
 test('a spent record is not taken for the live one; the probe finds the moved record', async () => {
   const spk = '0014' + 'ab'.repeat(20);
-  const sh = await SR.scriptHash(spk);
-  const qsh = await SR.scriptHash('cc' + ME + Q);
+  const sh = await explorerScriptHash(spk);
+  const qsh = await explorerScriptHash('cc' + ME + Q);
   const table = {
     [`/scripthash/${sh}/txs`]: [{ txid: 'create', vin: [{ prevout: { scriptpubkey: spk } }], status: { confirmed: true, block_height: 8 } }],
     '/tx/create/hex': JSON.stringify({ records: [{ controller: ME, signer: P, vout: 0, value: '99480' }] }),
@@ -220,7 +221,7 @@ test('feature probes name every entry point each flow needs', () => {
 test('a restored wallet finds its stakes on the chain: bonded ones, and unbonding ones by the stake they came from', async () => {
   const csv = 43200;
   const stakeSpk = lwk.sequentiaStakeScript(ME, csv), unbondSpk = lwk.sequentiaUnbondScript(ME);
-  const sS = await SR.scriptHash(stakeSpk), sU = await SR.scriptHash(unbondSpk);
+  const sS = await explorerScriptHash(stakeSpk), sU = await explorerScriptHash(unbondSpk);
   const c = ctx({ esplora: explorer({
     [`/scripthash/${sS}/utxo`]: [
       { txid: 'bond1', vout: 0, value: 4000000000000, status: { confirmed: true, block_time: 1792590000 } },
@@ -240,7 +241,7 @@ test('a restored wallet finds its stakes on the chain: bonded ones, and unbondin
 
 test('finding stakes: another key\'s unbonding output is not taken for ours, and nothing found is nothing', async () => {
   const csv = 43200;
-  const sU = await SR.scriptHash(lwk.sequentiaUnbondScript(ME));
+  const sU = await explorerScriptHash(lwk.sequentiaUnbondScript(ME));
   const c = ctx({ esplora: explorer({
     [`/scripthash/${sU}/utxo`]: [{ txid: 'u', vout: 0, value: 1 }],
     '/tx/u': { vin: [{ txid: 'x', vout: 0, prevout: { scriptpubkey: lwk.sequentiaStakeScript(P, csv), value: 1 } }] },
@@ -256,7 +257,7 @@ test('a time-locked stake (as Ambra bonds) is found, matures by median time, and
   const csv = SR.TIME_CSV;
   const stakeSpk = lwk.sequentiaStakeScript(ME, csv);
   const t = {
-    [`/scripthash/${await SR.scriptHash(stakeSpk)}/utxo`]: [{ txid: 'tb', vout: 0, value: 4000000000000, status: { confirmed: true, block_time: 1700000000 } }],
+    [`/scripthash/${await explorerScriptHash(stakeSpk)}/utxo`]: [{ txid: 'tb', vout: 0, value: 4000000000000, status: { confirmed: true, block_time: 1700000000 } }],
     '/tx/tb': { txid: 'tb', vout: [{ scriptpubkey: stakeSpk, value: 4000000000000 }], status: { confirmed: true, block_height: 500, block_hash: 'B' } },
     '/tx/tb/outspend/0': { spent: false },
     '/block/B': { id: 'B', previousblockhash: 'P', mediantime: 1700000100 },
