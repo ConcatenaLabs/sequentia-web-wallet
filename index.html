@@ -4602,11 +4602,11 @@ function userKnownAssets(){
 // composer when it is on, switching with the mode. A page that sets window.SEQ_USER_TRADE = false
 // keeps the full composer in both modes. user-trade-switch.test.mjs holds the rule.
 function userTradeOn(){ return window.SEQ_USER_TRADE !== false; }
-function applyTradeMode(){
+function applyTradeMode({ follow = true } = {}){
   const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
   const user = !devMode() && userTradeOn();
   for(const c of sec.children){ if(c.id === 'userComposerRoot') c.classList.toggle('hide', !user); else c.classList.toggle('uc-dev-hidden', user); }
-  if(user && userComposer){ userComposer.render(); userComposer.follow(); }
+  if(user && userComposer){ userComposer.render(); if(follow) userComposer.follow(); }
 }
 // The wallet's own hosted Bitcoin node, as the composer's BTC trades drive it: holds under the
 // wallet's own hash, payments capped at the ticket's route.
@@ -5268,8 +5268,9 @@ function initUserComposer(){
     openHistory: ()=> tab('history'),
   });
   // The pairs and the chain are read once; the composer draws when they are in.
+  // Drawn at once; its open trades are followed once the pairs are read (one follow, never two).
   Promise.all([userModePairs(), chainGenesis()]).finally(()=> applyTradeMode());
-  applyTradeMode();
+  applyTradeMode({ follow: false });
 }
 
 // ---------- developer mode: the composer's Ark rail ----------

@@ -440,9 +440,6 @@ export const READYING_MS = 10 * 60_000
 // and the longest it waits for them before it says the trade takes longer than usual.
 export const SETTLE_POLL_MS = 5000
 export const SETTLE_MOST_MS = 10 * 60_000
-// How far under the amount a person accepted the trade may receive, in basis points, and still go
-// ahead by itself once what it pays has been settled first.
-export const SETTLE_BOUND_BPS = 100n
 // The book's entries read while the amount was typed stand for the quote this long.
 const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
@@ -1157,6 +1154,12 @@ export function createEngine (deps) {
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
     const sources = admittedSources(ad.pairs, ad.genesis, payAsset, receiveAsset)
     if (!sources.length) return { ok: false, why: 'not-listed' }
+    // More than the balance shows: said so at once ("That is more than your …"), never settled
+    // first and waited for, since no settlement covers it.
+    if (payAsset !== 'BTC' && deps.held) {
+      const shown = big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n))
+      if (shown > 0n && A > shown) return { ok: false, why: 'part-ready', ready: String(shown), soon: soon() }
+    }
     // BTC is paid over the wallet's Bitcoin Lightning, never from a leaf. An order taken on the
     // chain is paid from the wallet's on-chain coins, the rest from its leaves.
     const haveLeaf = payAsset === 'BTC'
@@ -1270,7 +1273,7 @@ export function createEngine (deps) {
     if (!best && reads.size > 0) return { ok: false, why: 'wallet-busy' }
     if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
-      fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source }
+      fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source, asked: String(A) }
     const have = haveOf(best.entry)
     // Less can be paid now than asked, while the wallet shows more of it (the rest waiting for a
     // round): settled first, then the whole amount is priced (D96), never "up to" a part of it.
@@ -1399,12 +1402,22 @@ export function createEngine (deps) {
   // Moves one trade on as far as it goes now. -> its record. When that changes what the wallet holds
   // (the trade's state, or what it brings held already), deps.changed is told, so the page reads its
   // balance again: an asset just received is one the person can pay with at once.
+  // One advance of a record at a time: a second one asked meanwhile (two follows overlapping: the
+  // page opening, a change of mode, the follow after a confirmation) answers the record as stored,
+  // and the one running reads it afresh, so a trade is never accepted twice.
+  const advancing = new Set()
   async function advance (rec) {
     if (asked > 0) return rec
-    const was = rec ? rec.state + '|' + heldAlready(rec) : null
-    const r = await advanceOnce(rec)
-    if (r && deps.changed && r.state + '|' + heldAlready(r) !== was) { try { deps.changed(r) } catch {} }
-    return r
+    if (!rec) return advanceOnce(rec)
+    if (advancing.has(rec.id)) return records().find((r) => r.id === rec.id) || rec
+    advancing.add(rec.id)
+    try {
+      rec = records().find((r) => r.id === rec.id) || rec
+      const was = rec.state + '|' + heldAlready(rec)
+      const r = await advanceOnce(rec)
+      if (r && deps.changed && r.state + '|' + heldAlready(r) !== was) { try { deps.changed(r) } catch {} }
+      return r
+    } finally { advancing.delete(rec.id) }
   }
 
   // Puts a settling trade's coins through the next round (the library gives up nothing twice).
@@ -1414,9 +1427,10 @@ export function createEngine (deps) {
   }
 
   // A confirmed trade whose coins are settled first: once through, priced again for the amount
-  // accepted, and confirmed into the same record when the new price is within the bound the person
-  // accepted (no less received than SETTLE_BOUND_BPS under what was shown, no more paid); returned
-  // with words when it moved past it, or when it waited SETTLE_MOST_MS. Nothing asks twice.
+  // accepted, and confirmed into the same record only when the new price is the one the person
+  // accepted or better (no less received, no more paid); returned with words when it moved, or
+  // when it waited SETTLE_MOST_MS. Nothing asks twice: one advance of a record at a time (`advancing`),
+  // and its stored state read again before the confirmation.
   async function advanceSettling (rec) {
     const t = rec.ticket, accepted = rec.accepted || t
     const late = () => { rec.state = 'returned'; rec.whyKind = 'late'; rec.error = 'settling first took too long'; return put(rec) }
@@ -1427,22 +1441,30 @@ export function createEngine (deps) {
     }
     if (!v || !v.ready) { if (now() - (rec.settleSince || rec.at) > SETTLE_MOST_MS) return late(); syncShared(); return rec }
     await syncShared()
-    const q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: accepted.amountIn })
+    // Priced again for the amount the person asked, so the same price gives the same ticket.
+    const q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: accepted.asked || accepted.amountIn })
     if (!q.ok) {
       if (q.why === 'settle-first' && now() - (rec.settleSince || rec.at) <= SETTLE_MOST_MS) { rec.settleCoins = q.coins || []; return put(rec) }
       if (now() - (rec.settleSince || rec.at) <= SETTLE_MOST_MS && ['wallet-busy', 'no-firm-offer'].includes(q.why)) return rec
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'no price within the bound: ' + q.why
       return put(rec)
     }
-    const within = big(q.ticket.amountIn) <= big(accepted.amountIn) &&
-      big(q.ticket.amountOut) * 10000n >= big(accepted.amountOut) * (10000n - SETTLE_BOUND_BPS)
+    // At the price accepted or better: no less received, and no more paid than the ticket showed or,
+    // where the price makes the amount fall an atom differently, than the person asked, at a price
+    // no worse (what is received for what is paid at least the ticket's).
+    const qIn = big(q.ticket.amountIn), qOut = big(q.ticket.amountOut), aIn = big(accepted.amountIn), aOut = big(accepted.amountOut)
+    const most = accepted.asked && big(accepted.asked) > aIn ? big(accepted.asked) : aIn
+    const within = qOut >= aOut && qIn <= most && qOut * aIn >= aOut * qIn
     if (!within) {
       drop(q.choice)
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.newTicket = q.ticket; rec.error = 'the price moved past the bound accepted'
       return put(rec)
     }
-    log('[user trade] settled first; going ahead within the price accepted:', rec.id)
-    try { return await confirm(q.choice, q.ticket, rec) } catch (e) {
+    // The record as stored now: another follow may have moved it on meanwhile.
+    const cur = records().find((r) => r.id === rec.id)
+    if (!cur || cur.state !== 'settling') { drop(q.choice); return cur || rec }
+    log('[user trade] settled first; going ahead at the price accepted:', rec.id)
+    try { return await confirm(q.choice, q.ticket, cur) } catch (e) {
       log('[user trade] after settling first:', e && e.message)
       return records().find((r) => r.id === rec.id) || rec
     }

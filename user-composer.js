@@ -552,7 +552,17 @@ export function mountUserComposer (ctx) {
   // a person is pricing or confirming one, and every half minute for a trade older than two
   // minutes (one still waiting for the other side excepted), so an open trade does not hold up
   // the next.
-  async function follow () {
+  // One follow at a time: one asked while another runs (the page opening, a change of mode, the
+  // follow after a confirmation) runs once that one has ended, never beside it.
+  function follow () {
+    if (S.following) { S.followAgain = true; return S.following }
+    S.following = followOnce().finally(() => {
+      S.following = null
+      if (S.followAgain) { S.followAgain = false; follow() }
+    })
+    return S.following
+  }
+  async function followOnce () {
     clearTimeout(S.timer)
     const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed', 'undone'].includes(r.state))
     if (!openRecs.length) return

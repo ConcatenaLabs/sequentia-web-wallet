@@ -260,6 +260,30 @@ test('composer: a trade answered settle-first says only how long, settles, is pr
   assert.ok(!s.calls.includes('swap_accept'), 'nothing is traded before the person confirms the price')
   await root.querySelector('#ucConfirm').onclick()
   for (let i = 0; i < 50 && !eng.records().length; i++) await wait(10)
-  const r = await eng.advance(eng.records()[0])
+  // The composer's own follow may be moving the trade on: an advance asked meanwhile answers the
+  // record as stored (one advance of a record at a time), so it is asked until the trade ends.
+  let r = await eng.advance(eng.records()[0])
+  for (let i = 0; i < 50 && r.state !== 'settled'; i++) { await wait(10); r = await eng.advance(eng.records()[0]) }
   assert.equal(r.state, 'settled', JSON.stringify(r))
+})
+
+test('composer: two follows asked at once run one after the other, never side by side (RV38 W1)', async () => {
+  let running = 0, most = 0, calls = 0
+  const open = [{ id: 'r1', state: 'settling', at: Date.now() }]
+  const engine = {
+    records: () => open, quote: async () => ({ ok: false, why: 'no-funds' }), estimate: async () => null, offered: async () => [],
+    resume: async () => { calls++; running++; most = Math.max(most, running); await wait(20); running--; return [] },
+    soon: () => false, spendable: async () => new Map(),
+  }
+  const doc = fakeDoc()
+  const ui = mountUserComposer({
+    root: doc.createElement('div'), engine, held: () => 0n, knownAssets: () => [X, Y], assetMeta: (h) => ({ ticker: h === X ? 'XT' : 'YT', precision: 0 }),
+    fmtAtoms: (a) => String(a), parseAtoms: (t) => BigInt(t), admittedReceives: () => [Y], market: null, refValue: () => null,
+    session: null, notify: () => {}, links: () => ({}), openHistory: () => {}, followMs: 1e9, followSlowMs: 1e9,
+  })
+  await Promise.all([ui.follow(), ui.follow(), ui.follow()])
+  for (let i = 0; i < 20 && running; i++) await wait(10)
+  assert.equal(most, 1, 'resumed side by side')
+  assert.equal(calls, 2, 'the follows asked meanwhile run once more after it, together')
+  clearTimeout(ui.state.timer)
 })

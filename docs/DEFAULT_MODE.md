@@ -597,10 +597,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   button reads "Goes through in about a minute", and the price is asked again by itself once it
   is through. If that is found only at **Trade**, the trade is kept under Your trades as "Goes
   through in about a minute", with the price the person accepted as its bound: once through it
-  is priced again and goes ahead by itself while it receives no less than 1% under what was
-  shown and pays no more; otherwise "Returned: nothing traded. The price moved while it
-  waited." A page closed or reloaded meanwhile finds the trade again and goes on with it, never
-  twice. Past ten minutes: "This is taking longer than usual. Nothing has moved: try again in a
+  is priced again and goes ahead by itself only at that price or better: it receives no less
+  than the ticket showed, and pays no more than the ticket showed (or than the amount the
+  person typed, at a price no worse, where the amount falls an atom differently); otherwise
+  "Returned: nothing traded. The price moved while it waited." A page closed or reloaded
+  meanwhile finds the trade again and goes on with it, never twice, however many times the page
+  follows it at once. Past ten minutes: "This is taking longer than usual. Nothing has moved: try again in a
   few minutes." Payments wait for that settlement the same way and then go. Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,
   at a settlement's fee each, so the next trade from them goes at once.
