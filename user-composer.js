@@ -214,10 +214,11 @@ export function mountUserComposer (ctx) {
     const payValue = el('div', 'sub uc-value'); payValue.id = 'ucPayValue'
     row1.appendChild(payValue)
     const have = el('div', 'sub uc-have'); have.id = 'ucHave'
-    const haveLine = el('span', null, USER_WORDS.balance(amt(S.pay, ctx.held(S.pay) || 0n))); haveLine.id = 'ucHaveLine'
+    const haveLine = el('span', null, haveWords()); haveLine.id = 'ucHaveLine'
     have.appendChild(haveLine)
     const max = el('button', 'ghost uc-max', USER_WORDS.max); max.type = 'button'; max.id = 'ucMax'
-    max.onclick = () => { const a = big(ctx.held(S.pay) || 0n); if (a <= 0n) return; S.amount = ctx.fmtAtoms(a, prec(S.pay)); inp.value = S.amount; S.fixed = 'pay'; if (S.ticket) { reset(); paintTicket() } schedule(0) }
+    // What can be traded: the balance, and a payment on its way, which the trade settles first.
+    max.onclick = () => { const a = big(ctx.held(S.pay) || 0n) + onWay(S.pay); if (a <= 0n) return; S.amount = ctx.fmtAtoms(a, prec(S.pay)); inp.value = S.amount; S.fixed = 'pay'; if (S.ticket) { reset(); paintTicket() } schedule(0) }
     have.appendChild(max)
     row1.appendChild(have)
     box.appendChild(row1)
@@ -275,7 +276,13 @@ export function mountUserComposer (ctx) {
   // every trade that settles or returns, and whenever the ticket is painted (#674).
   function paintHave () {
     const h = ctx.root.querySelector('#ucHaveLine')
-    if (h && S.pay) h.textContent = USER_WORDS.balance(amt(S.pay, ctx.held(S.pay) || 0n))
+    if (h && S.pay) h.textContent = haveWords()
+  }
+  const onWay = (a) => (ctx.onItsWay && a ? big(ctx.onItsWay(a) || 0n) : 0n)
+  // "balance 0 USDX · 500000 USDX arriving, in about a minute" while a payment is on its way.
+  function haveWords () {
+    const w = USER_WORDS.balance(amt(S.pay, ctx.held(S.pay) || 0n)), o = onWay(S.pay)
+    return o > 0n ? w + ' \u00b7 ' + USER_WORDS.arriving(amt(S.pay, o)) : w
   }
 
   function paintTicket () {

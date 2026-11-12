@@ -29,7 +29,7 @@ function settleFirst (coins) {
 // be traded until a round settles it: `swap_read` (at the quote) or `swap_accept` (at the
 // confirmation, with `deepAt: 'accept'`) answers settle_first naming it; `settle_first` gives it up
 // once, and is ready after the next sync; the round gives the wallet `c2`, which trades.
-function standIn ({ deepAt = 'read', rateNum = 4n, rateDen = 3n } = {}) {
+function standIn ({ deepAt = 'read', rateNum = 4n, rateDen = 3n, maxGive = 1000000n } = {}) {
   const coins = [{ leaf_id: 'c1', asset: X, value: '3000000', state: 'live', kind: 'transfer', hops: 3 }]
   const swaps = []
   const calls = []
@@ -74,7 +74,7 @@ function standIn ({ deepAt = 'read', rateNum = 4n, rateDen = 3n } = {}) {
   const posts = []
   let held = false
   const fetchJson = async (url, init) => {
-    if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: String(rateNum), rate_den: String(rateDen), max_give: '1000000', min_give: '10000' }] }
+    if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: String(rateNum), rate_den: String(rateDen), max_give: String(maxGive), min_give: '10000' }] }
     const b = init && init.body ? JSON.parse(init.body) : {}
     posts.push([url.split('/v1/')[1], b])
     if (url.endsWith('/v1/firm')) {
@@ -91,7 +91,7 @@ function standIn ({ deepAt = 'read', rateNum = 4n, rateDen = 3n } = {}) {
     return {}
   }
   const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
-  return { lib, fetchJson, store, calls, posts, settleAsks, coins, swaps, accepts, setRate (n, d) { rateNum = n; rateDen = d } }
+  return { lib, fetchJson, store, calls, posts, settleAsks, coins, swaps, accepts, setRate (n, d) { rateNum = n; rateDen = d }, setMaxGive (m) { maxGive = m } }
 }
 
 const admitted = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
@@ -166,4 +166,21 @@ test('W4: more than the balance shows, part of it in a round: never "taking long
   assert.notEqual(q.why, 'settle-first', 'an amount above the balance is settled first, then retried, then "This is taking longer than usual"')
   assert.deepEqual([q.why, q.ready], ['part-ready', '3000000'], 'said at once: "That is more than your 3000000 …"')
   assert.equal(USER_WORDS.moreThanHeld('3000000 XT'), 'That is more than your 3000000 XT.')
+})
+
+test('W2b: a ticket the maker capped below the amount typed goes ahead at the ticket\'s size, never the whole amount typed', async () => {
+  const s = standIn({ deepAt: 'accept', maxGive: 150000n })
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.equal(rec.state, 'settling')
+  s.setMaxGive(1000000n)   // the maker's book is deeper by the time the coins are through
+  let r = eng.records().find((x) => x.id === rec.id)
+  for (let i = 0; i < 6 && r.state === 'settling'; i++) r = await eng.advance(eng.records().find((x) => x.id === rec.id))
+  console.log('W2b ticket: pay', q.ticket.amountIn, 'receive', q.ticket.amountOut, 'asked', q.ticket.asked, '-> state', r.state, 'pay', r.ticket.amountIn, 'receive', r.ticket.amountOut)
+  assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn) + (BigInt(q.ticket.amountIn) + BigInt(q.ticket.amountOut) - 1n) / BigInt(q.ticket.amountOut),
+    'paid ' + r.ticket.amountIn + ' where the ticket the person confirmed said ' + q.ticket.amountIn)
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut))
+  assert.equal(r.state, 'sent', 'it goes, at the ticket\'s size and price')
 })

@@ -97,6 +97,8 @@ export const USER_WORDS = Object.freeze({
   amount: 'Amount',
   max: 'Max',
   balance: (x) => `balance ${x}`,
+  // Under You pay, beside the balance: a payment on its way, which a trade settles first and pays.
+  arriving: (x) => `${x} arriving, in about a minute`,
   // What the book can fill now, when less than asked: said beside the amounts as they are typed.
   bookUpTo: (x) => `The book can fill up to ${x} now.`,
   // The same, when a maker takes more only after its coins are next settled, a few minutes on.
@@ -1441,21 +1443,30 @@ export function createEngine (deps) {
     }
     if (!v || !v.ready) { if (now() - (rec.settleSince || rec.at) > SETTLE_MOST_MS) return late(); syncShared(); return rec }
     await syncShared()
-    // Priced again for the amount the person asked, so the same price gives the same ticket.
-    const q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: accepted.asked || accepted.amountIn })
+    // Priced again for at most one received atom's price above what the ticket pays (and never above
+    // the amount the person typed), so the maker's rounding gives the same ticket at the same price,
+    // and a ticket the maker's depth capped goes at its own size, never at the whole amount typed.
+    const aIn = big(accepted.amountIn), aOut = big(accepted.amountOut)
+    const step = aOut > 0n ? (aIn + aOut - 1n) / aOut : 0n
+    const most = accepted.asked && big(accepted.asked) < aIn + step ? (big(accepted.asked) > aIn ? big(accepted.asked) : aIn) : aIn + step
+    // At the price accepted or better: no less received, no more paid than `most`, and what is
+    // received for what is paid at least the ticket's.
+    const within = (x) => x && x.ok && big(x.ticket.amountOut) >= aOut && big(x.ticket.amountIn) <= most &&
+      big(x.ticket.amountOut) * aIn >= aOut * big(x.ticket.amountIn)
+    let q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: String(most) })
+    // A ticket the maker's depth capped, whose next atom costs more than the ticket's price: priced
+    // once more at exactly what the ticket paid.
+    if (q.ok && !within(q) && most > aIn) {
+      drop(q.choice)
+      q = await quoteOnce({ payAsset: t.payAsset, receiveAsset: t.receiveAsset, amount: String(aIn) })
+    }
     if (!q.ok) {
       if (q.why === 'settle-first' && now() - (rec.settleSince || rec.at) <= SETTLE_MOST_MS) { rec.settleCoins = q.coins || []; return put(rec) }
       if (now() - (rec.settleSince || rec.at) <= SETTLE_MOST_MS && ['wallet-busy', 'no-firm-offer'].includes(q.why)) return rec
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'no price within the bound: ' + q.why
       return put(rec)
     }
-    // At the price accepted or better: no less received, and no more paid than the ticket showed or,
-    // where the price makes the amount fall an atom differently, than the person asked, at a price
-    // no worse (what is received for what is paid at least the ticket's).
-    const qIn = big(q.ticket.amountIn), qOut = big(q.ticket.amountOut), aIn = big(accepted.amountIn), aOut = big(accepted.amountOut)
-    const most = accepted.asked && big(accepted.asked) > aIn ? big(accepted.asked) : aIn
-    const within = qOut >= aOut && qIn <= most && qOut * aIn >= aOut * qIn
-    if (!within) {
+    if (!within(q)) {
       drop(q.choice)
       rec.state = 'returned'; rec.whyKind = 'moved'; rec.newTicket = q.ticket; rec.error = 'the price moved past the bound accepted'
       return put(rec)

@@ -591,8 +591,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   given: "Still getting the exact price: this can take up to half a minute…". If the price
   moves: "The price moved. Here is the new one."
 - **What the balance shows can always be traded or sent**, and so can a payment still on its way:
-  its asset is offered under You pay (first when the wallet holds nothing else), and the trade
-  settles it first. When part of what is paid waits only
+  its asset is offered under You pay (first when the wallet holds nothing else), the line under
+  it reads "balance <amount> <TICKER> · <amount> <TICKER> arriving, in about a minute", Max
+  fills both, and the trade settles it first. When part of what is paid waits only
   for the operator's next settlement (a coin too many payments from one to give part of, a
   payment still arriving, coins the wallet's own upkeep is settling, a coin of a format the other
   side's older build does not read), the wallet puts it through that settlement by itself, the
@@ -600,8 +601,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   is through. If that is found only at **Trade**, the trade is kept under Your trades as "Goes
   through in about a minute", with the price the person accepted as its bound: once through it
   is priced again and goes ahead by itself only at that price or better: it receives no less
-  than the ticket showed, and pays no more than the ticket showed (or than the amount the
-  person typed, at a price no worse, where the amount falls an atom differently); otherwise
+  than the ticket showed, pays at most the price of one received atom more than the ticket
+  showed (never more than the amount typed), and gets no less for what it pays than the
+  ticket's price; otherwise
   "Returned: nothing traded. The price moved while it waited." A page closed or reloaded
   meanwhile finds the trade again and goes on with it, never twice, however many times the page
   follows it at once. Past ten minutes: "This is taking longer than usual. Nothing has moved: try again in a
