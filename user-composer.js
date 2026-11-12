@@ -451,6 +451,13 @@ export function mountUserComposer (ctx) {
   }
 
   const ENDED = ['settled', 'returned', 'failed', 'undone']
+  // A trade's transactions on a chain: a composed trade's are its steps'.
+  function linksOf (r) {
+    if (!ctx.links) return []
+    const all = ctx.engine.records()
+    const recs = r.source === 'composed' ? [r.first, r.second].map((id) => all.find((x) => x.id === id)).filter(Boolean) : [r]
+    return recs.flatMap((x) => ctx.links(x))
+  }
   // What a trade brought: a composed purchase that ended at its first step brought that step's asset.
   const got = (r) => (r.source === 'composed' && r.ended === 'via' ? amt(r.via, r.viaAtoms) : amt(r.ticket.receiveAsset, r.ticket.amountOut))
   const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${got(r)}`
@@ -525,10 +532,7 @@ export function mountUserComposer (ctx) {
       const steps = tradeSteps({ r, name })
       if (steps) { c.appendChild(el('div', 'lbl uc-steps-title', USER_WORDS.stepsTitle)); stepList(c, steps) }
     }
-    // A composed trade links its steps' transactions.
-    const all = ctx.engine.records()
-    const linked = r.source === 'composed' ? [r.first, r.second].map((id) => all.find((x) => x.id === id)).filter(Boolean) : [r]
-    for (const k of (ctx.links ? linked.flatMap((x) => ctx.links(x)) : [])) {
+    for (const k of linksOf(r)) {
       const a = el('a', null, k.text); a.href = k.href; a.target = '_blank'; a.rel = 'noopener'
       line(USER_WORDS.txOn(k.chain), a, 'mono')
     }
@@ -548,7 +552,7 @@ export function mountUserComposer (ctx) {
       if (!r.ticket || isStep(r) || !ENDED.includes(r.state) || S.ended.has(r.id)) continue
       S.ended.add(r.id)
       if ((S.card && S.card.id === r.id) || !ctx.notify) continue
-      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: (ctx.links ? ctx.links(r) : [])[0] || null })
+      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: linksOf(r)[0] || null })
     }
   }
 
