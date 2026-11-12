@@ -260,8 +260,15 @@ export const USER_WORDS = Object.freeze({
   // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
   sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
   settled: 'Settled',
-  // A trade that waits on Bitcoin blocks says what is already true while it waits.
-  waitingOther: 'Waiting for the other side. Nothing has left your wallet yet.',
+  // Buying with BTC, until what is bought is held for the wallet (its round, then that round's block
+  // certified: one to two and a half minutes measured): the wallet pays its BTC only then, and only
+  // an open page pays it. Closed before that, nothing is traded and nothing is paid.
+  waitingOther: 'Keep this page open: your BTC is paid once what you buy is held for you, in about 2 minutes. Nothing has left your wallet yet. If the page closes first, nothing is traded.',
+  // Buying with BTC, the BTC being paid: seconds.
+  btcPaying: 'Paying your BTC. Keep this page open a moment more.',
+  // Buying with BTC, the BTC paid and its proof handed on, what was bought being collected: it comes
+  // to the wallet on any device, open or not (the operator holds what claims it).
+  btcCollecting: 'Paid. What you bought is arriving, and it comes to your wallet even if this page closes.',
   // A purchase of BTC whose payment is made: the BTC comes once the other side pays it out.
   btcOnItsWay: 'Paid. Your BTC is on its way.',
   // What the trade brings is the wallet's; only its settling with the network is left. One word on
@@ -394,7 +401,9 @@ export function tradeStateWord (r, now = Date.now()) {
   // room for it yet): said so, the coins being the wallet's all along.
   const held = heldAlready(r)
   const word = held ? (m >= SLOW_SETTLE_MIN && (r.settleState || []).some((x) => x && x !== 'released') ? W.receivedSlow : W.received)
-    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay : r.awaiting ? W.sentAwaiting : W.sent
+    : r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay
+      : r.source === 'btc-gateway' && r.dir === 'buy' ? (r.preimage && r.posted ? W.btcCollecting : W.btcPaying)
+        : r.awaiting ? W.sentAwaiting : W.sent
   return m >= 1 ? W.minutes(word, m) : word
 }
 

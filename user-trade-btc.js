@@ -16,7 +16,9 @@
 //   buying an asset with BTC   the maker makes a Bitcoin invoice; the wallet asks to receive the
 //                              asset under its hash; the maker's leaf pays it; once the wallet's
 //                              leaf has come and is final, with its home date far enough off, the
-//                              wallet pays the maker's invoice, learns the preimage, and claims.
+//                              wallet pays the maker's invoice, learns the preimage, hands it to
+//                              the operator at once (so any device of the wallet claims, the page
+//                              open or not), and claims.
 // Neither side can take what it gets before paying: the leaf received under the hash opens only
 // with the preimage, and the preimage comes out only when the BTC is paid.
 //
@@ -288,9 +290,16 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       if (st.state !== 'complete') return put(rec)
       rec.preimage = st.preimage
       put(rec)
+      // The operator is handed the preimage before anything else, so what was bought never rests on
+      // this page staying open: the operator serves it, and the wallet on any device (one restored
+      // from the phrase included) claims the asset at its next sync. Safe to hand on: it opens the
+      // wallet's leaf only with the wallet's own key, and the maker, paid, knows it already.
+      await postPreimage(rec)
       await run('lightning_receive_preimage', { hash: rec.hash, preimage: st.preimage })
       await run('sync').catch((e) => log('[user trade] sync:', e.message))
     }
+    // Handed on once more while the claim has not run, should the first try have failed.
+    if (rec.preimage && !rec.posted && rec.receiveState !== 'received') await postPreimage(rec)
     if (rec.preimage) {
       const r2 = ((await run('lightning_receives')) || {})[rec.hash] || {}
       rec.receiveState = r2.state || null
@@ -303,6 +312,12 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       if ((await settleStep(rec)) === 'settled') { rec.state = 'settled'; rec.settledAt = now() }
     }
     return put(rec)
+  }
+
+  // Hands the operator the preimage of a purchase whose BTC is paid; `rec.posted` once it took it.
+  async function postPreimage (rec) {
+    try { await run('lightning_post_preimage', { hash: rec.hash, preimage: rec.preimage }); rec.posted = true; put(rec) }
+    catch (e) { log('[user trade] post preimage:', e.message) }
   }
 
   // The maker's invoice for a purchase, renewed when it runs out within INVOICE_LEFT_SECONDS: the

@@ -781,8 +781,14 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
 
 - Settling waits for the network, and no status promises how long: the only time a row shows is
   the minutes it has waited, once that is one or more. While it waits the row says what is
-  already true: "Waiting for the other side. Nothing has left your wallet yet." (buying with BTC,
-  until the asset is held for the wallet); "Sent (<N> min)"; "Paid. Your BTC is on its way."
+  already true. Buying with BTC, until the asset is held for the wallet: "Keep this page open:
+  your BTC is paid once what you buy is held for you, in about 2 minutes. Nothing has left your
+  wallet yet. If the page closes first, nothing is traded." (only an open page pays the BTC);
+  while the BTC is paid, "Paying your BTC. Keep this page open a moment more."; once it is paid,
+  "Paid. What you bought is arriving, and it comes to your wallet even if this page closes." (the
+  wallet hands the operator what claims it at once, so any device of the wallet collects it). A
+  site the wallet trades for is told such a purchase is under way, with these words, and never
+  that it traded, until the asset is collected. Otherwise "Sent (<N> min)"; "Paid. Your BTC is on its way."
   (selling for BTC, once the asset is paid); and once what the trade brings is held, "Received,
   settling (<N> min)", or after ten minutes still settling "Received, and yours to use. Settling
   with the network is taking longer than usual."

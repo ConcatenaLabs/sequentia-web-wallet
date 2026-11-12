@@ -346,6 +346,12 @@ export function makeSiteOrders (d) {
       mark(rec.id)
       // Accepted to go once what it pays is settled: under way, never a fill yet.
       if (rec.state === 'settling') return { trade: rec.id, filled: 0, under_way: 1, state: tradeState(rec), failed: [], order: null, order_error: null, gave: '0', got: '0' }
+      // A purchase with BTC is traded only once its BTC is paid and what it buys is collected, minutes
+      // after the confirmation, and only while the page stays open until its BTC is paid: under way
+      // until then, with what the wallet says of it (`note`), never "traded".
+      if (rec.source === 'btc-gateway' && !heldAlready(rec)) {
+        return { trade: rec.id, filled: 0, under_way: 1, state: tradeState(rec), note: tradeStateWord(rec, now()), failed: [], order: null, order_error: null, gave: '0', got: '0' }
+      }
       return { trade: rec.id, filled: 1, failed: [], order: null, order_error: null, gave, got }
     }
     return await busy(placeRest)(p, market)
