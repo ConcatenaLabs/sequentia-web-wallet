@@ -8635,6 +8635,8 @@ function ownedOptions(sel){
   // included, is listed for being the network's own (default-arca.js heldAssetList).
   const others=[];
   try{ if(leavesApi) for(const h of leavesApi.leafAssets()) others.push([h, leavesApi.leafAtoms(h)]); }catch{}
+  // Money still arriving can be sent (it settles first): its asset is listed while nothing else of it is held.
+  try{ for(const h of onItsWayAssets()) others.push([h, onItsWay(h)]); }catch{}
   try{ for(const c of ((lnLastStatus && lnLastStatus.channels) || [])) if(c.asset && c.leg!=='btc') others.push([c.asset, lnBalanceFor(c.asset)]); }catch{}
   // What vests later: listed, so a send of it says from when it can be.
   try{ if(leavesApi && leavesApi.vestingAssets) for(const h of leavesApi.vestingAssets()) others.push([h, vestingFor(h)]); }catch{}

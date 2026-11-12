@@ -194,3 +194,19 @@ test('while a payment is arriving, Balance shows the asset as Arriving with abou
   assert.equal(DEFAULT_WORDS.arrivingIn('0.02', 'XT'), '0.02 XT arriving, in about a minute')
   assert.equal(DEFAULT_WORDS.arrivingFigure, 'Arriving')
 })
+
+test('Send lists an asset whose only money is still arriving, so it can be chosen and sent', { timeout: 20000 }, async (t) => {
+  const { api } = await mount(t)
+  const opts = []
+  const sel = { value: '', innerHTML: '', options: opts, appendChild: (o) => { opts.push(o); return o } }
+  const deps = {
+    leavesApi: api, lnLastStatus: null, oampBalances: {}, devMode: () => false,
+    balObj: () => ({}), el: () => ({}), assetMeta: () => ({ ticker: 'XT' }), lnBalanceFor: () => 0n, vestingFor: () => 0n,
+    heldAssetList: (await import('./default-arca.js')).heldAssetList,
+  }
+  const src = [fn('onItsWay'), fn('onItsWayAssets'), fn('ownedOptions'), 'return ownedOptions'].join('\n')
+  const ownedOptions = new Function(...Object.keys(deps), src)(...Object.values(deps))
+  assert.equal(api.leafAtoms(X), 0n, 'nothing of X is in the figure: it is all arriving')
+  ownedOptions(sel)
+  assert.deepEqual(opts.map((o) => o.value), ['BTC', X], 'X is offered beside BTC')
+})
