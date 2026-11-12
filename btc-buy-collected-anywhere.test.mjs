@@ -149,3 +149,14 @@ test('the site: a purchase with BTC is under way, with what the wallet says, nev
   assert.equal(r.under_way, 1)
   assert.equal(r.note, USER_WORDS.waitingOther)
 })
+
+test('a restored wallet counts a coin received under another\'s hash nowhere until the operator serves its preimage', async () => {
+  // The library's balance on a restored wallet holding one such coin of 9.7 USDX beside 11.5 free:
+  // `arca` lists it as `awaiting_preimage`; `held`, which the figure reads, leaves it out. Paid, the
+  // operator serves its preimage within seconds (the paying wallet hands it on, the desk too once
+  // paid) and sync claims it; never paid, it goes back to the other side at its timeout. Either way
+  // it is in no figure and nothing calls it on its way meanwhile.
+  const { leafBalances } = await import('./leaves.js')
+  const b = leafBalances({ arca: { [X]: { live: '1152910790', awaiting_preimage: '970000000' } }, held: { [X]: '1152910790' }, sequentia_onchain: {} })
+  assert.equal(b.get(X).leaves, 1152910790n)
+})
