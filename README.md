@@ -48,11 +48,13 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Trade tab in developer mode: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
   self-enforcing SeqOB covenants and fill without the wallet being open. An order's locked coins
   come back through Reclaim once its lock has passed: a median time a day after it is placed (a
-  block height a day ahead when the explorer gives no median time). An order's terms are kept only in the browser
-  that placed it. An order whose record is gone (the site's data cleared, another device, a
-  restore from the phrase) still shows its coins: the wallet lists what it paid to a script it
-  holds no order for, and takes the order back when it can rebuild its terms, from the market's
-  prices when it was placed or from what you say you asked for in return
+  block height a day ahead when the explorer gives no median time). An order's terms are kept in
+  the browser that placed it and, encrypted to a key of the phrase, in a 59-byte note in the
+  order's funding transaction (`order-note.js`). A restore from the phrase, another device or
+  cleared site data rebuilds every order with a note exactly, filled in part or not, listed or not,
+  in either mode. An order without a note still shows its coins: the wallet lists what it paid to a
+  script it holds no order for, and takes the order back when it can rebuild its terms, from the
+  market's prices when it was placed or from what you say you asked for in return
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
 - BTC on a Bitcoin ark in default mode: native bitcoin held in Bark's wallet of the same phrase
   on the ark the page names (the testnet's own Bark server on testnet4), paid in seconds between
@@ -834,6 +836,7 @@ server does not answer eligibility, the Trade tab trades as it does without rest
 | `restricted-trade.js` / `restricted-engine.js` / `restricted-host.js` | Restricted assets in the Trade tab: the taker's side of a maker's quote (one transaction, both legs) and of a gated order, the check each side runs on the whole transaction before signing, the default composer's pricing and its approval and bitcoin cards, and the page's coins, keys, explorer and courier behind them. |
 | `restricted-composed.js` | Bitcoin for a restricted asset as one trade: the ticket of every step (the bitcoin purchase, the move of what it bought to the chain, the trade there), and the rest made by itself once the first has settled. |
 | `market-view.js` | A pair's market, in both modes' Trade tab: chart, last price and 24-hour change, best bid and ask, recent trades, from the relay's `trades`, `candles` and `ticker`; developer mode adds rails. |
+| `order-note.js` | A resting order's note: its terms, encrypted to the phrase's own key (`m/1017'/9'/0'`, HKDF label `sequentia/resting-order-note/v1`, AES-256-CTR, a random nonce stored in the note), written in the order's funding transaction and read back by `covenant-recovery.js` `ordersFromNotes`. The file's header is the format another wallet reproduces; `order-note.test.mjs` holds a vector. No DOM. |
 | `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `covenant-sim.js` | SeqDEX's Simplicity order (the template `seqdex/order`): its address from the terms and the pinned commitment root, and a fill's witness from the template's pinned programs, with no compiler; `seqob.js` signs and verifies its offers (`simplicity_covenant`). Pinned to the template's vectors as seqdex vendors them. |
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
