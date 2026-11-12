@@ -107,7 +107,7 @@ OpenAMP identity and enclave-signing key is `m/5/0` inside the wasm `Signer`.
 | `/pools/pools.json` | index.html | the staking pool board's feed (pools to delegate to) |
 | `/arca` | leaves.js (its worker) | the operator's server, which user mode joins by itself (`window.SEQ_ARCA`) |
 | `/node-rpc` | leaves.js (its worker) | a node's JSON-RPC, read calls and broadcasts only, through which the leaf wallet follows the chain |
-| `/node-rpc/hold` | leaves/worker.js | the node route's hold (`window.SEQ_PAUSE_URL`): the worker's wait for each of the library's pauses between two tries, a synchronous request held open for the pause, so a pause costs no processor; a site without it answers 404 and the worker waits on the clock from then on |
+| `/node-rpc/hold` | leaves/worker.js, leaves/hold.js | the node route's hold (`window.SEQ_PAUSE_URL`): the worker's wait for each of the library's pauses between two tries, a synchronous request held open for the pause (25 s at most a request; a longer pause is asked in parts), so a pause costs no processor; a site without it (a 404), or whose hold answers 204 in under half the time asked, is waited on the clock from then on |
 | `/leafmaker` | user-trade.js, user-trade-btc.js | a live leaf maker (`tooling/lsp/leaf-maker.mjs`): its quotes, firm in-tree swap offers and, from its BTC desk, BTC trades in one hash-lock, for user mode's Trade tab (override: `window.SEQ_LEAF_MAKERS`, a list of base URLs) |
 | `/leafmaker-btc` | user-trade.js, user-trade-btc.js | the live BTC maker: the same program with its BTC desk on a Bitcoin Lightning node of its own |
 | `user-mode/pairs.json` | index.html | the pairs, and their sources, user mode offers per chain (override: `window.SEQ_USER_MODE_PAIRS`) |
