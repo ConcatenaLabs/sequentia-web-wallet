@@ -99,7 +99,7 @@ try {
   const toasts = []
   const C = {
     $: () => null, toast: (m) => { toasts.push(m); console.log('     toast: ' + m) },
-    assetMeta: (h) => ({ ticker: h === X ? 'XLOCK' : h === Y ? 'YASK' : h === policy ? 'tSEQ' : h.slice(0, 6), precision: 8 }),
+    assetMeta: (h) => { const t = h === X ? 'XLOCK' : h === Y ? 'YASK' : h === policy ? 'tSEQ' : h.slice(0, 6); return { ticker: t, name: t, precision: 8 } },
     fmtAtoms: (a, p) => (Number(a) / 10 ** (p || 0)).toString(), prettyErr: (e) => String(e && e.message || e),
     wasm: lwk, network, wollet, signer, mnemonic: MNEMONIC, POLICY_HEX: policy,
     client: { fullScan: (w) => client.fullScan(w), broadcast: async (pset) => {
@@ -110,6 +110,7 @@ try {
     applyFee: (b) => b.feeRate(2000), withWollet: async (f) => f(), sync, noteOwnTx: () => {},
     esploraFetch: (path, opts) => fetch(shim.url + path, opts),
     feeRateFor: () => BigInt(COIN), DEFAULT_FEERATE: 2000, EXCHANGE_RATE_SCALE: COIN, SEQOB: 'http://127.0.0.1:1',
+    balObj: () => wollet.balance().toJSON(), registryAssets: () => [X, Y, policy],
   }
   const swap = await import(join(root, 'swap.js'))
   const { planRefund, cancel } = await import(join(root, 'covenant-order.js'))
@@ -159,26 +160,53 @@ try {
   ok(toasts.some((t) => /never reached the chain/.test(t)), 'and the page says so')
   store.set('seqobCovenantOrders.archived.v1', '[]')
 
-  // 4. The record deleted by hand. The page lists the coin and rebuilds the order from what was asked.
+  // A second order, at a round price of the market then (5 XLOCK for 1.55 YASK); the relay is not
+  // reached, so it is never listed.
+  const SELL2 = 5n * BigInt(COIN), RECV2 = 155000000n
+  await sync()
+  try { await SW.placeCovenant(X, Y, SELL2, RECV2, null) } catch (e) { console.log('     (placing it: ' + String(e.message || e).slice(0, 200) + ')') }
+  const second = records().find((r) => r.sellAtoms === String(SELL2))
+  ok(second && second.covTxid, 'a second order rests at a round price, ' + (second && second.covTxid))
+  mine(1)
+  // The relay's trade log of the pair around then: XLOCK is the base, prices in YASK atoms per XLOCK atom.
+  const { createServer: httpServer } = await import('node:http')
+  const relay = httpServer((req, res) => {
+    const now = Math.floor(Date.now() / 1000)
+    if (req.url.startsWith(`/v1/market/${X}/${Y}/trades`)) { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ trades: [{ ts: now, price: 0.3104 }, { ts: now, price: 0.3097 }] })) }
+    res.writeHead(404); res.end('{}')
+  })
+  await new Promise((r) => relay.listen(0, '127.0.0.1', r))
+  C.SEQOB = `http://127.0.0.1:${relay.address().port}`
+
+  // 4. Both records deleted by hand. The page lists both coins and rebuilds the orders.
   writeRecords([])
   await sync()
   await SW.scanLostOrders(true)
   const locks = SW.lostLocks()
-  ok(locks.length === 1 && locks[0].txid === original.fundTxid && locks[0].value === SELL && locks[0].asset === X,
-    `the page lists ${locks.length} coin paid to a script it holds no order for: ${locks.map((l) => l.txid.slice(0, 12) + '…:' + l.vout + ' ' + l.value).join(', ')}`)
-  const l = locks[0]
-  const t0 = Date.now()
-  const wrong = await SW.recoverLostOrder(l, Y, '3.1')
+  ok(locks.length === 2 && locks.some((l) => l.txid === original.fundTxid && l.value === SELL) && locks.some((l) => l.txid === second.covTxid && l.value === SELL2),
+    `the page lists ${locks.length} coins paid to a script it holds no order for: ${locks.map((l) => l.txid.slice(0, 12) + '…:' + l.vout + ' ' + l.value).join(', ')}`)
+  const lr = locks.find((x) => x.value === SELL2), l = locks.find((x) => x.value === SELL)
+  let t0 = Date.now()
+  const auto = await SW.autoRecoverLostOrder(lr)
+  ok(auto.rec && auto.rec.recvAtoms === String(RECV2) && auto.rec.receive === Y && auto.rec.expiry === second.expiry && auto.rec.makerIndex === second.makerIndex,
+    `the order at the market's round price is found by the page itself, asking nothing (${auto.tried} candidates, ${Date.now() - t0} ms)`)
+  t0 = Date.now()
+  const autoOther = await SW.autoRecoverLostOrder(l)
+  ok(!autoOther.rec && autoOther.complete, `the other order, not at a market price, is not (${autoOther.tried} candidates, ${Date.now() - t0} ms): the page asks`)
+  t0 = Date.now()
+  const wrong = (await SW.recoverLostOrder(l, Y, '3.1')).rec
   ok(wrong === null, `a wrong amount asked for finds no order (${Date.now() - t0} ms)`)
-  const wrongAsset = await SW.recoverLostOrder(l, policy, '3.12345678')
+  const wrongAsset = (await SW.recoverLostOrder(l, policy, '3.12345678')).rec
   ok(wrongAsset === null, 'the right amount in another asset finds no order')
-  const t1 = Date.now()
-  const back = await SW.recoverLostOrder(l, Y, '3.12345678')
-  ok(!!back, `what was asked for rebuilds the order (${Date.now() - t1} ms)`)
+  t0 = Date.now()
+  const near = await SW.recoverLostOrder(l, Y, '3.1234567', 0.0001)
+  const back = near.rec
+  ok(!!back, `"about 3.1234567, within 0.0001 %" rebuilds the order (${near.tried} candidates, ${Date.now() - t0} ms)`)
+  relay.close()
   for (const k of ['pay', 'receive', 'sellAtoms', 'recvAtoms', 'makerIndex', 'spkHex', 'expiry', 'idsInternal'])
     ok(back && String(back[k]) === String(original[k]), `  ${k} = ${back && back[k]} (the deleted record had ${original[k]})`)
   ok(back && back.covTxid === original.fundTxid && back.covVout === vout && back.recovered === true, '  at the coin, marked recovered (never listed by itself)')
-  ok(records().length === 1, 'the order is back in Your resting orders')
+  ok(records().length === 2, 'both orders are back in Your resting orders')
 
   // 5. Reclaim. Before its lock opens, the refund is forced into a block and refused.
   const reclaimTx = async () => {

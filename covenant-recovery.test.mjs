@@ -11,7 +11,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates,
+import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates, searchOrder, amountsFromRatios, amountsInRange,
   FUNDING_GRACE_MS, ABSENT_RECHECK_MS } from './covenant-recovery.js'
 import { planPlaceOrder } from './covenant-order.js'
 import { computeRate, covenantMinLot, covenantDerivationIds, orderExpiryTime } from './covenant-flow.js'
@@ -174,4 +174,34 @@ test('what the person asked for, in atoms', () => {
   assert.deepEqual(recvCandidates('0.123', 2), [])
   assert.deepEqual(recvCandidates('abc', 8), [])
   assert.deepEqual(recvCandidates('', 8), [])
+})
+
+test('the page finds an order placed at a market price by itself, before asking', async () => {
+  // Locked 100 X (8 places) at a round price of 0.0009 Y per X (Y 8 places): asked 0.09 Y.
+  const expiry = orderExpiryTime(1794465000)
+  const plan = placedOrder({ sell: 100_00000000n, recv: 9_000_000n, index: 5, expiry })
+  const lock = { txid: '33'.repeat(32), vout: 0, spkHex: plan.spkHex, asset: A, value: 100_00000000n }
+  // The market's trades around the funding were at 0.000904 and 0.000897 Y per X.
+  const amounts = amountsFromRatios(100_00000000n, [0.000904, 0.000897], 8, 8)
+  assert.ok(amounts.includes(9_000_000n), 'the round price is among the candidates')
+  const res = await searchOrder({ lock, candidates: amounts.map((recv) => ({ asset: B, recv })), makers: makerKeys(8), expiries: [expiry, orderExpiryTime(1794464940)] })
+  assert.equal(res.rec && res.rec.recvAtoms, '9000000')
+  assert.equal(res.rec.makerIndex, 5)
+})
+
+test('a near answer is searched around, the roundest amounts first when the range is wide', () => {
+  assert.deepEqual(amountsInRange('0.09', 0, 8), [9000000n, 8999999n, 9000001n])
+  const narrow = amountsInRange('0.09', 0.01, 8)   // 900 atoms either side: every atom
+  assert.equal(narrow.length, 1801); assert.equal(narrow[0], 9000000n)
+  const wide = amountsInRange('0.09', 5, 8, 2000)   // 450,000 either side: steps of 1,000 atoms
+  assert.ok(wide.length <= 2003 && wide.includes(9_100_000n) && wide.includes(8_550_000n) && !wide.includes(9_000_500n))
+})
+
+test('the search stops at its budget and says it did not finish', async () => {
+  const plan = placedOrder({ sell: 5000n, recv: 7n, index: 0, expiry: 1794465000 })
+  const lock = { txid: '44'.repeat(32), vout: 0, spkHex: plan.spkHex, asset: A, value: 5000n }
+  let t = 0
+  const res = await searchOrder({ lock, candidates: Array.from({ length: 4000 }, (_, i) => ({ asset: B, recv: BigInt(1000 + i) })),
+    makers: makerKeys(2), expiries: [1794465001, 1794465002], budgetMs: 10, now: () => (t += 1) })
+  assert.equal(res.rec, null); assert.equal(res.complete, false)
 })

@@ -37,7 +37,7 @@ import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
 // match as the taker. Everything routes through these; no crypto is hand-rolled here.
 import { planPlaceOrder, buildCovenantTerms, settleFill as covSettleFill, planRefund as covPlanRefund, cancel as covCancel } from './covenant-order.js';
-import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates } from './covenant-recovery.js';
+import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, searchOrder, recvCandidates, amountsFromRatios, amountsInRange } from './covenant-recovery.js';
 import { verifyAgainstSPK as covVerifyAgainstSPK } from './covenant.js';
 import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
 import { computeRate, orderExpiry, orderExpiryTime, lockState, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits, DEFAULT_ORDER_BLOCKS, covenantMinLot, revHex, covenantDerivationIds } from './covenant-flow.js';
@@ -10554,7 +10554,8 @@ async function renderMyOrders(){
 // An order whose record is gone (#708). The record is the only copy of an order's terms until it is
 // listed, so the page looks for what this wallet paid to a taproot script it holds no order for
 // and that is still there, and offers to take any of them back that the person says was an order:
-// it rebuilds the order from what they asked for in return (covenant-recovery.js rebuildOrder),
+// it rebuilds the order from the market's prices when it was placed, or from what they asked for in
+// return (covenant-recovery.js searchOrder),
 // accepting only terms that derive the coin's very script, and the order is then in Your resting
 // orders, with Reclaim once its lock opens. An archived record whose coin turns up is restored.
 // ---------------------------------------------------------------------------
@@ -10623,50 +10624,93 @@ function wireLostRows(host){
     if (l) takeBackLostOrder(l);
   });
 }
-// The order locking `l`, rebuilt from what the person asked for in return (`want`, `amountText`),
-// put back in Your resting orders; null when no order of this wallet asked for that.
-async function recoverLostOrder(l, want, amountText){
-  const recv = recvCandidates(amountText, C.assetMeta(want).precision);
-  if (!recv.length) return null;
+// The order locking `l`, put back in Your resting orders when one of `candidates` ({ asset, recv })
+// derives its script. -> { rec, complete, tried }
+async function searchLostOrder(l, candidates, budgetMs){
   const makers = [];
   for (let i = 0; i <= makerIndexCeiling(); i++){ const p = makerPayout(C.signer, C.network, i); makers.push({ index: i, program: p.program, internalKey: p.internalKey }); }
   const expiries = await expiryCandidates({ get: explorerGet }, l.height);
-  const rec = await rebuildOrder({ lock: l, receive: [want], recvAtoms: recv, makers, expiries });
-  if (!rec) return null;
-  rec.offerId = seqob.randHex(16);
-  if (!PLACED.some(r => String(r.spkHex).toLowerCase() === rec.spkHex)){ PLACED.push(rec); savePlaced(); }
-  _lostLocks = _lostLocks.filter(x => x.spkHex !== rec.spkHex);
-  return rec;
+  const res = await searchOrder({ lock: l, candidates, makers, expiries, budgetMs });
+  if (!res.rec) return res;
+  res.rec.offerId = seqob.randHex(16);
+  if (!PLACED.some(r => String(r.spkHex).toLowerCase() === res.rec.spkHex)){ PLACED.push(res.rec); savePlaced(); }
+  _lostLocks = _lostLocks.filter(x => x.spkHex !== res.rec.spkHex);
+  return res;
+}
+// Before asking: the terms the page derives itself. For every asset the order could have asked
+// for, the market's trades within two days of the funding (all it lists when none is that close),
+// as the composer would have priced an order from them.
+async function autoRecoverLostOrder(l, budgetMs = 60_000){
+  const base = C.SEQOB || '/seqob', A = l.asset, pa = C.assetMeta(A).precision || 0;
+  const get = async (p) => { try { const r = await fetch(base + p); return r.ok ? await r.json() : null; } catch { return null; } };
+  const candidates = [];
+  for (const B of startableAssets().filter(h => h && h !== 'BTC' && h !== A)){
+    const ratios = [], near = [];
+    for (const [b, q, inv] of [[A, B, false], [B, A, true]]){
+      const j = await get(`/v1/market/${b}/${q}/trades?limit=1000`);
+      for (const t of (j && j.trades) || []){
+        const r = inv ? 1 / Number(t.price) : Number(t.price);
+        if (!(r > 0) || !Number.isFinite(r)) continue;
+        ratios.push(r);
+        if (l.time && Math.abs(Number(t.ts) - l.time) <= 2 * 86400) near.push(r);
+      }
+    }
+    for (const recv of amountsFromRatios(l.value, near.length ? near : ratios, pa, C.assetMeta(B).precision || 0)) candidates.push({ asset: B, recv });
+  }
+  if (!candidates.length) return { rec: null, complete: true, tried: 0 };
+  return searchLostOrder(l, candidates, budgetMs);
+}
+// What the person says they asked for: `amountText` of `want`, within `pct` percent.
+async function recoverLostOrder(l, want, amountText, pct = 0, budgetMs = 120_000){
+  const amounts = amountsInRange(amountText, pct, C.assetMeta(want).precision);
+  if (!amounts.length) return { rec: null, complete: true, tried: 0 };
+  return searchLostOrder(l, amounts.map(recv => ({ asset: want, recv })), budgetMs);
 }
 function takeBackLostOrder(l){
   const give = C.assetMeta(l.asset);
   const { m: modal, ok, st } = C.modalRows({ title: 'Take back an order', kv: [
     ['Locked', C.fmtAtoms(l.value, give.precision) + ' ' + give.ticker],
-    ['What it needs', 'What you asked for in return, as the order\'s review showed it. The wallet finds the order\'s terms from it and from its own keys.'],
   ] });
   const card = modal.querySelector('.card'), act = ok.parentNode;
-  const assets = startableAssets().filter(h => h && h !== 'BTC' && h !== l.asset);
-  const sel = document.createElement('select');
-  sel.innerHTML = assets.map(h => `<option value="${esc(h)}">${esc(C.assetMeta(h).ticker)}</option>`).join('');
-  const amt = document.createElement('input'); amt.type = 'text'; amt.inputMode = 'decimal'; amt.placeholder = 'Amount you asked for';
-  const row = document.createElement('div'); row.className = 'row'; row.style.marginTop = '10px';
-  row.appendChild(amt); row.appendChild(sel); card.insertBefore(row, act);
-  ok.textContent = 'Find the order';
-  ok.onclick = async () => {
-    const want = sel.value;
-    if (!want || !recvCandidates(amt.value, C.assetMeta(want).precision).length){ st.className = 'status err'; st.textContent = 'Enter the amount you asked for.'; return; }
-    ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Looking for the order\'s terms…';
-    try {
-      const rec = await recoverLostOrder(l, want, amt.value);
-      if (!rec){ ok.disabled = false; st.className = 'status err'; st.textContent = `No order of this wallet asked for that in return for these ${give.ticker}. Check the asset and the amount, exactly as the order's review showed them.`; return; }
-      modal.remove();
-      const ls = lockState(rec.expiry, await covTipNow());
-      C.toast(ls.known && !ls.open
-        ? `Found the order. Its ${give.ticker} come back with Reclaim once its lock opens, ${ls.until}.`
-        : `Found the order. Its lock has passed: Reclaim takes its ${give.ticker} back now.`, undefined, { sticky: true });
-      renderMyOrders();
-    } catch (e){ ok.disabled = false; st.className = 'status err'; st.textContent = 'Could not look for the order: ' + C.prettyErr(e); }
+  const found = async (rec) => {
+    modal.remove();
+    const ls = lockState(rec.expiry, await covTipNow());
+    C.toast(ls.known && !ls.open
+      ? `Found the order. Its ${give.ticker} come back with Reclaim once its lock opens, ${ls.until}.`
+      : `Found the order. Its lock has passed: Reclaim takes its ${give.ticker} back now.`, undefined, { sticky: true });
+    renderMyOrders();
   };
+  ok.disabled = true; act.style.display = 'none';
+  st.className = 'status'; st.innerHTML = '<span class="spin"></span>Looking for the order\'s terms at the market\'s prices when it was placed…';
+  (async () => {
+    let res = null; try { res = await autoRecoverLostOrder(l); } catch {}
+    if (res && res.rec) return found(res.rec);
+    // Not at a market price: ask what was asked for in return.
+    const ask = document.createElement('div');
+    ask.innerHTML = `<div class="sub" style="margin-top:8px">The order was not at a price the market had then. What did you ask for in return? The amount as the order's review showed it; if you are not sure of it, say how far off it may be.</div>`;
+    const assets = startableAssets().filter(h => h && h !== 'BTC' && h !== l.asset);
+    const sel = document.createElement('select');
+    sel.innerHTML = assets.map(h => `<option value="${esc(h)}">${esc(C.assetMeta(h).ticker)}</option>`).join('');
+    const amt = document.createElement('input'); amt.type = 'text'; amt.inputMode = 'decimal'; amt.placeholder = 'Amount you asked for';
+    const pct = document.createElement('input'); pct.type = 'text'; pct.inputMode = 'decimal'; pct.placeholder = 'Within ± % (0 if exact)'; pct.value = '0';
+    const row = document.createElement('div'); row.className = 'row'; row.style.marginTop = '10px';
+    row.appendChild(amt); row.appendChild(sel); row.appendChild(pct);
+    ask.appendChild(row); card.insertBefore(ask, act);
+    act.style.display = ''; ok.disabled = false; ok.textContent = 'Find the order'; st.className = 'status'; st.textContent = '';
+    ok.onclick = async () => {
+      const want = sel.value;
+      if (!want || !recvCandidates(amt.value, C.assetMeta(want).precision).length){ st.className = 'status err'; st.textContent = 'Enter the amount you asked for.'; return; }
+      ok.disabled = true; st.className = 'status'; st.innerHTML = '<span class="spin"></span>Looking for the order\'s terms…';
+      try {
+        const r = await recoverLostOrder(l, want, amt.value, Number(pct.value) || 0);
+        if (r.rec) return found(r.rec);
+        ok.disabled = false; st.className = 'status err';
+        st.textContent = r.complete
+          ? `No order of this wallet asked for that in return for these ${give.ticker}. Check the asset and the amount, or widen how far off it may be.`
+          : `Not found among the amounts tried in two minutes. Narrow how far off it may be, or check the asset.`;
+      } catch (e){ ok.disabled = false; st.className = 'status err'; st.textContent = 'Could not look for the order: ' + C.prettyErr(e); }
+    };
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -10738,7 +10782,7 @@ function stripBip32(b64){
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
 export const __test__ = {
   // #708: a resting order's record and the way back for one whose record is gone.
-  reconcileUnfundedPlaced, scanLostOrders, recoverLostOrder, orderFromPlaced, refundHooksFor, placeCovenant,
+  reconcileUnfundedPlaced, scanLostOrders, recoverLostOrder, autoRecoverLostOrder, orderFromPlaced, refundHooksFor, placeCovenant,
   lostLocks: () => _lostLocks, placed: () => PLACED, loadPlaced, archived: () => loadArchived(),
   crossableDepthAtoms, ratioRecvPerPay, stripBip32, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,

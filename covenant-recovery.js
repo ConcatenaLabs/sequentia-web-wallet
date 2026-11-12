@@ -17,8 +17,9 @@
 //    that is still there: an order whose record is gone looks exactly like that (so does a
 //    payment to someone's taproot address; the wallet cannot tell them apart until terms match).
 //
-//  * rebuildOrder takes back such an order from what the person says they asked for in return.
-//    Everything else is the wallet's or the chain's: the asset and amount locked (the output),
+//  * searchOrder takes back such an order: first from terms the page derives itself (the
+//    market's prices around the funding), then from what the person says they asked for in
+//    return, exactly or within a range. Everything else is the wallet's or the chain's: the asset and amount locked (the output),
 //    the maker key and payout (the wallet's key at an index), the lock (the median time or the
 //    height a day after one of the blocks just below the funding), and the generation of asset
 //    byte order. A candidate is accepted only when it derives the output's very script.
@@ -27,8 +28,8 @@
 // "not found"); anything else throws, and a thrown read decides nothing.
 
 import { explorerScriptHash } from './explorer-script-hash.js'
-import { planPlaceOrder } from './covenant-order.js'
-import { computeRate, covenantMinLot, covenantDerivationIds, orderExpiry, orderExpiryTime, leafProductFits } from './covenant-flow.js'
+import { computeRate, covenantMinLot, covenantDerivationIds, orderExpiry, orderExpiryTime, leafProductFits, isTimeLock } from './covenant-flow.js'
+import { spkMatcher, leafHash, buildFillLeaf, buildRefundLeaf } from './covenant.js'
 
 export const FUNDING_GRACE_MS = 10 * 60 * 1000      // a record younger than this may still be funding
 export const ABSENT_RECHECK_MS = 10 * 60 * 1000     // a funding seen absent is put away only when absent again this much later
@@ -134,45 +135,97 @@ export async function expiryCandidates (io, height) {
   return [...times, ...heights]
 }
 
-// The record of the order locking `lock` ({ txid, vout, spkHex, asset (display), value }), if
-// one of the candidates derives its script; else null.
-//   receive   display ids of the asset asked for (one, or every asset the wallet knows)
-//   recvAtoms what the person says they asked for, in atoms (the amount and its neighbours)
-//   makers    [{ index, program, internalKey }]: the wallet's maker keys
-//   expiries  from expiryCandidates
-// About half a millisecond a candidate: one asset, three amounts, fifteen keys and the 75 locks
-// take a few seconds; the search yields to the page as it goes.
-export async function rebuildOrder ({ lock, receive, recvAtoms, makers, expiries }) {
+// The record of the order locking `lock` ({ txid, vout, spkHex, asset (display), value }), found
+// among candidate terms; null when none derives its script.
+//   candidates [{ asset (display id asked for), recv (atoms) }], likeliest first
+//   makers     [{ index, program, internalKey }]: the wallet's maker keys, likeliest first
+//   expiries   from expiryCandidates (median-time locks first, then heights)
+//   budgetMs   stop looking after this long (the answer is then { rec: null, complete: false })
+// Each candidate costs about 0.2 ms (spkMatcher): its fill leaf once per key, then one root and one
+// multiplication of the base point per lock. The search runs in passes, likeliest first: the asset
+// byte order of every order placed since that fix and median-time locks; then height locks; then
+// the older byte order. It yields to the page as it goes.
+export async function searchOrder ({ lock, candidates, makers, expiries, budgetMs = 60_000, now = () => Date.now() }) {
   const spk = lc(lock.spkHex), sell = BigInt(lock.value), minLot = covenantMinLot(sell)
-  let tried = 0
-  for (const idsInternal of [true, false]) {
-    for (const b of receive) {
-      if (lc(b) === lc(lock.asset)) continue
-      for (const recv of recvAtoms) {
-        if (BigInt(recv) < 1n) continue
-        const { rateNum, rateDen } = computeRate(sell, BigInt(recv))
-        if (!leafProductFits(sell, rateNum, rateDen)) continue
-        for (const m of makers) {
-          for (const expiry of expiries) {
-            if (++tried % 250 === 0) await new Promise((r) => setTimeout(r, 0))   // the page stays responsive
-            let plan
-            try {
-              plan = planPlaceOrder({ ...covenantDerivationIds(lc(lock.asset), lc(b), idsInternal), sellAtoms: sell,
-                rateNum, rateDen, minLot, expiryLocktime: expiry, makerProg: m.program, makerX: m.internalKey })
-            } catch { continue }
-            if (lc(plan.spkHex) !== spk) continue
-            return {
-              offerId: null, pay: lc(lock.asset), receive: lc(b),
-              sellAtoms: String(sell), recvAtoms: String(BigInt(recv)),
-              makerIndex: m.index, covTxid: lock.txid, covVout: lock.vout, spkHex: spk,
-              expiry, created: Date.now(), posted: false, idsInternal, recovered: true,
-            }
+  const matches = spkMatcher(spk)
+  const times = expiries.filter((e) => isTimeLock(e)), heights = expiries.filter((e) => !isTimeLock(e))
+  const refundH = new Map()   // `${index}:${expiry}` -> leaf hash
+  const refund = (m, e) => { const k = m.index + ':' + e; let h = refundH.get(k); if (!h) { h = leafHash(buildRefundLeaf(e, m.internalKey)); refundH.set(k, h) } return h }
+  const t0 = now(); let tried = 0
+  for (const [idsInternal, locks] of [[true, times], [true, heights], [false, expiries]]) {
+    if (!locks.length) continue
+    for (const c of candidates) {
+      if (lc(c.asset) === lc(lock.asset) || BigInt(c.recv) < 1n) continue
+      const { rateNum, rateDen } = computeRate(sell, BigInt(c.recv))
+      if (!leafProductFits(sell, rateNum, rateDen)) continue
+      const ids = covenantDerivationIds(lc(lock.asset), lc(c.asset), idsInternal)
+      for (const m of makers) {
+        let fillH
+        try { fillH = leafHash(buildFillLeaf(ids.assetA, ids.assetB, rateNum, rateDen, minLot, m.program, 1)) } catch { continue }
+        for (const expiry of locks) {
+          if (++tried % 500 === 0) {
+            await new Promise((r) => setTimeout(r, 0))   // the page stays responsive
+            if (now() - t0 > budgetMs) return { rec: null, complete: false, tried }
           }
+          if (!matches(fillH, refund(m, expiry))) continue
+          return { tried, complete: true, rec: {
+            offerId: null, pay: lc(lock.asset), receive: lc(c.asset),
+            sellAtoms: String(sell), recvAtoms: String(BigInt(c.recv)),
+            makerIndex: m.index, covTxid: lock.txid, covVout: lock.vout, spkHex: spk,
+            expiry, created: Date.now(), posted: false, idsInternal, recovered: true,
+          } }
         }
       }
     }
   }
-  return null
+  return { rec: null, complete: true, tried }
+}
+
+// rebuildOrder: searchOrder over every asset in `receive` with every amount in `recvAtoms`.
+export async function rebuildOrder ({ lock, receive, recvAtoms, makers, expiries, budgetMs }) {
+  const candidates = []
+  for (const asset of receive) for (const recv of recvAtoms) candidates.push({ asset, recv })
+  return (await searchOrder({ lock, candidates, makers, expiries, budgetMs })).rec
+}
+
+// The amounts asked for that an order placed at one of `ratios` (atoms of the asked asset per atom
+// locked: the market's trades around the funding, its book) could carry, as the composer makes
+// them: the price itself, the price and its inverse rounded to one to four significant digits, and
+// the amount received rounded the same way, each rounded to an atom down, to the nearest, and up.
+export function amountsFromRatios (sell, ratios, precLock, precAsked) {
+  const out = new Map(), S = Number(sell), scale = Math.pow(10, Number(precAsked) - Number(precLock))
+  const add = (x) => { if (!(x > 0) || !Number.isFinite(x)) return; for (const f of [Math.floor, Math.round, Math.ceil]) { const a = f(x); if (a >= 1) out.set(String(a), BigInt(a)) } }
+  const sig = (x, d) => Number(x.toPrecision(d))
+  for (const r of ratios) {
+    if (!(r > 0) || !Number.isFinite(r)) continue
+    add(S * r)
+    const p = r / scale   // the price in whole units of the asked asset per whole unit locked
+    for (let d = 1; d <= 4; d++) {
+      add(S * sig(p, d) * scale)
+      add(S * scale / sig(1 / p, d))
+      const recvUnits = S * r / Math.pow(10, Number(precAsked))
+      add(sig(recvUnits, d) * Math.pow(10, Number(precAsked)))
+    }
+  }
+  return [...out.values()]
+}
+
+// The amounts within `pct` percent of `amountText` (in the asset's precision), nearest first. When
+// there are more than `cap` of them, only the roundest: amounts on the finest step that keeps them
+// within `cap` (a person who does not remember an amount exactly remembers a round one).
+export function amountsInRange (amountText, pct, precision, cap = 2000) {
+  const c = recvCandidates(amountText, precision)[0]
+  if (!c) return []
+  const p = Math.max(0, Number(pct) || 0)
+  const span = BigInt(Math.floor(Number(c) * p / 100))
+  const lo = c - span > 0n ? c - span : 1n, hi = c + span
+  let step = 1n
+  while ((hi - lo) / step + 1n > BigInt(cap)) step *= 10n
+  const out = new Set([c])
+  for (let a = ((lo + step - 1n) / step) * step; a <= hi; a += step) out.add(a)
+  for (const a of [c - 1n, c + 1n]) if (a > 0n) out.add(a)
+  const d = (a) => (a > c ? a - c : c - a)
+  return [...out].sort((a, b) => (d(a) < d(b) ? -1 : d(a) > d(b) ? 1 : 0))
 }
 
 // The atoms a person's "I asked for N" can mean: N as written in the asset's precision, and the
