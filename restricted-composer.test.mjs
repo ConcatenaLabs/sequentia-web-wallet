@@ -1,10 +1,12 @@
 // The composer (user-composer.js) on a small stand-in document, for a pair with a restricted
 // asset: a quote answered with a card (the approval card, or the asset to go through) shows the
 // card and never settles anything; a quote answered settle-first for the asset that pays for a
-// restricted asset settles it, then prices the trade again by itself.
+// restricted asset settles it, then prices the trade again by itself. And a pair offered a moment
+// ago that nobody offers now is asked again for as long as the engine says so, then said plainly.
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { mountUserComposer } from './user-composer.js'
+import test, { mock } from 'node:test'
+import { mountUserComposer, READY_TRIES } from './user-composer.js'
+import { USER_WORDS, OFFERED_AGAIN_EVERY_MS } from './user-trade.js'
 
 const X = 'aa'.repeat(32) // what pays
 const R = 'bb'.repeat(32) // the restricted asset
@@ -96,4 +98,24 @@ test('composer: settle-first for the asset paying for a restricted asset settles
   assert.equal(ui.state.ticket, ticket)
   assert.equal(ui.state.error, '')
   assert.ok(root.querySelector('#ucConfirm'), 'the ticket is shown with Confirm')
+})
+
+test('composer: a pair offered a moment ago is asked again until the engine stops saying so, then said plainly', async () => {
+  // The engine answers `again` for longer than READY_TRIES asks (its own window, OFFERED_AGAIN_MS,
+  // bounds it), then plainly that nobody offers it. The words end on that, never on "it takes a
+  // moment" with nothing asking any more (RV46's F4 on #711).
+  const n = READY_TRIES + 6
+  const answers = [...Array.from({ length: n }, () => ({ ok: false, why: 'not-offered', again: true })), { ok: false, why: 'not-offered' }]
+  const { engine, seen } = scripted(answers)
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const { ui, root } = mount(engine)
+    await root.querySelector('#ucReview').onclick()
+    for (let i = 0; i < 3 * n && seen.quotes.length <= n; i++) {
+      mock.timers.tick(OFFERED_AGAIN_EVERY_MS)
+      for (let k = 0; k < 20; k++) await Promise.resolve()
+    }
+    assert.equal(seen.quotes.length, n + 1, 'asked again for as long as the engine said `again`')
+    assert.equal(ui.state.error, USER_WORDS.notOffered('RSB', 'USDX'), 'the last words say nobody offers it')
+  } finally { mock.timers.reset() }
 })

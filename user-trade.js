@@ -58,8 +58,9 @@ import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries,
 import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
-import { DEFAULT_WORDS, vestingShort } from './default-arca.js'
+import { DEFAULT_WORDS, vestingShort, nextFinalBy } from './default-arca.js'
 import { restrictedQuote, restrictedConfirm, restrictedAdvance } from './restricted-engine.js'
+import { composedQuote, composedAdvance, openComposedIds, claimOnce } from './restricted-composed.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -72,9 +73,20 @@ export const MAKER_COMPLETE_MS = 120_000
 export const REPRICE_MOST_MS = 60_000
 // How many offers of one trade may be gone (each priced again at once) before it is returned.
 export const GONE_MOST = 3
+// Whether refusal `e` says a coin the wallet held (`held`, the leaf ids it held before the step)
+// is spent already: the operator's `double_spend`, naming the coin.
+export function spentElsewhere (e, held) {
+  const m = String((e && e.message) || '')
+  if (!/double_spend/.test(m)) return false
+  const named = (m.match(/\b[0-9a-f]{64}\b/i) || [])[0]
+  return !!named && (held || []).includes(named.toLowerCase())
+}
 // A step whose outcome is unknown (the operator did not answer, so the library may still complete
 // it at its next sync) is looked for this long before the trade is called returned.
 export const UNCERTAIN_MS = 10 * 60 * 1000
+// The longest a restricted trade's move to the chain is followed after its page closed: the page's
+// own wait for a move (index.html MOVE_WAIT_MS, 45 minutes) and five minutes more.
+export const RESTRICTED_MOVE_MOST_MS = 50 * 60 * 1000
 // A maker's firm offer is accepted only while at least this long is left before it lapses.
 export const FIRM_MARGIN_MS = 20_000
 // The most the operator's fee may be of a price, in millionths, for a trade in user mode.
@@ -111,6 +123,9 @@ export const USER_WORDS = Object.freeze({
   bookUpToSoon: (x) => `The book can fill up to ${x} now, and more in a few minutes.`,
   // Nothing to fill now for that reason alone.
   notOfferedSoon: (get, pay) => `${get} for ${pay} can be traded again in a few minutes.`,
+  // Nobody offers the pair this moment, though it was offered a moment ago: the price is asked
+  // again by itself.
+  offeredAgain: (get, pay) => `Getting a price for ${get} for ${pay}: it takes a moment. Nothing has moved.`,
   review: 'Review',
   confirm: 'Trade',
   cancel: 'Cancel',
@@ -127,6 +142,9 @@ export const USER_WORDS = Object.freeze({
   enter: 'Enter how much you pay.',
   tooSmall: 'That amount is too small to trade.',
   noFirmOffer: 'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',
+  // The wallet's own refusal: what it holds of the asset, less the fees the trade keeps back, does
+  // not cover the amount (nothing more is on its way). `most`: what can be traded now, as Max fills it.
+  ownShort: (most) => `You can trade up to ${most} now: the fees of this trade come out of what you hold. Nothing has moved.`,
   // The wallet's own library was busy finishing something it started for longer than a quote waits.
   walletBusy: 'Your wallet is still finishing something it started, so it could not get a price in time. Nothing has moved: try again in a moment.',
   noFunds: (pay) => `You have no ${pay} to trade.`,
@@ -190,7 +208,9 @@ export const USER_WORDS = Object.freeze({
   priceMoved: 'The price moved. Here is the new one.',
   // What is paid waits for the network to settle it first: the trade goes ahead by itself after.
   settling: 'Goes through in about a minute',
-  settleLate: 'This is taking longer than usual. Nothing has moved: try again in a few minutes.',
+  goesThrough: (minutes) => (minutes <= 1 ? 'Goes through in about a minute' : `Goes through within about ${minutes} minutes`),
+  goesThroughLate: 'Taking longer than usual: this goes ahead by itself, or is returned with nothing traded',
+  settleLate: 'This is taking longer than usual. Nothing has moved, and your money stays in your wallet.',
   // A trade confirmed while what it pays was settled first, whose price then moved past what was
   // accepted: nothing traded, said as an expired price is.
   returnedMoved: 'Returned: nothing traded. The price moved while it waited.',
@@ -296,8 +316,12 @@ export function tradeStateWord (r, now = Date.now()) {
   if (r.state === 'returned' && (r.feesPaid || []).length) return null
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' && r.whyKind === 'moved') return W.returnedMoved
-  // Confirmed, and what it pays being settled first: it goes ahead by itself once through.
-  if (r.state === 'settling') return W.settling
+  // Confirmed, and what it pays being settled first: it goes ahead by itself once through, within
+  // what the library last said (`finalBy`), and past that by two minutes, that it takes longer.
+  if (r.state === 'settling') {
+    if (r.finalBy == null) return W.settling
+    return now > r.finalBy + 120_000 ? W.goesThroughLate : W.goesThrough(Math.max(1, Math.ceil((r.finalBy - now) / 60_000)))
+  }
   if (r.state === 'returned' || r.state === 'failed') return W.returned
   if (r.state === 'confirming') return W.sending
   const since = (t) => Math.floor((now - (t || r.at || now)) / 60000)
@@ -348,6 +372,20 @@ export function shortBy (message) {
   return d ? BigInt(d[1]) : 0n
 }
 
+// The most the wallet can pay now of what a payment of `paying` atoms was refused for, by the
+// library's own refusal of it: short of what it takes with its margins ("the wallet holds H … in live
+// coins, and paying P takes T with the margins": P less what it is short), or leaving change below the
+// operator's smallest leaf ("… smallest leaf in asset … (M atoms): pay a little less, or that much
+// more": P less M). -> atoms (0n when nothing can go), or null for any other refusal.
+export function ownShortMost (message, paying) {
+  const short = shortBy(message)
+  if (!(short > 0n)) return null
+  const m = String(message || '').match(/paying (\d+) takes/)
+  const p = m ? BigInt(m[1]) : big(paying)
+  if (!(p > 0n)) return null
+  return p > short ? p - short : 0n
+}
+
 // The indicative entries worth asking for firm terms, best first: a source whose coin waits on
 // Bitcoin blocks is chosen over one handed over in seconds only when it gives SLOW_PREMIUM_BPS
 // more (chooseCandidate), so one that does not give that much more than the best such indicative
@@ -382,6 +420,8 @@ const TRADES_KEY = 'swk.usertrade'
 export const KEEP_ENDED = 200
 export const KEEP_BYTES = 1_000_000
 const ENDED_STATES = ['settled', 'returned', 'failed', 'undone']
+// A composed purchase whose bitcoin step cannot be paid now says why, as any bitcoin purchase does.
+const FIRST_STEP_SAYS = ['no-funds', 'btc-moving', 'wallet-busy', 'too-small', 'part-ready', 'not-ready']
 // The library's states of a swap that settled and is dead: its coin coming home (`returning`), and
 // home (`returned`). The page reads them; it infers nothing.
 export const UNDOING_STATES = Object.freeze(['returning'])
@@ -400,9 +440,11 @@ export function undoneOf (rec, swapState, ret = null) {
 }
 export const STORAGE_FULL = 'The trade was not made: this browser has no room left to keep its record. Nothing was signed.'
 // `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
-// left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped.
+// left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped, nor any
+// record of a composed trade still open (its steps, ended or not: restricted-composed.js).
 export function boundedRecords (list, keep, bytes) {
-  const ended = (r) => ENDED_STATES.includes(r && r.state)
+  const kept = openComposedIds(list)
+  const ended = (r) => ENDED_STATES.includes(r && r.state) && !kept.has(r.id)
   const size = list.map((r) => JSON.stringify(r).length + 1)
   let endedLeft = list.filter(ended).length
   let total = size.reduce((a, b) => a + b, 1)
@@ -446,10 +488,22 @@ export const BTC_ONLY_FIRM_MS = 60000
 // How long a refresh asked to get coins ready for a resting order is waited on before it is asked
 // again: its round, and the round's block being certified.
 export const READYING_MS = 10 * 60_000
+// A pair offered within this long that nobody offers now: a maker reading its coins again after a
+// trade quotes nothing for up to about 90 s (#698), so the wallet asks again rather than saying the
+// pair is not offered, every OFFERED_AGAIN_EVERY_MS.
+export const OFFERED_AGAIN_MS = 3 * 60_000
+export const OFFERED_AGAIN_EVERY_MS = 5000
 // How often a trade that settles first asks whether its coins are through (each ask after a sync),
 // and the longest it waits for them before it says the trade takes longer than usual.
 export const SETTLE_POLL_MS = 5000
 export const SETTLE_MOST_MS = 10 * 60_000
+// The library says how long a settle still takes at most (`settle_first`'s `final_in_seconds`): a
+// settle waits twice that and this margin when that is longer than SETTLE_MOST_MS.
+export const SETTLE_MARGIN_MS = 120_000
+export function settleBound (finalInSeconds) {
+  const s = Number(finalInSeconds)
+  return Number.isFinite(s) && s > 0 ? Math.max(SETTLE_MOST_MS, 2 * s * 1000 + SETTLE_MARGIN_MS) : SETTLE_MOST_MS
+}
 // The book's entries read while the amount was typed stand for the quote this long.
 const ENTRIES_FRESH_MS = 8000
 // The states of a coin held by something under way (a live one here is planned for a refresh).
@@ -598,6 +652,10 @@ export function createEngine (deps) {
     }
     const near = out.filter((e) => nearFeed(e, payAsset, receiveAsset))
     if (out.soon) near.soon = true
+    // A pair offered a moment ago that nobody offers now is offered again shortly (#698).
+    const key = payAsset + '>' + receiveAsset
+    if (near.length) offeredAt.set(key, now())
+    else if (offeredAt.has(key) && now() - offeredAt.get(key) < OFFERED_AGAIN_MS) near.again = true
     return near
   }
 
@@ -664,7 +722,7 @@ export function createEngine (deps) {
     // not hold.
     const size = sizeEntry(entry, pay < have ? pay : have)
     if (!size) return null
-    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep, (e) => { if (refusalSeen) refusalSeen(e) })
+    if (entry.source === 'btc-gateway') return btcT.firm(entry, payAsset, receiveAsset, pay, have, size, quoteStep, (e, at) => { if (refusalSeen) refusalSeen(e, at) })
     if (entry.source === 'leaf-resting') return firmResting(entry, payAsset, receiveAsset, pay, have, size, hard)
     if (entry.source === 'onchain-fill') return firmOnchain(entry, payAsset, receiveAsset, pay, have)
     if (entry.source === 'covenant-round') {
@@ -947,6 +1005,7 @@ export function createEngine (deps) {
   // Bitcoin invoice for it.
   function drop (c) {
     if (!c) return
+    if (c.source === 'composed') { drop(c.first); return }
     if (c.offer) release(c.entry.maker, c.offer.swap)
     if (c.btc) {
       btcT.release(c.entry.maker, c.btc.offer && c.btc.offer.swap)
@@ -979,6 +1038,8 @@ export function createEngine (deps) {
   //       now; `soon` when a maker takes more after its next round) }
   //  | { ok: false, why: 'not-listed'|'not-offered'|'soon'|'too-small' }
   const estimates = new Map()
+  // When each directed pair (pay>receive) last had an entry: see OFFERED_AGAIN_MS.
+  const offeredAt = new Map()
   async function estimate ({ payAsset, receiveAsset, pay, receive }) {
     // While the amount is typed, what the wallet can pay is read behind it, so Review finds it.
     if (payAsset !== 'BTC' && (!holdings || now() - holdings.at > 10_000)) readHoldingsSoon()
@@ -1001,7 +1062,7 @@ export function createEngine (deps) {
     const es = c.es.filter((e) => (e.source !== 'btc-gateway' || deps.btc) && big(e.maxReceive) > 0n)
     // A maker that takes more only after its next round (its instant budget is spent for now).
     const soon = !!c.es.soon || es.some((e) => e.soon)
-    if (!es.length) return { ok: false, why: soon ? 'soon' : 'not-offered' }
+    if (!es.length) return { ok: false, why: soon ? 'soon' : 'not-offered', ...(c.es.again ? { again: true } : {}) }
     const cdiv = (a, b) => (a + b - 1n) / b
     let most = null
     for (const e of es) { const r = big(e.maxReceive); if (!most || r > most.receive) most = { receive: r, pay: cdiv(r * e.rateNum, e.rateDen) } }
@@ -1045,7 +1106,14 @@ export function createEngine (deps) {
   // coins at the operator's depth limit, too deep to give part of, arriving, or of a format the other
   // side does not read), with the coins it named: the trade settles them first, and goes.
   let settleSeen = null
-  const noteLiveShort = (e) => {
+  // The wallet's own shortfall a source's check met (`ownShortMost`): what it could pay at most.
+  let ownMost = null, ownLive = null
+  const noteLiveShort = (e, at = {}) => {
+    const most = ownShortMost(e && e.message, at.paying)
+    if (most != null && (ownMost == null || most > ownMost)) ownMost = most
+    // What the refusal says the wallet holds in live coins (absent for the change's refusal).
+    const h = String(e && e.message).match(/holds (\d+) of asset \S+ in live coins/)
+    if (h) ownLive = BigInt(h[1])
     if (/ in live coins/.test(String(e && e.message))) liveShort = true
     if (e && e.kind === 'settle_first') settleSeen = { coins: [...new Set([...(settleSeen ? settleSeen.coins : []), ...(e.coins || [])])] }
   }
@@ -1107,13 +1175,17 @@ export function createEngine (deps) {
 
   // Puts through the operator's next round what a quote or a confirmation answered 'settle-first'
   // for (the library's `settle_first`, which gives up nothing twice), and waits, a sync and a new
-  // ask every SETTLE_POLL_MS, until the library says nothing it named is settling or waiting.
-  // -> true once through; false past `until` (SETTLE_MOST_MS), when `stop()` says so, or with a
-  // library that has no such command.
-  async function settle ({ payAsset, coins }, { until = now() + SETTLE_MOST_MS, stop = null } = {}) {
+  // ask every SETTLE_POLL_MS, until the library says nothing it named is settling or waiting and
+  // the coins their round made can be spent. `onWait(finalBy)` hears when the library says they
+  // will be (ms), each time it says. -> true once through; false past `until` (by default
+  // settleBound of the library's first answer), when `stop()` says so, or with a library that has
+  // no such command.
+  async function settle ({ payAsset, coins }, { until = null, stop = null, onWait = null } = {}) {
     // `spread`: the round cuts what it settles into a few coins of the asset, so the trades after
     // this one trade on from one while another is in a round (the fee is the same).
     const ask = coins && coins.length ? { coins, spread: true } : { asset: payAsset, spread: true }
+    const start = now()
+    let wait = null
     for (let first = true; ; first = false) {
       if (stop && stop()) return false
       if (!first) await syncShared()
@@ -1123,10 +1195,17 @@ export function createEngine (deps) {
         if (/no command|unknown command/i.test(String(e && e.message))) return false
       }
       if (v && (v.settling || []).length) log('[user trade] settling first:', v.settling.length, 'coin(s) of', String(payAsset).slice(0, 8))
+      if (v && !v.ready && v.final_in_seconds != null) {
+        // Given up only past the most the library says (final_in_seconds), twice over; the words
+        // count down to what it usually takes (nextFinalBy).
+        if (until == null) until = start + settleBound(v.final_in_seconds)
+        wait = nextFinalBy(wait, v, now())
+        if (onWait) try { onWait(wait.finalBy) } catch {}
+      }
       // Once through, priced again after the next sync has the new coins in hand.
       if (v && v.ready && !first) return true
       if (v && v.ready && first && !(v.done || []).length && !(v.left || []).length) { await syncShared(); return true }
-      if (now() >= until) return false
+      if (now() >= (until ?? start + SETTLE_MOST_MS)) return false
       await sleep(SETTLE_POLL_MS)
     }
   }
@@ -1161,6 +1240,7 @@ export function createEngine (deps) {
     quoteStep = onStep
     tooOldFrom = null
     liveShort = false
+    ownMost = null; ownLive = null
     settleSeen = null
     makerReads = new Set()
     const reads = makerReads
@@ -1169,6 +1249,17 @@ export function createEngine (deps) {
     // A pair with a restricted asset trades on the chain under its policy server
     // (restricted-engine.js), or, without what that needs, as before.
     const rq = await restrictedQuote(deps.restricted, { payAsset, receiveAsset, amount: A })
+    // Bitcoin for a restricted asset: one trade through the asset that bitcoin buys and that buys
+    // it (restricted-composed.js), one ticket and one confirmation. Bitcoin the wallet cannot pay
+    // now is said as for any purchase; otherwise, the card names the asset to go through.
+    if (rq && rq.why === 'btc-route' && payAsset === 'BTC' && rq.card && rq.card.side === 'get' && (rq.card.choices || []).length) {
+      const cq = await composedQuote(deps.restricted, { receiveAsset, vias: rq.card.choices, drop, run, nowSec: () => Math.floor(now() / 1000),
+        quoteFirst: (via) => quoteOnce({ payAsset: 'BTC', receiveAsset: via, amount: A, onStep, cap }) })
+      if (cq.ok) return cq
+      if (cq.first && FIRST_STEP_SAYS.includes(cq.first.why)) return cq.first
+      // Not approved for what the ticket would bring: the approval card, before anything moves.
+      if (cq.card) return { ok: false, why: 'approval', card: cq.card }
+    }
     if (rq) return rq
     // More than the wallet holds to spend, the rest vesting later: refused with the date from
     // which all of it can be used (default-arca.js vestingShort), whatever the pair. Nothing is
@@ -1299,11 +1390,20 @@ export function createEngine (deps) {
     }
     // Nobody gave firm terms because what the wallet holds of the asset is not live now (given up in
     // a refresh, received and not yet settled): it is being made ready, never "nobody could confirm".
+    // Nobody gave firm terms because the wallet itself cannot pay this much with the fees, and the
+    // balance shows nothing more of it on its way: what can be traded now, never "nobody could
+    // confirm" nor "try again" (#666).
+    // (Coins it holds that are not live now, held in a refresh or just received, are being made ready
+    // instead: the refusal's live figure is short of what it holds.)
+    if (!best && ownMost != null && payAsset !== 'BTC' && (ownLive == null || ownLive >= haveLeaf)) {
+      const shown = deps.held ? big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n)) : 0n
+      if (shown <= haveLeaf) return { ok: false, why: 'own-short', most: String(ownMost) }
+    }
     if (!best && liveShort && payAsset !== 'BTC') return settleFirst(payAsset, [], haveLeaf)
     // A maker gave firm terms in time and the wallet's library was still reading them when the
     // quote's time ran out (held by a long command of its own): the wallet was busy, nobody refused.
     if (!best && reads.size > 0) return { ok: false, why: 'wallet-busy' }
-    if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small' }
+    if (!best) return { ok: false, why: !es.length ? 'not-offered' : ind.length ? 'no-firm-offer' : 'too-small', ...(!es.length && all.again ? { again: true } : {}) }
     const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
       fees: best.fees.map((f) => ({ asset: f.asset, atoms: String(f.atoms) })), source: best.source, asked: String(A) }
     const have = haveOf(best.entry)
@@ -1320,11 +1420,13 @@ export function createEngine (deps) {
   // Confirms a ticket's choice: writes the trade's record, then takes the one step. Answers the
   // record; `advance` follows it.
   // `prior`: a trade confirmed before, whose step waited for its coins to be settled first (state
-  // 'settling'): the same record goes on with the new price, so it is never made twice.
-  async function confirm (choice, ticket, prior = null) {
+  // 'settling'): the same record goes on with the new price, so it is never made twice. `extra`:
+  // fields the record carries from the start (a composed trade's step: `partOf`, and `id` for the
+  // one record its trade on the chain keeps whatever its tries).
+  async function confirm (choice, ticket, prior = null, extra = {}) {
     // What the wallet can pay changes with this trade: the next quote reads it afresh.
     holdings = null
-    const id = prior ? prior.id : `${now()}-${Math.random().toString(16).slice(2, 10)}`
+    const id = prior ? prior.id : extra.id || `${now()}-${Math.random().toString(16).slice(2, 10)}`
     // A trade priced again after its offer was gone: a cancel's respend of its coins left margins
     // (`cancelFees`), paid in the asset paid. The record's ticket counts them, in what is paid and
     // in its fees, so the fee line is what the trade cost.
@@ -1334,8 +1436,19 @@ export function createEngine (deps) {
     }
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
       ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: prior.state === 'settling' || !!prior.settledFirst, settleSince: prior.settleSince,
-        ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}) } : {}) })
+        ...(prior.gave ? { gave: prior.gave } : {}), ...(prior.cancelFees ? { cancelFees: prior.cancelFees } : {}) } : {}),
+      ...extra })
     try {
+      if (choice.source === 'composed') {
+        // The composed record first, then its first step's own record, marked as its.
+        rec.via = choice.via; rec.viaAtoms = choice.viaAtoms; rec.firstFees = choice.firstTicket.fees || []
+        rec.moveFee = choice.moveFee; rec.moved = choice.moved; rec.secondFee = choice.secondFee; rec.secondFeeAsset = choice.secondFeeAsset
+        put(rec)
+        const one = await confirm(choice.first, choice.firstTicket, null, { partOf: rec.id })
+        rec.first = one.id
+        if (one.state !== 'confirming') { rec.state = one.state === 'waiting' ? 'waiting' : 'sent'; rec.sentAt = now(); if (rec.state === 'waiting') rec.waitingSince = now() }
+        return put(rec)
+      }
       if (choice.source === 'covenant-round') {
         rec.order = choice.entry.id
         rec.orderJson = choice.entry.raw._relayJson || choice.entry.raw
@@ -1437,6 +1550,25 @@ export function createEngine (deps) {
         settleAsk(rec).catch(() => {})
         return put(rec)
       }
+      // A step refused, before anything was signed to the other side, because a coin of the
+      // wallet's it paid from is spent elsewhere (a second device gave it to a round): a fill of an
+      // order resting in the tree, a take of a covenant order, or an acceptance of a maker's offer
+      // whose coin the wallet first shapes by paying itself. The library has caught up and holds
+      // what replaced it, so the trade is priced again into the same record under what was
+      // accepted, as a maker's gone offer is (advanceGone, #710). A person does not know which kind
+      // of offer was the best price, so all behave the same.
+      if (rec.state === 'confirming' && refused && spentElsewhere(e, rec.before) && ['leaf-resting', 'covenant-round', 'leaf-maker'].includes(choice.source)) {
+        drop(choice)
+        rec.gave = [...(rec.gave || []), { ...(rec.order ? { order: rec.order } : { swap: rec.swap }), why: String(e.message || '').slice(0, 300), whose: 'taker' }]
+        log('[user trade] a coin it paid from was spent elsewhere; pricing again:', rec.id)
+        if (rec.gave.length >= GONE_MOST) {
+          rec.state = 'returned'; rec.whyKind = null; rec.error = 'the offers were gone ' + rec.gave.length + ' times'
+          if (big(rec.cancelFees) > 0n) rec.feesPaid = [{ asset: rec.ticket.payAsset, atoms: String(rec.cancelFees) }]
+          return put(rec)
+        }
+        rec.state = 'repricing'; rec.repriceSince = now(); rec.accepted = rec.accepted || ticket; rec.error = null
+        return put(rec)
+      }
       if (rec.state === 'confirming') {
         if (refused) { rec.state = 'failed'; rec.error = e.message; put(rec); throw e }
         rec.uncertain = true; rec.uncertainAt = now(); rec.error = e.message
@@ -1520,8 +1652,9 @@ export function createEngine (deps) {
   // A confirmed trade whose coins are settled first: once through, priced again for the amount
   // accepted, and confirmed into the same record only when the new price is the one the person
   // accepted or better (no less received, no more paid); returned with words when it moved, or
-  // when it waited SETTLE_MOST_MS. Nothing asks twice: one advance of a record at a time (`advancing`),
-  // and its stored state read again before the confirmation.
+  // when it waited past its bound (rec.settleMost, else SETTLE_MOST_MS). Nothing asks twice: one
+  // advance of a record at a time (`advancing`), and its stored state read again before the
+  // confirmation.
   async function advanceSettling (rec) {
     const late = () => { rec.state = 'returned'; rec.whyKind = 'late'; rec.error = 'settling first took too long'; return put(rec) }
     let v = null
@@ -1529,9 +1662,18 @@ export function createEngine (deps) {
       log('[user trade] settle_first:', e && e.message)
       if (/no command|unknown command/i.test(String(e && e.message))) { rec.state = 'failed'; rec.error = e.message; return put(rec) }
     }
-    if (!v || !v.ready) { if (now() - (rec.settleSince || rec.at) > SETTLE_MOST_MS) return late(); syncShared(); return rec }
+    // How long it may wait: what the library first said it takes, twice, with a margin (settleBound),
+    // kept on the record so a page opened later holds it to the same bound.
+    if (v && !v.ready && v.final_in_seconds != null) {
+      if (rec.settleMost == null) rec.settleMost = settleBound(v.final_in_seconds)
+      const n = nextFinalBy(rec.finalBy != null ? { finalBy: rec.finalBy, step: rec.finalStep ?? null } : null, v, now())
+      rec.finalBy = n.finalBy; rec.finalStep = n.step
+      put(rec)
+    }
+    const upTo = rec.settleMost || SETTLE_MOST_MS
+    if (!v || !v.ready) { if (now() - (rec.settleSince || rec.at) > upTo) return late(); syncShared(); return rec }
     await syncShared()
-    return repriceWithin(rec, SETTLE_MOST_MS, rec.settleSince || rec.at)
+    return repriceWithin(rec, upTo, rec.settleSince || rec.at)
   }
 
   // Prices a confirmed trade again for the amount accepted (`rec.accepted`), and confirms it into
@@ -1595,6 +1737,16 @@ export function createEngine (deps) {
     if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
     if (rec.state === 'settling') return advanceSettling(rec)
     if (rec.state === 'repricing') return repriceWithin(rec, REPRICE_MOST_MS, rec.repriceSince || rec.at)
+    // A composed trade moves on under a claim no other page of this wallet holds at the same time,
+    // from its record as stored then: two pages never move or take for one trade.
+    if (rec.source === 'composed') {
+      const done = await claimOnce(rec.id, async () => {
+        const now_ = records().find((r) => r.id === rec.id) || rec
+        if (['settled', 'returned', 'failed', 'undone'].includes(now_.state)) return now_
+        return composedAdvance(deps.restricted, now_, { records, put, now, run, stepCoin, confirm: (c, t, x) => confirm(c, t, null, x) })
+      }, deps.locks)
+      return done || records().find((r) => r.id === rec.id) || rec
+    }
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an
       // acceptance the library made is in its own store; read it there. A step that did not answer
@@ -1616,9 +1768,14 @@ export function createEngine (deps) {
         const got = ((await run('coins')) || []).find((c) => !(rec.before || []).includes(c.leaf_id) && c.asset === rec.receiveAsset && c.state === 'live')
         if (got) { rec.state = 'sent'; rec.sentAt = now() } else notFound('not filled')
       } else if (rec.source === 'restricted') {
-        // A trade whose broadcast did not answer: it was made once the chain knows it.
+        // A trade whose broadcast did not answer: it was made once the chain knows it. One whose page
+        // closed while what it pays from was moving to the chain is followed while that move runs
+        // (#697), up to RESTRICTED_MOVE_MOST_MS: it is never ended as not made meanwhile.
         const st = rec.txid ? await Promise.resolve(deps.restricted.status(rec.txid)).catch(() => 'unknown') : 'unknown'
-        if (st !== 'unknown') { rec.state = 'sent'; rec.sentAt = now() } else notFound('not made')
+        const moving = !rec.txid && rec.movingSince && now() - rec.movingSince < RESTRICTED_MOVE_MOST_MS && deps.restricted.moving &&
+          await Promise.resolve(deps.restricted.moving()).catch(() => true)
+        if (st !== 'unknown') { rec.state = 'sent'; rec.sentAt = now() } else if (moving) return rec
+        else { delete rec.movingSince; notFound('not made') }
       } else if (rec.source === 'onchain-fill') {
         // A FILL whose broadcast did not answer: it is the wallet's once the node knows it.
         const st = rec.txid ? await Promise.resolve(deps.onchain.status(rec.txid)).catch(() => 'unknown') : 'unknown'
@@ -1697,6 +1854,32 @@ export function createEngine (deps) {
 
   async function participation (pid) {
     return ((await run('participations')) || []).find((p) => p.participation === pid) || null
+  }
+
+  // The coin a bitcoin purchase brought, as the wallet holds it now (restricted-composed.js): the
+  // coin its claim made, or the one the round that settled it made in its place. -> { coin } (live),
+  // { waiting } (in a round), { merged } (a round made one coin of it and others), { gone }.
+  async function stepCoin (rec) {
+    const first = ((rec && rec.settleTargets) || [])[0]
+    if (!first || !first.leaf_id) return { gone: true }
+    const coins = (await run('coins')) || []
+    let id = first.leaf_id
+    for (let hop = 0; hop < 4; hop++) {
+      const c = coins.find((x) => x && x.leaf_id === id)
+      if (!c) return { gone: true }
+      if (c.state === 'live') return { coin: c }
+      const pid = roundOf(c)
+      if (!pid) return movedOn(c) || c.state === 'spent' ? { gone: true } : { waiting: true }
+      const p = await participation(pid)
+      if (!p || p.state !== 'released') return { waiting: true }
+      // A round that gave up this coin alone made one coin of it; with others, a coin that is no
+      // longer the purchase's alone.
+      if ((p.gives || []).length > 1) return { merged: true }
+      const made = (p.new_leaves || []).filter((n) => n && (!n.asset || n.asset === c.asset))
+      if (made.length !== 1 || !made[0].leaf_id) return { waiting: true }
+      id = made[0].leaf_id
+    }
+    return { waiting: true }
   }
 
   // The coins a trade brings, or leaves as change on a reassignment, settled in the operator's

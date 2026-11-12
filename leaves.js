@@ -88,7 +88,7 @@
 // The mode's words, the same in every Sequentia wallet (this one, the extension and
 // Ambra): change them in all three together.
 import { expandRequest } from './pay-code.js'
-import { pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen,
+import { DEFAULT_WORDS, settleMinutes, nextFinalBy, pinnedOperator, defaultWatchtowers, checkPinned, treeRoute, arrivingAtoms, redoingAtoms, keptSafeAtoms, anchorDepth, boardCandidates, boardAll, boardSpent, onchainLessBoards, JOIN_RETRY_MS, CLAIMS_EVERY_MS, vestingLots, vestingAtoms, vestingAssets, vestingFor, vestingRefusal, vestedOpen,
   homeCoins, unreachableOf, homeQuote as quoteHome, homeTake, homeUnderWay as underWay } from './default-arca.js'
 
 export const MODE_WORDS = Object.freeze({
@@ -552,6 +552,8 @@ export class LeafError extends Error {
     if (e && Array.isArray(e.close)) this.close = e.close
     // A spend that waits only for a round (`settle_first`): the coins to put through it first.
     if (e && Array.isArray(e.coins)) this.coins = e.coins
+    // And how long they wait, as the library reads it (`settle_first`'s figures).
+    for (const k of ['final_in_seconds', 'usual_in_seconds', 'waiting_for']) if (e && e[k] != null) this[k] = e[k]
     // And, for a payment to a receive code, the most it can pay once they are closed and that
     // payment's fee, with the leaves the close gives back counted (the library's `most`, `fee`).
     if (e && e.most != null) this.most = String(e.most)
@@ -1743,9 +1745,15 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // planned ones it names would cover it) is asked again once those coins are given up in
   // the next round for leaves no plan names: plan_release, then sync until that round is
   // final and the new leaves are held. Every other answer and refusal is the library's.
-  async function paying (command, args) {
+  // `stage`, when given, hears 'asking' before each time the library is asked to pay (it may then
+  // sign), and 'waiting' while the payment waits for a round with nothing signed for it: a page
+  // that keeps a payment across a closed page asks again only one that was 'waiting'.
+  async function paying (command, args, stage = null) {
+    const tell = (x) => { if (stage) try { stage(x) } catch {} }
     for (let i = 0; ; i++) {
+      tell('asking')
       try { return await run(command, args) } catch (e) {
+        tell('waiting')
         // Coins too many payments from a round (the operator's `depth_limit`) are refreshed in the
         // next round, by themselves, and the payment asked again once that round is final: the
         // same wait as a release, which a person in user mode never has to ask for.
@@ -1770,12 +1778,19 @@ export function mountLeaves (ctx, root, settingsRoot) {
         // once it is through, about a minute later. Nothing is refused for it.
         // An offboard's quote answers at once, as the library gave it: the page reviews the payment
         // then, and the offboard made on that review settles first.
+        // Past RELEASE_TRIES settles that each ended ready while the payment still waited: said in
+        // plain words, never the library's own text (it names the asset by its id).
+        if (e instanceof LeafError && e.kind === 'settle_first' && i >= RELEASE_TRIES && command !== 'offboard_quote') {
+          throw new LeafError({ kind: 'refused', code: 'settle_gave_up', message: DEFAULT_WORDS.settleGaveUp })
+        }
         if (e instanceof LeafError && e.kind === 'settle_first' && i < RELEASE_TRIES && command !== 'offboard_quote') {
           const coins = e.coins && e.coins.length ? e.coins : null
           // Cut into a few coins of the asset (`spread`, the same fee): what is paid or traded next goes
           // from one while another is in a round.
           const ask = coins ? { coins, spread: true } : { asset: e.asset, spread: true }
           S.releasing = { coins: coins || [], asset: e.asset, since: now(), command, why: 'settle' }
+          // The refusal says how long already (the library's reading, as `settle_first` gives it).
+          { const n = nextFinalBy(null, e, now()); if (n) { S.releasing.wait = n; S.releasing.finalBy = n.finalBy } }
           render()
           try {
             log(`[leaves] ${command}: ${coins ? coins.length : 'the'} coin(s) it needs go through the next round first; paid once through`)
@@ -1863,8 +1878,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // Puts through the next round what a `settle_first` refusal named (`ask`: its coins, or its asset),
   // asking the library again every ROUND_POLL_MS (it gives up nothing twice), after a sync, until it
-  // answers ready: nothing it named is settling or waiting any more. Up to RELEASE_WAIT_MS. A library
-  // without the command answers as before (the refusal stands).
+  // answers ready: nothing it named is settling or waiting any more, and the coins their round made
+  // can be spent. The library's answers (`final_in_seconds`, `waiting_for`) set `S.releasing.finalBy`,
+  // the time the page's words count down to (default-arca.js nextFinalBy). Up to RELEASE_WAIT_MS. A
+  // library without the command answers as before (the refusal stands).
   async function waitSettled (ask) {
     const until = now() + RELEASE_WAIT_MS
     for (let first = true; ; first = false) {
@@ -1875,9 +1892,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
         if (!first) { try { const s = await run('sync'); synced(s) } catch {} }
         v = await run('settle_first', ask)
         if (v && (v.settling || []).length) log(`[leaves] ${v.settling.length} coin(s) given up in the next round to settle first`)
+        if (S.releasing) { const n = nextFinalBy(S.releasing.wait || null, v, now()); if (n) { S.releasing.wait = n; S.releasing.finalBy = n.finalBy } }
       } finally { S.busy = false }
       if (!v || v.ready) { try { S.coins = (await run('coins')) || S.coins } catch {}; return v }
-      if (now() >= until) throw new LeafError({ kind: 'refused', message: 'the next round did not settle the coins this needs in time; nothing was paid, and it can be asked again' })
+      if (now() >= until) throw new LeafError({ kind: 'refused', code: 'settle_gave_up', message: DEFAULT_WORDS.settleGaveUp })
       await sleep(ROUND_POLL_MS)
     }
   }
@@ -2651,9 +2669,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   // ---- for the page API (wallet-api.js): the library's commands, one at a time ----
-  async function command (cmd, args) {
+  async function command (cmd, args, stage = null) {
     if (!S.open) throw new LeafError({ kind: 'refused', message: 'this wallet has not joined a leaf operator: join one in the wallet\u2019s Leaves tab' })
-    try { return await asking(() => act(cmd, () => paying(cmd, args || {}))) } catch (e) {
+    try { return await asking(() => act(cmd, () => paying(cmd, args || {}, stage))) } catch (e) {
       // Refused for what the wallet holds out of round (a large payment just received, such as
       // the faucet's five assets): what it received is given up in the next round at the next
       // turn of the upkeep, not after the refresh's usual pace, so room comes back sooner.
@@ -2857,12 +2875,12 @@ export function mountLeaves (ctx, root, settingsRoot) {
     receiveCode,
     // Pays a receive code in the tree, as a person asked (first in line, through the next round
     // when it needs a planned coin), and reads what it moved.
-    payCode: (text, amount, asset) => {
+    payCode: (text, amount, asset, stage = null) => {
       const t0 = now()
       return asking(async () => {
         while (S.busy) await sleep(50)
         const t1 = now()
-        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset }), { answerFirst: true }).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
+        const v = await act('send', () => paying('send', { request: text, amount: String(amount), asset }, stage), { answerFirst: true }).catch((e) => { throw dev() ? devRefusal(e) : plainRefusal(e) })
         log(`[leaves] send: waited ${t1 - t0} ms for the wallet, paid in ${now() - t1} ms`)
         if (ctx.onChange) try { ctx.onChange() } catch {}
         return v
@@ -2871,13 +2889,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // A payment to an address out of the tree, paid in the operator's next settlement: the
     // library's quote, then the payment made only on that quote (`shown`).
     offboardQuote: (args) => command('offboard_quote', args),
-    offboard: (args) => command('offboard', args).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
+    offboard: (args, stage = null) => command('offboard', args, stage).then((v) => { if (ctx.onChange) try { ctx.onChange() } catch {} return v }),
     // The operator's interval between settlements, in seconds, or null.
     // The operator's smallest leaf of an asset, in atoms (an output below it is refused), or 0n.
     minLeaf: (hex) => { const a = ((S.info && S.info.server_info && S.info.server_info.assets) || []).find((x) => x && x.asset === hex); return a ? big(a.min_leaf) : 0n },
     roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
     // The chain's block interval the operator follows, in seconds, or null.
     blockSeconds: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.block_seconds) || null },
+    // The most the operator takes from a settlement to a payment out of the tree being unlocked in a
+    // block (`offboards.unlock_within_seconds`), or null when it says none.
+    unlockSeconds: () => { const o = S.info && S.info.server_info && S.info.server_info.offboards; return (o && o.unlock_within_seconds) || null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),
@@ -2886,7 +2907,14 @@ export function mountLeaves (ctx, root, settingsRoot) {
     sendQuote: (text, amount, asset) => asking(() => act('send_quote', () => run('send_quote', { request: text, amount: String(amount), asset }), { answerFirst: true })),
     // Why a payment waits for a round, while it does: 'channel' (a channel's side set free first),
     // 'depth' or a plan's release; null when none waits.
-    releasing: () => (S.releasing ? { why: S.releasing.why || 'planned', asset: S.releasing.asset, coins: S.releasing.coins.length, since: S.releasing.since } : null),
+    releasing: () => (S.releasing ? { why: S.releasing.why || 'planned', asset: S.releasing.asset, coins: S.releasing.coins.length, since: S.releasing.since,
+      finalBy: S.releasing.finalBy ?? null } : null),
+    // The minutes a payment that settles first waits at most before it goes, from the operator's
+    // round interval, block time and anchor depth (default-arca.js settleMinutes).
+    settleMinutes: () => {
+      const si = (S.info && S.info.server_info) || {}, f = si.fills || {}
+      return settleMinutes(f.round_interval_seconds, f.block_seconds, anchorDepth(S.info), !!(si.batches && si.batches.no_sweep), f.round_pass_seconds)
+    },
     refreshSoon: () => refreshSoon(),
     joinError: () => S.joinError || null,
     // `atoms` of an asset as the page's own reading of the chain shows them, less what a board just

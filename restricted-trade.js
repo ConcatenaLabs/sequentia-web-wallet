@@ -338,6 +338,11 @@ export const RESTRICTED_WORDS = Object.freeze({
   noneSelling: (ticker) => `No one is selling ${ticker} right now. Check back later.`,
   noneBuying: (ticker) => `No one is buying ${ticker} right now. Check back later.`,
   viaHeld: (via) => `Your bitcoin bought ${via}; it is yours to trade or send.`,
+  viaWaiting: (via, ticker) => `Your bitcoin bought ${via}. It buys ${ticker} by itself as soon as an offer allows; until then the ${via} is yours.`,
+  viaKeep: (amount) => `You also get ${amount}.`,
+  // The true wait, on the ticket before the person confirms: what it pays from is moved to the chain first.
+  takes: (minutes) => `Takes about ${minutes} minutes, as what you pay is first moved to where this trade is made. Keep this page open.`,
+  viaApproval: (via, ticker) => `Your bitcoin bought ${via}. It buys ${ticker} once its issuer approves this wallet; until then the ${via} is yours.`,
 })
 
 // The approval card of a refusal (RA1 design 5.2): whom to ask, taking the first of the asset's
@@ -440,7 +445,18 @@ export async function takeDvP (host, entry, { feeAsset, onTxid }) {
   const fee = big(await host.feeAtoms(feeAsset, TRADE_VBYTES))
   const owns = await host.walletOwns()
   const c = await host.courier(entry)
+  // Until the trade goes to its broadcast, nothing of the wallet's has left it signed: a maker that
+  // refuses, does not answer or answers out of turn before then has moved nothing, and the trade
+  // is refused at once, never followed as one that may have been made (#697).
+  let sent = false
   try {
+    return await dvpSteps()
+  } catch (e) {
+    if (sent || (e && e.kind === 'refused')) throw e
+    throw refusal(String((e && e.message) || e))
+  } finally { try { c.close() } catch {} }
+
+  async function dvpSteps () {
     await c.send({ type: 'dvp_request', taker_aid: aid, seq_amount: Number(value) })
     const m = await c.recv('dvp_coins', STEP_MS)
     const theirs = await host.coinsAt((m.dvp_coins || []).map((x) => ({ txid: x.Txid ?? x.txid, vout: x.Vout ?? x.vout })))
@@ -492,6 +508,7 @@ export async function takeDvP (host, entry, { feeAsset, onTxid }) {
       const signed = await host.signWallet(hex, unsigned.inputs)
       const bad = checkSigned(tx, readTx(signed), offeredIdx)
       if (bad) { await c.fail('bad_terms', bad); throw refusal(bad) }
+      sent = true
       txid = await broadcast(policy, { ...body, tx: signed, broadcast: true, user_sigs: sm.user_sigs, expires_at: Number(sm.expires_at), expiry_sig: sm.expiry_sig }, tx.txid, onTxid)
     } else {
       const theirsSigned = readTx(sm.dvp_tx)
@@ -507,11 +524,12 @@ export async function takeDvP (host, entry, { feeAsset, onTxid }) {
       const exp = await chainNow(host) + EXPIRY_S
       const sigs = await host.signEnclave(signed, unsigned.inputs, sellerIns, mine)
       const es = await host.signDigest(expiryDigest(tx.txid, exp))
+      sent = true
       txid = await broadcast(policy, { ...body, tx: signed, broadcast: true, user_sigs: sigs, expires_at: exp, expiry_sig: es }, tx.txid, onTxid)
     }
     await c.send({ type: 'dvp_done', settle_txid: txid }).catch(() => {})
     return { txid }
-  } finally { try { c.close() } catch {} }
+  }
 }
 
 // The layout when the buyer pays the price and the fee in one asset from one set of coins: the

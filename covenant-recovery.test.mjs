@@ -11,7 +11,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates, searchOrder, restingCoin, amountsFromRatios, amountsInRange,
+import { locateFunding, applyLocate, findUnrecordedLocks, expiryCandidates, rebuildOrder, recvCandidates, searchOrder, restingCoin, amountsFromRatios, amountsInRange, SLICE_MS,
   FUNDING_GRACE_MS, ABSENT_RECHECK_MS } from './covenant-recovery.js'
 import { planPlaceOrder } from './covenant-order.js'
 import { computeRate, covenantMinLot, covenantDerivationIds, orderExpiryTime } from './covenant-flow.js'
@@ -219,15 +219,51 @@ test('the search stops at its budget and says it did not finish', async () => {
 
 test('an order\'s coin is followed through its fills by its script (RV45 P2, P3)', async () => {
   const at = (utxo, txs) => ({ get: async (p) => (p.endsWith('/utxo') ? utxo : p.endsWith('/txs') ? txs : null) })
-  const rec = { spkHex: REC.script }
+  const rec = { spkHex: REC.script, pay: A }
   // After a part fill what is left rests at the same script in the fill's transaction.
-  const part = await restingCoin(rec, at([{ txid: 'f1'.repeat(32), vout: 1, value: 500, status: { confirmed: true } }], []))
+  const part = await restingCoin(rec, at([{ txid: 'f1'.repeat(32), vout: 1, value: 500, asset: A, status: { confirmed: true } }], []))
   assert.deepEqual(part, { coin: { txid: 'f1'.repeat(32), vout: 1, value: 500n, confirmed: true } })
   // Filled whole: nothing rests; settled only once the spend is in a block.
   assert.deepEqual(await restingCoin(rec, at([], [{ status: { confirmed: true } }, { status: { confirmed: true } }])), { done: true, settled: true })
   assert.deepEqual(await restingCoin(rec, at([], [{ status: { confirmed: true } }, { status: { confirmed: false } }])), { done: true, settled: false })
   // A fill reorganized out: the coin rests again where it was.
-  const back = await restingCoin(rec, at([{ txid: 'a0'.repeat(32), vout: 0, value: 1000, status: { confirmed: true } }], []))
+  const back = await restingCoin(rec, at([{ txid: 'a0'.repeat(32), vout: 0, value: 1000, asset: A, status: { confirmed: true } }], []))
   assert.equal(back.coin.value, 1000n)
   await assert.rejects(() => restingCoin(rec, { get: async () => { throw new Error('explorer 502') } }))
+})
+
+// web wallet #723 (review RV45, R4): an order's script is public, so anyone can pay a coin of another
+// asset, or a blinded one, to it. Only an explicit coin of the asset the order locked is the order's.
+test('a stranger\'s coin at the order\'s script is never taken for the order\'s', async () => {
+  const at = (utxo, txs) => ({ get: async (p) => (p.endsWith('/utxo') ? utxo : p.endsWith('/txs') ? txs : null) })
+  const rec = { spkHex: REC.script, pay: A }
+  const stranger = { txid: '5e'.repeat(32), vout: 0, value: 5_000_000_000, asset: B, status: { confirmed: true } }
+  const blinded = { txid: 'b1'.repeat(32), vout: 1, valuecommitment: '08' + 'ab'.repeat(32), assetcommitment: '0a' + 'cd'.repeat(32), status: { confirmed: true } }
+  const ours = { txid: '0e'.repeat(32), vout: 2, value: 500, asset: A.toUpperCase(), status: { confirmed: false } }
+  assert.deepEqual(await restingCoin(rec, at([stranger, blinded, ours], [])),
+    { coin: { txid: '0e'.repeat(32), vout: 2, value: 500n, confirmed: false } })
+  // Filled whole, with a stranger's coins left there: the order reads as filled, and nothing throws.
+  assert.deepEqual(await restingCoin(rec, at([stranger, blinded], [{ status: { confirmed: true } }])), { done: true, settled: true })
+})
+
+// web wallet #724 (review RV45): the search hands the page back at least every SLICE_MS of work,
+// whatever a candidate costs on the device, and stops at its budget.
+test('the search yields by elapsed time, not by a count of candidates', async () => {
+  const plan = placedOrder({ sell: 5000n, recv: 7n, index: 0, expiry: 1794465000 })
+  const lock = { txid: '44'.repeat(32), vout: 0, spkHex: plan.spkHex, asset: A, value: 5000n }
+  // A slow device: every reading of the clock is 1 ms on.
+  let t = 0
+  const pauses = []
+  const res = await searchOrder({ lock, candidates: Array.from({ length: 400 }, (_, i) => ({ asset: B, recv: BigInt(1000 + i) })),
+    makers: makerKeys(1), expiries: [1794465001], budgetMs: 10_000, now: () => (t += 1), pause: async () => { pauses.push(t) } })
+  assert.equal(res.complete, true)
+  assert.ok(pauses.length > 0, 'yielded at least once before 500 candidates')
+  const gaps = pauses.map((p, i) => p - (i ? pauses[i - 1] : 0))
+  assert.ok(Math.max(...gaps) <= SLICE_MS + 3, `held the page at most ${SLICE_MS} ms at a time (longest: ${Math.max(...gaps)} ms)`)
+  // The budget: a search that runs out of time says it did not finish, and stops within a slice of it.
+  t = 0
+  const out = await searchOrder({ lock, candidates: Array.from({ length: 4000 }, (_, i) => ({ asset: B, recv: BigInt(1000 + i) })),
+    makers: makerKeys(1), expiries: [1794465001], budgetMs: 200, now: () => (t += 1), pause: async () => {} })
+  assert.equal(out.complete, false)
+  assert.ok(t <= 200 + 2 * SLICE_MS + 4, `stopped at its budget (clock at ${t} ms)`)
 })

@@ -26,10 +26,12 @@
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
-import { USER_WORDS, QUOTE_FIRM_MS, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
+import { USER_WORDS, QUOTE_FIRM_MS, OFFERED_AGAIN_EVERY_MS, SETTLE_MOST_MS, settleBound, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
+import { SETTLE_LATE_MS } from './default-arca.js'
 import { mountMarketView } from './market-view.js'
 import { openPicker, PICKER_WORDS } from './asset-picker.js'
 import { RESTRICTED_WORDS } from './restricted-trade.js'
+import { isStep } from './restricted-composed.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 // The chooser button's marks (no words): what nothing chosen shows, and the arrow.
@@ -41,8 +43,6 @@ const CARET = '▾'
 // times at most (about ten minutes: a round and its block).
 export const READY_RETRY_MS = 20_000
 export const READY_TRIES = 30
-// How many times in a row a trade settles first before it says it takes longer than usual.
-export const SETTLE_TRIES = 3
 // How long Trade waits for the trade's step before the screen is free again.
 export const CONFIRM_SHOWN_MS = 1500
 export const FOLLOW_FAST_MS = 120_000
@@ -137,8 +137,11 @@ export function mountUserComposer (ctx) {
     if (!e.ok && e.why === 'restricted') { S.note = ''; paintNote(); return }
     if (!e.ok) {
       S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall
-        : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
+        : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay))
+        : e.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       if (other && doc.activeElement !== other) other.value = ''
+      // Offered a moment ago: estimated again shortly, by itself (#698).
+      if (e.again) schedule(OFFERED_AGAIN_EVERY_MS)
       paintNote(); return
     }
     const fill = S.fixed === 'pay' ? ctx.fmtAtoms(big(e.receive), prec(S.get)) : ctx.fmtAtoms(big(e.pay), prec(S.pay))
@@ -321,7 +324,7 @@ export function mountUserComposer (ctx) {
     const btn = (text, id, f, cls) => { const b = el('button', cls || '', text); b.type = 'button'; b.id = id; b.disabled = S.busy; b.onclick = f; return b }
     if (!S.ticket && S.card) { paintAnswerCard(t, act, btn); return }
     if (!S.ticket) {
-      act.appendChild(btn(S.settling ? USER_WORDS.settling : S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
+      act.appendChild(btn(S.settling ? settleWord() : S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
       return
     }
     const k = S.ticket
@@ -333,6 +336,8 @@ export function mountUserComposer (ctx) {
     cost.textContent = costText
     t.appendChild(cost)
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
+    if (k.minutes) { const w = el('div', 'sub', RESTRICTED_WORDS.takes(k.minutes)); w.id = 'ucTakes'; t.appendChild(w) }
+    if (k.keep && k.via) { const kp = el('div', 'sub', RESTRICTED_WORDS.viaKeep(amt(k.via, k.keep))); kp.id = 'ucKeep'; t.appendChild(kp) }
     if (S.moving) { const mv = el('div', 'sub', USER_WORDS.btcMore(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)); mv.id = 'ucMoving'; t.appendChild(mv) }
     act.appendChild(btn(S.busy ? USER_WORDS.sending : USER_WORDS.confirm, 'ucConfirm', confirm, 'primary'))
     act.appendChild(btn(USER_WORDS.cancel, 'ucCancel', () => { ctx.engine.drop(S.choice); reset(); paintTicket() }, 'ghost'))
@@ -370,13 +375,19 @@ export function mountUserComposer (ctx) {
       // itself, saying only how long it takes (D96).
       else if (q.why === 'settle-first') { settleThenReview(q); return }
       else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
+        : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
         : q.why === 'btc-moving' ? USER_WORDS.btcMoving(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)
-        : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
+        : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay))
+        : q.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       // Coins being made ready for this trade: priced again by itself while the person waits,
-      // every READY_RETRY_MS, as long as nothing they typed changed.
+      // every READY_RETRY_MS, as long as nothing they typed changed. A pair offered a moment ago
+      // that nobody offers now (a maker reading its coins again after a trade, #698): every
+      // OFFERED_AGAIN_EVERY_MS, while it was offered within OFFERED_AGAIN_MS: the engine's window
+      // bounds it, not a count of tries, so the last answer, once past it, is the words shown.
       if (!q.ok && (q.why === 'readying' || q.why === 'btc-moving')) readyAgain()
+      else if (!q.ok && q.again) readyAgain(OFFERED_AGAIN_EVERY_MS, false)
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
       S.error = USER_WORDS.notOffered(name(S.get), name(S.pay))
@@ -435,32 +446,46 @@ export function mountUserComposer (ctx) {
 
   let readyTimer = null, readyTries = 0
   // A quote answered 'settle-first': the coins it waits on go through the next round (the engine's
-  // settle), the person told only "Goes through in about a minute", and the trade is priced again
-  // by itself once they are through, while nothing they typed changed. Past SETTLE_TRIES quotes that
-  // still wait, or the engine's longest wait, it says the trade takes longer than usual.
-  let settleTries = 0
+  // settle), the person told only how long, and the trade is priced again by itself once they are
+  // through, while nothing they typed changed. It waits by time, not by tries: as long as the
+  // library says the coins take (`finalBy`, from its `final_in_seconds`), twice over with a margin
+  // (settleBound), and never less than SETTLE_MOST_MS from the first settle of the same ask; only
+  // past that does it say the trade takes longer than usual. Past what the library said, the words
+  // say it takes longer and goes by itself.
+  let settleAsk = null
+  const settleWord = () => {
+    if (S.settleBy == null) return USER_WORDS.settling
+    const t = Date.now()
+    return t > S.settleBy + SETTLE_LATE_MS ? USER_WORDS.goesThroughLate : USER_WORDS.goesThrough(Math.max(1, Math.ceil((S.settleBy - t) / 60_000)))
+  }
   async function settleThenReview (q) {
     const asked = `${S.pay}|${S.get}|${S.amount}`
     const stale = () => `${S.pay}|${S.get}|${S.amount}` !== asked
-    if (++settleTries > SETTLE_TRIES) { settleTries = 0; S.error = USER_WORDS.settleLate; S.busy = false; paintTicket(); return }
-    S.busy = true; S.settling = true; S.note = USER_WORDS.settling; paintTicket()
+    if (!settleAsk || settleAsk.asked !== asked) settleAsk = { asked, since: Date.now(), most: SETTLE_MOST_MS }
+    if (Date.now() - settleAsk.since > settleAsk.most) { settleAsk = null; S.settleBy = null; S.error = USER_WORDS.settleLate; S.busy = false; paintTicket(); return }
+    S.busy = true; S.settling = true; S.note = settleWord(); paintTicket()
     let through = false
-    try { through = await ctx.engine.settle({ payAsset: q.payAsset || S.pay, coins: q.coins }, { stop: stale }) } catch (e) { console.warn('[user composer] settle:', e && e.message) }
+    const onWait = (finalBy) => {
+      S.settleBy = finalBy
+      settleAsk.most = Math.max(settleAsk.most, settleBound((finalBy - settleAsk.since) / 1000))
+      S.note = settleWord(); paintTicket()
+    }
+    try { through = await ctx.engine.settle({ payAsset: q.payAsset || S.pay, coins: q.coins }, { stop: stale, onWait }) } catch (e) { console.warn('[user composer] settle:', e && e.message) }
     S.settling = false; S.busy = false
-    if (stale()) { settleTries = 0; S.note = ''; paintTicket(); return }
-    if (!through) { settleTries = 0; S.note = ''; S.error = USER_WORDS.settleLate; paintTicket(); return }
+    if (stale()) { settleAsk = null; S.settleBy = null; S.note = ''; paintTicket(); return }
+    if (!through) { settleAsk = null; S.settleBy = null; S.note = ''; S.error = USER_WORDS.settleLate; paintTicket(); return }
     await review()
-    if (S.ticket || S.error) settleTries = 0
+    if (S.ticket || S.error) { settleAsk = null; S.settleBy = null }
   }
 
-  function readyAgain () {
+  function readyAgain (ms = READY_RETRY_MS, counted = true) {
     const asked = `${S.pay}|${S.get}|${S.amount}`
     clearTimeout(readyTimer)
-    if (++readyTries > READY_TRIES) { readyTries = 0; return }
+    if (counted && ++readyTries > READY_TRIES) { readyTries = 0; return }
     readyTimer = setTimeout(() => {
       if (`${S.pay}|${S.get}|${S.amount}` !== asked || S.busy || S.ticket) { readyTries = 0; return }
       review()
-    }, READY_RETRY_MS)
+    }, ms)
   }
 
   // Trade: the step is taken in the background. If it is not done within CONFIRM_SHOWN_MS, the
@@ -493,12 +518,33 @@ export function mountUserComposer (ctx) {
   }
 
   function stateWord (r) {
+    // A purchase with bitcoin whose second step has not gone: what the person now holds.
+    // A restricted trade moving what it pays from to the chain: what the move says, with its wait.
+    if (r.source === 'restricted' && r.state === 'confirming' && r.note) return r.note
+    // Not approved now: says so, and the card shows how to get approved.
+    if (r.source === 'composed' && r.viaHeld && r.via) {
+      if (r.state === 'settled') return RESTRICTED_WORDS.viaHeld(name(r.via))
+      return (r.card ? RESTRICTED_WORDS.viaApproval : RESTRICTED_WORDS.viaWaiting)(name(r.via), name(r.ticket.receiveAsset))
+    }
     if (r.state === 'returned' && (r.feesPaid || []).length) return USER_WORDS.returnedFees(r.feesPaid.map((f) => amt(f.asset, f.atoms)).join(' and '))
     return tradeStateWord(r, Date.now())
   }
 
   const ENDED = ['settled', 'returned', 'failed', 'undone']
-  const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${amt(r.ticket.receiveAsset, r.ticket.amountOut)}`
+  // A trade's transactions on a chain: a composed trade's are its steps'.
+  function linksOf (r) {
+    if (!ctx.links) return []
+    const all = ctx.engine.records()
+    const recs = r.source === 'composed' ? [r.first, r.second].map((id) => all.find((x) => x.id === id)).filter(Boolean) : [r]
+    return recs.flatMap((x) => ctx.links(x))
+  }
+  // What a trade brought: a composed purchase that ended at its first step brought that step's asset.
+  // What it holds of that asset: what the move put on the chain once it has, else the coin itself.
+  const got = (r) => (r.source === 'composed' && r.ended === 'via' ? amt(r.via, r.viaOut ? r.viaOut.value : r.viaAtoms) : amt(r.ticket.receiveAsset, r.ticket.amountOut))
+  // The fees a trade paid: a composed purchase that ended holding its first step's asset, that
+  // step's and, once made, the move's.
+  const feesOf = (r) => (r.ended !== 'via' ? r.ticket.fees : [...(r.firstFees || []), ...(r.viaOut && r.move ? [{ asset: r.via, atoms: r.move.fee }] : [])])
+  const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${got(r)}`
 
   function paintTrades () {
     noteEnds()
@@ -511,7 +557,8 @@ export function mountUserComposer (ctx) {
     // An ended trade stays here only while the page that saw it end is open; after a reload it is
     // in History alone, so trades never push the market down the page.
     const endedAt = (r) => r.settledAt || r.returnedAt || r.failedAt || r.at || 0
-    const recs = ctx.engine.records().filter((r) => (r.state !== 'confirming' || r.uncertain || Date.now() - (r.at || 0) < 10 * 60_000) && r.ticket)
+    // A step of a composed trade is shown as the trade it is part of.
+    const recs = ctx.engine.records().filter((r) => !isStep(r) && (r.state !== 'confirming' || r.uncertain || Date.now() - (r.at || 0) < 10 * 60_000) && r.ticket)
       .filter((r) => !ENDED.includes(r.state) || endedAt(r) >= S.openedAt).slice(-12).reverse()
     list.classList.toggle('uc-has-open', recs.some((r) => !ENDED.includes(r.state)))
     if (!recs.length) return
@@ -562,14 +609,28 @@ export function mountUserComposer (ctx) {
     head.appendChild(ht); c.appendChild(head)
     const line = (label, value, cls) => { const d = el('div', 'kv'); d.appendChild(el('span', 'k', label)); const v = el('span', 'v' + (cls ? ' ' + cls : '')); if (typeof value === 'string') v.textContent = value; else v.appendChild(value); d.appendChild(v); c.appendChild(d); return d }
     line(USER_WORDS.amountIn, amt(r.ticket.payAsset, r.ticket.amountIn))
-    line(USER_WORDS.amountOut, amt(r.ticket.receiveAsset, r.ticket.amountOut))
-    c.appendChild(el('div', 'sub uc-cost', costLine(r.ticket.fees, amt, r.ticket.payAsset)))
+    line(USER_WORDS.amountOut, got(r))
+    // A composed purchase that ended at its first step paid that step's fees alone.
+    c.appendChild(el('div', 'sub uc-cost', costLine(feesOf(r), amt, r.ticket.payAsset)))
     line(USER_WORDS.cardState, stateWord(r), 'uc-card-state').dataset.state = r.state
+    // A composed purchase waiting on the issuer's approval: whom to ask, as before a purchase.
+    let cardAct = null
+    if (r.source === 'composed' && r.card && !ended) {
+      const k = r.card
+      const box = el('div', 'uc-card'); box.id = 'ucCardApproval'
+      box.appendChild(el('div', '', k.text))
+      if (k.reason) box.appendChild(el('div', 'sub', k.reason))
+      c.appendChild(box)
+      cardAct = el('div', 'row')
+      if (k.code) { const b = el('button', 'ghost', RESTRICTED_WORDS.copyCode); b.type = 'button'; b.id = 'ucCopyCodeCard'; b.onclick = () => { try { navigator.clipboard.writeText(k.code) } catch {} }; cardAct.appendChild(b) }
+      if (k.link) { const a = el('a', 'btn ghost', k.link.text); a.id = 'ucOpenPageCard'; a.href = k.link.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; cardAct.appendChild(a) }
+      c.appendChild(cardAct)
+    }
     if (r.source === 'btc-gateway') {
       const steps = tradeSteps({ r, name })
       if (steps) { c.appendChild(el('div', 'lbl uc-steps-title', USER_WORDS.stepsTitle)); stepList(c, steps) }
     }
-    for (const k of (ctx.links ? ctx.links(r) : [])) {
+    for (const k of linksOf(r)) {
       const a = el('a', null, k.text); a.href = k.href; a.target = '_blank'; a.rel = 'noopener'
       line(USER_WORDS.txOn(k.chain), a, 'mono')
     }
@@ -581,15 +642,15 @@ export function mountUserComposer (ctx) {
 
   // A trade that ends while its card is closed is said wherever the person is (ctx.notify), once.
   // The trades ended before the page looked are not said again.
-  function endedIds () { return ctx.engine.records().filter((r) => r.ticket && ENDED.includes(r.state)).map((r) => r.id) }
+  function endedIds () { return ctx.engine.records().filter((r) => r.ticket && !isStep(r) && ENDED.includes(r.state)).map((r) => r.id) }
   function seenEnds () { S.ended = new Set(endedIds()) }
   function noteEnds () {
     if (!S.ended) { seenEnds(); return }
     for (const r of ctx.engine.records()) {
-      if (!r.ticket || !ENDED.includes(r.state) || S.ended.has(r.id)) continue
+      if (!r.ticket || isStep(r) || !ENDED.includes(r.state) || S.ended.has(r.id)) continue
       S.ended.add(r.id)
       if ((S.card && S.card.id === r.id) || !ctx.notify) continue
-      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: (ctx.links ? ctx.links(r) : [])[0] || null })
+      ctx.notify(USER_WORDS.ended(what(r), stateWord(r)), { sticky: r.state !== 'settled', link: linksOf(r)[0] || null })
     }
   }
 

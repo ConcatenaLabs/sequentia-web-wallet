@@ -37,7 +37,8 @@ import { T4_WAIT, T4_WAIT_SHORT, testnet4BlockAgeNow, blockAgeText } from './btc
 // fills permissionlessly (even while the wallet is offline), and settle an inbound
 // match as the taker. Everything routes through these; no crypto is hand-rolled here.
 import { planPlaceOrder, buildCovenantTerms, settleFill as covSettleFill, planRefund as covPlanRefund, cancel as covCancel } from './covenant-order.js';
-import { locateFunding, applyLocate, findUnrecordedLocks, restingCoin, expiryCandidates, searchOrder, recvCandidates, amountsFromRatios, amountsInRange } from './covenant-recovery.js';
+import { locateFunding, applyLocate, findUnrecordedLocks, ordersFromNotes, restingCoin, expiryCandidates, searchOrder, recvCandidates, amountsFromRatios, amountsInRange } from './covenant-recovery.js';
+import { noteKey, sealNote, openNote } from './order-note.js';
 import { verifyAgainstSPK as covVerifyAgainstSPK } from './covenant.js';
 import { makeCovenantHooks, makerPayout } from './covenant-fill-host.js';
 import { computeRate, orderExpiry, orderExpiryTime, lockState, deriveOtherField, buildCovenantOffer, fillRestSplit, leafProductFits, DEFAULT_ORDER_BLOCKS, covenantMinLot, revHex, covenantDerivationIds } from './covenant-flow.js';
@@ -6757,8 +6758,31 @@ const PLACED_KEY = 'seqobCovenantOrders.v1';
 function loadPlaced(){ try { PLACED = JSON.parse(localStorage.getItem(PLACED_KEY) || '[]') || []; } catch { PLACED = []; } }
 function savePlaced(){ try { localStorage.setItem(PLACED_KEY, JSON.stringify(PLACED)); } catch {} }
 function nextMakerIndex(){
-  let mx = -1; for (const r of PLACED){ if (typeof r.makerIndex === 'number' && r.makerIndex > mx) mx = r.makerIndex; }
+  // Archived orders count too: an order filled or taken back keeps its key, and a payout is never shared.
+  let mx = -1; for (const r of PLACED.concat(loadArchived())){ if (typeof r.makerIndex === 'number' && r.makerIndex > mx) mx = r.makerIndex; }
   return mx + 1;   // a fresh taproot payout per order, so credits never collide
+}
+// Whether the wallet kit writes a data output (SWK TxBuilder.addDataOutput). A page served with an
+// older kit places its orders without a note, records them so, and says so once in the console:
+// such an order is found again by the searches, not by a note.
+let _noDataOutputSaid = false;
+export function kitWritesNotes(network, warn = (m) => console.warn(m)){
+  let b = null, ok = false;
+  try { b = network.txBuilder(); ok = typeof b.addDataOutput === 'function'; } catch { ok = false; }
+  try { b && b.free && b.free(); } catch {}
+  if (!ok && !_noDataOutputSaid){
+    _noDataOutputSaid = true;
+    warn('[order note] the wallet kit has no data output: resting orders are placed without a note of their terms, and a restore finds them only by search');
+  }
+  return ok;
+}
+// The key of this wallet's order notes (order-note.js), from its own key tree; null without one.
+let _noteKey = null, _noteRoot = null;
+async function orderNoteKey(){
+  const root = C.keyRoot && C.keyRoot();
+  if (!root) return null;
+  if (_noteRoot !== root){ _noteKey = await noteKey(root); _noteRoot = root; }
+  return _noteKey;
 }
 
 // The companion Wollet: the primary wallet is wpkh (BIP84) and does not track the
@@ -6783,12 +6807,15 @@ async function esplora(path, opts){ return C.esploraFetch(path, opts); }
 // Fund a covenant spk: send `atoms` of asset A to the covenant address as an
 // explicit output (the proven TxBuilder -> sign -> finalize -> broadcast path),
 // then resolve the covenant vout by matching the spk on the broadcast tx.
-async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset, onSigned){
+// `note` (order-note.js, 59 bytes) rides in a data output of the fee asset: an asset the funding
+// already moves and the relaying node accepts, so it adds no input, no change and no other asset.
+async function fundCovenant(covAddr, spkHex, assetHex, atoms, feeAsset, onSigned, note){
   const addr = new C.wasm.Address(covAddr);
   // C-1: pay the funding fee in the CHOSEN fee asset (open fee market), not silently in tSEQ. applyFee
   // prices any asset — tSEQ included — from the feed, so the fee the user is shown ("Fee paid in: X") is
   // the fee actually charged. Falls back to the pay asset if no fee asset was resolved.
-  const b = C.network.txBuilder().addExplicitRecipient(addr, BigInt(atoms), new C.wasm.AssetId(assetHex));
+  let b = C.network.txBuilder().addExplicitRecipient(addr, BigInt(atoms), new C.wasm.AssetId(assetHex));
+  if (note) b = b.addDataOutput(note, new C.wasm.AssetId(feeAsset || assetHex));   // placeCovenant asked the kit first (kitWritesNotes)
   const exec = async () => {
     const pset = C.applyFee(b, feeAsset || assetHex).finish(C.wollet);
     const signed = C.signer.sign(pset);
@@ -6878,10 +6905,19 @@ async function placeCovenant(pay, receive, payAtoms, recvAtoms, onStatus, opts){
     // (the user paid BTC and expects BTC back). Absent for ordinary same-chain orders.
     ...(opts.advertiseOfferAssetAs ? { pegged: true, advertiseAs: opts.advertiseOfferAssetAs } : {}),
   };
+  // The order's terms, sealed to the wallet's own key, ride in its funding (order-note.js): a restore
+  // from the phrase alone rebuilds the order from them. Without a key or a note the order still goes;
+  // the searches by price and by the person's answer remain for it.
+  let note = null;
+  if (!opts.noNote && kitWritesNotes(C.network)){
+    try { const k = await orderNoteKey(); if (k) note = await sealNote(k, { receive, recvAtoms, expiry: params.expiryLocktime, makerIndex: idx, idsInternal: true }); }
+    catch (e) { console.warn('[order note]', (e && e.message) || e); }
+  }
+  rec.noted = !!note;
   PLACED.push(rec); savePlaced();
   onStatus && onStatus('Funding the order on-chain…');
   const { txid, vout } = await fundCovenant(covAddr, plan.spkHex, pay, payAtoms, feeAssetPolicy().asset,
-    (fundTxid) => { rec.fundTxid = fundTxid; savePlaced(); });
+    (fundTxid) => { rec.fundTxid = fundTxid; savePlaced(); }, note);
   rec.covTxid = txid; rec.covVout = vout; savePlaced();   // outpoint known -> reclaim is fully self-contained
   const covenant = buildCovenantTerms(plan.order, txid, vout, plan.tap);
   const offer = buildCovenantOffer({
@@ -7236,7 +7272,7 @@ function refundFee(lockedAsset, locked){
   for (const h of [S.feeAsset, lockedAsset, ...feeAssetOptions().map(o => o.hex)]){
     const atoms = can(h); if (atoms != null) return { asset: h, atoms };
   }
-  throw new Error(`No asset this wallet holds can pay the network fee for taking ${lockedAsset ? 'back these ' + C.assetMeta(lockedAsset).ticker : 'the coins back'}: receive a little of an asset the network accepts for fees, then try again.`);
+  throw new Error(`No asset this wallet holds can pay the network fee for taking ${lockedAsset ? 'back these ' + C.assetMeta(lockedAsset).ticker : 'the coins back'}: receive a little of an asset the network accepts for fees, and Reclaim can take them back at once. The coins stay in the order until then.`);
 }
 function refundHooksFor(fee){
   fee = fee || refundFee(null, 0n);
@@ -10593,29 +10629,68 @@ function makerIndexCeiling(){
 // Developer mode only: default mode has no resting orders of this kind and says nothing of them.
 const devModeNow = () => !C.devMode || !!C.devMode();
 let _lostAsked = false;   // the person asked to look for an order missing from the list
-// An archived record whose coin rests on the chain again (a block that spent it left the chain, or a
-// record put away too early) comes back by itself: its script says it exactly.
-async function restoreArchived(){
+// An archived record whose coin rests on the chain again comes back by itself: its script says it
+// exactly. That is a block that spent it leaving the chain (the chain follows its Bitcoin anchor),
+// a record put away too early, or a refund that never reached a block: Reclaim puts its record away
+// at broadcast, and a refund dropped from the mempool leaves the coin resting (web wallet #722).
+// A refund just sent is given RECLAIM_SEEN_MS for the explorer to see it spend the coin.
+const RECLAIM_SEEN_MS = 5 * 60_000;
+async function restoreArchived(now = Date.now()){
   const archived = loadArchived();
   let restored = 0;
   for (let i = archived.length - 1; i >= 0; i--){
     const r = archived[i];
-    if (!r.spkHex || r.archivedWhy === 'reclaimed') continue;
+    if (!r.spkHex) continue;
+    if (r.archivedWhy === 'reclaimed' && now - Number(r.archivedAt || 0) < RECLAIM_SEEN_MS) continue;
     let res; try { res = await restingCoin(r, { get: explorerGet }); } catch { continue; }
     if (!res.coin || PLACED.some(x => String(x.spkHex).toLowerCase() === String(r.spkHex).toLowerCase())) continue;
     const rec = { ...r, covTxid: res.coin.txid, covVout: res.coin.vout, restAtoms: String(res.coin.value) };
-    delete rec._orphan; delete rec.archivedAt; delete rec.absentAt; delete rec.archivedWhy;
+    delete rec._orphan; delete rec.archivedAt; delete rec.absentAt; delete rec.archivedWhy; delete rec.refundTxid;
     PLACED.push(rec); archived.splice(i, 1); restored++;
   }
   if (restored){ savePlaced(); saveArchived(archived); ensureCovenantRelay(); }
   return restored;
 }
+// In every mode: the orders the wallet's notes rebuild (order-note.js), exactly, from the chain. An
+// order whose coin still rests goes back in Your resting orders; one filled whole or taken back is
+// archived, so it is not read again.
+const NOTE_CHECKED_KEY = 'seqobCovenantNoteScan.v1';     // spends read that carry no note
+async function restoreFromNotes(){
+  const key = await orderNoteKey();
+  if (!key) return 0;
+  const archived = loadArchived(), known = new Set();
+  for (const r of PLACED.concat(archived)) if (r.spkHex) known.add(String(r.spkHex).toLowerCase());
+  const seen = new Set(readList(NOTE_CHECKED_KEY));
+  const recs = await ordersFromNotes({ get: explorerGet, ownSpends: async () => ownSpendTxids() }, {
+    open: (n) => openNote(key, n), known, checked: { has: (t) => seen.has(t), add: (t) => seen.add(t) },
+    makerAt: (i) => { const p = makerPayout(C.signer, C.network, i); return { index: i, program: p.program, internalKey: p.internalKey }; },
+  });
+  let restored = 0, put = 0;
+  for (const rec of recs){
+    let res = null; try { res = await restingCoin(rec, { get: explorerGet }); } catch {}
+    rec.offerId = seqob.randHex(16);
+    if (res && res.coin){
+      rec.covTxid = res.coin.txid; rec.covVout = res.coin.vout; rec.restAtoms = String(res.coin.value);
+      PLACED.push(rec); restored++;
+    } else if (res && res.done && res.settled){ archived.push({ ...rec, archivedAt: Date.now(), archivedWhy: 'done' }); put++; }
+  }
+  if (restored){ savePlaced(); ensureCovenantRelay(); }
+  if (put) saveArchived(archived);
+  writeList(NOTE_CHECKED_KEY, [...seen], 5000);
+  return restored;
+}
 async function scanLostOrders(force){
   if (_lostScanning || (!force && Date.now() - _lostScanAt < LOST_SCAN_MS)) return;
-  if (!devModeNow()){ _lostLocks = []; return; }
   _lostScanning = true;
   try {
-    const restored = await restoreArchived();
+    // In every mode: an order Reclaim did not in the end take back is the person's to see again.
+    let restored = await restoreArchived();
+    try { restored += await restoreFromNotes(); } catch (e) { console.warn('[order notes]', (e && e.message) || e); }
+    if (!devModeNow()){
+      _lostLocks = []; _lostScanAt = Date.now();
+      if (restored) renderMyOrders();
+      return;
+    }
     // What the wallet paid to a taproot script it holds no order for is listed only when the person
     // asks: without its terms an order's coin looks like any payment to such a script (a deposit, a
     // payment to someone else), and a wallet that never left an order must see nothing.
@@ -10762,9 +10837,9 @@ async function followPlaced(rec){
   if (res.done) return res.settled ? 'done' : 'spending';
   return 'unknown';
 }
-function archivePlaced(rec, why){
+function archivePlaced(rec, why, live = rec){
   saveArchived(loadArchived().concat([{ ...rec, archivedAt: Date.now(), archivedWhy: why }]));
-  PLACED = PLACED.filter(r => r !== rec); savePlaced();
+  PLACED = PLACED.filter(r => r !== live); savePlaced();
 }
 async function followPlacedCoins(){
   let changed = false;
@@ -10786,7 +10861,7 @@ async function reclaimPlaced(rec, tipNow, confirm){
   for (let attempt = 0; attempt < 2; attempt++){
     const st = await followPlaced(rec); savePlaced();
     if (st === 'done' || st === 'spending'){ if (st === 'done') archivePlaced(rec, 'done'); return { done: true }; }
-    if (st !== 'resting') throw new Error('The order\'s coins could not be read just now. Try again in a minute.');
+    if (st !== 'resting') throw new Error('The order\'s coins could not be read just now. Nothing was sent: they stay in the order, and Reclaim reads them afresh each time it is pressed.');
     const locked = BigInt(rec.restAtoms);
     const fee = refundFee(rec.pay, locked);
     if (attempt === 0 && confirm && !(await confirm({ ...fee, locked }))) return { cancelled: true };
@@ -10801,7 +10876,7 @@ async function reclaimPlaced(rec, tipNow, confirm){
     try {
       const out = await covCancel(rec.offerId, { recipe, tipHeight: tipNow.height, tipTime: tipNow.medianTime, expiryLocktime: Number(rec.expiry) },
         { relayCancel: async (offerId) => seqob.signAndCancel(offerId, makerPriv()), ...refundHooksFor(fee) });
-      if (out.refundTxid){ archivePlaced(rec, 'reclaimed'); return { refundTxid: out.refundTxid, locked }; }
+      if (out.refundTxid){ archivePlaced({ ...rec, refundTxid: out.refundTxid }, 'reclaimed', rec); return { refundTxid: out.refundTxid, locked }; }
       return out;
     } catch (e){
       if (attempt === 0 && /missingorspent|missing-inputs|txn-mempool-conflict/.test(String(e && e.message || e))) continue;   // filled meanwhile: look again
@@ -10893,7 +10968,7 @@ function stripBip32(b64){
 // from a headless harness, no DOM. Adds composerRoute for the reframe's mapping.
 export const __test__ = {
   // #708: a resting order's record and the way back for one whose record is gone.
-  askLostOrders: () => { _lostAsked = true; }, reconcileUnfundedPlaced, scanLostOrders, recoverLostOrder, autoRecoverLostOrder, reclaimPlaced, followPlacedCoins, refundFee, orderFromPlaced, refundHooksFor, placeCovenant,
+  askLostOrders: () => { _lostAsked = true; }, reconcileUnfundedPlaced, scanLostOrders, restoreArchived, restoreFromNotes, recoverLostOrder, autoRecoverLostOrder, reclaimPlaced, followPlacedCoins, refundFee, orderFromPlaced, refundHooksFor, placeCovenant,
   lostLocks: () => _lostLocks, placed: () => PLACED, loadPlaced, archived: () => loadArchived(),
   crossableDepthAtoms, ratioRecvPerPay, stripBip32, feeAssetPolicy, feeAssetOptions, acceptedFee, defaultFeeAsset, setFeeState: (o) => Object.assign(S, o),
   // Walk orchestration, exposed so the SEQUENCING can be tested without a courier,
