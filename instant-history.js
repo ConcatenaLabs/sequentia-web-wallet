@@ -103,6 +103,8 @@ export function tradeRows (records) {
   for (const r of records || []) {
     const t = r && r.ticket
     if (!t || !t.payAsset || !t.receiveAsset) continue
+    // A composed trade moved nothing itself: its steps' rows are what moved.
+    if (r.source === 'composed') continue
     const at = Number(r.sentAt || r.at) || 0
     if (r.state === 'undone') {
       // Undone: what it was to bring never came; what was paid is coming back, then back.

@@ -48,11 +48,13 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
 - Trade tab in developer mode: SeqDEX order book, Market and Limit orders; same-chain orders rest on-chain as
   self-enforcing SeqOB covenants and fill without the wallet being open. An order's locked coins
   come back through Reclaim once its lock has passed: a median time a day after it is placed (a
-  block height a day ahead when the explorer gives no median time). An order's terms are kept only in the browser
-  that placed it. An order whose record is gone (the site's data cleared, another device, a
-  restore from the phrase) still shows its coins: the wallet lists what it paid to a script it
-  holds no order for, and takes the order back when it can rebuild its terms, from the market's
-  prices when it was placed or from what you say you asked for in return
+  block height a day ahead when the explorer gives no median time). An order's terms are kept in
+  the browser that placed it and, encrypted to a key of the phrase, in a 59-byte note in the
+  order's funding transaction (`order-note.js`). A restore from the phrase, another device or
+  cleared site data rebuilds every order with a note exactly, filled in part or not, listed or not,
+  in either mode. An order without a note still shows its coins: the wallet lists what it paid to a
+  script it holds no order for, and takes the order back when it can rebuild its terms, from the
+  market's prices when it was placed or from what you say you asked for in return
 - Cross-chain BTC↔asset HTLC swaps, taker and in-browser maker, with resume-after-reload safety
 - BTC on a Bitcoin ark in default mode: native bitcoin held in Bark's wallet of the same phrase
   on the ark the page names (the testnet's own Bark server on testnet4), paid in seconds between
@@ -808,9 +810,17 @@ default mode the Trade tab simply trades it against other assets. The wallet tak
 quote in one transaction that moves both sides at once, or fills a resting order whose coin
 only the asset's policy server can release; either way the wallet checks the whole transaction
 before it signs anything, and the policy server checks it again and broadcasts it. A buyer the
-issuer has not approved is shown whom to ask and the approval code to give them. A restricted
-asset is never paid for with bitcoin directly: the screen names the asset that bitcoin buys and
-that buys it. A restricted asset is sent only to its recipient's approval code. When the policy
+issuer has not approved is shown whom to ask and the approval code to give them. A trade the
+other side declines before anything is sent ends at once with nothing traded; one whose page was
+closed while what it pays from was being made ready is followed until that is done. Bitcoin buys a
+restricted asset as one trade with one ticket and one confirmation: the bitcoin buys an asset that
+buys the restricted one, and once that has settled the wallet makes the rest by itself, moving
+exactly what the bitcoin bought to the chain and trading it there, only at terms giving at least
+what the ticket showed and at no higher fees. Every fee is on the ticket, and no other coin of the
+person's is touched. Until the rest can go, the screen says which asset the bitcoin bought, and
+that asset is the person's to keep, trade or send; when the issuer does not approve the wallet at
+that moment, the screen says so and shows whom to ask, as it does before a purchase. A
+restricted asset is sent only to its recipient's approval code. When the policy
 server does not answer eligibility, the Trade tab trades as it does without restricted assets.
 
 ## For developers
@@ -824,7 +834,9 @@ server does not answer eligibility, the Trade tab trades as it does without rest
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
 | `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
 | `restricted-trade.js` / `restricted-engine.js` / `restricted-host.js` | Restricted assets in the Trade tab: the taker's side of a maker's quote (one transaction, both legs) and of a gated order, the check each side runs on the whole transaction before signing, the default composer's pricing and its approval and bitcoin cards, and the page's coins, keys, explorer and courier behind them. |
+| `restricted-composed.js` | Bitcoin for a restricted asset as one trade: the ticket of every step (the bitcoin purchase, the move of what it bought to the chain, the trade there), and the rest made by itself once the first has settled. |
 | `market-view.js` | A pair's market, in both modes' Trade tab: chart, last price and 24-hour change, best bid and ask, recent trades, from the relay's `trades`, `candles` and `ticker`; developer mode adds rails. |
+| `order-note.js` | A resting order's note: its terms, encrypted to the phrase's own key (`m/1017'/9'/0'`, HKDF label `sequentia/resting-order-note/v1`, AES-256-CTR, a random nonce stored in the note), written in the order's funding transaction and read back by `covenant-recovery.js` `ordersFromNotes`. The file's header is the format another wallet reproduces; `order-note.test.mjs` holds a vector. No DOM. |
 | `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `covenant-sim.js` | SeqDEX's Simplicity order (the template `seqdex/order`): its address from the terms and the pinned commitment root, and a fill's witness from the template's pinned programs, with no compiler; `seqob.js` signs and verifies its offers (`simplicity_covenant`). Pinned to the template's vectors as seqdex vendors them. |
 | `seqob.js` | SeqDEX order-book (seqob relay) protocol client: wire codec, offer signing/verification, end-to-end crypter, REST + WebSocket lift driver. |
