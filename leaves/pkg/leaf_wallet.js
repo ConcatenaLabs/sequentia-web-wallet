@@ -234,6 +234,30 @@ export function installStore(directory) {
     const ret = wasm.installStore(ptr0, len0);
     return ret;
 }
+
+/**
+ * Waits `ms` milliseconds as the library does between two tries: through
+ * the host's wait ([`set_pause`]), never less than `ms`. For a host to check
+ * its wait.
+ * @param {number} ms
+ */
+export function pause(ms) {
+    wasm.pause(ms);
+}
+
+/**
+ * Gives the library the host's wait, `wait(ms)`: a function that blocks the
+ * calling thread for up to `ms` milliseconds without using the processor,
+ * and returns. It may return early or throw; the library then waits out the
+ * rest on the clock, which keeps a core busy, so a host that can wait
+ * without one should give it. `null` takes it back. How the host waits is
+ * its own: a synchronous request its server holds, `Atomics.wait` on a
+ * shared buffer where the page is cross-origin isolated or under Node.
+ * @param {Function | null} [wait]
+ */
+export function setPause(wait) {
+    wasm.setPause(isLikeNone(wait) ? 0 : addToExternrefTable0(wait));
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -637,7 +661,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1133, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1134, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_b19ca315ae9c045d___convert__closures_____invoke___wasm_bindgen_b19ca315ae9c045d___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_b19ca315ae9c045d___JsError___true_);
             return ret;
         },
