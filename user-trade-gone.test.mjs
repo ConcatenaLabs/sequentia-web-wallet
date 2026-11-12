@@ -1,0 +1,133 @@
+// A maker that answers "the offer is gone" (the operator refused its completion, web wallet #685):
+// the trade takes its coins back at once and is priced again for what the person accepted, going
+// ahead in the same record only at that price or better, the maker's own offer made in its place
+// taken first; otherwise it comes back with the words it has. Never the two minutes' wait for an
+// answer that cannot change.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { createEngine } from './user-trade.js'
+
+const X = 'aa'.repeat(32), Y = 'bb'.repeat(32)
+
+// A stand-in library and maker. The maker's first completion is refused by the operator: it
+// answers 409 gone, with an offer made in its place at `again` (null: none), and later asks of the
+// same acceptance get the same answer.
+function standIn ({ again = 'same', rateNum = 4n } = {}) {
+  const coins = [{ leaf_id: 'dead', asset: X, value: '3000000', state: 'live', kind: 'transfer' }]
+  const swaps = new Map()
+  const calls = []
+  const posts = []
+  let n = 0
+  let refusedOnce = false
+  const lib = {
+    command (cmd, a) {
+      calls.push(cmd)
+      switch (cmd) {
+        case 'coins': return coins.map((c) => ({ ...c }))
+        case 'plans': return { plans: [] }
+        case 'swap_read': {
+          const [, id, gets, gives] = a.offer.split(':')
+          return { swap: id, gets: { asset: Y, value: gets }, gives: { asset: X, value: gives }, pays: { asset: X, margins: '192' },
+            change: { asset: X, value: '1000' }, dates: { expiry: 1800000000 }, hops: 1 }
+        }
+        case 'info': return { server_info: { depth_limit: 5 } }
+        case 'swap_accept': {
+          const [, id] = a.offer.split(':')
+          swaps.set(id, { swap: id, role: 'taker', state: 'accepted' })
+          // The first acceptance names the coin a second device gave to a round; later ones the coin
+          // that replaced it, which the cancel's catch-up brought.
+          const c = coins.find((x) => x.state === 'live')
+          c.state = 'offered'; c.note = 'swap ' + id
+          return { swap: id, accept: 'swap-accept:' + id }
+        }
+        case 'swaps': return [...swaps.values()].map((s) => ({ ...s }))
+        case 'sync': return {}
+        case 'swap_cancel': {
+          const s = swaps.get(a.swap)
+          s.state = 'cancelled'
+          // The library's cancel: the respend is refused for the dead coin, the wallet catches up
+          // (the dead coin spent, the round's coin taken), and the acceptance is cancelled.
+          const d = coins.find((x) => x.leaf_id === 'dead')
+          d.state = 'spent'
+          coins.push({ leaf_id: 'round', asset: X, value: '3000000', state: 'live', kind: 'batch' })
+          return { swap: a.swap, cancelled: true, spent_elsewhere: ['dead'], freed: [] }
+        }
+        default: throw new Error('no command ' + cmd)
+      }
+    },
+  }
+  const made = new Map()
+  const offer = (give, rn = 4n) => {
+    const id = 'o' + (++n); const want = (BigInt(give) * rn + 2n) / 3n
+    const o = { swap: id, offer: `swap-offer:${id}:${give}:${want}`, give: String(give), want: String(want), expires_at: 4102444800 }
+    made.set(id, o)
+    return o
+  }
+  const fetchJson = async (url, init) => {
+    if (url.endsWith('/v1/quotes')) return { quotes: [{ give_asset: Y, want_asset: X, rate_num: String(rateNum), rate_den: '3', max_give: '1000000', min_give: '10000' }] }
+    const b = init && init.body ? JSON.parse(init.body) : {}
+    posts.push([url.split('/v1/')[1], b])
+    if (url.endsWith('/v1/firm')) return offer(b.give, posts.filter(([p]) => p === 'firm').length > 1 ? rateNum + (again === 'worse' ? 1n : 0n) : 4n)
+    if (url.endsWith('/v1/release')) return {}
+    if (url.endsWith('/v1/accept')) {
+      const s = swaps.get(b.swap)
+      if (!refusedOnce || s.gone) {
+        refusedOnce = true
+        if (!s.gone) {
+          const first = made.get(b.swap)
+          s.gone = { error: 'refused: the operator refused the swap\'s completion (409 double_spend): leaf dead… is already spent; the offer is withdrawn',
+            swap: b.swap, gone: true, code: 'double_spend', whose: 'taker', coin: 'dead', ...(again === 'same' ? { offer: offer(first.give) } : {}) }
+        }
+        const e = new Error(s.gone.error); e.status = 409; e.body = s.gone; throw e
+      }
+      s.state = 'done'
+      coins.find((x) => x.note === 'swap ' + b.swap).state = 'spent'
+      coins.push({ leaf_id: 'got-' + b.swap, asset: Y, value: '1', state: 'live', kind: 'transfer' })
+      return { swap: b.swap, state: 'done' }
+    }
+    return {}
+  }
+  const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
+  return { lib, fetchJson, store, calls, posts, swaps, coins }
+}
+
+const admitted = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
+
+test('a gone offer: the coins come back at once and the maker\'s offer made in its place completes the trade in the same record', async () => {
+  const s = standIn({ again: 'same' })
+  const t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  assert.ok(q.ok, q.why)
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.equal(rec.state, 'sent')
+  assert.equal(rec.gone && rec.gone.whose, 'taker', 'the first hand-over\'s answer is read')
+  const firms = s.posts.filter(([p]) => p === 'firm').length
+  const r = await eng.advance(eng.records()[0])
+  // The clock stood still: acted on at once, not after the two minutes the engine gives a maker.
+  assert.equal(t - rec.sentAt, 0)
+  assert.ok(s.calls.includes('swap_cancel'), 'the dead acceptance is cancelled')
+  assert.equal(s.posts.filter(([p]) => p === 'firm').length, firms, 'the offer made in its place is taken, no new one asked')
+  assert.equal(eng.records().length, 1, 'one record: the trade is never made twice')
+  assert.equal(r.id, rec.id)
+  assert.notEqual(r.swap, rec.swap, 'it goes ahead on the new offer')
+  assert.deepEqual(r.gave.map((g) => g.swap), [rec.swap])
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut) && BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'no worse than the ticket')
+  const done = await eng.advance(eng.records()[0])
+  assert.equal(done.state, 'settled', JSON.stringify(done))
+  assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 1, 'exactly one swap done')
+})
+
+test('a gone offer with no offer in its place, and the maker now asking more: returned with words, at once', async () => {
+  const s = standIn({ again: 'worse' })
+  const t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const rec = await eng.confirm(q.choice, q.ticket)
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned', JSON.stringify(r))
+  assert.equal(r.whyKind, 'moved', 'said as a price that moved')
+  assert.equal(t - rec.sentAt, 0, 'at once: the clock stood still')
+  assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 0, 'nothing traded')
+  assert.ok(!s.posts.some(([p, b]) => p === 'accept' && b.swap !== rec.swap), 'no other offer was accepted')
+})
