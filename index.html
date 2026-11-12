@@ -4665,9 +4665,14 @@ function restrictedDeps(){
     },
     fee: async (hex)=> restrictedFeeAtoms(hex, TRADE_VBYTES),
     ensure: (needs, say)=> ensureOnChain(needs, say, 'traded'),
+    // A composed purchase moves its coin to this address, and pays its trade on the chain from what
+    // landed there alone.
+    address: async ()=> wollet.address(undefined).address().toUnconfidential().toString(),
+    unspent: async (op)=>{ try{ await restrictedHost().coinsAt([op]); return true; }catch(e){ return !/ is spent$/.test(String(e?.message??e)); } },
     take: async (entry, opts)=>{
       const host = restrictedHost();
       try{
+        if(opts && opts.only) host.onlyFrom(opts.only);
         const r = entry.kind === 'gated' ? await takeGated(host, entry, opts) : await takeDvP(host, entry, opts);
         try{ await sync(); }catch{} try{ await oampRefreshBalances(); }catch{}
         return r;

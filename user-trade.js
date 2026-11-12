@@ -60,7 +60,7 @@ import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
 import { DEFAULT_WORDS, vestingShort } from './default-arca.js'
 import { restrictedQuote, restrictedConfirm, restrictedAdvance } from './restricted-engine.js'
-import { composedQuote, composedAdvance } from './restricted-composed.js'
+import { composedQuote, composedAdvance, openComposedIds, claimOnce } from './restricted-composed.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
@@ -396,9 +396,11 @@ export function undoneOf (rec, swapState, ret = null) {
 }
 export const STORAGE_FULL = 'The trade was not made: this browser has no room left to keep its record. Nothing was signed.'
 // `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
-// left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped.
+// left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped, nor any
+// record of a composed trade still open (its steps, ended or not: restricted-composed.js).
 export function boundedRecords (list, keep, bytes) {
-  const ended = (r) => ENDED_STATES.includes(r && r.state)
+  const kept = openComposedIds(list)
+  const ended = (r) => ENDED_STATES.includes(r && r.state) && !kept.has(r.id)
   const size = list.map((r) => JSON.stringify(r).length + 1)
   let endedLeft = list.filter(ended).length
   let total = size.reduce((a, b) => a + b, 1)
@@ -1159,10 +1161,12 @@ export function createEngine (deps) {
     // it (restricted-composed.js), one ticket and one confirmation. Bitcoin the wallet cannot pay
     // now is said as for any purchase; otherwise, the card names the asset to go through.
     if (rq && rq.why === 'btc-route' && payAsset === 'BTC' && rq.card && rq.card.side === 'get' && (rq.card.choices || []).length) {
-      const cq = await composedQuote(deps.restricted, { receiveAsset, vias: rq.card.choices, drop,
+      const cq = await composedQuote(deps.restricted, { receiveAsset, vias: rq.card.choices, drop, run, nowSec: () => Math.floor(now() / 1000),
         quoteFirst: (via) => quoteOnce({ payAsset: 'BTC', receiveAsset: via, amount: A, onStep, cap }) })
       if (cq.ok) return cq
       if (cq.first && FIRST_STEP_SAYS.includes(cq.first.why)) return cq.first
+      // Not approved for what the ticket would bring: the approval card, before anything moves.
+      if (cq.card) return { ok: false, why: 'approval', card: cq.card }
     }
     if (rq) return rq
     // More than the wallet holds to spend, the rest vesting later: refused with the date from
@@ -1315,20 +1319,21 @@ export function createEngine (deps) {
   // Confirms a ticket's choice: writes the trade's record, then takes the one step. Answers the
   // record; `advance` follows it.
   // `prior`: a trade confirmed before, whose step waited for its coins to be settled first (state
-  // 'settling'): the same record goes on with the new price, so it is never made twice; a step of a
-  // composed trade stays its step. `extra`: fields the record carries from the start (a composed
-  // trade's step: `partOf`).
+  // 'settling'): the same record goes on with the new price, so it is never made twice. `extra`:
+  // fields the record carries from the start (a composed trade's step: `partOf`, and `id` for the
+  // one record its trade on the chain keeps whatever its tries).
   async function confirm (choice, ticket, prior = null, extra = {}) {
     // What the wallet can pay changes with this trade: the next quote reads it afresh.
     holdings = null
-    const id = prior ? prior.id : `${now()}-${Math.random().toString(16).slice(2, 10)}`
+    const id = prior ? prior.id : extra.id || `${now()}-${Math.random().toString(16).slice(2, 10)}`
     const rec = put({ id, at: prior ? prior.at : now(), source: choice.source, state: 'confirming', ticket,
-      ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: true, settleSince: prior.settleSince, ...(prior.partOf ? { partOf: prior.partOf } : {}) } : {}),
+      ...(prior ? { accepted: prior.accepted || prior.ticket, settledFirst: true, settleSince: prior.settleSince } : {}),
       ...extra })
     try {
       if (choice.source === 'composed') {
         // The composed record first, then its first step's own record, marked as its.
         rec.via = choice.via; rec.viaAtoms = choice.viaAtoms; rec.firstFees = choice.firstTicket.fees || []
+        rec.moveFee = choice.moveFee; rec.moved = choice.moved; rec.secondFee = choice.secondFee; rec.secondFeeAsset = choice.secondFeeAsset
         put(rec)
         const one = await confirm(choice.first, choice.firstTicket, null, { partOf: rec.id })
         rec.first = one.id
@@ -1522,7 +1527,16 @@ export function createEngine (deps) {
   async function advanceOnce (rec) {
     if (!rec || ['settled', 'returned', 'failed', 'undone'].includes(rec.state)) return rec
     if (rec.state === 'settling') return advanceSettling(rec)
-    if (rec.source === 'composed') return composedAdvance(deps.restricted, rec, { records, put, now, confirm: (c, t, x) => confirm(c, t, null, x) })
+    // A composed trade moves on under a claim no other page of this wallet holds at the same time,
+    // from its record as stored then: two pages never move or take for one trade.
+    if (rec.source === 'composed') {
+      const done = await claimOnce(rec.id, async () => {
+        const now_ = records().find((r) => r.id === rec.id) || rec
+        if (['settled', 'returned', 'failed', 'undone'].includes(now_.state)) return now_
+        return composedAdvance(deps.restricted, now_, { records, put, now, run, stepCoin, confirm: (c, t, x) => confirm(c, t, null, x) })
+      }, deps.locks)
+      return done || records().find((r) => r.id === rec.id) || rec
+    }
     if (rec.state === 'confirming') {
       // The page closed between the record and the step, or the step did not answer. A take or an
       // acceptance the library made is in its own store; read it there. A step that did not answer
@@ -1625,6 +1639,32 @@ export function createEngine (deps) {
 
   async function participation (pid) {
     return ((await run('participations')) || []).find((p) => p.participation === pid) || null
+  }
+
+  // The coin a bitcoin purchase brought, as the wallet holds it now (restricted-composed.js): the
+  // coin its claim made, or the one the round that settled it made in its place. -> { coin } (live),
+  // { waiting } (in a round), { merged } (a round made one coin of it and others), { gone }.
+  async function stepCoin (rec) {
+    const first = ((rec && rec.settleTargets) || [])[0]
+    if (!first || !first.leaf_id) return { gone: true }
+    const coins = (await run('coins')) || []
+    let id = first.leaf_id
+    for (let hop = 0; hop < 4; hop++) {
+      const c = coins.find((x) => x && x.leaf_id === id)
+      if (!c) return { gone: true }
+      if (c.state === 'live') return { coin: c }
+      const pid = roundOf(c)
+      if (!pid) return movedOn(c) || c.state === 'spent' ? { gone: true } : { waiting: true }
+      const p = await participation(pid)
+      if (!p || p.state !== 'released') return { waiting: true }
+      // A round that gave up this coin alone made one coin of it; with others, a coin that is no
+      // longer the purchase's alone.
+      if ((p.gives || []).length > 1) return { merged: true }
+      const made = (p.new_leaves || []).filter((n) => n && (!n.asset || n.asset === c.asset))
+      if (made.length !== 1 || !made[0].leaf_id) return { waiting: true }
+      id = made[0].leaf_id
+    }
+    return { waiting: true }
   }
 
   // The coins a trade brings, or leaves as change on a reassignment, settled in the operator's

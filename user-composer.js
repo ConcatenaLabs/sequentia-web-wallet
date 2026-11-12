@@ -486,7 +486,11 @@ export function mountUserComposer (ctx) {
 
   function stateWord (r) {
     // A purchase with bitcoin whose second step has not gone: what the person now holds.
-    if (r.source === 'composed' && r.viaHeld && r.via) return r.state === 'settled' ? RESTRICTED_WORDS.viaHeld(name(r.via)) : RESTRICTED_WORDS.viaWaiting(name(r.via), name(r.ticket.receiveAsset))
+    // Not approved now: says so, and the card shows how to get approved.
+    if (r.source === 'composed' && r.viaHeld && r.via) {
+      if (r.state === 'settled') return RESTRICTED_WORDS.viaHeld(name(r.via))
+      return (r.card ? RESTRICTED_WORDS.viaApproval : RESTRICTED_WORDS.viaWaiting)(name(r.via), name(r.ticket.receiveAsset))
+    }
     if (r.state === 'returned' && (r.feesPaid || []).length) return USER_WORDS.returnedFees(r.feesPaid.map((f) => amt(f.asset, f.atoms)).join(' and '))
     return tradeStateWord(r, Date.now())
   }
@@ -500,7 +504,11 @@ export function mountUserComposer (ctx) {
     return recs.flatMap((x) => ctx.links(x))
   }
   // What a trade brought: a composed purchase that ended at its first step brought that step's asset.
-  const got = (r) => (r.source === 'composed' && r.ended === 'via' ? amt(r.via, r.viaAtoms) : amt(r.ticket.receiveAsset, r.ticket.amountOut))
+  // What it holds of that asset: what the move put on the chain once it has, else the coin itself.
+  const got = (r) => (r.source === 'composed' && r.ended === 'via' ? amt(r.via, r.viaOut ? r.viaOut.value : r.viaAtoms) : amt(r.ticket.receiveAsset, r.ticket.amountOut))
+  // The fees a trade paid: a composed purchase that ended holding its first step's asset, that
+  // step's and, once made, the move's.
+  const feesOf = (r) => (r.ended !== 'via' ? r.ticket.fees : [...(r.firstFees || []), ...(r.viaOut && r.move ? [{ asset: r.via, atoms: r.move.fee }] : [])])
   const what = (r) => `${amt(r.ticket.payAsset, r.ticket.amountIn)} → ${got(r)}`
 
   function paintTrades () {
@@ -568,8 +576,21 @@ export function mountUserComposer (ctx) {
     line(USER_WORDS.amountIn, amt(r.ticket.payAsset, r.ticket.amountIn))
     line(USER_WORDS.amountOut, got(r))
     // A composed purchase that ended at its first step paid that step's fees alone.
-    c.appendChild(el('div', 'sub uc-cost', costLine(r.ended === 'via' ? r.firstFees : r.ticket.fees, amt, r.ticket.payAsset)))
+    c.appendChild(el('div', 'sub uc-cost', costLine(feesOf(r), amt, r.ticket.payAsset)))
     line(USER_WORDS.cardState, stateWord(r), 'uc-card-state').dataset.state = r.state
+    // A composed purchase waiting on the issuer's approval: whom to ask, as before a purchase.
+    let cardAct = null
+    if (r.source === 'composed' && r.card && !ended) {
+      const k = r.card
+      const box = el('div', 'uc-card'); box.id = 'ucCardApproval'
+      box.appendChild(el('div', '', k.text))
+      if (k.reason) box.appendChild(el('div', 'sub', k.reason))
+      c.appendChild(box)
+      cardAct = el('div', 'row')
+      if (k.code) { const b = el('button', 'ghost', RESTRICTED_WORDS.copyCode); b.type = 'button'; b.id = 'ucCopyCodeCard'; b.onclick = () => { try { navigator.clipboard.writeText(k.code) } catch {} }; cardAct.appendChild(b) }
+      if (k.link) { const a = el('a', 'btn ghost', k.link.text); a.id = 'ucOpenPageCard'; a.href = k.link.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; cardAct.appendChild(a) }
+      c.appendChild(cardAct)
+    }
     if (r.source === 'btc-gateway') {
       const steps = tradeSteps({ r, name })
       if (steps) { c.appendChild(el('div', 'lbl uc-steps-title', USER_WORDS.stepsTitle)); stepList(c, steps) }

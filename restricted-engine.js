@@ -23,7 +23,10 @@
 //   fee(asset)           -> the fee of one trade in that asset
 //   ensure(needs, say)   -> puts what the trade pays from on the chain ([{ hex, atoms }]), saying
 //                           so through say(text) while it waits
-//   take(entry, { receive, feeAsset, onTxid }) -> { txid }; onTxid(txid) before the broadcast
+//   take(entry, { receive, feeAsset, only?, onTxid }) -> { txid }; onTxid(txid) before the broadcast;
+//                           `only`: the outpoints the asset paid comes from, no other coin of it
+//   address()            -> the wallet's own unconfidential address on the chain (composed purchases)
+//   unspent(outpoint)    -> false once the wallet's coin there is spent (composed purchases)
 //   status(txid)         -> 'confirmed' | 'pending' | 'unknown'
 //   name(asset)          -> its ticker
 
@@ -88,6 +91,12 @@ export async function restrictedQuote (R, { payAsset, receiveAsset, amount, arri
   const need = best.give + (feeAsset === payAsset ? fee : 0n)
   if (big(await R.held(payAsset)) + big(arriving) < need) return { ok: false, why: 'no-funds' }
   if (feeAsset !== payAsset && big(await R.held(feeAsset)) < fee) return { ok: false, why: 'no-funds' }
+  // Approved for one atom is not approved for the amount (an issuer's rules can bound what one
+  // account receives): asked again for what this trade brings, before anything moves.
+  if (rGet) {
+    const card = await R.eligible(receiveAsset, best.receive)
+    if (card) return { ok: false, why: 'approval', card }
+  }
   const ticket = { payAsset, receiveAsset, amountIn: String(best.give), amountOut: String(best.receive),
     fees: [{ asset: feeAsset, atoms: String(fee) }], source: 'restricted' }
   return { ok: true, ticket, choice: { source: 'restricted', entry: best.e, give: best.give, receive: best.receive, feeAsset, fee } }
@@ -106,7 +115,10 @@ export async function restrictedConfirm (R, choice, rec, put) {
   rec.note = null
   // The trade's txid is recorded before the broadcast: a broadcast whose answer is lost is
   // followed by it (the engine's uncertain step), never reported as nothing moved.
-  const r = await R.take(choice.entry, { receive: choice.receive, feeAsset: choice.feeAsset, onTxid: (txid) => { rec.txid = txid; put(rec) } })
+  // `only`: the coins of the asset paid that the trade pays from, and no other (a composed
+  // purchase's second step pays from what its move put on the chain).
+  const r = await R.take(choice.entry, { receive: choice.receive, feeAsset: choice.feeAsset, ...(choice.only ? { only: choice.only } : {}),
+    onTxid: (txid) => { rec.txid = txid; put(rec) } })
   rec.txid = r.txid; rec.state = 'sent'; rec.sentAt = Date.now()
   return put(rec)
 }

@@ -806,9 +806,12 @@ only the asset's policy server can release; either way the wallet checks the who
 before it signs anything, and the policy server checks it again and broadcasts it. A buyer the
 issuer has not approved is shown whom to ask and the approval code to give them. Bitcoin buys a
 restricted asset as one trade with one ticket and one confirmation: the bitcoin buys an asset that
-buys the restricted one, and the wallet makes the second trade by itself once the first has
-settled, only at terms giving at least what the ticket showed. Until it can, the screen says
-which asset the bitcoin bought, and that asset is the person's to keep, trade or send. A
+buys the restricted one, and once that has settled the wallet makes the rest by itself, moving
+exactly what the bitcoin bought to the chain and trading it there, only at terms giving at least
+what the ticket showed and at no higher fees. Every fee is on the ticket, and no other coin of the
+person's is touched. Until the rest can go, the screen says which asset the bitcoin bought, and
+that asset is the person's to keep, trade or send; when the issuer does not approve the wallet at
+that moment, the screen says so and shows whom to ask, as it does before a purchase. A
 restricted asset is sent only to its recipient's approval code. When the policy
 server does not answer eligibility, the Trade tab trades as it does without restricted assets.
 
@@ -823,7 +826,7 @@ server does not answer eligibility, the Trade tab trades as it does without rest
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
 | `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
 | `restricted-trade.js` / `restricted-engine.js` / `restricted-host.js` | Restricted assets in the Trade tab: the taker's side of a maker's quote (one transaction, both legs) and of a gated order, the check each side runs on the whole transaction before signing, the default composer's pricing and its approval and bitcoin cards, and the page's coins, keys, explorer and courier behind them. |
-| `restricted-composed.js` | Bitcoin for a restricted asset as one trade: the ticket of both steps, and the second step made by itself once the first has settled. |
+| `restricted-composed.js` | Bitcoin for a restricted asset as one trade: the ticket of every step (the bitcoin purchase, the move of what it bought to the chain, the trade there), and the rest made by itself once the first has settled. |
 | `market-view.js` | A pair's market, in both modes' Trade tab: chart, last price and 24-hour change, best bid and ask, recent trades, from the relay's `trades`, `candles` and `ticker`; developer mode adds rails. |
 | `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `covenant-sim.js` | SeqDEX's Simplicity order (the template `seqdex/order`): its address from the terms and the pinned commitment root, and a fill's witness from the template's pinned programs, with no compiler; `seqob.js` signs and verifies its offers (`simplicity_covenant`). Pinned to the template's vectors as seqdex vendors them. |
