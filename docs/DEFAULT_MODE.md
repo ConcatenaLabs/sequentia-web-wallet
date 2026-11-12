@@ -113,10 +113,10 @@ In practice:
 - A coin another wallet paid this one is made the wallet's own in the operator's next settlement,
   by itself, which ends what its senders could still do with it. One that is arriving goes into
   the very next settlement, ahead of others; one that counted goes when the wallet has been left
-  alone two minutes, or holds more than half of what counts at once. The wallet never gives every
-  coin of an asset to a settlement at once: when those it would give are all of the asset it can
-  spend now, it keeps one back (the largest that can still be traded from), and gives it in a
-  later settlement. A counted coin given to a
+  alone two minutes, or holds more than half of what counts at once. A wallet holding more than
+  one coin of an asset never gives them all to a settlement at once: when those it would give are
+  all of the asset it can spend now, it keeps one back (the largest that can still be traded
+  from), and gives it in a later settlement. A counted coin given to a
   settlement still pays: a settlement that waits for the operator is taken back after two
   minutes, and a payment or a trade that needs the coin takes it back first. Nothing is said about
   it. A page can turn this off (`window.SEQ_REFRESH_RECEIVED = false`).
