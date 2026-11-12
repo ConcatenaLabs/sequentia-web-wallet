@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { createEngine, USER_WORDS, tradeStateWord, forbiddenIn } from './user-trade.js'
 import { mountUserComposer } from './user-composer.js'
 import { refreshLeaves, shapeCoins } from './leaves.js'
@@ -286,4 +287,37 @@ test('composer: two follows asked at once run one after the other, never side by
   assert.equal(most, 1, 'resumed side by side')
   assert.equal(calls, 2, 'the follows asked meanwhile run once more after it, together')
   clearTimeout(ui.state.timer)
+})
+
+test('composer: money still arriving can be traded: its asset is offered to pay, and the trade settles first, then goes (D96)', async () => {
+  // The wallet's figure holds nothing yet; 3,000,000 X is on its way (a payment past the instant
+  // limit). The library's coin c1 must be settled before it can be traded.
+  const s = standIn({ deepAt: 'read' })
+  const eng = engineOf(s, { held: (a) => (a === X ? 3000000n : 0n) })   // the page's engine counts what is on its way
+  const doc = fakeDoc()
+  const root = doc.createElement('div')
+  const ui = mountUserComposer({
+    root, engine: eng, held: () => 0n, onItsWay: (a) => (a === X ? 3000000n : 0n), knownAssets: () => ['BTC', X, Y],
+    assetMeta: (h) => ({ ticker: h === X ? 'XT' : h === Y ? 'YT' : 'BTC', precision: 0 }),
+    fmtAtoms: (a) => String(a), parseAtoms: (t) => BigInt(t), admittedReceives: () => [Y], market: null, refValue: () => null,
+    session: null, notify: () => {}, links: () => ({}), openHistory: () => {}, followMs: 1e9, followSlowMs: 1e9, confirmShownMs: 50,
+  })
+  ui.render()
+  assert.equal(ui.state.pay, X, 'what is on its way is offered to pay, first when nothing else is held')
+  Object.assign(ui.state, { get: Y, amount: '400000', getChosen: true })
+  ui.render()
+  await root.querySelector('#ucReview').onclick()
+  for (let i = 0; i < 50 && !ui.state.ticket; i++) await wait(10)
+  assert.ok(ui.state.ticket, 'priced once settled: ' + (ui.state.error || ui.state.note))
+  assert.ok(s.settleAsks.length > 0, 'settled first')
+  await root.querySelector('#ucConfirm').onclick()
+  for (let i = 0; i < 50 && !eng.records().length; i++) await wait(10)
+  let r = await eng.advance(eng.records()[0])
+  for (let i = 0; i < 50 && r.state !== 'settled'; i++) { await wait(10); r = await eng.advance(eng.records()[0]) }
+  assert.equal(r.state, 'settled', JSON.stringify(r))
+  clearTimeout(ui.state.timer)
+  // The page wires it: the engine's figure counts what is on its way, the composer lists it.
+  const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8')
+  assert.match(html, /held: \(a\)=> userHeld\(a\) \+ onItsWay\(a\),/)
+  assert.match(html, /onItsWay: \(a\)=> onItsWay\(a\),/)
 })

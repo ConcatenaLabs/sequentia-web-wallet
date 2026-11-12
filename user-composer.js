@@ -75,11 +75,12 @@ export function mountUserComposer (ctx) {
 
   // What can be paid: BTC always, and an asset only while the wallet holds some (a fresh wallet
   // pays from BTC alone); what can be got is every asset the book knows.
-  // An asset held only as what vests later is listed too, so a trade of it says from when it can be.
-  const listed = (a) => big(ctx.held(a)) + (ctx.vestingAtoms ? big(ctx.vestingAtoms(a)) : 0n)
+  // An asset held only as what vests later is listed too, so a trade of it says from when it can be;
+  // and one with a payment on its way (ctx.onItsWay), which a trade settles first and then pays.
+  const listed = (a) => big(ctx.held(a)) + (ctx.vestingAtoms ? big(ctx.vestingAtoms(a)) : 0n) + (ctx.onItsWay ? big(ctx.onItsWay(a) || 0n) : 0n)
   function payList () { return payAssets(ctx.knownAssets(), listed, S.pay, name) }
   // What is paid starts as the first asset held, in the pickers' order (BTC first when held).
-  function defaultPay () { const l = payList(); return l.find((a) => big(ctx.held(a)) > 0n) || l[0] }
+  function defaultPay () { const l = payList(); return l.find((a) => big(ctx.held(a)) > 0n) || l.find((a) => ctx.onItsWay && big(ctx.onItsWay(a) || 0n) > 0n) || l[0] }
   function offeredNow () { return S.offered.pay === S.pay ? S.offered.list.filter((a) => a !== S.pay) : [] }
   function getList () {
     const admitted = (ctx.admittedReceives ? ctx.admittedReceives(S.pay) : []).filter((a) => a !== S.pay)

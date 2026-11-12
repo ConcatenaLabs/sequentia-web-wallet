@@ -4592,6 +4592,7 @@ function userKnownAssets(){
   try { for(const k of Object.keys(balObj())) s.add(k); } catch {}
   try { if(leavesApi) for(const k of leavesApi.leafAssets()) s.add(k); } catch {}
   try { if(leavesApi && leavesApi.vestingAssets) for(const k of leavesApi.vestingAssets()) s.add(k); } catch {}
+  for(const k of onItsWayAssets()) s.add(k);
   try { for(const k of Object.keys(REGISTRY_ASSETS || {})) s.add(k); } catch {}
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
@@ -5237,8 +5238,9 @@ function initUserComposer(){
       feeRateFor, feerate: DEFAULT_FEERATE, rateScale: EXCHANGE_RATE_SCALE,
     }),
     // What the balance shows of an asset, so one held but not payable yet reads as not ready, never
-    // as none; and default mode's board of coins on the chain, asked for at once.
-    held: (a)=> userHeld(a),
+    // as none; and default mode's board of coins on the chain, asked for at once. What is on its
+    // way counts too: a trade of it settles first and then goes (D96), as a payment of it does.
+    held: (a)=> userHeld(a) + onItsWay(a),
     // What vests later: a trade that needs it is refused with its date.
     vesting: (a)=> vestingLotsFor(a),
     // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
@@ -5254,7 +5256,7 @@ function initUserComposer(){
   userComposer = mountUserComposer({
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
     session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
-    knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor,
+    knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor, onItsWay: (a)=> onItsWay(a),
     isHidden: isAssetHidden, refValue: refValueStr,
     // The confirmations the Bitcoin ark's server waits for before a board's BTC can be traded.
     btcMoveBlocks: ()=> (btcArk && btcArk.info() && Number(btcArk.info().required_board_confirmations)) || null,

@@ -590,7 +590,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   sources are given to answer (eight seconds), while the wallet still checks a price it was
   given: "Still getting the exact price: this can take up to half a minute…". If the price
   moves: "The price moved. Here is the new one."
-- **What the balance shows can always be traded or sent.** When part of what is paid waits only
+- **What the balance shows can always be traded or sent**, and so can a payment still on its way:
+  its asset is offered under You pay (first when the wallet holds nothing else), and the trade
+  settles it first. When part of what is paid waits only
   for the operator's next settlement (a coin too many payments from one to give part of, a
   payment still arriving, coins the wallet's own upkeep is settling, a coin of a format the other
   side's older build does not read), the wallet puts it through that settlement by itself, the
