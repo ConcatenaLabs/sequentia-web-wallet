@@ -26,7 +26,8 @@
 // step now (engine.offered), then the admitted rest, then every other asset known; it starts on
 // the first one offered.
 
-import { USER_WORDS, QUOTE_FIRM_MS, OFFERED_AGAIN_EVERY_MS, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
+import { USER_WORDS, QUOTE_FIRM_MS, OFFERED_AGAIN_EVERY_MS, SETTLE_MOST_MS, settleBound, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
+import { SETTLE_LATE_MS } from './default-arca.js'
 import { mountMarketView } from './market-view.js'
 import { openPicker, PICKER_WORDS } from './asset-picker.js'
 import { RESTRICTED_WORDS } from './restricted-trade.js'
@@ -41,8 +42,6 @@ const CARET = '▾'
 // times at most (about ten minutes: a round and its block).
 export const READY_RETRY_MS = 20_000
 export const READY_TRIES = 30
-// How many times in a row a trade settles first before it says it takes longer than usual.
-export const SETTLE_TRIES = 3
 // How long Trade waits for the trade's step before the screen is free again.
 export const CONFIRM_SHOWN_MS = 1500
 export const FOLLOW_FAST_MS = 120_000
@@ -324,7 +323,7 @@ export function mountUserComposer (ctx) {
     const btn = (text, id, f, cls) => { const b = el('button', cls || '', text); b.type = 'button'; b.id = id; b.disabled = S.busy; b.onclick = f; return b }
     if (!S.ticket && S.card) { paintAnswerCard(t, act, btn); return }
     if (!S.ticket) {
-      act.appendChild(btn(S.settling ? USER_WORDS.settling : S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
+      act.appendChild(btn(S.settling ? settleWord() : S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
       return
     }
     const k = S.ticket
@@ -373,6 +372,7 @@ export function mountUserComposer (ctx) {
       // itself, saying only how long it takes (D96).
       else if (q.why === 'settle-first') { settleThenReview(q); return }
       else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
+        : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
         : q.why === 'btc-moving' ? USER_WORDS.btcMoving(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)
@@ -442,22 +442,36 @@ export function mountUserComposer (ctx) {
 
   let readyTimer = null, readyTries = 0
   // A quote answered 'settle-first': the coins it waits on go through the next round (the engine's
-  // settle), the person told only "Goes through in about a minute", and the trade is priced again
-  // by itself once they are through, while nothing they typed changed. Past SETTLE_TRIES quotes that
-  // still wait, or the engine's longest wait, it says the trade takes longer than usual.
-  let settleTries = 0
+  // settle), the person told only how long, and the trade is priced again by itself once they are
+  // through, while nothing they typed changed. It waits by time, not by tries: as long as the
+  // library says the coins take (`finalBy`, from its `final_in_seconds`), twice over with a margin
+  // (settleBound), and never less than SETTLE_MOST_MS from the first settle of the same ask; only
+  // past that does it say the trade takes longer than usual. Past what the library said, the words
+  // say it takes longer and goes by itself.
+  let settleAsk = null
+  const settleWord = () => {
+    if (S.settleBy == null) return USER_WORDS.settling
+    const t = Date.now()
+    return t > S.settleBy + SETTLE_LATE_MS ? USER_WORDS.goesThroughLate : USER_WORDS.goesThrough(Math.max(1, Math.ceil((S.settleBy - t) / 60_000)))
+  }
   async function settleThenReview (q) {
     const asked = `${S.pay}|${S.get}|${S.amount}`
     const stale = () => `${S.pay}|${S.get}|${S.amount}` !== asked
-    if (++settleTries > SETTLE_TRIES) { settleTries = 0; S.error = USER_WORDS.settleLate; S.busy = false; paintTicket(); return }
-    S.busy = true; S.settling = true; S.note = USER_WORDS.settling; paintTicket()
+    if (!settleAsk || settleAsk.asked !== asked) settleAsk = { asked, since: Date.now(), most: SETTLE_MOST_MS }
+    if (Date.now() - settleAsk.since > settleAsk.most) { settleAsk = null; S.settleBy = null; S.error = USER_WORDS.settleLate; S.busy = false; paintTicket(); return }
+    S.busy = true; S.settling = true; S.note = settleWord(); paintTicket()
     let through = false
-    try { through = await ctx.engine.settle({ payAsset: q.payAsset || S.pay, coins: q.coins }, { stop: stale }) } catch (e) { console.warn('[user composer] settle:', e && e.message) }
+    const onWait = (finalBy) => {
+      S.settleBy = finalBy
+      settleAsk.most = Math.max(settleAsk.most, settleBound((finalBy - settleAsk.since) / 1000))
+      S.note = settleWord(); paintTicket()
+    }
+    try { through = await ctx.engine.settle({ payAsset: q.payAsset || S.pay, coins: q.coins }, { stop: stale, onWait }) } catch (e) { console.warn('[user composer] settle:', e && e.message) }
     S.settling = false; S.busy = false
-    if (stale()) { settleTries = 0; S.note = ''; paintTicket(); return }
-    if (!through) { settleTries = 0; S.note = ''; S.error = USER_WORDS.settleLate; paintTicket(); return }
+    if (stale()) { settleAsk = null; S.settleBy = null; S.note = ''; paintTicket(); return }
+    if (!through) { settleAsk = null; S.settleBy = null; S.note = ''; S.error = USER_WORDS.settleLate; paintTicket(); return }
     await review()
-    if (S.ticket || S.error) settleTries = 0
+    if (S.ticket || S.error) { settleAsk = null; S.settleBy = null }
   }
 
   function readyAgain (ms = READY_RETRY_MS) {
