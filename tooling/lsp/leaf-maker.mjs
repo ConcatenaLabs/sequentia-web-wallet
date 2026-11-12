@@ -23,7 +23,13 @@
 //                                  the ladder's levels: never above ceil(give × the rate of any quote
 //                                  whose max_give carries `give`)
 //   POST /v1/accept {swap, accept} -> { swap, state: 'done' }: completes the swap (`swap_complete`, the
-//                                  operator co-signing); asked again it answers the same
+//                                  operator co-signing); asked again it answers the same. When the
+//                                  operator refuses the completion, nothing is co-signed and the offer
+//                                  is gone: 409 { error, swap, gone: true, code, whose, coin, offer? },
+//                                  `whose` naming the side whose coin the operator refused ('taker' when
+//                                  the wallet's coin was spent elsewhere), `offer` a new firm offer at the
+//                                  same give and want from what the maker holds now (the shape of
+//                                  /v1/firm's answer) when it can make one; asked again, the same answer
 //   POST /v1/release {swap}       -> { swap, state: 'releasing' }: cancels a firm offer nobody took; answered
 //                                  at once, the cancel ahead of the upkeep and of any later firm
 //   GET  /v1/swap/<id>            -> { swap, state }
@@ -662,6 +668,26 @@ export function slicesFor (p0, spendable, held, margin, rates = new Map(), cfg =
   return slices.length ? { slices, min, pair: p } : null
 }
 
+// A completion the operator refused (`swap_complete`): the library's `swap_refused`, or, from a
+// library that leaves such an offer open, the server's own refusal. Nothing was co-signed. Any
+// other answer (the operator not reached, the request standing to be posted again) is not one.
+export function completionRefused (e) {
+  return !!e && (e.kind === 'swap_refused' || e.kind === 'server_refused')
+}
+
+// How long the answer to an acceptance whose completion was refused is kept for the same
+// acceptance handed over again.
+export const GONE_KEEP_MS = 15 * 60 * 1000
+
+// The answer to an acceptance whose completion the operator refused: the offer is gone (`gone`),
+// whose coin the operator named (`whose`: 'taker' when the wallet's own coin was spent elsewhere,
+// which it learns by cancelling its acceptance), and the offer made in its place at the same
+// price (`offer`, the shape of a firm offer's answer), or none.
+export function goneAnswer (swap, e, again) {
+  return { error: String((e && e.message) || 'the operator refused the completion'), swap: String(swap), gone: true,
+    code: (e && e.code) || null, whose: (e && e.whose) || null, coin: (e && e.coin) || null, ...(again ? { offer: again } : {}) }
+}
+
 async function main () {
   const cfgPath = arg('--config')
   if (!cfgPath) { console.error('usage: leaf-maker.mjs --config maker.json [--init]'); process.exit(2) }
@@ -875,6 +901,7 @@ async function main () {
   if (desk) log('the BTC desk is open')
 
   const firm = new Map()   // swap -> { give_asset, give, expires }
+  const gone = new Map()   // swap whose completion the operator refused -> { body, at }
   const gaveUp = new Map()    // leaf -> when the maker gave it up in a round (a cut or a settle)
   let noPieces = false        // the library answered a refresh in pieces with one leaf: no cuts
   const seen = new Map()   // leaf_id -> first seen (ms), for settling received coins
@@ -1133,8 +1160,38 @@ async function main () {
       if (p === '/v1/accept') {
         const st = await swapState(b.swap, true)
         if (st === 'done') return send(res, 200, { swap: b.swap, state: 'done' })
-        if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st })
-        const r = await cmd('swap_complete', { accept: String(b.accept || '') }, true)
+        // An offer whose completion the operator refused is gone: asked again, the same answer, at
+        // once, with the offer made in its place (`gone`).
+        if (gone.has(b.swap)) return send(res, 409, gone.get(b.swap).body)
+        if (st !== 'open') return send(res, 409, { error: `the swap is ${st || 'unknown'} here`, state: st, gone: true })
+        let r
+        try { r = await cmd('swap_complete', { accept: String(b.accept || '') }, true) } catch (e) {
+          if (!completionRefused(e)) throw e
+          // The operator refused it: nothing was co-signed and the offer is withdrawn, its coins the
+          // maker's again (a library that leaves it open has it cancelled here). The taker is told at
+          // once, with a new offer at the same price from what the maker holds now when it can make
+          // one, so the wallet goes ahead in seconds rather than handing the acceptance over again.
+          if (e.kind !== 'swap_refused') await cmd('swap_cancel', { swap: String(b.swap) }, true).catch((x) => log('cancel', String(b.swap).slice(0, 12), x.message))
+          const f = firm.get(b.swap)
+          firm.delete(b.swap)
+          let again = null
+          if (f) {
+            try {
+              const o = await cmd('swap_offer', { give_asset: f.give_asset, give: String(f.give), want_asset: f.want_asset, want: String(f.want) }, true)
+              const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
+              firm.set(o.swap, { ...f, expires })
+              again = { swap: o.swap, offer: o.offer, give: String(f.give), want: String(f.want), expires_at: Math.floor(expires / 1000) }
+            } catch (x) { log('no new offer for', String(b.swap).slice(0, 12) + ':', x.message) }
+          }
+          if (holdings) holdings.stale = true
+          readHoldings(true).catch(() => {})
+          const body = goneAnswer(b.swap, e, again)
+          gone.set(b.swap, { body, at: Date.now() })
+          for (const [k, v] of gone) if (Date.now() - v.at > GONE_KEEP_MS) gone.delete(k)
+          log('refused completion', String(b.swap).slice(0, 12), (e.whose ? `(the ${e.whose}'s coin)` : '') + ':', e.message,
+            again ? '; offered again as ' + again.swap.slice(0, 12) : '; no new offer')
+          return send(res, 409, body)
+        }
         const f = firm.get(b.swap)
         if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)

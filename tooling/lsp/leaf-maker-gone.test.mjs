@@ -1,0 +1,30 @@
+// An acceptance whose completion the operator refuses is answered at once that the offer is gone,
+// with whose coin the operator named and the offer made in its place (web wallet #685). Live,
+// 2026-11-12: the taker's coin had been given to a round by its second device; the maker's library
+// released its own coins and left the swap open, and every hand-over of the same acceptance for
+// the next 163 s was refused "coin … is live now, not held for the swap".
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { completionRefused, goneAnswer } from './leaf-maker.mjs'
+
+test('a refusal of the operator is a refused completion; the operator not reached is not', () => {
+  assert.equal(completionRefused({ kind: 'swap_refused', message: 'refused: the operator refused the swap\'s completion' }), true)
+  // A library that leaves the offer open answers the server's refusal as it is.
+  assert.equal(completionRefused({ kind: 'server_refused', code: 'double_spend', message: 'the server refused cosign_transfer (409 double_spend)' }), true)
+  // The request stands and may still be co-signed: the offer is not gone.
+  assert.equal(completionRefused({ kind: 'unreachable', message: 'cannot reach the server' }), false)
+  // The maker's own coin is still sending a completion posted before: not gone either.
+  assert.equal(completionRefused({ kind: 'refused', message: 'refused: coin ab is sending now, not held for the swap' }), false)
+  assert.equal(completionRefused(null), false)
+})
+
+test('the gone answer names whose coin, and carries the offer made in its place', () => {
+  const e = { kind: 'swap_refused', code: 'double_spend', whose: 'taker', coin: 'c0'.repeat(32), message: 'refused: …' }
+  const again = { swap: 'ee'.repeat(32), offer: 'arca-offer:…', give: '511116118', want: '9999992', expires_at: 1794500000 }
+  assert.deepEqual(goneAnswer('aa'.repeat(32), e, again), { error: 'refused: …', swap: 'aa'.repeat(32), gone: true, code: 'double_spend',
+    whose: 'taker', coin: 'c0'.repeat(32), offer: again })
+  const none = goneAnswer('aa'.repeat(32), { kind: 'server_refused', code: 'margin', message: 'm' }, null)
+  assert.equal(none.gone, true)
+  assert.equal(none.whose, null)
+  assert.equal('offer' in none, false, 'no offer when the maker cannot make one')
+})

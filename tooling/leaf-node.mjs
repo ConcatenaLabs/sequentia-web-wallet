@@ -295,7 +295,7 @@ export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = nu
           if (full.result && full.result.cost_by_step) detail.steps = full.result.cost_by_step
         }
         wt.parentPort.postMessage({ id, ok: true, value, detail })
-      } catch (e) { wt.parentPort.postMessage({ id, ok: false, error: { message: e.message, kind: e.kind || null, code: e.code || null, status: e.status || null }, detail: e.cost ? { cost: e.cost, refused: String(e.message).slice(0, 300) } : null }) }
+      } catch (e) { wt.parentPort.postMessage({ id, ok: false, error: { message: e.message, kind: e.kind || null, code: e.code || null, status: e.status || null, ...(e.swap ? { swap: e.swap, coin: e.coin || null, whose: e.whose || null } : {}) }, detail: e.cost ? { cost: e.cost, refused: String(e.message).slice(0, 300) } : null }) }
     })
   }
 }
