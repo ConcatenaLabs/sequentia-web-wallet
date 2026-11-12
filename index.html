@@ -1770,6 +1770,10 @@
   // leaf wallet follows the chain through (same origin; it forwards only a wallet's read calls and
   // broadcasts), and the operator's key, pinned: a wallet in default mode joins it by itself, and
   // only while its server shows this key. A page that sets SEQ_ARCA = null first joins none.
+  // Where the leaf wallet's worker waits out a pause without using the processor: the node route's
+  // hold, which answers after the time asked (leaves/worker.js). A page that sets it to null waits
+  // on the clock.
+  if(window.SEQ_PAUSE_URL === undefined) window.SEQ_PAUSE_URL = location.origin + '/node-rpc/hold';
   if(window.SEQ_ARCA === undefined) window.SEQ_ARCA = {
     server:   location.origin + '/arca',
     node_url: location.origin + '/node-rpc',
@@ -4368,7 +4372,8 @@ function initLeaves(){
   if(leavesApi) return;
   const lnOn = ()=>{ try { return seqlnState().deployed; } catch { return false; } };
   leavesApi = mountLeaves({
-    makeWorker: ()=> new Worker(new URL('./leaves/worker.js', import.meta.url), { type:'module' }),
+    // The leaf wallet's pauses wait on the node route's hold (leaves/worker.js), same-origin.
+    makeWorker: ()=> { const w = new Worker(new URL('./leaves/worker.js', import.meta.url), { type:'module' }); if(window.SEQ_PAUSE_URL) w.postMessage({ op:'pause', args:{ url: window.SEQ_PAUSE_URL } }); return w },
     store: localStorage,
     walletTag,
     mnemonic: ()=> bip39Phrase(),
@@ -7662,7 +7667,8 @@ function setSyncStatus(state, err){
   // A wallet opened in this browser for the first time: what is shown is not all it holds yet.
   let finding = false; try{ finding = state!=='err' && !!leavesApi && leavesApi.restoring(); }catch{}
   let stalled = null; try{ stalled = finding && leavesApi.restoreStalled ? leavesApi.restoreStalled() : null; }catch{}
-  if(finding){ state='syncing'; html='<span class="spin"></span>'+esc(stalled ? DEFAULT_WORDS.findingStalled : DEFAULT_WORDS.finding); }
+  let slow = null; try{ slow = finding && leavesApi.restoreSlow ? leavesApi.restoreSlow() : null; }catch{}
+  if(finding){ state='syncing'; html='<span class="spin"></span>'+esc(stalled ? DEFAULT_WORDS.findingStalled : slow==='long' ? DEFAULT_WORDS.findingLong : slow ? DEFAULT_WORDS.findingSlow : DEFAULT_WORDS.finding); }
   else if(state==='syncing'){
     html='<span class="spin"></span>'+(snapAt ? 'Syncing… showing your wallet as of '+esc(whenText(snapAt))+'.' : 'Syncing…');
   } else if(state==='ok'){ cls='status ok'; html='Up to date.'; }
@@ -9328,20 +9334,23 @@ function collectRows(){
 // Whether the wallet is finding what it holds and the service holding its coins for instant
 // payments answers: a payment asked meanwhile waits for it to open, for as long as that takes.
 function findingStalled(){ try{ return !!leavesApi && !leavesApi.isOpen() && !!(leavesApi.restoreStalled && leavesApi.restoreStalled()); }catch{ return false; } }
-function findingOn(){ try{ return !!leavesApi && leavesApi.restoring() && !findingStalled(); }catch{ return false; } }
+// Whether the restore has run far longer than any history should take (leaves.js RESTORE_LONG_MS):
+// a payment waiting for it stops waiting and says so.
+function findingTooLong(){ try{ return !!leavesApi && !leavesApi.isOpen() && !!leavesApi.restoreSlow && leavesApi.restoreSlow()==='long'; }catch{ return false; } }
+function findingOn(){ try{ return !!leavesApi && leavesApi.restoring() && !findingStalled() && !findingTooLong(); }catch{ return false; } }
 // The one wait of everything asked while the wallet is still opening (Send's payments, a trade's
 // price): until it has opened, for as long as a restore finding what it holds runs, else up to
 // OPEN_WAIT_MS, `say` showing "Your wallet is still opening; this goes on by itself once it has."
 // meanwhile. -> null once it is open (or when there is nothing to open), else why it cannot go on:
-// the service that holds its coins for instant payments does not answer, or it has not opened in
-// that time.
+// the service that holds its coins for instant payments does not answer, its restore has run far
+// longer than any history should take, or it has not opened in that time.
 async function walletOpening(say){
   if(!leavesApi || leavesApi.isOpen() || !leavesApi.expected()) return null;
   if(say) say(DEFAULT_WORDS.waitOpening);
   const until = Date.now() + OPEN_WAIT_MS;
-  while(!leavesApi.isOpen() && !findingStalled() && (Date.now() < until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
+  while(!leavesApi.isOpen() && !findingStalled() && !findingTooLong() && (Date.now() < until || findingOn())) await new Promise(r=>setTimeout(r, 1000));
   if(leavesApi.isOpen()) return null;
-  return findingStalled() ? DEFAULT_WORDS.findingStalledPay : DEFAULT_WORDS.stillOpening;
+  return findingStalled() ? DEFAULT_WORDS.findingStalledPay : findingTooLong() ? DEFAULT_WORDS.findingLongPay : DEFAULT_WORDS.stillOpening;
 }
 async function confidentialReview(r, reset){
   const h=r.asset, m=assetMeta(h), prec=sendPrecision(h);
