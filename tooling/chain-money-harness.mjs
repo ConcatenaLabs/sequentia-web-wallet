@@ -145,7 +145,7 @@ export async function setup (t) {
   const st = await H.state()
   const X = st.x
   const cfg = { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password }
-  const dir = mkdtempSync(join(process.env.SF6_TMP || tmpdir(), 'chain-cases-'))
+  const dir = mkdtempSync(join(process.env.CASES_TMP || tmpdir(), 'chain-cases-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   process.env.LEAVES_PKG = PKG
   const { leafLibrary } = await import('./leaf-node.mjs')

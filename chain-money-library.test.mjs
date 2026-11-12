@@ -27,6 +27,7 @@ import { mountLeaves, JOINED_KEY } from './leaves.js'
 import * as arca from './default-arca.js'
 const { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute, codeRoute, boardMinutes } = arca   // codeRoute: absent before this change
 import { readPayCode, buildPayCode } from './pay-code.js'
+import * as pending from './pending-sends.js'
 
 const CONTROL = process.env.SEQ_LEAF_HARNESS
 const PKG = process.env.LEAVES_PKG || new URL('./leaves/pkg', import.meta.url).pathname
@@ -92,6 +93,7 @@ function page (leavesApi, ticker, chain) {
   const modals = []
   const deps = {
     leavesApi, DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, codeRoute, boardMinutes, readPayCode,
+    settleWords: arca.settleWords, putPending: pending.putPending, dropPending: pending.dropPending, stageWriter: pending.stageWriter, samePending: pending.samePending,
     devMode: () => false, isOampAsset: () => false, arkDirectWhy: () => null, arkRoom: () => null,
     availableFor: (h) => chain[h] || 0n, feeMarginAtoms: () => 2000n,
     assetMeta: () => ({ ticker, precision: 8 }),
@@ -114,9 +116,13 @@ function page (leavesApi, ticker, chain) {
   }
   // A page before this change has none of the chain's helpers: they stand in as counting nothing.
   const stub = { chainSpendable: 'function chainSpendable(h){ return chainHeld(h); }', codeWay: 'function codeWay(full){ return { dest: full, byAddress: false }; }', chainHeld: 'function chainHeld(h){ return availableFor(h); }',
-    chainMovable: 'function chainMovable(){ return 0n; }', bringMargin: 'function bringMargin(){ return 0n; }', bringMinutes: 'function bringMinutes(){ return 5; }', bringWant: 'function bringWant(){ return 0n; }' }
+    chainMovable: 'function chainMovable(){ return 0n; }', bringMargin: 'function bringMargin(){ return 0n; }', bringMinutes: 'function bringMinutes(){ return 5; }', bringWant: 'function bringWant(){ return 0n; }',
+    settleAhead: 'function settleAhead(){ return DEFAULT_WORDS.settling; }', settleLine: 'function settleLine(){ return DEFAULT_WORDS.settling; }',
+    sendStage: 'function sendStage(){ return ()=>{}; }', sendEnded: 'function sendEnded(){}', sameOnItsWay: 'function sameOnItsWay(){ return \'\'; }',
+    movedInWithin: 'function movedInWithin(){ return {}; }', bringWait: 'function bringWait(){ return 5; }' }
   const names = ['onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview',
-    'chainHeld', 'chainSpendable', 'chainMovable', 'bringMargin', 'bringWant', 'bringMinutes', 'codeWay', 'payCodeRoute']
+    'chainHeld', 'chainSpendable', 'chainMovable', 'bringMargin', 'bringWant', 'bringMinutes', 'codeWay', 'payCodeRoute',
+    'settleAhead', 'settleLine', 'sendStage', 'sendEnded', 'sameOnItsWay', 'movedInWithin', 'bringWait']
   // The fee's margin stands in last: an extracted one-line function brings the page's own after it.
   const src = names.map((n) => (!has(n) && stub[n]) ? stub[n] : fn(n)).join('\n') + '\nfunction feeMarginAtoms(){ return 2000n; }\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))
