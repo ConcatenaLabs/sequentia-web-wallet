@@ -5,14 +5,14 @@
 // answer that cannot change.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createEngine } from './user-trade.js'
+import { createEngine, tradeStateWord } from './user-trade.js'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32)
 
 // A stand-in library and maker. The maker's first completion is refused by the operator: it
 // answers 409 gone, with an offer made in its place at `again` (null: none), and later asks of the
 // same acceptance get the same answer.
-function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
+function standIn ({ again = 'same', rateNum = 4n, always = false, respend = 0n, whose = 'taker', unknown = 0 } = {}) {
   const coins = [{ leaf_id: 'dead', asset: X, value: '3000000', state: 'live', kind: 'transfer' }]
   const swaps = new Map()
   const calls = []
@@ -44,10 +44,20 @@ function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
         case 'sync': return {}
         case 'swap_cancel': {
           const s = swaps.get(a.swap)
+          // The answer to the cancel's respend has not come: the library does not know yet.
+          if (unknown > 0) { unknown--; return { swap: a.swap, cancelled: false, acceptance_stands: true, unknown: true } }
           s.state = 'cancelled'
           // The library's cancel: the respend is refused for the dead coin, the wallet catches up
           // (the dead coin spent, the round's coin taken), and the acceptance is cancelled.
           const d = coins.find((x) => x.note === 'swap ' + a.swap)
+          // The maker's coin was refused: the taker's own coin is respent to a fresh one of its own,
+          // which leaves the transfer's margins.
+          if (respend > 0n) {
+            const v = BigInt(d.value) - respend
+            d.state = 'spent'
+            coins.push({ leaf_id: 'self' + (++n), asset: X, value: String(v), state: 'live', kind: 'transfer' })
+            return { swap: a.swap, cancelled: true, respent: [d.leaf_id] }
+          }
           d.state = 'spent'
           coins.push({ leaf_id: 'round' + (++n), asset: X, value: '3000000', state: 'live', kind: 'batch' })
           return { swap: a.swap, cancelled: true, spent_elsewhere: [d.leaf_id], freed: [] }
@@ -57,6 +67,8 @@ function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
     },
   }
   const made = new Map()
+  // A maker that quotes nothing for a while (reading its coins again after a trade).
+  const silent = { on: false }
   const offer = (give, rn = 4n) => {
     const id = 'o' + (++n); const want = (BigInt(give) * rn + 2n) / 3n
     const o = { swap: id, offer: `swap-offer:${id}:${give}:${want}`, give: String(give), want: String(want), expires_at: 4102444800 }
@@ -76,7 +88,7 @@ function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
         if (!s.gone) {
           const first = made.get(b.swap)
           s.gone = { error: 'refused: the operator refused the swap\'s completion (409 double_spend): leaf dead… is already spent; the offer is withdrawn',
-            swap: b.swap, gone: true, code: 'double_spend', whose: 'taker', coin: 'dead', ...(again === 'same' ? { offer: offer(first.give) } : {}) }
+            swap: b.swap, gone: true, code: 'double_spend', whose, coin: 'dead', ...(again === 'same' ? { offer: offer(first.give) } : {}) }
         }
         const e = new Error(s.gone.error); e.status = 409; e.body = s.gone; throw e
       }
@@ -88,7 +100,8 @@ function standIn ({ again = 'same', rateNum = 4n, always = false } = {}) {
     return {}
   }
   const store = { m: {}, getItem (k) { return this.m[k] ?? null }, setItem (k, v) { this.m[k] = v } }
-  return { lib, fetchJson, store, calls, posts, swaps, coins, markRefused: () => { refusedOnce = true } }
+  return { lib, fetchJson: async (u, i) => (silent.on && u.endsWith('/v1/quotes') ? { quotes: [] } : fetchJson(u, i)), store, calls, posts, swaps, coins, silent,
+    markRefused: () => { refusedOnce = true } }
 }
 
 const admitted = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
@@ -166,4 +179,73 @@ test('a maker that answers done after the wait: the trade settles, its coins nev
   const r = await eng2.advance(eng2.records().find((x) => x.id === rec.id))
   assert.ok(!s.calls.includes('swap_cancel'), 'no cancel after a done answer')
   assert.equal(r.state, 'settled', JSON.stringify(r))
+})
+
+test('a gone offer whose cancel respent the coins: the re-priced trade counts the respend\'s margins in what it paid and in its fees', async () => {
+  const s = standIn({ again: 'same', respend: 500n, whose: 'maker' })
+  const t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const rec = await eng.confirm(q.choice, q.ticket)
+  assert.equal(rec.gone && rec.gone.whose, 'maker')
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.cancelFees, '500', 'the respend left 500')
+  const fees = (r.ticket.fees || []).filter((f) => f.asset === X).reduce((n, f) => n + BigInt(f.atoms), 0n)
+  const before = (q.ticket.fees || []).filter((f) => f.asset === X).reduce((n, f) => n + BigInt(f.atoms), 0n)
+  assert.equal(fees, before + 500n, 'the fee line counts the respend\'s margins: ' + JSON.stringify(r.ticket.fees))
+  assert.equal(BigInt(r.ticket.amountIn), BigInt(r.accepted.amountIn) + 500n, 'what is paid counts them too, so the fees are included in it')
+  const done = await eng.advance(eng.records()[0])
+  assert.equal(done.state, 'settled', JSON.stringify(done))
+})
+
+test('a gone offer whose earlier cancel left the coins sending: the respend\'s margins are still counted', async () => {
+  const s = standIn({ again: 'same', respend: 700n, whose: 'maker' })
+  const t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  await eng.confirm(q.choice, q.ticket)
+  // An earlier cancel's respend went unanswered: the coin waits for it.
+  s.coins.find((c) => c.state === 'offered').state = 'sending'
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.cancelFees, '700', JSON.stringify(r))
+})
+
+test('a gone offer with no offer in its place while the maker quotes nothing: asked again, not returned, and goes ahead once it quotes', async () => {
+  const s = standIn({ again: 'none' })
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const rec = await eng.confirm(q.choice, q.ticket)
+  s.silent.on = true
+  t += 10_000
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'repricing', 'a maker quoting nothing this moment is asked again: ' + JSON.stringify(r))
+  t += 20_000
+  s.silent.on = false
+  let r2 = r
+  for (let i = 0; i < 3 && r2.state !== 'settled'; i++) { t += 5_000; r2 = await eng.advance(eng.records()[0]) }
+  assert.equal(r2.state, 'settled', JSON.stringify(r2))
+  assert.equal(r2.id, rec.id)
+  assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 1, 'exactly one swap done')
+})
+
+test('a cancel whose answer has not come: the trade waits, says so in words, and is never traded again until it is known', async () => {
+  const s = standIn({ again: 'same', unknown: 2 })
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  const rec = await eng.confirm(q.choice, q.ticket)
+  let r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'sent', JSON.stringify(r))
+  assert.equal(r.swap, rec.swap, 'not traded again')
+  t += 60_000
+  assert.equal(tradeStateWord(r, t), 'Sent, waiting for an answer: nothing more is needed from you (1 min)')
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.swap, rec.swap, 'still not traded again')
+  r = await eng.advance(eng.records()[0])
+  assert.notEqual(r.swap, rec.swap, 'once the cancel is known, priced again')
+  assert.ok(!r.awaiting)
+  const done = await eng.advance(eng.records()[0])
+  assert.equal(done.state, 'settled', JSON.stringify(done))
+  assert.equal([...s.swaps.values()].filter((x) => x.state === 'done').length, 1, 'exactly one swap done')
 })
