@@ -51,9 +51,24 @@ test('the book from both orientations, by rail', () => {
     { maker_pubkey: 'b', offer_id: '2', offer_asset: U, want_asset: G, offer_amount: '8800', want_amount: '200000000', resting_leaf: {} },
     { maker_pubkey: 'b', offer_id: '2', offer_asset: U, want_asset: G, offer_amount: '8800', want_amount: '200000000', resting_leaf: {} },
   ]
-  const b = bookOf(offers, G, U, 8, 2, now)
+  const b = bookOf(offers.map((o) => ({ ...o, _verified: true })), G, U, 8, 2, now)
   assert.equal(b.ask, 46); assert.equal(b.bid, 44); assert.equal(b.askDepth, 1); assert.equal(b.bidDepth, 2)
   assert.deepEqual(Object.keys(b.byRail).sort(), ['leaf-resting', 'onchain-fill'])
+})
+
+test('only offers the wallet can verify and take count in the price and depth (#670)', async () => {
+  const fs = await import('node:fs')
+  const [rt, gated] = JSON.parse(fs.readFileSync(new URL('./restricted-offer-vectors.json', import.meta.url)))
+  const base = rt.pair.base_asset; const quote = rt.pair.quote_asset
+  // Signed by the maker: counted. The same offer with a changed amount, unsigned or of a kind the
+  // wallet cannot take (a round order, filled only by its clearer): not counted.
+  const forged = { ...gated, offer_id: 'go-2', want_amount: '1' }
+  const round = { maker_pubkey: 'c', offer_id: '3', offer_asset: base, want_asset: quote, offer_amount: '400', want_amount: '1', round_order: {}, _verified: true }
+  const unsigned = { maker_pubkey: 'd', offer_id: '4', offer_asset: base, want_asset: quote, offer_amount: '400', want_amount: '1', covenant: {} }
+  const b = bookOf([rt, gated, forged, round, unsigned], base, quote, 0, 8, now)
+  assert.equal(b.askDepth, 700)
+  assert.equal(b.ask, 50000000 / 1e8 / 300)
+  assert.deepEqual(Object.keys(b.byRail), ['restricted'])
 })
 
 const market = {

@@ -1827,6 +1827,8 @@ import { HDKey, mnemonicToSeedSync, btc, schnorr, sha256, secp256k1 } from './bt
 import { initRewards, rewardSettings, setRewardSettings, scanRewards, runAutoConvert,
   conversions as rewardConversions, sliceForWholeHtlc, NATIVE_BTC as AC_BTC } from './rewards.js';
 import * as seqob from './seqob.js';
+import { restrictedEntries, approvalCard, takeDvP, takeGated, TRADE_VBYTES } from './restricted-trade.js';
+import { makeRestrictedHost } from './restricted-host.js';
 import { nodeRejectText, shortfallText } from './node-reject.js';
 import { waitReasons } from './wait-reason.js';
 import { feeAssetVerdict, rateNote } from './fee-verdict.js';
@@ -1878,7 +1880,7 @@ import { noteArrival, noteSent, instantLog, instantRows, addressPayments, setSta
 import { arkMovementRows, keptMovements } from './btc-ark-history.js';
 import { makeUserOnchain } from './user-onchain.js';
 import { hostedBtcLightning } from './btc-lightning.js';
-import { admittedReceives } from './tooling/lsp/single-step-book.mjs';
+import { admittedReceives, admittedSources } from './tooling/lsp/single-step-book.mjs';
 import { postExisting, orderFromCovenantTerms } from './covenant-order.js';
 import { composerState, setComposerRail, canonicalPair } from './swap.js';
 import { mountPageApi } from './wallet-api.js';
@@ -2054,6 +2056,9 @@ function assetMeta(hex){ if(!hex) return {ticker:'—', name:'Asset', precision:
   if(hex==='BTC') return {ticker:'BTC', name:'Bitcoin testnet4', precision:8};
   if(hex.startsWith('oamp:')){ const m=oampAssets[hex.slice(5)]; return m ? {ticker:m.ticker||'?', name:m.name||'Restricted asset', precision:m.precision||0} : {ticker:'?', name:'Restricted asset', precision:0}; }
   if(hex===POLICY_HEX) return {ticker:'tSEQ', name:'Sequence', precision:8};
+  // A restricted asset by the ticker its policy server lists (the issuer's own record), never by its id.
+  let om = null; try{ om = !labels()[hex] && oampAssets[hex]; }catch{}
+  if(om && om.ticker) return { ...(REGISTRY_ASSETS[hex] || {}), ticker: om.ticker, name: om.name || 'Restricted asset', precision: om.precision || 0 };
   return labels()[hex] || REGISTRY_ASSETS[hex] || DEFAULT_ASSETS[hex] || {ticker:hex.slice(0,8)+'…', name:'Asset', precision:0}; }
 // Asset TRUST signals (E1): distinguish a registry-verified asset, a merely-known one, and an
 // unknown id the wallet just happens to hold (a potential impostor). tSEQ (policy asset) and BTC
@@ -4564,6 +4569,114 @@ async function chainGenesis(){
   if(!_genesis && leavesApi && leavesApi.isOpen()){ try { _genesis = (await leavesApi.command('info')).genesis_hash; } catch {} }
   return _genesis;
 }
+// ---------- restricted assets in the Trade tab (restricted-engine.js, restricted-trade.js) ----------
+// A restricted asset trades on the chain only, between accounts its policy server approves: a
+// maker's quote in one transaction, or a gated order filled with the server's co-signature. The
+// page's part is here: the wallet's coins and keys (restricted-host.js), the policy server through
+// the same-origin proxy, and the words. Whether the page's policy server answers eligibility is
+// read once every ten minutes; without it the Trade tab trades as before.
+let _restrictedOn = { at: 0, on: false };
+async function restrictedAvailable(){
+  if(Date.now() - _restrictedOn.at < 10 * 60_000) return _restrictedOn.on;
+  let on = false;
+  // A request without its parameters: 400 where the endpoint exists, 404 where it does not.
+  try{ const r = await fetch(OPENAMP + '/v1/eligibility', { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) }); on = r.status !== 404 && r.status < 500; }catch{}
+  _restrictedOn = { at: Date.now(), on };
+  return on;
+}
+// A restricted asset's id is its on-chain id (the registry's), as it is for every asset here.
+function isRestrictedAsset(hex){ const a = oampAssets && oampAssets[hex]; return !!a && (!a.enforcement || a.enforcement === 'cosign'); }
+// The policy server an offer names: only this page's own, through its proxy.
+function restrictedPolicyBase(url){
+  if(!url) return OPENAMP;
+  const known = [OPENAMP, location.origin + '/openamp', (window.SEQ_OPENAMP_PUBLIC || 'https://sequentiatestnet.com/openamp')].map(u=> u.replace(/\/+$/,''));
+  return known.includes(String(url).replace(/\/+$/,'')) ? OPENAMP : null;
+}
+// The fee of one restricted trade, in an asset's own units at the wallet's rate.
+function restrictedFeeAtoms(hex, vbytes){
+  const rate = feeRateFor(hex), ref = BigInt(DEFAULT_FEERATE) * BigInt(vbytes) / 1000n;
+  return (ref * BigInt(EXCHANGE_RATE_SCALE) + rate - 1n) / rate;
+}
+let _restrictedHost = null;
+function restrictedHost(){
+  if(_restrictedHost) return _restrictedHost;
+  _restrictedHost = makeRestrictedHost({
+    policyBase: restrictedPolicyBase,
+    aid: ()=> OAMP_AID,
+    utxos: ()=>{ const out = []; for(const u of wollet.utxos()){ try{ const sec = u.unblinded(); if(sec.isExplicit && !sec.isExplicit()) continue; const op = u.outpoint(), spk = u.scriptPubkey();
+      out.push({ txid: op.txid().toString(), vout: op.vout(), asset: sec.asset().toString(), value: String(sec.value()), scriptPubkey: spk.toString(), chain: chainOf(u), index: u.wildcardIndex() }); }catch{} } return out; },
+    keyOrigin: ()=>{
+      const m = String(accountXpub() || '').match(/^\[([0-9a-f]{8})\/([^\]]*)\](\w+)$/);
+      if(!m) return { fingerprint: '00000000', path: [], pubkey: ()=> '' };
+      const path = m[2].split('/').map(x=> /['h]$/.test(x) ? (parseInt(x) + 0x80000000) >>> 0 : parseInt(x));
+      const hd = HDKey.fromExtendedKey(m[3], TESTNET_BIP32_VERSIONS);
+      return { fingerprint: m[1], path, pubkey: (c, i)=> hexOfBytes(hd.deriveChild(c).deriveChild(i).publicKey) };
+    },
+    // The wallet library signs the inputs it knows as its own, and no other (the trade checks it).
+    sign: (b64)=>{ const p = new Pset(b64); try{ p.addDetails(wollet); }catch{} const fin = wollet.finalize(signer.sign(p)); return fin.extractTx().toString(); },
+    enclaveSighash: (hex, i, prevouts, leaf, control)=> enclaveSighash(hex, i, prevouts, leaf, control, network.genesisBlockHash()),
+    signDigest: (d)=> signer.openampSignSighash(d),
+    receiveScript: ()=> wollet.address(addrIndex == null ? undefined : addrIndex).address().scriptPubkey().toString(),
+    scriptOf: (a)=> new Address(a).scriptPubkey().toString(),
+    feeAtoms: restrictedFeeAtoms,
+    esplora: async (path)=>{ const r = await fetch(ESPLORA + path, { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) }); if(!r.ok) throw new Error('explorer: HTTP ' + r.status); return r.json(); },
+    courier: async (offer, amount)=>{ const { openCourierSession } = await import('./xcourier.js'); return openCourierSession(offer._relayJson ? { ...offer, maker_pubkey: offer.maker_pubkey } : offer, amount, ''); },
+    fetchJson: async (url, init)=>{ const r = await fetch(url, init || { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) }); const j = await r.json().catch(()=>({}));
+      if(!r.ok){ const e = new Error(j.error || j.reason || ('HTTP ' + r.status)); if(r.status === 403) e.kind = 'refused'; throw e; } return j; },
+    now: ()=> Math.floor(Date.now() / 1000),
+  });
+  return _restrictedHost;
+}
+function restrictedDeps(){
+  const name = (h)=> assetMeta(h).ticker;
+  return {
+    available: restrictedAvailable,
+    isRestricted: isRestrictedAsset,
+    book: (pay, receive)=> isRestrictedAsset(receive) ? relayPairBook(receive, pay) : relayPairBook(pay, receive),
+    // The assets the book trades a restricted asset for now, in the trade's direction: buying it,
+    // those offers take for it; selling it, those offers give for it.
+    sellers: async (hex, { sell = false } = {})=>{
+      try{ const j = await fetch(`${seqob.seqobBase()}/v1/markets`, { cache:'no-store', signal: AbortSignal.timeout(USER_READ_TIMEOUT_MS) }).then(r=> r.ok ? r.json() : {});
+        const ms = (j.markets || []).map(m=> m.pair || m).filter(p=> p && p.base_asset === hex && /^[0-9a-f]{64}$/.test(p.quote_asset || ''));
+        const out = [];
+        for(const p of ms){ const book = await relayPairBook(hex, p.quote_asset);
+          const dir = sell ? { payAsset: hex, receiveAsset: p.quote_asset } : { payAsset: p.quote_asset, receiveAsset: hex };
+          if(restrictedEntries(book, dir).length) out.push({ asset: p.quote_asset }); }
+        return out;
+      }catch{ return []; }
+    },
+    btcBuys: (hex, { sell = false } = {})=>{ const g = _genesis; return !!(_userPairs && g && (sell ? admittedSources(_userPairs, g, hex, 'BTC') : admittedSources(_userPairs, g, 'BTC', hex)).length); },
+    eligible: async (hex, atoms)=>{
+      const aid = OAMP_AID || (OAMP_XONLY ? openampComputeAid([OAMP_XONLY]) : '');
+      let j; try{ j = await oampFetch(`/v1/eligibility?asset=${encodeURIComponent(hex)}&aid=${encodeURIComponent(aid)}&atoms=${encodeURIComponent(String(atoms || 1))}`); }catch{ return null; }
+      if(!j || j.eligible !== false) return null;
+      const reg = REGISTRY_ASSETS[hex] || {}, c = oampContract(oampAssets[hex]) || {};
+      return approvalCard(j, { ticker: name(hex), entity: c.entity || reg.entity || null, domain: (c.entity && c.entity.domain) || assetDomain(hex) }, aid);
+    },
+    held: (hex)=> isRestrictedAsset(hex) ? ((oampBalances[hex] && oampBalances[hex].atoms) || 0n) : userHeld(hex),
+    // The fee is paid in the asset paid; selling a restricted asset, in the asset received, else in
+    // another asset the wallet holds that the network takes fees in; never by default in one asset.
+    feeAsset: async (pay, receive)=>{
+      const ok = (h)=>{ try{ return !isRestrictedAsset(h) && feeRateFor(h) > 0n; }catch{ return false; } };
+      if(!isRestrictedAsset(pay) && ok(pay)) return pay;
+      if(ok(receive) && userHeld(receive) > 0n) return receive;
+      for(const h of Object.keys(balObj())) if(ok(h) && userHeld(h) > 0n) return h;
+      return null;
+    },
+    fee: async (hex)=> restrictedFeeAtoms(hex, TRADE_VBYTES),
+    ensure: (needs, say)=> ensureOnChain(needs, say, 'traded'),
+    take: async (entry, opts)=>{
+      const host = restrictedHost();
+      try{
+        const r = entry.kind === 'gated' ? await takeGated(host, entry, opts) : await takeDvP(host, entry, opts);
+        try{ await sync(); }catch{} try{ await oampRefreshBalances(); }catch{}
+        return r;
+      } finally { host.releaseAll(); }
+    },
+    status: (txid)=> restrictedHost().status(txid),
+    name,
+  };
+}
 // The relay's on-chain book for a pair, both orientations, each offer checked and kept with the
 // relay's own JSON (what the leaf library reads an order from).
 async function relayPairBook(base, quote){
@@ -4580,6 +4693,8 @@ async function relayPairBook(base, quote){
 }
 function userHeld(a){
   let n = 0n;
+  // A restricted asset is held at the wallet's enclave, on the chain only.
+  try { if(a !== 'BTC' && oampBalances[a]) n += oampBalances[a].atoms || 0n; } catch {}
   try { n += a==='BTC' ? (btcBalance || 0n) : (BigInt(balObj()[a] || 0) - (chainArriving().get(a) || 0n)); } catch {}
   try { if(leavesApi) n += leavesApi.leafAtoms(a) || 0n; } catch {}
   try { n += BigInt(Math.round(lnSpendableFor(a).units || 0)); } catch {}
@@ -4594,6 +4709,7 @@ function userKnownAssets(){
   try { if(leavesApi && leavesApi.vestingAssets) for(const k of leavesApi.vestingAssets()) s.add(k); } catch {}
   for(const k of onItsWayAssets()) s.add(k);
   try { for(const k of Object.keys(REGISTRY_ASSETS || {})) s.add(k); } catch {}
+  try { for(const k of Object.keys(oampAssets || {})) if(isRestrictedAsset(k)) s.add(k); } catch {}
   try { for(const c of Object.values((_userPairs && _userPairs.chains) || {})) for(const p of c.pairs || []) { s.add(p.pay); s.add(p.receive); } } catch {}
   return [...s].filter(a=> a==='BTC' || /^[0-9a-f]{64}$/.test(a));
 }
@@ -5193,6 +5309,9 @@ function initUserComposer(){
     // The live makers: the one of in-tree swaps, and the one of BTC (its own Bitcoin node).
     makers: ()=> (typeof window!=='undefined' && Array.isArray(window.SEQ_LEAF_MAKERS)) ? window.SEQ_LEAF_MAKERS : [location.origin + '/leafmaker', location.origin + '/leafmaker-btc'],
     relayBook: (pay, receive)=> relayPairBook(receive, pay),
+    // Restricted assets trade on the chain under their policy server (restricted-engine.js):
+    // absent when this page's policy server does not answer eligibility, and the trade is as before.
+    restricted: restrictedDeps(),
     // Atoms of `receive` an atom of `pay` is worth on the price feed, or null when either is
     // unpriced: the engine leaves out any entry far off it.
     fairRate: (pay, receive)=>{
@@ -8374,6 +8493,9 @@ const _lnPassedOver = new Set();
 // returned as it is. `atoms` is the amount sent, when known.
 // -> { dest, byAddress, lightning?, address?, why? }
 function payCodeRoute(text, asset, atoms){
+  // A restricted asset goes to the recipient's account only, never through the Ark or Lightning:
+  // whatever was pasted is checked as an account where the send is made (#665).
+  if(isOampAsset(asset)) return { dest: text, byAddress: false };
   let c = null; try{ c = readPayCode(text); }catch{ return { dest: text, byAddress: false }; }
   if(!c) return { dest: text, byAddress: false };
   // One payment of hold - board or more (ark-limits.js) goes to the address straight away: the
@@ -8399,6 +8521,9 @@ function payCodeRoute(text, asset, atoms){
   }
   return { dest: c.address || text, byAddress: !!c.address };
 }
+const RESTRICTED_SEND_WORDS = Object.freeze({
+  needsCode: (t)=> `${t} is sent to its recipient's approval code: the 40-character code their wallet shows for ${t}. Ask them for it and paste it here.`,
+});
 function payCodeDestination(text, asset){ return payCodeRoute(text, asset).dest; }
 // Default mode's Confidential switch, under the code (and under the address while the code waits on
 // the operator): on, the code is the wallet's confidential address alone (confidentialCode).
@@ -10288,7 +10413,10 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
       const id=oampId(r.asset);
       const atoms=parseAtoms(r.amtS, sendPrecision(r.asset));
       if(atoms<=0n) throw new Error('amount must be greater than zero');
-      const recipientAid=r.addr.trim();
+      const recipientAid=r.addr.trim().toLowerCase();
+      // Only an account's approval code receives a restricted asset (a payment code or an address
+      // carries none): said in plain words before anything is asked of the policy server (#665).
+      if(!/^[0-9a-f]{40}$/.test(recipientAid)) throw new Error(RESTRICTED_SEND_WORDS.needsCode(assetMeta(r.asset).ticker));
       // WW-6: track this transfer's txid locally so it shows in the History tab with a
       // pending/confirmed chip and Bitcoin anchor depth until it confirms.
       await oampReviewBroadcast(id, recipientAid, atoms, (txid)=>{

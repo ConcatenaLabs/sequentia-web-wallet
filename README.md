@@ -79,8 +79,9 @@ Protocol-level documentation (anchoring, proof of stake, the open fee market) li
   staking-pool delegation (join a pool, switch, or leave; the coins never move)
 - Transaction history on both chains with RBF fee bump, CPFP, and replace (Sequentia) and CPFP
   (Bitcoin) in developer mode; default mode speeds up a waiting transaction by itself
-- OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed), and a
-  Sign tab for OpenAMP's tagged non-spending signatures (a challenge or a document hash)
+- OpenAMP restricted assets: balances, receive, send (locally signed, never blind-signed),
+  trades on the chain with approved holders, and a Sign tab for OpenAMP's tagged non-spending
+  signatures (a challenge or a document hash)
 - Classic signed messages over a wallet address key, in the format `verifymessage` accepts,
   and, from the same Sign tab, a message signed with the staking key, which is how a site
   that reads your stake -- Levo -- signs you in: paste its message, sign, paste the signature back
@@ -798,6 +799,16 @@ are drafted by the enclave, reviewed in the wallet, and signed locally (Schnorr 
 returned sighashes); the wallet never blind-signs. If the service is unreachable the wallet
 works normally without the restricted rows.
 
+A restricted asset trades on the chain only, between accounts its issuer has approved, and in
+default mode the Trade tab simply trades it against other assets. The wallet takes a maker's
+quote in one transaction that moves both sides at once, or fills a resting order whose coin
+only the asset's policy server can release; either way the wallet checks the whole transaction
+before it signs anything, and the policy server checks it again and broadcasts it. A buyer the
+issuer has not approved is shown whom to ask and the approval code to give them. A restricted
+asset is never paid for with bitcoin directly: the screen names the asset that bitcoin buys and
+that buys it. A restricted asset is sent only to its recipient's approval code. When the policy
+server does not answer eligibility, the Trade tab trades as it does without restricted assets.
+
 ## For developers
 
 ### Repo layout
@@ -808,6 +819,7 @@ works normally without the restricted rows.
 | `pkg/` | **Not tracked.** The `lwk_wasm` WebAssembly bindings built from SWK (see below). |
 | `btc.js` | Vendored bundle of `@scure/btc-signer`, `@scure/bip32`, `@scure/bip39`, `@scure/base`, `@noble/hashes` (MIT): the Bitcoin testnet4 side and HD derivation. |
 | `swap.js` | The Trade tab: composer, routing, Market/Limit, covenant order placement, fee selection. |
+| `restricted-trade.js` / `restricted-engine.js` / `restricted-host.js` | Restricted assets in the Trade tab: the taker's side of a maker's quote (one transaction, both legs) and of a gated order, the check each side runs on the whole transaction before signing, the default composer's pricing and its approval and bitcoin cards, and the page's coins, keys, explorer and courier behind them. |
 | `market-view.js` | A pair's market, in both modes' Trade tab: chart, last price and 24-hour change, best bid and ask, recent trades, from the relay's `trades`, `candles` and `ticker`; developer mode adds rails. |
 | `covenant.js` / `covenant-order.js` / `covenant-flow.js` / `covenant-fill-host.js` | The SeqOB passive-CLOB covenant: the byte-exact leaf and witness builders (pinned to the Go and Python originals), the place/watch-for-fill order flow (and `postExisting`, which lists an order whose coin something else put on the chain, such as an offboard from leaves, once the chain shows it there), the pure composer glue, and the seam that hands raw FILL assembly to wasm. |
 | `covenant-sim.js` | SeqDEX's Simplicity order (the template `seqdex/order`): its address from the terms and the pinned commitment root, and a fill's witness from the template's pinned programs, with no compiler; `seqob.js` signs and verifies its offers (`simplicity_covenant`). Pinned to the template's vectors as seqdex vendors them. |
