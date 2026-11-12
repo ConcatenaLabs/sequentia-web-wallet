@@ -495,8 +495,9 @@ test('the wallet\'s own refusal carries what can be traded now as a value: the p
   const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
   assert.equal(q.why, 'own-short', q.why)
   assert.equal(q.most, '998646271', 'the library\'s figure, not one read out of its words (' + String(999931875n - (999932651n - 999647047n)) + ')')
-  // With the exact amount that empties the coins, above it: what Max trades.
-  assert.equal(q.all, '999646271')
+  // With what emptying the coins pays in all, above it: the library's `all` plus the margins its
+  // words name (999932651 - 999931875 = 776), the person's figure being all-in.
+  assert.equal(q.all, '999647047')
   assert.equal(refusalAll(e), 999646271n)
   assert.equal(refusalAll({ message: e.message }), null, 'never read out of the words')
   const le2 = new LeafError({ kind: 'refused', message: e.message, most: '1', all: '2' })

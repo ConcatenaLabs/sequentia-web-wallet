@@ -808,11 +808,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   what you hold. Nothing has moved." (the wallet's own payment would not cover the amount with the
   fees it keeps back, or would leave change below the network's smallest coin, and nothing more of
   it is on its way: every amount up to <most> goes; with more on its way, the trade waits for it
-  and the whole amount goes). **Max** asks for all of it: when the fees leave less than the
-  balance, Review prices the exact amount that empties the coins, the fees out of it, and shows
-  that amount under You pay. It can be a little more than <most>: an amount between the two would
-  leave change below the network's smallest coin, so a typed amount there is told the sentence
-  above; "Nobody could confirm a price for this just now. Nothing has moved: try again in a
+  and the whole amount goes). Every amount the person gives is all-in: the fees are part of it,
+  and You pay is what leaves the wallet. **Max** fills in the balance, and a trade of the balance
+  empties the coins: You pay is the balance, its fees included, and nothing stays. When one trade
+  cannot take all of it (it takes at most sixteen coins, or no offer pays exactly what is left),
+  the amount becomes the most that goes, You pay is that same amount, and the ticket names the
+  rest: "<amount> <TICKER> stays in your wallet, to trade or send after this one."; "Nobody could confirm a price for this just now. Nothing has moved: try again in a
   moment."; "Your wallet is still finishing something it started, so it could not get a price in
   time. Nothing has moved: try again in a moment." (no price within 45 seconds of Review while the
   wallet was busy, or a maker gave a price in time and the wallet was still checking it when the
