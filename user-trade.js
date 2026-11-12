@@ -1602,10 +1602,13 @@ export function createEngine (deps) {
       // trade is kept, with the price the person accepted as its bound, while those coins go
       // through the next round; then it is priced again and goes ahead by itself (advance), or is
       // returned with words if the price moved past that bound. The firm offer is let go of now.
-      if (rec.state === 'confirming' && e && e.kind === 'settle_first') {
+      // The same when the operator refused the step for coins too many payments from a round (its
+      // `depth_limit`, which a fill of a resting order meets only at the fill, #746): a round cures it.
+      const deep = refused && (e.code === 'depth_limit' || /\(\d{3} depth_limit\)/.test(String(e.message)))
+      if (rec.state === 'confirming' && e && (e.kind === 'settle_first' || deep)) {
         drop(choice)
         rec.state = 'settling'
-        rec.settleCoins = e.coins || []
+        rec.settleCoins = (e.kind === 'settle_first' && e.coins) || []
         rec.settleSince = rec.settleSince || now()
         rec.accepted = rec.accepted || ticket
         rec.error = null
