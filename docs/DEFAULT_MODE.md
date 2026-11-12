@@ -51,12 +51,13 @@ In practice:
   then in the figure. Payments count in the order they came, and one that counted never leaves
   the figure again, neither for a change in prices nor when the wallet pays out of it (its change
   keeps its place). A payment the wallet cannot value arrives; receiving never stops for it.
-- A deposit to the wallet's address on Sequentia is arriving from the moment the wallet sees it
-  until it is money the wallet can use: in the mempool, then, for an asset the wallet moves into
-  the Ark by itself, until that move is final. It counts once, then, and never leaves the figure
-  again. Its line says "usually within <N> minutes", N from the operator's anchor depth (a Sequentia
-  block, and ten minutes for each Bitcoin block that must bury the move's anchor, rounded up to
-  five). The wallet's own change from a payment it made counts at once.
+- A payment to the wallet's address on Sequentia is in the figure, and can be sent and traded at
+  once (see Send and Trade), from the moment it is in a block. Until then its sender can still
+  replace it, so it is in no figure that can be spent: the line under the figure reads "<amount>
+  <TICKER> arriving, in about a minute", and History marks its row "Arriving · about a minute".
+  The wallet moves it into the Ark by itself when it has been left alone a while; the money stays
+  in the figure throughout, since moving it in is the wallet's own doing. The wallet's own change
+  from a payment it made counts at once.
 - A wallet opened in a browser for the first time (a restored phrase, a new device, a cleared
   profile) first finds what it holds. Until it has, the line under the total reads "Syncing…
   finding everything this wallet holds." rather than any figure as of a time, Receive shows the
@@ -69,7 +70,9 @@ In practice:
   finding everything this wallet holds is taking far longer than it should. Nothing has moved,
   and your coins are still yours. Reload the page to start again.", and a payment or trade still
   waiting reads "Your wallet is taking far longer than it should to find everything it holds, so
-  nothing has moved. Reload the page to start again; your coins are still yours." If the service that holds its coins for instant payments does not answer, the
+  nothing has moved. Reload the page to start again; your coins are still yours." Once it has opened, the
+  wallet checks the coins its history gave up a little at a time while nobody is asking it for
+  anything, so a receive code, a price or a payment asked meanwhile waits a second at most. If the service that holds its coins for instant payments does not answer, the
   wallet is never shown empty: the line reads "Syncing… the service that holds your coins for
   instant payments is not answering, so this wallet has not found them yet. They are still
   yours, and show here once it answers.", the wallet asks again every half minute, and a trade,
@@ -101,8 +104,9 @@ In practice:
   has been read again, then **"Up to date."**
 - A coin that could be spent, and that a Bitcoin reorganisation took back out of the chain with
   the block it rested on, is arriving again until the network takes it in again: it leaves the
-  figure for History's **Arriving**, and is never shown as gone. Developer mode says so under the
-  figure: **"<amount> <TICKER> being redone after a Bitcoin reorganisation"**.
+  figure for History's **Arriving**, and is never shown as gone. The wallet's own money it was
+  moving in from the chain stays in the figure meanwhile, as it did before. Developer mode says so
+  under the figure: **"<amount> <TICKER> being redone after a Bitcoin reorganisation"**.
 - A coin the wallet left unrefreshed while it was away, or one paid to it whose sender took an
   earlier coin of its lineage back on the chain, is taken on the chain under its own key by the
   operator or a watchtower: the wallet deposits each coin, sealed and with nothing shown, with
@@ -339,6 +343,43 @@ modes (`asset-picker.js`):
   now, so it goes to the address. It arrives after a Bitcoin block." (for BTC; for an asset, "It
   arrives after the next block, in about a minute."). Anything that is not a code goes the way it
   always has. The wallet chooses; nothing asks the person.
+- Money held on the chain (a payment received at the wallet's address a moment ago) is sent the
+  way that completes soonest. To a receive code that names an address, when only the chain covers
+  it, it is paid at that address at once, with the review above. To a receive code with no address,
+  or when the amount needs both what is on the chain and what the wallet holds in the Ark, the
+  wallet first moves what is on the chain in, then makes the payment. That is one payment: the
+  review and **Send** read "Goes through within about <N> minutes", counted down after **Send**, N as
+  for a move in (a Sequentia block, and ten minutes for each Bitcoin block that must bury its anchor,
+  rounded up to five), and, when part of what the wallet holds of it in the Ark is still on its way
+  and so settles first once the money is in, that settlement's minutes added: one wait, never two.
+  While it waits, Activity shows the payment as "Sending", and a page closed meanwhile goes on with
+  it when the wallet is next open, within the same fee bound or not at all. Its fees, the move's
+  and the payment's, are known only once the money is in,
+  so the review shows the most they can be, "Fee: At most <amount> <TICKER>", and the total, "At
+  most <amount + fee> <TICKER>". Once the money is in, the payment is priced and goes only within
+  that; if it would cost more, nothing is sent and the review is shown again with the fee as it is
+  now, under "The fee changed while your money was moved in, so nothing was sent. Here it is with
+  the fee now." A payment to an address that needs both goes the same way: "It arrives within <N>
+  minutes. Keep this page open meanwhile.", N the move in and the payment together, and the
+  settlement first only when part of what pays is still on its way. The wallet
+  waits for the money to be in a block for the N minutes it said and no longer; past them nothing
+  is sent: "This is taking longer than usual. Nothing was sent, and your money is still yours." If
+  the network will not take the money in (too little of it to move once its fee is paid), it says
+  so at once: "Nothing was sent, and your money is still yours. It can go to an address: ask for
+  one, or paste one." Within a minute of a payment the wallet itself made on the chain it waits that
+  minute first, since both spend the same coins. The line under the amount says the same while it
+  is typed ("It arrives after the next block, in about a minute." or "Goes through within about
+  <N> minutes"). **Max** to a receive code fills in all of it, what is on the
+  chain included, less the margin for the fees, and a larger amount is refused naming that same
+  figure: "You can send up to <Max> <TICKER>: the fee comes out of your balance." Money on the chain
+  that cannot be moved in (an asset the network does not take in, or too little of it to move once
+  the move's fee is paid) is paid at the code's address when it names one; to a code with no
+  address: "This <TICKER> can be sent only to an address. Ask for an address to pay, or paste one."
+  Money held that is less than the fee of sending it (the fee is paid in what is sent): "This
+  <TICKER> is less than the fee to send it, so it cannot be sent yet. Once more arrives, it can."
+  Coins of a supervised asset its issuer froze are never moved and never offered: a payment short
+  for them says "<amount> <TICKER> is frozen by its issuer: it can't be sent until the issuer lifts
+  the freeze."
 - A payment name (`name@domain`, also read as `lightning:name@domain` or `₿name@domain`, typed or
   scanned) is paid as what it stands for. A name at the site's own domain is paid at a receive code
   its wallet left signed with the name service, any asset, as any code is. The code must carry the
@@ -490,9 +531,8 @@ once the coins it made can be spent. Past that time by two minutes it reads "Tak
     amount that does not give the payment away: all it holds of the asset there, or the smallest
     power of ten above what the payment needs (at least one whole unit), whichever is smaller
     (never less than the operator's smallest coin of the asset; of what the library can move now,
-    when part of what is held cannot be, such as a channel's balance). It says "Moving <amount>
-    <TICKER> out of the Ark so it can be sent confidentially. They are ready within <N> minutes.
-    Keep this page open." (<N> as for a payment to an address, above) and the review opens once
+    when part of what is held cannot be, such as a channel's balance). It says "Getting <amount>
+    <TICKER> ready to be sent confidentially. Ready within <N> minutes. Keep this page open." (<N> as for a payment to an address, above) and the review opens once
     they are there, usually in about three minutes: one settlement of the operator's and its
     payout on the chain, and no confirmation more. A move
     already under way is waited for, never asked twice, so Review pressed again (the browser
@@ -515,20 +555,20 @@ once the coins it made can be spent. Past that time by two minutes it reads "Tak
 - A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain, and
   default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
   Ark to its own address by itself (never less than the operator's smallest coin of the asset),
-  and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
-  are ready within <N> minutes. Keep this page open." ("used to join the pool", "mixed"; Ambra
+  and says so while it waits, naming no rail: "Getting <amount> <TICKER> ready to be staked. Ready
+  within <N> minutes. Keep this page open." ("used to join the pool", "mixed", "traded"; Ambra
   mobile says "Keep this screen open."; <N> is the operator's next settlement, its block and
   certificate, and the operator's unlock of the coins in a block, counted as for a payment to an
-  address). Once it
+  address). A restricted trade's ticket says that wait and two minutes for the trade. Once it
   has arrived the usual review opens; nothing is signed before it.
 - When the operator cannot pay that much on the chain now (its published `fundable`, against
   the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be
-  moved out of the Ark right now: the network has too little of it free. Nothing has moved: try
-  again later."
+  made ready right now: the network has too little of it free. Nothing has moved: try again
+  later."
 - A move already under way is waited for, never asked twice. One the operator cannot pay on the
-  chain yet says "<amount> <TICKER> cannot be moved out of the Ark yet: the network moves it as
+  chain yet says "<amount> <TICKER> is not ready to be staked yet: the network makes it ready as
   soon as it can, and it stays yours meanwhile. …"; one that has not arrived within 45 minutes,
-  "What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes."
+  "What was being made ready has not arrived yet. It stays yours: try again in a few minutes."
 - Too little held: "Not enough <TICKER>: <amount> <TICKER> short." The 40,000 tSEQ minimum
   counts the fee only when the fee is paid in tSEQ: the stake card has **Pay the fee in**, and
   with too little tSEQ for both the wallet chooses another held asset there and says "Not enough
@@ -658,6 +698,35 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   Payments wait for that settlement the same way and then go. Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,
   at a settlement's fee each, so the next trade from them goes at once.
+- **Money held on the chain** (a payment received at the wallet's address a moment ago) is traded
+  the way that completes soonest. When a book offers an order on the chain for the pair and the
+  whole amount, it is taken at once from the wallet's coins there. Otherwise the ticket is shown at
+  once, priced on the best offer for what is paid less a small margin for the fees, with "Goes
+  through within about <N> minutes" under it (N as for a move in, under Send). The ticket is
+  all-in: what it pays includes every fee, the move's among them, and since those are known only
+  once the money is in, its fee line is the most they can be, "Fees at most <amount> <TICKER>,
+  included above". **Trade** then moves the money in first, and the trade is kept under Your trades
+  as "Goes through within about <N> minutes", counted down, with the ticket as its bound, exactly
+  as a trade that settles first: once the money is in it is priced again and goes ahead by itself only at the
+  ticket's price or better, the move's fee counted in what it pays, once however often the page
+  follows it, and an anchor rollback meanwhile only makes it wait longer; otherwise "Returned:
+  nothing traded. The price moved while it waited." The trade then lists what it paid, the move's
+  fee in its fees. When the rest of what it pays must settle first as well, that is the same
+  wait, not a second one: the words count down to whichever ends later, the move or the settlement
+  the wallet expects, and past that by two minutes read "Taking longer than usual: this goes ahead
+  by itself, or is returned with nothing traded". It waits the N minutes its ticket says, longer
+  only when the wallet says the settlement takes longer (then twice that, as above), then
+  "Returned: nothing traded.", the money in the wallet; if the network will not take the money in: "Returned: nothing traded, and
+  your money stays in your wallet. You can send it to an address." Once the trade has gone ahead or been returned, the wallet
+  stops moving money in for it. Money on the chain that cannot be moved in is never waited
+  on: an order on the chain that takes it goes, and otherwise the ticket says why, at once: "This
+  <TICKER> arrived in too small an amount to trade yet. You can send it, and once more arrives you
+  can trade it." or "Nobody offers to trade this <TICKER> now. You can send it." Money on the chain
+  its issuer froze for this wallet (a supervised asset) is never moved in or waited on either: when
+  the amount needs it, "<amount> <TICKER> is frozen by its issuer and stays where it is until the
+  issuer lifts the freeze. Nothing has moved.", with "You can trade up to <most> now." before the
+  last sentence when the rest of the holding trades any (what it holds elsewhere and what can be
+  moved in, less the fees kept back).
 - A trade whose other side cannot complete it after all (the other side says the offer is gone:
   the network refused it, for example because another device of the same wallet had already
   spent the coin it named) is not waited on: the wallet takes its coins back at once, learning
@@ -849,13 +918,13 @@ What it shows beyond the Market and Trade sections above:
   at once, or one a Bitcoin reorganisation took back (a round, final once its block is certified
   with its anchor buried under the operator's anchor depth: "about a minute" while that depth is
   0, else "usually within <N> minutes", a minute and ten for each Bitcoin block, rounded up to
-  five); **Arriving**, "usually within <N> minutes",
-  for a deposit to the address (Balance); **Coming back**, "about a minute", for what a channel
+  five); **Coming back**, "about a minute", for what a channel
   being closed held; **Coming back**, "within about <N> hours" (from when it can be claimed home,
   once known; "within about two days" until then), for what an undone trade, or the wallet's
   safekeeping, is bringing home, whether or not this browser made the trade. Past that time the line says "taking longer than usual;
-  the wallet keeps at it", and the wallet keeps at it. A received row, or a deposit's row on the
-  chain, that is still arriving says so itself.
+  the wallet keeps at it", and the wallet keeps at it. A received row that is still arriving says
+  so itself. A payment to the wallet's address is in the figure once it is in a block; until then
+  its row reads **Arriving**, "about a minute".
 - A payment is in History the moment it leaves, and a payment arriving as soon as the network has
   it. This holds for what is paid and received in seconds too, and for every trade of the Trade
   tab: the wallet writes each down as it happens, in the browser that holds it, and shows them
@@ -921,8 +990,8 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   When it needs coins on the chain that the wallet holds in the Ark, it first asks **Get coins
   ready for <site>?**, "<site> needs coins on the chain for what you asked there. The wallet moves
   them to your own address; they stay yours, and only the fee for the move is paid.", with
-  **Moves**, **Fee for the move** and **Asked by**; once approved, the wallet says "Moving
-  <amount> <TICKER> out of the Ark so it can be used on <site>." while it waits, as Stake does.
+  **Moves**, **Fee for the move** and **Asked by**; once approved, the wallet says "Getting
+  <amount> <TICKER> ready to be used on <site>." while it waits, as Stake does.
 
 ## Report a problem
 

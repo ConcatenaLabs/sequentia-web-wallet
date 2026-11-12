@@ -203,3 +203,111 @@ test('a resting fill refused the same way twice is not asked a third time', asyn
   assert.deepEqual(asked, ['order_fill_resting_quote:200251', 'order_fill_resting_quote:100124', 'order_fill_resting_quote:200251',
     'order_fill_resting_quote:100124'], 'asked once more after the first refusal, not again: ' + s.calls.join(','))
 })
+
+test('a fill refused because its coin was spent elsewhere is priced again into the same record (#710)', async () => {
+  const s = standIn()
+  const DEAD = 'e1'.repeat(32)
+  s.coins[0].leaf_id = DEAD
+  const lib = s.lib.command.bind(s.lib)
+  let refusedOnce = false
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting' && !refusedOnce) {
+      refusedOnce = true
+      // The operator refuses: a second device gave the coin to a round. The library caught up: the
+      // coin is spent, and the round's coin is held in its place.
+      s.coins[0].state = 'spent'
+      s.coins.push({ leaf_id: 'r1', asset: X, value: '2000000', state: 'live', expiry: 1800000000 })
+      const e = new Error(`refused: the server refused order_fill (409 double_spend): leaf ${DEAD} is already spent: the server co-signs one spend of a leaf`)
+      e.kind = 'server_refused'; throw e
+    }
+    if (cmd === 'order_fill_resting') { s.calls.push(cmd); s.shownCoin = a.shown.coin; s.coins.find((c) => c.leaf_id === 'r1').state = 'spent'
+      s.coins.push({ leaf_id: 'got', asset: Y, value: a.amount, state: 'live', expiry: 1790000000 })
+      return { order: ORDER, filled: a.amount, paid: a.shown.paid, fee: '300', change: a.shown.change, gives: ['r1'], answer: { transfer_id: 'tr2', coins: [] } } }
+    const v = lib(cmd, a)
+    if (cmd === 'order_fill_resting_quote') v.gives = s.coins.filter((c) => c.state === 'live' && c.asset === X).map((c) => c.leaf_id)
+    return v
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(q.ok, q.why)
+  let r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'repricing', 'not returned: priced again')
+  assert.equal(r.gave.length, 1); assert.equal(r.gave[0].whose, 'taker')
+  r = await eng.advance(eng.records()[0])
+  assert.equal(eng.records().length, 1, 'the same record')
+  assert.equal(r.state, 'sent', JSON.stringify(r))
+  assert.equal(r.transfer, 'tr2')
+  assert.ok(BigInt(r.ticket.amountOut) >= BigInt(q.ticket.amountOut) && BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'at the price accepted or better')
+})
+
+test('a refusal that names no coin of the wallet\'s returns the fill as before', async () => {
+  const s = standIn()
+  const lib = s.lib.command.bind(s.lib)
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting') { const e = new Error('refused: the server refused order_fill (409 double_spend): leaf ' + 'f0'.repeat(32) + ' is already spent'); e.kind = 'server_refused'; throw e }
+    return lib(cmd, a)
+  }
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  await assert.rejects(eng.confirm(q.choice, q.ticket))
+  assert.equal(eng.records()[0].state, 'failed')
+})
+
+test('a fill refused while the other device\'s round is not final waits for the library\'s catch-up, then goes (RV46 P6)', async () => {
+  // The second device's round is broadcast, not final: the library's catch-up after the refusal
+  // finds nothing yet, so it holds the coin out of every spend and answers a quote `settle_first`
+  // naming it, and `settle_first` waits until a catch-up settles it. The trade waits by that word,
+  // asking no fill in the meantime, and goes from the round's coin once it is ready; never three
+  // re-prices in seconds ending "Returned".
+  const s = standIn()
+  const DEAD = 'e1'.repeat(32)
+  s.coins[0].leaf_id = DEAD
+  let t = 1_000_000
+  let final = false, refused = 0, fills = 0, waits = 0
+  const lib = s.lib.command.bind(s.lib)
+  const settleFirst = () => { const e = new Error(`refused: the wallet's coins of asset ${X} that pay this now hold 0, short of the 400503 it takes; 2000000 more are given up by another device of this wallet, in a round that is not final yet`); e.kind = 'settle_first'; e.coins = [DEAD]; e.asset = X; return e }
+  s.lib.command = (cmd, a) => {
+    if (cmd === 'order_fill_resting') {
+      fills++
+      if (!final) {
+        refused++
+        const e = new Error(`refused: the server refused order_fill (409 double_spend): leaf ${DEAD} is already spent: the server co-signs one spend of a leaf`)
+        e.kind = 'server_refused'; throw e
+      }
+      s.calls.push(cmd); s.shownCoin = a.shown.coin; s.coins.find((c) => c.leaf_id === 'r1').state = 'spent'
+      s.coins.push({ leaf_id: 'got', asset: Y, value: a.amount, state: 'live', expiry: 1790000000 })
+      return { order: ORDER, filled: a.amount, paid: a.shown.paid, fee: '300', change: a.shown.change, gives: ['r1'], answer: { transfer_id: 'tr3', coins: [] } }
+    }
+    if (cmd === 'order_fill_resting_quote' && refused > 0 && !final) throw settleFirst()
+    if (cmd === 'settle_first') {
+      if (!final) { waits++; return { settling: [], waiting: [DEAD], done: [], left: [], ready: false, final_in_seconds: 900, usual_in_seconds: 360, waiting_for: 'round' } }
+      return { settling: [], waiting: [], done: [DEAD], left: [], ready: true }
+    }
+    const v = lib(cmd, a)
+    if (cmd === 'order_fill_resting_quote') v.gives = s.coins.filter((c) => c.state === 'live' && c.asset === X).map((c) => c.leaf_id)
+    return v
+  }
+  const eng = createEngine({ leaves: s.lib, fetchJson: async () => ({}), makers: () => [], relayBook: s.relayBook, relayFills: s.relayFills, admitted, store: s.store, now: () => t })
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400503' })
+  assert.ok(q.ok, q.why)
+  let r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'repricing', JSON.stringify(r))
+  // Advanced as the page follows it, every few seconds, over two minutes: it waits.
+  for (let i = 0; i < 30; i++) {
+    t += 4000
+    r = await eng.advance(eng.records()[0])
+    assert.notEqual(r.state, 'returned', 'never returned while the library says it waits: ' + JSON.stringify(r))
+  }
+  assert.equal(r.state, 'settling', JSON.stringify(r))
+  assert.equal(fills, 1, 'no fill asked while the coin waits')
+  assert.ok(waits > 0, 'the library\'s settle_first was asked')
+  // The round final: the library's catch-up holds the round's coin, and the trade goes from it.
+  final = true
+  s.coins[0].state = 'spent'
+  s.coins.push({ leaf_id: 'r1', asset: X, value: '2000000', state: 'live', expiry: 1800000000 })
+  t += 4000
+  r = await eng.advance(eng.records()[0])
+  assert.equal(eng.records().length, 1, 'the same record')
+  assert.equal(r.state, 'sent', JSON.stringify(r))
+  assert.equal(r.transfer, 'tr3')
+})
