@@ -245,6 +245,9 @@ export const USER_WORDS = Object.freeze({
   // It can be sent all the same.
   chainDust: (pay) => `This ${pay} arrived in too small an amount to trade yet. You can send it, and once more arrives you can trade it.`,
   chainStays: (pay) => `Nobody offers to trade this ${pay} now. You can send it.`,
+  // What it pays is held on the chain and frozen by its issuer for this wallet (a supervised asset):
+  // it moves nowhere until the issuer lifts the freeze. `amount`: the frozen amount and its ticker.
+  chainFrozen: (amount) => `${amount} is frozen by its issuer: it can't be traded until the issuer lifts the freeze. Nothing has moved.`,
   sent: 'Sent',
   // A trade whose taking back waits for an answer that has not come: the wallet asks again by itself.
   sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
@@ -1290,7 +1293,8 @@ export function createEngine (deps) {
       // that takes it, or anything else the sources price, goes; otherwise the plain reason.
       const q = await quoteHeld(args)
       if (q.ok) return q
-      return ['settle-first', 'no-funds', 'not-ready', 'part-ready', 'readying'].includes(q.why) ? { ok: false, why: 'chain-stays', stays: plan.stays } : q
+      return ['settle-first', 'no-funds', 'not-ready', 'part-ready', 'readying'].includes(q.why)
+        ? { ok: false, why: 'chain-stays', stays: plan.stays, ...(plan.stays === 'frozen' ? { frozen: String(plan.frozen) } : {}) } : q
     }
     if (plan.chainFill) {
       const q = await quoteHeld({ ...args, only: 'onchain-fill' })
@@ -1311,16 +1315,21 @@ export function createEngine (deps) {
     if (!c || !(big(c.atoms) > 0n)) return null
     const shown = big(await Promise.resolve(deps.held(payAsset)).catch(() => 0n))
     const chain = big(c.atoms)
+    // What its issuer froze of it for this wallet (a supervised asset): in the figure, and it moves
+    // nowhere, neither in nor to an order on the chain.
+    const frozen = big(c.frozen) < chain ? big(c.frozen) : chain
     const tree = shown > chain ? shown - chain : 0n
     if (tree >= A) return null
     if (A + big(c.margin) > tree + big(c.movable)) {
+      // The balance covers it only with frozen coins: said so, at once, never settled first.
+      if (frozen > 0n && A <= tree + chain) return { stays: 'frozen', frozen, chainFill: chain - frozen >= A }
       // The balance covers it only with money on the chain that cannot be moved in (`c.stays`: 'dust',
       // too little of it once the move's fee is paid; 'unserved', an asset the network does not take
       // in): said so, unless an order on the chain takes it (quoteOnce).
-      if (c.stays && A <= tree + chain) return { stays: c.stays, chainFill: chain >= A }
+      if (c.stays && A <= tree + chain) return { stays: c.stays, chainFill: chain - frozen >= A }
       return null
     }
-    return { tree, chain, movable: big(c.movable), margin: big(c.margin), minutes: Number(c.minutes) || 5, chainFill: chain >= A }
+    return { tree, chain, movable: big(c.movable), margin: big(c.margin), minutes: Number(c.minutes) || 5, chainFill: chain - frozen >= A }
   }
 
   // The ticket of a trade paid with money moved in first: the amount, all of it paid, for what the

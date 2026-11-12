@@ -1561,7 +1561,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
       // What the moves made since this ask began took off the chain: an ask whose `want` they cover
       // (another ask's move, or upkeep's) is answered { already }; otherwise it waits for the rest.
       const moved = () => movesSince(asset, since).reduce((n, m) => n + big(m.spent), 0n)
-      const inTree = () => Object.values((S.balance && S.balance.arca && S.balance.arca[asset]) || {}).reduce((n, v) => n + big(v), 0n)
+      // What the tree holds of it that a payment can be made from, now or once final: live and
+      // pending coins only (a resting order's coins, ones exiting, returning or kept safe are listed
+      // under the same asset and are not money moved in).
+      const inTree = () => { const a = (S.balance && S.balance.arca && S.balance.arca[asset]) || {}; return big(a.live) + big(a.pending) }
       const covered = () => { const m = moved(); return (m > 0n && m >= big(want)) || (big(need) > 0n && inTree() >= big(need)) }
       const rest = () => { const r = big(want) - moved(); return r > 0n ? r : 0n }
       while (S.open && !S.stopped && !gone()) {

@@ -5608,7 +5608,9 @@ function initUserComposer(){
     // `minutes`: the one wait its ticket says, the move's, or, when part of what the wallet holds of
     // it is still on its way and settles first meanwhile, that settlement's when it is the longer
     // (the trade asks for both at once: user-trade.js settlingBy).
-    chain: (a)=> devMode() || isOampAsset(a) ? null : ({ atoms: chainHeld(a), movable: chainMovable(a), margin: bringMargin(a), minutes: tradeBringMinutes(a), stays: chainStays(a) }),
+    // `frozen`: what its issuer froze of it on the chain for this wallet, which moves nowhere.
+    chain: (a)=> devMode() || isOampAsset(a) ? null : ({ atoms: chainHeld(a), movable: chainMovable(a), margin: bringMargin(a), minutes: tradeBringMinutes(a), stays: chainStays(a),
+      frozen: (()=>{ try{ return (leavesApi && leavesApi.frozenOnchain) ? (leavesApi.frozenOnchain(a) || 0n) : 0n; }catch{ return 0n; } })() }),
     bringIn: (a, want, o={})=> (leavesApi && !devMode() && leavesApi.bringIn) ? leavesApi.bringIn(a, { want: want || 0n, until: o.until, since: o.since, stop: o.stop }) : null,
     // The fees of the moves in made since a trade was confirmed: in what it paid (the ticket is all-in).
     movedFees: (a, since)=> (leavesApi && leavesApi.movedFees) ? leavesApi.movedFees(a, since) : 0n,

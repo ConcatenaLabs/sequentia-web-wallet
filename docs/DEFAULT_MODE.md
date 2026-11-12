@@ -719,7 +719,10 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   stops moving money in for it. Money on the chain that cannot be moved in is never waited
   on: an order on the chain that takes it goes, and otherwise the ticket says why, at once: "This
   <TICKER> arrived in too small an amount to trade yet. You can send it, and once more arrives you
-  can trade it." or "Nobody offers to trade this <TICKER> now. You can send it."
+  can trade it." or "Nobody offers to trade this <TICKER> now. You can send it." Money on the chain
+  its issuer froze for this wallet (a supervised asset) is never moved in or waited on either: when
+  the amount needs it, "<amount> <TICKER> is frozen by its issuer: it can't be traded until the
+  issuer lifts the freeze. Nothing has moved."
 - A trade whose other side cannot complete it after all (the other side says the offer is gone:
   the network refused it, for example because another device of the same wallet had already
   spent the coin it named) is not waited on: the wallet takes its coins back at once, learning

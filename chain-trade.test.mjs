@@ -349,3 +349,26 @@ test('the settle\'s bound is kept: past twice what the library said, returned wi
   assert.equal(r.whyKind, 'late')
   assert.equal(s.accepts.length, 0)
 })
+
+test('money on the chain its issuer froze for this wallet: said at once with the freeze, never moved in nor settled first', async () => {
+  // All of it frozen.
+  const s = standIn({ onchain: 1_000_000n })
+  s.chainDep = () => ({ atoms: s.chain, movable: 0n, margin: 2000n, minutes: 5, frozen: s.chain })
+  const eng = engineOf(s)
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  console.log('all frozen ->', JSON.stringify(q))
+  assert.deepEqual([q.ok, q.why, q.stays, q.frozen], [false, 'chain-stays', 'frozen', '1000000'])
+  assert.equal(s.brings, 0, 'nothing moved in')
+  assert.equal(USER_WORDS.chainFrozen('0.01 Z'), '0.01 Z is frozen by its issuer: it can\'t be traded until the issuer lifts the freeze. Nothing has moved.')
+  assert.ok(!/try again|ark|arca|leaf|board|round|operator|chain/i.test(USER_WORDS.chainFrozen('0.01 Z')))
+  // Part of it frozen, and the amount needs that part.
+  const p = standIn({ onchain: 1_000_000n })
+  p.chainDep = () => ({ atoms: p.chain, movable: 400_000n, margin: 2000n, minutes: 5, frozen: 600_000n })
+  const q2 = await engineOf(p).quote({ payAsset: X, receiveAsset: Y, amount: '800000' })
+  assert.deepEqual([q2.ok, q2.why, q2.stays, q2.frozen], [false, 'chain-stays', 'frozen', '600000'])
+  assert.equal(p.brings, 0)
+  // What is not frozen still trades: moved in, the ticket at once.
+  const q3 = await engineOf(p).quote({ payAsset: X, receiveAsset: Y, amount: '300000' })
+  assert.ok(q3.ok, q3.why)
+  assert.equal(q3.ticket.bringIn, 5)
+})

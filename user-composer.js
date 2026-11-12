@@ -381,7 +381,7 @@ export function mountUserComposer (ctx) {
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
         : q.why === 'btc-moving' ? USER_WORDS.btcMoving(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)
-        : q.why === 'chain-stays' ? (q.stays === 'dust' ? USER_WORDS.chainDust(name(S.pay)) : USER_WORDS.chainStays(name(S.pay)))
+        : q.why === 'chain-stays' ? (q.stays === 'frozen' ? USER_WORDS.chainFrozen(amt(S.pay, q.frozen)) : q.stays === 'dust' ? USER_WORDS.chainDust(name(S.pay)) : USER_WORDS.chainStays(name(S.pay)))
         : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay))
         : q.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       // Coins being made ready for this trade: priced again by itself while the person waits,

@@ -43,7 +43,7 @@ function library () {
   const L = { chain: 0n, pending: 0n, live: 0n, calls: [], refuse: null, sendFee: 10n, boards: 0 }
   const answer = (cmd, a) => {
     switch (cmd) {
-      case 'balance': return { arca: { [X]: { live: String(L.live), pending: String(L.pending) } }, sequentia_onchain: L.chain > 0n ? { [X]: String(L.chain) } : {} }
+      case 'balance': return { arca: { [X]: { live: String(L.live), pending: String(L.pending), ...(L.offered ? { offered: String(L.offered) } : {}) } }, sequentia_onchain: L.chain > 0n ? { [X]: String(L.chain) } : {} }
       case 'info': return { server_info: { assets: [{ asset: X, min_leaf: '1000' }], fills: { round_interval_seconds: 60, block_seconds: 60 } } }
       case 'coin_places': return { coins: [] }
       case 'coins': return []
@@ -334,4 +334,14 @@ test('a payment found again after the page closed while its money moved in is no
   assert.deepEqual(ends, ['refused'], 'said once on Balance: not sent')
   assert.ok(!lib.calls.includes('send'))
   assert.equal(pendingSends(p.store, 't').length, 0)
+})
+
+test('coins of the asset a resting order holds in the tree are not money moved in: the chain\'s money is moved in, and the payment goes', async (t) => {
+  const { api, lib, C } = await mount(t)
+  lib.chain = 1_500_000n; lib.offered = 2_000_000n
+  await api.syncNow().catch(() => {})
+  const since = C.t
+  const v = await api.bringIn(X, { final: true, want: 1_016_000n, need: 1_016_000n, since, until: since + 300_000 })
+  assert.ok(v && v.boarded, 'moved in, not answered as moved: ' + JSON.stringify(v))
+  assert.equal(lib.calls.filter((c) => c === 'board').length, 1)
 })
