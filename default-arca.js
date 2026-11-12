@@ -68,6 +68,9 @@ export const DEFAULT_WORDS = Object.freeze({
   showCode: 'Show receive code',
   newCode: 'New code',
   addressTip: 'Your address, the same tb1 address on both chains. For BTC, and for senders that ask for an address.',
+  // While a wallet opened in this browser for the first time finds what it holds.
+  finding: 'Syncing… finding everything this wallet holds.',
+  findingTip: 'Your address, the same tb1 address on both chains. Your receive code shows here once the wallet has found everything it holds.',
   // Receive's Confidential switch: the code is then the wallet's confidential address alone. A
   // payment that arrives in seconds is never confidential (the operator publishes every leaf of
   // a round, its asset and value), so the code carries none of those ways; BTC never is either.

@@ -1229,15 +1229,22 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // The join's restore, run to its end once: a page closed while it ran restores again when it
   // next opens, so a phrase's coins are never left behind by a tab closed too soon.
+  // While it runs the wallet is finding what it holds (`restoring`): the page says so, rather than
+  // showing what it has read so far as all there is, and a payment asked meanwhile waits for it.
   async function restoreOnce () {
     const key = tagged(RESTORED_KEY, tag())
     try { if (ctx.store.getItem(key)) return } catch {}
     const t0 = now()
+    S.restoring = { since: t0 }
+    emit('restoring', { since: t0 })
     try {
       S.restored = await run('restore')
       try { ctx.store.setItem(key, String(now())) } catch {}
       log(`[leaves] restore: ${now() - t0} ms`)
-    } catch (e) { S.restored = { error: e.message }; log('[leaves] restore: ' + e.message) }
+    } catch (e) { S.restored = { error: e.message }; log('[leaves] restore: ' + e.message) } finally {
+      // The caller opens the wallet next and the page is drawn again once it has read the balance.
+      S.restoring = null
+    }
   }
 
   // A person reviewing a payment the wallet is about to make (`holdReads`): the wallet's own upkeep
@@ -2672,6 +2679,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Whether the library has given its balance this session (the figures are its own, not the
     // last ones kept), or the wallet has nothing with an operator to read.
     balanceRead: () => !!S.balance,
+    // Whether the wallet is finding what it holds: the restore of a wallet opened in this browser
+    // for the first time (or whose first restore was cut short), until it returns.
+    restoring: () => !!S.restoring,
     // Whether this wallet has, or joins by itself, a wallet with an operator whose balance is to be read.
     expected: () => !!(S.open || S.starting || joinedOperator(ctx.store, tag()) || (!dev() && pinned())),
     // The operator's anchor depth, as the library follows it (0: a coin is spendable once its
