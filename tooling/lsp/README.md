@@ -291,10 +291,13 @@ a working coin (below).
 
 ### Working coins
 
-A swap pays from one coin, and that coin's whole worth is then out of round until the maker's next
-round: its change, and what the taker pays in its place. So for every asset it gives, the maker
-keeps four working coins worth at most a quarter of its instant budget each, at its node's rates,
-and the rest in reserve coins. The size is worked out from the budget at every pass, never a
+A swap pays from one coin. A coin of a round or a board then puts its whole worth out of round
+until the maker's next round: its change, and what the taker pays in its place. A coin already out
+of round (one it received, or a swap's change) puts nothing more out of round, and the library pays
+from such a coin first. So for every asset it gives, the maker keeps four working coins worth at
+most a quarter of its instant budget shared among the assets it gives, at its node's rates, and the
+rest in reserve coins: the first trade in every asset together puts at most a quarter of the
+budget out of round, and a run of small trades never fills it. The size is worked out from the budget at every pass, never a
 number of atoms in the configuration, so a price move changes it at once. The library pays a swap
 from the smallest coin that pays it alone (the arca CLI README, `swap offer`), so small swaps reach
 the working coins and never a reserve coin.
@@ -303,17 +306,22 @@ the working coins and never a reserve coin.
   or a board cut into the ones missing and a reserve of the rest, in the operator's next round (the
   library's refresh in pieces, `quote` and `participate` with `piece` and `pieces`), one cut at a
   time, read from the coins' state. A coin the library takes back from a refresh that waited at
-  the operator is given up again ten minutes later, whether it was being cut or settled. Coins are
-  never cut by a payment to itself out of round. A library that does not cut a
+  the operator is given up again ten minutes later, whether it was being cut or settled. Working
+  coins are never cut by a payment to itself out of round (only an asset's lone due coin is split
+  so, above). A library that does not cut a
   refresh into pieces is detected from its quote, and nothing is given up.
 - **Settling and merging.** What it received is settled into working coins and a reserve of the
   rest. No merge makes a coin larger than a working coin, and no board is larger than one.
-- **Quotes.** It quotes of an asset at most its largest live coin whose whole worth fits the room
-  left in its budget, and a firm offer is sized the same way, so a price it shows is a price it
+- **Quotes.** It quotes of an asset at most its largest live coin whose spend fits the room left in
+  its budget (a coin out of round always does), and a firm offer is sized the same way, so a price it shows is a price it
   confirms. The room is worked out from its latest reading of its coins: the budget less what it
   holds out of round and what its open offers hold. After an offer or a completion it quotes
   nothing until that reading is renewed. With no coin that fits, the asset is not quoted until its
   next round, and an asset its node does not price is not quoted at all.
+- **Why an asset is not offered.** Whenever an asset it gives stops being offered, the maker logs
+  one line saying why (`offers no USDX now: …`): it holds none, every coin is in a round, every
+  coin is held by an open offer or a lock, its node does not price it, or no coin fits the room
+  left in its budget. It logs `offers USDX again` when that ends.
 
 The library reads what each command needs, by state: the coins the maker traded away and the
 participations it completed, thousands after a few days of trading, are not read again. The

@@ -124,15 +124,16 @@ test('the kept coin goes in its turn: once the coins back from the round fill a 
   assert.deepEqual(pass(plenty).plan.give, ['u-1'])
 })
 
-test('a coin halved below the smallest quote is kept whole; one that fits no room is no quote to keep', () => {
+test('a coin halved below the smallest quote is kept whole; one of an asset not priced is no quote to keep', () => {
   // 15,000 halves to 7,500, under the pairs' 10,000.
   const small = [coin('s-only', 15_000, 'S')]
   const p = pass(small).plan
   assert.deepEqual([p.give, p.split], [[], []])
   assert.deepEqual(p.keep, [{ leaf: 's-only', asset: 'S' }])
-  // Worth more than the room left: it pays no quote now, so settling it costs the book nothing.
-  const huge = [coin('g-huge', 50_000_000, 'G')]
-  assert.deepEqual(pass(huge).plan.give, ['g-huge'])
+  // A coin of an asset the node does not price pays no quote under a budget, so settling it costs
+  // the book nothing. (A coin out of round always fits the room: its spend puts nothing more out.)
+  const unpriced = [coin('z-1', 50_000_000, 'Z')]
+  assert.deepEqual(pass(unpriced).plan.give, ['z-1'])
 })
 
 test('a resting order\'s coin and a coin held as spent elsewhere fill no quote', () => {
