@@ -160,6 +160,11 @@ export const DEFAULT_WORDS = Object.freeze({
   // What is sent waits only for the next settlement (the wallet's own upkeep is moving it, or the
   // library names coins to settle first): the payment goes ahead by itself after it (D96).
   settling: 'Goes through in about a minute',
+  // The same, with the true wait: the library's (`settle_first`'s `final_in_seconds`) once it has
+  // said, the operator's round, block and anchor depth before (settleMinutes); past it, that it
+  // takes longer and still goes by itself.
+  goesThrough: (minutes) => (minutes <= 1 ? 'Goes through in about a minute' : `Goes through within about ${minutes} minutes`),
+  goesThroughLate: 'Taking longer than usual: this goes ahead by itself',
   // A payment to an address whose coins are held but not spendable yet (the change of a payment
   // just made, a coin just received): when it can go, as long as a payment to an address takes.
   stillArrivingWithin: (ticker, minutes) => minutes
@@ -380,27 +385,29 @@ export function homeUnderWay (coins, kept, unreachable) {
 
 // The minutes a payment to an address from the tree takes at most to reach the receiving
 // wallet's figure, from the wait for the operator's next settlement (`seconds`: its interval
-// between settlements, or the library's `round_within_seconds`) and the chain's block interval
-// (`blockSeconds`, the operator's `fills.block_seconds`, 60 when it says none). The whole way, not
-// the settlement alone: the settlement's block, the paying wallet handing over its part once that
-// block is in, the operator's payment to the address and its block, and the wallets' own passes
-// and reads of the chain: ADDRESS_PATH_BLOCKS blocks and ADDRESS_PATH_SLACK_S seconds beside the
-// settlement, rounded up to five minutes. On the testnet (a settlement a minute, a block a
-// minute) that is ten minutes; payments measured there took three to six. A time stated is one
-// the wallet keeps. -> minutes, or null when the operator publishes no interval.
+// between settlements, or the library's `round_within_seconds`), the chain's block interval
+// (`blockSeconds`, the operator's `fills.block_seconds`, 60 when it says none) and the most the
+// operator takes from the settlement to the payment's unlock in a block (`unlockSeconds`, its
+// `offboards.unlock_within_seconds`, UNLOCK_WITHIN_S when it says none). The whole way, not the
+// settlement alone: the settlement's block and its certificate (ADDRESS_PATH_BLOCKS), the unlock,
+// and the wallets' own passes and reads of the chain (ADDRESS_PATH_SLACK_S), rounded up to five
+// minutes. On the testnet (a settlement a minute, a block a minute, no unlock time published) that
+// is fifteen minutes. A time stated is one the wallet keeps. -> minutes, or null when the operator
+// publishes no interval.
 // The minutes coins the wallet moves out of the tree to its own address take to be its to spend on
 // the chain (for a stake, say): the operator's next settlement (`seconds`), the wallet handing
-// over its part of it at once, and the settlement's block, with MOVE_OUT_BLOCKS blocks and
-// MOVE_OUT_SLACK_S seconds for the reads on either side. Nothing waits on another wallet, so it is
-// not ADDRESS_PATH's ten minutes: on the testnet (a settlement a minute, a block a minute) it is
-// four. -> minutes, or null when the operator publishes no interval.
+// over its part of it at once, the settlement's block, and the operator's unlock of the output in a
+// block (`unlockSeconds`, as for arrivalMinutes), with MOVE_OUT_BLOCKS blocks and MOVE_OUT_SLACK_S
+// seconds for the reads on either side. Nothing waits on another wallet: on the testnet (a
+// settlement a minute, a block a minute, no unlock time published) it is fourteen.
+// -> minutes, or null when the operator publishes no interval.
 export const MOVE_OUT_BLOCKS = 2
 export const MOVE_OUT_SLACK_S = 30
-export function moveOutMinutes (seconds, blockSeconds) {
+export function moveOutMinutes (seconds, blockSeconds, unlockSeconds = null) {
   const n = Number(seconds)
   if (!Number.isFinite(n) || n <= 0) return null
   const b = Number(blockSeconds) > 0 ? Number(blockSeconds) : 60
-  return Math.max(1, Math.ceil((n + MOVE_OUT_BLOCKS * b + MOVE_OUT_SLACK_S) / 60))
+  return Math.max(1, Math.ceil((n + MOVE_OUT_BLOCKS * b + unlockOf(unlockSeconds) + MOVE_OUT_SLACK_S) / 60))
 }
 
 // How often the page syncs while some coin is arriving (ARRIVING_STATES: a coin given up in the
@@ -421,13 +428,15 @@ export function arrivingSyncDue ({ arriving, nowMs, since, lastSyncMs = 0, busy 
   return Number(nowMs) - Number(lastSyncMs || 0) >= ARRIVING_SYNC_MS
 }
 
-export const ADDRESS_PATH_BLOCKS = 4
-export const ADDRESS_PATH_SLACK_S = 240
-export function arrivalMinutes (seconds, blockSeconds) {
+export const ADDRESS_PATH_BLOCKS = 2
+export const ADDRESS_PATH_SLACK_S = 120
+export const UNLOCK_WITHIN_S = 600
+const unlockOf = (u) => (Number(u) > 0 ? Number(u) : UNLOCK_WITHIN_S)
+export function arrivalMinutes (seconds, blockSeconds, unlockSeconds = null) {
   const n = Number(seconds)
   if (!Number.isFinite(n) || n <= 0) return null
   const b = Number(blockSeconds) > 0 ? Number(blockSeconds) : 60
-  const m = Math.ceil((n + ADDRESS_PATH_BLOCKS * b + ADDRESS_PATH_SLACK_S) / 60)
+  const m = Math.ceil((n + ADDRESS_PATH_BLOCKS * b + unlockOf(unlockSeconds) + ADDRESS_PATH_SLACK_S) / 60)
   return Math.max(5, Math.ceil(m / 5) * 5)
 }
 
@@ -438,8 +447,8 @@ export function arrivalMinutes (seconds, blockSeconds) {
 // review's arrival time, `blockSeconds` the chain's block interval. -> { text, sent }
 // The text is "Sending" (`made: false`) until the library says the payment is made: "Sent" is never
 // shown for a payment that is not (offboardStage).
-export function offboardOutcome (v, amount, ticker, minutes, blockSeconds) {
-  const mins = arrivalMinutes(v && v.round_within_seconds, blockSeconds) || minutes
+export function offboardOutcome (v, amount, ticker, minutes, blockSeconds, unlockSeconds = null) {
+  const mins = arrivalMinutes(v && v.round_within_seconds, blockSeconds, unlockSeconds) || minutes
   if (v && v.already) return { text: DEFAULT_WORDS.sentAlready(amount, ticker, minutes), sent: false, minutes: mins }
   return { text: DEFAULT_WORDS.sendingLater(amount, ticker), sent: true, minutes: mins }
 }
@@ -971,6 +980,48 @@ export function roundMinutes (anchorDepth) {
   if (!(Number.isFinite(d) && d > 0)) return 1
   return Math.ceil((1 + d * 10) / 5) * 5
 }
+// The minutes a payment that settles first usually waits before it goes, as the library's
+// `settle_first` counts it (`usual_in_seconds`) for a coin not yet in a round: the operator's next
+// round; a round interval more for the other participations' forfeits when the operator holds its
+// rounds for them (`held`: its batches have no sweep); a block for the round and one more for its
+// certificate; a Bitcoin block (about ten minutes) for each block of anchor depth the operator
+// counts finality at; and the operator's release: two of its passes over the rounds when it
+// publishes how long they take (`passSeconds`, its `fills.round_pass_seconds`, one more pass then
+// to build the round), else a round interval and a block. 6 on the testnet (rounds and blocks a
+// minute apart, rounds held, depth 0, no pass time published).
+export function settleMinutes (roundSeconds, blockSeconds, anchorDepth, held = false, passSeconds = null) {
+  const r = Number(roundSeconds) > 0 ? Number(roundSeconds) : 60
+  const b = Number(blockSeconds) > 0 ? Number(blockSeconds) : 60
+  const d = Number.isFinite(Number(anchorDepth)) && Number(anchorDepth) > 0 ? Number(anchorDepth) : 0
+  const p = Number(passSeconds) > 0 ? Number(passSeconds) : null
+  const release = p != null ? 2 * p : r + b
+  return Math.max(1, Math.ceil((r + (p ?? 0) + (held ? r : 0) + 2 * b + d * 600 + release) / 60))
+}
+// The time a payment settling first is told it goes by, from each answer of the library's
+// `settle_first`, or its `settle_first` refusal (`usual_in_seconds`, what it usually takes, else
+// `final_in_seconds`, the most; and `waiting_for`): the first answer sets it, and it stays while
+// the step waited for stands or moves on (a step slower than usual makes it late, not later), and is
+// set again only when the step goes back (a new round, an anchor rollback). `prev` is the last
+// { finalBy, step } (ms, the step's name), or null. -> the new one.
+const WAIT_STEPS = ['round', 'forfeits', 'block', 'certificate', 'anchor', 'release']
+export function nextFinalBy (prev, answer, nowMs = Date.now()) {
+  const secs = answer && (answer.usual_in_seconds ?? answer.final_in_seconds)
+  if (!answer || answer.ready || secs == null) return prev
+  const at = nowMs + Number(secs) * 1000, step = answer.waiting_for ?? null
+  if (!prev || prev.finalBy == null) return { finalBy: at, step }
+  const back = step != null && prev.step != null && WAIT_STEPS.indexOf(step) < WAIT_STEPS.indexOf(prev.step)
+  return back ? { finalBy: at, step } : { finalBy: prev.finalBy, step: step ?? prev.step }
+}
+// The words of a payment settling first, at `nowMs`: within the minutes left to `finalBy` (ms, when
+// the library said it would be through), or `minutes` before it has said; past `finalBy` by
+// SETTLE_LATE_MS, that it takes longer and goes by itself.
+export const SETTLE_LATE_MS = 120_000
+export function settleWords (finalBy, minutes, nowMs = Date.now(), words = DEFAULT_WORDS) {
+  if (finalBy == null) return words.goesThrough(minutes || 1)
+  if (nowMs > finalBy + SETTLE_LATE_MS) return words.goesThroughLate
+  return words.goesThrough(Math.max(1, Math.ceil((finalBy - nowMs) / 60_000)))
+}
+
 // The seconds after which a line of `cause` is taking longer than it said.
 export function statedSeconds (cause, boardMin = 5, roundMin = 1) {
   return cause === 'return' ? 2 * 86_400 : cause === 'board' ? boardMin * 60 : roundMin <= 1 ? 180 : roundMin * 60
