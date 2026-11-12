@@ -529,9 +529,8 @@ once the coins it made can be spent. Past that time by two minutes it reads "Tak
     amount that does not give the payment away: all it holds of the asset there, or the smallest
     power of ten above what the payment needs (at least one whole unit), whichever is smaller
     (never less than the operator's smallest coin of the asset; of what the library can move now,
-    when part of what is held cannot be, such as a channel's balance). It says "Moving <amount>
-    <TICKER> out of the Ark so it can be sent confidentially. They are ready within <N> minutes.
-    Keep this page open." (<N> as for a payment to an address, above) and the review opens once
+    when part of what is held cannot be, such as a channel's balance). It says "Getting <amount>
+    <TICKER> ready to be sent confidentially. Ready within <N> minutes. Keep this page open." (<N> as for a payment to an address, above) and the review opens once
     they are there, usually in about three minutes: one settlement of the operator's and its
     payout on the chain, and no confirmation more. A move
     already under way is waited for, never asked twice, so Review pressed again (the browser
@@ -554,20 +553,20 @@ once the coins it made can be spent. Past that time by two minutes it reads "Tak
 - A stake, a pool's delegation and a mix are made from coins the wallet holds on the chain, and
   default mode holds what it receives in the Ark. So the wallet moves what is missing out of the
   Ark to its own address by itself (never less than the operator's smallest coin of the asset),
-  and says so while it waits: "Moving <amount> <TICKER> out of the Ark so it can be staked. They
-  are ready within <N> minutes. Keep this page open." ("used to join the pool", "mixed"; Ambra
+  and says so while it waits, naming no rail: "Getting <amount> <TICKER> ready to be staked. Ready
+  within <N> minutes. Keep this page open." ("used to join the pool", "mixed", "traded"; Ambra
   mobile says "Keep this screen open."; <N> is the operator's next settlement, its block and
   certificate, and the operator's unlock of the coins in a block, counted as for a payment to an
-  address). Once it
+  address). A restricted trade's ticket says that wait and two minutes for the trade. Once it
   has arrived the usual review opens; nothing is signed before it.
 - When the operator cannot pay that much on the chain now (its published `fundable`, against
   the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be
-  moved out of the Ark right now: the network has too little of it free. Nothing has moved: try
-  again later."
+  made ready right now: the network has too little of it free. Nothing has moved: try again
+  later."
 - A move already under way is waited for, never asked twice. One the operator cannot pay on the
-  chain yet says "<amount> <TICKER> cannot be moved out of the Ark yet: the network moves it as
+  chain yet says "<amount> <TICKER> is not ready to be staked yet: the network makes it ready as
   soon as it can, and it stays yours meanwhile. …"; one that has not arrived within 45 minutes,
-  "What was moved out of the Ark has not arrived yet. It stays yours: try again in a few minutes."
+  "What was being made ready has not arrived yet. It stays yours: try again in a few minutes."
 - Too little held: "Not enough <TICKER>: <amount> <TICKER> short." The 40,000 tSEQ minimum
   counts the fee only when the fee is paid in tSEQ: the stake card has **Pay the fee in**, and
   with too little tSEQ for both the wallet chooses another held asset there and says "Not enough
@@ -984,8 +983,8 @@ A site that trades through a wallet (SeqDEX) offers every wallet it can reach, i
   When it needs coins on the chain that the wallet holds in the Ark, it first asks **Get coins
   ready for <site>?**, "<site> needs coins on the chain for what you asked there. The wallet moves
   them to your own address; they stay yours, and only the fee for the move is paid.", with
-  **Moves**, **Fee for the move** and **Asked by**; once approved, the wallet says "Moving
-  <amount> <TICKER> out of the Ark so it can be used on <site>." while it waits, as Stake does.
+  **Moves**, **Fee for the move** and **Asked by**; once approved, the wallet says "Getting
+  <amount> <TICKER> ready to be used on <site>." while it waits, as Stake does.
 
 ## Report a problem
 

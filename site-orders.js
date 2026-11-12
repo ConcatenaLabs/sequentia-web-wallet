@@ -180,7 +180,7 @@ export function makeSiteOrders (d) {
   function refusal (q, pay, get) {
     const W = USER_WORDS
     if (q.why === 'not-listed') return W.notListed(tick(get), tick(pay))
-    if (q.why === 'not-offered') return W.notOffered(tick(get), tick(pay))
+    if (q.why === 'not-offered') return q.again ? W.offeredAgain(tick(get), tick(pay)) : W.notOffered(tick(get), tick(pay))
     if (q.why === 'no-funds') return W.noFunds(tick(pay))
     if (q.why === 'not-ready') return W.notReady(tick(pay), q.soon)
     if (q.why === 'redoing') return W.redoing(tick(pay))

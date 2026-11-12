@@ -365,3 +365,93 @@ test('bitcoin and a restricted asset: each leg read in the trade\'s own directio
   assert.equal(buy.card.text, 'Bitcoin buys USDX, and USDX buys RSB. Get USDX first, then trade it for RSB.')
   assert.deepEqual(asked, [['sellers', true], ['sellers', false], ['btcBuys', false]])
 })
+
+test('the engine: money still on its way in is settled first and the trade priced again, never "you have none" (#691)', async () => {
+  const { a, b, R } = fakeR({ held: async () => 0n, onItsWay: async (x) => (x === 'bb'.repeat(32) ? 0n : 10n ** 12n) })
+  const q = await restrictedQuote(R, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.deepEqual(q, { ok: false, why: 'settle-first', payAsset: b, coins: [], held: '0' })
+  // Less on its way than the trade needs: none to trade.
+  const poor = fakeR({ held: async () => 0n, onItsWay: async () => 10n })
+  assert.deepEqual(await restrictedQuote(poor.R, { payAsset: poor.b, receiveAsset: poor.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
+})
+
+test('the engine: what the trade must first move to the chain is on the ticket, its fee and its wait, before anything moves', async () => {
+  const asked = []
+  const { a, b, R } = fakeR({ moveQuote: async (needs) => { asked.push(needs); return { fees: [{ asset: needs[0].hex, atoms: 88n }], minutes: 4 } } })
+  const q = await restrictedQuote(R, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.equal(q.ok, true)
+  assert.deepEqual(asked, [[{ hex: b, atoms: 807n }]], 'the move of what the trade pays, its fee included')
+  assert.deepEqual(q.ticket.fees, [{ asset: b, atoms: '7' }, { asset: b, atoms: '88' }])
+  assert.equal(q.ticket.minutes, 6)
+  assert.deepEqual(q.choice.moveFees, [{ asset: b, atoms: 88n }])
+  const { forbiddenIn } = await import('./user-trade.js')
+  assert.deepEqual(forbiddenIn(m.RESTRICTED_WORDS.takes(6)), [])
+  // Nothing to move: no wait on the ticket.
+  const none = await restrictedQuote({ ...R, moveQuote: async () => null }, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.equal(none.ticket.minutes, undefined); assert.equal(none.ticket.fees.length, 1)
+  // Coins that must go through a round before they can move: settled first, as any trade.
+  const sf = await restrictedQuote({ ...R, moveQuote: async () => { const e = new Error('settle first'); e.kind = 'settle_first'; e.coins = ['c1']; throw e } }, { payAsset: b, receiveAsset: a, amount: 50000000n })
+  assert.deepEqual(sf, { ok: false, why: 'settle-first', payAsset: b, coins: ['c1'], held: '0' })
+  // A move whose fee the wallet cannot also pay: none to trade.
+  const tight = fakeR({ held: async () => 807n, moveQuote: async () => ({ fees: [{ asset: 'x', atoms: 0n }, { asset: b, atoms: 88n }], minutes: 4 }) })
+  assert.deepEqual(await restrictedQuote(tight.R, { payAsset: tight.b, receiveAsset: tight.a, amount: 50000000n }), { ok: false, why: 'no-funds' })
+})
+
+test('a maker that refuses or goes quiet before the trade is sent ends it at once: nothing moved, never followed as maybe made (#697)', async () => {
+  // The courier as xcourier.js reads a maker's refusal: an error, not a refusal of the wallet's.
+  const failing = (why) => (rig) => {
+    rig.host.courier = async () => ({ send: async () => {}, recv: async () => { throw new Error(why) }, fail: async () => {}, close () {} })
+    return rig
+  }
+  for (const why of ['peer failed the lift: stale_offer this maker process serves offer 423c, not 40cf',
+    'timed out waiting for "dvp_coins" — no frames arrived at all']) {
+    const { host, entry, seen } = failing(why)(dvpRig(() => []))
+    let told = null
+    const e = await m.takeDvP(host, entry, { feeAsset: F, onTxid: (t) => { told = t } }).then(() => null, (x) => x)
+    assert.equal(e && e.kind, 'refused', why)
+    assert.match(e.message, /^refused: /)
+    assert.equal(told, null); assert.equal(seen.signed, 0); assert.equal(seen.cosigned, 0)
+  }
+  // The same after the maker's signatures, before the broadcast: the policy server's check refuses.
+  const late = dvpRig(makerSells(99999))
+  late.host.policy = ((p) => () => ({ ...p(), check: async () => { throw new Error('velocity limit') } }))(late.host.policy)
+  const e2 = await m.takeDvP(late.host, late.entry, { feeAsset: F }).then(() => null, (x) => x)
+  assert.equal(e2 && e2.kind, 'refused')
+  // Once the trade went to its broadcast, a lost answer is still followed, never refused.
+  const lost = dvpRig(makerSells(99999))
+  lost.host.policy = ((p) => () => ({ ...p(), cosign: async () => { throw new Error('Failed to fetch') } }))(lost.host.policy)
+  const e3 = await m.takeDvP(lost.host, lost.entry, { feeAsset: F }).then(() => null, (x) => x)
+  assert.notEqual(e3 && e3.kind, 'refused')
+})
+
+test('a restricted trade marks the record while what it pays from moves to the chain, and clears it after', async () => {
+  const marks = []
+  const rec = { ticket: { payAsset: 'p', receiveAsset: 'r' } }
+  const R = { isRestricted: () => false,
+    ensure: async (_n, say) => { marks.push(rec.movingSince != null); say('moving'); marks.push(rec.note) },
+    take: async (_e, o) => { marks.push(rec.movingSince != null); o.onTxid('ab'.repeat(32)); return { txid: 'ab'.repeat(32) } } }
+  await restrictedConfirm(R, { entry: { id: 'x' }, give: 1n, receive: 1n, feeAsset: 'p', fee: 1n }, rec, (r) => r)
+  assert.deepEqual(marks, [true, 'moving', false])
+  // A move that fails clears the mark too.
+  const rec2 = { ticket: { payAsset: 'p', receiveAsset: 'r' } }
+  await assert.rejects(restrictedConfirm({ ...R, ensure: async () => { throw new Error('not ready') } }, { entry: { id: 'x' }, give: 1n, receive: 1n, feeAsset: 'p', fee: 1n }, rec2, (r) => r))
+  assert.equal(rec2.movingSince, undefined)
+})
+
+test('a sale whose fee must first be made ready carries that move\'s fee and the true wait on its ticket, as a purchase does', async () => {
+  const asked = []
+  const { a, b, R } = fakeR({ held: async () => 10n ** 12n, feeAsset: async (p, r) => r, moveQuote: async (needs) => { asked.push(needs); return { fees: [{ asset: b, atoms: 88n }], minutes: 14 } } })
+  // The maker's buy quote: 300 of the restricted asset for 45,000,000 of the other (verified, as the
+  // book marks what it checked).
+  const buy = { ...JSON.parse(JSON.stringify(vectors[0])), offer_id: 'rt-buy', trade_dir: 'TRADE_DIR_BUY', offer_amount: '45000000', offer_asset: b, want_amount: '300', want_asset: a }
+  seqob.normRelayOffer(buy); buy._verified = true; buy._status = { active_amount: '300' }
+  R.book = async () => [buy]
+  const q = await restrictedQuote(R, { payAsset: a, receiveAsset: b, amount: 300n })
+  if (!q.ok) assert.fail('no ticket: ' + JSON.stringify(q))
+  assert.equal(q.ticket.payAsset, a)
+  // Only the fee is moved: the restricted asset sold is already where the trade is made.
+  assert.deepEqual(asked.map((n) => n.map((x) => x.hex)), [[b]])
+  assert.deepEqual(q.ticket.fees.slice(-1), [{ asset: b, atoms: '88' }])
+  assert.equal(q.ticket.minutes, 16)
+  assert.equal(m.RESTRICTED_WORDS.takes(16), 'Takes about 16 minutes, as what you pay is first moved to where this trade is made. Keep this page open.')
+})
