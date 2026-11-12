@@ -10,6 +10,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { mountLeaves, JOINED_KEY, LeafError } from './leaves.js'
+import { settleWords } from './default-arca.js'
+import { stageWriter, dropPending, samePending } from './pending-sends.js'
 import { DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes, addressRoute } from './default-arca.js'
 
 const X = '75'.repeat(32)
@@ -99,7 +101,7 @@ async function mount (t) {
 function page (leavesApi) {
   const modals = []
   const deps = {
-    leavesApi, DEFAULT_WORDS, sendableNow, offboardOutcome, arrivalMinutes,
+    leavesApi, DEFAULT_WORDS, settleWords, stageWriter, dropPending, samePending, sendableNow, offboardOutcome, arrivalMinutes,
     devMode: () => false,
     assetMeta: () => ({ ticker: 'XT', precision: 8 }),
     parseAtoms: (s, p) => BigInt(Math.round(Number(s) * 10 ** p)),
@@ -119,7 +121,7 @@ function page (leavesApi) {
     followAddressPayments: async () => 'made', markTold: () => {}, offboardNewsText: () => '', OFFBOARD_FOLLOW_MS: 0,
     document: { body: { contains: () => false } }, performance: { now: () => Date.now() },
   }
-  const names = ['onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
+  const names = ['settleAhead', 'settleLine', 'sendStage', 'sendEnded', 'sameOnItsWay', 'onItsWay', 'settlesFirst', 'shortWords', 'noneNowWords', 'afterClose', 'waitFor', 'treeSendReview', 'offboardReview']
   // A page without onItsWay (before this change) counts nothing on its way.
   const src = names.map((n) => n === 'onItsWay' && !html.includes('function onItsWay(') ? 'function onItsWay(){ return 0n; }' : fn(n)).join('\n') + '\nreturn { ' + names.join(', ') + ' };'
   const f = new Function(...Object.keys(deps), src)(...Object.values(deps))
@@ -135,8 +137,11 @@ test('a payment to a receive code of money still arriving is reviewed, settles f
   assert.equal(p.onItsWay(X), 2_000_000n, 'it is on its way')
   const { ok, st, rows, m } = p.modals[0]
   assert.equal(rows.title, DEFAULT_WORDS.sendTitle('0.005', 'XT'))
-  assert.ok(textOf(m).includes(DEFAULT_WORDS.settling), textOf(m))
-  assert.ok(!/arriving|round|limit|settle/i.test(textOf(m).replace(DEFAULT_WORDS.settling, '')), 'nothing names arriving, rounds or limits: ' + textOf(m))
+  // The true wait (settleMinutes): the round, a block and its certificate, and the operator's release.
+  const within = DEFAULT_WORDS.goesThrough(api.settleMinutes())
+  assert.equal(within, 'Goes through within about 5 minutes', 'rounds and blocks a minute apart, not held, depth 0')
+  assert.ok(textOf(m).includes(within), textOf(m))
+  assert.ok(!/arriving|round|limit|settle/i.test(textOf(m).replace(within, '')), 'nothing names arriving, rounds or limits: ' + textOf(m))
   await ok.onclick()
   assert.ok(st.textContent.startsWith('Sent 0.005 XT'), st.textContent)
   assert.ok(lib.settled(), 'settled first')
@@ -153,7 +158,12 @@ test('a payment to an address of money still arriving is reviewed, settles first
   await p.offboardReview({ asset: X, amtS: '0.005', addr: 'tex1qaddress' }, () => {})
   const { ok, st, rows, m } = p.modals[0]
   assert.deepEqual(rows.kv, [[DEFAULT_WORDS.feeLabel, DEFAULT_WORDS.feeKeptSome]])
-  assert.ok(textOf(m).includes(DEFAULT_WORDS.arrivesWithin(arrivalMinutes(120, 60))), textOf(m))
+  // Settled first, it arrives within the settle the page says (settleMinutes) and then the whole
+  // way from its own settlement: never less than the two together.
+  const settleS = api.settleMinutes() * 60
+  const within = arrivalMinutes(settleS + 60, 60)
+  assert.ok(within * 60 >= settleS + (arrivalMinutes(60, 60) - 5) * 60, 'the sum, not one more settlement')
+  assert.ok(textOf(m).includes(DEFAULT_WORDS.arrivesWithin(within)), textOf(m))
   assert.equal(lib.calls.filter((c) => c === 'settle_first').length, 0, 'the review settles nothing: only Send does')
   await ok.onclick()
   assert.ok(!/err/.test(st.className), st.className + ' ' + st.textContent)
