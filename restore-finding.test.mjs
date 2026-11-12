@@ -94,10 +94,12 @@ test('#365: the page says it, in default mode\'s words, and both payment waits f
   assert.match(status, /leavesApi\.restoring\(\)/)
   assert.match(status, /DEFAULT_WORDS\.finding\b/)
   assert.ok(status.indexOf('DEFAULT_WORDS.finding') < status.indexOf('showing your wallet as of'), 'the finding line comes first')
-  // Send's two waits for an opening wallet go on while it finds what it holds, and end at once
-  // when the operator does not answer it.
+  // The one wait for an opening wallet (Send's two paths and the trade's price) goes on while it
+  // finds what it holds, and ends at once when the operator does not answer it.
   const waits = html.match(/while\(!leavesApi\.isOpen\(\) && !findingStalled\(\) && \(Date\.now\(\) ?< ?until \|\| findingOn\(\)\)\)/g) || []
-  assert.equal(waits.length, 2, 'both waits run past their cap while the wallet finds what it holds')
+  assert.equal(waits.length, 1, 'one wait, run past its cap while the wallet finds what it holds')
+  assert.equal((html.match(/await walletOpening\(/g) || []).length, 2, 'Send\'s two paths wait with it')
+  assert.match(html, /opening: walletOpening,/)
   assert.doesNotMatch(html, /while\(!leavesApi\.isOpen\(\) && Date\.now\(\) ?< ?until\)/)
   // Receive says when the code shows; the page redraws the line and Receive when the finding starts.
   assert.match(html, /DEFAULT_WORDS\.findingTip/)
@@ -114,7 +116,7 @@ function page (leavesApi) {
   const waitTo = fn('ensureOnChain').split('\n')
   const cut = waitTo.findIndex((l) => l.includes('DEFAULT_WORDS.stillOpening'))
   const ensure = waitTo.slice(0, cut + 1).join('\n') + "\n  return 'went on'\n}"
-  const src = [fn('findingStalled'), fn('findingOn'), fn('setSyncStatus'), ensure,
+  const src = [fn('findingStalled'), fn('findingOn'), fn('walletOpening'), fn('setSyncStatus'), ensure,
     'return { setSyncStatus, ensureOnChain, line: () => $("syncStatus").innerHTML.replace(/<[^>]*>/g, "") }'].join('\n')
   // eslint-disable-next-line no-new-func
   return new Function('leavesApi', 'DEFAULT_WORDS', '$', 'esc', 'whenText', 'OPEN_WAIT_MS', 'devMode', 'refuseIfVesting', 'instantAtoms', 'onItsWay', 'fmtAmount', 'assetMeta',
