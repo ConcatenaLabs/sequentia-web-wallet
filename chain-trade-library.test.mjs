@@ -8,6 +8,7 @@
 // SEQ_LEAF_HARNESS, and the wallet kit's lwk_wasm build (../pkg, or LWK_PKG) for the maker's
 // phrase; it skips itself otherwise:
 //
+//   (the harness started with ARCA_OPERATOR_MORE_ASSETS=1, so the maker gives an asset the node prices)
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 LWK_PKG=<SWK>/lwk_wasm/pkg node --test chain-trade-library.test.mjs
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -56,16 +57,18 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
   let st = await H.state()
   // The maker's budget is a share of the operator's bond: posted first.
   if (!st.bond) { await H.c('/bond_post', { amount: 50000000 }); st = await H.state() }
-  const X = st.x, Y = st.y
+  // The maker quotes only what the node prices for fees: the harness's extra listed asset.
+  assert.ok(st.more && st.more.length, 'the harness serves one more asset listed for fees (ARCA_OPERATOR_MORE_ASSETS=1)')
+  const X = st.x, Y = st.more[0]
   const cfg = { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password }
   const dir = mkdtempSync(join(tmpdir(), 'chain-trade-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   // A live maker selling Y for X at 5 X per 4 Y.
   const lwk = await lwkFrom(LWK)
   const maker = await startMaker(H, st, join(dir, 'maker'), { pairs: [{ give: Y, want: X, rate_num: '5', rate_den: '4', min_give: '10000' }],
-    fund: [[Y, 60000000], [X, 1000000]], port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, coinSize: 2000000, exitDelayUnits: 1 })
+    fund: [[Y, 6000000], [X, 1000000]], port: await freePort(), lwk, settleSeconds: 20, syncSeconds: 3, coinSize: 2000000, exitDelayUnits: 300 })   // within what the page's wallet accepts (254 to 338 units)
   t.after(() => maker.stop())
-  await makerReady(H, maker, Y)
+  await makerReady(H, maker, Y, 400000)
   await H.c('/fund_server', { asset: X, amount: 200000000 }); await H.c('/fund_server', { asset: Y, amount: 200000000 }); await H.produce()
 
   process.env.LEAVES_PKG = PKG
@@ -94,8 +97,9 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
     store: memStore(), tag: () => 't', log: (...a) => console.log(...a),
   })
 
-  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '1000000' })
-  console.log('quote of 1,000,000 X held on the chain:', q.ok ? JSON.stringify(q.ticket) : q.why)
+  // Within the wallet's instant budget under the harness's bond (500,000 of the reference unit).
+  const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
+  console.log('quote of 400,000 X held on the chain:', q.ok ? JSON.stringify(q.ticket) : q.why)
   assert.ok(q.ok, 'priced at once, not ' + q.why)
   assert.equal(q.ticket.bringIn, boardMinutes(api.anchorDepth()))
   const rec = await eng.confirm(q.choice, q.ticket)
@@ -121,10 +125,13 @@ test('a trade of money received on the chain: priced at once, moved in, then tra
   assert.ok(BigInt(r.ticket.amountIn) <= BigInt(q.ticket.amountIn), 'no more paid than the ticket')
   // The Y arrives in the wallet.
   for (let i = 0; i < 60; i++) {
-    const got = (A.command('coins') || []).filter((c) => c.asset === Y).reduce((n, c) => n + BigInt(c.value), 0n)
+    try { await api.syncNow() } catch {}
+    const got = (A.command('coins') || []).filter((c) => c.asset === Y && !/^(spent|given_up)$/.test(c.state)).reduce((n, c) => n + BigInt(c.value), 0n)
+    if (i % 10 === 0) console.log('waiting for the Y: record', eng.records().find((x) => x.id === rec.id).state, 'swaps', JSON.stringify((A.command('swaps') || []).map((x) => x.state)), 'Y coins', String(got))
     if (got >= BigInt(r.ticket.amountOut)) { console.log('the wallet holds', String(got), 'Y'); return }
     try { await H.c('/build'); await H.c('/pass'); await H.produce(); await H.bury() } catch {}
     await eng.resume(); await sleep(2000)
   }
+  console.log('the maker said:\n' + maker.log.slice(-25).join('').slice(-5000))
   assert.fail('the Y never came')
 })
