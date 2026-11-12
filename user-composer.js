@@ -271,7 +271,7 @@ export function mountUserComposer (ctx) {
 
   // The card a restricted asset's trade shows in place of Confirm: the approval card (whom to
   // ask, the approval code to give them) or the assets to pay or be paid with.
-  function paintCard (t, act, btn) {
+  function paintAnswerCard (t, act, btn) {
     const c = S.card
     const box = el('div', 'uc-card'); box.id = 'ucCard'
     box.appendChild(el('div', '', c.text))
@@ -300,7 +300,7 @@ export function mountUserComposer (ctx) {
     note.classList.toggle('err', !!S.error)
     paintAbout()
     const btn = (text, id, f, cls) => { const b = el('button', cls || '', text); b.type = 'button'; b.id = id; b.disabled = S.busy; b.onclick = f; return b }
-    if (!S.ticket && S.card) { paintCard(t, act, btn); return }
+    if (!S.ticket && S.card) { paintAnswerCard(t, act, btn); return }
     if (!S.ticket) {
       act.appendChild(btn(S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
       return
