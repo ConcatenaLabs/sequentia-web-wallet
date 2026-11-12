@@ -229,6 +229,9 @@ export function expiryDigest (txid, expiresAt) {
 const rt = (o) => o && o.restricted
 const gated = (o) => o && (o.gated_order || o.gatedOrder)
 const dirOf = (o) => String(o.trade_dir || o.tradeDir || '')
+// The offer's pair, as the relay serves it (`pair`), its base the restricted asset.
+const baseOf = (o) => String((o.pair && (o.pair.base_asset || o.pair.baseAsset)) || o.base_asset || o.baseAsset || '').toLowerCase()
+const quoteOf = (o) => String((o.pair && (o.pair.quote_asset || o.pair.quoteAsset)) || o.quote_asset || o.quoteAsset || '').toLowerCase()
 
 // The book's restricted entries for a directed pair, the engine's way (single-step-book.mjs):
 // rateNum atoms paid per rateDen received. A maker's quote trades whole (its amount, no part);
@@ -240,8 +243,8 @@ export function restrictedEntries (offers, { payAsset, receiveAsset }) {
   const out = []
   for (const o of offers || []) {
     if (!o || o._verified !== true) continue
-    const base = String(o.base_asset || o.baseAsset || '').toLowerCase()
-    const quote = String(o.quote_asset || o.quoteAsset || '').toLowerCase()
+    const base = baseOf(o)
+    const quote = quoteOf(o)
     const r = rt(o)
     if (r) {
       if (quote === BTC || /^btc$/i.test(quote) || !/^[0-9a-f]{64}$/.test(quote)) continue
@@ -260,6 +263,8 @@ export function restrictedEntries (offers, { payAsset, receiveAsset }) {
     const g = gated(o)
     if (g) {
       const a = rev(g.asset_a || g.assetA); const b = rev(g.asset_b || g.assetB)
+      // The order's own terms name the pair it is listed under.
+      if (a !== base || b !== quote) continue
       if (payAsset !== b || receiveAsset !== a) continue
       const num = big(g.rate_num || g.rateNum); const den = big(g.rate_den || g.rateDen)
       if (num <= 0n || den <= 0n) continue
@@ -278,7 +283,7 @@ export function entryAsset (e) {
   const o = e.raw
   if (e.kind === 'gated') { const g = gated(o); return { asset: rev(g.asset_a || g.assetA), policy: g.policy_server || g.policyServer, makerAid: g.maker_aid || g.makerAid } }
   const r = rt(o)
-  return { asset: String(o.base_asset || o.baseAsset).toLowerCase(), policy: r.policy_server || r.policyServer, makerAid: r.maker_aid || r.makerAid }
+  return { asset: baseOf(o), policy: r.policy_server || r.policyServer, makerAid: r.maker_aid || r.makerAid }
 }
 
 // A gated fill's amounts (the SeqDEX fill covenant behind the policy key): what is paid for
@@ -318,9 +323,12 @@ export const RESTRICTED_WORDS = Object.freeze({
     velocity: 'That is more of this asset than can change hands today: try a smaller amount or try again later.',
   }),
   sellerHeld: 'The seller cannot sell this asset right now. Try again later.',
-  btcVia: (ticker, via) => `Paid with bitcoin through ${via}: your bitcoin buys ${via}, and ${via} buys ${ticker}.`,
+  btcVia: (ticker, via) => `Bitcoin buys ${via}, and ${via} buys ${ticker}. Get ${via} first, then trade it for ${ticker}.`,
   btcOther: (ticker, list) => `${ticker} is bought with ${list}. Choose one to pay with; paying with bitcoin directly comes with a network upgrade.`,
   payWith: (t) => `Pay with ${t}`,
+  getIn: (t) => `Get ${t}`,
+  btcViaSell: (ticker, via) => `${ticker} buys ${via}, and ${via} buys bitcoin. Trade ${ticker} for ${via} first, then ${via} for bitcoin.`,
+  btcOtherSell: (ticker, list) => `${ticker} is sold for ${list}. Choose what to get; getting bitcoin directly comes with a network upgrade.`,
   noneSelling: (ticker) => `No one is selling ${ticker} right now. Check back later.`,
   noneBuying: (ticker) => `No one is buying ${ticker} right now. Check back later.`,
   viaHeld: (via) => `Your bitcoin bought ${via}; it is yours to trade or send.`,
@@ -353,15 +361,15 @@ export function approvalCard (elig, asset, code) {
 // paths and that buys R from the book. `buyers` are the assets the book takes for R
 // ([{ asset, rate }] best first, rate = X atoms per R atom); `btcBuys(X)` says whether bitcoin
 // buys X now. -> { via: X } | { card: { text, choices: [X] } }
-export function btcRoute (ticker, buyers, btcBuys, name = (a) => a) {
+export function btcRoute (ticker, buyers, btcBuys, name = (a) => a, sell = false) {
   const seen = new Set(); const xs = []
   for (const b of buyers || []) if (b && b.asset && b.asset !== BTC && !seen.has(b.asset)) { seen.add(b.asset); xs.push(b.asset) }
   const via = xs.find((x) => btcBuys(x))
   if (via) return { via }
-  if (!xs.length) return { card: { text: RESTRICTED_WORDS.noneSelling(ticker), choices: [] } }
+  if (!xs.length) return { card: { text: sell ? RESTRICTED_WORDS.noneBuying(ticker) : RESTRICTED_WORDS.noneSelling(ticker), choices: [] } }
   const names = xs.map(name)
   const list = names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' or ' + names[names.length - 1]
-  return { card: { text: RESTRICTED_WORDS.btcOther(ticker, list), choices: xs } }
+  return { card: { text: (sell ? RESTRICTED_WORDS.btcOtherSell : RESTRICTED_WORDS.btcOther)(ticker, list), choices: xs } }
 }
 
 // ---------------------------------------------------------------- the taker
@@ -389,8 +397,8 @@ export function btcRoute (ticker, buyers, btcBuys, name = (a) => a) {
 // asset the taker pays the fee in (never the restricted one).
 export async function takeDvP (host, entry, { feeAsset }) {
   const o = entry.raw; const r = rt(o)
-  const asset = String(o.base_asset || o.baseAsset).toLowerCase()
-  const assetB = String(o.quote_asset || o.quoteAsset).toLowerCase()
+  const asset = baseOf(o)
+  const assetB = quoteOf(o)
   const makerSells = /SELL/.test(dirOf(o))
   const value = big(o.base_amount || o.baseAmount)
   const price = big(makerSells ? (o.want_amount || o.wantAmount) : (o.offer_amount || o.offerAmount))

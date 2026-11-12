@@ -337,8 +337,8 @@ function encodeRestrictedTerms(c){
 function encodeGatedOrderTerms(c){
   if (!c) return null;
   const w = new PW();
-  w.str(1, O(c,'covenant_txid','covenantTxid'));
-  w.uint(2, O(c,'covenant_vout','covenantVout'));
+  // covenant_txid (1) and covenant_vout (2): the order re-rests at every part fill, so its
+  // outpoint is outside the signed bytes (seqdex offer.CanonicalOfferBytes).
   w.str(3, O(c,'asset_a','assetA'));
   w.str(4, O(c,'asset_b','assetB'));
   w.uint(5, O(c,'rate_num','rateNum'));

@@ -29,6 +29,7 @@
 import { USER_WORDS, QUOTE_FIRM_MS, pickerOrder, costLine, tradeStateWord, tradeSteps } from './user-trade.js'
 import { mountMarketView } from './market-view.js'
 import { openPicker, PICKER_WORDS } from './asset-picker.js'
+import { RESTRICTED_WORDS } from './restricted-trade.js'
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 // The chooser button's marks (no words): what nothing chosen shows, and the arrow.
@@ -130,6 +131,7 @@ export function mountUserComposer (ctx) {
     const seq = ++S.estSeq
     const e = await ctx.engine.estimate({ payAsset: S.pay, receiveAsset: S.get, ...(S.fixed === 'pay' ? { pay: String(atoms) } : { receive: String(atoms) }) })
     if (seq !== S.estSeq || S.ticket) return
+    if (!e.ok && e.why === 'restricted') { S.note = ''; paintNote(); return }
     if (!e.ok) {
       S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall
         : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
@@ -167,7 +169,7 @@ export function mountUserComposer (ctx) {
     return b
   }
 
-  function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = ''; S.moving = false }
+  function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = ''; S.moving = false; S.card = null }
 
   // "about" beside the amount that follows the price, while it is an estimate.
   function paintAbout () {
@@ -267,6 +269,29 @@ export function mountUserComposer (ctx) {
     }
   }
 
+  // The card a restricted asset's trade shows in place of Confirm: the approval card (whom to
+  // ask, the approval code to give them) or the assets to pay or be paid with.
+  function paintCard (t, act, btn) {
+    const c = S.card
+    const box = el('div', 'uc-card'); box.id = 'ucCard'
+    box.appendChild(el('div', '', c.text))
+    if (c.reason) box.appendChild(el('div', 'sub', c.reason))
+    t.appendChild(box)
+    if (c.code) {
+      act.appendChild(btn(RESTRICTED_WORDS.copyCode, 'ucCopyCode', () => { try { navigator.clipboard.writeText(c.code) } catch {} }, 'primary'))
+    }
+    if (c.link) {
+      const a = el('a', 'btn ghost', c.link.text); a.id = 'ucOpenPage'; a.href = c.link.url; a.target = '_blank'; a.rel = 'noopener noreferrer'
+      act.appendChild(a)
+    }
+    for (const x of c.choices || []) {
+      act.appendChild(btn((c.side === 'get' ? RESTRICTED_WORDS.getIn : RESTRICTED_WORDS.payWith)(name(x)), 'ucVia-' + x.slice(0, 8), () => {
+        if (c.side === 'get') { S.get = x; S.getChosen = true } else { S.pay = x; S.payChosen = true }
+        reset(); render()
+      }, (c.choices || []).length === 1 ? 'primary' : 'ghost'))
+    }
+  }
+
   function paintTicket () {
     const t = ctx.root.querySelector('#ucTicket'), note = ctx.root.querySelector('#ucNote'), act = ctx.root.querySelector('#ucAct')
     if (!t) return
@@ -275,6 +300,7 @@ export function mountUserComposer (ctx) {
     note.classList.toggle('err', !!S.error)
     paintAbout()
     const btn = (text, id, f, cls) => { const b = el('button', cls || '', text); b.type = 'button'; b.id = id; b.disabled = S.busy; b.onclick = f; return b }
+    if (!S.ticket && S.card) { paintCard(t, act, btn); return }
     if (!S.ticket) {
       act.appendChild(btn(S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
       return
@@ -309,6 +335,8 @@ export function mountUserComposer (ctx) {
         onStep: withBtc ? (k) => paintProgress(k) : null })
       if (withBtc && q.ok) paintProgress('priced')
       if (q.ok) { S.ticket = q.ticket; S.choice = q.choice; S.moving = !!q.moving }
+      // A restricted asset: whom to ask for approval, or what to pay with; never an error.
+      else if (q.card) S.card = q.card
       else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.partReady(amt(S.pay, q.ready), name(S.pay), q.soon) : q.why === 'too-small' ? USER_WORDS.tooSmall
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
