@@ -5376,6 +5376,8 @@ function initUserComposer(){
     root: $('userComposerRoot'), engine: userTrade, assetMeta, fmtAtoms, fmtShow: fmtAmount, parseAtoms,
     session: (()=>{ try{ return sessionStorage; }catch{ return null; } })(), tag: walletTag,
     knownAssets: userKnownAssets, held: userHeld, vestingAtoms: vestingFor, onItsWay: (a)=> onItsWay(a),
+    // A trade asked while the wallet is still opening waits for it (tradeOpening).
+    opening: tradeOpening, openingNote: DEFAULT_WORDS.waitOpening,
     isHidden: isAssetHidden, refValue: refValueStr,
     // The confirmations the Bitcoin ark's server waits for before a board's BTC can be traded.
     btcMoveBlocks: ()=> (btcArk && btcArk.info() && Number(btcArk.info().required_board_confirmations)) || null,
@@ -9326,6 +9328,16 @@ function collectRows(){
 // payments answers: a payment asked meanwhile waits for it to open, for as long as that takes.
 function findingStalled(){ try{ return !!leavesApi && !leavesApi.isOpen() && !!(leavesApi.restoreStalled && leavesApi.restoreStalled()); }catch{ return false; } }
 function findingOn(){ try{ return !!leavesApi && leavesApi.restoring() && !findingStalled(); }catch{ return false; } }
+// A trade asked while the wallet is still opening waits for it, as a payment does, for as long as
+// that takes (the composer says "Your wallet is still opening; this goes on by itself once it
+// has."). -> null once it is open (or there is nothing to open), else why it cannot be: the service
+// that holds the wallet's coins for instant payments is not answering.
+async function tradeOpening(){
+  if(!leavesApi || leavesApi.isOpen() || devMode() || !leavesApi.expected()) return null;
+  const failed = ()=>{ try{ return !!(leavesApi.joinError && leavesApi.joinError()); }catch{ return false; } };
+  while(!leavesApi.isOpen() && !findingStalled() && !failed()) await new Promise(r=>setTimeout(r, 1000));
+  return leavesApi.isOpen() ? null : DEFAULT_WORDS.findingStalledPay;
+}
 async function confidentialReview(r, reset){
   const h=r.asset, m=assetMeta(h), prec=sendPrecision(h);
   const a=parseAtoms(r.amtS, prec);

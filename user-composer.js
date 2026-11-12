@@ -344,6 +344,16 @@ export function mountUserComposer (ctx) {
     try { atoms = ctx.parseAtoms(String(S.amount || '').trim(), prec(S.pay)) } catch { atoms = 0n }
     if (!(big(atoms) > 0n)) { S.error = USER_WORDS.enter; paintTicket(); return }
     if (!S.get) { S.error = USER_WORDS.nothingOffered(name(S.pay)); paintTicket(); return }
+    // A wallet still opening (a restore finding what it holds) is waited for, saying so, as a
+    // payment waits for it (ctx.opening, the page's): the trade is priced once it has opened. One
+    // that cannot open says why, in the page's words; never "try again".
+    if (ctx.opening) {
+      S.busy = true; S.note = ctx.openingNote || ''; paintTicket()
+      let why = null
+      try { why = await ctx.opening() } catch (e) { console.warn('[user composer] opening:', e && e.message) }
+      S.note = ''
+      if (why) { S.busy = false; S.error = why; paintTicket(); return }
+    }
     S.busy = true; S.pricingLong = false; paintTicket()
     // Past the makers' window the wallet may still be checking the price it was given: said so.
     const longTimer = setTimeout(() => { if (S.busy && !S.ticket) { S.pricingLong = true; paintTicket() } }, QUOTE_FIRM_MS + 1000)
