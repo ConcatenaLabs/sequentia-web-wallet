@@ -491,7 +491,10 @@ modes (`asset-picker.js`):
   Ark to its own address by itself (never less than the operator's smallest coin of the asset),
   and says so while it waits, naming no rail: "Getting <amount> <TICKER> ready to be staked. Ready
   within <N> minutes. Keep this page open." ("used to join the pool", "mixed", "traded"; Ambra
-  mobile says "Keep this screen open."). Once it
+  mobile says "Keep this screen open."). <N> counts the operator's next settlement and its block,
+  then the operator's unlock of the moved coins into the wallet's address with its block: the
+  operator's published `offboards.unlock_within_seconds`, or ten minutes and a block when it
+  publishes none. A restricted trade's ticket says that wait and two minutes for the trade. Once it
   has arrived the usual review opens; nothing is signed before it.
 - When the operator cannot pay that much on the chain now (its published `fundable`, against
   the whole coin the move gives), nothing is asked, so no coin waits: "<amount> <TICKER> cannot be

@@ -342,13 +342,17 @@ test('amountFits: the fee on top of the amount, out of what can be spent', () =>
 // Coins moved out of the tree to the wallet's own address (to stake them, say) wait for one
 // settlement and its block, not for another wallet: measured on the testnet, request to final on
 // the chain in 4 min 45 s, of which 97 s was this wallet handing over its part late.
-test('moveOutMinutes: a settlement and its block, not the ten minutes of a payment to another wallet', () => {
-  assert.equal(moveOutMinutes(60, 60), 4)
-  assert.equal(moveOutMinutes(60), 4)
-  assert.equal(moveOutMinutes(600, 60), 13)
+test('moveOutMinutes: a settlement, its block, the operator\'s unlock and its block, as the testnet takes them', () => {
+  // An operator that publishes no unlock time: counted at what the testnet's took (600 s).
+  assert.equal(moveOutMinutes(60, 60), 14)
+  assert.equal(moveOutMinutes(60), 14)
+  assert.equal(moveOutMinutes(600, 60), 23)
+  // One that publishes it: its own time, which holds the unlock's block; 0 included.
+  assert.equal(moveOutMinutes(60, 60, 150), 5)
+  assert.equal(moveOutMinutes(60, 60, 0), 3)
   assert.equal(moveOutMinutes(null), null)
   assert.equal(DEFAULT_WORDS.movingOut('40,000 tSEQ', 'staked', moveOutMinutes(60, 60)),
-    'Getting 40,000 tSEQ ready to be staked. Ready within 4 minutes. Keep this page open.')
+    'Getting 40,000 tSEQ ready to be staked. Ready within 14 minutes. Keep this page open.')
 })
 
 // A coin given up in the next round (the wallet's own refresh of what it received, a move out of

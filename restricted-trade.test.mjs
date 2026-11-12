@@ -437,3 +437,21 @@ test('a restricted trade marks the record while what it pays from moves to the c
   await assert.rejects(restrictedConfirm({ ...R, ensure: async () => { throw new Error('not ready') } }, { entry: { id: 'x' }, give: 1n, receive: 1n, feeAsset: 'p', fee: 1n }, rec2, (r) => r))
   assert.equal(rec2.movingSince, undefined)
 })
+
+test('a sale whose fee must first be made ready carries that move\'s fee and the true wait on its ticket, as a purchase does', async () => {
+  const asked = []
+  const { a, b, R } = fakeR({ held: async () => 10n ** 12n, feeAsset: async (p, r) => r, moveQuote: async (needs) => { asked.push(needs); return { fees: [{ asset: b, atoms: 88n }], minutes: 14 } } })
+  // The maker's buy quote: 300 of the restricted asset for 45,000,000 of the other (verified, as the
+  // book marks what it checked).
+  const buy = { ...JSON.parse(JSON.stringify(vectors[0])), offer_id: 'rt-buy', trade_dir: 'TRADE_DIR_BUY', offer_amount: '45000000', offer_asset: b, want_amount: '300', want_asset: a }
+  seqob.normRelayOffer(buy); buy._verified = true; buy._status = { active_amount: '300' }
+  R.book = async () => [buy]
+  const q = await restrictedQuote(R, { payAsset: a, receiveAsset: b, amount: 300n })
+  if (!q.ok) assert.fail('no ticket: ' + JSON.stringify(q))
+  assert.equal(q.ticket.payAsset, a)
+  // Only the fee is moved: the restricted asset sold is already where the trade is made.
+  assert.deepEqual(asked.map((n) => n.map((x) => x.hex)), [[b]])
+  assert.deepEqual(q.ticket.fees.slice(-1), [{ asset: b, atoms: '88' }])
+  assert.equal(q.ticket.minutes, 16)
+  assert.equal(m.RESTRICTED_WORDS.takes(16), 'Takes about 16 minutes, as what you pay is first moved to where this trade is made. Keep this page open.')
+})

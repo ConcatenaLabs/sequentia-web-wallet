@@ -4673,7 +4673,7 @@ function restrictedDeps(){
         fees.push({ asset: n.hex, atoms: BigInt((q && q.fee && q.fee.amount) || 0) });
       }
       if(!move) return null;
-      return { fees, minutes: moveOutMinutes(leavesApi && leavesApi.roundInterval(), leavesApi && leavesApi.blockSeconds()) || 5 };
+      return { fees, minutes: moveOutMinutes(leavesApi && leavesApi.roundInterval(), leavesApi && leavesApi.blockSeconds(), leavesApi && leavesApi.unlockSeconds ? leavesApi.unlockSeconds() : null) || 5 };
     },
     // The fee is paid in the asset paid; selling a restricted asset, in the asset received, else in
     // another asset the wallet holds that the network takes fees in; never by default in one asset.
@@ -12114,7 +12114,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
   for(const m of missing){ const can = instantAtoms(m.hex) + onItsWay(m.hex); if(can < m.atoms) throw new Error(DEFAULT_WORDS.notEnough(fmtAmount(m.atoms - can, assetMeta(m.hex).precision ?? 8), assetMeta(m.hex).ticker)); }
   const address = wollet.address(undefined).address().toUnconfidential().toString();
   _keepOnChainUntil = Date.now() + MOVE_WAIT_MS + KEEP_ON_CHAIN_MS;
-  let minutes = moveOutMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds());
+  let minutes = moveOutMinutes(leavesApi.roundInterval(), leavesApi.blockSeconds(), leavesApi.unlockSeconds ? leavesApi.unlockSeconds() : null);
   const what = (missing.length ? missing : all).map(m=>amountWords(m.hex, m.atoms)).join(' and ');
   // A round pays the whole coin a move gives (what is moved and its change) out of the operator's
   // wallet: when that is more than the operator can fund now, nothing is asked, so no coin waits.
@@ -12138,7 +12138,7 @@ async function ensureOnChain(needs, say, purpose, have = onChainAtoms){
     for(const [i, m] of missing.entries()){
       const q = quotes[i];
       const v = await leavesApi.offboard({ asset: m.hex, amount: String(m.atoms), address, ...(q ? { shown: q } : {}) });
-      minutes = moveOutMinutes(v && v.round_within_seconds, leavesApi.blockSeconds()) || minutes;
+      minutes = moveOutMinutes(v && v.round_within_seconds, leavesApi.blockSeconds(), leavesApi.unlockSeconds ? leavesApi.unlockSeconds() : null) || minutes;
       try{ noteSent(localStorage, walletTag(), { asset: m.hex, atoms: m.atoms, fee: q && q.fee ? { asset: m.hex, atoms: BigInt(q.fee.amount||0) } : null, later: true }); }catch{}
     }
   }catch(e){ console.warn('[on chain] moving out of the Ark:', e?.message??e); _keepOnChainUntil = Date.now() + KEEP_ON_CHAIN_MS; throw new Error(DEFAULT_WORDS.notMoved); }

@@ -2830,6 +2830,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
     roundInterval: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.round_interval_seconds) || null },
     // The chain's block interval the operator follows, in seconds, or null.
     blockSeconds: () => { const f = S.info && S.info.server_info && S.info.server_info.fills; return (f && f.block_seconds) || null },
+    // The most seconds the operator takes from releasing a move to the chain to unlocking it into its
+    // address (`offboards.unlock_within_seconds`), or null when it publishes none.
+    unlockSeconds: () => { const o = S.info && S.info.server_info && S.info.server_info.offboards; const v = o ? Number(o.unlock_within_seconds) : NaN; return Number.isFinite(v) && v >= 0 ? v : null },
     // Boards the chain's new coins soon (the page calls it when its own scan sees them).
     boardSoon: () => { if (S.open && !dev()) upkeepSoon(2000) },
     releaseFor: (asset, leaves) => releaseFor(asset, leaves),

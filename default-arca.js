@@ -391,17 +391,25 @@ export function homeUnderWay (coins, kept, unreachable) {
 // the wallet keeps. -> minutes, or null when the operator publishes no interval.
 // The minutes coins the wallet moves out of the tree to its own address take to be its to spend on
 // the chain (for a stake, say): the operator's next settlement (`seconds`), the wallet handing
-// over its part of it at once, and the settlement's block, with MOVE_OUT_BLOCKS blocks and
-// MOVE_OUT_SLACK_S seconds for the reads on either side. Nothing waits on another wallet, so it is
-// not ADDRESS_PATH's ten minutes: on the testnet (a settlement a minute, a block a minute) it is
-// four. -> minutes, or null when the operator publishes no interval.
+// over its part of it at once, the settlement's block, the operator's unlock of the moved coins
+// into the address once it has released the move, and the unlock's block (`unlockSeconds`: the
+// operator's published `offboards.unlock_within_seconds`, which holds that block), with MOVE_OUT_BLOCKS blocks and
+// MOVE_OUT_SLACK_S seconds for the reads on either side. An operator that publishes no unlock time
+// is counted at UNLOCK_UNPUBLISHED_S, what the testnet's took (arca #824: its watcher unlocks in
+// a pass that came about every five minutes, so up to two passes). On the testnet (a settlement
+// a minute, a block a minute) that is fourteen minutes; measured, 7 to 13. -> minutes, or null when
+// the operator publishes no interval.
 export const MOVE_OUT_BLOCKS = 2
 export const MOVE_OUT_SLACK_S = 30
-export function moveOutMinutes (seconds, blockSeconds) {
+export const UNLOCK_UNPUBLISHED_S = 600
+export function moveOutMinutes (seconds, blockSeconds, unlockSeconds = null) {
   const n = Number(seconds)
   if (!Number.isFinite(n) || n <= 0) return null
   const b = Number(blockSeconds) > 0 ? Number(blockSeconds) : 60
-  return Math.max(1, Math.ceil((n + MOVE_OUT_BLOCKS * b + MOVE_OUT_SLACK_S) / 60))
+  // A published unlock time holds the unlock's own block; the unpublished one does not.
+  const published = unlockSeconds != null && Number.isFinite(Number(unlockSeconds)) && Number(unlockSeconds) >= 0
+  const u = published ? Number(unlockSeconds) : UNLOCK_UNPUBLISHED_S + b
+  return Math.max(1, Math.ceil((n + (MOVE_OUT_BLOCKS - 1) * b + u + MOVE_OUT_SLACK_S) / 60))
 }
 
 // How often the page syncs while some coin is arriving (ARRIVING_STATES: a coin given up in the
