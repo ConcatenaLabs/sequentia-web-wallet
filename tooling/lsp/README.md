@@ -287,7 +287,7 @@ three quarters of the cap. A merge's own coin is larger, and is not merged again
 comes in. At twice the cap it boards no more of the asset and merges its smallest coins of all, as
 few as bring it back under. With `merge_max_coins` (a number, at least 2), the coins one pass merges
 hold at most that many `coin_size` together; and with an instant budget, no merge holds more than
-a working coin (below).
+a working coin and only crumbs are merged (below).
 
 ### Working coins
 
@@ -302,16 +302,25 @@ number of atoms in the configuration, so a price move changes it at once. The li
 from the smallest coin that pays it alone (the arca CLI README, `swap offer`), so small swaps reach
 the working coins and never a reserve coin.
 
+- **What a coin is.** Beside the size, a coin is a crumb (under half a working coin), a working
+  coin (from half a working coin up to one that cannot be cut into a working coin and half one,
+  once the refresh's fee of at most 1% is paid), or a reserve (larger). The cut and the merge read
+  this one rule, so neither takes what the other made. The size moves by a few atoms whenever a
+  rate or the budget does; a coin cut at one minute's size stays a working coin until the size
+  falls by about a third or doubles, so a maker whose coins are shaped makes no refresh while
+  nobody trades with it.
 - **Cutting.** An asset with fewer than four working coins has its smallest reserve coin of a round
-  or a board cut into the ones missing and a reserve of the rest, in the operator's next round (the
-  library's refresh in pieces, `quote` and `participate` with `piece` and `pieces`), one cut at a
-  time, read from the coins' state. A coin the library takes back from a refresh that waited at
+  or a board cut into as many of the ones missing as it holds and a rest of at least half a
+  working coin (never less than the asset's smallest quote, its pairs' `min_give`), in the
+  operator's next round (the library's refresh in pieces, `quote` and `participate` with `piece`
+  and `pieces`), one cut at a time, read from the coins' state. A cut never leaves a crumb. A coin the library takes back from a refresh that waited at
   the operator is given up again ten minutes later, whether it was being cut or settled. Working
   coins are never cut by a payment to itself out of round (only an asset's lone due coin is split
   so, above). A library that does not cut a
   refresh into pieces is detected from its quote, and nothing is given up.
 - **Settling and merging.** What it received is settled into working coins and a reserve of the
-  rest. No merge makes a coin larger than a working coin, and no board is larger than one.
+  rest. Past `max_coins` only crumbs and small boards are merged, never a working coin or a
+  reserve; no merge makes a coin larger than a working coin, and no board is larger than one.
 - **Quotes.** It quotes of an asset at most its largest live coin whose spend fits the room left in
   its budget (a coin out of round always does), and a firm offer is sized the same way, so a price it shows is a price it
   confirms. The room is worked out from its latest reading of its coins: the budget less what it
