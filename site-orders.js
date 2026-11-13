@@ -32,8 +32,12 @@
 //   list(order, rec)  -> posts an order placed here on the book once it rests; optional
 //   busy(on)          told while a review is being priced or settled, so a page's own follow of
 //                     its trades waits (the wallet answers one command at a time); optional
-//   followTrades      false where the page's own composer already follows every trade it made
-//                     (the web wallet's Trade tab); `follow` then lists orders only
+//   followTrades      where the page's own follow of the engine's trades moves every trade on (the
+//                     web wallet's Trade tab): a function that wakes that follow, asked the moment
+//                     a site's trade is written and at every `follow` while one is open, so a trade
+//                     accepted while that follow rested has its row and its end; `follow` then
+//                     moves no trade itself. `false` leaves the trades to that follow alone;
+//                     absent, `follow` moves them on itself
 //   now()             -> milliseconds; optional
 //   answerMs          how long a trade's step is waited on before the site is answered with the
 //                     trade under way (SITE_ANSWER_MS); optional
@@ -327,8 +331,10 @@ export function makeSiteOrders (d) {
       // answered meanwhile.
       try { d.busy && d.busy(true) } catch {}
       const done = d.engine.confirm(p.choice, p.ticket)
+      // Once the step is taken (or the trade is written to wait for its coins), the page's follow is
+      // woken: the trade has its row from then, and moves on by itself (#770).
       done.then((rec) => { if (rec && rec.id && rec.state !== 'failed') mark(rec.id) }, (e) => log('[site orders] confirm:', e && e.message))
-        .finally(() => { try { d.busy && d.busy(false) } catch {} })
+        .finally(() => { try { d.busy && d.busy(false) } catch {} wake() })
       const later = Symbol('later')
       let rec
       // The price no longer held (the offer lapsed, or what it spends changed since it was shown):
@@ -375,10 +381,19 @@ export function makeSiteOrders (d) {
     return { trade: null, filled: 0, failed: [], order: r.order, order_error: null, gave: '0', got: '0' }
   }
 
-  // Moves this wallet's site trades on, and lists the orders placed here that rest now.
+  // The page's own follow of every trade, woken (followTrades as a function); never thrown from.
+  function wake () {
+    if (typeof d.followTrades !== 'function') return
+    try { Promise.resolve(d.followTrades()).catch((e) => log('[site orders] follow of trades:', e && e.message)) } catch (e) { log('[site orders] follow of trades:', e && e.message) }
+  }
+
+  // Moves this wallet's site trades on (or wakes the page's follow of them), and lists the orders
+  // placed here that rest now.
   async function follow () {
     const v = db()
-    const recs = d.followTrades === false ? [] : (d.engine.records ? d.engine.records() : []).filter((r) => v.trades[r.id] && !['settled', 'returned', 'failed', 'undone'].includes(r.state))
+    const open = (d.engine.records ? d.engine.records() : []).filter((r) => v.trades[r.id] && !['settled', 'returned', 'failed', 'undone'].includes(r.state))
+    if (open.length) wake()
+    const recs = d.followTrades === false || typeof d.followTrades === 'function' ? [] : open
     for (const r of recs) {
       try { if (keepEnded(v, await d.engine.advance(r))) write(v) } catch (e) { log('[site orders] follow:', e && e.message) }
     }

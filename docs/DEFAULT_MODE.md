@@ -693,13 +693,17 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   "Returned: nothing traded. The price moved while it waited." The same holds when that is found
   only at **Trade**, with the exact ticket as its bound. A site's order (SeqDEX) is the same
   trade: its **Trade?** shows the same rows, and once approved the site is answered with the
-  trade under way. When the book shows no price for the pair before the coins are through, the
+  trade under way; the trade is under Your trades from that moment, and moves on by itself in
+  either mode, as the Trade tab's own trades do. When the book shows no price for the pair before the coins are through, the
   wallet says it is getting them ready and asks again by itself. A page closed or reloaded
   meanwhile finds the trade again and goes on with it, never twice, however many times the page
   follows it at once. It waits twice the most the wallet says it can take, and at least ten minutes;
   while it waits past what the wallet expected, a confirmed trade reads "Taking longer than usual:
   this goes ahead by itself, or is returned with nothing traded"; past the bound it is
-  "Returned: nothing traded."
+  "Returned: nothing traded. It took too long to get ready." Once through, if what it was to pay
+  is no longer the wallet's (another payment or another device of the wallet spent it), it is
+  "Returned: nothing traded. Your wallet no longer holds what it was to pay." A site's order says
+  the same words to the site.
   Payments wait for that settlement the same way and then go. Coins too deep for
   part of them to be traded are settled by the wallet once it has been left alone two minutes,
   at a settlement's fee each, so the next trade from them goes at once.
@@ -721,7 +725,7 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   the wallet expects, and past that by two minutes read "Taking longer than usual: this goes ahead
   by itself, or is returned with nothing traded". It waits the N minutes its ticket says, longer
   only when the wallet says the settlement takes longer (then twice that, as above), then
-  "Returned: nothing traded.", the money in the wallet; if the network will not take the money in: "Returned: nothing traded, and
+  "Returned: nothing traded. It took too long to get ready.", the money in the wallet; if the network will not take the money in: "Returned: nothing traded, and
   your money stays in your wallet. You can send it to an address." Once the trade has gone ahead or been returned, the wallet
   stops moving money in for it. Money on the chain that cannot be moved in is never waited
   on: an order on the chain that takes it goes, and otherwise the ticket says why, at once: "This

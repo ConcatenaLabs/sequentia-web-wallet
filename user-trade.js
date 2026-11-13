@@ -243,6 +243,11 @@ export const USER_WORDS = Object.freeze({
   // A trade confirmed while what it pays was settled first, whose price then moved past what was
   // accepted: nothing traded, said as an expired price is.
   returnedMoved: 'Returned: nothing traded. The price moved while it waited.',
+  // A trade that waited for its coins (or its money moved in) past the most it was to wait.
+  returnedLate: 'Returned: nothing traded. It took too long to get ready.',
+  // A trade that waited for its coins, whose coins were no longer the wallet's to pay with once
+  // through (spent by another payment, or another device of the wallet).
+  returnedGone: 'Returned: nothing traded. Your wallet no longer holds what it was to pay.',
   // A trade paid with money moved in first, whose move the network would not take (too little of
   // it to move once its fee is paid, or not taken at all): nothing traded.
   returnedRefused: 'Returned: nothing traded, and your money stays in your wallet. You can send it to an address.',
@@ -383,6 +388,8 @@ export function tradeStateWord (r, now = Date.now()) {
   if (r.state === 'returned' && r.whyKind === 'lapsed') return W.returnedLapsed
   if (r.state === 'returned' && r.whyKind === 'moved') return W.returnedMoved
   if (r.state === 'returned' && r.whyKind === 'refused') return W.returnedRefused
+  if (r.state === 'returned' && r.whyKind === 'late') return W.returnedLate
+  if (r.state === 'returned' && r.whyKind === 'gone') return W.returnedGone
   // Confirmed, and what it pays being settled first (or moved in first): it goes ahead by itself once
   // through, within one wait (settlingBy: the later of the move's minutes and what the library last
   // said), and past that by two minutes, that it takes longer.
@@ -2112,7 +2119,8 @@ export function createEngine (deps) {
       // Nobody offers it this moment: a maker quotes nothing while it reads its coins again after a
       // trade, so within the time given it is asked again at the next advance.
       if (now() - since <= mostMs && ['wallet-busy', 'no-firm-offer', 'not-offered'].includes(q.why)) return put(rec)
-      rec.state = 'returned'; rec.whyKind = 'moved'; rec.error = 'no price within the bound: ' + q.why
+      // What it was to pay is no longer the wallet's: said so, not as a price that moved.
+      rec.state = 'returned'; rec.whyKind = ['no-funds', 'own-short'].includes(q.why) ? 'gone' : 'moved'; rec.error = 'no price within the bound: ' + q.why
       return back()
     }
     if (!within(q)) {

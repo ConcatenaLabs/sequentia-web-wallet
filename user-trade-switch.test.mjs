@@ -40,3 +40,14 @@ test('the mode change redraws the Trade tab', () => {
 test('the page itself sets no override', () => {
   assert.ok(!/window\.SEQ_USER_TRADE\s*=(?!=)/.test(html.replace(/\/\/.*$/gm, '')), 'index.html sets SEQ_USER_TRADE');
 });
+
+// #770: a site's trade accepted as waiting moves on by the Trade tab's follow, woken the moment it
+// is written, in either mode; the follow of open trades does not depend on which composer shows.
+test('the site orders wake the Trade tab\'s follow, and open trades are followed in both modes', () => {
+  const a = html.indexOf('makeSiteOrders({');
+  const deps = html.slice(a, html.indexOf('log: (...a)', a));
+  assert.ok(/followTrades:\s*\(\)\s*=>\s*userComposer\s*\?\s*userComposer\.follow\(\)/.test(deps), 'followTrades wakes userComposer.follow');
+  const b = html.indexOf('function applyTradeMode(');
+  const body = html.slice(b, html.indexOf('\n}', b));
+  assert.ok(/\n\s*if\(follow && userComposer\) userComposer\.follow\(\);/.test(body), 'applyTradeMode follows open trades whatever the mode');
+});
