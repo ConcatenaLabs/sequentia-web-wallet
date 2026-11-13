@@ -430,7 +430,11 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
     const results = []
     for (let i = 0; i < 40; i++) {
       const [g, w] = i % 2 ? [X, M] : [M, X]
-      const r = await trade(maker, T.t, g, w, 11000 + (i % 5) * 1000, 10)
+      // Trades of 110,000 to 150,000, so that what the maker receives is large against the harness
+      // operator's fixed margins (about 700 to 1,000 atoms), as a testnet trade is against its own:
+      // the library pays a swap from a received coin first, and refuses one whose margins pass its
+      // 1% bound (arca #869).
+      const r = await trade(maker, T.t, g, w, 110000 + (i % 5) * 10000, 10)
       results.push({ i, pair: name(g) + '->' + name(w), ...r })
       // The taker's change, refreshed every other trade: this case is the maker's depth, not its.
       if (i % 2 === 1) await refreshChange(H, T)
