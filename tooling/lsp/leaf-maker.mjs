@@ -839,6 +839,7 @@ export function whyUnoffered (coins, asset, roomValue, rates, least = null) {
   if (!mine.length) return 'it holds none'
   if (mine.some((c) => c.state === 'given')) return 'every coin of it is in a round, until the round is final'
   if (mine.some((c) => c.state === 'offered' || c.state === 'sending')) return 'every coin of it is held by an open offer or a lock'
+  if (mine.some((c) => c.state === 'at_depth_limit')) return 'every coin of it that would pay is at the operator\'s depth limit of reassignments, until a round refreshes it'
   return 'no coin of it is live (' + [...new Set(mine.map((c) => c.state))].join(', ') + ')'
 }
 
@@ -944,6 +945,25 @@ export function ownToRefresh (coins, { lineageOf = null, hopsOf = null, sizes = 
     out.push(c.leaf_id)
   }
   return out
+}
+
+// The operator's limit of reassignments since a round (its info's `depth_limit`), or null.
+export const depthLimitOf = (info) => { const si = (info && info.server_info) || info; return si && Number.isFinite(si.depth_limit) ? si.depth_limit : null }
+// The coins as a quote or a firm offer may pay from them: a live coin of kind transfer or fill whose
+// reassignments since a round (`hopsOf`: leaf -> hops, coin_places) have reached the operator's
+// `depthLimit` pays nothing out of round ("more are at the operator's depth limit"), so it is shown
+// as `at_depth_limit` and quotes nothing, and keepFree does not keep it to keep its asset offered:
+// a book that quotes it refuses every firm offer it sized on it (case d of web #778). -> coins.
+export function payableView (coins, hopsOf, depthLimit) {
+  if (depthLimit == null || !hopsOf) return coins
+  return (coins || []).map((c) => (c && c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill') && (hopsOf.get(c.leaf_id) ?? -1) >= depthLimit ? { ...c, state: 'at_depth_limit' } : c))
+}
+// The received coins (kind transfer, live) within two reassignments of the operator's depth limit,
+// due now whatever their rest: a round is the only way such a coin pays again, and a swap paying
+// from it makes change one reassignment deeper (ownToRefresh does the same for its own coins).
+export function deepDue (coins, hopsOf, depthLimit) {
+  if (depthLimit == null || !hopsOf) return []
+  return (coins || []).filter((c) => c && c.state === 'live' && c.kind === 'transfer' && (hopsOf.get(c.leaf_id) ?? -1) >= depthLimit - 2).map((c) => c.leaf_id)
 }
 
 // The arguments of a library command. One ahead of the queue (`first`) answers a taker (a firm
@@ -1433,7 +1453,7 @@ async function main () {
   const firmHoldings = async () => {
     const h = known(holdings && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true))
     firmReading = h
-    return budgetedSpendable(h.sp, h.coins, roomOf(h), ratesNow)
+    return budgetedSpendable(h.sp, payableView(h.coins, hopsOf, depthLimitOf(lastInfo)), roomOf(h), ratesNow)
   }
   // The terms of a firm offer of `give` of `give_asset` for `want_asset`, with every check a firm
   // offer passes: the pair quoted, its want asset taken now (not capped), the maker holding that
@@ -1546,7 +1566,7 @@ async function main () {
       {
         const room = roomNow(budgetValue, coins, ratesNow, lineageOf), least = leastGives(cfg)
         for (const a of givesOf()) {
-          const why = whyUnoffered(coins, a, room, ratesNow, least)
+          const why = whyUnoffered(payableView(coins, hopsOf, depthLimitOf(lastInfo)), a, room, ratesNow, least)
           if (why !== (unoffered.get(a) ?? null)) { log(why ? 'offers no ' + tickerOf(a) + ' now: ' + why : 'offers ' + tickerOf(a) + ' again'); if (why) unoffered.set(a, why); else unoffered.delete(a) }
         }
       }
@@ -1558,6 +1578,8 @@ async function main () {
       const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull || half, first: firstPass })
         .filter((id) => t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS)
       firstPass = false
+      // Received coins near the operator's depth limit, due now whatever their rest (deepDue).
+      for (const id of deepDue(coins, hopsOf, depthLimitOf(lastInfo))) if (!due.includes(id) && t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS) due.push(id)
       // Settled only when received (receivedOnly).
       { const ids = new Set(due); await learnLineage(coins.filter((c) => c && ids.has(c.leaf_id))) }
       const ownDue = due.filter((id) => !receivedOnly([id], lineageOf).length)
@@ -1566,7 +1588,7 @@ async function main () {
       if (ownText !== ownLog) { if (ownText) log('leaves', ownText, 'coin(s) of its own lineage out of its settle: made by itself, at risk to nobody'); ownLog = ownText }
       if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) { lineageOf.delete(id); hopsOf.delete(id); if (lineageOf.atRisk) lineageOf.atRisk.delete(id) }
       // Its own coins that are too large or too deep to keep, when the operator can take each now.
-      const own = ownToRefresh(coins, { lineageOf, hopsOf, sizes, depthLimit: lastInfo && Number.isFinite((lastInfo.server_info || lastInfo).depth_limit) ? (lastInfo.server_info || lastInfo).depth_limit : null,
+      const own = ownToRefresh(coins, { lineageOf, hopsOf, sizes, depthLimit: depthLimitOf(lastInfo),
         headroom: lastInfo ? headroomOf(lastInfo) : null, gaveUp, now: t }).filter((id) => !due.includes(id))
       const ownRefText = own.slice().sort().join()
       if (ownRefText !== ownRefLog) { if (own.length) log('refreshes', own.length, 'coin(s) of its own lineage larger than a working coin, or near the depth limit, that the operator can take now'); ownRefLog = ownRefText }
@@ -1577,7 +1599,7 @@ async function main () {
       // and goes in a later turn; an asset's only free coin, due itself, waits until the maker must
       // settle, then goes whole.
       const book = { roomValue: roomNow(budgetValue, coins, ratesNow, lineageOf), rates: ratesNow, sizes, least: leastGives(cfg), must: outOfRoundFull || half }
-      const plan = keepFree(coins, due, book)
+      const plan = keepFree(payableView(coins, hopsOf, depthLimitOf(lastInfo)), due, book)
       const gave = new Set()   // the leaves this pass gave up or spent: given, as the next pass reads them
       const asNow = () => coins.map((c) => (c && gave.has(c.leaf_id) ? { ...c, state: 'given' } : c))
       const settling = [...plan.give]
@@ -1666,7 +1688,7 @@ async function main () {
         // What it can give without passing its budget once a swap's coin is out of round (D94):
         // a price it shows is one it would confirm.
         const view = known(holdings)
-        const sp = budgetedSpendable(view.sp, view.coins, roomOf(view), ratesNow)
+        const sp = budgetedSpendable(view.sp, payableView(view.coins, hopsOf, depthLimitOf(lastInfo)), roomOf(view), ratesNow)
         // In-tree quotes are cut to the room left in its instant budget; a pair cut to nothing is
         // named in `after_next_round`.
         // And none that wants an asset the operator refreshes no more of now.

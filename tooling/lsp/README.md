@@ -285,7 +285,11 @@ without checkpoint exits, which a double-sign could take). A coin of its own is 
 it is larger than a working coin (the library pays a swap from a coin out of round first, and that
 swap's change would then be received, and at risk whole) or two reassignments short of the
 operator's `depth_limit`, and then only when the operator can take it whole now: given to a refresh
-that waits at the cap, it would count whole against the room while it waits.
+that waits at the cap, it would count whole against the room while it waits. A received coin two
+reassignments short of the limit is settled at once, whatever its rest. A coin at the limit pays
+nothing out of round until a round refreshes it, so it quotes nothing, is never kept out of a settle
+to keep its asset offered, and an asset whose every paying coin is there is logged as not offered
+for that reason.
 
 Of an asset the operator caps, it settles in parts the operator can take on now: the smallest
 received coins first, as many as fit together in nine tenths of the operator's headroom for the

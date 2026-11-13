@@ -212,3 +212,34 @@ test('what it takes in of a capped asset is judged from its coins now, not from 
   assert.deepEqual(capQuotes([q], lowerRoom(null, full)).later, [{ give_asset: 'X', want_asset: 'M' }], 'past it, the pair is named for after the next round')
   assert.equal(intakeLeft(coins, null).size, 0, 'no bound without the operator\'s info')
 })
+
+test('a coin at the operator\'s depth limit quotes nothing, is not kept to keep its asset offered, and settles at once (web #778, case d)', async () => {
+  const { payableView, deepDue, depthLimitOf, keepFree, whyUnoffered, budgetedSpendable } = await import('./leaf-maker.mjs')
+  assert.equal(depthLimitOf({ depth_limit: 5 }), 5)
+  assert.equal(depthLimitOf({ server_info: { depth_limit: 5 } }), 5)
+  assert.equal(depthLimitOf(null), null)
+  const coins = [
+    { leaf_id: 'deep', asset: 'M', value: '257860', kind: 'transfer', state: 'live' },
+    { leaf_id: 'near', asset: 'M', value: '40000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'fresh', asset: 'M', value: '30000', kind: 'transfer', state: 'live' },
+  ]
+  const hopsOf = new Map([['deep', 5], ['near', 3], ['fresh', 1]])
+  const view = payableView(coins, hopsOf, 5)
+  assert.deepEqual(view.map((c) => c.state), ['at_depth_limit', 'live', 'live'])
+  // What a quote gives: the largest coin that pays, not the one at the limit.
+  const rates = new Map([['M', 100_000_000n]])
+  assert.equal(budgetedSpendable(new Map([['M', 327_860n]]), view, 10n ** 9n, rates).get('M'), 40_000n)
+  // Every coin that would pay at the limit: the asset is not offered, and the log says why.
+  const alone = payableView([coins[0]], hopsOf, 5)
+  assert.match(whyUnoffered(alone, 'M', 10n ** 9n, rates), /depth limit/)
+  assert.equal(budgetedSpendable(new Map([['M', 257_860n]]), alone, 10n ** 9n, rates).get('M'), 0n)
+  // Due now: the coins within two reassignments of the limit, whatever their rest.
+  assert.deepEqual(deepDue(coins, hopsOf, 5), ['deep', 'near'])
+  assert.deepEqual(deepDue(coins, hopsOf, null), [])
+  // keepFree does not keep the coin at the limit to keep the asset offered: it cannot pay.
+  const plan = keepFree(payableView([coins[0]], hopsOf, 5), ['deep'], { roomValue: 10n ** 9n, rates, sizes: new Map([['M', 312_500n]]) })
+  assert.deepEqual(plan.give, ['deep'])
+  assert.deepEqual(plan.keep, [])
+  // Without the operator's limit or the hops, nothing changes.
+  assert.equal(payableView(coins, hopsOf, null), coins)
+})
