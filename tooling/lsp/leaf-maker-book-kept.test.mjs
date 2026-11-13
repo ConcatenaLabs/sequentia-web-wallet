@@ -190,3 +190,25 @@ test('the library\'s own at_risk mark is read when it names one; the mirror only
   assert.equal(heldOut(rcv, none), true)
   assert.equal(placesStale([rcv], none), false)
 })
+
+test('what it takes in of a capped asset is judged from its coins now, not from last minute\'s reading (web #778, case c)', async () => {
+  const { intakeLeft, lowerRoom, capQuotes } = await import('./leaf-maker.mjs')
+  // The operator caps M at 1,000,000 with 900,000 in flight: a headroom of 100,000, of which the
+  // maker counts on 90,000. It holds 60,000 of M received out of round (two sales of 30,000).
+  const info = { assets: [{ asset: 'M', in_flight: '900000', in_flight_cap: '1000000' }, { asset: 'X' }] }
+  const coins = [{ leaf_id: 'a', asset: 'M', value: '30000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'b', asset: 'M', value: '30000', kind: 'transfer', state: 'unread' },
+    { leaf_id: 'own', asset: 'M', value: '500000', kind: 'transfer', state: 'live' }]
+  const lineageOf = new Map([['a', 'received'], ['own', 'own']])
+  const left = intakeLeft(coins, info, lineageOf)
+  assert.equal(left.get('M'), 30_000n, 'the share of the headroom less what it holds, its own change not counted')
+  assert.equal(left.has('X'), false, 'an uncapped asset is not bounded here')
+  // A third sale of 30,000 fits; a fourth does not: the quote is cut to what is left.
+  const q = { give_asset: 'X', want_asset: 'M', rate_num: '1', rate_den: '1', min_give: '10000', max_give: '206333' }
+  const room = lowerRoom(new Map([['M', 400_000n], ['X', 400_000n]]), left)
+  assert.equal(capQuotes([q], room).quotes[0].max_give, '30000')
+  const full = intakeLeft([...coins, { leaf_id: 'c', asset: 'M', value: '30000', kind: 'transfer', state: 'unread' }], info, lineageOf)
+  assert.equal(full.get('M'), 0n)
+  assert.deepEqual(capQuotes([q], lowerRoom(null, full)).later, [{ give_asset: 'X', want_asset: 'M' }], 'past it, the pair is named for after the next round')
+  assert.equal(intakeLeft(coins, null).size, 0, 'no bound without the operator\'s info')
+})

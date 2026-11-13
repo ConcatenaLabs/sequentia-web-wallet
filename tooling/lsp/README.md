@@ -301,7 +301,10 @@ It takes in no asset whose refreshes the operator holds back. It reads the opera
 showing `in_flight` at or past its `in_flight_cap`, or of which the maker already holds out of round
 as much as nine tenths of the operator's headroom for it, gets no quote and no firm offer (in-tree
 or at the BTC desk) that wants it, and such an offer is refused with a sentence that names the
-asset. A coin of that asset received out of round would stay out of round until the cap frees,
+asset. Below that, what a quote or a firm offer takes in of a capped asset is cut to what is left
+of that share, judged from its coins at the offer (the last minute's reading of the cap, and what
+it holds out of round now), so offers in one minute never take in more together. A coin of that
+asset received out of round would stay out of round until the cap frees,
 and it would count against the maker's instant budget the whole time. The maker keeps giving that
 asset and trading every other pair, and takes it in again once the operator's info shows it under
 its cap. Coins it already holds out of round when an asset reaches its cap are counted aside (see

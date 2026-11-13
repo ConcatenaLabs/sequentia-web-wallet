@@ -346,6 +346,29 @@ export function intakeStopped (info, outOfRound) {
   }
   return out
 }
+// What the maker can still take in of each asset the operator caps, judged from its coins as they
+// are now (`coins`, the latest view, with what its last trades made), not from the last minute's
+// reading: the share of the operator's headroom it counts on (HEADROOM_SHARE of cap less in flight,
+// `info`) less what it holds out of round of the asset already (heldOut, `lineageOf`). A quote and
+// a firm offer that want more are cut to it, so two offers in one minute never take in past what
+// the operator can refresh (web #778, case c: 150,000 taken in against 90,000). -> Map asset ->
+// atoms, only capped assets; empty without the operator's info.
+export function intakeLeft (coins, info, lineageOf = null) {
+  const out = new Map()
+  if (!info) return out
+  for (const [a, r] of headroomOf(info)) out.set(a, (r * HEADROOM_SHARE.num) / HEADROOM_SHARE.den)
+  for (const c of coins || []) if (out.has(c && c.asset) && heldOut(c, lineageOf)) out.set(c.asset, out.get(c.asset) - big(c.value))
+  for (const [a, v] of out) if (v < 0n) out.set(a, 0n)
+  return out
+}
+// Two bounds on what is taken in (asset -> atoms, or null for none), the lower of each asset's.
+export function lowerRoom (x, y) {
+  if (!x) return y || null
+  if (!y) return x
+  const out = new Map(x)
+  for (const [a, v] of y) out.set(a, out.has(a) && out.get(a) < v ? out.get(a) : v)
+  return out
+}
 // The due coins of each settle group that the operator can take in this round: of an asset it caps,
 // the smallest first, as many as fit together in its headroom (at HEADROOM_SHARE). A participation
 // of more than the headroom is held back by the operator and withdrawn, then asked again whole ten
@@ -1405,7 +1428,7 @@ async function main () {
   // The room a view leaves, and what that room takes in of each asset; the pass's bond answer
   // without a budget.
   const roomOf = (h) => roomNow(budgetValue, h.coins, ratesNow, lineageOf)
-  const wantRoomOf = (h) => (budgetValue == null ? room : roomAtomsOf(roomOf(h), ratesNow))
+  const wantRoomOf = (h) => lowerRoom(budgetValue == null ? room : roomAtomsOf(roomOf(h), ratesNow), intakeLeft(h.coins, lastInfo, lineageOf))
   let firmReading = null
   const firmHoldings = async () => {
     const h = known(holdings && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true))
