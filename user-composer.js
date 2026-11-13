@@ -674,6 +674,9 @@ export function mountUserComposer (ctx) {
     const openRecs = ctx.engine.records().filter((r) => !['settled', 'returned', 'failed', 'undone'].includes(r.state))
     if (!openRecs.length) return
     if (S.busy) { S.timer = setTimeout(follow, ctx.followMs || 4000); return }
+    // A trade written since the last paint (a site's, accepted as waiting) has its row before the
+    // pass over the trades, which waits on the wallet.
+    paintTrades()
     try { await ctx.engine.resume() } catch (e) { console.warn('[user composer] resume:', e && e.message) }
     // Painted whether the tab is shown or not: an ending is said wherever the person is.
     paintTrades()

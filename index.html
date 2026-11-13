@@ -4696,7 +4696,10 @@ function siteDeps(){
       if(!siteOrders){
         initUserComposer();
         siteOrders = makeSiteOrders({
-          engine: userTrade, assetMeta, fmtAtoms, store: localStorage, tag: walletTag, followTrades: false,
+          engine: userTrade, assetMeta, fmtAtoms, store: localStorage, tag: walletTag,
+          // The Trade tab's follow moves every trade on, a site's among them: woken the moment a
+          // site's trade is written, so one accepted while it rested has its row and its end (#770).
+          followTrades: ()=> userComposer ? userComposer.follow() : null,
           busy: (on)=>{ try{ if(userComposer && userComposer.state) userComposer.state.busy = !!on; }catch{} },
           leaves: { command: async (cmd, args)=>{
             if(!leavesApi || !leavesApi.isOpen()) throw new Error('this wallet holds nothing it can place an order from');
@@ -4958,7 +4961,10 @@ function applyTradeMode({ follow = true } = {}){
   const sec = document.querySelector('section[data-panel="swap"]'); if(!sec) return;
   const user = !devMode() && userTradeOn();
   for(const c of sec.children){ if(c.id === 'userComposerRoot') c.classList.toggle('hide', !user); else c.classList.toggle('uc-dev-hidden', user); }
-  if(user && userComposer){ userComposer.render(); if(follow) userComposer.follow(); }
+  if(user && userComposer) userComposer.render();
+  // Open trades move on in either mode: a site's trade, or one made before the mode changed, ends
+  // whichever composer is shown.
+  if(follow && userComposer) userComposer.follow();
 }
 // The wallet's own hosted Bitcoin node, as the composer's BTC trades drive it: holds under the
 // wallet's own hash, payments capped at the ticket's route.

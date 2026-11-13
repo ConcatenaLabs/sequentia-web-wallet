@@ -359,3 +359,157 @@ test('two tabs of one wallet: one moves a waiting trade on at a time, from the r
   assert.equal(of(tabA, rec.id).state, 'settled', 'never written back')
   assert.equal(tabA.records().length, 1)
 })
+
+// #770: a trade accepted as waiting is followed by the page's own follow of its trades, and nothing
+// else: no test hand advancing it. The page had opened with nothing open, so its follow was at rest
+// when the site's trade was approved. The page's clock runs a hundred times faster than the test's,
+// so the library's minutes are the test's tenths of a second.
+const fast = () => { const t0 = Date.now(); return () => t0 + (Date.now() - t0) * 100 }
+async function settles (eng, id, ms = 8000) {
+  const t = Date.now()
+  let r = eng.records().find((x) => x.id === id)
+  while (Date.now() - t < ms && r && !['settled', 'returned', 'failed'].includes(r.state)) { await wait(20); r = eng.records().find((x) => x.id === id) }
+  return r
+}
+const rowOf = (root, id) => (root.querySelector('#ucTrades') || { children: [] }).children.find((c) => c.dataset && c.dataset.trade === id) || null
+
+for (const side of ['buy', 'sell']) {
+  test(`#770: a site's market ${side} accepted as waiting has a row from its approval and goes by itself, with the page's follow at rest before it`, { timeout: 20_000 }, async () => {
+    const s = standIn()
+    const eng = engineOf(s, { now: fast() })
+    const doc = fakeDoc()
+    const root = doc.createElement('div')
+    const ui = composerOf(eng, root, { followMs: 10, followSlowMs: 10 })
+    ui.render()
+    await ui.follow()
+    const S = makeSiteOrders({ engine: eng, leaves: { command: async () => { throw new Error('nothing rests here') } }, assetMeta: meta,
+      fmtAtoms: (a) => String(a), store: mem(), tag: () => 't', answerMs: 1000, followTrades: () => ui.follow(),
+      busy: (on) => { ui.state.busy = !!on } })
+    const origin = 'https://dex.example/'
+    // A purchase of the base (YT) paid in the quote asset (XT), or a sale of the base (XT).
+    const params = side === 'buy' ? { type: 'market', base: Y, quote: X, side: 'buy', amount: ABOUT } : { type: 'market', base: X, quote: Y, side: 'sell', amount: A }
+    const q = await S.quote(params, origin)
+    assert.equal(q.kind, 'take')
+    assert.ok(q.display.rows.some(([, v]) => /^Goes through within about \d minutes$/.test(v)), JSON.stringify(q.display.rows))
+    const a = await S.confirm(q.id)
+    assert.equal(a.under_way, 1)
+    for (let i = 0; i < 50 && !rowOf(root, a.trade); i++) await wait(10)
+    const row = rowOf(root, a.trade)
+    s.through()
+    const r = await settles(eng, a.trade)
+    clearTimeout(ui.state.timer)
+    assert.ok(row, 'a row on the Trade tab from the approval')
+    assert.equal(r.state, 'settled', 'it went by itself once its coins were through: ' + JSON.stringify(r && { state: r.state, error: r.error }))
+    assert.equal((await S.orders(origin)).trades[0].state, 'settled', 'and the site is told so')
+  })
+}
+
+// The page as the wallet's index.html builds it: the site's orders wake the Trade tab's follow.
+const pageOf = (s, k = 100) => {
+  const t0 = Date.now()
+  const eng = engineOf(s, { now: () => t0 + (Date.now() - t0) * k })
+  const doc = fakeDoc()
+  const root = doc.createElement('div')
+  const ui = composerOf(eng, root, { followMs: 10, followSlowMs: 10 })
+  ui.render()
+  const S = makeSiteOrders({ engine: eng, leaves: { command: async () => { throw new Error('nothing rests here') } }, assetMeta: meta,
+    fmtAtoms: (a) => String(a), store: mem(), tag: () => 't', answerMs: 1000, followTrades: () => ui.follow(), busy: (on) => { ui.state.busy = !!on } })
+  return { eng, root, ui, S, clock: () => t0 + (Date.now() - t0) * k }
+}
+
+test('#770: a waited Trade-tab trade ends by the page\'s follow alone', { timeout: 20_000 }, async () => {
+  const s = standIn()
+  const { eng, root, ui } = pageOf(s)
+  await ui.follow()
+  Object.assign(ui.state, { pay: X, get: Y, amount: A, payChosen: true, getChosen: true })
+  ui.render()
+  await root.querySelector('#ucReview').onclick()
+  await root.querySelector('#ucConfirm').onclick()
+  for (let i = 0; i < 50 && !eng.records().length; i++) await wait(10)
+  const id = eng.records()[0].id
+  assert.ok(rowOf(root, id), 'its row')
+  s.through()
+  const r = await settles(eng, id)
+  clearTimeout(ui.state.timer)
+  assert.equal(r.state, 'settled', JSON.stringify(r && r.state))
+})
+
+test('#770: a waited site trade whose coins never come through says it takes longer, then comes back within its bound with nothing traded, on its row and to the site', { timeout: 30_000 }, async () => {
+  // Every clock of the page at the same pace (the Trade tab and the site's answers read Date.now).
+  const realNow = Date.now, t0 = realNow()
+  Date.now = () => t0 + (realNow() - t0) * 200
+  try {
+  const s = standIn()
+  const { eng, root, ui, S, clock } = pageOf(s, 1)
+  await ui.follow()
+  const origin = 'https://dex.example/'
+  const q = await S.quote({ type: 'market', base: Y, quote: X, side: 'buy', amount: ABOUT }, origin)
+  const a = await S.confirm(q.id)
+  const since = clock()
+  const words = new Set(), notes = new Set()
+  let r = eng.records().find((x) => x.id === a.trade)
+  for (let i = 0; i < 1000 && r.state === 'settling'; i++) {
+    await wait(10)
+    r = eng.records().find((x) => x.id === a.trade)
+    const row = rowOf(root, a.trade)
+    if (row) words.add(row.children[1].textContent)
+    notes.add((await S.orders(origin)).trades[0].note)
+  }
+  const ended = clock()
+  clearTimeout(ui.state.timer)
+  assert.equal(r.state, 'returned', JSON.stringify(r.state))
+  assert.equal(r.whyKind, 'late')
+  // The bound: twice the most the library said (300 s), and two minutes, at least ten minutes.
+  assert.ok(ended - since <= 12 * 60_000 + 60_000, 'within its bound: ' + Math.round((ended - since) / 1000) + ' s')
+  assert.ok(words.has(USER_WORDS.goesThroughLate), 'the row said it takes longer: ' + [...words].join(' | '))
+  assert.ok(notes.has(USER_WORDS.goesThroughLate), 'and so did the site: ' + [...notes].join(' | '))
+  const end = (await S.orders(origin)).trades[0]
+  assert.equal(end.state, 'failed')
+  assert.equal(end.note, USER_WORDS.returnedLate)
+  assert.ok(!s.calls.includes('swap_accept'), 'nothing traded')
+  } finally { Date.now = realNow }
+})
+
+test('#770: a waited site trade whose coins went elsewhere comes back saying so, with nothing traded', { timeout: 20_000 }, async () => {
+  const s = standIn()
+  const { eng, ui, S } = pageOf(s)
+  await ui.follow()
+  const origin = 'https://dex.example/'
+  const q = await S.quote({ type: 'market', base: X, quote: Y, side: 'sell', amount: A }, origin)
+  const a = await S.confirm(q.id)
+  // Another device of the wallet spent the coin: through, and nothing of X is left.
+  s.coins.find((c) => c.leaf_id === 'c1').state = 'spent'
+  const r = await settles(eng, a.trade)
+  clearTimeout(ui.state.timer)
+  assert.equal(r.state, 'returned', JSON.stringify(r && { state: r.state, error: r.error }))
+  assert.equal(r.whyKind, 'gone', r.error)
+  assert.equal((await S.orders(origin)).trades[0].note, USER_WORDS.returnedGone)
+  assert.ok(!s.calls.includes('swap_accept'), 'nothing traded')
+})
+
+test('#770: a site\'s follow wakes the page\'s follow while a site trade is open, and moves none itself', { timeout: 20_000 }, async () => {
+  const s = standIn()
+  const eng = engineOf(s)
+  let woken = 0
+  const S = makeSiteOrders({ engine: eng, leaves: { command: async () => { throw new Error('nothing rests here') } }, assetMeta: meta,
+    fmtAtoms: (a) => String(a), store: mem(), tag: () => 't', answerMs: 1000, followTrades: () => { woken++ } })
+  await S.follow()
+  assert.equal(woken, 0, 'nothing open: nothing woken')
+  const q = await S.quote({ type: 'market', base: X, quote: Y, side: 'sell', amount: A }, 'o')
+  await S.confirm(q.id)
+  await wait(10)
+  assert.equal(woken, 1, 'woken once the trade is written')
+  const asks = s.settleAsks.length
+  await S.follow()
+  assert.equal(woken, 2, 'and at each follow while it is open')
+  assert.equal(s.settleAsks.length, asks, 'the site\'s follow moved nothing itself')
+})
+
+test('#770: the words of a returned waited trade name no rail', () => {
+  for (const w of [USER_WORDS.returnedLate, USER_WORDS.returnedGone]) {
+    assert.deepEqual(forbiddenIn(w), [], w)
+    assert.ok(!/try again|could not be made/i.test(w), w)
+  }
+  assert.equal(tradeStateWord({ state: 'returned', whyKind: 'late' }), USER_WORDS.returnedLate)
+  assert.equal(tradeStateWord({ state: 'returned', whyKind: 'gone' }), USER_WORDS.returnedGone)
+})
