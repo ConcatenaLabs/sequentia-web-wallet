@@ -146,17 +146,18 @@ async function wallet (H, st, lwk, dir, mnemonic, boards) {
 
 // A taker's own change, refreshed into a round: every sale pays from its change (the library pays
 // from a coin out of round first), a reassignment deeper each time, and past the operator's depth
-// limit it pays no more ("more are at the operator's depth limit"). -> once none is left out of
-// round and the round's new coins are the taker's to spend (none given any more).
+// limit it pays no more ("more are at the operator's depth limit"). -> once the round's new
+// coins are the taker's to spend: a live coin of a round in each asset refreshed.
 async function refreshChange (H, W) {
   await W.t('sync').catch(() => {})
-  const ch = (await W.t('coins')).filter((c) => c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill')).map((c) => c.leaf_id)
-  if (!ch.length) return
+  const out = (await W.t('coins')).filter((c) => c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill'))
+  if (!out.length) return
+  const ch = out.map((c) => c.leaf_id), assets = [...new Set(out.map((c) => c.asset))]
   try { const q = await W.t('quote', { leaves: ch }); await W.t('participate', { leaves: ch, shown: q.coins }) } catch (e) { console.log(at(), 'taker refresh:', e.message); return }
   for (let i = 0; i < 300; i++) {
     await H.pump().catch(() => {}); await W.t('sync').catch(() => {})
-    const cs = await W.t('coins')
-    if (!cs.some((c) => (c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill')) || c.state === 'given')) return
+    const live = (await W.t('coins')).filter((c) => c.state === 'live')
+    if (assets.every((a) => live.some((c) => c.asset === a && c.kind === 'batch'))) return
     await sleep(1000)
   }
   console.log(at(), 'taker refresh: its round did not come back within 300 s')
