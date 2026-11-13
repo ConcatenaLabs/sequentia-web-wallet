@@ -4716,6 +4716,8 @@ function siteDeps(){
             return { relay_expires: Number(res.offer.expires_at_unix) };
           },
           log: (...a)=> console.log(...a),
+          // A site's order waiting for a price that was offered a moment ago: said on this page.
+          note: (t)=>{ try{ toast(t); }catch{} },
         });
         // Orders placed for a site are listed by themselves once they rest, while this page is open.
         setInterval(()=>{ siteOrders.follow().catch(()=>{}); }, 60000);

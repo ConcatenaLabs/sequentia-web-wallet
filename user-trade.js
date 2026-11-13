@@ -753,6 +753,9 @@ export function createEngine (deps) {
         try {
           const q = await deps.fetchJson(m + '/v1/quotes')
           const es = makerEntries(m, q.quotes, { payAsset, receiveAsset }).filter((e) => sources.includes(e.source))
+          // Every pair the maker offers now, not only the one asked: a pair asked next that it
+          // offered a moment ago and offers not now is asked again (OFFERED_AGAIN_MS), not refused.
+          for (const x of q.quotes || []) if (x && x.want_asset && x.give_asset && big(x.max_give || 0) > 0n) offeredAt.set(x.want_asset + '>' + x.give_asset, now())
           // A pair the maker takes more of only after its next round, its quotes cut to nothing.
           if ((q.after_next_round || []).some((x) => x && x.give_asset === receiveAsset && x.want_asset === payAsset)) es.soon = true
           return es

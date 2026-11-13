@@ -293,3 +293,38 @@ test('a trade whose record the wallet no longer keeps reads as it ended, never a
   assert.ok(o.trades.find((t) => t.trade === seen).note, 'the kept note')
   assert.ok(!Object.values(st).includes('sent'))
 })
+
+// web #659: a pair offered a moment ago that nobody offers now (a maker reading its coins again
+// after a trade) is asked again, as the Trade tab does, and the person is told; never "Not offered
+// right now" for a pair offered seconds ago.
+test('a site\'s order for a pair offered a moment ago is asked again, and says it is getting a price', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  const base = E.estimate
+  let n = 0
+  E.estimate = async (a) => (++n <= 2 ? { ok: false, why: 'not-offered', again: true } : base(a))
+  const notes = [], waits = []
+  let t = 0
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't', now: () => t,
+    note: (x) => notes.push(x), wait: async (ms) => { waits.push(ms); t += ms } })
+  const q = await S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/')
+  assert.equal(q.kind, 'take', 'priced once the maker offers it again')
+  assert.deepEqual(waits, [5000, 5000])
+  assert.deepEqual(notes, [USER_WORDS.offeredAgain('GOLD', 'USDX')])
+  assert.match(notes[0], /^Getting a price for GOLD for USDX/)
+})
+
+test('a pair asked again is given up at the Trade tab\'s bound, with its words', async () => {
+  const E = fakeEngine(), L = fakeLeaves()
+  E.estimate = async () => ({ ok: false, why: 'not-offered', again: true })
+  let t = 0
+  const S = makeSiteOrders({ engine: E, leaves: L, assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't', now: () => t, wait: async (ms) => { t += ms } })
+  await assert.rejects(S.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/'), (e) => e.message === USER_WORDS.offeredAgain('GOLD', 'USDX'))
+  assert.ok(t >= 180_000 && t < 190_000, 'asked again for the three minutes the engine counts it offered: ' + t)
+  // Never offered: refused at once, as before.
+  const E2 = fakeEngine()
+  E2.estimate = async () => ({ ok: false, why: 'not-offered' })
+  let waited = 0
+  const S2 = makeSiteOrders({ engine: E2, leaves: fakeLeaves(), assetMeta: meta, fmtAtoms, store: mem(), tag: () => 't', wait: async () => { waited++ } })
+  await assert.rejects(S2.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/'), (e) => e.message === USER_WORDS.notOffered('GOLD', 'USDX'))
+  assert.equal(waited, 0)
+})

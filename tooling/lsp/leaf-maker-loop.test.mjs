@@ -148,3 +148,23 @@ test('the testnet\'s hour of sizes, nobody trading: no cut and no merge once the
   assert.equal(cuts, 0)
   assert.equal(merges, 0)
 })
+
+test('a cut makes the missing working coins and a feeder from the smallest reserve that holds them, and waits for a coin the operator cannot take on', () => {
+  const u = 1_000_000_000n
+  // One working coin: three missing, and WORKING_FEEDER more, from the smallest reserve that holds
+  // all seven and half one: 8u, not the 3u one (two pieces) nor the 1000u one.
+  const coins = [coin('w', u), coin('small', 3n * u), coin('feeder', 8n * u), coin('huge', 1000n * u)]
+  assert.deepEqual(shapeFor(coins, 'A', u), { leaf: 'feeder', piece: String(u), pieces: 3 + M.WORKING_FEEDER })
+  // None holds them all: the smallest reserve, cut into what it holds.
+  assert.deepEqual(shapeFor([coin('w', u), coin('small', 3n * u)], 'A', u), { leaf: 'small', piece: String(u), pieces: 2 })
+  // The operator's headroom in the asset (of an asset it caps) takes at most 0.9 x 5u = 4.5u: the
+  // 8u coin waits, and says so.
+  const w = shapeFor(coins, 'A', u, new Map(), Date.now(), null, new Map([['A', 5n * u]]))
+  assert.deepEqual(w, { waits: true, leaf: 'feeder', value: String(8n * u), headroom: String(5n * u) })
+  // An asset the operator does not cap is not bounded.
+  assert.equal(shapeFor(coins, 'A', u, new Map(), Date.now(), null, new Map([['B', 1n]])).leaf, 'feeder')
+  // The feeder's pieces are working coins of a round, each at most a working coin: a swap paying
+  // from one puts no more out of round than any working coin, and none is a coin out of round that
+  // the library pays from first (arca #892).
+  assert.equal(M.coinShape(u, u), 'working')
+})

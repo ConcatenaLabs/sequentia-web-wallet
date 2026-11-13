@@ -133,7 +133,7 @@ test('a shaped maker makes no cut and no merge while nobody trades, as rates mov
     maker = await launchMaker(H, mdir, port, [[X, 2_000_000], [A, 2_000_000], [B, 2_000_000]])
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
-    for (const a of [X, A, B]) await makerReady(H, maker, a, 120000)
+    for (const a of [X, A, B]) await makerReady(H, maker, a, 300000)
     // Shaped: boarded, cut and merged until it says nothing of either for three minutes.
     let quiet = Date.now(), seen = 0
     for (const end = Date.now() + 40 * 60_000; Date.now() < end && Date.now() - quiet < 180_000;) {

@@ -39,11 +39,14 @@
 //                     moves no trade itself. `false` leaves the trades to that follow alone;
 //                     absent, `follow` moves them on itself
 //   now()             -> milliseconds; optional
+//   note(text)        tells the person something while a review is being priced (a price asked
+//                     again, "Getting a price for …"); optional
+//   wait(ms)          -> a promise resolved after `ms` (setTimeout's); optional
 //   answerMs          how long a trade's step is waited on before the site is answered with the
 //                     trade under way (SITE_ANSWER_MS); optional
 //   log(...)          optional
 
-import { USER_WORDS, costLine, heldAlready, tradeStateWord } from './user-trade.js'
+import { USER_WORDS, costLine, heldAlready, tradeStateWord, OFFERED_AGAIN_MS, OFFERED_AGAIN_EVERY_MS } from './user-trade.js'
 import { settleWords } from './default-arca.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -246,6 +249,15 @@ export function makeSiteOrders (d) {
     let tq = null
     const t0 = now()
     try { tq = await tradeQuote(o) } catch (e) { log('[site orders] no price:', e && e.message); tq = null }
+    // A pair offered a moment ago that nobody offers now (a maker reading its coins again after a
+    // trade): asked again every OFFERED_AGAIN_EVERY_MS, as the Trade tab does, while the engine says
+    // so (`again`, within OFFERED_AGAIN_MS of the last offer), and the person told meanwhile, never
+    // "Not offered right now" for a pair offered seconds ago (web #659).
+    for (let i = 0; tq && tq.q && !tq.q.ok && tq.q.why === 'not-offered' && tq.q.again && now() - t0 < OFFERED_AGAIN_MS; i++) {
+      if (i === 0) { try { d.note && d.note(USER_WORDS.offeredAgain(tick(tq.get), tick(tq.pay))) } catch {} }
+      await (d.wait ? d.wait(OFFERED_AGAIN_EVERY_MS) : new Promise((r) => setTimeout(r, OFFERED_AGAIN_EVERY_MS)))
+      try { tq = await tradeQuote(o) } catch (e) { log('[site orders] no price:', e && e.message); tq = null }
+    }
     log(`[site orders] ${o.type} ${o.side}: priced in ${now() - t0} ms:`, tq && tq.q ? (tq.q.ok ? `${tq.q.ticket.amountIn} -> ${tq.q.ticket.amountOut}` : tq.q.why) : 'no price')
     const unit = unitOf(o.base)
     const opts = o.opts || {}

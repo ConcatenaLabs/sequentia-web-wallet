@@ -1,7 +1,7 @@
 // The maker never gives the last free coin of an asset it quotes to a round (sequentia-testnet-ops
 // #235): whatever its upkeep settles or cuts, the coin its largest quote is sized on stays free
 // while nothing else free fills a working coin's trade, and goes in a later turn; an asset's only
-// free coin, due itself, is split first, so the asset stays in the book at half its quote.
+// free coin, due itself, is kept until the maker must settle, then settles whole.
 //
 // Each case runs the upkeep's choice (keepFree, or on a maker without it every due coin) and then
 // the quote and the firm offer as the maker makes them (budgetedSpendable, slicesFor, walkWant),
@@ -16,7 +16,7 @@ import { walkWant } from './leaf-maker-ladder.mjs'
 const { budgetedSpendable, roomNow, quotesFrom, slicesFor, workingSizes, receivedDue, settleGroups, shapeFor } = maker
 
 // The upkeep's choice of what to give: keepFree's, or, without it, every coin due.
-const choose = (coins, due, book) => (maker.keepFree ? maker.keepFree(coins, due, book) : { give: due, keep: [], split: [] })
+const choose = (coins, due, book) => (maker.keepFree ? maker.keepFree(coins, due, book) : { give: due, keep: [] })
 
 const big = (v) => BigInt(v)
 const coin = (id, value, asset, kind = 'transfer', state = 'live') => ({ leaf_id: id, asset, value: String(value), kind, state })
@@ -45,17 +45,14 @@ function firm (coins, asset, give) {
   return !!(sl && give >= sl.min && walkWant(sl.slices, give))
 }
 // The upkeep's pass past half its budget: every received coin due, the choice made, and what it
-// gives is given (state `given`); a split leaves two coins of the halves in its place.
-function pass (coins) {
+// gives is given (state `given`). `must`: the maker must settle (past half its budget, or an offer
+// refused for what it holds out of round).
+function pass (coins, must = false) {
   const due = receivedDue(coins, new Map(), 1_000_000, 600_000, { all: true })
-  const book = { roomValue: roomNow(BUDGET, coins, rates), rates, sizes, least }
+  const book = { roomValue: roomNow(BUDGET, coins, rates), rates, sizes, least, must }
   const plan = choose(coins, due, book)
   const given = new Set(settleGroups(coins, plan.give, sizes).flatMap((g) => g.leaves))
-  let out = coins.map((c) => (given.has(c.leaf_id) ? { ...c, state: 'given' } : c))
-  for (const s of plan.split) {
-    out = out.filter((c) => c.leaf_id !== s.leaf)
-    out.push(coin(s.leaf + '-paid', s.pay, s.asset), coin(s.leaf + '-change', big(s.value) - big(s.pay), s.asset))
-  }
+  const out = coins.map((c) => (given.has(c.leaf_id) ? { ...c, state: 'given' } : c))
   return { coins: out, plan }
 }
 
@@ -88,26 +85,19 @@ test('the same with three assets at once, as the box\'s maker settled USDX, GOLD
   assert.deepEqual(plan.keep.map((k) => k.leaf).sort(), ['g-large', 's-large', 'u-large'])
 })
 
-test('a maker whose only coin of an asset is itself due stays in the book with a smaller quote rather than none', () => {
+test('a maker whose only coin of an asset is itself due keeps it offered until it must settle, then settles it whole, never paying itself', () => {
   const coins = [coin('g-only', 6_000_000, 'G'), coin('x1', 5_000_000, 'X', 'batch')]
   const before = quoted(coins, 'G')
   assert.equal(before, 6_000_000n)
+  // It can wait: kept, the asset still quoted in full.
   const first = pass(coins)
-  const q1 = quoted(first.coins, 'G')
-  assert.ok(q1 > 0n, `after the upkeep it still quotes the asset (${q1})`)
-  assert.ok(q1 < before, 'a smaller quote: it was split')
-  assert.deepEqual(first.plan.split, [{ leaf: 'g-only', asset: 'G', value: '6000000', pay: '3000000' }])
-  // The next pass gives one half to the round and keeps the other.
-  const second = pass(first.coins)
-  assert.equal(second.plan.give.length, 1)
-  assert.equal(second.plan.keep.length, 1)
-  assert.equal(quoted(second.coins, 'G'), 3_000_000n, 'the asset stays in the book at half its quote')
-  // While that half is in its round, the kept half stays; once it is back, the kept half goes.
-  assert.deepEqual(pass(second.coins).plan.give, [], 'not while the other half is in its round')
-  const back = second.coins.filter((c) => c.state !== 'given').concat([coin('g-back', 3_000_000, 'G', 'batch')])
-  const third = pass(back)
-  assert.equal(third.plan.give.length, 1, 'once it is back, the kept half goes in its turn')
-  assert.equal(quoted(third.coins, 'G'), 3_000_000n, 'and the coin back from the round is quoted')
+  assert.deepEqual(first.plan, { give: [], keep: [{ leaf: 'g-only', asset: 'G' }] })
+  assert.equal(quoted(first.coins, 'G'), before)
+  // It must settle: the coin goes whole. No payment to itself out of round, which the library would
+  // pay from any coin it picks (web #659: a reserve of 5.33 million SEQ, held out of round whole).
+  const pressed = pass(coins, true)
+  assert.deepEqual(pressed.plan, { give: ['g-only'], keep: [] })
+  assert.ok(!('split' in pressed.plan))
 })
 
 test('the kept coin goes in its turn: once the coins back from the round fill a working coin\'s trade', () => {
@@ -128,7 +118,7 @@ test('a coin halved below the smallest quote is kept whole; one of an asset not 
   // 15,000 halves to 7,500, under the pairs' 10,000.
   const small = [coin('s-only', 15_000, 'S')]
   const p = pass(small).plan
-  assert.deepEqual([p.give, p.split], [[], []])
+  assert.deepEqual(p.give, [])
   assert.deepEqual(p.keep, [{ leaf: 's-only', asset: 'S' }])
   // A coin of an asset the node does not price pays no quote under a budget, so settling it costs
   // the book nothing. (A coin out of round always fits the room: its spend puts nothing more out.)
@@ -139,7 +129,7 @@ test('a coin halved below the smallest quote is kept whole; one of an asset not 
 test('a resting order\'s coin and a coin held as spent elsewhere fill no quote', () => {
   const coins = [coin('u-1', 2_000_000, 'U'), { ...coin('o-1', 9_000_000, 'U', 'batch'), template: 'order-3' }, { ...coin('e-1', 9_000_000, 'U', 'batch'), spent_elsewhere_until: 99 }]
   const p = pass(coins).plan
-  assert.deepEqual(p.split.map((s) => s.leaf), ['u-1'], 'its only free coin: split, not given')
+  assert.deepEqual([p.give, p.keep.map((k) => k.leaf)], [[], ['u-1']], 'its only free coin: kept, not given')
 })
 
 test('a cut is no different: the only free coin of an asset is not cut while nothing else would quote', () => {

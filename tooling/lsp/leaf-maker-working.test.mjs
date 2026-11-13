@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { workingSizes, shapeFor, budgetedSpendable, roomNow, pastHalfBudget, settleGroups, mergeMost, coinsToMerge, capQuotes, quotesFrom, budgetRoom,
-  WORKING_COUNT, GIVE_UP_AGAIN_MS } from './leaf-maker.mjs'
+  WORKING_COUNT, WORKING_FEEDER, GIVE_UP_AGAIN_MS } from './leaf-maker.mjs'
 
 const coin = (id, value, asset = 'G', kind = 'batch', state = 'live') => ({ leaf_id: id, asset, value: String(value), kind, state })
 
@@ -37,27 +37,28 @@ test('a working coin is a quarter of the budget, in each asset at the node\'s ra
   assert.equal(workingSizes({ instant_budget: null }, rates).size, 0)
 })
 
-test('the smallest reserve coin is cut into the working coins missing, one cut at a time', () => {
+test('the smallest reserve that holds them is cut into the working coins missing and a feeder, one cut an asset at a time', () => {
   const size = workingSizes(bond(), rates).get('G')
-  // The box's GOLD: no coin at a working size; its smallest is the $560k coin.
+  // The box's GOLD: no coin at a working size; its smallest is the $560k coin, about 12.8 working
+  // coins: the four missing and WORKING_FEEDER more.
   const coins = [coin('g1', GOLD_560K), coin('g2', 14_370_000_000n), coin('g3', 159_950_000_000n), coin('t1', TSEQ_COIN, 'T')]
-  assert.deepEqual(shapeFor(coins, 'G', size), { leaf: 'g1', piece: String(size), pieces: WORKING_COUNT })
-  // Two working coins already: two more. A crumb of change does not count as one.
+  assert.deepEqual(shapeFor(coins, 'G', size), { leaf: 'g1', piece: String(size), pieces: WORKING_COUNT + WORKING_FEEDER })
+  // Two working coins already: two more and the feeder. A crumb of change does not count as one.
   const two = [...coins, coin('w1', size), coin('w2', size / 2n), coin('crumb', 1000n)]
-  assert.equal(shapeFor(two, 'G', size).pieces, 2)
+  assert.equal(shapeFor(two, 'G', size).pieces, 2 + WORKING_FEEDER)
   // Four: nothing to cut.
   assert.equal(shapeFor([...two, coin('w3', size), coin('w4', size)], 'G', size), null)
   // While a reserve coin is given up in a round (a cut under way), no second cut.
   assert.equal(shapeFor([...coins.slice(1), { ...coins[0], state: 'given' }], 'G', size), null)
   // Once it is spent (gone from the held coins), the next cut may run.
   assert.equal(shapeFor(coins.slice(1), 'G', size).leaf, 'g2')
-  // A cut the library took back (g1 live again, given up a minute ago): the next coin is cut; g1
-  // itself again once GIVE_UP_AGAIN_MS has passed. Never stalled for good (#652).
+  // A cut the library took back (g1 live again, given up a minute ago): no other reserve of the
+  // asset is given meanwhile, since each is fronted whole; g1 itself again once GIVE_UP_AGAIN_MS has
+  // passed. Never stalled for good (#652).
   const t = 1_000_000_000
   const gave = new Map([['g1', t - 60_000]])
-  assert.equal(shapeFor(coins, 'G', size, gave, t).leaf, 'g2')
-  assert.equal(shapeFor([coins[0]], 'G', size, gave, t), null)
-  assert.equal(shapeFor([coins[0]], 'G', size, gave, t - 60_000 + GIVE_UP_AGAIN_MS).leaf, 'g1')
+  assert.equal(shapeFor(coins, 'G', size, gave, t), null)
+  assert.equal(shapeFor(coins, 'G', size, gave, t - 60_000 + GIVE_UP_AGAIN_MS).leaf, 'g1')
   // A coin received out of round (settling takes it) and a resting order's coin are never cut.
   assert.equal(shapeFor([coin('r', GOLD_560K, 'G', 'transfer'), { ...coin('o', GOLD_560K), template: 'order-3' }], 'G', size), null)
   // No size known: no cut.
@@ -185,11 +186,12 @@ test('after a firm offer or an acceptance the coins are read again ahead of the 
   const { readFileSync } = await import('node:fs')
   const { nextJob } = await import('../leaf-node.mjs')
   const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
-  // Every place that makes the reading stale (a firm offer, an acceptance, a refused one's new
-  // offer) reads the coins again with `first`.
-  const stale = src.split('holdings.stale = true').slice(1).map((s) => s.split('\n').slice(0, 3).join('\n'))
-  assert.equal(stale.length, 3)
-  for (const s of stale) assert.match(s, /readHoldings\(true\)/)
+  // Every place that changes the coins (a firm offer, an acceptance, a payment of the BTC desk)
+  // notes the change in the book at once (knownCoins) and reads the coins again with `first`; no
+  // place empties the book meanwhile.
+  assert.ok(!/\.stale\b/.test(src), 'no reading is made stale, which emptied the book')
+  for (const kind of ["noteChange('offered', leavesOf(o), [], o.swap)\n        readHoldings(true)", "noteChange('done', f.leaves, f.made, b.swap)\n        readHoldings(true)"]) assert.ok(src.includes(kind), kind)
+  assert.match(src, /noteChange\('done', leavesOf\(paid\)[^\n]*\n\s+readHoldings\(true\)/)
   // A `first` command runs during a quote's 90 s hold; a queued one does not.
   const t = 1000, hold = t + 90_000
   assert.equal(nextJob([{ id: 1, name: 'coins', first: true }], t + 1000, hold), 0)

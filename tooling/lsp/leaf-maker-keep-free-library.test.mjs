@@ -5,7 +5,8 @@
 // The maker gives three assets, M0, M1 and M2, for X, and X for each. A taker buys some of each,
 // so every coin the maker holds of them is the change of a swap, a coin it received; then it sells
 // the maker M0 and M1 twice each. Its upkeep settles what it received once it has rested: M0 and
-// M1 keep their large coin free and settle the rest, M2, whose only coin is due, is split first.
+// M1 keep their large coin free and settle the rest, M2, whose only coin is due, is kept (never split
+// by a payment to itself).
 // Through the passes and the rounds, every one of the three stays quoted, and a firm offer of what
 // was quoted before the upkeep is answered.
 //
@@ -136,8 +137,9 @@ test('every asset the maker quotes stays quoted through its upkeep, and what it 
     stops.push(async () => { watching = false; await watch })
     // The upkeep settles each once it has rested; then 90 s more, through the rounds.
     const settled = (m) => logSince().some((l) => /settling \d+ received coins of/.test(l) && l.includes(m))
-    const split = (m) => logSince().some((l) => /splitting its only free coin of/.test(l) && l.includes(m))
-    for (let i = 0; i < 360 && !(settled(M0) && settled(M1) && (settled(M2) || split(M2))); i++) await sleep(1000)
+    const kept = (m) => logSince().some((l) => /keeps out of its round/.test(l) && l.includes(m.slice(0, 12)))
+    const split = () => logSince().some((l) => /splitting|split:/.test(l))
+    for (let i = 0; i < 360 && !(settled(M0) && settled(M1) && (settled(M2) || kept(M2))); i++) await sleep(1000)
     await sleep(90_000)
     watching = false; await watch
     const upkeep = logSince().filter((l) => /settling|keeps out|splitting|split:/.test(l))
@@ -151,8 +153,9 @@ test('every asset the maker quotes stays quoted through its upkeep, and what it 
       const f = firmAfter.get(m)
       assert.ok(f && f.status === 200, `${m.slice(0, 8)}: what it quoted as it settled is answered firm: ${JSON.stringify(f && f.body)}`)
     }
-    // M2, whose only coin was due: split, and quoted smaller rather than not at all.
-    assert.ok(split(M2), 'M2\'s only coin was split')
+    // M2, whose only coin was due: kept and quoted, never split by a payment to itself.
+    assert.ok(kept(M2) || settled(M2), 'M2\'s only coin was kept, or settled whole')
+    assert.ok(!split(), 'no coin split by a payment to itself')
   } finally {
     for (const s of stops.reverse()) { try { await s() } catch {} }
     rmSync(dir, { recursive: true, force: true })
