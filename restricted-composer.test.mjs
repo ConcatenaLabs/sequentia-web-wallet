@@ -80,7 +80,7 @@ test('composer: a quote answered with a card shows the card and never settles an
     const { ui, root } = mount(engine)
     await root.querySelector('#ucReview').onclick()
     await wait(20)
-    assert.equal(ui.state.card, card, 'the card is shown')
+    assert.equal(ui.state.answer, card, 'the card is shown')
     assert.deepEqual(seen.settles, [], 'nothing is settled for a card')
     assert.equal(seen.quotes.length, 1, 'priced once')
     assert.ok(root.querySelector('#ucCard'), 'the card is painted')

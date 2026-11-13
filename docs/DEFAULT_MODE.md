@@ -794,7 +794,11 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   "Paid. What you bought is arriving, and it comes to your wallet even if this page closes." (the
   wallet hands the operator what claims it at once, so any device of the wallet collects it). A
   site the wallet trades for is told such a purchase is under way, with these words, and never
-  that it traded, until the asset is collected. Otherwise "Sent (<N> min)"; "Paid. Your BTC is on its way."
+  that it traded, until the asset is collected. A second purchase paid with BTC asked while one is
+  still to pay, when nobody offers the pair meanwhile (the other side holds what it sells for the
+  first until it is paid): "You have a purchase paid with BTC under way: this one can be priced
+  once that one is paid. Nothing has moved.", on the Trade tab and to a site alike; the Trade tab
+  prices it again by itself every 20 s while the person waits. Otherwise "Sent (<N> min)"; "Paid. Your BTC is on its way."
   (selling for BTC, once the asset is paid); and once what the trade brings is held, "Received,
   settling (<N> min)", or after ten minutes still settling "Received, and yours to use. Settling
   with the network is taking longer than usual."

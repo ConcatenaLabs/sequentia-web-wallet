@@ -199,6 +199,7 @@ export function makeSiteOrders (d) {
     if (q.why === 'own-short') return W.ownShort(fmt(pay, q.most))
     if (q.why === 'no-firm-offer') return W.noFirmOffer
     if (q.why === 'wallet-busy') return W.walletBusy
+    if (q.why === 'btc-ahead') return W.btcAhead
     // A reason this list does not know is never told as the amount's fault.
     return W.failed
   }
@@ -222,7 +223,7 @@ export function makeSiteOrders (d) {
         const want = ceilDiv(o.amount * big(q.ticket.amountIn), big(q.ticket.amountOut))
         return { pay, get, q: await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: want }) }
       }
-      if (est && !est.ok && (est.why === 'not-listed' || est.why === 'not-offered')) return { pay, get, q: est }
+      if (est && !est.ok && ['not-listed', 'not-offered', 'btc-ahead'].includes(est.why)) return { pay, get, q: est }
     }
     const probeAmount = o.price != null ? ceilDiv(o.amount * o.price, unitOf(o.base)) : 10n ** 18n
     const probe = await d.engine.quote({ payAsset: pay, receiveAsset: get, amount: probeAmount })
