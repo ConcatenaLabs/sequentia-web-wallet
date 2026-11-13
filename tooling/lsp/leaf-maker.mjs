@@ -550,16 +550,23 @@ export function coinShape (value, size, least = null) {
   return afterFee(v) >= s + cutFloor(s, least) ? 'reserve' : 'working'
 }
 
-// The coin of `asset` to cut into working coins of `size` this pass: when fewer than WORKING_COUNT
-// of its live coins are working coins (coinShape), its smallest reserve coin of a round or a board
+// Working coins a cut makes beyond those missing, so the next trades' replenishments come from
+// them and not from another cut: every cut gives a whole reserve to a round, and the operator
+// fronts all of it until the reserve's old leaf comes back.
+export const WORKING_FEEDER = 4
+// The coin of `asset` to cut into working coins of `size` this pass, when fewer than WORKING_COUNT
+// of its live coins are working coins (coinShape): its smallest reserve coin of a round or a board
 // (never one received out of round, which settling takes into a round already, nor a resting
-// order's), cut into as many pieces as are missing and it holds, leaving a rest of at least
-// cutFloor (`least`, the asset's smallest quote) once the fee is paid: so a cut never leaves a
-// crumb, and is never made for a coin a few atoms over the size. Read from the coins as they are
-// now: none while a reserve coin of the asset is given up in a round (a cut under way); a cut taken
-// back leaves its coin live, and it is cut again once `gaveUp` (leaf -> when the maker gave it up)
-// is GIVE_UP_AGAIN_MS old. -> { leaf, piece, pieces }
-export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now(), least = null) {
+// order's) that holds every missing piece and WORKING_FEEDER more, else its smallest reserve, cut
+// into as many of those as it holds beside a rest of at least cutFloor (`least`, the asset's
+// smallest quote) once the fee is paid: so a cut never leaves a crumb and is never made for a coin
+// a few atoms over the size. One cut of an asset at a time: none while one of its reserves is given
+// to a round, nor for GIVE_UP_AGAIN_MS after the library took one back (`gaveUp`: leaf -> when the
+// maker gave it up), since another reserve given meanwhile is fronted whole as well. And none of a
+// coin larger than HEADROOM_SHARE of the operator's headroom in the asset (`headroom`, of an asset
+// it caps): the operator cannot take it on, and it would wait given. -> { leaf, piece, pieces }, or
+// { waits, leaf, value, headroom } when the coin it would cut is larger than that, or null.
+export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now(), least = null, headroom = null) {
   if (size == null || big(size) <= 0n) return null
   const s = big(size)
   const mine = (coins || []).filter((c) => c && c.asset === asset && !isOrderCoin(c))
@@ -570,14 +577,19 @@ export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now
   // gather them).
   const working = live.filter((c) => coinShape(c.value, s, least) === 'working').length
   if (working >= WORKING_COUNT) return null
-  const reserve = live.filter((c) => reserveOf(c) && !(gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS))
-    .sort((x, y) => (big(x.value) < big(y.value) ? -1 : big(x.value) > big(y.value) ? 1 : 0))
+  const reserve = live.filter(reserveOf).sort((x, y) => (big(x.value) < big(y.value) ? -1 : big(x.value) > big(y.value) ? 1 : 0))
+  if (reserve.some((c) => gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS)) return null
   if (!reserve.length) return null
-  // As many pieces as are missing and as the coin holds beside a rest of at least the floor.
-  const holds = (afterFee(reserve[0].value) - cutFloor(s, least)) / s
-  const pieces = Math.min(WORKING_COUNT - working, Number(holds))
-  return { leaf: reserve[0].leaf_id, piece: String(s), pieces }
+  const holds = (c) => Number((afterFee(c.value) - cutFloor(s, least)) / s)
+  const want = WORKING_COUNT - working + WORKING_FEEDER
+  const coin = reserve.find((c) => holds(c) >= want) || reserve[0]
+  const room = headroom && headroom.get(asset)
+  if (room != null && big(coin.value) > (big(room) * HEADROOM_SHARE.num) / HEADROOM_SHARE.den) return { waits: true, leaf: coin.leaf_id, value: String(coin.value), headroom: String(room) }
+  return { leaf: coin.leaf_id, piece: String(s), pieces: Math.min(want, holds(coin), MAX_CUT_PIECES) }
 }
+// The most pieces one cut asks for: the library makes at most 14 (MAX_PIECES in arca
+// bark/src/arca/round.rs) beside the rest.
+export const MAX_CUT_PIECES = 14
 
 // The room left in the maker's instant budget now, in reference atoms, from its coins as they are
 // (`coins`, the latest reading) rather than from the last pass: the budget's value (`budgetValue`,
@@ -1392,6 +1404,7 @@ async function main () {
   let waitLog = ''   // the received coins waiting for the operator's headroom, as last logged
   let ownLog = ''    // the coins of its own lineage left out of a settle, as last logged
   let ownRefLog = '' // the coins of its own lineage it refreshes all the same, as last logged
+  const cutWaits = new Map()    // asset -> why its cut waits (shapeFor's `waits`), for /v1/explain
   const lineageOf = new Map()   // leaf -> its lineage (coin_places), or null when the library names none
   const hopsOf = new Map()      // leaf -> its reassignments since a round (coin_places)
   const unoffered = new Map()   // asset -> why it is offered no more, as last logged
@@ -1641,8 +1654,10 @@ async function main () {
       // Working coins: an asset it gives with fewer than WORKING_COUNT coins of a working size has
       // its smallest reserve coin cut into them in the next round.
       for (const a of givesOf()) {
-        const s = shapeFor(coins, a, sizes.get(a) ?? null, gaveUp, Date.now(), perAsset(book.least, a, null))
-        if (!s) continue
+        const s = shapeFor(coins, a, sizes.get(a) ?? null, gaveUp, Date.now(), perAsset(book.least, a, null), lastInfo ? headroomOf(lastInfo) : null)
+        if (s && s.waits) cutWaits.set(a, `its smallest reserve that would be cut (${s.value}) is larger than the operator can take on now (nine tenths of its headroom, ${s.headroom}): it waits`)
+        else cutWaits.delete(a)
+        if (!s || s.waits) continue
         // A cut gives its coin to a round too: not while nothing else free of the asset would
         // fill a working coin's trade (keepFree's rule); it is cut in a later turn.
         const after = bookAfter(asNow(), a, [s.leaf], book)
@@ -1713,6 +1728,7 @@ async function main () {
           room_now: view && budgetValue != null ? String(roomOf(view)) : null,
           counts_against_room: view ? budgetHeld(view.coins, ratesNow, tickerOf, lineageOf) : null,
           at_risk_from: lineageOf.marked ? 'the library (coin_places at_risk)' : 'mirrored from lineage and state',
+          cut_waits: Object.fromEntries([...cutWaits].map(([a, why]) => [tickerOf(a), why])),
           library_out_of_round: ((bondNow && bondNow.out_of_round) || []).map((h) => ({ asset: tickerOf(h.asset), value: String(h.value) })),
           coins_by_lineage: lineage,
           held_back_at_cap: named(stuckPrev), operator_headroom: lastInfo ? named(headroomOf(lastInfo)) : null,
