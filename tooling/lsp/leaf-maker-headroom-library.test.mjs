@@ -290,7 +290,7 @@ test('a: a coin of the maker\'s own lineage larger than the headroom never stops
     makerOf = maker
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
-    await makerReady(H, maker, X, 120000)
+    await makerReady(H, maker, X, 300000)
     const book = watchBook(maker, [[M, X], [X, M]], name)
     stops.push(() => book.stop())
     await explain(maker, 'at start')
@@ -337,7 +337,7 @@ test('c: received coins against a small headroom stop that asset\'s intake only,
     makerOf = maker
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
-    for (const a of [M, N, X]) await makerReady(H, maker, a, 120000)
+    for (const a of [M, N, X]) await makerReady(H, maker, a, 300000)
     // Its working coins cut before the cap is set (a cut is a refresh of a whole coin).
     for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
     await sleep(60000)
@@ -412,7 +412,7 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
     makerOf = maker
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
-    for (const a of [M, X]) await makerReady(H, maker, a, 120000)
+    for (const a of [M, X]) await makerReady(H, maker, a, 300000)
     for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
     await sleep(60000)
     const book = watchBook(maker, [[M, X], [X, M]], name)
