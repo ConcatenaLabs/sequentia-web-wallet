@@ -55,8 +55,11 @@ export function payAssets (known, held, current, name) {
 }
 
 export function mountUserComposer (ctx) {
+  // `card`: the open trade's card over the page ({ id, m }); `answer`: a restricted asset's card in
+  // place of Trade (whom to ask, what to pay with). Two things: resetting the ticket after Trade
+  // must not orphan the trade's card.
   const S = { pay: null, get: null, amount: '', recv: '', fixed: 'pay', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
-    estTimer: null, estSeq: 0, card: null, ended: null, progress: null, openedAt: Date.now(),
+    estTimer: null, estSeq: 0, card: null, answer: null, ended: null, progress: null, openedAt: Date.now(),
     offered: { pay: null, list: [], at: 0, loading: false } }
   const OFFERS_MS = ctx.offersMs || 60000
   // The pair and the amount typed are kept for the browser tab's session (ctx.session, a
@@ -137,6 +140,7 @@ export function mountUserComposer (ctx) {
     if (!e.ok && e.why === 'restricted') { S.note = ''; paintNote(); return }
     if (!e.ok) {
       S.note = e.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay)) : e.why === 'too-small' ? USER_WORDS.tooSmall
+        : e.why === 'btc-ahead' ? USER_WORDS.btcAhead
         : e.why === 'soon' ? USER_WORDS.notOfferedSoon(name(S.get), name(S.pay))
         : e.again ? USER_WORDS.offeredAgain(name(S.get), name(S.pay)) : USER_WORDS.notOffered(name(S.get), name(S.pay))
       if (other && doc.activeElement !== other) other.value = ''
@@ -175,7 +179,7 @@ export function mountUserComposer (ctx) {
     return b
   }
 
-  function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = ''; S.moving = false; S.card = null; S.stays = 0n }
+  function reset () { S.ticket = null; S.choice = null; S.note = ''; S.error = ''; S.moving = false; S.answer = null; S.stays = 0n }
 
   // "about" beside the amount that follows the price, while it is an estimate.
   function paintAbout () {
@@ -284,7 +288,7 @@ export function mountUserComposer (ctx) {
   // The card a restricted asset's trade shows in place of Confirm: the approval card (whom to
   // ask, the approval code to give them) or the assets to pay or be paid with.
   function paintAnswerCard (t, act, btn) {
-    const c = S.card
+    const c = S.answer
     const box = el('div', 'uc-card'); box.id = 'ucCard'
     box.appendChild(el('div', '', c.text))
     if (c.reason) box.appendChild(el('div', 'sub', c.reason))
@@ -326,7 +330,7 @@ export function mountUserComposer (ctx) {
     note.classList.toggle('err', !!S.error)
     paintAbout()
     const btn = (text, id, f, cls) => { const b = el('button', cls || '', text); b.type = 'button'; b.id = id; b.disabled = S.busy; b.onclick = f; return b }
-    if (!S.ticket && S.card) { paintAnswerCard(t, act, btn); return }
+    if (!S.ticket && S.answer) { paintAnswerCard(t, act, btn); return }
     if (!S.ticket) {
       act.appendChild(btn(S.busy ? (S.pricingLong ? USER_WORDS.pricingLong : USER_WORDS.pricing) : USER_WORDS.review, 'ucReview', review, 'primary'))
       return
@@ -398,7 +402,7 @@ export function mountUserComposer (ctx) {
         }
       }
       // A restricted asset: whom to ask for approval, or what to pay with; never an error.
-      else if (q.card) S.card = q.card
+      else if (q.card) S.answer = q.card
       // Max asked for all of it and no trade takes that much: what emptying the coins the wallet
       // can pay from pays in all (the engine's `all`, the fees in) is priced, once.
       else if (q.why === 'own-short' && q.all && S.maxed && !S.maxAgain && S.fixed === 'pay' && big(q.all) < big(atoms)) { S.maxAgain = true; allOf = big(q.all) }
@@ -406,6 +410,7 @@ export function mountUserComposer (ctx) {
         : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy
+        : q.why === 'btc-ahead' ? USER_WORDS.btcAhead
         : q.why === 'btc-moving' ? USER_WORDS.btcMoving(ctx.btcMoveBlocks ? ctx.btcMoveBlocks() : 2)
         : q.why === 'chain-stays' ? (q.stays === 'frozen' ? USER_WORDS.chainFrozen(amt(S.pay, q.frozen), big(q.most) > 0n ? amt(S.pay, q.most) : '') : q.stays === 'dust' ? USER_WORDS.chainDust(name(S.pay)) : USER_WORDS.chainStays(name(S.pay)))
         : q.why === 'not-listed' ? USER_WORDS.notListed(name(S.get), name(S.pay))
@@ -415,7 +420,9 @@ export function mountUserComposer (ctx) {
       // that nobody offers now (a maker reading its coins again after a trade, #698): every
       // OFFERED_AGAIN_EVERY_MS, while it was offered within OFFERED_AGAIN_MS: the engine's window
       // bounds it, not a count of tries, so the last answer, once past it, is the words shown.
-      if (!q.ok && (q.why === 'readying' || q.why === 'btc-moving')) readyAgain()
+      // Behind a purchase paid with BTC that is still to pay: priced again by itself, so the ticket
+      // comes once that one is paid.
+      if (!q.ok && (q.why === 'readying' || q.why === 'btc-moving' || q.why === 'btc-ahead')) readyAgain()
       else if (!q.ok && q.again) readyAgain(OFFERED_AGAIN_EVERY_MS, false)
     } catch (e) {
       console.warn('[user composer] quote:', e && e.message)
@@ -557,7 +564,7 @@ export function mountUserComposer (ctx) {
     // A trade being sent shows at once, as "Sending…".
     // An ended trade stays here only while the page that saw it end is open; after a reload it is
     // in History alone, so trades never push the market down the page.
-    const endedAt = (r) => r.settledAt || r.returnedAt || r.failedAt || r.at || 0
+    const endedAt = (r) => r.settledAt || r.returnedAt || r.failedAt || r.endedAt || r.at || 0
     // A step of a composed trade is shown as the trade it is part of.
     const recs = ctx.engine.records().filter((r) => !isStep(r) && (r.state !== 'confirming' || r.uncertain || Date.now() - (r.at || 0) < 10 * 60_000) && r.ticket)
       .filter((r) => !ENDED.includes(r.state) || endedAt(r) >= S.openedAt).slice(-12).reverse()

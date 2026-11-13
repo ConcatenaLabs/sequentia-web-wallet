@@ -150,6 +150,10 @@ export const USER_WORDS = Object.freeze({
   // Nobody offers the pair this moment, though it was offered a moment ago: the price is asked
   // again by itself.
   offeredAgain: (get, pay) => `Getting a price for ${get} for ${pay}: it takes a moment. Nothing has moved.`,
+  // Nobody offers the pair now, and a purchase of the wallet's own paid with BTC is still to pay:
+  // the BTC desk holds what it gives for that purchase until it is paid, so this one waits for it.
+  // The Trade tab prices it again by itself.
+  btcAhead: 'You have a purchase paid with BTC under way: this one can be priced once that one is paid. Nothing has moved.',
   review: 'Review',
   confirm: 'Trade',
   cancel: 'Cancel',
@@ -564,9 +568,16 @@ export const STORAGE_FULL = 'The trade was not made: this browser has no room le
 // `list` (oldest first) with its oldest ended records dropped until at most `keep` ended ones are
 // left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped, nor any
 // record of a composed trade still open (its steps, ended or not: restricted-composed.js).
-export function boundedRecords (list, keep, bytes) {
-  const kept = openComposedIds(list)
+// An ended record keeps no list of what the wallet held before it (`before`, `beforeParts`): only an
+// unfinished trade looks for what it brought among them. An unfinished one keeps the whole list,
+// spent coins included, since the library can make a spent or lost coin live again (a plan's step
+// that did not happen, a round final again). Each list is the wallet's whole coin history, so with
+// them every ended record ran to about 110 KB on a wallet of weeks and the store's bound kept only
+// the last eight trades (#776); a store written so is made lean at its next write.
+export function boundedRecords (list0, keep, bytes) {
+  const kept = openComposedIds(list0)
   const ended = (r) => ENDED_STATES.includes(r && r.state) && !kept.has(r.id)
+  const list = list0.map((r) => (ended(r) && (r.before || r.beforeParts) ? lean(r) : r))
   const size = list.map((r) => JSON.stringify(r).length + 1)
   let endedLeft = list.filter(ended).length
   let total = size.reduce((a, b) => a + b, 1)
@@ -577,6 +588,7 @@ export function boundedRecords (list, keep, bytes) {
   }
   return drop.size ? list.filter((_, i) => !drop.has(i)) : list
 }
+function lean (r) { const { before, beforeParts, ...rest } = r; return rest }
 // How long a quote waits before it asks once more for firm terms that none gave.
 const FIRM_RETRY_MS = 3000
 // How long the sources are given to answer for firm terms, from the moment they are asked: every
@@ -689,7 +701,10 @@ export function createEngine (deps) {
     log('[user trade] the trade records could not be written:', refused && refused.message)
     const e = new Error(STORAGE_FULL); e.code = 'storage-full'; throw e
   }
-  function put (rec) { const l = records(); const i = l.findIndex((r) => r.id === rec.id); if (i >= 0) l[i] = rec; else l.push(rec); save(l); return rec }
+  // A record's first write in an ended state stamps when it ended (`endedAt`), whichever way it
+  // ended: the Trade tab keeps an ended trade while the page that saw it end is open, and one with
+  // no time of its end left the list at once.
+  function put (rec) { if (ENDED_STATES.includes(rec && rec.state) && !rec.endedAt) rec.endedAt = now(); const l = records(); const i = l.findIndex((r) => r.id === rec.id); if (i >= 0) l[i] = rec; else l.push(rec); save(l); return rec }
   const btcT = btcTrades({ run, deps, put, log, now, settleStep: (rec) => settleStep(rec), maxFeePpm: MAX_FEE_PPM, firmMarginMs: FIRM_MARGIN_MS })
 
   // A wallet that holds no leaves (it joined no operator) can pay nothing from them.
@@ -1240,7 +1255,7 @@ export function createEngine (deps) {
     const es = c.es.filter((e) => (e.source !== 'btc-gateway' || deps.btc) && big(e.maxReceive) > 0n)
     // A maker that takes more only after its next round (its instant budget is spent for now).
     const soon = !!c.es.soon || es.some((e) => e.soon)
-    if (!es.length) return { ok: false, why: soon ? 'soon' : 'not-offered', ...(c.es.again ? { again: true } : {}) }
+    if (!es.length) return behindBtc({ ok: false, why: soon ? 'soon' : 'not-offered', ...(c.es.again ? { again: true } : {}) }, payAsset)
     const cdiv = (a, b) => (a + b - 1n) / b
     let most = null
     for (const e of es) { const r = big(e.maxReceive); if (!most || r > most.receive) most = { receive: r, pay: cdiv(r * e.rateNum, e.rateDen) } }
@@ -1373,6 +1388,19 @@ export function createEngine (deps) {
   // coin of the asset paid that waits for a round. The one place the engine words that ask.
   const settleArgs = (payAsset, coins) => (coins && coins.length ? { coins } : { asset: payAsset })
 
+  // A purchase of the wallet's own paid with BTC that has not paid its BTC yet (#774): the BTC desk
+  // holds what it gives for that one until it is paid, which can leave it nothing to offer meanwhile.
+  function btcBuyOpen () {
+    return records().find((r) => r.source === 'btc-gateway' && r.ticket && r.ticket.payAsset === 'BTC' &&
+      !ENDED_STATES.includes(r.state) && !r.preimage) || null
+  }
+  // A price paid with BTC that nobody offers now, while such a purchase is under way: said as that,
+  // never "it takes a moment" for as long as it lasts.
+  function behindBtc (q, payAsset) {
+    if (!q || q.ok || payAsset !== 'BTC' || !['not-offered', 'no-firm-offer', 'soon'].includes(q.why) || !btcBuyOpen()) return q
+    return { ok: false, why: 'btc-ahead' }
+  }
+
   const personWaits = (f) => async (...a) => {
     asked++
     try { return await (deps.leaves && deps.leaves.hold ? deps.leaves.hold(() => f(...a)) : f(...a)) } finally { asked-- }
@@ -1386,7 +1414,7 @@ export function createEngine (deps) {
     const cap = { until: Date.now() + (deps.quoteMostMs ?? QUOTE_MOST_MS) }
     let late = false, timer = null
     const inner = quoteOnce({ ...args, cap }).then((q) => (q && !q.ok && PROMISES.includes(q.why) && restoring() ? { ok: false, why: 'restoring' }
-      : q && !q.ok && q.why === 'settle-first' && !late ? waitAndGo(q, args) : q)).then((q) => {
+      : q && !q.ok && q.why === 'settle-first' && !late ? waitAndGo(q, args) : behindBtc(q, args.payAsset))).then((q) => {
       if (late && q && q.ok) { log('[user trade] a price came after the quote ended, let go:', q.ticket && q.ticket.source); drop(q.choice) }
       return q
     })

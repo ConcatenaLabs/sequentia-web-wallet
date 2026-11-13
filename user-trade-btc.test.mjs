@@ -124,6 +124,30 @@ test('buying with BTC: the maker\'s hash, its leaf first, and the BTC paid only 
   assert.equal(r.state, 'settled')
 })
 
+// The library can make a spent coin live again (a plan's step that did not happen: store.rs
+// unspend_coin) or a lost one (a round final again: plan.rs revive_step_leaf). A trade still under
+// way counts what came back from the coins it did not hold before, so a coin spent at the approval
+// and live again by then is never taken for what the trade got back (#777 review).
+test('selling for BTC, returned: a coin of the asset paid, spent at the approval and live again since, is not counted as what came back', async () => {
+  const s = standIn()
+  s.coins.push({ leaf_id: 'old', asset: X, value: '5000', state: 'spent', expiry: 1790000000 })
+  const eng = createEngine({ leaves: s.lib, fetchJson: s.fetchJson, makers: () => ['http://m'], admitted: admitted(X, 'BTC'), store: s.store, btc: s.btc })
+  const q = await eng.quote({ payAsset: X, receiveAsset: 'BTC', amount: '200680' })
+  assert.ok(q.ok, q.why)
+  let r = await eng.confirm(q.choice, q.ticket)
+  assert.equal(r.state, 'sent')
+  assert.ok(eng.records()[0].before.includes('old'), 'the unfinished trade keeps the spent coin among what the wallet held')
+  // The plan that spent it did not happen: it is live again. Then the maker never pays: the
+  // payment fails back, its leaf home less its margins (480).
+  s.coins.find((c) => c.leaf_id === 'old').state = 'live'
+  s.pays[H].state = 'returned'
+  s.coins.push({ leaf_id: 'ret', asset: X, value: String(BigInt(s.want) + 200n), state: 'live', expiry: 1790000000 })
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned')
+  assert.deepEqual(r.feesPaid, [{ asset: X, atoms: '480' }], 'the margins lost, not hidden by the coin made live again')
+  assert.notEqual(tradeStateWord(r), USER_WORDS.returned, 'the row names the fees paid')
+})
+
 test('buying with BTC: a maker that never locks leaves nothing moved', async () => {
   const s = standIn()
   s.makerSats = 50000n

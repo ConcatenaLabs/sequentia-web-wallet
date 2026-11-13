@@ -32,6 +32,7 @@
 // payment to a direct peer meets.
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
+
 const ceilDiv = (a, b) => (a + b - 1n) / b
 
 // What the wallet allows the Bitcoin leg: a Bitcoin block at half its pace (the clocks meet only
