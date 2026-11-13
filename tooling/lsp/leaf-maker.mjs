@@ -241,14 +241,48 @@ const HELD_OUT = ['live', 'offered', 'sending', 'given', 'forfeited', 'unread']
 // owner's exit (`trade`), which is at risk to nobody (`lineageOf`: leaf -> lineage, from coin_places;
 // a coin it names none for counts). Without that exception a large change of its own, which it never
 // settles (receivedOnly), would hold the room at nothing for good, every pair empty (web #778).
-// The mirror is exact, defect included: the library counts a coin given to a participation (or
-// offered, or sending) at its whole value whatever its lineage (arca #889); this does too, since the
-// room must match what the library refuses. When #889 is fixed, a given coin of its own lineage
-// stops counting there, and must here: this is the one place that decides it.
+// A library that names the mark itself (arca #893: coin_places' `at_risk`, the same function as its
+// bond's out_of_round) is read instead of this mirror: `lineageOf.atRisk` (leaf -> { at_risk,
+// state }, the coin's state when it was marked) decides a coin whose state has not moved since.
+// The mirror decides the rest, as that library counts when it names the mark (`lineageOf.marked`:
+// a coin of its own lineage given to a round counts nothing, arca #889 fixed), and as an older one
+// counts otherwise (given to a round, it counts at its whole value, #889's defect included), since
+// the room must match what the library refuses. This is the one place that decides it.
 export function heldOut (c, lineageOf = null) {
   if (!c || (c.kind !== 'transfer' && c.kind !== 'fill') || !HELD_OUT.includes(c.state)) return false
-  if (c.state === 'live' && lineageOf) { const l = lineageOf.get(c.leaf_id); if (l === 'own' || l === 'trade') return false }
+  const m = lineageOf && lineageOf.atRisk && lineageOf.atRisk.get(c.leaf_id)
+  if (m && typeof m.at_risk === 'boolean' && m.state === c.state) return m.at_risk
+  const l = lineageOf && lineageOf.get(c.leaf_id)
+  const own = l === 'own' || l === 'trade'
+  if (own && c.state === 'live') return false
+  if (own && c.state === 'given' && lineageOf.marked) return false
   return true
+}
+// What the library's coin_places answer says of each coin into `lineageOf` (a Map: leaf ->
+// lineage; `hopsOf`: leaf -> hops): its lineage and depth, and, when it names the mark (arca #893),
+// whether it counts the coin against the budget now (`lineageOf.atRisk`, `lineageOf.marked`).
+// `asked`: the coins the read was for, each marked as read in its state now, so a coin the answer
+// names no mark for is not asked again until its state moves.
+export function learnPlaces (places, lineageOf, hopsOf, asked = []) {
+  if (!lineageOf.atRisk) lineageOf.atRisk = new Map()
+  for (const c of (places && places.coins) || []) {
+    if (!c || !c.leaf_id) continue
+    if (c.lineage) lineageOf.set(c.leaf_id, c.lineage)
+    if (hopsOf && Number.isFinite(c.hops)) hopsOf.set(c.leaf_id, c.hops)
+    if ('at_risk' in c) { lineageOf.marked = true; lineageOf.atRisk.set(c.leaf_id, { at_risk: c.at_risk, state: c.state }) }
+  }
+  for (const c of asked) {
+    if (!lineageOf.has(c.leaf_id)) lineageOf.set(c.leaf_id, null)
+    const m = lineageOf.atRisk.get(c.leaf_id)
+    if (lineageOf.marked && (!m || m.state !== c.state)) lineageOf.atRisk.set(c.leaf_id, { at_risk: null, state: c.state })
+  }
+}
+// Whether coin_places is to be read again for `coins` (those of kind transfer or fill in a state
+// that counts): one whose lineage is not known yet, or, from a library that names the mark, one
+// whose state moved since it was marked.
+export function placesStale (coins, lineageOf) {
+  return (coins || []).some((c) => (c.state === 'live' && !lineageOf.has(c.leaf_id)) ||
+    (lineageOf.marked && (() => { const m = lineageOf.atRisk && lineageOf.atRisk.get(c.leaf_id); return !m || m.state !== c.state })()))
 }
 export function outOfRoundSummary (coins, name = (a) => a, lineageOf = null) {
   const by = new Map()
@@ -860,7 +894,7 @@ export function receivedOnly (due, lineageOf) {
 // maker refreshes all the same, each when the operator can take it whole now (within HEADROOM_SHARE
 // of its headroom in the asset, or the asset uncapped), so that it never waits given at the cap,
 // where the library counts it at its whole value (arca #889):
-//   - one larger than a working coin of its asset (`sizes`): the library pays a swap from a coin
+//   - one larger than a working coin of its asset (`sizes`, a reserve by coinShape): the library pays a swap from a coin
 //     out of round first, and a swap's change on an operator without checkpoint exits is received
 //     (at risk whole) until refreshed, so a large coin of its own turns into a large coin at risk at
 //     the next trade (web #778, case a: 848,792 at risk after a trade of 20,000);
@@ -877,7 +911,9 @@ export function ownToRefresh (coins, { lineageOf = null, hopsOf = null, sizes = 
     if (gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS) continue
     const size = sizes && sizes.get(c.asset)
     const hops = hopsOf && hopsOf.get(c.leaf_id)
-    const large = size != null && big(c.value) > big(size)
+    // Larger than a working coin by the rule the cut and the merge read (coinShape): a coin a few
+    // atoms over this minute's size is a working coin, not refreshed for it (web wallet #783).
+    const large = size != null && coinShape(c.value, size) === 'reserve'
     const deep = depthLimit != null && Number.isFinite(hops) && hops >= depthLimit - 2
     if (!large && !deep) continue
     const r = headroom && headroom.get(c.asset)
@@ -1476,15 +1512,13 @@ async function main () {
       // The lineage of each coin of kind transfer or fill it holds, read once from the library
       // (coin_places) and kept, since a coin's lineage does not change: a live one of its own counts
       // nothing against the room (heldOut), and only received ones are settled (receivedOnly).
-      const learnLineage = async (ids) => {
-        if (!ids.some((id) => !lineageOf.has(id))) return
+      const learnLineage = async (cs) => {
+        if (!placesStale(cs, lineageOf)) return
         // A coin the library names no lineage for (an older library) counts as received; a read that
         // failed is asked again at the next pass.
-        let read = false
-        try { for (const c of ((await cmd('coin_places', {})) || {}).coins || []) { if (c && c.leaf_id && c.lineage) lineageOf.set(c.leaf_id, c.lineage); if (c && c.leaf_id && Number.isFinite(c.hops)) hopsOf.set(c.leaf_id, c.hops) } read = true } catch (e) { if (/no command/.test(String(e && e.message))) read = true; else log('coin_places:', e.message) }
-        if (read) for (const id of ids) if (!lineageOf.has(id)) lineageOf.set(id, null)
+        try { learnPlaces(await cmd('coin_places', {}), lineageOf, hopsOf, cs) } catch (e) { if (/no command/.test(String(e && e.message))) learnPlaces(null, lineageOf, hopsOf, cs); else log('coin_places:', e.message) }
       }
-      await learnLineage(coins.filter((c) => c && (c.kind === 'transfer' || c.kind === 'fill') && c.state === 'live').map((c) => c.leaf_id))
+      await learnLineage(coins.filter((c) => c && (c.kind === 'transfer' || c.kind === 'fill') && HELD_OUT.includes(c.state) && c.state !== 'unread'))
       // One line whenever an asset it gives stops being offered, saying why, and when it is again.
       {
         const room = roomNow(budgetValue, coins, ratesNow, lineageOf), least = leastGives(cfg)
@@ -1502,12 +1536,12 @@ async function main () {
         .filter((id) => t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS)
       firstPass = false
       // Settled only when received (receivedOnly).
-      await learnLineage(due)
+      { const ids = new Set(due); await learnLineage(coins.filter((c) => c && ids.has(c.leaf_id))) }
       const ownDue = due.filter((id) => !receivedOnly([id], lineageOf).length)
       if (ownDue.length) { due.splice(0, due.length, ...receivedOnly(due, lineageOf)) }
       const ownText = ownDue.length ? String(ownDue.length) : ''
       if (ownText !== ownLog) { if (ownText) log('leaves', ownText, 'coin(s) of its own lineage out of its settle: made by itself, at risk to nobody'); ownLog = ownText }
-      if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) { lineageOf.delete(id); hopsOf.delete(id) }
+      if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) { lineageOf.delete(id); hopsOf.delete(id); if (lineageOf.atRisk) lineageOf.atRisk.delete(id) }
       // Its own coins that are too large or too deep to keep, when the operator can take each now.
       const own = ownToRefresh(coins, { lineageOf, hopsOf, sizes, depthLimit: lastInfo && Number.isFinite((lastInfo.server_info || lastInfo).depth_limit) ? (lastInfo.server_info || lastInfo).depth_limit : null,
         headroom: lastInfo ? headroomOf(lastInfo) : null, gaveUp, now: t }).filter((id) => !due.includes(id))
@@ -1633,6 +1667,7 @@ async function main () {
           budget: ib ? { ppm: ib.ppm ?? null, own_ppm: ib.own_ppm ?? null, operator_ppm: ib.operator_ppm ?? null, value: ib.value ?? null, held_value: ib.held_value ?? null, room: ib.room ?? null } : null,
           room_now: view && budgetValue != null ? String(roomOf(view)) : null,
           counts_against_room: view ? budgetHeld(view.coins, ratesNow, tickerOf, lineageOf) : null,
+          at_risk_from: lineageOf.marked ? 'the library (coin_places at_risk)' : 'mirrored from lineage and state',
           library_out_of_round: ((bondNow && bondNow.out_of_round) || []).map((h) => ({ asset: tickerOf(h.asset), value: String(h.value) })),
           coins_by_lineage: lineage,
           held_back_at_cap: named(stuckPrev), operator_headroom: lastInfo ? named(headroomOf(lastInfo)) : null,

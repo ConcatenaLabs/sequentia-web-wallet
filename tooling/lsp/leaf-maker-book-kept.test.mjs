@@ -140,4 +140,53 @@ test('its own coins too large or too deep to keep are refreshed, each only when 
   assert.deepEqual(ownToRefresh(coins, o), ['large', 'deep'])
   assert.deepEqual(ownToRefresh(coins, { ...o, headroom: new Map([['M', 200_000n]]) }), ['deep'], 'the large one waits while the headroom cannot take it whole')
   assert.deepEqual(ownToRefresh(coins, { ...o, gaveUp: new Map([['deep', 999_000]]) }), ['large'], 'not one given up within ten minutes')
+  // A coin a few atoms over a working coin, or up to one and a half of one, is a working coin by the
+  // rule the cut and the merge read (coinShape): never refreshed for its size, which would make a
+  // second cut-and-merge loop as the size moves (web #783).
+  const near = [{ leaf_id: 'over', asset: 'M', value: '62503', kind: 'transfer', state: 'live' },
+    { leaf_id: 'band', asset: 'M', value: '93000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'above', asset: 'M', value: '96000', kind: 'transfer', state: 'live' }]
+  const own = new Map([['over', 'own'], ['band', 'own'], ['above', 'own']])
+  assert.deepEqual(ownToRefresh(near, { ...o, lineageOf: own, hopsOf: new Map() }), ['above'])
+})
+
+test('the library\'s own at_risk mark is read when it names one; the mirror only when it does not (arca #893)', async () => {
+  const { learnPlaces, placesStale } = await import('./leaf-maker.mjs')
+  const own = { leaf_id: 'own', asset: 'M', value: '870000', kind: 'transfer', state: 'given' }
+  const rcv = { leaf_id: 'rcv', asset: 'M', value: '30000', kind: 'transfer', state: 'live' }
+  // An older library (f8e98e1b): no mark. The mirror, #889's defect included: its own coin given to
+  // a round counts whole.
+  const old = new Map()
+  learnPlaces({ coins: [{ leaf_id: 'own', lineage: 'own', state: 'given', hops: 1 }, { leaf_id: 'rcv', lineage: 'received', state: 'live', hops: 0 }] }, old, new Map(), [own, rcv])
+  assert.equal(old.marked, undefined)
+  assert.equal(heldOut(own, old), true)
+  assert.equal(heldOut({ ...own, state: 'live' }, old), false)
+  assert.equal(heldOut(rcv, old), true)
+  assert.equal(placesStale([own, rcv], old), false, 'an older library is read once a coin, for its lineage')
+  // A library that names the mark: what it says, whatever the mirror would.
+  const now = new Map()
+  learnPlaces({ coins: [{ leaf_id: 'own', lineage: 'own', state: 'given', at_risk: false }, { leaf_id: 'rcv', lineage: 'received', state: 'live', at_risk: true }] }, now, new Map(), [own, rcv])
+  assert.equal(now.marked, true)
+  assert.equal(heldOut(own, now), false, 'its own coin given to a round counts nothing (arca #889 fixed)')
+  assert.equal(heldOut(rcv, now), true)
+  const odd = new Map()
+  learnPlaces({ coins: [{ leaf_id: 'rcv', lineage: 'received', state: 'live', at_risk: false }] }, odd, new Map(), [rcv])
+  assert.equal(heldOut(rcv, odd), false, 'the mark decides, not the mirror')
+  // A coin whose state moved since it was marked: the mirror of that library's rule decides, and
+  // the places are read again.
+  const sent = { ...own, state: 'offered' }
+  assert.equal(placesStale([sent], now), true)
+  assert.equal(heldOut(sent, now), true, 'offered to a swap: counts whole, as that library counts it')
+  assert.equal(heldOut({ ...own, leaf_id: 'new', state: 'given' }, new Map([...now].concat([['new', 'own']])) ), true, 'a map without the mark falls back to the older rule')
+  // A mark the library could not read (null, at_risk_error): the mirror, and no read again until
+  // the coin's state moves.
+  const unread = new Map()
+  learnPlaces({ coins: [{ leaf_id: 'own', lineage: 'own', state: 'given', at_risk: null }], at_risk_error: 'record not read' }, unread, new Map(), [own])
+  assert.equal(heldOut(own, unread), false, 'its own coin given, by the rule of a library that names the mark')
+  assert.equal(placesStale([own], unread), false)
+  // A library without coin_places at all: every coin counts as received, read once.
+  const none = new Map()
+  learnPlaces(null, none, new Map(), [rcv])
+  assert.equal(heldOut(rcv, none), true)
+  assert.equal(placesStale([rcv], none), false)
 })
