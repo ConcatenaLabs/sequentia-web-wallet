@@ -192,7 +192,9 @@ export function makeSiteOrders (d) {
     if (q.why === 'busy') return W.busy(tick(pay))
     if (q.why === 'freeing') return W.freeing(tick(pay), q.soon)
     if (q.why === 'readying') return W.readying(tick(pay), q.soon)
-    if (q.why === 'part-ready') return W.partReady(fmt(pay, q.ready), tick(pay), q.soon)
+    // More than the wallet holds, nothing of it on its way: the whole of it, named.
+    if (q.why === 'part-ready') return W.moreThanHeld(fmt(pay, q.ready))
+    if (q.why === 'restoring') return W.restoring
     if (q.why === 'too-small') return W.tooSmall
     if (q.why === 'own-short') return W.ownShort(fmt(pay, q.most))
     if (q.why === 'no-firm-offer') return W.noFirmOffer
@@ -264,7 +266,8 @@ export function makeSiteOrders (d) {
       const rows = t.indicative
         ? [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, USER_WORDS.about + ' ' + fmt(t.receiveAsset, t.about)],
             ['', USER_WORDS.atLeast(fmt(t.receiveAsset, t.amountOut))], ...((t.fees || []).length ? [feeRow(t.fees, t.payAsset)] : []),
-            ['', settleWords(t.finalBy, 1, now(), USER_WORDS)]]
+            // The wait, only as the wallet gave it; with none given, no time is promised.
+            ['', t.finalBy == null ? USER_WORDS.settling : settleWords(t.finalBy, 1, now(), USER_WORDS)]]
         : [[USER_WORDS.amountIn, fmt(t.payAsset, t.amountIn)], [USER_WORDS.amountOut, fmt(t.receiveAsset, t.amountOut)],
             feeRow(t.fees, t.payAsset)]
       if (t.upTo) rows.push(['', USER_WORDS.upTo(fmt(t.payAsset, t.upTo))])

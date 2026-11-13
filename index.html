@@ -5607,6 +5607,8 @@ function initUserComposer(){
     vesting: (a)=> vestingLotsFor(a),
     // The operator's anchor depth: at 0 a coin not ready yet is on its way, ready in a minute or two.
     anchorDepth: ()=> leavesApi && leavesApi.anchorDepth ? leavesApi.anchorDepth() : null,
+    // A restore still checking the wallet's history: no trade waits on money said to be on its way.
+    restoring: ()=> !!(leavesApi && leavesApi.stillRestoring && leavesApi.stillRestoring()),
     prepare: ()=> { try{ if(leavesApi) leavesApi.boardSoon(); }catch{} },
     // Money held on the chain that no order on the chain takes: moved in first, then traded, the
     // ticket saying how long (default mode only: developer mode moves nothing by itself).

@@ -64,7 +64,8 @@ export function refusalWords (q, name, amt) {
     case 'busy': return W.busy(p)
     case 'freeing': return W.freeing(p, q.soon)
     case 'readying': return W.readying(p, q.soon)
-    case 'part-ready': return W.partReady(amt(q.payAsset, q.ready), p, q.soon)
+    case 'part-ready': return W.moreThanHeld(amt(q.payAsset, q.ready))
+    case 'restoring': return W.restoring
     case 'too-small': return W.tooSmall
     case 'no-firm-offer': return W.noFirmOffer
     case 'not-listed': return W.notListed(g, p)

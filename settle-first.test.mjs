@@ -107,7 +107,9 @@ test('the words of settling first name no rail and no part of a balance', () => 
     assert.deepEqual(forbiddenIn(w), [], w)
     assert.ok(!/can be traded now|only \S+ of your/i.test(w), w)
   }
-  assert.equal(USER_WORDS.settling, 'Goes through in about a minute')
+  // With no wait from the wallet, no time is promised (arca #879).
+  assert.equal(USER_WORDS.settling, 'Goes through by itself once what you pay is ready')
+  assert.ok(!/minute/.test(USER_WORDS.settling))
   // The answer that named a part of a balance is no longer given by the engine (only kept for
   // developer surfaces that name the cause).
   assert.ok(!/why: 'part-ready'[^\n]*\n[^\n]*\n/.test(''))

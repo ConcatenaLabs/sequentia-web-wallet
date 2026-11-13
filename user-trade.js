@@ -37,6 +37,9 @@
 //                                 before a coin in it can be traded (the library's `info`
 //                                 `anchor_depth`), or null; optional: at 0 a coin not ready yet is
 //                                 on its way and ready in a minute or two
+//   restoring()                -> whether a restore is still under way, its history included;
+//                                 optional: while it is, a quote that would wait on money on its way
+//                                 (or name a time for it) answers 'restoring' instead
 //   vesting(asset)             -> what of an asset vests later ([{ asset, vest, vests, atoms }], the
 //                                 wallet's last `claims` reading, default-arca.js vestingLots); optional:
 //                                 with it, a pay amount that needs what has not vested is 'vesting'
@@ -88,6 +91,10 @@ export const MAKER_COMPLETE_MS = 120_000
 // How long a trade whose maker's offer is gone keeps asking for a price within what was accepted
 // (the wallet busy, no firm offer yet) before it is returned with words.
 export const REPRICE_MOST_MS = 60_000
+// A waiting trade whose coins the wallet called through, priced again and refused once more for
+// coins that wait for a round: the next price is asked of the other side only after the wait that
+// refusal gave, and at least this long after, never at every follow.
+export const REPRICE_AGAIN_MS = 30_000
 // How many offers of one trade may be gone (each priced again at once) before it is returned.
 export const GONE_MOST = 3
 // Whether refusal `e` says a coin the wallet held (`held`, the leaf ids it held before the step)
@@ -177,11 +184,11 @@ export const USER_WORDS = Object.freeze({
   // ready once its block is certified (anchor depth 0), so it is ready in a minute or two.
   notReady: (pay, soon) => soon ? `Your ${pay} is on its way: it is ready to trade in a minute or two. Nothing has moved.`
     : `Your ${pay} is not ready to trade yet: it is once the next Bitcoin blocks settle it. Nothing has moved.`,
-  // Part of what is paid can be traded now, too little for any offer; the rest settles first.
   // More than the wallet holds of what is paid, nothing of it waiting: the whole of it, named.
   moreThanHeld: (have) => `That is more than your ${have}.`,
-  partReady: (ready, pay, soon) => soon ? `Only ${ready} of your ${pay} can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.`
-    : `Only ${ready} of your ${pay} can be traded now, too little for any offer: the rest is ready once the next Bitcoin blocks settle it. Nothing has moved.`,
+  // A restore still checking the wallet's earlier history: what the wallet would say is on its way
+  // may be history, so nothing waits on it and no time is promised.
+  restoring: 'Your wallet is still being restored: this trade can be priced once that is done. Nothing has moved.',
   // A coin that was ready, taken back out of the chain with its Bitcoin block: still the wallet's,
   // and in its balance, while the network takes it in again.
   redoing: (pay) => `Your ${pay} is being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once that settles. Nothing has moved.`,
@@ -228,8 +235,9 @@ export const USER_WORDS = Object.freeze({
   btcMoving: (blocks) => `Your BTC is being moved so it can be traded. It is ready after ${btcBlocks(blocks)}. Nothing has moved yet.`,
   btcMore: (blocks) => `More of your BTC is being moved so it can be traded, ready after ${btcBlocks(blocks)}.`,
   priceMoved: 'The price moved. Here is the new one.',
-  // What is paid waits for the network to settle it first: the trade goes ahead by itself after.
-  settling: 'Goes through in about a minute',
+  // What is paid waits for the network to settle it first, and the wallet has not said how long:
+  // the trade goes ahead by itself after, and no time is promised until the wallet says one.
+  settling: 'Goes through by itself once what you pay is ready',
   // A ticket accepted before what it pays is settled: the book's price now, and the least it goes
   // for once settled, its fees taken; less than that and it comes back.
   atLeast: (x) => `You receive at least ${x} after fees, or the trade comes back and nothing is traded.`,
@@ -1343,6 +1351,13 @@ export function createEngine (deps) {
     return true
   }
 
+  // Whether a restore is still checking the wallet's history (deps.restoring): what the wallet says is
+  // on its way may be history then (arca #879), so no answer that waits on it, or names a time for
+  // it, is given.
+  function restoring () { try { return !!(deps.restoring && deps.restoring()) } catch { return false } }
+  // The answers that promise money on its way, or a time for it.
+  const PROMISES = ['settle-first', 'not-ready', 'readying', 'freeing']
+
   // Whether the operator calls a coin ready once its block is certified (anchor depth 0).
   function soon () {
     try { const d = deps.anchorDepth ? deps.anchorDepth() : null; return d !== null && d !== undefined && Number(d) === 0 } catch { return false }
@@ -1370,7 +1385,8 @@ export function createEngine (deps) {
   async function quote (args) {
     const cap = { until: Date.now() + (deps.quoteMostMs ?? QUOTE_MOST_MS) }
     let late = false, timer = null
-    const inner = quoteOnce({ ...args, cap }).then((q) => (q && !q.ok && q.why === 'settle-first' && !late ? waitAndGo(q, args) : q)).then((q) => {
+    const inner = quoteOnce({ ...args, cap }).then((q) => (q && !q.ok && PROMISES.includes(q.why) && restoring() ? { ok: false, why: 'restoring' }
+      : q && !q.ok && q.why === 'settle-first' && !late ? waitAndGo(q, args) : q)).then((q) => {
       if (late && q && q.ok) { log('[user trade] a price came after the quote ended, let go:', q.ticket && q.ticket.source); drop(q.choice) }
       return q
     })
@@ -2056,6 +2072,9 @@ export function createEngine (deps) {
     }
     const upTo = rec.settleMost || most
     if (!v || !v.ready) { if (now() - (rec.settleSince || rec.at) > upTo) return late(); syncShared(); return rec }
+    // Through, by the wallet's word, but the last price asked was refused for coins that wait for a
+    // round: the other side is asked again only once that refusal's wait is through.
+    if (rec.repriceAfter && now() < rec.repriceAfter) { if (now() - (rec.settleSince || rec.at) > upTo) return late(); syncShared(); return rec }
     await syncShared()
     return repriceWithin(rec, upTo, rec.settleSince || rec.at)
   }
@@ -2114,6 +2133,14 @@ export function createEngine (deps) {
       if (q.why === 'settle-first' && (state !== 'settling' || now() - since <= mostMs)) {
         rec.settleCoins = q.coins || []
         if (state !== 'settling') { rec.state = 'settling'; rec.settleSince = now(); settleAsk(rec).catch(() => {}) }
+        // The refusal's own wait is the trade's time (the row counts down to it, and says when it
+        // passes), and the other side is asked again only once that wait is through.
+        if (q.wait) {
+          const n = nextFinalBy(rec.finalBy != null ? { finalBy: rec.finalBy, step: rec.finalStep ?? null } : null, q.wait, now())
+          if (n) { rec.finalBy = n.finalBy; rec.finalStep = n.step }
+        }
+        const secs = q.wait ? Number(q.wait.usual_in_seconds ?? q.wait.final_in_seconds) : NaN
+        rec.repriceAfter = now() + Math.max(REPRICE_AGAIN_MS, Number.isFinite(secs) ? secs * 1000 : 0)
         return put(rec)
       }
       // Nobody offers it this moment: a maker quotes nothing while it reads its coins again after a
