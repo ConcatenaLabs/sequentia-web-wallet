@@ -683,7 +683,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   moves nothing: You pay, You receive "about <amount>" at the price now, "You receive at least
   <amount> after fees, or the trade comes back and nothing is traded.", a fee line when the
   operator charges for the settlement, and how long it waits, "Goes through within about <N>
-  minutes" (as for a payment, counted down to when the wallet expects the coins through). The
+  minutes" (as for a payment, counted down to when the wallet expects the coins through), only as
+  the wallet said it; when the wallet has not said how long, no time: "Goes through by itself once
+  what you pay is ready", until it says. The
   least is the price now, less the fees the wallet last paid in that asset and the settlement's,
   and less a hundredth of it; an order's limit raises it. Only **Trade** puts the coins through the settlement,
   and keeps the trade under Your trades with the same words; once through it
@@ -812,7 +814,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   Nothing has moved." (the offers are orders resting in the tree that only coins expiring later can
   fill: the wallet refreshes its older coins in the next round by itself, and prices the trade
   again while the person waits, taking the next order if that one went); "That is more than your
-  <amount>." (more than the wallet holds, nothing of it on its way); "Your <pay> is held by an order
+  <amount>." (more than the wallet holds, nothing of it on its way, on the Trade tab and on a
+  site alike); "Your wallet is still being restored: this trade can be priced once that is done.
+  Nothing has moved." (a wallet restored from its phrase whose earlier history is still being
+  checked, when the trade would wait on money said to be on its way: during a restore that may be
+  history, so nothing is promised on it; a trade paid from coins it can spend now is priced as
+  usual); "Your <pay> is held by an order
   you placed, and can be traded once it is filled or cancelled. Nothing has moved." (only a coin of
   an order the person placed); "You can trade up to <most> now: the fees of this trade come out of
   what you hold. Nothing has moved." (the wallet's own payment would not cover the amount with the

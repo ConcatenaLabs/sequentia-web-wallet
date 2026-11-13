@@ -344,7 +344,8 @@ export function mountUserComposer (ctx) {
     t.appendChild(cost)
     // A refresh the operator charges for is paid out of what is paid: its fee, on its own line.
     if (k.indicative && (k.fees || []).length) { const f = el('div', 'sub', costLine(k.fees, amt, k.payAsset)); f.id = 'ucFees'; t.appendChild(f) }
-    if (k.indicative) { const w = el('div', 'sub', settleWords(k.finalBy, 1, Date.now(), USER_WORDS)); w.id = 'ucWait'; t.appendChild(w) }
+    // The wait, only as the wallet gave it; with none given, no time is promised.
+    if (k.indicative) { const w = el('div', 'sub', k.finalBy == null ? USER_WORDS.settling : settleWords(k.finalBy, 1, Date.now(), USER_WORDS)); w.id = 'ucWait'; t.appendChild(w) }
     if (k.upTo) t.appendChild(el('div', 'sub', USER_WORDS.upTo(amt(k.payAsset, k.upTo))))
     // After Max, what one trade could not take: named, never left unsaid.
     if (S.stays > 0n) { const st = el('div', 'sub', USER_WORDS.stays(amt(k.payAsset, S.stays))); st.id = 'ucStays'; t.appendChild(st) }
@@ -401,7 +402,7 @@ export function mountUserComposer (ctx) {
       // Max asked for all of it and no trade takes that much: what emptying the coins the wallet
       // can pay from pays in all (the engine's `all`, the fees in) is priced, once.
       else if (q.why === 'own-short' && q.all && S.maxed && !S.maxAgain && S.fixed === 'pay' && big(q.all) < big(atoms)) { S.maxAgain = true; allOf = big(q.all) }
-      else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
+      else S.error = q.why === 'vesting' ? USER_WORDS.notVested(show(big(q.atoms), prec(S.pay)), name(S.pay), q.vests) : q.why === 'no-funds' ? USER_WORDS.noFunds(name(S.pay)) : q.why === 'not-ready' ? USER_WORDS.notReady(name(S.pay), q.soon) : q.why === 'redoing' ? USER_WORDS.redoing(name(S.pay)) : q.why === 'busy' ? USER_WORDS.busy(name(S.pay)) : q.why === 'freeing' ? USER_WORDS.freeing(name(S.pay), q.soon) : q.why === 'readying' ? USER_WORDS.readying(name(S.pay), q.soon) : q.why === 'restoring' ? USER_WORDS.restoring : q.why === 'part-ready' ? USER_WORDS.moreThanHeld(amt(S.pay, q.ready)) : q.why === 'too-small' ? USER_WORDS.tooSmall
         : q.why === 'own-short' ? USER_WORDS.ownShort(amt(S.pay, q.most))
         : q.why === 'no-firm-offer' ? USER_WORDS.noFirmOffer
         : q.why === 'wallet-busy' ? USER_WORDS.walletBusy

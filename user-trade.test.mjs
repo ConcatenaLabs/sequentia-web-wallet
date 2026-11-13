@@ -539,7 +539,7 @@ test('engine: an amount that would trade, paid from coins mostly not ready yet, 
   const q = await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })
   // The rest of what the balance shows waits for a round: settled first, never "Only X of your Y".
   assert.equal(waits(q), 'settle-first')
-  assert.deepEqual(forbiddenIn(USER_WORDS.partReady('0.00005 XT', 'XT')), [])
+  assert.equal(USER_WORDS.partReady, undefined, 'no words name a part of a balance as on its way')
 })
 
 test('engine: at anchor depth 0 a coin not ready yet is on its way; a coin a reorganisation took back is being redone', async () => {
@@ -561,9 +561,8 @@ test('engine: at anchor depth 0 a coin not ready yet is on its way; a coin a reo
   assert.equal(r.why, 'redoing')
   assert.equal(USER_WORDS.redoing('USDX'), 'Your USDX is being redone after a Bitcoin reorganisation: it is still yours, and ready to trade again once that settles. Nothing has moved.')
   // The person's words hold none of default mode's forbidden words.
-  for (const w of [USER_WORDS.notReady('USDX', true), USER_WORDS.partReady('0.01 USDX', 'USDX', true), USER_WORDS.freeing('GOLD', true),
+  for (const w of [USER_WORDS.notReady('USDX', true), USER_WORDS.freeing('GOLD', true), USER_WORDS.restoring,
     USER_WORDS.redoing('USDX'), USER_WORDS.received]) assert.deepEqual(forbiddenIn(w), [], w)
-  assert.equal(USER_WORDS.partReady('0.0149 USDX', 'USDX', true), 'Only 0.0149 USDX of your USDX can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.')
 })
 
 test('a trade whose coins are held settles in a minute or two at anchor depth 0', () => {

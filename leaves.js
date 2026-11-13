@@ -3057,6 +3057,10 @@ export function mountLeaves (ctx, root, settingsRoot) {
     // Whether the wallet is finding what it holds: the restore of a wallet opened in this browser
     // for the first time (or whose first restore was cut short), until it returns.
     restoring: () => !!S.restoring,
+    // Whether a restore is still under way, its earlier history included (the balance's `history`
+    // while the library checks it, a few coins at a time): until then what the library says is on
+    // its way may be that history, and nothing is promised on it.
+    stillRestoring: () => !!S.restoring || !!(S.balance && S.balance.history && S.balance.history.loading),
     // While restoring, since when the operator has not answered the restore (it is tried again
     // every RESTORE_RETRY_MS): { why, since }, else null.
     restoreStalled: () => (S.restoring && S.restoring.stalled) || null,
