@@ -250,13 +250,28 @@ const HELD_OUT = ['live', 'offered', 'sending', 'given', 'forfeited', 'unread']
 // the room must match what the library refuses. This is the one place that decides it.
 export function heldOut (c, lineageOf = null) {
   if (!c || (c.kind !== 'transfer' && c.kind !== 'fill') || !HELD_OUT.includes(c.state)) return false
-  const m = lineageOf && lineageOf.atRisk && lineageOf.atRisk.get(c.leaf_id)
-  if (m && typeof m.at_risk === 'boolean' && m.state === c.state) return m.at_risk
+  const m = markOf(c, lineageOf)
+  if (m) return m.at_risk
   const l = lineageOf && lineageOf.get(c.leaf_id)
   const own = l === 'own' || l === 'trade'
   if (own && c.state === 'live') return false
   if (own && c.state === 'given' && lineageOf.marked) return false
   return true
+}
+// The library's mark for `c` when it decides the coin (a mark of the coin's state now), or null.
+function markOf (c, lineageOf) {
+  const m = lineageOf && lineageOf.atRisk && lineageOf.atRisk.get(c.leaf_id)
+  return m && typeof m.at_risk === 'boolean' && m.state === c.state ? m : null
+}
+// How many of `coins` that could count against the room heldOut decided by the library's mark, and
+// how many by the mirror (for /v1/explain).
+export function heldOutDecided (coins, lineageOf) {
+  const out = { by_mark: 0, by_mirror: 0 }
+  for (const c of coins || []) {
+    if (!c || (c.kind !== 'transfer' && c.kind !== 'fill') || !HELD_OUT.includes(c.state)) continue
+    if (markOf(c, lineageOf)) out.by_mark++; else out.by_mirror++
+  }
+  return out
 }
 // What the library's coin_places answer says of each coin into `lineageOf` (a Map: leaf ->
 // lineage; `hopsOf`: leaf -> hops): its lineage and depth, and, when it names the mark (arca #893),
@@ -1728,6 +1743,7 @@ async function main () {
           room_now: view && budgetValue != null ? String(roomOf(view)) : null,
           counts_against_room: view ? budgetHeld(view.coins, ratesNow, tickerOf, lineageOf) : null,
           at_risk_from: lineageOf.marked ? 'the library (coin_places at_risk)' : 'mirrored from lineage and state',
+          at_risk_decided: view ? heldOutDecided(view.coins, lineageOf) : null,
           cut_waits: Object.fromEntries([...cutWaits].map(([a, why]) => [tickerOf(a), why])),
           library_out_of_round: ((bondNow && bondNow.out_of_round) || []).map((h) => ({ asset: tickerOf(h.asset), value: String(h.value) })),
           coins_by_lineage: lineage,

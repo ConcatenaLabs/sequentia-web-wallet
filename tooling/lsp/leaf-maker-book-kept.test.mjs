@@ -189,6 +189,11 @@ test('the library\'s own at_risk mark is read when it names one; the mirror only
   learnPlaces(null, none, new Map(), [rcv])
   assert.equal(heldOut(rcv, none), true)
   assert.equal(placesStale([rcv], none), false)
+  // What /v1/explain counts: which coins the mark decided and which the mirror.
+  const { heldOutDecided } = await import('./leaf-maker.mjs')
+  assert.deepEqual(heldOutDecided([own, rcv], now), { by_mark: 2, by_mirror: 0 })
+  assert.deepEqual(heldOutDecided([own, rcv, sent], now), { by_mark: 2, by_mirror: 1 })
+  assert.deepEqual(heldOutDecided([own, rcv], old), { by_mark: 0, by_mirror: 2 })
 })
 
 test('what it takes in of a capped asset is judged from its coins now, not from last minute\'s reading (web #778, case c)', async () => {
