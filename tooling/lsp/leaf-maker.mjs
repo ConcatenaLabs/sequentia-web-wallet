@@ -1613,7 +1613,7 @@ async function main () {
       for (const id of deepDue(coins, hopsOf, depthLimitOf(lastInfo))) if (!due.includes(id) && t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS) due.push(id)
       // Settled only when received (receivedOnly).
       { const ids = new Set(due); await learnLineage(coins.filter((c) => c && ids.has(c.leaf_id))) }
-      const ownDue = cfg.settle_own ? [] : due.filter((id) => !receivedOnly([id], lineageOf).length)
+      const ownDue = due.filter((id) => !receivedOnly([id], lineageOf).length)
       if (ownDue.length) { due.splice(0, due.length, ...receivedOnly(due, lineageOf)) }
       const ownText = ownDue.length ? String(ownDue.length) : ''
       if (ownText !== ownLog) { if (ownText) log('leaves', ownText, 'coin(s) of its own lineage out of its settle: made by itself, at risk to nobody'); ownLog = ownText }

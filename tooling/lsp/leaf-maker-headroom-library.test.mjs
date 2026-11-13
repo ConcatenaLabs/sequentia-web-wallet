@@ -19,7 +19,7 @@
 // with three more assets listed for fees (ARCA_OPERATOR_MORE_ASSETS=3) and the control paths that
 // set an asset's in-flight cap and the bond's instant budget, its control address in
 // SEQ_LEAF_HARNESS, and the wallet kit's lwk_wasm (../../pkg or LWK_PKG); it skips itself otherwise.
-// LEAF_MAKER_CASES (a, c, d; every one when unset) picks the cases.
+// LEAF_MAKER_CASES (a, c, d; every one when unset; n, the capital measurement, only when named) picks the cases.
 //
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 node --test tooling/lsp/leaf-maker-headroom-library.test.mjs
 import test from 'node:test'
@@ -469,108 +469,16 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
   }
 })
 
-// The operator's capital through forty trades: its pool of each asset traded (`/v1/chain`: what it
-// fronts for refreshes whose old coins have not come back, `in_flight`, and the batches' value paid
-// on out of round, `transferred`), read every 15 s for two minutes before the trades, through
-// them, and for LEAF_MAKER_AFTER_MINUTES (30) after, while the taker refreshes what it receives and
-// the operator's watcher reclaims what comes back (`/settle` as its timers run it). The curve goes
-// to LEAF_MAKER_CURVE (a path) as JSON. LEAF_MAKER_SETTLE_OWN=1 runs the maker with `settle_own`.
-test('m: the operator\'s capital through forty trades and after', { skip: skipCase('m'), timeout: 10_800_000 }, async () => {
-  const { H, st, lwk } = await stack()
-  const X = st.x, M = st.more[2]
-  const name = (a) => (a === X ? 'X' : a === M ? 'M2' : a.slice(0, 6))
-  const dir = mkdtempSync(join(tmpdir(), 'maker-capital-m-'))
-  const stops = []
-  let makerOf = null
-  const curve = []
-  const chainUrl = st.server.replace(/\/+$/, '') + '/v1/chain'
-  let phase = 'setup'
-  const sample = async () => {
-    try {
-      const c = await getJson(chainUrl)
-      const row = { t: Math.round((Date.now() - t0) / 1000), phase }
-      for (const a of [M, X]) { const p = (c.pool || {})[a] || {}; row[name(a)] = { in_flight: p.in_flight, transferred: p.transferred, released: p.released, reclaimable: p.reclaimable, locked: p.locked } }
-      curve.push(row)
-    } catch {}
-  }
-  let sampling = true
-  const sampler = (async () => { while (sampling) { await sample(); await sleep(15000) } })()
-  stops.push(async () => { sampling = false; await sampler })
-  // The operator's clock as its timers run it: rounds, and every third turn the watcher and the
-  // nursery (reclaims, releases).
-  let pumping = true
-  const pumper = (async () => { let k = 0; while (pumping) { try { await H.pump(); if (++k % 3 === 0) await H.c('/settle') } catch {} await sleep(2000) } })()
-  stops.push(async () => { pumping = false; await pumper })
-  try {
-    // A cap far above what is traded, so that the operator publishes what is in flight and holds
-    // nothing back.
-    for (const a of [M, X]) await H.c('/fees', { asset: a, in_flight_cap: 1e15 })
-    const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
-    const port = await freePort()
-    const pairs = [{ give: M, want: X, rate_num: '1', rate_den: '1', min_give: '10000' }, { give: X, want: M, rate_num: '1', rate_den: '1', min_give: '10000' }]
-    makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', ...(process.env.LEAF_MAKER_SETTLE_OWN === '1' ? { settle_own: true } : {}) })
-    const maker = await launchMaker(H, join(dir, 'maker'), port, [[M, 1500000], [X, 1500000]])
-    makerOf = maker
-    stops.push(() => maker.stop())
-    for (const a of [M, X]) await makerReady(H, maker, a, 300000)
-    for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
-    await sleep(60000)
-    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 800000], [M, 800000]])
-    stops.push(() => T.stop())
-    phase = 'before'
-    await sleep(120000)
-    phase = 'trades'
-    const results = []
-    for (let i = 0; i < 40; i++) {
-      const [g, w] = i % 2 ? [X, M] : [M, X]
-      let size = 110000 + (i % 5) * 10000
-      for (let k = 0; k < 30; k++) {
-        const q = ((await getJson(maker.url + '/v1/quotes')).quotes || []).filter((x) => x.give_asset === g && x.want_asset === w)
-        const most = q.reduce((m, x) => (BigInt(x.max_give) > m ? BigInt(x.max_give) : m), 0n)
-        if (most >= 10000n) { if (BigInt(size) > most) size = Number(most); break }
-        await sleep(2000)
-      }
-      const r = await trade(maker, T.t, g, w, size, 10)
-      results.push({ i, pair: name(g) + '->' + name(w), size, ...r })
-      // The taker refreshes what it received (and its change) after every second trade.
-      if (i % 2 === 1) await refreshChange(H, T)
-    }
-    await refreshChange(H, T)
-    phase = 'after'
-    const minutes = Number(process.env.LEAF_MAKER_AFTER_MINUTES || 30)
-    for (let i = 0; i < minutes; i++) {
-      await sleep(60000)
-      if (i % 5 === 4) {
-        const e = await explain(maker, 'after the trades, minute ' + (i + 1))
-        console.log(at(), 'maker coins by lineage', JSON.stringify((Array.isArray(e && e.coins_by_lineage) ? e.coins_by_lineage : []).map((x) => [x.lineage, name(x.asset), x.kind, x.state, x.n, x.hops_most])))
-      }
-    }
-    await sample()
-    const lines = logLines(maker, 0, /settling|own lineage|merging|cutting/)
-    console.log('the maker said:\n' + lines.map((l) => l.slice(0, 240)).join('\n'))
-    console.log('trades:', JSON.stringify(results.map((x) => [x.i, x.pair, x.size, x.ms, x.refusals, x.refused ? JSON.stringify(x.refused).slice(0, 160) : 'ok'])))
-    const pick = (p) => curve.filter((r) => r.phase === p)
-    for (const p of ['before', 'trades', 'after']) {
-      const rs = pick(p)
-      if (!rs.length) continue
-      const f = (r, a, k) => (r[a] && r[a][k]) || '0'
-      console.log(`${p}: ${rs.length} readings; M2 in_flight first ${f(rs[0], 'M2', 'in_flight')} last ${f(rs[rs.length - 1], 'M2', 'in_flight')} most ${rs.reduce((m, r) => (BigInt(f(r, 'M2', 'in_flight')) > m ? BigInt(f(r, 'M2', 'in_flight')) : m), 0n)}; X in_flight first ${f(rs[0], 'X', 'in_flight')} last ${f(rs[rs.length - 1], 'X', 'in_flight')} most ${rs.reduce((m, r) => (BigInt(f(r, 'X', 'in_flight')) > m ? BigInt(f(r, 'X', 'in_flight')) : m), 0n)}; transferred last M2 ${f(rs[rs.length - 1], 'M2', 'transferred')} X ${f(rs[rs.length - 1], 'X', 'transferred')}`)
-    }
-    assert.equal(results.filter((x) => x.refused).length, 0, 'every trade completed')
-  } finally {
-    if (process.env.LEAF_MAKER_CURVE) writeFileSync(process.env.LEAF_MAKER_CURVE, JSON.stringify(curve))
-    await dumpMaker(makerOf, 'm')
-    for (const s of stops.reverse()) { try { await s() } catch {} }
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-// The same measurement with two makers side by side, each on its own pair and with its own taker,
-// and each starting from coins of a round, as the testnet's makers hold them (a board's coin counts
-// nothing in flight: its forfeit pays the operator back at once): maker A on M0 and M1 as it is (it settles only
-// received coins and its own when large or deep), maker B on M2 and X with `settle_own` (its own change settled
-// after its rest too). The curves go to LEAF_MAKER_CURVE, one series a maker.
-test('n: two makers from coins of a round, own change settled or not', { skip: skipCase('n'), timeout: 10_800_000 }, async () => {
+// The operator's capital through forty trades on one pair, both ways, from a maker whose coins are
+// of a round, as the testnet's makers hold them (a board's coin counts nothing in flight: its
+// forfeit pays the operator back at once). The operator's pool of each asset (`/v1/chain`: what it
+// fronts for refreshes whose old coins have not come back, `in_flight`) is read every 15 s for two
+// minutes before the trades, through them, and for LEAF_MAKER_AFTER_MINUTES (30) after, while the
+// taker refreshes what it receives and the operator's watcher reclaims what comes back (`/settle`
+// as its timers run it); the curve goes to LEAF_MAKER_CURVE (a path) as JSON. What stays in flight
+// sits on nodes whose consent tree passed RECLAIM-D's 32 steps (arca #903): measured on arca
+// 7eee1eae, the maker settling its own change as well changed nothing.
+test('n: the operator\'s capital through forty trades from coins of a round', { skip: skipCase('n'), timeout: 10_800_000 }, async () => {
   const { H, st, lwk } = await stack()
   const [M0, M1, M2] = st.more, Y = st.x
   const names = new Map([[M0, 'M0'], [M1, 'M1'], [M2, 'M2'], [Y, 'X']])
@@ -597,14 +505,14 @@ test('n: two makers from coins of a round, own change settled or not', { skip: s
   stops.push(async () => { pumping = false; await pumper })
   try {
     for (const a of [M0, M1, M2, Y]) await H.c('/fees', { asset: a, in_flight_cap: 1e15 })
-    const setups = [{ label: 'A', g: M0, w: M1, own: false }, { label: 'B', g: M2, w: Y, own: true }]
+    const setups = [{ label: 'A', g: M0, w: M1 }]
     // Each maker's store made first: both assets boarded and refreshed into a round, so its
     // reserve and the working coins it cuts from it are coins of a round.
     for (const s of setups) {
       s.mnemonic = lwk.Mnemonic.fromRandom(12).toString()
       s.port = await freePort()
       const pairs = [{ give: s.g, want: s.w, rate_num: '1', rate_den: '1', min_give: '10000' }, { give: s.w, want: s.g, rate_num: '1', rate_den: '1', min_give: '10000' }]
-      const cfg = makerConfig(join(dir, 'maker' + s.label), st, s.port, s.mnemonic, pairs, { instant_budget: '0.5', ...(s.own ? { settle_own: true } : {}) })
+      const cfg = makerConfig(join(dir, 'maker' + s.label), st, s.port, s.mnemonic, pairs, { instant_budget: '0.5' })
       const seed = await wallet(H, st, lwk, cfg.store_dir, s.mnemonic, [[s.g, 1500000], [s.w, 1500000]])
       const boards = (await seed.t('coins')).filter((c) => c.state === 'live' && c.kind === 'board').map((c) => c.leaf_id)
       const q = await seed.t('quote', { leaves: boards })
@@ -664,7 +572,7 @@ test('n: two makers from coins of a round, own change settled or not', { skip: s
     }
     await sample()
     for (const s of setups) {
-      console.log(`maker ${s.label}${s.own ? ' (settle_own)' : ' (as is)'} said:\n` + logLines(s.maker, 0, /settling|own lineage|merging|cutting/).map((l) => l.slice(0, 200)).join('\n'))
+      console.log(`maker ${s.label} said:\n` + logLines(s.maker, 0, /settling|own lineage|merging|cutting/).map((l) => l.slice(0, 200)).join('\n'))
       console.log(`maker ${s.label} trades:`, JSON.stringify(s.results.map((x) => [x.i, x.size, x.ms, x.refused ? 'refused' : 'ok'])))
     }
     const f = (r, a, k) => (r[a] && r[a][k]) || '0'
