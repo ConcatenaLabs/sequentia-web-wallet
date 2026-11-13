@@ -143,6 +143,21 @@ async function wallet (H, st, lwk, dir, mnemonic, boards) {
   return { lib, t, stop: () => lib.stop() }
 }
 
+// A taker's own change, refreshed into a round: every sale pays from its change (the library pays
+// from a coin out of round first), a reassignment deeper each time, and past the operator's depth
+// limit it pays no more ("more are at the operator's depth limit"). -> when none is left.
+async function refreshChange (H, W) {
+  await W.t('sync').catch(() => {})
+  const ch = (await W.t('coins')).filter((c) => c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill')).map((c) => c.leaf_id)
+  if (!ch.length) return
+  try { const q = await W.t('quote', { leaves: ch }); await W.t('participate', { leaves: ch, shown: q.coins }) } catch (e) { console.log(at(), 'taker refresh:', e.message); return }
+  for (let i = 0; i < 120; i++) {
+    await H.pump().catch(() => {}); await W.t('sync').catch(() => {})
+    if (!(await W.t('coins')).some((c) => c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill'))) return
+    await sleep(1000)
+  }
+}
+
 // The maker's configuration, as startMaker writes it, with its budget share named.
 function makerConfig (dir, st, port, mnemonic, pairs, extra = {}) {
   mkdirSync(dir, { recursive: true })
@@ -344,6 +359,7 @@ test('c: received coins against a small headroom stop that asset\'s intake only,
       console.log(at(), 'the maker buys 30,000 M1:', JSON.stringify(r))
       await explain(maker, 'after sale ' + (i + 1))
       if (r.refused) break
+      if (i % 2 === 1) await refreshChange(H, T)
     }
     const stoppedAt = book.seen.get('X->M1').offAt[0]
     console.log(at(), 'X->M1 first not offered at', stoppedAt)
@@ -360,6 +376,7 @@ test('c: received coins against a small headroom stop that asset\'s intake only,
     await makeInFlight(H, st, T, R, M)
     await headroom(H, st, M, 100000)
     await sleep(65000)
+    await refreshChange(H, T)
     const big = await trade(maker, T.t, X, M, 120000, 5)
     console.log(at(), 'the maker buys 120,000 M1 in one trade:', JSON.stringify(big))
     for (let i = 0; i < 4; i++) { await sleep(60000); await explain(maker, 'large coin, minute ' + (i + 1)) }
@@ -407,6 +424,8 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
       const [g, w] = i % 2 ? [X, M] : [M, X]
       const r = await trade(maker, T.t, g, w, 11000 + (i % 5) * 1000, 10)
       results.push({ i, pair: name(g) + '->' + name(w), ...r })
+      // The taker's change, refreshed every other trade: this case is the maker's depth, not its.
+      if (i % 2 === 1) await refreshChange(H, T)
       if (i % 5 === 4) {
         const e = await explain(maker, 'after trade ' + (i + 1))
         const hops = ((e && e.coins_by_lineage) || []).map((x) => [x.lineage, x.asset, x.kind, x.state, x.n, x.hops_most])
