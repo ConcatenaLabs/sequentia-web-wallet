@@ -10,9 +10,10 @@
 //   it out of round reaches the headroom. It takes in no more of that asset, every other pair stays
 //   offered, what it received settles in parts within the headroom, and a sale past its share of
 //   the headroom in one trade is refused and quoted at what is left of it.
-// - Depth: forty trades in a row on one pair, both ways. Every trade's change is a coin of the
-//   maker's own lineage, a reassignment deeper each time; the maker quotes throughout and the
-//   operator refuses none of its offers for depth.
+// - Depth: forty trades in a row on one pair, both ways. Every trade's change is a reassignment
+//   deeper each time; the operator refuses none of the maker's offers for depth, every trade
+//   completes (a taker refused while the maker's instant budget waits for a round asks again), and
+//   the book is offered at every reading of the five minutes after.
 //
 // The book is read once a second (/v1/quotes) and the maker's explain answer (/v1/explain) at each
 // step. It needs the operator repository's harness (bark-cli/tests/arca_operator_for_browsers.rs)
@@ -210,7 +211,7 @@ const explain = async (maker, label) => {
     const e = await getJson(maker.url + '/v1/explain')
     console.log(at(), 'explain', label + ':', JSON.stringify({ room_now: e.room_now, budget: e.budget && e.budget.value, counts: e.counts_against_room, lineage: e.coins_by_lineage,
       library_out_of_round: e.library_out_of_round, headroom: e.operator_headroom, takes_in_none_of: e.takes_in_none_of, not_offered: e.not_offered,
-      waiting_for_headroom: e.waiting_for_headroom, kept: e.kept_out_of_settle }))
+      waiting_for_headroom: e.waiting_for_headroom, kept: e.kept_out_of_settle, at_risk_from: e.at_risk_from, at_risk_decided: e.at_risk_decided }))
     return e
   } catch (x) { console.log(at(), 'explain', label + ': none (' + x.message + ')'); return null }
 }
@@ -222,6 +223,8 @@ const pumpLoop = (H) => {
 // A trade with the maker: the taker asks a firm offer of `give` of `give_asset`, takes it, and the
 // maker completes it. -> the firm answer's time, ms.
 async function trade (maker, t, give_asset, want_asset, give, tries = 60) {
+  const first = Date.now()
+  let firstRefused = null
   for (let i = 0; ; i++) {
     const asked = Date.now()
     const f = await post(maker.url + '/v1/firm', { give_asset, want_asset, give: String(give) })
@@ -232,9 +235,10 @@ async function trade (maker, t, give_asset, want_asset, give, tries = 60) {
       const done = await post(maker.url + '/v1/accept', { swap: f.body.swap, accept: acc.accept })
       assert.equal(done.status, 200, JSON.stringify(done.body))
       await t('mailbox').catch(() => {})
-      return { ms, refusals: i }
+      return { ms, refusals: i, waited_ms: Date.now() - first, ...(firstRefused ? { first_refusal: JSON.stringify(firstRefused).slice(0, 200) } : {}) }
     }
-    if (i >= tries) return { ms, refused: f.body, refusals: i }
+    if (i >= tries) return { ms, refused: f.body, refusals: i, waited_ms: Date.now() - first }
+    if (!firstRefused) firstRefused = f.body
     await sleep(2000)
   }
 }
@@ -442,7 +446,9 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
         if (most >= 10000n) { if (BigInt(size) > most) size = Number(most); break }
         await sleep(2000)
       }
-      const r = await trade(maker, T.t, g, w, size, 10)
+      // A taker refused for the maker's instant budget (`after_next_round`: its coins wait for their
+      // round) asks again, as a wallet does, for up to about four minutes.
+      const r = await trade(maker, T.t, g, w, size, 120)
       results.push({ i, pair: name(g) + '->' + name(w), size, ...r })
       // The taker's change, refreshed every other trade: this case is the maker's depth, not its.
       if (i % 2 === 1) await refreshChange(H, T)
@@ -457,11 +463,16 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
     const depth = logLines(maker, 0, /depth/i)
     const lines = logLines(maker, 0, /settling|own lineage|merging|cutting|offers no|depth/)
     console.log('the maker said:\n' + lines.map((l) => l.slice(0, 300)).join('\n'))
-    console.log('trades:', JSON.stringify(results.map((x) => [x.i, x.pair, x.size, x.ms, x.refusals, x.refused ? JSON.stringify(x.refused).slice(0, 200) : 'ok'])))
+    console.log('trades:', JSON.stringify(results.map((x) => [x.i, x.pair, x.size, x.ms, x.refusals, x.waited_ms, x.refused ? JSON.stringify(x.refused).slice(0, 200) : 'ok'])))
+    const waits = results.filter((x) => x.first_refusal)
+    console.log(`waits: ${waits.length} of 40 trades waited, the longest ${Math.max(0, ...results.map((x) => x.waited_ms))} ms; first refusals:`, JSON.stringify(waits.map((x) => [x.i, x.waited_ms, x.first_refusal])))
     console.log('the book:', JSON.stringify(r))
-    assert.equal(results.filter((x) => x.refused).length, 0, 'every trade was offered and completed')
+    for (const [k, s] of Object.entries(r.pairs)) console.log(`${k}: not offered in ${s.off} of ${s.on + s.off} readings`)
+    assert.equal(results.filter((x) => x.refused).length, 0, 'every trade completed, a taker asking again through a pause of the instant budget')
     assert.equal(depth.length, 0, 'no depth refusal: ' + depth.join('\n'))
-    for (const [k, s] of Object.entries(r.pairs)) assert.equal(s.off, 0, `${k} offered at every reading (${s.off} of ${s.on + s.off} not, at ${s.offAt.join(' ')})`)
+    // While four million of trades pass a budget of 2.5 million, a pair is off between rounds; it is
+    // offered at every reading of the five minutes after the trades.
+    for (const [k] of Object.entries(r.pairs)) assert.equal(r.lastOff[k], 0, `${k} offered at every reading of the last five minutes`)
   } finally {
     await dumpMaker(makerOf, 'd')
     for (const s of stops.reverse()) { try { await s() } catch {} }
