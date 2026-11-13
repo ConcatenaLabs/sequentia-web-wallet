@@ -6,7 +6,7 @@
 //   node --test tooling/lsp/leaf-maker-book-kept.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { knownCoins, madeBy, leavesOf, budgetHeld, roomNow, budgetedSpendable, headroomOf, intakeStopped, withinHeadroom, lineageSummary, UNREAD } from './leaf-maker.mjs'
+import { knownCoins, madeBy, leavesOf, budgetHeld, roomNow, budgetedSpendable, headroomOf, intakeStopped, withinHeadroom, lineageSummary, receivedOnly, UNREAD } from './leaf-maker.mjs'
 import { spendableFrom } from '../../user-trade.js'
 
 const G = 'aa'.repeat(32), U = 'bb'.repeat(32), S = 'cc'.repeat(32)
@@ -88,4 +88,12 @@ test('the maker takes in no more of an asset than the operator can take on of wh
   assert.deepEqual([...intakeStopped(INFO, [{ asset: S, value: '1000' }])], [], 'a little held: it still takes SEQ in')
   assert.deepEqual([...intakeStopped({ assets: [{ asset: S, in_flight: '10', in_flight_cap: '10' }] }, [])], [S], 'a full cap, as before')
   assert.deepEqual([...intakeStopped(INFO, null)], [])
+})
+
+test('only coins of received lineage are settled: a coin the maker made itself is never given to a refresh for its kind', () => {
+  // The BTC desk at 03:56Z: its own payment's change (own lineage, kind transfer, 5.33M tSEQ) went
+  // to a refresh with what takers paid it; given, a library counts it at risk whole.
+  const lineage = new Map([['change', 'own'], ['paid', 'received'], ['swapped', 'trade']])
+  assert.deepEqual(receivedOnly(['change', 'paid', 'swapped', 'unknown'], lineage), ['paid', 'unknown'])
+  assert.deepEqual(receivedOnly(['x'], new Map([['x', null]])), ['x'], 'a library that names no lineage: settled as before')
 })

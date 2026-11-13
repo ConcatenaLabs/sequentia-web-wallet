@@ -275,6 +275,11 @@ millions would then be held out of round whole and fill its budget, every pair a
 whose worth fits no room left quotes nothing and settles with the rest.) A cut into working coins
 follows the same rule: it waits while its coin is the only one that would quote.
 
+It settles only coins of received lineage (the library's `coin_places`: a payment or a trade's
+proceeds that a double-sign could take). A coin it made itself (the change of its own payment) is at
+risk to nobody while it is live, and given to a refresh a library counts it at risk whole while the
+refresh is pending, so it is never settled for being of kind transfer.
+
 Of an asset the operator caps, it settles in parts the operator can take on now: the smallest
 received coins first, as many as fit together in nine tenths of the operator's headroom for the
 asset (`in_flight_cap` less `in_flight`), the rest in a later pass ("settles in parts the operator

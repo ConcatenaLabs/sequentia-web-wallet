@@ -779,6 +779,17 @@ export function receivedDue (coins, seen, now, restMs, { all = false, first = fa
   return due
 }
 
+// Of the due coins, those of received lineage only (`lineageOf`: leaf -> the library's coin_places
+// lineage, own, trade or received): a coin the maker made itself (the change of its own payment, a
+// piece it cut out of round) is of its own lineage, at risk to nobody while it is live, and is never
+// given to a refresh merely for being of kind transfer. Given to one, a library counts it at risk at
+// its whole value while the participation is pending (web #659: three such coins of 5.33 million
+// tSEQ the operator's headroom could not take, every pair of the BTC desk empty). A coin whose
+// lineage the library does not name (an older library) counts as received, as before.
+export function receivedOnly (due, lineageOf) {
+  return (due || []).filter((id) => ((lineageOf && lineageOf.get(id)) ?? 'received') === 'received')
+}
+
 // The arguments of a library command. One ahead of the queue (`first`) answers a taker (a firm
 // offer, an acceptance, a swap's state): its start re-checks only the coins, each against the chain
 // and its lineage watched (`recheck: 'coins'`), and leaves the following of the participations'
@@ -1203,6 +1214,8 @@ async function main () {
   let lastBoardRefusal = null
   let keptLog = ''   // the coins kept out of a settle, as last logged
   let waitLog = ''   // the received coins waiting for the operator's headroom, as last logged
+  let ownLog = ''    // the coins of its own lineage left out of a settle, as last logged
+  const lineageOf = new Map()   // leaf -> its lineage (coin_places), or null when the library names none
   const unoffered = new Map()   // asset -> why it is offered no more, as last logged
   // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
   // quotes are served from the last reading (`holdings`), which every pass of the upkeep and every
@@ -1377,6 +1390,17 @@ async function main () {
       const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull || half, first: firstPass })
         .filter((id) => t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS)
       firstPass = false
+      // Settled only when received (receivedOnly): the lineage of each coin due, read once from
+      // the library (coin_places) and kept, since a coin's lineage does not change.
+      if (due.some((id) => !lineageOf.has(id))) {
+        try { for (const c of ((await cmd('coin_places', {})) || {}).coins || []) if (c && c.leaf_id && c.lineage) lineageOf.set(c.leaf_id, c.lineage) } catch (e) { if (!/no command/.test(String(e && e.message))) log('coin_places:', e.message) }
+        for (const id of due) if (!lineageOf.has(id)) lineageOf.set(id, null)
+      }
+      const ownDue = due.filter((id) => !receivedOnly([id], lineageOf).length)
+      if (ownDue.length) { due.splice(0, due.length, ...receivedOnly(due, lineageOf)) }
+      const ownText = ownDue.length ? String(ownDue.length) : ''
+      if (ownText !== ownLog) { if (ownText) log('leaves', ownText, 'coin(s) of its own lineage out of its settle: made by itself, at risk to nobody'); ownLog = ownText }
+      if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) lineageOf.delete(id)
       for (const [id, at] of gaveUp) if (t - at > 6 * GIVE_UP_AGAIN_MS) gaveUp.delete(id)
       // Never the last free coin of an asset it quotes (keepFree): of each asset, the coin its
       // largest quote is sized on stays out while nothing else free fills a working coin's trade,
