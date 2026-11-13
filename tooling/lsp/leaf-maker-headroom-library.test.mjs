@@ -436,7 +436,7 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
       if (i % 2 === 1) await refreshChange(H, T)
       if (i % 5 === 4) {
         const e = await explain(maker, 'after trade ' + (i + 1))
-        const hops = ((e && e.coins_by_lineage) || []).map((x) => [x.lineage, x.asset, x.kind, x.state, x.n, x.hops_most])
+        const hops = (Array.isArray(e && e.coins_by_lineage) ? e.coins_by_lineage : []).map((x) => [x.lineage, x.asset, x.kind, x.state, x.n, x.hops_most])
         console.log(at(), 'hops by lineage after trade', i + 1, JSON.stringify(hops))
       }
     }
