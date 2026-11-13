@@ -231,10 +231,25 @@ export function mergeMost (cfg, asset, working = null) {
 // by state and asset (`name` gives an asset's ticker). The refusal's figure adds the payment asked.
 // `unread`: a coin the maker knows its last trade made, not read from its library yet (knownCoins).
 const HELD_OUT = ['live', 'offered', 'sending', 'given', 'forfeited', 'unread']
-export function outOfRoundSummary (coins, name = (a) => a) {
+// Whether a coin counts against the budget as held out of round, as the library counts it (bond.rs
+// `at_risk`): a coin of kind transfer or fill in a state that counts, except a live one whose lineage
+// the library names as its own (`own`: its change, a piece it paid itself) or a trade's with its
+// owner's exit (`trade`), which is at risk to nobody (`lineageOf`: leaf -> lineage, from coin_places;
+// a coin it names none for counts). Without that exception a large change of its own, which it never
+// settles (receivedOnly), would hold the room at nothing for good, every pair empty (web #778).
+// The mirror is exact, defect included: the library counts a coin given to a participation (or
+// offered, or sending) at its whole value whatever its lineage (arca #889); this does too, since the
+// room must match what the library refuses. When #889 is fixed, a given coin of its own lineage
+// stops counting there, and must here: this is the one place that decides it.
+export function heldOut (c, lineageOf = null) {
+  if (!c || (c.kind !== 'transfer' && c.kind !== 'fill') || !HELD_OUT.includes(c.state)) return false
+  if (c.state === 'live' && lineageOf) { const l = lineageOf.get(c.leaf_id); if (l === 'own' || l === 'trade') return false }
+  return true
+}
+export function outOfRoundSummary (coins, name = (a) => a, lineageOf = null) {
   const by = new Map()
   for (const c of coins || []) {
-    if (!c || (c.kind !== 'transfer' && c.kind !== 'fill') || !HELD_OUT.includes(c.state)) continue
+    if (!heldOut(c, lineageOf)) continue
     const k = c.state + ' ' + name(c.asset)
     const e = by.get(k) || { n: 0, atoms: 0n, largest: 0n }
     const v = big(c.value)
@@ -300,7 +315,14 @@ export function intakeStopped (info, outOfRound) {
 // counted against the budget, for good (web #659: 5.33 million SEQ on the BTC desk). The rest wait
 // for a later pass. `coins` gives the values. -> { groups (settleGroups' shape), waiting: [{ asset,
 // leaves }] }.
-export function withinHeadroom (groups, coins, headroom) {
+//
+// A received coin larger than the share of the headroom alone (`alone`: the leaves that may go so)
+// is given by itself when nothing smaller of its asset fits: it counts against the budget at its
+// whole value whether it is live or given, so holding it back never makes room, and only a
+// refresh ends it. The operator runs it as soon as it can (when what it opens fits, or by its
+// rule for refreshes that bring a node back, arca server/src/rounds.rs `CapJudge`); meanwhile
+// the library takes it back after 120 s and the maker gives it again GIVE_UP_AGAIN_MS later.
+export function withinHeadroom (groups, coins, headroom, alone = null) {
   const of = new Map((coins || []).map((c) => [c && c.leaf_id, c]))
   const out = [], waiting = []
   for (const g of groups || []) {
@@ -311,6 +333,7 @@ export function withinHeadroom (groups, coins, headroom) {
     const take = [], rest = []
     let sum = 0n
     for (const id of sorted) { const v = big(of.get(id) && of.get(id).value); if (sum + v <= most) { take.push(id); sum += v } else rest.push(id) }
+    if (!take.length && alone) { const i = rest.findIndex((id) => alone.has(id)); if (i >= 0) take.push(...rest.splice(i, 1)) }
     if (take.length) out.push({ ...g, leaves: take })
     if (rest.length) waiting.push({ asset: g.asset, leaves: rest })
   }
@@ -468,12 +491,12 @@ export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now
 // without a budget. So a swap that completes takes its room at the next reading of the coins, which
 // the maker makes at every offer and completion, and two offers open at once never pass the budget
 // together (web wallet #632, #653).
-export function roomNow (budgetValue, coins, rates) {
+export function roomNow (budgetValue, coins, rates, lineageOf = null) {
   if (budgetValue == null) return null
   let room = big(budgetValue)
   for (const c of coins || []) {
     if (!c) continue
-    const out = (c.kind === 'transfer' || c.kind === 'fill') && HELD_OUT.includes(c.state)
+    const out = heldOut(c, lineageOf)
     const offered = c.state === 'offered' && c.kind !== 'transfer' && c.kind !== 'fill'
     if (!out && !offered) continue
     const r = rates && rates.get(c.asset)
@@ -531,11 +554,11 @@ export function leavesOf (answer) {
 // with its count, atoms, worth (reference atoms at `rates`, null where unpriced) and largest coin;
 // `name` gives an asset's ticker. -> [{ asset, kind, state, n, atoms, worth, largest }], the
 // largest worth first.
-export function budgetHeld (coins, rates, name = (a) => a) {
+export function budgetHeld (coins, rates, name = (a) => a, lineageOf = null) {
   const by = new Map()
   for (const c of coins || []) {
     if (!c) continue
-    const out = (c.kind === 'transfer' || c.kind === 'fill') && HELD_OUT.includes(c.state)
+    const out = heldOut(c, lineageOf)
     const offered = c.state === 'offered' && c.kind !== 'transfer' && c.kind !== 'fill'
     if (!out && !offered) continue
     const k = c.asset + ' ' + c.kind + ' ' + c.state
@@ -552,15 +575,17 @@ export function budgetHeld (coins, rates, name = (a) => a) {
 // The library's coin_places answer summed for the explain answer: the coins it holds by how they
 // were made (`lineage`: own, a round's, a board's or its own change; trade, paid by a trade whose
 // checkpoints all have their owner's exit; received, a payment or a trade without it, which is what
-// the library counts against the budget at its whole value), asset, kind and state. -> [{ lineage,
-// asset, kind, state, n, atoms }].
+// the library counts against the budget at its whole value), asset, kind and state, with the most
+// reassignments since a round of any of them (`hops`). -> [{ lineage, asset, kind, state, n, atoms,
+// hops_most }].
 export function lineageSummary (places, name = (a) => a) {
   const by = new Map()
   for (const c of (places && places.coins) || []) {
     if (!c || ['spent', 'exited', 'lost'].includes(c.state)) continue
     const k = [c.lineage, c.asset, c.kind, c.state].join(' ')
-    const e = by.get(k) || { lineage: c.lineage || null, asset: name(c.asset), kind: c.kind, state: c.state, n: 0, atoms: 0n }
+    const e = by.get(k) || { lineage: c.lineage || null, asset: name(c.asset), kind: c.kind, state: c.state, n: 0, atoms: 0n, hops_most: null }
     e.n++; e.atoms += big(c.value)
+    if (Number.isFinite(c.hops) && (e.hops_most == null || c.hops > e.hops_most)) e.hops_most = c.hops
     by.set(k, e)
   }
   return [...by.values()].sort((x, y) => (y.atoms > x.atoms ? 1 : y.atoms < x.atoms ? -1 : 0)).map((e) => ({ ...e, atoms: String(e.atoms) }))
@@ -788,6 +813,37 @@ export function receivedDue (coins, seen, now, restMs, { all = false, first = fa
 // lineage the library does not name (an older library) counts as received, as before.
 export function receivedOnly (due, lineageOf) {
   return (due || []).filter((id) => ((lineageOf && lineageOf.get(id)) ?? 'received') === 'received')
+}
+
+// The coins of its own lineage (or a trade's with its owner's exit) of kind transfer or fill that the
+// maker refreshes all the same, each when the operator can take it whole now (within HEADROOM_SHARE
+// of its headroom in the asset, or the asset uncapped), so that it never waits given at the cap,
+// where the library counts it at its whole value (arca #889):
+//   - one larger than a working coin of its asset (`sizes`): the library pays a swap from a coin
+//     out of round first, and a swap's change on an operator without checkpoint exits is received
+//     (at risk whole) until refreshed, so a large coin of its own turns into a large coin at risk at
+//     the next trade (web #778, case a: 848,792 at risk after a trade of 20,000);
+//   - one `hops` reassignments deep or more, at most two short of the operator's `depth_limit`
+//     (`hopsOf`: leaf -> hops, coin_places): past the limit the operator co-signs no payment of it,
+//     and a swap's change is a reassignment deeper each time, which only a refresh starts again.
+// Not one given up within GIVE_UP_AGAIN_MS (`gaveUp`), nor a resting order's. -> leaf ids.
+export function ownToRefresh (coins, { lineageOf = null, hopsOf = null, sizes = null, depthLimit = null, headroom = null, gaveUp = null, now = Date.now() } = {}) {
+  const out = []
+  for (const c of coins || []) {
+    if (!c || c.state !== 'live' || (c.kind !== 'transfer' && c.kind !== 'fill') || isOrderCoin(c)) continue
+    const l = lineageOf && lineageOf.get(c.leaf_id)
+    if (l !== 'own' && l !== 'trade') continue
+    if (gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS) continue
+    const size = sizes && sizes.get(c.asset)
+    const hops = hopsOf && hopsOf.get(c.leaf_id)
+    const large = size != null && big(c.value) > big(size)
+    const deep = depthLimit != null && Number.isFinite(hops) && hops >= depthLimit - 2
+    if (!large && !deep) continue
+    const r = headroom && headroom.get(c.asset)
+    if (r != null && big(c.value) > (r * HEADROOM_SHARE.num) / HEADROOM_SHARE.den) continue
+    out.push(c.leaf_id)
+  }
+  return out
 }
 
 // The arguments of a library command. One ahead of the queue (`first`) answers a taker (a firm
@@ -1215,7 +1271,9 @@ async function main () {
   let keptLog = ''   // the coins kept out of a settle, as last logged
   let waitLog = ''   // the received coins waiting for the operator's headroom, as last logged
   let ownLog = ''    // the coins of its own lineage left out of a settle, as last logged
+  let ownRefLog = '' // the coins of its own lineage it refreshes all the same, as last logged
   const lineageOf = new Map()   // leaf -> its lineage (coin_places), or null when the library names none
+  const hopsOf = new Map()      // leaf -> its reassignments since a round (coin_places)
   const unoffered = new Map()   // asset -> why it is offered no more, as last logged
   // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
   // quotes are served from the last reading (`holdings`), which every pass of the upkeep and every
@@ -1269,7 +1327,7 @@ async function main () {
   // emptied until the reading answers (web #659, which on a busy library was tens of seconds).
   // The room a view leaves, and what that room takes in of each asset; the pass's bond answer
   // without a budget.
-  const roomOf = (h) => roomNow(budgetValue, h.coins, ratesNow)
+  const roomOf = (h) => roomNow(budgetValue, h.coins, ratesNow, lineageOf)
   const wantRoomOf = (h) => (budgetValue == null ? room : roomAtomsOf(roomOf(h), ratesNow))
   let firmReading = null
   const firmHoldings = async () => {
@@ -1374,9 +1432,21 @@ async function main () {
       // acceptance read the coins again since (each renews the holdings): the latest reading.
       if (changed) { try { await readHoldings() } catch (e) { log('holdings:', e.message) } }
       const coins = (holdings && holdings.coins) || []
+      // The lineage of each coin of kind transfer or fill it holds, read once from the library
+      // (coin_places) and kept, since a coin's lineage does not change: a live one of its own counts
+      // nothing against the room (heldOut), and only received ones are settled (receivedOnly).
+      const learnLineage = async (ids) => {
+        if (!ids.some((id) => !lineageOf.has(id))) return
+        // A coin the library names no lineage for (an older library) counts as received; a read that
+        // failed is asked again at the next pass.
+        let read = false
+        try { for (const c of ((await cmd('coin_places', {})) || {}).coins || []) { if (c && c.leaf_id && c.lineage) lineageOf.set(c.leaf_id, c.lineage); if (c && c.leaf_id && Number.isFinite(c.hops)) hopsOf.set(c.leaf_id, c.hops) } read = true } catch (e) { if (/no command/.test(String(e && e.message))) read = true; else log('coin_places:', e.message) }
+        if (read) for (const id of ids) if (!lineageOf.has(id)) lineageOf.set(id, null)
+      }
+      await learnLineage(coins.filter((c) => c && (c.kind === 'transfer' || c.kind === 'fill') && c.state === 'live').map((c) => c.leaf_id))
       // One line whenever an asset it gives stops being offered, saying why, and when it is again.
       {
-        const room = roomNow(budgetValue, coins, ratesNow), least = leastGives(cfg)
+        const room = roomNow(budgetValue, coins, ratesNow, lineageOf), least = leastGives(cfg)
         for (const a of givesOf()) {
           const why = whyUnoffered(coins, a, room, ratesNow, least)
           if (why !== (unoffered.get(a) ?? null)) { log(why ? 'offers no ' + tickerOf(a) + ' now: ' + why : 'offers ' + tickerOf(a) + ' again'); if (why) unoffered.set(a, why); else unoffered.delete(a) }
@@ -1390,23 +1460,25 @@ async function main () {
       const due = receivedDue(coins, seen, t, (cfg.settle_seconds ?? 600) * 1000, { all: outOfRoundFull || half, first: firstPass })
         .filter((id) => t - (gaveUp.get(id) ?? -Infinity) >= GIVE_UP_AGAIN_MS)
       firstPass = false
-      // Settled only when received (receivedOnly): the lineage of each coin due, read once from
-      // the library (coin_places) and kept, since a coin's lineage does not change.
-      if (due.some((id) => !lineageOf.has(id))) {
-        try { for (const c of ((await cmd('coin_places', {})) || {}).coins || []) if (c && c.leaf_id && c.lineage) lineageOf.set(c.leaf_id, c.lineage) } catch (e) { if (!/no command/.test(String(e && e.message))) log('coin_places:', e.message) }
-        for (const id of due) if (!lineageOf.has(id)) lineageOf.set(id, null)
-      }
+      // Settled only when received (receivedOnly).
+      await learnLineage(due)
       const ownDue = due.filter((id) => !receivedOnly([id], lineageOf).length)
       if (ownDue.length) { due.splice(0, due.length, ...receivedOnly(due, lineageOf)) }
       const ownText = ownDue.length ? String(ownDue.length) : ''
       if (ownText !== ownLog) { if (ownText) log('leaves', ownText, 'coin(s) of its own lineage out of its settle: made by itself, at risk to nobody'); ownLog = ownText }
-      if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) lineageOf.delete(id)
+      if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) { lineageOf.delete(id); hopsOf.delete(id) }
+      // Its own coins that are too large or too deep to keep, when the operator can take each now.
+      const own = ownToRefresh(coins, { lineageOf, hopsOf, sizes, depthLimit: lastInfo && Number.isFinite((lastInfo.server_info || lastInfo).depth_limit) ? (lastInfo.server_info || lastInfo).depth_limit : null,
+        headroom: lastInfo ? headroomOf(lastInfo) : null, gaveUp, now: t }).filter((id) => !due.includes(id))
+      const ownRefText = own.slice().sort().join()
+      if (ownRefText !== ownRefLog) { if (own.length) log('refreshes', own.length, 'coin(s) of its own lineage larger than a working coin, or near the depth limit, that the operator can take now'); ownRefLog = ownRefText }
+      due.push(...own)
       for (const [id, at] of gaveUp) if (t - at > 6 * GIVE_UP_AGAIN_MS) gaveUp.delete(id)
       // Never the last free coin of an asset it quotes (keepFree): of each asset, the coin its
       // largest quote is sized on stays out while nothing else free fills a working coin's trade,
       // and goes in a later turn; an asset's only free coin, due itself, waits until the maker must
       // settle, then goes whole.
-      const book = { roomValue: roomNow(budgetValue, coins, ratesNow), rates: ratesNow, sizes, least: leastGives(cfg), must: outOfRoundFull || half }
+      const book = { roomValue: roomNow(budgetValue, coins, ratesNow, lineageOf), rates: ratesNow, sizes, least: leastGives(cfg), must: outOfRoundFull || half }
       const plan = keepFree(coins, due, book)
       const gave = new Set()   // the leaves this pass gave up or spent: given, as the next pass reads them
       const asNow = () => coins.map((c) => (c && gave.has(c.leaf_id) ? { ...c, state: 'given' } : c))
@@ -1415,7 +1487,7 @@ async function main () {
       if (keptText !== keptLog) { if (keptText) log('keeps out of its round, so the asset stays offered (it settles in a later turn):', keptText); keptLog = keptText }
       // Each asset in its own participation, its new value cut into working coins (a refresh in
       // pieces), so settling never makes a coin larger than a working coin but a reserve of the rest.
-      const fit = withinHeadroom(settleGroups(coins, settling, sizes), coins, lastInfo ? headroomOf(lastInfo) : null)
+      const fit = withinHeadroom(settleGroups(coins, settling, sizes), coins, lastInfo ? headroomOf(lastInfo) : null, new Set(receivedOnly(settling, lineageOf)))
       const waitText = fit.waiting.map((w) => tickerOf(w.asset) + ' ' + w.leaves.length).sort().join(', ')
       if (waitText !== waitLog) { if (waitText) log('settles in parts the operator can take on now; waiting for its headroom:', waitText); waitLog = waitText }
       for (const g of fit.groups) {
@@ -1519,7 +1591,7 @@ async function main () {
           as_of: Math.floor(Date.now() / 1000), reading_at: holdings ? Math.floor(holdings.at / 1000) : null, changes_since_reading: changes.length,
           budget: ib ? { ppm: ib.ppm ?? null, own_ppm: ib.own_ppm ?? null, operator_ppm: ib.operator_ppm ?? null, value: ib.value ?? null, held_value: ib.held_value ?? null, room: ib.room ?? null } : null,
           room_now: view && budgetValue != null ? String(roomOf(view)) : null,
-          counts_against_room: view ? budgetHeld(view.coins, ratesNow, tickerOf) : null,
+          counts_against_room: view ? budgetHeld(view.coins, ratesNow, tickerOf, lineageOf) : null,
           library_out_of_round: ((bondNow && bondNow.out_of_round) || []).map((h) => ({ asset: tickerOf(h.asset), value: String(h.value) })),
           coins_by_lineage: lineage,
           held_back_at_cap: named(stuckPrev), operator_headroom: lastInfo ? named(headroomOf(lastInfo)) : null,
@@ -1630,7 +1702,7 @@ async function main () {
       log('refused', p, e.message)
       const full = OUT_OF_ROUND_FULL.test(e.message || '')
       if (full) {
-        log('holds out of round, by its last reading:', outOfRoundSummary(holdings && holdings.coins, tickerOf), '; asked to take', asked && asked.want_asset ? tickerOf(asked.want_asset) : '?')
+        log('holds out of round, by its last reading:', outOfRoundSummary(holdings && holdings.coins, tickerOf, lineageOf), '; asked to take', asked && asked.want_asset ? tickerOf(asked.want_asset) : '?')
         outOfRoundFull = true; readRoom(true).catch(() => {}); setImmediate(tick)
       }
       return send(res, 409, { error: e.message, kind: e.kind || null, ...(full ? { after_next_round: true } : {}) })

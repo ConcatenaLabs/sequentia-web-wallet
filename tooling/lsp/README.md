@@ -275,16 +275,26 @@ millions would then be held out of round whole and fill its budget, every pair a
 whose worth fits no room left quotes nothing and settles with the rest.) A cut into working coins
 follows the same rule: it waits while its coin is the only one that would quote.
 
-It settles only coins of received lineage (the library's `coin_places`: a payment or a trade's
-proceeds that a double-sign could take). A coin it made itself (the change of its own payment) is at
-risk to nobody while it is live, and given to a refresh a library counts it at risk whole while the
-refresh is pending, so it is never settled for being of kind transfer.
+Its room counts what it holds out of round as the library counts it (the library's `coin_places`
+lineage): a coin it made itself (the change of its own payment) is at risk to nobody while it is
+live and counts nothing, a received coin counts at its whole value, and any coin given to a round,
+offered or being sent counts at its whole value whatever its lineage, as the library counts it.
+
+It settles coins of received lineage (a payment, or a trade's proceeds and change on an operator
+without checkpoint exits, which a double-sign could take). A coin of its own is refreshed only when
+it is larger than a working coin (the library pays a swap from a coin out of round first, and that
+swap's change would then be received, and at risk whole) or two reassignments short of the
+operator's `depth_limit`, and then only when the operator can take it whole now: given to a refresh
+that waits at the cap, it would count whole against the room while it waits.
 
 Of an asset the operator caps, it settles in parts the operator can take on now: the smallest
 received coins first, as many as fit together in nine tenths of the operator's headroom for the
 asset (`in_flight_cap` less `in_flight`), the rest in a later pass ("settles in parts the operator
-can take on now; waiting for its headroom: …"). A refresh of more than the headroom is held back by
-the operator, withdrawn and asked again whole, and would never fit while the cap stays near full.
+can take on now; waiting for its headroom: …"). A received coin larger than that share goes alone
+when nothing smaller fits: it counts whole whether it is live or given, so holding it back never
+makes room. The operator runs it once what it opens fits, or when it brings back a node nothing
+else can; until then the library takes it back after two minutes and the maker gives it again ten
+minutes later.
 
 It takes in no asset whose refreshes the operator holds back. It reads the operator's
 `/v1/info` every minute, straight from the operator rather than through the library. An asset

@@ -6,7 +6,7 @@
 //   node --test tooling/lsp/leaf-maker-book-kept.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { knownCoins, madeBy, leavesOf, budgetHeld, roomNow, budgetedSpendable, headroomOf, intakeStopped, withinHeadroom, lineageSummary, receivedOnly, UNREAD } from './leaf-maker.mjs'
+import { knownCoins, madeBy, leavesOf, budgetHeld, roomNow, budgetedSpendable, headroomOf, intakeStopped, withinHeadroom, lineageSummary, receivedOnly, heldOut, ownToRefresh, UNREAD } from './leaf-maker.mjs'
 import { spendableFrom } from '../../user-trade.js'
 
 const G = 'aa'.repeat(32), U = 'bb'.repeat(32), S = 'cc'.repeat(32)
@@ -62,8 +62,8 @@ test('what fills the budget is summed by asset, kind and state', () => {
   const coins = [coin('r1', S, 5000, 'transfer'), coin('r2', S, 3000, 'transfer', 'given'), coin('b1', G, 700), coin('o1', G, 400, 'batch', 'offered')]
   const h = budgetHeld(coins, rates, (a) => (a === S ? 'SEQ' : 'GOLD'))
   assert.deepEqual(h.map((e) => [e.asset, e.kind, e.state, e.n, e.atoms]), [['SEQ', 'transfer', 'live', 1, '5000'], ['SEQ', 'transfer', 'given', 1, '3000'], ['GOLD', 'batch', 'offered', 1, '400']])
-  const l = lineageSummary({ coins: [{ lineage: 'received', asset: S, kind: 'transfer', state: 'live', value: '5' }, { lineage: 'received', asset: S, kind: 'transfer', state: 'live', value: '7' }, { lineage: 'own', asset: S, kind: 'batch', state: 'spent', value: '9' }] })
-  assert.deepEqual(l, [{ lineage: 'received', asset: S, kind: 'transfer', state: 'live', n: 2, atoms: '12' }])
+  const l = lineageSummary({ coins: [{ lineage: 'received', asset: S, kind: 'transfer', state: 'live', value: '5', hops: 2 }, { lineage: 'received', asset: S, kind: 'transfer', state: 'live', value: '7', hops: 4 }, { lineage: 'own', asset: S, kind: 'batch', state: 'spent', value: '9' }] })
+  assert.deepEqual(l, [{ lineage: 'received', asset: S, kind: 'transfer', state: 'live', n: 2, atoms: '12', hops_most: 4 }])
 })
 
 // The box at 04:13Z on 2026-11-13: the operator's SEQ in flight 4.147e15 of a cap of 4.396e15, and the
@@ -96,4 +96,48 @@ test('only coins of received lineage are settled: a coin the maker made itself i
   const lineage = new Map([['change', 'own'], ['paid', 'received'], ['swapped', 'trade']])
   assert.deepEqual(receivedOnly(['change', 'paid', 'swapped', 'unknown'], lineage), ['paid', 'unknown'])
   assert.deepEqual(receivedOnly(['x'], new Map([['x', null]])), ['x'], 'a library that names no lineage: settled as before')
+})
+
+test('a live coin of its own lineage counts nothing against the room, as the library counts it (web #778)', () => {
+  const rates = new Map([['M', 100_000_000n]])
+  const coins = [
+    { leaf_id: 'own', asset: 'M', value: '869520', kind: 'transfer', state: 'live' },
+    { leaf_id: 'rcv', asset: 'M', value: '30000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'trd', asset: 'M', value: '5000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'gvn', asset: 'M', value: '7000', kind: 'transfer', state: 'given' },
+  ]
+  const lineageOf = new Map([['own', 'own'], ['rcv', 'received'], ['trd', 'trade'], ['gvn', 'own']])
+  // Without lineage (an older library), every one counts, as before.
+  assert.equal(roomNow(1_000_000n, coins, rates), 88_480n)
+  // With it: the received coin, and the one given to a round whatever its lineage (the library
+  // counts a coin given to a participation at its whole value).
+  assert.equal(roomNow(1_000_000n, coins, rates, lineageOf), 963_000n)
+  assert.equal(heldOut(coins[0], lineageOf), false)
+  assert.equal(heldOut(coins[0], new Map([['own', null]])), true, 'a coin the library names no lineage for counts')
+  assert.deepEqual(budgetHeld(coins, rates, (a) => a, lineageOf).map((e) => [e.state, e.n, e.atoms]), [['live', 1, '30000'], ['given', 1, '7000']])
+})
+
+test('a received coin larger than the headroom goes alone when nothing smaller fits; never waits for good (web #778)', () => {
+  const coins = [{ leaf_id: 'big', asset: 'M', value: '120000' }, { leaf_id: 'own', asset: 'M', value: '150000' }]
+  const room = new Map([['M', 100_000n]])
+  const g = [{ asset: 'M', leaves: ['big'], piece: null }]
+  assert.deepEqual(withinHeadroom(g, coins, room).groups, [], 'without `alone`, as before: it waits')
+  assert.deepEqual(withinHeadroom(g, coins, room, new Set(['big'])).groups, [{ asset: 'M', leaves: ['big'], piece: null }])
+  assert.deepEqual(withinHeadroom([{ asset: 'M', leaves: ['own'], piece: null }], coins, room, new Set(['big'])).groups, [], 'only a coin named in `alone`')
+})
+
+test('its own coins too large or too deep to keep are refreshed, each only when the operator can take it whole (web #778)', () => {
+  const coins = [
+    { leaf_id: 'large', asset: 'M', value: '848792', kind: 'transfer', state: 'live' },
+    { leaf_id: 'small', asset: 'M', value: '20000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'deep', asset: 'M', value: '20000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'rcv', asset: 'M', value: '900000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'batch', asset: 'M', value: '900000', kind: 'batch', state: 'live' },
+  ]
+  const lineageOf = new Map([['large', 'own'], ['small', 'own'], ['deep', 'trade'], ['rcv', 'received'], ['batch', 'own']])
+  const hopsOf = new Map([['large', 1], ['small', 2], ['deep', 3]])
+  const o = { lineageOf, hopsOf, sizes: new Map([['M', 62500n]]), depthLimit: 5, now: 1_000_000 }
+  assert.deepEqual(ownToRefresh(coins, o), ['large', 'deep'])
+  assert.deepEqual(ownToRefresh(coins, { ...o, headroom: new Map([['M', 200_000n]]) }), ['deep'], 'the large one waits while the headroom cannot take it whole')
+  assert.deepEqual(ownToRefresh(coins, { ...o, gaveUp: new Map([['deep', 999_000]]) }), ['large'], 'not one given up within ten minutes')
 })
