@@ -193,13 +193,17 @@ export const MERGE_TO = 0.75
 // makes a coin larger: a swap pays from the coins the maker holds, its change is out of round until
 // its next round, and a coin many times the maker's trades put most of it out of round at every
 // trade (`merge_max_coins` in the configuration: `most` is that many `coin_size`).
-export function coinsToMerge (coins, asset, cap, exclude = [], small = null, most = null) {
+// With `working` (the asset's working-coin size, atoms), only crumbs are merged (coinShape): a
+// working coin or a reserve is what a cut makes and keeps, and merging it would hand the next cut
+// its coin (web wallet #783).
+export function coinsToMerge (coins, asset, cap, exclude = [], small = null, most = null, working = null) {
   const live = (coins || []).filter((c) => c && c.asset === asset && c.state === 'live' && !isOrderCoin(c))
   if (live.length <= cap) return []
   const b = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
   const full = live.length >= 2 * cap
   const limit = small != null && !full ? b(small) : null
-  let pool = live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id) && (c.kind === 'board' || limit == null || b(c.value) <= limit))
+  let pool = live.filter((c) => c.kind !== 'transfer' && !exclude.includes(c.leaf_id) && (c.kind === 'board' || limit == null || b(c.value) <= limit) &&
+    (working == null || coinShape(c.value, working) === 'crumb'))
     .sort((x, y) => ((x.kind === 'board') !== (y.kind === 'board') ? (x.kind === 'board' ? -1 : 1)
       : b(x.value) < b(y.value) ? -1 : b(x.value) > b(y.value) ? 1 : 0))
   if (most != null) {
@@ -458,27 +462,64 @@ export function workingSizes (bond, rates, given = 1) {
 // the maker would give the coin up and take it back every pass while the cap stays full.
 export const GIVE_UP_AGAIN_MS = 600_000
 
+// What a coin of `value` atoms is beside the asset's working-coin size `size` (web wallet #783),
+// the one rule the cut (shapeFor) and the merge (coinsToMerge) both read, so neither takes what the
+// other makes:
+// - 'crumb': under half a working coin. It pays no trade of a working coin's size; merges gather
+//   crumbs, and a cut never makes one.
+// - 'working': from half a working coin up to a coin that cannot be cut into one working coin and a
+//   rest of at least `floor` (cutFloor). A cut makes these and a merge never takes them.
+// - 'reserve': larger, a coin a cut can take: one working coin and a rest worth holding, once the
+//   refresh's fee is paid (at most MAX_REFRESH_FEE_PPM of the coin, the library's own bound).
+// The working size is worked out from the budget and the node's rates at every pass and moves by a
+// few atoms a minute; a coin cut at last minute's size stays a working coin until the size falls
+// by about a third or doubles, and only such a move reshapes the coins. -> 'crumb' | 'working' |
+// 'reserve'.
+export const MAX_REFRESH_FEE_PPM = 10_000n
+// What of a coin is left once a refresh's fee is paid, at the most the library pays without being
+// told a bound (DEFAULT_MAX_FEE_PPM in arca bark/src/arca/round.rs).
+const afterFee = (v) => big(v) - (big(v) * MAX_REFRESH_FEE_PPM + 999_999n) / 1_000_000n
+// The smallest rest a cut leaves beside its working coins: half a working coin (anything smaller
+// is a crumb, which the merges would take), and never less than the asset's smallest quote
+// (`least`, atoms: a coin under it quotes nothing).
+export function cutFloor (size, least = null) {
+  const half = (big(size) + 1n) / 2n
+  const l = least == null ? 0n : big(least)
+  return l > half ? l : half
+}
+export function coinShape (value, size, least = null) {
+  const v = big(value), s = big(size)
+  if (v * 2n < s) return 'crumb'
+  return afterFee(v) >= s + cutFloor(s, least) ? 'reserve' : 'working'
+}
+
 // The coin of `asset` to cut into working coins of `size` this pass: when fewer than WORKING_COUNT
-// of its live coins are working coins (at most `size`, at least half of it), its smallest larger
-// coin of a round or a board (never one received out of round, which settling takes into a round
-// already, nor a resting order's), cut into as many pieces as are missing and a reserve coin of the
-// rest. Read from the coins as they are now: none while a reserve coin of the asset is given up in
-// a round (a cut under way); a cut taken back leaves its coin live, and it is cut again once
-// `gaveUp` (leaf -> when the maker gave it up) is GIVE_UP_AGAIN_MS old. -> { leaf, piece, pieces }
-export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now()) {
+// of its live coins are working coins (coinShape), its smallest reserve coin of a round or a board
+// (never one received out of round, which settling takes into a round already, nor a resting
+// order's), cut into as many pieces as are missing and it holds, leaving a rest of at least
+// cutFloor (`least`, the asset's smallest quote) once the fee is paid: so a cut never leaves a
+// crumb, and is never made for a coin a few atoms over the size. Read from the coins as they are
+// now: none while a reserve coin of the asset is given up in a round (a cut under way); a cut taken
+// back leaves its coin live, and it is cut again once `gaveUp` (leaf -> when the maker gave it up)
+// is GIVE_UP_AGAIN_MS old. -> { leaf, piece, pieces }
+export function shapeFor (coins, asset, size, gaveUp = new Map(), now = Date.now(), least = null) {
   if (size == null || big(size) <= 0n) return null
+  const s = big(size)
   const mine = (coins || []).filter((c) => c && c.asset === asset && !isOrderCoin(c))
-  const reserveOf = (c) => (c.kind === 'batch' || c.kind === 'board') && big(c.value) > big(size)
+  const reserveOf = (c) => (c.kind === 'batch' || c.kind === 'board') && coinShape(c.value, s, least) === 'reserve'
   if (mine.some((c) => c.state === 'given' && reserveOf(c))) return null
   const live = mine.filter((c) => c.state === 'live')
-  // A working coin is at most `size` and at least half of it: crumbs a swap's change left do not
-  // count, since they pay no trade of a working coin's size (merges gather them).
-  const working = live.filter((c) => big(c.value) <= big(size) && big(c.value) * 2n >= big(size)).length
+  // Crumbs a swap's change left do not count: they pay no trade of a working coin's size (merges
+  // gather them).
+  const working = live.filter((c) => coinShape(c.value, s, least) === 'working').length
   if (working >= WORKING_COUNT) return null
   const reserve = live.filter((c) => reserveOf(c) && !(gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS))
     .sort((x, y) => (big(x.value) < big(y.value) ? -1 : big(x.value) > big(y.value) ? 1 : 0))
   if (!reserve.length) return null
-  return { leaf: reserve[0].leaf_id, piece: String(big(size)), pieces: WORKING_COUNT - working }
+  // As many pieces as are missing and as the coin holds beside a rest of at least the floor.
+  const holds = (afterFee(reserve[0].value) - cutFloor(s, least)) / s
+  const pieces = Math.min(WORKING_COUNT - working, Number(holds))
+  return { leaf: reserve[0].leaf_id, piece: String(s), pieces }
 }
 
 // The room left in the maker's instant budget now, in reference atoms, from its coins as they are
@@ -1508,7 +1549,7 @@ async function main () {
       // up 16 a participation), so every command it makes reads a store of bounded size.
       for (const [a, n] of counted) {
         if (n <= cap(a)) continue
-        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null), mergeMost(cfg, a, sizes.get(a) ?? null))
+        const merge = coinsToMerge(coins, a, cap(a), due, perAsset(cfg.coin_size, a, null), mergeMost(cfg, a, sizes.get(a) ?? null), sizes.get(a) ?? null)
         if (merge.length < 2) continue
         try {
           const q = await cmd('quote', { leaves: merge })
@@ -1521,7 +1562,7 @@ async function main () {
       // Working coins: an asset it gives with fewer than WORKING_COUNT coins of a working size has
       // its smallest reserve coin cut into them in the next round.
       for (const a of givesOf()) {
-        const s = shapeFor(coins, a, sizes.get(a) ?? null, gaveUp)
+        const s = shapeFor(coins, a, sizes.get(a) ?? null, gaveUp, Date.now(), perAsset(book.least, a, null))
         if (!s) continue
         // A cut gives its coin to a round too: not while nothing else free of the asset would
         // fill a working coin's trade (keepFree's rule); it is cut in a later turn.
