@@ -240,7 +240,7 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 | `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again. When the operator refuses the completion, nothing is co-signed and the offer is gone: `409 {error, swap, gone: true, code, whose, coin, offer?}`, where `whose` names the side whose coin the operator refused (`"taker"` when the wallet's own coin was spent elsewhere) and `offer` is a new firm offer of the same give, priced and checked as `/v1/firm` prices and checks one and made only when the live price asks no more than the gone offer did, shaped as `/v1/firm`'s answer; without it the taker asks for a new price. The same answer when asked again |
 | `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took; answers `{swap, state: "releasing"}` at once and cancels ahead of the maker's upkeep and of any later firm offer |
 | `GET` | `/v1/swap/<id>` | where a swap stands |
-| `GET` | `/v1/explain` | read-only: why its book is what it is. Its instant budget (`ppm`, `own_ppm`, `operator_ppm`, `value`, `held_value`, `room`) and the room left by what it knows now; what counts against the room by asset, kind and state, and whether that is the library's own mark (`at_risk_from`: a library that names `at_risk` in `coin_places`) or mirrored from each coin's lineage and state; the library's coins by how they were made (`coins_by_lineage`: `own`, `trade`, or `received`, which the library counts against the budget at its whole value; read through the library's queue, 20 s at most); what it holds back at the operator's cap and the operator's headroom per capped asset; the assets it takes in none of; its working-coin sizes; why each asset it gives is not offered; the coins kept out of a settle or waiting for headroom; why a cut waits (`cut_waits`); its open offers and its BTC desk's swaps by state |
+| `GET` | `/v1/explain` | read-only: why its book is what it is. Its instant budget (`ppm`, `own_ppm`, `operator_ppm`, `value`, `held_value`, `room`) and the room left by what it knows now; what counts against the room by asset, kind and state, and whether that is the library's own mark (`at_risk_from`: a library that names `at_risk` in `coin_places`) or mirrored from each coin's lineage and state, and how many coins each decided (`at_risk_decided`: `by_mark`, `by_mirror`); the library's coins by how they were made (`coins_by_lineage`: `own`, `trade`, or `received`, which the library counts against the budget at its whole value; read through the library's queue, 20 s at most); what it holds back at the operator's cap and the operator's headroom per capped asset; the assets it takes in none of; its working-coin sizes; why each asset it gives is not offered; the coins kept out of a settle or waiting for headroom; why a cut waits (`cut_waits`); its open offers and its BTC desk's swaps by state |
 
 It answers a taker within a second or two whatever its upkeep is doing. The leaf library runs one
 command at a time, and a command that has started runs to its end, so the upkeep asks for its
@@ -277,11 +277,18 @@ follows the same rule: it waits while its coin is the only one that would quote.
 
 Its room counts what it holds out of round as the library counts it (the library's `coin_places`
 lineage): a coin it made itself (the change of its own payment) is at risk to nobody while it is
-live and counts nothing, a received coin counts at its whole value, and any coin given to a round,
-offered or being sent counts at its whole value whatever its lineage, as the library counts it.
+live and counts nothing, and a received coin counts at its whole value. A library that marks each
+coin `at_risk` in `coin_places` is read for every coin whose state has not moved since the read;
+for coins a trade made since its last pass, and on an older library, the maker applies the
+library's rule itself (on an older library a coin given to a round, offered or being sent counts
+whole whatever its lineage). `/v1/explain` counts which coins were decided which way
+(`at_risk_decided`).
 
-It settles coins of received lineage (a payment, or a trade's proceeds and change on an operator
-without checkpoint exits, which a double-sign could take). A coin of its own is refreshed only when
+It settles coins of received lineage, of kind transfer or fill (a payment, a fill, or a trade's
+proceeds and change on an operator without checkpoint exits, which a double-sign could take); a
+resting order's own coin is left alone. Its own change is left to the library: a coin that alone
+keeps one of the operator's nodes from coming back is refreshed by the library's own sync, for no
+fee. A coin of its own is refreshed only when
 it is larger than a working coin (the library pays a swap from a coin out of round first, and that
 swap's change would then be received, and at risk whole) or two reassignments short of the
 operator's `depth_limit`, and then only when the operator can take it whole now: given to a refresh
