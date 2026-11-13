@@ -8,7 +8,8 @@
 //   cannot take, and never counted against the room, so every pair stays offered.
 // - Received coins against a small headroom: takers pay the maker an asset until what it holds of
 //   it out of round reaches the headroom. It takes in no more of that asset, every other pair stays
-//   offered, and what it received settles in parts within the headroom.
+//   offered, what it received settles in parts within the headroom, and a sale past its share of
+//   the headroom in one trade is refused and quoted at what is left of it.
 // - Depth: forty trades in a row on one pair, both ways. Every trade's change is a coin of the
 //   maker's own lineage, a reassignment deeper each time; the maker quotes throughout and the
 //   operator refuses none of its offers for depth.
@@ -145,17 +146,20 @@ async function wallet (H, st, lwk, dir, mnemonic, boards) {
 
 // A taker's own change, refreshed into a round: every sale pays from its change (the library pays
 // from a coin out of round first), a reassignment deeper each time, and past the operator's depth
-// limit it pays no more ("more are at the operator's depth limit"). -> when none is left.
+// limit it pays no more ("more are at the operator's depth limit"). -> once none is left out of
+// round and the round's new coins are the taker's to spend (none given any more).
 async function refreshChange (H, W) {
   await W.t('sync').catch(() => {})
   const ch = (await W.t('coins')).filter((c) => c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill')).map((c) => c.leaf_id)
   if (!ch.length) return
   try { const q = await W.t('quote', { leaves: ch }); await W.t('participate', { leaves: ch, shown: q.coins }) } catch (e) { console.log(at(), 'taker refresh:', e.message); return }
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 300; i++) {
     await H.pump().catch(() => {}); await W.t('sync').catch(() => {})
-    if (!(await W.t('coins')).some((c) => c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill'))) return
+    const cs = await W.t('coins')
+    if (!cs.some((c) => (c.state === 'live' && (c.kind === 'transfer' || c.kind === 'fill')) || c.state === 'given')) return
     await sleep(1000)
   }
+  console.log(at(), 'taker refresh: its round did not come back within 300 s')
 }
 
 // The maker's configuration, as startMaker writes it, with its budget share named.
@@ -371,14 +375,17 @@ test('c: received coins against a small headroom stop that asset\'s intake only,
     await explain(maker, 'capped two minutes')
     await headroom(H, st, M, null)
     for (let i = 0; i < 5; i++) { await sleep(60000); await explain(maker, 'cap lifted, minute ' + (i + 1)) }
-    // A received coin larger than 0.9 of the headroom: the cap set again at 100,000, the taker pays
-    // 120,000 M1 in one trade.
+    // A sale larger than the maker's share of the headroom in one trade: the cap set again at
+    // 100,000, the taker offers 120,000 M1 at once. The maker takes in no coin larger than nine
+    // tenths of the headroom: it refuses, and quotes what is left of that share.
     await makeInFlight(H, st, T, R, M)
     await headroom(H, st, M, 100000)
     await sleep(65000)
     await refreshChange(H, T)
     const big = await trade(maker, T.t, X, M, 120000, 5)
     console.log(at(), 'the maker buys 120,000 M1 in one trade:', JSON.stringify(big))
+    assert.ok(big.refused && big.refused.after_next_round, 'the sale past its share of the headroom is refused for after its next round')
+    assert.ok(!big.refused.quote || BigInt(big.refused.quote.max_give) <= 90_000n, 'quoted at most nine tenths of the headroom: ' + JSON.stringify(big.refused.quote))
     for (let i = 0; i < 4; i++) { await sleep(60000); await explain(maker, 'large coin, minute ' + (i + 1)) }
     const r = await book.stop()
     const lines = logLines(maker, 0, /settling|own lineage|waiting for its headroom|offers no|takes in|held back|keeps out/)
