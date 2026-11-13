@@ -916,14 +916,17 @@ export function capQuotes (quotes, room) {
   return { quotes: out, later }
 }
 
-// The received coins (`kind` transfer, live) to refresh now: each one rested `restMs` since `seen`
-// first noted it at `now`; every one when `all` (an offer was refused for what the maker holds out
-// of round); and on the `first` pass after a start, every one already held, whose rest is unknown
-// and was most likely spent already: a restart never makes them wait out a whole rest again.
+// The received coins (`kind` transfer or fill, live) to refresh now: each one rested `restMs` since
+// `seen` first noted it at `now`; every one when `all` (an offer was refused for what the maker
+// holds out of round); and on the `first` pass after a start, every one already held, whose rest is
+// unknown and was most likely spent already: a restart never makes them wait out a whole rest
+// again. A coin a fill made is out of round like a payment's (a fill coin of 4,843 USDX waited 17.7
+// hours on the testnet when only kind transfer was settled); a resting order's own coin is not
+// (isOrderCoin: refreshing it would cancel the order).
 export function receivedDue (coins, seen, now, restMs, { all = false, first = false } = {}) {
   const due = []
   for (const c of coins || []) {
-    if (!c || c.state !== 'live' || c.kind !== 'transfer') continue
+    if (!c || c.state !== 'live' || (c.kind !== 'transfer' && c.kind !== 'fill') || isOrderCoin(c)) continue
     if (!seen.has(c.leaf_id)) seen.set(c.leaf_id, first ? now - restMs - 1 : now)
     if (all || now - seen.get(c.leaf_id) > restMs) due.push(c.leaf_id)
   }

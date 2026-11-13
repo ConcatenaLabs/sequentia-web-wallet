@@ -33,6 +33,9 @@ test('received coins are refreshed after their rest, at once on a start, and all
   // An offer refused for what is held out of round: every received coin now.
   seen = new Map()
   assert.deepEqual(receivedDue(coins, seen, 1e9, rest, { all: true }), ['r1', 'r2'])
+  // A coin a fill made is settled like a payment's; a resting order's own coin never (web #780).
+  const fills = [...coins, { leaf_id: 'f1', kind: 'fill', state: 'live' }, { leaf_id: 'o1', kind: 'fill', state: 'live', template: 'order-sell' }]
+  assert.deepEqual(receivedDue(fills, new Map(), 1e9, rest, { all: true }), ['r1', 'r2', 'f1'])
   const why = 'refused: with this payment the wallet would hold out of round 106169746177161 atoms of the reference unit at this node\'s rates, more than the bond\'s 100000000000000: a double-sign would pay the operator more than its bond costs it; have coins refreshed in a round first'
   assert.ok(OUT_OF_ROUND_FULL.test(why))
   assert.ok(!OUT_OF_ROUND_FULL.test('refused: the wallet holds 0 of asset aa in live coins'))
