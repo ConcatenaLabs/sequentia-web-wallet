@@ -33,6 +33,9 @@
 //   POST /v1/release {swap}       -> { swap, state: 'releasing' }: cancels a firm offer nobody took; answered
 //                                  at once, the cancel ahead of the upkeep and of any later firm
 //   GET  /v1/swap/<id>            -> { swap, state }
+//   GET  /v1/explain              -> read-only: its budget and what fills it (by asset, kind, state and
+//                                  the library's lineage), held back at caps, headroom, working sizes,
+//                                  why each asset is not offered (README: "The live leaf maker")
 //
 // Run:  node tooling/lsp/leaf-maker.mjs --config maker.json
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --init   (draws the maker's phrase, once;
@@ -136,11 +139,30 @@ export const SYNC_ARGS = Object.freeze({ catch_up: false })
 // for one of the two at most, not for both. A library without the argument deposits in its sync,
 // and refuses the command (`no command`), which the upkeep passes over in silence.
 export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
-// The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS); each failure
-// logged, a library without the deposits command passed over in silence.
+// The library runs one command at a time, and a command that has started runs to its end: a firm
+// offer queued ahead of everything still waits out a sync already under way (14 s on the box,
+// 13.8 s for the firm offer behind it, web #659), or a `deposits` (17 s). So the upkeep asks for
+// both in slices of SLICE_MS (`budget_ms`): a library that takes the argument stops at the first
+// point past it where the command can stop (between its steps, and between the items of a long
+// step), answers `more: true`, and goes on where it stopped at the next call. Each slice is a
+// command of its own in the queue, and a taker's firm offer or acceptance, queued first, runs
+// between two of them: it waits for one slice at most. A library without the argument runs the
+// whole command in one call and answers without `more`, as before. SLICES_MOST bounds one pass.
+export const SLICE_MS = 1000
+export const SLICES_MOST = 600
+export async function sliced (cmd, name, args) {
+  let r = null
+  for (let i = 0; i < SLICES_MOST; i++) {
+    r = await cmd(name, { ...(args || {}), budget_ms: SLICE_MS })
+    if (!(r && typeof r === 'object' && !Array.isArray(r) && r.more === true)) break
+  }
+  return r
+}
+// The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS), each in
+// slices; each failure logged, a library without the deposits command passed over in silence.
 export async function upkeepSync (cmd, log) {
-  try { await cmd('sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
-  try { await cmd('deposits') } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
+  try { await sliced(cmd, 'sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
+  try { await sliced(cmd, 'deposits', {}) } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
 }
 export const HELD_COINS = Object.freeze({ held: true, brief: true })
 
@@ -207,7 +229,8 @@ export function mergeMost (cfg, asset, working = null) {
 // What the maker holds out of round when an offer is refused for it, from its last reading of
 // its coins: the coins received out of round (kind transfer or fill) in each state that counts,
 // by state and asset (`name` gives an asset's ticker). The refusal's figure adds the payment asked.
-const HELD_OUT = ['live', 'offered', 'sending', 'given', 'forfeited']
+// `unread`: a coin the maker knows its last trade made, not read from its library yet (knownCoins).
+const HELD_OUT = ['live', 'offered', 'sending', 'given', 'forfeited', 'unread']
 export function outOfRoundSummary (coins, name = (a) => a) {
   const by = new Map()
   for (const c of coins || []) {
@@ -241,6 +264,57 @@ export function cappedAssets (info) {
     if (used >= cap) out.add(a.asset)
   }
   return out
+}
+// What the operator can still take on of each asset it caps (`in_flight_cap` − `in_flight` in its
+// info, never below 0): a refresh of more than that waits until earlier ones come back. -> Map.
+export function headroomOf (info) {
+  const out = new Map()
+  const si = (info && info.server_info) || info || {}
+  for (const a of si.assets || []) {
+    if (!a || typeof a.asset !== 'string' || a.in_flight_cap == null) continue
+    try { const h = BigInt(a.in_flight_cap) - BigInt(a.in_flight ?? 0); out.set(a.asset, h > 0n ? h : 0n) } catch {}
+  }
+  return out
+}
+// The share of an asset's headroom the maker counts on: other wallets refresh too.
+export const HEADROOM_SHARE = { num: 9n, den: 10n }
+// The assets the maker takes in no more of (sequentia-testnet-ops, web #659): those the operator
+// caps now (cappedAssets), and those of which it already holds out of round (`outOfRound`, the
+// library's bond answer: [{ asset, value }]) as much as the operator can take on in its rounds now
+// (its headroom, at HEADROOM_SHARE): what it took in past that could not be refreshed at all, and
+// would count against its budget, and so stop every pair, until the cap frees. -> Set.
+export function intakeStopped (info, outOfRound) {
+  const out = cappedAssets(info)
+  const room = headroomOf(info)
+  for (const h of outOfRound || []) {
+    const r = h && room.get(h.asset)
+    if (r == null) continue
+    if (big(h.value) > 0n && big(h.value) >= (r * HEADROOM_SHARE.num) / HEADROOM_SHARE.den) out.add(h.asset)
+  }
+  return out
+}
+// The due coins of each settle group that the operator can take in this round: of an asset it caps,
+// the smallest first, as many as fit together in its headroom (at HEADROOM_SHARE). A participation
+// of more than the headroom is held back by the operator and withdrawn, then asked again whole ten
+// minutes later, and never fits while the cap stays near full: the coins stayed out of round, and
+// counted against the budget, for good (web #659: 5.33 million SEQ on the BTC desk). The rest wait
+// for a later pass. `coins` gives the values. -> { groups (settleGroups' shape), waiting: [{ asset,
+// leaves }] }.
+export function withinHeadroom (groups, coins, headroom) {
+  const of = new Map((coins || []).map((c) => [c && c.leaf_id, c]))
+  const out = [], waiting = []
+  for (const g of groups || []) {
+    const r = headroom && headroom.get(g.asset)
+    if (r == null) { out.push(g); continue }
+    const most = (r * HEADROOM_SHARE.num) / HEADROOM_SHARE.den
+    const sorted = g.leaves.slice().sort((x, y) => { const a = big(of.get(x) && of.get(x).value), b = big(of.get(y) && of.get(y).value); return a < b ? -1 : a > b ? 1 : 0 })
+    const take = [], rest = []
+    let sum = 0n
+    for (const id of sorted) { const v = big(of.get(id) && of.get(id).value); if (sum + v <= most) { take.push(id); sum += v } else rest.push(id) }
+    if (take.length) out.push({ ...g, leaves: take })
+    if (rest.length) waiting.push({ asset: g.asset, leaves: rest })
+  }
+  return { groups: out, waiting }
 }
 // The quotes and the pairs named for after the next round, less those that want a capped asset.
 export function withoutCapped (quotes, later, capped) {
@@ -409,6 +483,89 @@ export function roomNow (budgetValue, coins, rates) {
   return room < 0n ? 0n : room
 }
 
+// The coins as the maker knows them now (web #659): its last reading of the library's coins
+// (`coins`, read from `from`, ms), with what it did itself since then (`changes`), so that its book
+// is never emptied while it reads its coins again or reshapes them: it offers from what it holds,
+// less what its trades took and what it gave to a round, and the next reading corrects it. Each
+// change is { at (ms), kind, id, leaves, made }:
+//   offered: a firm offer of its own holds `leaves` (the library's swap_offer names them);
+//   given:   `leaves` given to a round (a settle, a merge, a cut);
+//   done:    `leaves` spent by a trade or a payment, which made `made` ([{ asset, value }]: the
+//            change and what it was paid, out of round); each is a coin of kind transfer in state
+//            `unread`, which the room counts (it is out of round) and nothing quotes (it is not
+//            live) until a reading names it.
+// A change older than the reading is in it already and is passed over; one whose coins the reading
+// no longer holds as live or offered (the reading came after it) changes nothing. So the view never
+// offers a coin the maker knows it gave or spent, and never counts a trade twice against its room.
+export const UNREAD = 'unread'
+export function knownCoins (coins, changes, from = 0) {
+  const out = new Map((coins || []).filter(Boolean).map((c) => [c.leaf_id, c]))
+  for (const ch of changes || []) {
+    if (!ch || ch.at < from) continue
+    const here = (ch.leaves || []).filter((id) => { const c = out.get(id); return c && (c.state === 'live' || c.state === 'offered') })
+    if (ch.kind === 'offered') { for (const id of here) out.set(id, { ...out.get(id), state: 'offered' }); continue }
+    if (ch.kind === 'given') { for (const id of here) if (out.get(id).state === 'live') out.set(id, { ...out.get(id), state: 'given' }); continue }
+    if (ch.kind === 'done' && here.length) {
+      for (const id of here) out.delete(id)
+      ;(ch.made || []).forEach((m, i) => { if (m && big(m.value) > 0n) out.set(`unread:${ch.id}:${i}`, { leaf_id: `unread:${ch.id}:${i}`, asset: m.asset, value: String(m.value), kind: 'transfer', state: UNREAD }) })
+    }
+  }
+  return [...out.values()]
+}
+// What a trade made for the maker, from the library's swap_offer answer (its `details.outputs`: what
+// it is paid, and its change), else what the offer asked: [{ asset, value }].
+export function madeBy (offer, wantAsset, want) {
+  const outs = offer && offer.details && Array.isArray(offer.details.outputs) ? offer.details.outputs : null
+  const made = outs ? outs.map((o) => ({ asset: o && o.asset, value: String((o && o.value) ?? 0) })).filter((o) => typeof o.asset === 'string' && big(o.value) > 0n) : []
+  return made.length ? made : [{ asset: wantAsset, value: String(want) }]
+}
+// The coins a library answer names as spent or held by it (swap_offer's `details.inputs`,
+// lightning_pay's `inputs`): leaf ids.
+export function leavesOf (answer) {
+  const xs = (answer && answer.details && answer.details.inputs) || (answer && answer.inputs) || []
+  return (Array.isArray(xs) ? xs : []).map((x) => (typeof x === 'string' ? x : x && x.leaf_id)).filter((x) => typeof x === 'string')
+}
+
+// What the maker's budget holds, for its explain answer: the coins that count against its room
+// (held out of round, and coins of a round its open offers hold), by asset, kind and state, each
+// with its count, atoms, worth (reference atoms at `rates`, null where unpriced) and largest coin;
+// `name` gives an asset's ticker. -> [{ asset, kind, state, n, atoms, worth, largest }], the
+// largest worth first.
+export function budgetHeld (coins, rates, name = (a) => a) {
+  const by = new Map()
+  for (const c of coins || []) {
+    if (!c) continue
+    const out = (c.kind === 'transfer' || c.kind === 'fill') && HELD_OUT.includes(c.state)
+    const offered = c.state === 'offered' && c.kind !== 'transfer' && c.kind !== 'fill'
+    if (!out && !offered) continue
+    const k = c.asset + ' ' + c.kind + ' ' + c.state
+    const e = by.get(k) || { asset: name(c.asset), kind: c.kind, state: c.state, n: 0, atoms: 0n, worth: 0n, priced: true, largest: 0n }
+    const r = rates && rates.get(c.asset)
+    e.n++; e.atoms += big(c.value); if (big(c.value) > e.largest) e.largest = big(c.value)
+    if (r == null || big(r) <= 0n) e.priced = false; else e.worth += worthOf(c.value, r)
+    by.set(k, e)
+  }
+  return [...by.values()].sort((x, y) => (y.worth > x.worth ? 1 : y.worth < x.worth ? -1 : 0))
+    .map((e) => ({ asset: e.asset, kind: e.kind, state: e.state, n: e.n, atoms: String(e.atoms), worth: e.priced ? String(e.worth) : null, largest: String(e.largest) }))
+}
+
+// The library's coin_places answer summed for the explain answer: the coins it holds by how they
+// were made (`lineage`: own, a round's, a board's or its own change; trade, paid by a trade whose
+// checkpoints all have their owner's exit; received, a payment or a trade without it, which is what
+// the library counts against the budget at its whole value), asset, kind and state. -> [{ lineage,
+// asset, kind, state, n, atoms }].
+export function lineageSummary (places, name = (a) => a) {
+  const by = new Map()
+  for (const c of (places && places.coins) || []) {
+    if (!c || ['spent', 'exited', 'lost'].includes(c.state)) continue
+    const k = [c.lineage, c.asset, c.kind, c.state].join(' ')
+    const e = by.get(k) || { lineage: c.lineage || null, asset: name(c.asset), kind: c.kind, state: c.state, n: 0, atoms: 0n }
+    e.n++; e.atoms += big(c.value)
+    by.set(k, e)
+  }
+  return [...by.values()].sort((x, y) => (y.atoms > x.atoms ? 1 : y.atoms < x.atoms ? -1 : 0)).map((e) => ({ ...e, atoms: String(e.atoms) }))
+}
+
 // The room left (`roomValue`, reference atoms) in atoms of each asset `rates` prices, rounded down:
 // what a quote or a firm offer may take in of the asset it wants, from the same reading as the coin
 // it gives from (roomNow). Null without a budget.
@@ -504,12 +661,13 @@ export function bookAfter (coins, asset, giving, { roomValue = null, rates = nul
 // quote is sized on stays out and the rest go now. That coin goes in a later turn: once no coin of
 // the asset is in a round, it goes when what is free beside it quotes (the asset then stays in the
 // book at that smaller quote). An asset whose only free coin is itself due, with none in a round,
-// cannot both keep it and settle it: that coin is split first, the maker paying itself half of it
-// out of round, and the next passes give one half to the round and keep the other until the first
-// is back. So the asset stays in the book at half its quote rather than none for the minute (or
-// three) its round takes. A coin smaller than twice `least` is kept whole instead: halved, neither
-// half would quote. -> { give: [leaf ids], keep: [{ leaf, asset }], split: [{ leaf, asset, value,
-// pay }] } (`pay`, atoms, what the maker pays itself from `leaf`).
+// cannot both keep it and settle it: it is kept while the maker can wait (`must` false), and goes
+// whole when it must settle (`must`: past half its budget, or an offer refused for what it holds
+// out of round), the asset then out of the book for the minute its round takes. It is never split
+// by a payment to itself out of round: the library pays such a payment from whatever coin it picks,
+// a reserve of millions among them, whose change is then held out of round at its whole value and
+// fills the budget, which empties every pair (web #659). -> { give: [leaf ids], keep: [{ leaf,
+// asset }] }.
 export function keepFree (coins, due, opts = {}) {
   const of = new Map((coins || []).map((c) => [c && c.leaf_id, c]))
   const byAsset = new Map()
@@ -519,7 +677,7 @@ export function keepFree (coins, due, opts = {}) {
     if (!byAsset.has(a)) byAsset.set(a, [])
     byAsset.get(a).push(id)
   }
-  const give = [], keep = [], split = []
+  const give = [], keep = []
   for (const [asset, ids] of byAsset) {
     const b = bookAfter(coins, asset, ids, opts)
     if (b.need === 0n || b.best >= b.target) { give.push(...ids); continue }
@@ -534,12 +692,10 @@ export function keepFree (coins, due, opts = {}) {
     const inRound = (coins || []).some((c) => c && c.asset === asset && c.state === 'given' && !isOrderCoin(c))
     if (others.length || inRound) { give.push(...others); keep.push({ leaf: top.leaf_id, asset }); continue }
     // Alone, beside smaller free coins: it goes, and the asset stays in the book at the smaller.
-    if (b.best > 0n) { give.push(top.leaf_id); continue }
-    const pay = big(top.value) / 2n
-    if (pay >= big(perAsset(opts.least, asset, '1'))) split.push({ leaf: top.leaf_id, asset, value: String(top.value), pay: String(pay) })
-    else keep.push({ leaf: top.leaf_id, asset })
+    if (b.best > 0n || opts.must) { give.push(top.leaf_id); continue }
+    keep.push({ leaf: top.leaf_id, asset })
   }
-  return { give, keep, split }
+  return { give, keep }
 }
 
 // Why the maker offers none of `asset` now, in words for its log, or null when it offers some:
@@ -1016,15 +1172,21 @@ async function main () {
       const r = await fetch(String(op.server).replace(/\/+$/, '') + '/v1/info', { signal: AbortSignal.timeout(15000) })
       if (!r.ok) throw new Error('the operator answered HTTP ' + r.status)
       lastInfo = await r.json()
-      const next = cappedAssets(lastInfo)
+      const next = intakeStopped(lastInfo, bondNow && bondNow.out_of_round)
       const was = [...capped].sort().join(), now = [...next].sort().join()
-      if (was !== now) log(next.size ? 'takes in none of ' + [...next].map(tickerOf).join(', ') + ': the operator refreshes no more of it now' : 'takes in every asset again')
+      if (was !== now) log(next.size ? 'takes in none of ' + [...next].map(tickerOf).join(', ') + ': the operator refreshes no more of it now, or no more than it holds out of round already' : 'takes in every asset again')
       capped = next
     } catch (e) { log('caps:', e.message) }
   }
   await readCaps()
   setInterval(readCaps, 60000)
-  const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
+  // A lock the desk paid: the coins it spent leave the book at once, and what is out of round of it
+  // (the payment held for the wallet, and the change) counts against the room until it is read.
+  const onPaid = (sw, paid) => {
+    noteChange('done', leavesOf(paid), [{ asset: sw.give_asset, value: String(sw.give) }, ...(paid && paid.change ? [{ asset: sw.give_asset, value: String(paid.change) }] : [])], 'btc:' + sw.swap)
+    readHoldings(true).catch(() => {})
+  }
+  const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onPaid, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
   if (desk) setInterval(() => { desk.stepNow().catch((e) => log('btc:', e.message)) }, Number(cfg.btc.step_seconds ?? 2) * 1000)
   if (desk) log('the BTC desk is open')
 
@@ -1040,6 +1202,7 @@ async function main () {
   let busy = false
   let lastBoardRefusal = null
   let keptLog = ''   // the coins kept out of a settle, as last logged
+  let waitLog = ''   // the received coins waiting for the operator's headroom, as last logged
   const unoffered = new Map()   // asset -> why it is offered no more, as last logged
   // What the maker can pay now. `first` asks the library ahead of its queue (a firm offer); the
   // quotes are served from the last reading (`holdings`), which every pass of the upkeep and every
@@ -1048,11 +1211,28 @@ async function main () {
   // no quote at all.
   // Each reading keeps the coins it was made from (`holdings.coins`): the upkeep's pass reads them
   // once and counts, settles and merges from that reading.
+  // What it did itself since a reading (knownCoins): its offers, trades and gives, each noted at
+  // once, so the book between two readings is what it knows it holds, never empty for the reading.
+  let changes = []
+  const noteChange = (kind, leaves, made = [], id = null) => { if (leaves && leaves.length) changes.push({ at: Date.now(), kind, leaves: [...leaves], made, id }) }
+  const forgetChange = (id) => { changes = changes.filter((c) => c.id !== id) }
   const readHoldings = async (first = false) => {
+    const from = Date.now()
     const coins = (await cmd('coins', HELD_COINS, first)) || []
-    const sp = spendableFrom(coins, await cmd('plans', {}, first).catch(() => ({ plans: [] })))
-    holdings = { sp, coins, at: Date.now() }
+    const plans = await cmd('plans', {}, first).catch(() => ({ plans: [] }))
+    const sp = spendableFrom(coins, plans)
+    // Only a reading begun later than the one in hand replaces it (two may run at once).
+    if (!holdings || from >= holdings.from) {
+      holdings = { sp, coins, plans, at: Date.now(), from }
+      changes = changes.filter((c) => c.at >= from)
+    }
     return holdings
+  }
+  // A reading with what the maker did since: { sp, coins }.
+  const known = (h) => {
+    if (!h) return h
+    const coins = knownCoins(h.coins, changes, h.from ?? h.at)
+    return { ...h, coins, sp: spendableFrom(coins, h.plans) }
   }
   const spendable = async (first = false) => (await readHoldings(first)).sp
   let holdings = null
@@ -1071,16 +1251,16 @@ async function main () {
   const HOLDINGS_FOR_FIRM_MS = 5 * 60 * 1000
   // What a firm offer is sized on: the upkeep's last reading while it is fresh, else a reading
   // asked ahead of the queue.
-  // An offer or a completion since the last reading changed the coins (an offered coin, a swap's
-  // change and what came in), so the reading is stale until the next one: a firm offer then reads
-  // the coins first, and quotes give nothing meanwhile.
-  // The room a reading leaves, and what that room takes in of each asset: none while the reading
-  // is stale, and the pass's bond answer without a budget.
-  const roomOf = (h) => (h.stale && budgetValue != null ? 0n : roomNow(budgetValue, h.coins, ratesNow))
+  // An offer or a completion since the last reading changed the coins: the book is the reading with
+  // what the maker knows it did since (known), read again at once ahead of the queue, never a book
+  // emptied until the reading answers (web #659, which on a busy library was tens of seconds).
+  // The room a view leaves, and what that room takes in of each asset; the pass's bond answer
+  // without a budget.
+  const roomOf = (h) => roomNow(budgetValue, h.coins, ratesNow)
   const wantRoomOf = (h) => (budgetValue == null ? room : roomAtomsOf(roomOf(h), ratesNow))
   let firmReading = null
   const firmHoldings = async () => {
-    const h = holdings && !holdings.stale && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true)
+    const h = known(holdings && Date.now() - holdings.at < HOLDINGS_FOR_FIRM_MS ? holdings : await readHoldings(true))
     firmReading = h
     return budgetedSpendable(h.sp, h.coins, roomOf(h), ratesNow)
   }
@@ -1172,7 +1352,7 @@ async function main () {
           const f = firm.get(id)
           if (!f) continue
           if (states.get(id) !== 'open') { firm.delete(id); continue }
-          if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }) } catch (e) { log('cancel', id, e.message) } firm.delete(id); changed = true }
+          if (t > f.expires) { try { await cmd('swap_cancel', { swap: id }); forgetChange(id) } catch (e) { log('cancel', id, e.message) } firm.delete(id); changed = true }
         }
       }
       // Coins it received, once rested, are refreshed in the operator's next round; all of them at
@@ -1200,25 +1380,21 @@ async function main () {
       for (const [id, at] of gaveUp) if (t - at > 6 * GIVE_UP_AGAIN_MS) gaveUp.delete(id)
       // Never the last free coin of an asset it quotes (keepFree): of each asset, the coin its
       // largest quote is sized on stays out while nothing else free fills a working coin's trade,
-      // and goes in a later turn; an asset's only free coin, due itself, is split first.
-      const book = { roomValue: roomNow(budgetValue, coins, ratesNow), rates: ratesNow, sizes, least: leastGives(cfg) }
+      // and goes in a later turn; an asset's only free coin, due itself, waits until the maker must
+      // settle, then goes whole.
+      const book = { roomValue: roomNow(budgetValue, coins, ratesNow), rates: ratesNow, sizes, least: leastGives(cfg), must: outOfRoundFull || half }
       const plan = keepFree(coins, due, book)
       const gave = new Set()   // the leaves this pass gave up or spent: given, as the next pass reads them
       const asNow = () => coins.map((c) => (c && gave.has(c.leaf_id) ? { ...c, state: 'given' } : c))
       const settling = [...plan.give]
-      for (const s of plan.split) {
-        try {
-          const req = await cmd('receive', { asset: s.asset, amount: s.pay })
-          await cmd('send', { request: req.request, amount: s.pay })
-          seen.delete(s.leaf); gave.add(s.leaf)
-          log('splitting its only free coin of', tickerOf(s.asset), `(${s.value}), due to settle: it pays itself ${s.pay} of it, so one half settles and the other stays offered`)
-        } catch (e) { log('split:', e.message, '; the coin settles whole'); settling.push(s.leaf) }
-      }
       const keptText = plan.keep.map((k) => tickerOf(k.asset) + ' ' + k.leaf.slice(0, 12)).sort().join(', ')
       if (keptText !== keptLog) { if (keptText) log('keeps out of its round, so the asset stays offered (it settles in a later turn):', keptText); keptLog = keptText }
       // Each asset in its own participation, its new value cut into working coins (a refresh in
       // pieces), so settling never makes a coin larger than a working coin but a reserve of the rest.
-      for (const g of settleGroups(coins, settling, sizes)) {
+      const fit = withinHeadroom(settleGroups(coins, settling, sizes), coins, lastInfo ? headroomOf(lastInfo) : null)
+      const waitText = fit.waiting.map((w) => tickerOf(w.asset) + ' ' + w.leaves.length).sort().join(', ')
+      if (waitText !== waitLog) { if (waitText) log('settles in parts the operator can take on now; waiting for its headroom:', waitText); waitLog = waitText }
+      for (const g of fit.groups) {
         try {
           const args = { leaves: g.leaves, ...(g.piece ? { piece: g.piece } : {}) }
           const q = await cmd('quote', args)
@@ -1227,6 +1403,7 @@ async function main () {
             (outOfRoundFull ? ' (offers refused for what it holds out of round)' : half ? ' (past half its budget out of round)' : '') + ':',
             JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
           for (const d of g.leaves) { seen.delete(d); gaveUp.set(d, t); gave.add(d) }
+          noteChange('given', g.leaves)
         } catch (e) { log('settle:', e.message) }
       }
       if (due.length) outOfRoundFull = false
@@ -1241,6 +1418,7 @@ async function main () {
           const q = await cmd('quote', { leaves: merge })
           const r = await cmd('participate', { leaves: merge, shown: q.coins })
           for (const d of merge) gave.add(d)
+          noteChange('given', merge)
           log('merging', merge.length, 'coins of', a.slice(0, 8), `(${n} held, at most ${cap(a)}):`, JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
         } catch (e) { log('merge:', e.message) }
       }
@@ -1260,7 +1438,7 @@ async function main () {
           // coin back whole, and the next pass would cut it again, so nothing is given up.
           if (!q || !q.pieces) { if (!noPieces) log('working coins: this leaf library does not cut a refresh into pieces; coins are left as they are'); noPieces = true; continue }
           const r = await cmd('participate', { ...args, shown: q.coins })
-          gaveUp.set(s.leaf, Date.now()); gave.add(s.leaf)
+          gaveUp.set(s.leaf, Date.now()); gave.add(s.leaf); noteChange('given', [s.leaf])
           log('cutting a coin of', tickerOf(a), 'into', s.pieces, 'working coins of', s.piece, 'and a reserve:', JSON.stringify((r.participations || []).map((p) => p.state || p.error)))
         } catch (e) { log('working coins:', e.message) }
       }
@@ -1293,14 +1471,39 @@ async function main () {
         if (!holdings) { if (!firstReading) firstReading = spendable(true).catch(() => {}).finally(() => { firstReading = null }); return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [] }) }
         // What it can give without passing its budget once a swap's coin is out of round (D94):
         // a price it shows is one it would confirm.
-        const sp = budgetedSpendable(holdings.sp, holdings.coins, roomOf(holdings), ratesNow)
+        const view = known(holdings)
+        const sp = budgetedSpendable(view.sp, view.coins, roomOf(view), ratesNow)
         // In-tree quotes are cut to the room left in its instant budget; a pair cut to nothing is
         // named in `after_next_round`.
         // And none that wants an asset the operator refreshes no more of now.
-        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), wantRoomOf(holdings))
+        const cut = capQuotes(quotesFrom(cfg.pairs, sp, new Map(), cfg.fee_margin || 0, liveRates(), cfg), wantRoomOf(view))
         const kept = withoutCapped([...cut.quotes, ...(desk ? desk.quotes(sp, cfg.fee_margin || 0) : [])], cut.later, capped)
         return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: Math.floor(holdings.at / 1000),
           quotes: kept.quotes, ...(kept.later.length ? { after_next_round: kept.later } : {}) })
+      }
+      if (req.method === 'GET' && p === '/v1/explain') {
+        // Why the book is what it is, read-only: the budget and what fills it, by how each coin was
+        // made, what the maker takes in no more of and why each asset it gives is not offered. The
+        // coins' lineage is the library's (coin_places), asked in the queue and waited on 20 s at
+        // most; the rest is the maker's last reading.
+        const view = holdings ? known(holdings) : null
+        let lineage = null
+        try { lineage = lineageSummary(await Promise.race([cmd('coin_places', {}), new Promise((_, no) => setTimeout(() => no(new Error('the library is busy: not read within 20 s')), 20000))]), tickerOf) } catch (e) { lineage = { error: e.message } }
+        const named = (m) => Object.fromEntries([...(m || [])].map(([a, v]) => [tickerOf(a), String(v)]))
+        const ib = bondNow && bondNow.instant_budget
+        return send(res, 200, {
+          as_of: Math.floor(Date.now() / 1000), reading_at: holdings ? Math.floor(holdings.at / 1000) : null, changes_since_reading: changes.length,
+          budget: ib ? { ppm: ib.ppm ?? null, own_ppm: ib.own_ppm ?? null, operator_ppm: ib.operator_ppm ?? null, value: ib.value ?? null, held_value: ib.held_value ?? null, room: ib.room ?? null } : null,
+          room_now: view && budgetValue != null ? String(roomOf(view)) : null,
+          counts_against_room: view ? budgetHeld(view.coins, ratesNow, tickerOf) : null,
+          library_out_of_round: ((bondNow && bondNow.out_of_round) || []).map((h) => ({ asset: tickerOf(h.asset), value: String(h.value) })),
+          coins_by_lineage: lineage,
+          held_back_at_cap: named(stuckPrev), operator_headroom: lastInfo ? named(headroomOf(lastInfo)) : null,
+          takes_in_none_of: [...capped].map(tickerOf), working_coin_sizes: named(sizes),
+          not_offered: Object.fromEntries([...unoffered].map(([a, why]) => [tickerOf(a), why])),
+          kept_out_of_settle: keptLog || null, waiting_for_headroom: waitLog || null, open_offers: firm.size,
+          btc_swaps: desk ? Object.entries([...desk.swaps.values()].reduce((m, x) => { m[x.state] = (m[x.state] || 0) + 1; return m }, {})).reduce((o, [k, v]) => ({ ...o, [k]: v }), {}) : null,
+        })
       }
       if (req.method === 'GET' && p.startsWith('/v1/swap/')) { const id = p.slice('/v1/swap/'.length); return send(res, 200, { swap: id, state: await swapState(id, true) }) }
       if (desk && req.method === 'GET' && p.startsWith('/v1/btc/')) { const r = await desk.route('GET', p, {}); if (r) return send(res, r[0], r[1]) }
@@ -1322,10 +1525,10 @@ async function main () {
         const { pair, give, want } = t
         const o = await cmd('swap_offer', { give_asset: pair.give, give: String(give), want_asset: pair.want, want: String(want) }, true)
         const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
-        firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires })
-        // The coins read again at once, ahead of the queue (a quote's 90 s hold lets only such
-        // commands run): quotes give nothing only until it answers (#659).
-        if (holdings) holdings.stale = true
+        firm.set(o.swap, { give_asset: pair.give, give, want_asset: pair.want, want, expires, leaves: leavesOf(o), made: madeBy(o, pair.want, want) })
+        // Its coins held for the offer from now on, and read again at once, ahead of the queue (a
+        // quote's 90 s hold lets only such commands run), which corrects the book (#659).
+        noteChange('offered', leavesOf(o), [], o.swap)
         readHoldings(true).catch(() => {})
         log('firm', o.swap.slice(0, 12), 'gives', String(give), pair.give.slice(0, 8), 'for', String(want), pair.want.slice(0, 8),
           'in', Date.now() - asked, 'ms')
@@ -1348,6 +1551,7 @@ async function main () {
           if (e.kind !== 'swap_refused') await cmd('swap_cancel', { swap: String(b.swap) }, true).catch((x) => log('cancel', String(b.swap).slice(0, 12), x.message))
           const f = firm.get(b.swap)
           firm.delete(b.swap)
+          forgetChange(b.swap)
           let again = null
           if (f) {
             try {
@@ -1359,12 +1563,12 @@ async function main () {
               else {
                 const o = await cmd('swap_offer', { give_asset: f.give_asset, give: String(f.give), want_asset: f.want_asset, want: String(want) }, true)
                 const expires = Date.now() + (cfg.offer_ttl_seconds ?? 300) * 1000
-                firm.set(o.swap, { ...f, want, expires })
+                firm.set(o.swap, { ...f, want, expires, leaves: leavesOf(o), made: madeBy(o, f.want_asset, want) })
+                noteChange('offered', leavesOf(o), [], o.swap)
                 again = { swap: o.swap, offer: o.offer, give: String(f.give), want: String(want), expires_at: Math.floor(expires / 1000) }
               }
             } catch (x) { log('no new offer for', String(b.swap).slice(0, 12) + ':', x.message) }
           }
-          if (holdings) holdings.stale = true
           readHoldings(true).catch(() => {})
           const body = goneAnswer(b.swap, e, again)
           gone.set(b.swap, { body, at: Date.now() })
@@ -1376,9 +1580,9 @@ async function main () {
         const f = firm.get(b.swap)
         if (f) reportTrade({ rail: 'leaf-maker', id: b.swap, give_asset: f.give_asset, give: f.give, want_asset: f.want_asset, want: f.want })
         firm.delete(b.swap)
-        // The coins read again at once, ahead of the queue (a quote's 90 s hold lets only such
-        // commands run): quotes give nothing only until it answers (#659).
-        if (holdings) holdings.stale = true
+        // The offer's coins spent, its change and what it was paid out of round and not read yet;
+        // read again at once, ahead of the queue, which corrects the book (#659).
+        if (f) noteChange('done', f.leaves, f.made, b.swap)
         readHoldings(true).catch(() => {})
         log('done', String(r.swap).slice(0, 12))
         return send(res, 200, { swap: b.swap, state: 'done' })
@@ -1392,6 +1596,7 @@ async function main () {
         // quoted again at once rather than at the upkeep's next pass.
         firm.delete(b.swap)
         cmd('swap_cancel', { swap: String(b.swap || '') }, true)
+          .then((x) => { forgetChange(String(b.swap || '')); return x })
           .then(() => readHoldings(true).catch(() => {}))
           .catch((e) => { if (!/not open|no such|unknown/i.test(e.message)) log('release', e.message) })
         return send(res, 200, { swap: b.swap, state: 'releasing' })

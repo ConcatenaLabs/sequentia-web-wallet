@@ -27,12 +27,12 @@ test('the upkeep syncs without its deposits, which run next as their own command
 })
 
 test('the upkeep runs its deposits after its sync, even when the sync fails', async () => {
-  const { upkeepSync, UPKEEP_SYNC_ARGS } = await import('./leaf-maker.mjs')
+  const { upkeepSync, UPKEEP_SYNC_ARGS, SLICE_MS } = await import('./leaf-maker.mjs')
   for (const syncFails of [false, true]) {
     const asked = [], logged = []
     const cmd = async (name, args) => { asked.push([name, args]); if (name === 'sync' && syncFails) throw new Error('the node') }
     await upkeepSync(cmd, (...a) => logged.push(a.join(' ')))
-    assert.deepEqual(asked, [['sync', UPKEEP_SYNC_ARGS], ['deposits', undefined]])
+    assert.deepEqual(asked, [['sync', { ...UPKEEP_SYNC_ARGS, budget_ms: SLICE_MS }], ['deposits', { budget_ms: SLICE_MS }]])
     assert.deepEqual(logged, syncFails ? ['sync: the node'] : [])
   }
   // An older library without the command: nothing logged.

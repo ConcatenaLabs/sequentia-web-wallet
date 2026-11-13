@@ -806,3 +806,23 @@ test('a pair offered a moment ago that nobody offers now is asked again, not cal
   t += 10_000
   assert.equal((await eng.quote({ payAsset: X, receiveAsset: Y, amount: '400000' })).ok, true)
 })
+
+test('a pair the maker offered while another was asked is asked again too, not called not offered (#659)', async () => {
+  const s = standIn()
+  let quiet = false
+  // The maker gives Y for X, and X for Y.
+  const both = [{ give_asset: Y, want_asset: X, rate_num: '4', rate_den: '3', max_give: '1000000', min_give: '10000' },
+    { give_asset: X, want_asset: Y, rate_num: '3', rate_den: '4', max_give: '1000000', min_give: '10000' }]
+  const fetchJson = async (url, init) => (url.endsWith('/v1/quotes') ? { quotes: quiet ? [] : both } : s.fetchJson(url, init))
+  const ad = () => ({ pairs: { chains: { g: { pairs: [{ pay: X, receive: Y, sources: ['leaf-maker'] }, { pay: Y, receive: X, sources: ['leaf-maker'] }] } } }, genesis: 'g' })
+  let t = 1_000_000
+  const eng = createEngine({ leaves: s.lib, fetchJson, makers: () => ['http://m'], admitted: ad, store: s.store, now: () => t })
+  // The wallet asked one way (X for Y) while the maker offered both ways.
+  const first = await eng.estimate({ payAsset: X, receiveAsset: Y, pay: '400000' })
+  assert.equal(first.ok, true, JSON.stringify(first))
+  quiet = true
+  t += 20_000
+  // The other way, never asked before, nobody offers it this moment: it was offered 20 s ago.
+  const e = await eng.estimate({ payAsset: Y, receiveAsset: X, pay: '400000' })
+  assert.deepEqual([e.ok, e.why, e.again], [false, 'not-offered', true])
+})

@@ -185,11 +185,12 @@ test('after a firm offer or an acceptance the coins are read again ahead of the 
   const { readFileSync } = await import('node:fs')
   const { nextJob } = await import('../leaf-node.mjs')
   const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
-  // Every place that makes the reading stale (a firm offer, an acceptance, a refused one's new
-  // offer) reads the coins again with `first`.
-  const stale = src.split('holdings.stale = true').slice(1).map((s) => s.split('\n').slice(0, 3).join('\n'))
-  assert.equal(stale.length, 3)
-  for (const s of stale) assert.match(s, /readHoldings\(true\)/)
+  // Every place that changes the coins (a firm offer, an acceptance, a payment of the BTC desk)
+  // notes the change in the book at once (knownCoins) and reads the coins again with `first`; no
+  // place empties the book meanwhile.
+  assert.ok(!/\.stale\b/.test(src), 'no reading is made stale, which emptied the book')
+  for (const kind of ["noteChange('offered', leavesOf(o), [], o.swap)\n        readHoldings(true)", "noteChange('done', f.leaves, f.made, b.swap)\n        readHoldings(true)"]) assert.ok(src.includes(kind), kind)
+  assert.match(src, /noteChange\('done', leavesOf\(paid\)[^\n]*\n\s+readHoldings\(true\)/)
   // A `first` command runs during a quote's 90 s hold; a queued one does not.
   const t = 1000, hold = t + 90_000
   assert.equal(nextJob([{ id: 1, name: 'coins', first: true }], t + 1000, hold), 0)

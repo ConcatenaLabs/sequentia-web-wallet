@@ -241,20 +241,36 @@ export function nextJob (queue, now, holdUntil = 0) {
 //   const lib = await leafLibraryThread(storeRoot)
 //   const w = await lib.open(mnemonic, nodePassword)   // or create(mnemonic, config)
 //   await w.command('sync')
-export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = null, slowMs = 5000 } = {}) {
+export async function leafLibraryThread (storeRoot, opts = {}) {
   const { Worker: W } = await import('node:worker_threads')
   const worker = new W(new URL(import.meta.url), { workerData: { leafThread: storeRoot } })
-  const queue = []
   const waiting = new Map()
+  worker.on('message', (m) => { const r = waiting.get(m.id); waiting.delete(m.id); if (r) r(m) })
+  worker.on('error', (e) => { for (const r of waiting.values()) r({ ok: false, error: { message: e.message } }); waiting.clear() })
+  const q = libraryQueue((job) => new Promise((r) => { waiting.set(job.id, r); worker.postMessage({ id: job.id, op: job.op, args: job.args }) }), opts)
+  const wallet = { command: (name, args = {}, o = {}) => q.call('command', { name, args }, !!o.first) }
+  return {
+    hold: q.hold,
+    exists: (mnemonic) => q.call('exists', { mnemonic }),
+    open: async (mnemonic, nodePassword) => { await q.call('open', { mnemonic, nodePassword }); return wallet },
+    create: async (mnemonic, config) => { await q.call('create', { mnemonic, config }); return wallet },
+    stop: () => worker.terminate(),
+  }
+}
+
+// The queue of leafLibraryThread, apart from its thread: `run(job)` runs one job ({ id, op, args })
+// and answers { ok, value } or { ok: false, error }, with `detail` for onSlow; the queue runs one
+// job at a time, in nextJob's order. -> { call(op, args, first), hold(ms) }.
+export function libraryQueue (run, { onSlow = null, onTime = null, slowMs = 5000 } = {}) {
+  const queue = []
   let next = 1, busy = false, holdUntil = 0, timer = null
-  worker.on('message', (m) => {
-    const p = waiting.get(m.id); waiting.delete(m.id); busy = false
-    if (p && onSlow && Date.now() - p.started > slowMs) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
-    if (p && onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued) } catch {} }
-    if (p) { if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) } }
+  function done (p, m) {
+    busy = false
+    if (onSlow && Date.now() - p.started > slowMs) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
+    if (onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued) } catch {} }
+    if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) }
     pump()
-  })
-  worker.on('error', (e) => { for (const p of waiting.values()) p.no(e); waiting.clear() })
+  }
   function pump () {
     if (busy || !queue.length) return
     const i = nextJob(queue, Date.now(), holdUntil)
@@ -262,18 +278,10 @@ export async function leafLibraryThread (storeRoot, { onSlow = null, onTime = nu
     const job = queue.splice(i, 1)[0]
     job.started = Date.now()
     busy = true
-    waiting.set(job.id, job)
-    worker.postMessage({ id: job.id, op: job.op, args: job.args })
+    Promise.resolve().then(() => run(job)).then((m) => done(job, m), (e) => done(job, { ok: false, error: { message: (e && e.message) || String(e) } }))
   }
   const call = (op, args, first = false) => new Promise((ok, no) => { queue.push({ id: next++, op, args, first, ok, no, queued: Date.now() }); pump() })
-  const wallet = { command: (name, args = {}, opts = {}) => call('command', { name, args }, !!opts.first) }
-  return {
-    hold: (ms) => { holdUntil = Math.max(holdUntil, Date.now() + ms) },
-    exists: (mnemonic) => call('exists', { mnemonic }),
-    open: async (mnemonic, nodePassword) => { await call('open', { mnemonic, nodePassword }); return wallet },
-    create: async (mnemonic, config) => { await call('create', { mnemonic, config }); return wallet },
-    stop: () => worker.terminate(),
-  }
+  return { call, hold: (ms) => { holdUntil = Math.max(holdUntil, Date.now() + ms) } }
 }
 
 // The thread's side of leafLibraryThread.

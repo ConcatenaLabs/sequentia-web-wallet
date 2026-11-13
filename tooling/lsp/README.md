@@ -240,6 +240,21 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 | `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again. When the operator refuses the completion, nothing is co-signed and the offer is gone: `409 {error, swap, gone: true, code, whose, coin, offer?}`, where `whose` names the side whose coin the operator refused (`"taker"` when the wallet's own coin was spent elsewhere) and `offer` is a new firm offer of the same give, priced and checked as `/v1/firm` prices and checks one and made only when the live price asks no more than the gone offer did, shaped as `/v1/firm`'s answer; without it the taker asks for a new price. The same answer when asked again |
 | `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took; answers `{swap, state: "releasing"}` at once and cancels ahead of the maker's upkeep and of any later firm offer |
 | `GET` | `/v1/swap/<id>` | where a swap stands |
+| `GET` | `/v1/explain` | read-only: why its book is what it is. Its instant budget (`ppm`, `own_ppm`, `operator_ppm`, `value`, `held_value`, `room`) and the room left by what it knows now; what counts against the room by asset, kind and state; the library's coins by how they were made (`coins_by_lineage`: `own`, `trade`, or `received`, which the library counts against the budget at its whole value; read through the library's queue, 20 s at most); what it holds back at the operator's cap and the operator's headroom per capped asset; the assets it takes in none of; its working-coin sizes; why each asset it gives is not offered; the coins kept out of a settle or waiting for headroom; its open offers and its BTC desk's swaps by state |
+
+It answers a taker within a second or two whatever its upkeep is doing. The leaf library runs one
+command at a time, and a command that has started runs to its end, so the upkeep asks for its
+`sync` and its `deposits` in slices of a second (`budget_ms`; a library that takes it stops at the
+first point past it where the command can stop, answers `more: true` and goes on at the next call).
+A firm offer or an acceptance goes ahead of every queued command and runs between two slices. A
+library without slices runs each in one call, and a firm offer then waits for it.
+
+Between two readings of its coins, its book is what it knows it holds: the last reading, less the
+coins its open offers hold, the coins its trades and its BTC desk's payments spent and the coins it
+gave to a round since; what a trade made it (its change, what it was paid) counts against its budget
+at once and is quoted once a reading names it. Every offer, completion and payment reads the coins
+again ahead of the queue, which corrects the book. Its book never empties because it is reading
+its coins again or reshaping them, and a price it cannot honour is refused at the firm offer.
 
 Every coin it receives is refreshed in the operator's next round once it has rested
 `settle_seconds`, so what it trades settles as the takers' coins do; and every one at once when
@@ -252,16 +267,25 @@ smaller of its largest quote (a swap pays from one coin: its largest free coin w
 the room left in its budget) and a working coin. Otherwise the coin its largest quote is sized on
 stays out and the rest goes now; that coin goes in a later turn, once nothing of the asset is in a
 round and something else free of it quotes. An asset whose only free coin is itself due cannot
-both keep it and settle it, so the maker splits it first: it pays itself half of the coin out of
-round, then settles one half and keeps the other until the first is back. A taker meets half the
-quote for that minute, never none. (A coin smaller than twice the smallest quote of its asset is
-kept whole; a coin whose worth fits no room left quotes nothing and settles with the rest.) A cut into
-working coins follows the same rule: it waits while its coin is the only one that would quote.
+both keep it and settle it: the maker keeps it while it can wait, and settles it whole when it must
+(past half its budget, or an offer refused for what it holds out of round); the asset is then out
+of its book for the minute its round takes. It never pays itself out of round to reshape a coin:
+the library pays such a payment from whatever coin it picks, and the change of a reserve of
+millions would then be held out of round whole and fill its budget, every pair at once. (A coin
+whose worth fits no room left quotes nothing and settles with the rest.) A cut into working coins
+follows the same rule: it waits while its coin is the only one that would quote.
+
+Of an asset the operator caps, it settles in parts the operator can take on now: the smallest
+received coins first, as many as fit together in nine tenths of the operator's headroom for the
+asset (`in_flight_cap` less `in_flight`), the rest in a later pass ("settles in parts the operator
+can take on now; waiting for its headroom: …"). A refresh of more than the headroom is held back by
+the operator, withdrawn and asked again whole, and would never fit while the cap stays near full.
 
 It takes in no asset whose refreshes the operator holds back. It reads the operator's
 `/v1/info` every minute, straight from the operator rather than through the library. An asset
-showing `in_flight` at or past its `in_flight_cap` gets no quote and no firm offer (in-tree or
-at the BTC desk) that wants it, and such an offer is refused with a sentence that names the
+showing `in_flight` at or past its `in_flight_cap`, or of which the maker already holds out of round
+as much as nine tenths of the operator's headroom for it, gets no quote and no firm offer (in-tree
+or at the BTC desk) that wants it, and such an offer is refused with a sentence that names the
 asset. A coin of that asset received out of round would stay out of round until the cap frees,
 and it would count against the maker's instant budget the whole time. The maker keeps giving that
 asset and trading every other pair, and takes it in again once the operator's info shows it under
@@ -307,8 +331,7 @@ the working coins and never a reserve coin.
   library's refresh in pieces, `quote` and `participate` with `piece` and `pieces`), one cut at a
   time, read from the coins' state. A coin the library takes back from a refresh that waited at
   the operator is given up again ten minutes later, whether it was being cut or settled. Working
-  coins are never cut by a payment to itself out of round (only an asset's lone due coin is split
-  so, above). A library that does not cut a
+  coins are never cut by a payment to itself out of round. A library that does not cut a
   refresh into pieces is detected from its quote, and nothing is given up.
 - **Settling and merging.** What it received is settled into working coins and a reserve of the
   rest. No merge makes a coin larger than a working coin, and no board is larger than one.

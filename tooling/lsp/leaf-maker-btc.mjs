@@ -92,7 +92,10 @@ export function checkBtcConfig (b) {
 
 // `lookup(hash)`, when given: the operator's own answer on the payment into its tree under `hash`
 // (its `lightning_receive_status`), read without the library, for `stepNow`.
-export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup }) {
+// `onPaid(swap, answer)`, when given: told of each payment the desk made from the maker's coins (the
+// library's lightning_pay answer, which names the coins it spent and its change), so the maker's
+// book leaves those coins out before it reads its coins again.
+export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPaid = null }) {
   const b = checkBtcConfig(cfg.btc)
   if (!b) return null
   const lockingMs = Number(b.locking_seconds ?? LOCKING_SECONDS) * 1000
@@ -245,7 +248,11 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup }) {
       try { q = await cmd('lightning_pay_quote', { invoice: String(body.invoice || ''), asset: s.give_asset }, true) } catch (e) { back(); throw e }
       if (q.payment_hash !== s.hash || q.asset !== s.give_asset || q.amount !== s.give) { back(); return [409, { error: 'the invoice is not for this swap' }] }
       if (!mine()) return [200, { swap: s.swap, state: s.state }]
-      try { await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true); break } catch (e) {
+      try {
+        const paid = await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true)
+        if (onPaid) { try { onPaid(s, paid) } catch {} }
+        break
+      } catch (e) {
         if (i < 2 && /changed since it was shown/.test(String(e.message)) && mine()) continue
         back(); throw e
       }
