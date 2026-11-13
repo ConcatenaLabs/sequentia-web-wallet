@@ -77,7 +77,7 @@
 import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries, sizeEntry, chooseCandidate, admittedSources, SLOW_SOURCES, SLOW_PREMIUM_BPS } from './tooling/lsp/single-step-book.mjs'
 import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
-import { btcTrades, coinsBefore } from './user-trade-btc.js'
+import { btcTrades } from './user-trade-btc.js'
 import { DEFAULT_WORDS, vestingShort, nextFinalBy } from './default-arca.js'
 import { restrictedQuote, restrictedConfirm, restrictedAdvance } from './restricted-engine.js'
 import { composedQuote, composedAdvance, openComposedIds, claimOnce } from './restricted-composed.js'
@@ -569,8 +569,11 @@ export const STORAGE_FULL = 'The trade was not made: this browser has no room le
 // left and the whole is at most `bytes` long as JSON. An unfinished record is never dropped, nor any
 // record of a composed trade still open (its steps, ended or not: restricted-composed.js).
 // An ended record keeps no list of what the wallet held before it (`before`, `beforeParts`): only an
-// unfinished trade looks for what it brought among them, and a store written with them (a wallet's
-// whole coin history in every record, #774) is made lean at its next write.
+// unfinished trade looks for what it brought among them. An unfinished one keeps the whole list,
+// spent coins included, since the library can make a spent or lost coin live again (a plan's step
+// that did not happen, a round final again). Each list is the wallet's whole coin history, so with
+// them every ended record ran to about 110 KB on a wallet of weeks and the store's bound kept only
+// the last eight trades (#776); a store written so is made lean at its next write.
 export function boundedRecords (list0, keep, bytes) {
   const kept = openComposedIds(list0)
   const ended = (r) => ENDED_STATES.includes(r && r.state) && !kept.has(r.id)
@@ -1820,7 +1823,7 @@ export function createEngine (deps) {
         // come back at that coin's next refresh): a return then says so.
         rec.selfPayCost = String(big(choice.quote.spends ?? choice.quote.gives) - big(choice.quote.gives))
         rec.settleTargets = choice.settle && choice.settle.change ? [{ asset: choice.settle.change.asset, value: choice.settle.change.value, fee: choice.settle.change.fee }] : []
-        rec.before = coinsBefore(await run('coins'))
+        rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
         put(rec)
         let r
         try { r = await run('take', { order: rec.orderJson, amount: choice.quote.filled, max_fee_ppm: MAX_FEE_PPM, shown: choice.quote }) } catch (e) {
@@ -1841,7 +1844,7 @@ export function createEngine (deps) {
         rec.settleTargets = !choice.settle ? [] : [{ asset: choice.settle.received.asset, value: choice.settle.received.value, fee: choice.settle.received.fee },
           ...(choice.settle.change ? [{ asset: choice.settle.change.asset, value: choice.settle.change.value, fee: choice.settle.change.fee }] : [])]
         // The coins the wallet holds now, so the coin the swap brings is the one it did not hold.
-        rec.before = coinsBefore(await run('coins'))
+        rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
         put(rec)
         const a = await run('swap_accept', { offer: choice.offer.offer, shown: choice.terms })
         // The coin it gives was made first by a payment of the wallet to itself (`pays.shapes`):
@@ -1876,7 +1879,7 @@ export function createEngine (deps) {
         rec.receiveAsset = choice.quote.gets.asset
         rec.settleTargets = [{ asset: choice.settle.received.asset, value: choice.settle.received.value, fee: choice.settle.received.fee },
           ...(choice.settle.change ? [{ asset: choice.settle.change.asset, value: choice.settle.change.value, fee: choice.settle.change.fee }] : [])]
-        rec.before = coinsBefore(await run('coins'))
+        rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
         put(rec)
         const args = { order: rec.order, amount: choice.quote.filled }
         let r

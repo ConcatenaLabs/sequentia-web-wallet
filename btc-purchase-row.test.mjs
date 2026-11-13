@@ -295,7 +295,7 @@ test('a page reloaded after the desk never paid in: the row says it came back, n
   clearTimeout(ui.state.timer)
 })
 
-test('a wallet with a long coin history keeps every trade: a record holds only the coins not gone, never the whole history (#774)', { timeout: 60_000 }, async () => {
+test('a wallet with a long coin history keeps every trade: only an unfinished trade holds the coin list, an ended one none (#776)', { timeout: 60_000 }, async () => {
   closeCards()
   const s = standIn()
   // Weeks of trades: 3,000 coins spent, exited or lost, and two live ones.
@@ -317,15 +317,15 @@ test('a wallet with a long coin history keeps every trade: a record holds only t
   }
   const recs = eng.records()
   assert.equal(recs.length, 12, 'every trade kept')
-  assert.ok(befores.every((b) => b.length <= 2 + 12), 'an open trade keeps only the coins held: ' + befores.map((b) => b.length))
-  assert.ok(!befores.some((b) => b.includes('0'.repeat(64))), 'no coin gone for good')
+  // Spent coins included: the library can make a spent or lost coin live again.
+  assert.ok(befores.every((b) => b.length >= 3002 && b.includes('0'.repeat(64))), 'an unfinished trade keeps every coin: ' + befores.map((b) => b.length))
   assert.ok(recs.every((r) => !r.before), 'an ended one keeps none')
   assert.equal(rows(root).length, 8, 'the Trade tab lists the newest eight ended trades')
-  assert.ok(s.store.getItem('swk.usertrade.default').length < 100_000, 'the store stays small')
+  assert.ok(s.store.getItem('swk.usertrade.default').length < 100_000, 'the store stays small once its trades end')
   clearTimeout(ui.state.timer)
 })
 
-test('a store written with the whole coin history in every record is made lean at its next write, and keeps every trade from then (#774)', { timeout: 30_000 }, async () => {
+test('a store written with the whole coin history in every record is made lean at its next write, and keeps every trade from then (#776)', { timeout: 30_000 }, async () => {
   closeCards()
   const s = standIn()
   s.ready = true

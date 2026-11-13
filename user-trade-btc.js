@@ -33,15 +33,6 @@
 
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
-// The coins a trade's record keeps as those the wallet held before it (`rec.before`), to know the
-// coin the trade brings or leaves as the one not among them: only those not gone for good. A coin
-// spent, exited or lost never comes back, so leaving it out changes no answer; kept, a wallet with
-// weeks of trades wrote its whole coin history into every record, and the store's bound
-// (KEEP_BYTES) then kept only the last few trades (#774).
-const GONE = ['spent', 'exited', 'lost']
-export function coinsBefore (coins) {
-  return (coins || []).filter((c) => c && !GONE.includes(c.state)).map((c) => c.leaf_id)
-}
 const ceilDiv = (a, b) => (a + b - 1n) / b
 
 // What the wallet allows the Bitcoin leg: a Bitcoin block at half its pace (the clocks meet only
@@ -171,7 +162,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       const e = new Error('the price is no longer held'); e.code = 'lapsed'; throw e
     }
     rec.maker = choice.entry.maker; rec.swap = o.swap; rec.dir = choice.dir
-    rec.before = coinsBefore(await run('coins'))
+    rec.before = ((await run('coins')) || []).map((c) => c.leaf_id)
     if (choice.dir === 'sell') {
       rec.hash = choice.btc.invoice.payment_hash; rec.invoiceX = o.invoice; rec.sats = String(choice.receive)
       rec.spends = choice.btc.quote.spends; rec.amount = choice.btc.quote.amount
