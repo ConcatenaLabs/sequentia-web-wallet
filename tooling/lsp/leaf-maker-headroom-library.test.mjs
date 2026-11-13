@@ -416,7 +416,7 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
     // The operator's suggested share (0.5): working coins large against the harness operator's
     // fixed margins, which the library bounds at 1% of a coin, as the testnet's coins are.
     makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5' })
-    const maker = await launchMaker(H, join(dir, 'maker'), port, [[M, 500000], [X, 500000]])
+    const maker = await launchMaker(H, join(dir, 'maker'), port, [[M, 1500000], [X, 1500000]])
     makerOf = maker
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
@@ -434,8 +434,16 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
       // operator's fixed margins (about 700 to 1,000 atoms), as a testnet trade is against its own:
       // the library pays a swap from a received coin first, and refuses one whose margins pass its
       // 1% bound (arca #869).
-      const r = await trade(maker, T.t, g, w, 110000 + (i % 5) * 10000, 10)
-      results.push({ i, pair: name(g) + '->' + name(w), ...r })
+      // A taker trades within the quote: at most its max_give, waiting while it is under the least.
+      let size = 110000 + (i % 5) * 10000
+      for (let k = 0; k < 30; k++) {
+        const q = ((await getJson(maker.url + '/v1/quotes')).quotes || []).filter((x) => x.give_asset === g && x.want_asset === w)
+        const most = q.reduce((m, x) => (BigInt(x.max_give) > m ? BigInt(x.max_give) : m), 0n)
+        if (most >= 10000n) { if (BigInt(size) > most) size = Number(most); break }
+        await sleep(2000)
+      }
+      const r = await trade(maker, T.t, g, w, size, 10)
+      results.push({ i, pair: name(g) + '->' + name(w), size, ...r })
       // The taker's change, refreshed every other trade: this case is the maker's depth, not its.
       if (i % 2 === 1) await refreshChange(H, T)
       if (i % 5 === 4) {
@@ -449,7 +457,7 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
     const depth = logLines(maker, 0, /depth/i)
     const lines = logLines(maker, 0, /settling|own lineage|merging|cutting|offers no|depth/)
     console.log('the maker said:\n' + lines.map((l) => l.slice(0, 300)).join('\n'))
-    console.log('trades:', JSON.stringify(results.map((x) => [x.i, x.pair, x.ms, x.refusals, x.refused ? JSON.stringify(x.refused).slice(0, 200) : 'ok'])))
+    console.log('trades:', JSON.stringify(results.map((x) => [x.i, x.pair, x.size, x.ms, x.refusals, x.refused ? JSON.stringify(x.refused).slice(0, 200) : 'ok'])))
     console.log('the book:', JSON.stringify(r))
     assert.equal(results.filter((x) => x.refused).length, 0, 'every trade was offered and completed')
     assert.equal(depth.length, 0, 'no depth refusal: ' + depth.join('\n'))
