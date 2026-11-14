@@ -31,7 +31,7 @@
 //   the whole pass (`budget_ms`, the maker's `sync in N slices` line).
 // - A maker of a large store (f), as a busy maker's on the testnet: some 700 coins on X and Y, the
 //   operator behind a proxy that holds each request (LEAF_MAKER_OPERATOR_DELAY_MS, 250 ms). A firm
-//   offer asked during a sync is answered within a slice, every pass of the upkeep's sync ends
+//   offer asked during a sync (one every LEAF_MAKER_PROBE_MS, 15 s) is answered within a slice, every pass of the upkeep's sync ends
 //   within its bound (`sync_pass_bound_ms`), and the rest of the upkeep (BTC purchases completed,
 //   received coins settled) waits for at most `sync_tick_ms` and one slice of the sync each upkeep
 //   pass. It needs the harness's Lightning legs and Bitcoin side, as b does.
@@ -748,7 +748,7 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
     const delay = Number(process.env.LEAF_MAKER_OPERATOR_DELAY_MS || 250)
     const proxy = await slowProxy(st.server, 0)
     stops.push(() => proxy.close())
-    const tickMs = 10000, boundMs = 120000
+    const tickMs = 10000, boundMs = 300000
     const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', exit_delay_units: 3, btc, max_coins: 2000,
       sync_tick_ms: tickMs, sync_pass_bound_ms: boundMs })
     writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
@@ -779,6 +779,10 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
     makerOf = maker
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
+    // A firm offer and its release cost the library seconds on a store this large (each command's
+    // start re-checks every coin), and go ahead of the upkeep: asked every second they would hold
+    // the library from the upkeep for good. One every LEAF_MAKER_PROBE_MS (15 s), as takers come.
+    const probeMs = Number(process.env.LEAF_MAKER_PROBE_MS || 15000)
     const probes = []
     let probing = true
     const prober = (async () => {
@@ -789,7 +793,7 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
           probes.push({ asked, ms: Date.now() - asked, status: f.status })
           if (f.status === 200) await post(maker.url + '/v1/release', { swap: f.body.swap }).catch(() => {})
         } catch (e) { probes.push({ asked, ms: Date.now() - asked, error: e.message }) }
-        await sleep(1000)
+        await sleep(probeMs)
       }
     })()
     stops.push(async () => { probing = false; await prober })
@@ -799,10 +803,14 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
     const ln = clnRpc(st.btc_lightning.wallets[0])
     // Trades both ways (the maker settles what it receives, settle_seconds 30), and purchases with
     // BTC between them.
+    // Takers come one every LEAF_MAKER_TRADE_GAP_MS (20 s): back to back, each command costing the
+    // library seconds on this store and going ahead of the upkeep, they would hold it for minutes.
+    const gapMs = Number(process.env.LEAF_MAKER_TRADE_GAP_MS || 20000)
     const purchases = []
     for (let k = 0; k < 2; k++) {
       for (const [g, w] of [[X, Y], [Y, X], [X, Y]]) {
         try { console.log(at(), 'trade', name(g) + '->' + name(w), JSON.stringify(await trade(maker, T.t, g, w, 30000, 120))) } catch (e) { console.log(at(), 'trade taker:', e.message.slice(0, 160)) }
+        await sleep(gapMs)
       }
       await refreshChange(H, T)
       const p = await btcPurchase(maker, T, ln, X, 20000)
@@ -815,7 +823,7 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
     const during = probes.filter((p) => p.status).map((p) => ({ ...p, pass: passes.find((x) => p.asked >= x.start && p.asked <= x.end) })).filter((p) => p.pass)
     const outside = probes.filter((p) => p.status && !passes.some((x) => p.asked >= x.start && p.asked <= x.end)).map((p) => p.ms).sort((a, b) => a - b)
     const q = (v, f) => (v.length ? v[Math.min(v.length - 1, Math.floor(v.length * f))] : null)
-    const goesOn = logLines(maker, 0, /goes on at the next upkeep pass: (\d+) ms/).map((l) => Number(l.match(/: (\d+) ms of it/)[1]))
+    const goesOn = logLines(maker, 0, /goes on at the next upkeep pass: the library ran it \d+ ms/).map((l) => Number(l.match(/ran it (\d+) ms/)[1]))
     const errors = logLines(maker, 0, /\berror: /)
     const settles = logLines(maker, 0, /settling \d+ received coins/)
     console.log(`passes in slices: ${passes.length}; their time in all, most ${Math.max(0, ...passes.map((x) => x.end - x.start))} ms; the longest slice ${Math.max(0, ...passes.map((x) => x.longest))} ms; slices most ${Math.max(0, ...passes.map((x) => x.slices))}`)

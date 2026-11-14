@@ -109,7 +109,7 @@ test('the upkeep runs at most sync_tick_ms of slices a pass, and goes on where i
   assert.ok(L.asked.every((a) => a[1].budget_ms === 1000))
   const goesOn = logged.filter((l) => l.startsWith('sync goes on at the next upkeep pass: '))
   assert.equal(goesOn.length, 3, JSON.stringify(logged))
-  assert.match(goesOn[0], /^sync goes on at the next upkeep pass: 10800 ms of it in this one; 9 slices over 1 upkeep pass\(es\), 10800 ms in all, the library 10800 ms of it, the longest slice 1200 ms$/)
+  assert.match(goesOn[0], /^sync goes on at the next upkeep pass: the library ran it 10800 ms in this one \(10800 ms with its waits\); 9 slices over 1 upkeep pass\(es\), 10800 ms in all, the library 10800 ms of it, the longest slice 1200 ms$/)
   const rest = logged.filter((l) => !goesOn.includes(l))
   assert.match(rest[0], /^sync in 30 slices: \d+ ms, the longest 1200 ms$/)
   assert.match(rest[1], /^deposits in 5 slices: /)
@@ -139,6 +139,16 @@ test('a pass past its bound is logged as an error, with its figures, once past i
   const M = slicedLibrary(3, 1)
   await upkeepSync(M.cmd, (...a) => quiet.push(a.join(' ')), null, { sliceMs: 1000, tickMs: 10_000, boundMs: 60_000, state: upkeepState(), clock: M.now })
   assert.ok(!quiet.some((l) => l.startsWith('error:')), JSON.stringify(quiet))
+})
+
+test('the time a slice waits behind a taker counts nothing against sync_tick_ms', async () => {
+  const { upkeepSync, upkeepState } = await import('./leaf-maker.mjs')
+  const L = slicedLibrary(6, 1)
+  const ran = { v: null }
+  // Each slice runs 1.2 s in the library and waits 30 s in the queue first.
+  const cmd = async (name, args) => { L.clock.t += 30_000; const r = await L.cmd(name, args); ran.v = 1200; return r }
+  const r = await upkeepSync(cmd, () => {}, () => ran.v, { sliceMs: 1000, tickMs: 10_000, boundMs: 1e9, state: upkeepState(), clock: L.now })
+  assert.equal(r.done, true, 'six slices of 1.2 s are 7.2 s of the library: one upkeep pass')
 })
 
 test('slice_ms 0 runs whole syncs: no budget, one call each', async () => {
