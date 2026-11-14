@@ -31,10 +31,10 @@
 //   the whole pass (`budget_ms`, the maker's `sync in N slices` line).
 // - A maker of a large store (f), as a busy maker's on the testnet: some 700 coins on X and Y, the
 //   operator behind a proxy that holds each request (LEAF_MAKER_OPERATOR_DELAY_MS, 250 ms). A firm
-//   offer asked during a sync (one every LEAF_MAKER_PROBE_MS, 15 s) is answered within a slice, every pass of the upkeep's sync ends
-//   within its bound (`sync_pass_bound_ms`), and the rest of the upkeep (BTC purchases completed,
-//   received coins settled) waits for at most `sync_tick_ms` and one slice of the sync each upkeep
-//   pass. It needs the harness's Lightning legs and Bitcoin side, as b does.
+//   offer asked during a sync (one every LEAF_MAKER_PROBE_MS, 15 s) is answered within a slice, every
+//   pass of the sync ends within its bound (`sync_pass_bound_ms`), and the rest of the upkeep (BTC
+//   purchases completed, received coins settled), whose commands run between the sync's slices, is
+//   done. It needs the harness's Lightning legs and Bitcoin side, as b does.
 // LEAF_MAKER_CASES (a, c, d; every one when unset; b, e, f and n, only when named) picks the cases.
 //
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 node --test tooling/lsp/leaf-maker-headroom-library.test.mjs
@@ -748,9 +748,11 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
     const delay = Number(process.env.LEAF_MAKER_OPERATOR_DELAY_MS || 250)
     const proxy = await slowProxy(st.server, 0)
     stops.push(() => proxy.close())
-    const tickMs = 10000, boundMs = 300000
+    const boundMs = 300000
+    // Its command times every minute (`times`): how long each of the upkeep's commands waited in the
+    // queue.
     const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', exit_delay_units: 3, btc, max_coins: 2000,
-      sync_tick_ms: tickMs, sync_pass_bound_ms: boundMs })
+      sync_pass_bound_ms: boundMs, times_seconds: 60 })
     writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
     // The store, through the proxy (no delay while it is made).
     const seed = await wallet(H, st, lwk, cfg.store_dir, mnemonic, [[X, 8000000], [Y, 8000000]], { server: proxy.url, exit_delay_units: 3 })
@@ -823,21 +825,26 @@ test('f: a maker of a large store answers within a slice, and its upkeep waits o
     const during = probes.filter((p) => p.status).map((p) => ({ ...p, pass: passes.find((x) => p.asked >= x.start && p.asked <= x.end) })).filter((p) => p.pass)
     const outside = probes.filter((p) => p.status && !passes.some((x) => p.asked >= x.start && p.asked <= x.end)).map((p) => p.ms).sort((a, b) => a - b)
     const q = (v, f) => (v.length ? v[Math.min(v.length - 1, Math.floor(v.length * f))] : null)
-    const goesOn = logLines(maker, 0, /goes on at the next upkeep pass: the library ran it \d+ ms/).map((l) => Number(l.match(/ran it (\d+) ms/)[1]))
+    // The longest wait in the queue of each of the upkeep's own commands (not the sync's, not a
+    // taker's), over the `times` lines.
+    const TAKERS = new Set(['sync', 'deposits', 'swap_offer', 'swap_complete', 'swap_cancel', 'swap_read', 'lightning_pay', 'lightning_pay_quote', 'hand_over_forfeits'])
+    const waited = {}
+    for (const l of logLines(maker, 0, / times \{/)) {
+      for (const [k, v] of Object.entries(JSON.parse(l.slice(l.indexOf('times ') + 6)))) if (!TAKERS.has(k)) waited[k] = Math.max(waited[k] || 0, v.waited_max || 0)
+    }
     const errors = logLines(maker, 0, /\berror: /)
     const settles = logLines(maker, 0, /settling \d+ received coins/)
     console.log(`passes in slices: ${passes.length}; their time in all, most ${Math.max(0, ...passes.map((x) => x.end - x.start))} ms; the longest slice ${Math.max(0, ...passes.map((x) => x.longest))} ms; slices most ${Math.max(0, ...passes.map((x) => x.slices))}`)
-    console.log(`upkeep passes the sync went on from: ${goesOn.length}, the sync's part of each most ${Math.max(0, ...goesOn)} ms; errors: ${errors.length}; settles: ${settles.length}`)
+    console.log(`the upkeep's commands, the longest wait in the queue of each: ${JSON.stringify(waited)}; errors: ${errors.length}; settles: ${settles.length}`)
     console.log(`firm offers: ${probes.length} asked, ${probes.filter((p) => p.status === 200).length} answered with an offer; outside a pass p50 ${q(outside, 0.5)} ms, p95 ${q(outside, 0.95)}, most ${outside[outside.length - 1] ?? null}; during a pass most ${Math.max(0, ...during.map((p) => p.ms))} ms (${during.length})`)
     console.log('purchases:', JSON.stringify(purchases.map((p) => ({ lock_ms: p.lock_ms, ready_ms: p.ready_ms, received_ms: p.received_ms }))))
-    console.log('the maker said:\n' + logLines(maker, 0, /slices|goes on|error|settling|btc/).map((l) => l.slice(0, 300)).join('\n'))
+    console.log('the maker said:\n' + logLines(maker, 0, /slices|error|settling|btc/).map((l) => l.slice(0, 300)).join('\n'))
     const longest = Math.max(0, ...passes.map((x) => x.longest))
     // Each firm offer during a pass answered within a slice and its own run.
     const late = during.filter((p) => p.ms > p.pass.longest + (q(outside, 0.95) ?? 1000) + 500)
     assert.deepEqual(late.map((p) => [p.ms, p.pass.end - p.pass.start, p.pass.longest]), [], 'each answered within a slice')
-    // No pass past its bound; the rest of each upkeep pass waited sync_tick_ms and one slice at most.
+    // No pass past its bound.
     assert.deepEqual(errors, [], 'no pass past its bound')
-    for (const ms of goesOn) assert.ok(ms <= tickMs + longest + 1000, `the rest of an upkeep pass waited ${ms} ms for the sync`)
     // Every purchase received, and the coins the maker received settled.
     for (const p of purchases) assert.ok(p.received_ms != null, 'each purchase is received')
     assert.ok(settles.length > 0, 'the maker settled the coins it received')
