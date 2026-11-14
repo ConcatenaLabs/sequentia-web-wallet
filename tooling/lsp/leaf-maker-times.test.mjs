@@ -46,5 +46,29 @@ test('the upkeep pass starts with upkeepSync', async () => {
   const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
   const pass = src.slice(src.indexOf('async function tickOnce ()'))
   assert.ok(pass.length < src.length, 'tickOnce is there')
-  assert.match(pass.slice(0, 400), /\n\s+await upkeepSync\(cmd, log\)\n/, 'the pass syncs and deposits first')
+  assert.match(pass.slice(0, 400), /\n\s+await upkeepSync\(cmd, log[,)]/, 'the pass syncs and deposits first')
+})
+
+test('a sync pass in several slices is logged with its slices, its time and its longest slice', async () => {
+  const { upkeepSync, sliced } = await import('./leaf-maker.mjs')
+  let left = 3
+  const logged = []
+  await upkeepSync(async (name) => (name === 'sync' && --left > 0 ? { more: true } : name === 'sync' ? { cost_by_step: {} } : []), (...a) => logged.push(a.join(' ')))
+  assert.equal(logged.length, 1, JSON.stringify(logged))
+  assert.match(logged[0], /^sync in 3 slices: \d+ ms, the longest \d+ ms$/)
+  // One slice: nothing logged.
+  const quiet = []
+  await upkeepSync(async () => ({}), (...a) => quiet.push(a.join(' ')))
+  assert.deepEqual(quiet, [])
+  // The stats on a clock of its own.
+  let t = 0
+  const st = {}
+  let k = 0
+  await sliced(async () => { t += [400, 1200, 300][k]; return ++k < 3 ? { more: true } : {} }, 'sync', {}, st, () => t)
+  assert.deepEqual(st, { slices: 3, ms: 1900, longest: 1200 })
+  // With the queue's reading of how long the library ran each slice, its wait in the queue is left out.
+  t = 0; k = 0
+  const ran = {}
+  await sliced(async () => { t += [90000, 400, 300][k]; ran.v = [900, 400, 300][k]; return ++k < 3 ? { more: true } : {} }, 'sync', {}, st, () => t, () => ran.v)
+  assert.deepEqual(st, { slices: 3, ms: 90700, longest: 900 })
 })

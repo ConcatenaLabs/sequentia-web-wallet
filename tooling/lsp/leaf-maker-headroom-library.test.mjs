@@ -20,7 +20,16 @@
 // with three more assets listed for fees (ARCA_OPERATOR_MORE_ASSETS=3) and the control paths that
 // set an asset's in-flight cap and the bond's instant budget, its control address in
 // SEQ_LEAF_HARNESS, and the wallet kit's lwk_wasm (../../pkg or LWK_PKG); it skips itself otherwise.
-// LEAF_MAKER_CASES (a, c, d; every one when unset; n, the capital measurement, only when named) picks the cases.
+// - A BTC purchase's lock (b): the maker pays a few units of an asset into a buyer's receive over
+//   Lightning, and its book stays offered through the lock, the purchase and the trades after it.
+//   It needs the harness's Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING=1,
+//   ARCA_OPERATOR_BTC_LIGHTNING=1) and skips itself without them, and runs on the harness's X and Y
+//   (its Lightning peer takes no channel in the more assets). The maker here boards in working
+//   coins and holds no reserve, so it shows which coin each lock took and the book through it, not
+//   the testnet's reserve-holding maker: it passes on a library before arca #911 as well.
+// - A firm offer asked while the maker syncs (e): answered within one slice of the sync, not after
+//   the whole pass (`budget_ms`, the maker's `sync in N slices` line).
+// LEAF_MAKER_CASES (a, c, d; every one when unset; b, e and n, only when named) picks the cases.
 //
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 node --test tooling/lsp/leaf-maker-headroom-library.test.mjs
 import test from 'node:test'
@@ -28,8 +37,11 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import http from 'node:http'
 import { leafLibraryThread } from '../leaf-node.mjs'
 import { harness, launchMaker, makerReady, freePort, sleep, lwkFrom } from '../user-mode-stack.mjs'
+import { clnRpc } from '../cln-rpc.mjs'
+import { needSeconds } from '../../user-trade-btc.js'
 
 const CONTROL = process.env.SEQ_LEAF_HARNESS
 const PKG = process.env.LEAVES_PKG || new URL('../../leaves/pkg', import.meta.url).pathname
@@ -53,14 +65,15 @@ const post = async (url, body) => {
 }
 const getJson = async (url) => (await fetch(url, { signal: AbortSignal.timeout(30000) })).json()
 
-async function stack () {
+async function stack (more = 3) {
   const H = harness(CONTROL)
   let st = await H.state()
-  assert.ok(st.more && st.more.length >= 3, 'the harness serves three more assets (ARCA_OPERATOR_MORE_ASSETS=3)')
+  st.more = st.more || []
+  assert.ok(st.more.length >= more, 'the harness serves three more assets (ARCA_OPERATOR_MORE_ASSETS=3)')
   if (!st.bond) {
     await H.c('/bond_post', { amount: BOND, instant_budget_fraction: 0.5 }); st = await H.state()
     // The operator funds its rounds from its own coins of each asset.
-    for (const a of [st.x, ...st.more]) await H.c('/fund_server', { asset: a, amount: 200000000 })
+    for (const a of [...new Set([st.x, st.y, ...st.more].filter(Boolean))]) await H.c('/fund_server', { asset: a, amount: 200000000 })
     await H.produce(); await H.bury()
   }
   const info = await getJson(st.server.replace(/\/+$/, '') + '/v1/info')
@@ -123,8 +136,8 @@ async function makeInFlight (H, st, W, R, asset) {
 }
 
 // A wallet of the leaf library on the harness: `assets` boarded, one coin each.
-async function wallet (H, st, lwk, dir, mnemonic, boards) {
-  const config = { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password, exit_delay_units: 1, min_exit_delay_units: 1 }
+async function wallet (H, st, lwk, dir, mnemonic, boards, extra = {}) {
+  const config = { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password, exit_delay_units: 1, min_exit_delay_units: 1, ...extra }
   const lib = await leafLibraryThread(dir)
   const W = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, st.node_password) : await lib.create(mnemonic, config)
   const t = (c, a = {}) => W.command(c, a)
@@ -145,8 +158,8 @@ async function wallet (H, st, lwk, dir, mnemonic, boards) {
   return { lib, t, stop: () => lib.stop() }
 }
 
-// A taker's own change, refreshed into a round: every sale pays from its change (the library pays
-// from a coin out of round first), a reassignment deeper each time, and past the operator's depth
+// A taker's own change, refreshed into a round: a sale may pay from its change (the library pays
+// from a coin already at risk first, then the smallest that pays alone), a reassignment deeper each time, and past the operator's depth
 // limit it pays no more ("more are at the operator's depth limit"). -> once the round's new
 // coins are the taker's to spend: a live coin of a round in each asset refreshed.
 async function refreshChange (H, W) {
@@ -475,6 +488,230 @@ test('d: forty trades in a row on one pair, both ways: quoted throughout, no dep
     for (const [k] of Object.entries(r.pairs)) assert.equal(r.lastOff[k], 0, `${k} offered at every reading of the last five minutes`)
   } finally {
     await dumpMaker(makerOf, 'd')
+    for (const s of stops.reverse()) { try { await s() } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// The book read every `everyMs`: at each reading, how many of `pairs` are offered. -> { stop() }
+// answering the readings as [ms since start, offered].
+function countBook (maker, pairs, everyMs = 5000) {
+  let on = true
+  const readings = []
+  const t0 = Date.now()
+  const run = (async () => {
+    while (on) {
+      try {
+        const qs = (await getJson(maker.url + '/v1/quotes')).quotes || []
+        readings.push([Date.now() - t0, pairs.filter(([g, w]) => qs.some((q) => q.give_asset === g && q.want_asset === w && BigInt(q.max_give) > 0n)).length])
+      } catch { readings.push([Date.now() - t0, null]) }
+      await sleep(everyMs)
+    }
+  })()
+  return { t0, readings, stop: async () => { on = false; await run; return readings } }
+}
+
+// One purchase with BTC, as the page makes it (user-trade-btc.js): the maker's firm offer of `give`
+// of `asset` for BTC, the buyer's receive under the hash of the maker's invoice, the maker's lock,
+// the buyer's leaf ready, the BTC paid from the buyer's node, the preimage handed to the operator
+// and the leaf claimed. -> the times of each step (ms after the lock) and what the library said
+// while the leaf was not ready.
+async function btcPurchase (maker, T, ln, asset, give) {
+  const f = await post(maker.url + '/v1/btc/firm', { give_asset: asset, want_asset: 'BTC', give: String(give) })
+  assert.equal(f.status, 200, 'a firm offer: ' + JSON.stringify(f.body))
+  const d = await ln('decode', { string: f.body.invoice })
+  const hash = d.payment_hash
+  const rq = await T.t('lightning_receive_quote', { asset, amount: String(give) }).catch(() => null)
+  const r = await T.t('lightning_receive', { asset, amount: String(give), hash, max_fee_ppm: 20000 })
+  const lockAt = Date.now()
+  const lock = await post(maker.url + '/v1/btc/lock', { swap: f.body.swap, invoice: r.invoice })
+  const locked = Date.now() - lockAt
+  const said = []
+  let ready = null
+  for (let i = 0; i < 1800 && !ready; i++) {
+    await T.t('sync').catch(() => {})
+    const a = await T.t('lightning_receive_ready', { hash, need_seconds: needSeconds(d.min_final_cltv_expiry ?? 18) }).catch((e) => ({ error: e.message }))
+    if (a && a.ready) { ready = Date.now() - lockAt; break }
+    const last = said[said.length - 1]
+    const w = a && (a.error || a.waiting_for)
+    if (!last || last.waiting_for !== w) said.push({ at: Date.now() - lockAt, waiting_for: w, usual_in_seconds: a && a.usual_in_seconds, final_in_seconds: a && a.final_in_seconds })
+    await sleep(1000)
+  }
+  assert.ok(ready != null, 'the leaf bought is ready within 30 minutes: ' + JSON.stringify(said))
+  const paid = await ln('pay', { bolt11: f.body.invoice })
+  assert.equal(paid.status, 'complete', JSON.stringify(paid))
+  await T.t('lightning_post_preimage', { hash, preimage: paid.payment_preimage }).catch((e) => console.log(at(), 'post preimage:', e.message))
+  await T.t('lightning_receive_preimage', { hash, preimage: paid.payment_preimage })
+  let received = null
+  for (let i = 0; i < 300 && received == null; i++) {
+    await T.t('sync').catch(() => {})
+    const st = ((await T.t('lightning_receives')) || {})[hash] || {}
+    if (st.state === 'received') received = Date.now() - lockAt
+    else await sleep(1000)
+  }
+  return { swap: f.body.swap, give, want_sats: f.body.want, lock_ms: locked, lock: lock.body, ready_ms: ready, received_ms: received, said, quote: rq && { fee: rq.fee, claimed: rq.claimed } }
+}
+
+test('b: a BTC purchase\'s lock of a few units leaves the maker\'s book offered, through the purchase and the trades after it', { skip: skipCase('b'), timeout: 3_600_000 }, async (tc) => {
+  // The two assets every harness serves (its Lightning peer takes no channel in the more assets).
+  const { H, st, lwk } = await stack(0)
+  if (!(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length)) return tc.skip('needs the harness\'s Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING, ARCA_OPERATOR_BTC_LIGHTNING)')
+  const X = st.x, M0 = st.y
+  const name = (a) => (a === X ? 'X' : a === M0 ? 'Y' : a === 'BTC' ? 'BTC' : a.slice(0, 6))
+  // The Lightning harness's node lists X alone for fees: Y at 1:1 too, so that the maker's node
+  // prices it (an asset its node does not price is not offered).
+  const rates = await H.rpc('getfeeexchangerates')
+  if (!rates[M0]) await H.rpc('setfeeexchangerates', [{ ...rates, [M0]: 100000000 }])
+  const dir = mkdtempSync(join(tmpdir(), 'maker-btc-b-'))
+  const stops = []
+  let makerOf = null
+  try {
+    const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
+    const port = await freePort()
+    const assets = [X, M0]
+    const pairs = []
+    for (const g of assets) for (const w of assets) if (g !== w) pairs.push({ give: g, want: w, rate_num: '1', rate_den: '1', min_give: '10000' })
+    // The maker gives X for BTC as the drill's desk does: 0.55 sat an atom.
+    const btc = { rpc: st.btc_lightning.hub, keep_sats: '200000', invoice_seconds: 3600, pairs: [{ give: X, want: 'BTC', rate_num: '11', rate_den: '20', min_give: '10000' }] }
+    // A payment over Lightning needs an exit delay longer than the operator's two units for it.
+    makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', exit_delay_units: 3, btc })
+    const maker = await launchMaker(H, join(dir, 'maker'), port, assets.map((a) => [a, 1500000]))
+    makerOf = maker
+    stops.push(() => maker.stop())
+    const stopPump = pumpLoop(H); stops.push(stopPump)
+    for (const a of assets) await makerReady(H, maker, a, 300000)
+    for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
+    await sleep(60000)
+    const all = [...pairs.map((p) => [p.give, p.want]), [X, 'BTC']]
+    const book = countBook(maker, all, 5000)
+    stops.push(() => book.stop())
+    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 800000], [M0, 800000]], { exit_delay_units: 3 })
+    stops.push(() => T.stop())
+    const ln = clnRpc(st.btc_lightning.wallets[0])
+    const e0 = await explain(maker, 'before the purchases')
+    console.log(at(), 'working coin sizes', JSON.stringify(e0 && e0.working_coin_sizes))
+    const purchases = [], marks = []
+    for (let k = 0; k < 3; k++) {
+      marks.push({ k, lock_at: Date.now() - book.t0 })
+      const from = maker.log.length
+      const p = await btcPurchase(maker, T, ln, X, 20000)
+      p.locked_from = logLines(maker, from, /btc locked/).map((l) => l.slice(0, 300))
+      purchases.push(p)
+      console.log(at(), 'purchase', k + 1, JSON.stringify(p))
+      // The trades after it, which on the testnet spent a lock's large change (arca #892, #911).
+      for (const [g, w] of [[X, M0], [M0, X]]) console.log(at(), 'trade', name(g) + '->' + name(w), JSON.stringify(await trade(maker, T.t, g, w, 30000, 120)))
+      await explain(maker, 'after purchase ' + (k + 1))
+      await sleep(240000)
+    }
+    const r = await book.stop()
+    const n = all.length
+    console.log('the book (ms, pairs offered of ' + n + '):', JSON.stringify(r))
+    for (const m of marks) {
+      const w = r.filter(([t]) => t >= m.lock_at && t <= m.lock_at + 300000).map(([, c]) => c)
+      console.log(`after lock ${m.k + 1}: ${w.length} readings in 5 min, offered pairs least ${Math.min(...w.filter((c) => c != null))}, most ${Math.max(...w.filter((c) => c != null))}; readings below ${n}: ${w.filter((c) => c != null && c < n).length}`)
+    }
+    const lines = logLines(maker, 0, /btc locked|settling|own lineage|merging|cutting|offers no|depth|slices/)
+    console.log('the maker said:\n' + lines.map((l) => l.slice(0, 300)).join('\n'))
+    for (const p of purchases) assert.ok(p.received_ms != null, 'each purchase is received')
+    // On the testnet, after each lock 35 of 42 pairs were off for 2.5 to 4 minutes; here no reading
+    // from the first lock on has more than one pair off.
+    const after = r.filter(([t, c]) => t >= marks[0].lock_at && c != null)
+    assert.ok(after.every(([, c]) => c >= n - 1), 'the book stays offered through every lock: ' + JSON.stringify(after.filter(([, c]) => c < n - 1)))
+  } finally {
+    await dumpMaker(makerOf, 'b')
+    for (const s of stops.reverse()) { try { await s() } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// A proxy to the operator that holds each request `delayMs` before passing it on, as a distant
+// operator does (on the testnet a maker's sync took 14 s): the maker's sync then runs past its
+// slices. -> { url, close() }.
+async function slowProxy (target, delayMs) {
+  const to = new URL(target)
+  const srv = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (d) => chunks.push(d))
+    req.on('end', () => setTimeout(() => {
+      const up = http.request({ host: to.hostname, port: to.port, path: req.url, method: req.method, headers: { ...req.headers, host: to.host } }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res) })
+      up.on('error', (e) => { try { res.writeHead(502); res.end(e.message) } catch {} })
+      up.end(Buffer.concat(chunks))
+    }, delayMs))
+  })
+  const port = await freePort()
+  await new Promise((ok) => srv.listen(port, '127.0.0.1', ok))
+  return { url: `http://127.0.0.1:${port}${to.pathname === '/' ? '' : to.pathname}`, close: () => new Promise((ok) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(() => ok()) }) }
+}
+
+// The maker's `sync in N slices: T ms, the longest S ms` lines as intervals: [start, end, longest] (ms).
+const slicePasses = (maker) => maker.log.join('').split('\n').map((l) => l.match(/^(\S+Z) .*\bsync in (\d+) slices: (\d+) ms, the longest (\d+) ms/))
+  .filter(Boolean).map((m) => { const end = Date.parse(m[1]); return { start: end - Number(m[3]), end, slices: Number(m[2]), longest: Number(m[4]) } })
+
+test('e: a firm offer asked while the maker syncs is answered within a slice of the sync', { skip: skipCase('e'), timeout: 3_600_000 }, async () => {
+  const { H, st, lwk } = await stack()
+  const X = st.x, M = st.more[2], P = st.more[1]
+  const name = (a) => (a === X ? 'X' : a === M ? 'M2' : a === P ? 'M1' : a.slice(0, 6))
+  const dir = mkdtempSync(join(tmpdir(), 'maker-slice-e-'))
+  const stops = []
+  let makerOf = null
+  try {
+    const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
+    const port = await freePort()
+    const pairs = [{ give: M, want: X, rate_num: '1', rate_den: '1', min_give: '10000' }, { give: X, want: M, rate_num: '1', rate_den: '1', min_give: '10000' },
+      { give: P, want: X, rate_num: '1', rate_den: '1', min_give: '10000' }]
+    // The maker reaches the operator through a proxy that holds each request (LEAF_MAKER_OPERATOR_DELAY_MS,
+    // 250 ms), so its syncs run for seconds, past their slices, as on the testnet.
+    const proxy = await slowProxy(st.server, Number(process.env.LEAF_MAKER_OPERATOR_DELAY_MS || 250))
+    stops.push(() => proxy.close())
+    const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5' })
+    writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
+    const maker = await launchMaker(H, join(dir, 'maker'), port, [[M, 1500000], [X, 1500000], [P, 1500000]])
+    makerOf = maker
+    stops.push(() => maker.stop())
+    const stopPump = pumpLoop(H); stops.push(stopPump)
+    // The prober, from the maker's start: a firm offer of M1 every second, released at once, each
+    // answer timed, an offer or a refusal (an answer is what a taker waits for).
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const asked = Date.now()
+        try {
+          const f = await post(maker.url + '/v1/firm', { give_asset: P, want_asset: X, give: '10000' })
+          probes.push({ asked, ms: Date.now() - asked, status: f.status })
+          if (f.status === 200) await post(maker.url + '/v1/release', { swap: f.body.swap }).catch(() => {})
+        } catch (e) { probes.push({ asked, ms: Date.now() - asked, error: e.message }) }
+        await sleep(1000)
+      }
+    })()
+    stops.push(async () => { probing = false; await prober })
+    for (const a of [M, X, P]) await makerReady(H, maker, a, 300000)
+    for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
+    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 800000], [M, 800000]])
+    stops.push(() => T.stop())
+    // Trades on M2 and X, whose settles give the maker's sync rounds to follow.
+    for (let i = 0; i < 16; i++) {
+      const [g, w] = i % 2 ? [X, M] : [M, X]
+      // The taker's own coins can be in a round: it says so and goes on (this case times the maker).
+      try { console.log(at(), 'trade', i + 1, name(g) + '->' + name(w), JSON.stringify(await trade(maker, T.t, g, w, 50000, 120))) } catch (e) { console.log(at(), 'trade', i + 1, 'taker:', e.message.slice(0, 160)) }
+      if (i % 2 === 1) await refreshChange(H, T)
+    }
+    await sleep(120000)
+    probing = false; await prober
+    const passes = slicePasses(maker)
+    const during = probes.filter((p) => p.status).map((p) => ({ ...p, pass: passes.find((x) => p.asked >= x.start && p.asked <= x.end) })).filter((p) => p.pass)
+    const outside = probes.filter((p) => p.status && !passes.some((x) => p.asked >= x.start && p.asked <= x.end)).map((p) => p.ms).sort((a, b) => a - b)
+    const q = (v, f) => (v.length ? v[Math.min(v.length - 1, Math.floor(v.length * f))] : null)
+    console.log(`passes in slices: ${passes.length}; their time in all, most ${Math.max(0, ...passes.map((x) => x.end - x.start))} ms; the longest slice ${Math.max(0, ...passes.map((x) => x.longest))} ms; slices most ${Math.max(0, ...passes.map((x) => x.slices))}`)
+    console.log(`firm offers: ${probes.length} asked, ${probes.filter((p) => p.status === 200).length} answered with an offer, ${probes.filter((p) => p.status && p.status !== 200).length} refused; outside a pass p50 ${q(outside, 0.5)} ms, p95 ${q(outside, 0.95)}, most ${outside[outside.length - 1] ?? null}`)
+    console.log('asked during a pass in slices [ms, its pass in all, its longest slice]:', JSON.stringify(during.map((p) => [p.ms, p.pass.end - p.pass.start, p.pass.longest])))
+    console.log('refused or failed:', JSON.stringify(probes.filter((p) => p.status !== 200).slice(0, 20)))
+    assert.ok(during.length > 0, 'some firm offers were asked during a sync in slices')
+    // Answered within one slice of the pass and its own run, never after the whole pass.
+    const late = during.filter((p) => p.ms > p.pass.longest + (q(outside, 0.95) ?? 1000) + 500)
+    assert.deepEqual(late.map((p) => [p.ms, p.pass.end - p.pass.start, p.pass.longest]), [], 'each answered within a slice')
+  } finally {
+    await dumpMaker(makerOf, 'e')
     for (const s of stops.reverse()) { try { await s() } catch {} }
     rmSync(dir, { recursive: true, force: true })
   }

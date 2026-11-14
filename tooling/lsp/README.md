@@ -247,7 +247,9 @@ command at a time, and a command that has started runs to its end, so the upkeep
 `sync` and its `deposits` in slices of a second (`budget_ms`; a library that takes it stops at the
 first point past it where the command can stop, answers `more: true` and goes on at the next call).
 A firm offer or an acceptance goes ahead of every queued command and runs between two slices. A
-library without slices runs each in one call, and a firm offer then waits for it.
+library without slices runs each in one call, and a firm offer then waits for it. A pass that took
+more than one slice is logged (`sync in <n> slices: <ms> ms, the longest <ms> ms`): a firm offer
+asked meanwhile waited for one slice at most, not the whole pass.
 
 Between two readings of its coins, its book is what it knows it holds: the last reading, less the
 coins its open offers hold, the coins its trades and its BTC desk's payments spent and the coins it
@@ -270,8 +272,9 @@ round and something else free of it quotes. An asset whose only free coin is its
 both keep it and settle it: the maker keeps it while it can wait, and settles it whole when it must
 (past half its budget, or an offer refused for what it holds out of round); the asset is then out
 of its book for the minute its round takes. It never pays itself out of round to reshape a coin:
-the library pays such a payment from whatever coin it picks, and the change of a reserve of
-millions would then be held out of round whole and fill its budget, every pair at once. (A coin
+the library pays such a payment (`send`) from the coins furthest from their exit date, the largest
+first, and the change of a reserve of millions would then be held out of round whole and fill its
+budget, every pair at once. (A coin
 whose worth fits no room left quotes nothing and settles with the rest.) A cut into working coins
 follows the same rule: it waits while its coin is the only one that would quote.
 
@@ -289,10 +292,11 @@ proceeds and change on an operator without checkpoint exits, which a double-sign
 resting order's own coin is left alone. Its own change is left to the library: a coin that alone
 keeps one of the operator's nodes from coming back is refreshed by the library's own sync, for no
 fee. A coin of its own is refreshed only when
-it is larger than a working coin (the library pays a swap from a coin out of round first, and that
-swap's change would then be received, and at risk whole) or two reassignments short of the
-operator's `depth_limit`, and then only when the operator can take it whole now: given to a refresh
-that waits at the cap, it would count whole against the room while it waits. A received coin two
+it is two reassignments short of the operator's `depth_limit`, and then only when the operator can
+take it whole now. Its size is no reason: the library pays a swap or a Lightning lock from a coin
+already at risk first, then from the smallest that pays it alone, so a large coin of its own is
+spent only when no smaller coin pays. A coin of its own given to a refresh that waits at the cap
+would count whole against the room while it waits. A received coin two
 reassignments short of the limit is settled at once, whatever its rest. A coin at the limit pays
 nothing out of round until a round refreshes it, so it quotes nothing, is never kept out of a settle
 to keep its asset offered, and an asset whose every paying coin is there is logged as not offered
@@ -516,7 +520,7 @@ began.
 | Method | Path | What it does |
 | --- | --- | --- |
 | `POST` | `/v1/btc/firm` `{give_asset, want_asset, give, invoice?}` | `give_asset: "BTC"`: `invoice` is the wallet's Bitcoin invoice for `give` sat, and the answer's `invoice` the operator's, for `want` of the asset under the same hash. `want_asset: "BTC"`: the answer's `invoice` is the maker's Bitcoin invoice for `want` sat |
-| `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it |
+| `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it; logged with the coins the library paid it from and its change (`btc locked <swap> <amount> <asset> from <leaves> change <atoms>`) |
 | `POST` | `/v1/btc/paid` `{swap}` | the wallet paid: the maker follows at once |
 | `POST` | `/v1/btc/release` `{swap}` | a firm offer nobody took |
 | `POST` | `/v1/btc/invoice` `{swap}` | the maker gives the asset and has locked: a new Bitcoin invoice under the same hash and for the same amount when the one given runs out within half an hour, `{swap, invoice, expires_at}` |

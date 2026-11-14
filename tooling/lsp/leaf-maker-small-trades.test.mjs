@@ -3,7 +3,7 @@
 // gives; every quote read in between offers every asset.
 //
 // Each trade is paid as the library pays it (bark/src/arca/pay.rs fit_order: the smallest coin
-// that pays it and its margins alone, a coin already out of round first): the coin is spent, its change is out of
+// that pays it and its margins alone, a coin already at risk out of round first): the coin is spent, its change is out of
 // round, and what the taker pays comes in out of round. The upkeep runs between trades as the
 // maker's does: past half its budget out of round every received coin is due, keepFree chooses,
 // and what it gives is in a round for three minutes (a round that stuck, as arca #868), then comes

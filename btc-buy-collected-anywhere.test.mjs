@@ -111,10 +111,10 @@ test('a hand-over the operator did not take (twice in one step) is made again at
 test('the Trade tab: keep the page open until the BTC is paid; then arriving, wherever the wallet is opened; Received only once claimed', () => {
   const T0 = 1793230206810
   const r = { source: 'btc-gateway', dir: 'buy', at: T0, state: 'waiting', waitingSince: T0 }
-  assert.equal(tradeStateWord(r, T0 + 5000), USER_WORDS.waitingOther)
-  assert.match(USER_WORDS.waitingOther, /^Keep this page open/)
-  assert.match(USER_WORDS.waitingOther, /about 2 minutes/)
-  assert.match(USER_WORDS.waitingOther, /If the page closes first, nothing is traded/)
+  assert.equal(tradeStateWord(r, T0 + 5000), USER_WORDS.waitingOther(5))
+  assert.match(USER_WORDS.waitingOther(5), /^Keep this page open/)
+  assert.match(USER_WORDS.waitingOther(5), /within about 5 minutes/)
+  assert.match(USER_WORDS.waitingOther(5), /If the page closes first, nothing is traded/)
   Object.assign(r, { state: 'sent', sentAt: T0 + 90000, paying: true })
   assert.equal(tradeStateWord(r, T0 + 91000), USER_WORDS.btcPaying)
   Object.assign(r, { preimage: 'ab', posted: true, receiveState: 'claiming' })
@@ -122,7 +122,7 @@ test('the Trade tab: keep the page open until the BTC is paid; then arriving, wh
   assert.ok(!/Received/.test(tradeStateWord(r, T0 + 95000)))
   r.receiveState = 'received'
   assert.equal(tradeStateWord(r, T0 + 96000), USER_WORDS.received)
-  for (const w of [USER_WORDS.waitingOther, USER_WORDS.btcPaying, USER_WORDS.btcCollecting]) {
+  for (const w of [USER_WORDS.waitingOther(5), USER_WORDS.waitingOtherLate, USER_WORDS.btcPaying, USER_WORDS.btcCollecting]) {
     assert.deepEqual(forbiddenIn(w), [], w)
     assert.ok(!/try again|can't be traded|cannot be traded/i.test(w), w)
   }
@@ -147,7 +147,7 @@ test('the site: a purchase with BTC is under way, with what the wallet says, nev
   const r = await S.confirm(q.id)
   assert.equal(r.filled, 0, 'not traded yet: ' + JSON.stringify(r))
   assert.equal(r.under_way, 1)
-  assert.equal(r.note, USER_WORDS.waitingOther)
+  assert.equal(r.note, USER_WORDS.waitingOther(5))
 })
 
 test('a restored wallet counts a coin received under another\'s hash nowhere until the operator serves its preimage', async () => {

@@ -109,6 +109,8 @@ export async function composedAdvance (R, rec, E) {
       rec.state = one.state; rec.sentAt = rec.sentAt || E.now()
       if (one.state === 'waiting') rec.waitingSince = rec.waitingSince || E.now()
     }
+    // A first step waiting for the other side: the wait it states is the trade's.
+    if (one.state === 'waiting' && rec.state === 'waiting') { rec.waitFirstBy = one.waitFirstBy; rec.waitBy = one.waitBy }
     // The first step came back: nothing of the wallet's moved for good, so nor did the trade.
     if (ENDED.includes(one.state)) {
       rec.state = 'returned'; rec.returnedAt = E.now(); rec.error = one.error || null

@@ -78,7 +78,7 @@ import { makerEntries, covenantRoundEntries, restingEntries, onchainFillEntries,
 import { planFillFromMatched } from './covenant-order.js'
 import { planSingleStep } from './tooling/lsp/settlement-router.mjs'
 import { btcTrades } from './user-trade-btc.js'
-import { DEFAULT_WORDS, vestingShort, nextFinalBy } from './default-arca.js'
+import { DEFAULT_WORDS, vestingShort, nextFinalBy, settleMinutesOf, SETTLE_LATE_MS } from './default-arca.js'
 import { restrictedQuote, restrictedConfirm, restrictedAdvance } from './restricted-engine.js'
 import { composedQuote, composedAdvance, openComposedIds, claimOnce } from './restricted-composed.js'
 
@@ -278,9 +278,11 @@ export const USER_WORDS = Object.freeze({
   sentAwaiting: 'Sent, waiting for an answer: nothing more is needed from you',
   settled: 'Settled',
   // Buying with BTC, until what is bought is held for the wallet (its round, then that round's block
-  // certified: one to two and a half minutes measured): the wallet pays its BTC only then, and only
-  // an open page pays it. Closed before that, nothing is traded and nothing is paid.
-  waitingOther: 'Keep this page open: your BTC is paid once what you buy is held for you, in about 2 minutes. Nothing has left your wallet yet. If the page closes first, nothing is traded.',
+  // certified): the wallet pays its BTC only then, and only an open page pays it. Closed before
+  // that, nothing is traded and nothing is paid. `m`: the minutes left of the wait the library states.
+  waitingOther: (m) => `Keep this page open: your BTC is paid once what you buy is held for you, within about ${m} minute${m === 1 ? '' : 's'}. Nothing has left your wallet yet. If the page closes first, nothing is traded.`,
+  // The same, past the wait the library stated by SETTLE_LATE_MS.
+  waitingOtherLate: 'Keep this page open: this is taking longer than usual. Your BTC is paid once what you buy is held for you, and nothing has left your wallet yet. If the page closes first, nothing is traded.',
   // Buying with BTC, the BTC being paid: seconds.
   btcPaying: 'Paying your BTC. Keep this page open a moment more.',
   // Buying with BTC, the BTC paid and its proof handed on, what was bought being collected: it comes
@@ -413,8 +415,13 @@ export function tradeStateWord (r, now = Date.now()) {
   if (r.state === 'returned' || r.state === 'failed') return W.returned
   if (r.state === 'confirming') return W.sending
   const since = (t) => Math.floor((now - (t || r.at || now)) / 60000)
-  // Buying with BTC: nothing has left the wallet until its asset is held for it.
-  if (r.state === 'waiting') { const m = since(r.waitingSince); return m >= 1 ? W.minutes(W.waitingOther, m) : W.waitingOther }
+  // Buying with BTC: nothing has left the wallet until its asset is held for it, within the wait the
+  // library states (waitBy, from lightning_receive_ready); before its first answer, the library's
+  // figure for the operator's next round (waitFirstBy, or the defaults' when the operator was not read).
+  if (r.state === 'waiting') {
+    const by = (r.waitBy && r.waitBy.finalBy) ?? r.waitFirstBy ?? ((r.waitingSince ?? r.at ?? now) + settleMinutesOf(null) * 60_000)
+    return now > by + SETTLE_LATE_MS ? W.waitingOtherLate : W.waitingOther(Math.max(1, Math.ceil((by - now) / 60_000)))
+  }
   const m = since(r.sentAt)
   // Received, its settling still waiting with the network after ten minutes (the network had no
   // room for it yet): said so, the coins being the wallet's all along.
@@ -1813,7 +1820,7 @@ export function createEngine (deps) {
         put(rec)
         const one = await confirm(choice.first, choice.firstTicket, null, { partOf: rec.id })
         rec.first = one.id
-        if (one.state !== 'confirming') { rec.state = one.state === 'waiting' ? 'waiting' : 'sent'; rec.sentAt = now(); if (rec.state === 'waiting') rec.waitingSince = now() }
+        if (one.state !== 'confirming') { rec.state = one.state === 'waiting' ? 'waiting' : 'sent'; rec.sentAt = now(); if (rec.state === 'waiting') { rec.waitingSince = now(); rec.waitFirstBy = one.waitFirstBy; rec.waitBy = one.waitBy } }
         return put(rec)
       }
       if (choice.source === 'covenant-round') {

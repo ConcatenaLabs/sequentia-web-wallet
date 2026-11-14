@@ -785,11 +785,18 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   address included, except the other side of a trade for BTC: that waits for the next settlement to
   make it the wallet's own, which the wallet asks for by itself, about a minute.
 
-- Settling waits for the network, and no status promises how long: the only time a row shows is
-  the minutes it has waited, once that is one or more. While it waits the row says what is
+- Settling waits for the network, and a status promises no time of its own: a row states a wait
+  only where the leaf library states one, and otherwise shows the minutes it has waited, once that
+  is one or more. While it waits the row says what is
   already true. Buying with BTC, until the asset is held for the wallet: "Keep this page open:
-  your BTC is paid once what you buy is held for you, in about 2 minutes. Nothing has left your
-  wallet yet. If the page closes first, nothing is traded." (only an open page pays the BTC);
+  your BTC is paid once what you buy is held for you, within about N minutes. Nothing has left
+  your wallet yet. If the page closes first, nothing is traded." (only an open page pays the BTC).
+  N is the wait the leaf library states for that asset (`lightning_receive_ready`: the time the
+  maker has to lock its side while it has not, then the operator's round, block and release as
+  the library counts them); before the library's first answer, its figure for the operator's next
+  round. Past that wait by two minutes: "Keep this page open: this is taking longer than usual.
+  Your BTC is paid once what you buy is held for you, and nothing has left your wallet yet. If
+  the page closes first, nothing is traded.";
   while the BTC is paid, "Paying your BTC. Keep this page open a moment more."; once it is paid,
   "Paid. What you bought is arriving, and it comes to your wallet even if this page closes." (the
   wallet hands the operator what claims it at once, so any device of the wallet collects it). A
