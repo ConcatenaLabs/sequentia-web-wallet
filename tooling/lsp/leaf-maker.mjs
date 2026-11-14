@@ -78,6 +78,11 @@
 //                                                all it holds
 //     "fee_margin": "2000",                      atoms of each asset kept back for a swap's fees
 //     "offer_ttl_seconds": 300, "sync_seconds": 20, "settle_seconds": 600,
+//     "slice_ms": 1000, "sync_tick_ms": 10000,   optional: the upkeep syncs in slices of `slice_ms` (0: in
+//     "sync_pass_bound_ms": 120000,              whole calls), at most `sync_tick_ms` of them each upkeep
+//                                                pass before the rest of it runs (the sync goes on at
+//                                                the next); a sync pass longer than the bound is logged
+//                                                as an error with its figures
 //     "board_keep": "100000",                    on-chain atoms of each asset it gives that it keeps
 //                                                (for exit fees); what it holds above that is boarded.
 //                                                This, coin_size and fee_margin each take one figure
@@ -142,42 +147,82 @@ export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
 // The library runs one command at a time, and a command that has started runs to its end: a firm
 // offer queued ahead of everything still waits out a sync already under way (14 s on the box,
 // 13.8 s for the firm offer behind it, web #659), or a `deposits` (17 s). So the upkeep asks for
-// both in slices of SLICE_MS (`budget_ms`): a library that takes the argument stops at the first
-// point past it where the command can stop (between its steps, and between the items of a long
-// step), answers `more: true`, and goes on where it stopped at the next call. Each slice is a
-// command of its own in the queue, and a taker's firm offer or acceptance, queued first, runs
+// both in slices of `slice_ms` (SLICE_MS; `budget_ms`): a library that takes the argument stops at
+// the first point past it where the command can stop (between its steps, and between the items of
+// a long step), answers `more: true`, and goes on where it stopped at the next call. Each slice is
+// a command of its own in the queue, and a taker's firm offer or acceptance, queued first, runs
 // between two of them: it waits for one slice at most. A library without the argument runs the
-// whole command in one call and answers without `more`, as before. SLICES_MOST bounds one pass.
+// whole command in one call and answers without `more`, as before; `slice_ms: 0` asks for that
+// (whole syncs, a firm offer waiting for all of one).
 export const SLICE_MS = 1000
+// SLICES_MOST bounds one pass: past it the pass is given up and logged, and the next starts afresh.
 export const SLICES_MOST = 600
-// `stats`, when given, is filled with the pass's slices, its time in all and its longest slice (ms):
-// the time the library ran it (`ran(name)`, the queue's own reading of the last one) when known,
-// else from the call to its answer, the time queued behind other commands included.
-export async function sliced (cmd, name, args, stats = null, clock = Date.now, ran = null) {
-  let r = null
+// The rest of the upkeep never waits on a pass without bound: a pass that has run SYNC_TICK_MS
+// (`sync_tick_ms`) of slices in one upkeep pass stops there, the rest of the pass runs (a swap for
+// BTC completed, received coins settled, offers refreshed), and the sync goes on where it stopped
+// at the next pass, the library keeping its place. Bounded by time rather than run between two
+// slices: the rest of a pass reads the holdings once and then runs dozens of library commands on
+// that reading, so running it between every two slices would multiply those reads and lengthen
+// every pass; this way it waits SYNC_TICK_MS and one slice at most. A whole sync (`slice_ms: 0`)
+// is one call, and the rest waits for it.
+export const SYNC_TICK_MS = 10_000
+// A pass of the upkeep's sync and deposits that takes longer than SYNC_PASS_BOUND_MS
+// (`sync_pass_bound_ms`, from its first slice to its last, the upkeep passes between included) is
+// logged as an error, with its figures: a library whose pass costs this much holds every pass's
+// reading of the chain and the operator that far behind.
+export const SYNC_PASS_BOUND_MS = 120_000
+// Where the upkeep's pass stands between two upkeep passes: the command under way (0 sync, 1
+// deposits), when the pass started, its slices, the library's time on them and the longest, how
+// many upkeep passes it has run in, and whether its bound was logged.
+export const upkeepState = () => ({ step: 0, start: null, slices: 0, ran: 0, longest: 0, ticks: 0, over: false, cmdStart: null, cmdSlices: 0, cmdLongest: 0 })
+// The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS), each in slices
+// of `sliceMs` (none: whole calls); each failure logged, a library without the deposits command
+// passed over in silence. At most `tickMs` of slices in one call: past it the call answers
+// `{ done: false }` and the next goes on (`state`, upkeepState(), kept between calls). A command
+// that took more than one slice is logged (`sync in N slices: T ms, the longest S ms`, S the time
+// the library ran a slice, from `ran` when given): what a firm offer asked meanwhile waited for at
+// most is one slice, not T. A pass longer than `boundMs` is logged as an error once it passes the
+// bound, and again when it ends, with its figures. -> { done }
+export async function upkeepSync (cmd, log, ran = null, opts = {}) {
+  const sliceMs = opts.sliceMs ?? SLICE_MS, tickMs = opts.tickMs ?? Infinity, boundMs = opts.boundMs ?? SYNC_PASS_BOUND_MS
+  const clock = opts.clock ?? Date.now
+  const st = opts.state ?? upkeepState()
+  const steps = [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]
   const t0 = clock()
-  let n = 0, longest = 0
-  for (let i = 0; i < SLICES_MOST; i++) {
+  if (st.start == null) Object.assign(st, upkeepState(), { start: t0 })
+  st.ticks++
+  const figures = () => `${st.slices} slices over ${st.ticks} upkeep pass(es), ${clock() - st.start} ms in all, the library ${st.ran} ms of it, the longest slice ${st.longest} ms`
+  const end = () => {
+    if (clock() - st.start > boundMs) log(`error: the upkeep's sync took longer than its bound (${boundMs} ms): ${figures()}`)
+    Object.assign(st, upkeepState())
+    return { done: true }
+  }
+  while (st.step < steps.length) {
+    const [name, args] = steps[st.step]
+    if (st.cmdStart == null) Object.assign(st, { cmdStart: clock(), cmdSlices: 0, cmdLongest: 0 })
+    let r = null, failed = false
     const s0 = clock()
-    r = await cmd(name, { ...(args || {}), budget_ms: SLICE_MS })
+    try { r = await cmd(name, sliceMs > 0 ? { ...args, budget_ms: sliceMs } : { ...args }) } catch (e) {
+      failed = true
+      if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message)
+    }
     const own = ran ? ran(name) : null
-    n++; longest = Math.max(longest, own != null ? own : clock() - s0)
-    if (!(r && typeof r === 'object' && !Array.isArray(r) && r.more === true)) break
+    const took = own != null ? own : clock() - s0
+    st.slices++; st.cmdSlices++; st.ran += took; st.longest = Math.max(st.longest, took); st.cmdLongest = Math.max(st.cmdLongest, took)
+    const more = !failed && sliceMs > 0 && r && typeof r === 'object' && !Array.isArray(r) && r.more === true
+    if (more && st.cmdSlices >= SLICES_MOST) log(`error: ${name} given up after ${st.cmdSlices} slices: ${figures()}`)
+    if (!more || st.cmdSlices >= SLICES_MOST) {
+      if (st.cmdSlices > 1) log(`${name} in ${st.cmdSlices} slices: ${clock() - st.cmdStart} ms, the longest ${st.cmdLongest} ms`)
+      st.step++; st.cmdStart = null
+      continue
+    }
+    if (!st.over && clock() - st.start > boundMs) { st.over = true; log(`error: the upkeep's sync is past its bound (${boundMs} ms) and goes on: ${figures()}`) }
+    if (clock() - t0 >= tickMs) {
+      log(`${name} goes on at the next upkeep pass: ${clock() - t0} ms of it in this one; ${figures()}`)
+      return { done: false }
+    }
   }
-  if (stats) Object.assign(stats, { slices: n, ms: clock() - t0, longest })
-  return r
-}
-// The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS), each in
-// slices; each failure logged, a library without the deposits command passed over in silence. A
-// pass that took more than one slice is logged (`sync in N slices: T ms, the longest S ms`, S the
-// time the library ran a slice, from `ran` when given): what a firm offer asked meanwhile waited
-// for at most is one slice, not T.
-export async function upkeepSync (cmd, log, ran = null) {
-  for (const [name, args] of [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]) {
-    const st = {}
-    try { await sliced(cmd, name, args, st, Date.now, ran) } catch (e) { if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message) }
-    if (st.slices > 1) log(`${name} in ${st.slices} slices: ${st.ms} ms, the longest ${st.longest} ms`)
-  }
+  return end()
 }
 export const HELD_COINS = Object.freeze({ held: true, brief: true })
 
@@ -1522,6 +1567,10 @@ async function main () {
     return { pair, give, want: w.want }
   }
   const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
+  // The upkeep's sync in slices of `slice_ms` (0: whole syncs), at most `sync_tick_ms` of them a
+  // pass before the rest of the pass runs, its bound `sync_pass_bound_ms` (upkeepSync).
+  const upkeepOpts = { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), tickMs: Number(cfg.sync_tick_ms ?? SYNC_TICK_MS),
+    boundMs: Number(cfg.sync_pass_bound_ms ?? SYNC_PASS_BOUND_MS), state: upkeepState() }
   async function tick () {
     if (busy || Date.now() - passEnd < passTook) return
     busy = true
@@ -1530,7 +1579,7 @@ async function main () {
   }
   async function tickOnce () {
     {
-      await upkeepSync(cmd, log, (name) => lastRan.get(name) ?? null)
+      await upkeepSync(cmd, log, (name) => lastRan.get(name) ?? null, upkeepOpts)
       // The coins it holds, read once for the pass.
       passHoldings = null
       try { passHoldings = await readHoldings() } catch (e) { log('holdings:', e.message) }
