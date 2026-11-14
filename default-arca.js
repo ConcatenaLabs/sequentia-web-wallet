@@ -1071,6 +1071,11 @@ export function settleMinutes (roundSeconds, blockSeconds, anchorDepth, held = f
   const release = p != null ? 3 * p : r + b
   return Math.max(1, Math.ceil((r + (p ?? 0) + (held ? r : 0) + 2 * b + d * 600 + release) / 60))
 }
+// settleMinutes for an operator as the library's `info` answers it (null: the defaults).
+export function settleMinutesOf (info) {
+  const si = (info && info.server_info) || {}, f = si.fills || {}
+  return settleMinutes(f.round_interval_seconds, f.block_seconds, anchorDepth(info), !!(si.batches && si.batches.no_sweep), f.round_pass_seconds)
+}
 // The time a payment settling first is told it goes by, from each answer of the library's
 // `settle_first`, or its `settle_first` refusal (`usual_in_seconds`, what it usually takes, else
 // `final_in_seconds`, the most; and `waiting_for`): the first answer sets it, and it stays while

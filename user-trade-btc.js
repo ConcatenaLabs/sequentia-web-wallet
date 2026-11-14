@@ -31,6 +31,8 @@
 // on the way), when the wallet can say what it is; else by the invoice's final delta alone, which only a
 // payment to a direct peer meets.
 
+import { nextFinalBy, settleMinutesOf } from './default-arca.js'
+
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 
 const ceilDiv = (a, b) => (a + b - 1n) / b
@@ -202,6 +204,9 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
     // the trade is under way whatever the maker answers now: a lock it refused is asked for again
     // as the trade is followed, and a receive it never pays lapses and the trade comes back.
     rec.state = 'waiting'; rec.waitingSince = now()
+    // What the page says the wait is before the library's first answer: the library's own figure for
+    // a leaf made by the operator's next round (settleMinutes, its step "round").
+    rec.waitFirstBy = rec.waitingSince + settleMinutesOf(await run('info').catch(() => null)) * 60_000
     put(rec)
     try { await post(rec.maker + '/v1/btc/lock', { swap: rec.swap, invoice: r.invoice }) } catch (e) { log('[user trade] the maker did not lock yet:', e.message) }
     return rec
@@ -266,7 +271,16 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
         log('[user trade] the leaf will not do:', e.message); rec.state = 'returned'; rec.returnedAt = now(); rec.why = e.message; return put(rec)
       }
       // Why the asset is not final yet, said once each time it changes.
-      if (!r.ready) { if (rec.notReady !== (r.why || '')) { rec.notReady = r.why || ''; log('[user trade] the asset is not final yet:', rec.notReady) } return put(rec) }
+      if (!r.ready) {
+        if (rec.notReady !== (r.why || '')) { rec.notReady = r.why || ''; log('[user trade] the asset is not final yet:', rec.notReady) }
+        // The wait the page states: the library's own (`usual_in_seconds`, else `final_in_seconds`,
+        // and its step), kept while the step stands or moves on. While the maker has not paid in
+        // (`payment`, which no round bounds) it is the time the maker has to lock its side.
+        rec.waitBy = r.waiting_for === 'payment'
+          ? { finalBy: (rec.waitingSince ?? rec.at) + MAKER_LOCK_MS, step: 'payment' }
+          : nextFinalBy(rec.waitBy && rec.waitBy.step !== 'payment' ? rec.waitBy : null, r, now())
+        return put(rec)
+      }
       rec.state = 'sent'; rec.sentAt = now(); rec.paying = true
       put(rec)
     }
