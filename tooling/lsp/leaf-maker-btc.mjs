@@ -243,13 +243,14 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     s.state = 'locking'; s.locking_at = Date.now(); s.attempt = attempt; s.invoice_x = body.invoice; save()
     const mine = () => s.attempt === attempt && s.state === 'locking'
     const back = () => { if (mine()) { s.state = 'offered'; save() } }
+    let paid = null
     for (let i = 0; ; i++) {
       let q
       try { q = await cmd('lightning_pay_quote', { invoice: String(body.invoice || ''), asset: s.give_asset }, true) } catch (e) { back(); throw e }
       if (q.payment_hash !== s.hash || q.asset !== s.give_asset || q.amount !== s.give) { back(); return [409, { error: 'the invoice is not for this swap' }] }
       if (!mine()) return [200, { swap: s.swap, state: s.state }]
       try {
-        const paid = await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true)
+        paid = await cmd('lightning_pay', { invoice: body.invoice, asset: s.give_asset, shown: q }, true)
         if (onPaid) { try { onPaid(s, paid) } catch {} }
         break
       } catch (e) {
@@ -258,7 +259,9 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       }
     }
     if (mine() || s.state === 'offered') { s.state = 'locked'; save() }
-    log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8))
+    // The coins the library chose to pay it from, and its change: which coin a lock takes decides
+    // what of the maker's is out of round after it.
+    log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8), 'from', ((paid && paid.inputs) || []).map((l) => String(l).slice(0, 12)).join(',') || '?', 'change', (paid && paid.change) || '0')
     return [200, { swap: s.swap, state: s.state }]
   }
 

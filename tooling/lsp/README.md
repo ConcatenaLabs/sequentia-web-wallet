@@ -247,7 +247,9 @@ command at a time, and a command that has started runs to its end, so the upkeep
 `sync` and its `deposits` in slices of a second (`budget_ms`; a library that takes it stops at the
 first point past it where the command can stop, answers `more: true` and goes on at the next call).
 A firm offer or an acceptance goes ahead of every queued command and runs between two slices. A
-library without slices runs each in one call, and a firm offer then waits for it.
+library without slices runs each in one call, and a firm offer then waits for it. A pass that took
+more than one slice is logged (`sync in <n> slices: <ms> ms, the longest <ms> ms`): a firm offer
+asked meanwhile waited for one slice at most, not the whole pass.
 
 Between two readings of its coins, its book is what it knows it holds: the last reading, less the
 coins its open offers hold, the coins its trades and its BTC desk's payments spent and the coins it
@@ -518,7 +520,7 @@ began.
 | Method | Path | What it does |
 | --- | --- | --- |
 | `POST` | `/v1/btc/firm` `{give_asset, want_asset, give, invoice?}` | `give_asset: "BTC"`: `invoice` is the wallet's Bitcoin invoice for `give` sat, and the answer's `invoice` the operator's, for `want` of the asset under the same hash. `want_asset: "BTC"`: the answer's `invoice` is the maker's Bitcoin invoice for `want` sat |
-| `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it |
+| `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it; logged with the coins the library paid it from and its change (`btc locked <swap> <amount> <asset> from <leaves> change <atoms>`) |
 | `POST` | `/v1/btc/paid` `{swap}` | the wallet paid: the maker follows at once |
 | `POST` | `/v1/btc/release` `{swap}` | a firm offer nobody took |
 | `POST` | `/v1/btc/invoice` `{swap}` | the maker gives the asset and has locked: a new Bitcoin invoice under the same hash and for the same amount when the one given runs out within half an hour, `{swap, invoice, expires_at}` |

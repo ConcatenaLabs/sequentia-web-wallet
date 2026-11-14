@@ -150,19 +150,30 @@ export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
 // whole command in one call and answers without `more`, as before. SLICES_MOST bounds one pass.
 export const SLICE_MS = 1000
 export const SLICES_MOST = 600
-export async function sliced (cmd, name, args) {
+// `stats`, when given, is filled with the pass's slices, its time in all and its longest slice (ms).
+export async function sliced (cmd, name, args, stats = null, clock = Date.now) {
   let r = null
+  const t0 = clock()
+  let n = 0, longest = 0
   for (let i = 0; i < SLICES_MOST; i++) {
+    const s0 = clock()
     r = await cmd(name, { ...(args || {}), budget_ms: SLICE_MS })
+    n++; longest = Math.max(longest, clock() - s0)
     if (!(r && typeof r === 'object' && !Array.isArray(r) && r.more === true)) break
   }
+  if (stats) Object.assign(stats, { slices: n, ms: clock() - t0, longest })
   return r
 }
 // The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS), each in
-// slices; each failure logged, a library without the deposits command passed over in silence.
+// slices; each failure logged, a library without the deposits command passed over in silence. A
+// pass that took more than one slice is logged (`sync in N slices: T ms, the longest S ms`): what
+// a firm offer asked meanwhile waited for at most is one slice, not T.
 export async function upkeepSync (cmd, log) {
-  try { await sliced(cmd, 'sync', UPKEEP_SYNC_ARGS) } catch (e) { log('sync:', e.message) }
-  try { await sliced(cmd, 'deposits', {}) } catch (e) { if (!/no command/.test(String(e && e.message))) log('deposits:', e.message) }
+  for (const [name, args] of [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]) {
+    const st = {}
+    try { await sliced(cmd, name, args, st) } catch (e) { if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message) }
+    if (st.slices > 1) log(`${name} in ${st.slices} slices: ${st.ms} ms, the longest ${st.longest} ms`)
+  }
 }
 export const HELD_COINS = Object.freeze({ held: true, brief: true })
 
