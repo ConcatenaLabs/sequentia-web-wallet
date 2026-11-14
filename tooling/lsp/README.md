@@ -251,6 +251,14 @@ library without slices runs each in one call, and a firm offer then waits for it
 more than one slice is logged (`sync in <n> slices: <ms> ms, the longest <ms> ms`): a firm offer
 asked meanwhile waited for one slice at most, not the whole pass.
 
+The rest of its upkeep never waits on a sync without bound: the sync runs on a loop of its own,
+every `sync_seconds`, and the rest of the upkeep (a swap for BTC completed, received coins settled,
+offers renewed, boards, merges) on its own timer, so each of its commands runs between two slices
+and waits for one slice at most, however long a pass takes. A sync whose pass takes longer than
+`sync_pass_bound_ms` (five minutes) is logged as an error with its slices, its time, the library's
+time and its longest slice. `slice_ms` sets the slice (a second); `slice_ms: 0` runs whole syncs,
+which a firm offer and the rest of the upkeep wait for.
+
 Between two readings of its coins, its book is what it knows it holds: the last reading, less the
 coins its open offers hold, the coins its trades and its BTC desk's payments spent and the coins it
 gave to a round since; what a trade made it (its change, what it was paid) counts against its budget
