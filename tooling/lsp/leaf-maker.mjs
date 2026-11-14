@@ -150,15 +150,18 @@ export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
 // whole command in one call and answers without `more`, as before. SLICES_MOST bounds one pass.
 export const SLICE_MS = 1000
 export const SLICES_MOST = 600
-// `stats`, when given, is filled with the pass's slices, its time in all and its longest slice (ms).
-export async function sliced (cmd, name, args, stats = null, clock = Date.now) {
+// `stats`, when given, is filled with the pass's slices, its time in all and its longest slice (ms):
+// the time the library ran it (`ran(name)`, the queue's own reading of the last one) when known,
+// else from the call to its answer, the time queued behind other commands included.
+export async function sliced (cmd, name, args, stats = null, clock = Date.now, ran = null) {
   let r = null
   const t0 = clock()
   let n = 0, longest = 0
   for (let i = 0; i < SLICES_MOST; i++) {
     const s0 = clock()
     r = await cmd(name, { ...(args || {}), budget_ms: SLICE_MS })
-    n++; longest = Math.max(longest, clock() - s0)
+    const own = ran ? ran(name) : null
+    n++; longest = Math.max(longest, own != null ? own : clock() - s0)
     if (!(r && typeof r === 'object' && !Array.isArray(r) && r.more === true)) break
   }
   if (stats) Object.assign(stats, { slices: n, ms: clock() - t0, longest })
@@ -166,12 +169,13 @@ export async function sliced (cmd, name, args, stats = null, clock = Date.now) {
 }
 // The upkeep's sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS), each in
 // slices; each failure logged, a library without the deposits command passed over in silence. A
-// pass that took more than one slice is logged (`sync in N slices: T ms, the longest S ms`): what
-// a firm offer asked meanwhile waited for at most is one slice, not T.
-export async function upkeepSync (cmd, log) {
+// pass that took more than one slice is logged (`sync in N slices: T ms, the longest S ms`, S the
+// time the library ran a slice, from `ran` when given): what a firm offer asked meanwhile waited
+// for at most is one slice, not T.
+export async function upkeepSync (cmd, log, ran = null) {
   for (const [name, args] of [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]) {
     const st = {}
-    try { await sliced(cmd, name, args, st) } catch (e) { if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message) }
+    try { await sliced(cmd, name, args, st, Date.now, ran) } catch (e) { if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message) }
     if (st.slices > 1) log(`${name} in ${st.slices} slices: ${st.ms} ms, the longest ${st.longest} ms`)
   }
 }
@@ -1219,10 +1223,11 @@ async function main () {
   // A command slower than `slow_ms` (two seconds) is logged by name: the upkeep's long ones are what a
   // firm offer waits behind.
   const times = commandTimes()
+  const lastRan = new Map()   // command -> how long the library ran its last call (ms), for upkeepSync
   const lib = await leafLibraryThread(cfg.store_dir, {
     slowMs: Number(cfg.slow_ms ?? SLOW_MS),
     onSlow: (name, ms, detail) => log('slow', name, ms, 'ms', detail ? JSON.stringify(detail) : ''),
-    onTime: (name, ms, waited) => times.add(name, ms, waited),
+    onTime: (name, ms, waited) => { times.add(name, ms, waited); lastRan.set(name, ms) },
   })
   setInterval(() => { const l = times.line(); if (l) log(l) }, (cfg.times_seconds ?? TIMES_SECONDS) * 1000).unref()
   const w = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, nodePassword) : await lib.create(mnemonic, {
@@ -1525,7 +1530,7 @@ async function main () {
   }
   async function tickOnce () {
     {
-      await upkeepSync(cmd, log)
+      await upkeepSync(cmd, log, (name) => lastRan.get(name) ?? null)
       // The coins it holds, read once for the pass.
       passHoldings = null
       try { passHoldings = await readHoldings() } catch (e) { log('holdings:', e.message) }

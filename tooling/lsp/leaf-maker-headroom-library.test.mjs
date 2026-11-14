@@ -37,6 +37,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import http from 'node:http'
 import { leafLibraryThread } from '../leaf-node.mjs'
 import { harness, launchMaker, makerReady, freePort, sleep, lwkFrom } from '../user-mode-stack.mjs'
 import { clnRpc } from '../cln-rpc.mjs'
@@ -623,6 +624,25 @@ test('b: a BTC purchase\'s lock of a few units leaves the maker\'s book offered,
   }
 })
 
+// A proxy to the operator that holds each request `delayMs` before passing it on, as a distant
+// operator does (on the testnet a maker's sync took 14 s): the maker's sync then runs past its
+// slices. -> { url, close() }.
+async function slowProxy (target, delayMs) {
+  const to = new URL(target)
+  const srv = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (d) => chunks.push(d))
+    req.on('end', () => setTimeout(() => {
+      const up = http.request({ host: to.hostname, port: to.port, path: req.url, method: req.method, headers: { ...req.headers, host: to.host } }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res) })
+      up.on('error', (e) => { try { res.writeHead(502); res.end(e.message) } catch {} })
+      up.end(Buffer.concat(chunks))
+    }, delayMs))
+  })
+  const port = await freePort()
+  await new Promise((ok) => srv.listen(port, '127.0.0.1', ok))
+  return { url: `http://127.0.0.1:${port}${to.pathname === '/' ? '' : to.pathname}`, close: () => new Promise((ok) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(() => ok()) }) }
+}
+
 // The maker's `sync in N slices: T ms, the longest S ms` lines as intervals: [start, end, longest] (ms).
 const slicePasses = (maker) => maker.log.join('').split('\n').map((l) => l.match(/^(\S+Z) .*\bsync in (\d+) slices: (\d+) ms, the longest (\d+) ms/))
   .filter(Boolean).map((m) => { const end = Date.parse(m[1]); return { start: end - Number(m[3]), end, slices: Number(m[2]), longest: Number(m[4]) } })
@@ -639,16 +659,18 @@ test('e: a firm offer asked while the maker syncs is answered within a slice of 
     const port = await freePort()
     const pairs = [{ give: M, want: X, rate_num: '1', rate_den: '1', min_give: '10000' }, { give: X, want: M, rate_num: '1', rate_den: '1', min_give: '10000' },
       { give: P, want: X, rate_num: '1', rate_den: '1', min_give: '10000' }]
-    makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5' })
+    // The maker reaches the operator through a proxy that holds each request (LEAF_MAKER_OPERATOR_DELAY_MS,
+    // 250 ms), so its syncs run for seconds, past their slices, as on the testnet.
+    const proxy = await slowProxy(st.server, Number(process.env.LEAF_MAKER_OPERATOR_DELAY_MS || 250))
+    stops.push(() => proxy.close())
+    const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5' })
+    writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
     const maker = await launchMaker(H, join(dir, 'maker'), port, [[M, 1500000], [X, 1500000], [P, 1500000]])
     makerOf = maker
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
-    for (const a of [M, X, P]) await makerReady(H, maker, a, 300000)
-    for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
-    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 800000], [M, 800000]])
-    stops.push(() => T.stop())
-    // The prober: a firm offer of M1 every second, released at once, its answer timed.
+    // The prober, from the maker's start: a firm offer of M1 every second, released at once, each
+    // answer timed, an offer or a refusal (an answer is what a taker waits for).
     const probes = []
     let probing = true
     const prober = (async () => {
@@ -663,20 +685,25 @@ test('e: a firm offer asked while the maker syncs is answered within a slice of 
       }
     })()
     stops.push(async () => { probing = false; await prober })
+    for (const a of [M, X, P]) await makerReady(H, maker, a, 300000)
+    for (let i = 0; i < 180 && !logLines(maker, 0, /cutting a coin/).length; i++) await sleep(1000)
+    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 800000], [M, 800000]])
+    stops.push(() => T.stop())
     // Trades on M2 and X, whose settles give the maker's sync rounds to follow.
     for (let i = 0; i < 16; i++) {
       const [g, w] = i % 2 ? [X, M] : [M, X]
-      console.log(at(), 'trade', i + 1, name(g) + '->' + name(w), JSON.stringify(await trade(maker, T.t, g, w, 110000, 120)))
+      // The taker's own coins can be in a round: it says so and goes on (this case times the maker).
+      try { console.log(at(), 'trade', i + 1, name(g) + '->' + name(w), JSON.stringify(await trade(maker, T.t, g, w, 50000, 120))) } catch (e) { console.log(at(), 'trade', i + 1, 'taker:', e.message.slice(0, 160)) }
       if (i % 2 === 1) await refreshChange(H, T)
     }
     await sleep(120000)
     probing = false; await prober
     const passes = slicePasses(maker)
-    const during = probes.filter((p) => p.status === 200).map((p) => ({ ...p, pass: passes.find((x) => p.asked >= x.start && p.asked <= x.end) })).filter((p) => p.pass)
-    const outside = probes.filter((p) => p.status === 200 && !passes.some((x) => p.asked >= x.start && p.asked <= x.end)).map((p) => p.ms).sort((a, b) => a - b)
+    const during = probes.filter((p) => p.status).map((p) => ({ ...p, pass: passes.find((x) => p.asked >= x.start && p.asked <= x.end) })).filter((p) => p.pass)
+    const outside = probes.filter((p) => p.status && !passes.some((x) => p.asked >= x.start && p.asked <= x.end)).map((p) => p.ms).sort((a, b) => a - b)
     const q = (v, f) => (v.length ? v[Math.min(v.length - 1, Math.floor(v.length * f))] : null)
     console.log(`passes in slices: ${passes.length}; their time in all, most ${Math.max(0, ...passes.map((x) => x.end - x.start))} ms; the longest slice ${Math.max(0, ...passes.map((x) => x.longest))} ms; slices most ${Math.max(0, ...passes.map((x) => x.slices))}`)
-    console.log(`firm offers: ${probes.length} asked, ${probes.filter((p) => p.status === 200).length} answered with an offer; outside a pass p50 ${q(outside, 0.5)} ms, p95 ${q(outside, 0.95)}, most ${outside[outside.length - 1] ?? null}`)
+    console.log(`firm offers: ${probes.length} asked, ${probes.filter((p) => p.status === 200).length} answered with an offer, ${probes.filter((p) => p.status && p.status !== 200).length} refused; outside a pass p50 ${q(outside, 0.5)} ms, p95 ${q(outside, 0.95)}, most ${outside[outside.length - 1] ?? null}`)
     console.log('asked during a pass in slices [ms, its pass in all, its longest slice]:', JSON.stringify(during.map((p) => [p.ms, p.pass.end - p.pass.start, p.pass.longest])))
     console.log('refused or failed:', JSON.stringify(probes.filter((p) => p.status !== 200).slice(0, 20)))
     assert.ok(during.length > 0, 'some firm offers were asked during a sync in slices')
