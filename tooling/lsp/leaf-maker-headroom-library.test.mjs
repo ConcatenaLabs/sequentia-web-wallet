@@ -145,8 +145,8 @@ async function wallet (H, st, lwk, dir, mnemonic, boards) {
   return { lib, t, stop: () => lib.stop() }
 }
 
-// A taker's own change, refreshed into a round: every sale pays from its change (the library pays
-// from a coin out of round first), a reassignment deeper each time, and past the operator's depth
+// A taker's own change, refreshed into a round: a sale may pay from its change (the library pays
+// from a coin already at risk first, then the smallest that pays alone), a reassignment deeper each time, and past the operator's depth
 // limit it pays no more ("more are at the operator's depth limit"). -> once the round's new
 // coins are the taker's to spend: a live coin of a round in each asset refreshed.
 async function refreshChange (H, W) {

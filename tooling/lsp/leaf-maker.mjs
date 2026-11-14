@@ -505,7 +505,7 @@ export const DEFAULT_INSTANT_BUDGET = '0.1'
 // shared among the assets it gives (so the first trade in every one of them together puts at most
 // that share out of round), at its node's rates, and the rest in larger reserve coins that a small
 // swap does not reach (the library pays a swap from the smallest coin that pays it alone, a coin
-// already out of round first, whose spend puts nothing more out of round). The size is derived from
+// already at risk out of round first, whose spend puts nothing more at risk). The size is derived from
 // the budget at every pass, never a fixed number of atoms; coins are cut to it inside rounds (a
 // refresh in pieces), never by a payment to itself out of round.
 export const WORKING_SHARE = 4n
@@ -814,8 +814,8 @@ export function bookAfter (coins, asset, giving, { roomValue = null, rates = nul
 // cannot both keep it and settle it: it is kept while the maker can wait (`must` false), and goes
 // whole when it must settle (`must`: past half its budget, or an offer refused for what it holds
 // out of round), the asset then out of the book for the minute its round takes. It is never split
-// by a payment to itself out of round: the library pays such a payment from whatever coin it picks,
-// a reserve of millions among them, whose change is then held out of round at its whole value and
+// by a payment to itself out of round: the library pays such a payment (`send`) from the coins
+// furthest from their exit date, the largest first, a reserve of millions among them, whose change is then held out of round at its whole value and
 // fills the budget, which empties every pair (web #659). -> { give: [leaf ids], keep: [{ leaf,
 // asset }] }.
 export function keepFree (coins, due, opts = {}) {
@@ -945,31 +945,25 @@ export function receivedOnly (due, lineageOf) {
 }
 
 // The coins of its own lineage (or a trade's with its owner's exit) of kind transfer or fill that the
-// maker refreshes all the same, each when the operator can take it whole now (within HEADROOM_SHARE
-// of its headroom in the asset, or the asset uncapped), so that it never waits given at the cap,
-// where the library counts it at its whole value (arca #889):
-//   - one larger than a working coin of its asset (`sizes`, a reserve by coinShape): the library pays a swap from a coin
-//     out of round first, and a swap's change on an operator without checkpoint exits is received
-//     (at risk whole) until refreshed, so a large coin of its own turns into a large coin at risk at
-//     the next trade (web #778, case a: 848,792 at risk after a trade of 20,000);
-//   - one `hops` reassignments deep or more, at most two short of the operator's `depth_limit`
-//     (`hopsOf`: leaf -> hops, coin_places): past the limit the operator co-signs no payment of it,
-//     and a swap's change is a reassignment deeper each time, which only a refresh starts again.
-// Not one given up within GIVE_UP_AGAIN_MS (`gaveUp`), nor a resting order's. -> leaf ids.
-export function ownToRefresh (coins, { lineageOf = null, hopsOf = null, sizes = null, depthLimit = null, headroom = null, gaveUp = null, now = Date.now() } = {}) {
+// maker refreshes all the same: those `hops` reassignments deep or more, at most two short of the
+// operator's `depth_limit` (`hopsOf`: leaf -> hops, coin_places), since past the limit the operator
+// co-signs no payment of it and a swap's change is a reassignment deeper each time, which only a
+// refresh starts again. Each only when the operator can take it whole now (within HEADROOM_SHARE of
+// its headroom in the asset, or the asset uncapped), so that it never waits given at the cap, where
+// the library counts it at its whole value (arca #889). A coin of its own is not refreshed for its
+// size: the library pays a swap or a lock from a coin already at risk first, then from the smallest
+// that pays it alone (arca #911), so a large coin of its own is spent only when no smaller one pays,
+// and each refresh of one made the operator front a whole reserve. Not one given up within
+// GIVE_UP_AGAIN_MS (`gaveUp`), nor a resting order's. -> leaf ids.
+export function ownToRefresh (coins, { lineageOf = null, hopsOf = null, depthLimit = null, headroom = null, gaveUp = null, now = Date.now() } = {}) {
   const out = []
   for (const c of coins || []) {
     if (!c || c.state !== 'live' || (c.kind !== 'transfer' && c.kind !== 'fill') || isOrderCoin(c)) continue
     const l = lineageOf && lineageOf.get(c.leaf_id)
     if (l !== 'own' && l !== 'trade') continue
     if (gaveUp && now - (gaveUp.get(c.leaf_id) ?? -Infinity) < GIVE_UP_AGAIN_MS) continue
-    const size = sizes && sizes.get(c.asset)
     const hops = hopsOf && hopsOf.get(c.leaf_id)
-    // Larger than a working coin by the rule the cut and the merge read (coinShape): a coin a few
-    // atoms over this minute's size is a working coin, not refreshed for it (web wallet #783).
-    const large = size != null && coinShape(c.value, size) === 'reserve'
-    const deep = depthLimit != null && Number.isFinite(hops) && hops >= depthLimit - 2
-    if (!large && !deep) continue
+    if (!(depthLimit != null && Number.isFinite(hops) && hops >= depthLimit - 2)) continue
     const r = headroom && headroom.get(c.asset)
     if (r != null && big(c.value) > (r * HEADROOM_SHARE.num) / HEADROOM_SHARE.den) continue
     out.push(c.leaf_id)
@@ -1618,11 +1612,11 @@ async function main () {
       const ownText = ownDue.length ? String(ownDue.length) : ''
       if (ownText !== ownLog) { if (ownText) log('leaves', ownText, 'coin(s) of its own lineage out of its settle: made by itself, at risk to nobody'); ownLog = ownText }
       if (lineageOf.size > 4096) for (const id of [...lineageOf.keys()].slice(0, 2048)) { lineageOf.delete(id); hopsOf.delete(id); if (lineageOf.atRisk) lineageOf.atRisk.delete(id) }
-      // Its own coins that are too large or too deep to keep, when the operator can take each now.
-      const own = ownToRefresh(coins, { lineageOf, hopsOf, sizes, depthLimit: depthLimitOf(lastInfo),
+      // Its own coins too deep to keep, when the operator can take each now.
+      const own = ownToRefresh(coins, { lineageOf, hopsOf, depthLimit: depthLimitOf(lastInfo),
         headroom: lastInfo ? headroomOf(lastInfo) : null, gaveUp, now: t }).filter((id) => !due.includes(id))
       const ownRefText = own.slice().sort().join()
-      if (ownRefText !== ownRefLog) { if (own.length) log('refreshes', own.length, 'coin(s) of its own lineage larger than a working coin, or near the depth limit, that the operator can take now'); ownRefLog = ownRefText }
+      if (ownRefText !== ownRefLog) { if (own.length) log('refreshes', own.length, 'coin(s) of its own lineage near the depth limit that the operator can take now'); ownRefLog = ownRefText }
       due.push(...own)
       for (const [id, at] of gaveUp) if (t - at > 6 * GIVE_UP_AGAIN_MS) gaveUp.delete(id)
       // Never the last free coin of an asset it quotes (keepFree): of each asset, the coin its

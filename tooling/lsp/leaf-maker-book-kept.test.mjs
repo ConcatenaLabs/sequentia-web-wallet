@@ -126,28 +126,25 @@ test('a received coin larger than the headroom goes alone when nothing smaller f
   assert.deepEqual(withinHeadroom([{ asset: 'M', leaves: ['own'], piece: null }], coins, room, new Set(['big'])).groups, [], 'only a coin named in `alone`')
 })
 
-test('its own coins too large or too deep to keep are refreshed, each only when the operator can take it whole (web #778)', () => {
+test('its own coins too deep to keep are refreshed, each only when the operator can take it whole; never one for its size (web #778, arca #911)', () => {
   const coins = [
     { leaf_id: 'large', asset: 'M', value: '848792', kind: 'transfer', state: 'live' },
     { leaf_id: 'small', asset: 'M', value: '20000', kind: 'transfer', state: 'live' },
     { leaf_id: 'deep', asset: 'M', value: '20000', kind: 'transfer', state: 'live' },
+    { leaf_id: 'deepLarge', asset: 'M', value: '848792', kind: 'transfer', state: 'live' },
     { leaf_id: 'rcv', asset: 'M', value: '900000', kind: 'transfer', state: 'live' },
     { leaf_id: 'batch', asset: 'M', value: '900000', kind: 'batch', state: 'live' },
   ]
-  const lineageOf = new Map([['large', 'own'], ['small', 'own'], ['deep', 'trade'], ['rcv', 'received'], ['batch', 'own']])
-  const hopsOf = new Map([['large', 1], ['small', 2], ['deep', 3]])
-  const o = { lineageOf, hopsOf, sizes: new Map([['M', 62500n]]), depthLimit: 5, now: 1_000_000 }
-  assert.deepEqual(ownToRefresh(coins, o), ['large', 'deep'])
-  assert.deepEqual(ownToRefresh(coins, { ...o, headroom: new Map([['M', 200_000n]]) }), ['deep'], 'the large one waits while the headroom cannot take it whole')
-  assert.deepEqual(ownToRefresh(coins, { ...o, gaveUp: new Map([['deep', 999_000]]) }), ['large'], 'not one given up within ten minutes')
-  // A coin a few atoms over a working coin, or up to one and a half of one, is a working coin by the
-  // rule the cut and the merge read (coinShape): never refreshed for its size, which would make a
-  // second cut-and-merge loop as the size moves (web #783).
-  const near = [{ leaf_id: 'over', asset: 'M', value: '62503', kind: 'transfer', state: 'live' },
-    { leaf_id: 'band', asset: 'M', value: '93000', kind: 'transfer', state: 'live' },
-    { leaf_id: 'above', asset: 'M', value: '96000', kind: 'transfer', state: 'live' }]
-  const own = new Map([['over', 'own'], ['band', 'own'], ['above', 'own']])
-  assert.deepEqual(ownToRefresh(near, { ...o, lineageOf: own, hopsOf: new Map() }), ['above'])
+  const lineageOf = new Map([['large', 'own'], ['small', 'own'], ['deep', 'trade'], ['deepLarge', 'own'], ['rcv', 'received'], ['batch', 'own']])
+  const hopsOf = new Map([['large', 1], ['small', 2], ['deep', 3], ['deepLarge', 4], ['rcv', 4]])
+  const o = { lineageOf, hopsOf, depthLimit: 5, now: 1_000_000 }
+  // The large coin of its own one reassignment deep is left alone: the library spends it only when
+  // no smaller coin pays, and its refresh would make the operator front it whole.
+  assert.deepEqual(ownToRefresh(coins, o), ['deep', 'deepLarge'])
+  assert.deepEqual(ownToRefresh(coins, { ...o, sizes: new Map([['M', 62500n]]) }), ['deep', 'deepLarge'], 'a working coin\'s size changes nothing')
+  assert.deepEqual(ownToRefresh(coins, { ...o, headroom: new Map([['M', 200_000n]]) }), ['deep'], 'a deep coin the headroom cannot take whole waits')
+  assert.deepEqual(ownToRefresh(coins, { ...o, gaveUp: new Map([['deep', 999_000]]) }), ['deepLarge'], 'not one given up within ten minutes')
+  assert.deepEqual(ownToRefresh(coins, { ...o, depthLimit: null }), [], 'an operator that publishes no limit: none')
 })
 
 test('the library\'s own at_risk mark is read when it names one; the mirror only when it does not (arca #893)', async () => {
