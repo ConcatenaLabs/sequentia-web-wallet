@@ -23,7 +23,10 @@
 // - A BTC purchase's lock (b): the maker pays a few units of an asset into a buyer's receive over
 //   Lightning, and its book stays offered through the lock, the purchase and the trades after it.
 //   It needs the harness's Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING=1,
-//   ARCA_OPERATOR_BTC_LIGHTNING=1) and skips itself without them.
+//   ARCA_OPERATOR_BTC_LIGHTNING=1) and skips itself without them, and runs on the harness's X and Y
+//   (its Lightning peer takes no channel in the more assets). The maker here boards in working
+//   coins and holds no reserve, so it shows which coin each lock took and the book through it, not
+//   the testnet's reserve-holding maker: it passes on a library before arca #911 as well.
 // - A firm offer asked while the maker syncs (e): answered within one slice of the sync, not after
 //   the whole pass (`budget_ms`, the maker's `sync in N slices` line).
 // LEAF_MAKER_CASES (a, c, d; every one when unset; b, e and n, only when named) picks the cases.
@@ -61,14 +64,15 @@ const post = async (url, body) => {
 }
 const getJson = async (url) => (await fetch(url, { signal: AbortSignal.timeout(30000) })).json()
 
-async function stack () {
+async function stack (more = 3) {
   const H = harness(CONTROL)
   let st = await H.state()
-  assert.ok(st.more && st.more.length >= 3, 'the harness serves three more assets (ARCA_OPERATOR_MORE_ASSETS=3)')
+  st.more = st.more || []
+  assert.ok(st.more.length >= more, 'the harness serves three more assets (ARCA_OPERATOR_MORE_ASSETS=3)')
   if (!st.bond) {
     await H.c('/bond_post', { amount: BOND, instant_budget_fraction: 0.5 }); st = await H.state()
     // The operator funds its rounds from its own coins of each asset.
-    for (const a of [st.x, ...st.more]) await H.c('/fund_server', { asset: a, amount: 200000000 })
+    for (const a of [...new Set([st.x, st.y, ...st.more].filter(Boolean))]) await H.c('/fund_server', { asset: a, amount: 200000000 })
     await H.produce(); await H.bury()
   }
   const info = await getJson(st.server.replace(/\/+$/, '') + '/v1/info')
@@ -548,17 +552,22 @@ async function btcPurchase (maker, T, ln, asset, give) {
 }
 
 test('b: a BTC purchase\'s lock of a few units leaves the maker\'s book offered, through the purchase and the trades after it', { skip: skipCase('b'), timeout: 3_600_000 }, async (tc) => {
-  const { H, st, lwk } = await stack()
+  // The two assets every harness serves (its Lightning peer takes no channel in the more assets).
+  const { H, st, lwk } = await stack(0)
   if (!(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length)) return tc.skip('needs the harness\'s Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING, ARCA_OPERATOR_BTC_LIGHTNING)')
-  const X = st.x, [M0, M1, M2] = st.more
-  const name = (a) => (a === X ? 'X' : a === M0 ? 'M0' : a === M1 ? 'M1' : a === M2 ? 'M2' : a === 'BTC' ? 'BTC' : a.slice(0, 6))
+  const X = st.x, M0 = st.y
+  const name = (a) => (a === X ? 'X' : a === M0 ? 'Y' : a === 'BTC' ? 'BTC' : a.slice(0, 6))
+  // The Lightning harness's node lists X alone for fees: Y at 1:1 too, so that the maker's node
+  // prices it (an asset its node does not price is not offered).
+  const rates = await H.rpc('getfeeexchangerates')
+  if (!rates[M0]) await H.rpc('setfeeexchangerates', [{ ...rates, [M0]: 100000000 }])
   const dir = mkdtempSync(join(tmpdir(), 'maker-btc-b-'))
   const stops = []
   let makerOf = null
   try {
     const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
     const port = await freePort()
-    const assets = [X, M0, M1, M2]
+    const assets = [X, M0]
     const pairs = []
     for (const g of assets) for (const w of assets) if (g !== w) pairs.push({ give: g, want: w, rate_num: '1', rate_den: '1', min_give: '10000' })
     // The maker gives X for BTC as the drill's desk does: 0.55 sat an atom.
