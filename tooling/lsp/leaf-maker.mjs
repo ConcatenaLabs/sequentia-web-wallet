@@ -10,7 +10,9 @@
 // quoted.
 //
 // HTTP (JSON; CORS open, since a page may reach it from another origin):
-//   GET  /health              -> { ok, operator, genesis_hash }
+//   GET  /health              -> { ok, operator, genesis_hash, period_ms, upkeep, sync }: `upkeep` and `sync`
+//                                  each { passes, last_start, last_end, last_ms, longest_ms, longest_gap_ms,
+//                                  ago_ms, under_way_ms } (ms; passRecord), read without the library
 //   GET  /v1/quotes           -> { operator, genesis_hash, as_of, quotes: [{ give_asset, want_asset, rate_num, rate_den,
 //                                  min_give, max_give }] }   (the maker gives give_asset and wants
 //                                  ceil(give × rate_num / rate_den) of want_asset; with a ladder, one
@@ -212,7 +214,29 @@ export function syncLoop (cmd, log, ran = null, opts = {}) {
   return async () => {
     if (running) return null
     running = true
-    try { return await upkeepSync(cmd, log, ran, opts) } finally { running = false }
+    if (opts.record) opts.record.begin()
+    try { return await upkeepSync(cmd, log, ran, opts) } finally { running = false; if (opts.record) opts.record.end() }
+  }
+}
+// What a loop of the maker's (its upkeep, its sync) has done, as `/health` answers it: its passes
+// ended, when the last one began and ended (ms), how long it took, the longest a pass took, and the
+// longest time between two ends of a pass, the first counted from `since` (the maker's start). A
+// maker that quotes and no longer keeps itself is seen by the time since its last end (`ago_ms`),
+// which a check compares with its period (`sync_seconds`) and its longest gap.
+export function passRecord (clock = Date.now, since = clock()) {
+  const r = { passes: 0, last_start: null, last_end: null, last_ms: null, longest_ms: 0, longest_gap_ms: 0 }
+  let start = null, end = since
+  return {
+    begin () { start = clock() },
+    end () {
+      const now = clock()
+      r.passes++; r.last_start = start ?? now; r.last_end = now; r.last_ms = now - r.last_start
+      r.longest_ms = Math.max(r.longest_ms, r.last_ms); r.longest_gap_ms = Math.max(r.longest_gap_ms, now - end)
+      end = now; start = null
+    },
+    // -> the record now, `ago_ms` the time since the last end (since the start before the first),
+    // `under_way_ms` how long the pass under way has run (null when none is).
+    now () { const now = clock(); return { ...r, ago_ms: now - end, under_way_ms: start == null ? null : now - start } },
   }
 }
 export const HELD_COINS = Object.freeze({ held: true, brief: true })
@@ -1516,6 +1540,8 @@ async function main () {
   // The upkeep leaves the library free at least as long as its last pass held it, so a taker's
   // firm offer or acceptance is as likely to find it idle as busy.
   let passEnd = 0, passTook = 0, lastHold = 0
+  // The upkeep's passes and the sync's, as `/health` answers them (passRecord).
+  const upkeepPasses = passRecord(), syncPasses = passRecord()
   const HOLDINGS_FOR_FIRM_MS = 5 * 60 * 1000
   // What a firm offer is sized on: the upkeep's last reading while it is fresh, else a reading
   // asked ahead of the queue.
@@ -1562,7 +1588,8 @@ async function main () {
     if (busy || Date.now() - passEnd < passTook) return
     busy = true
     const t0 = Date.now()
-    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally { busy = false; passEnd = Date.now(); passTook = passEnd - t0 }
+    upkeepPasses.begin()
+    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally { busy = false; passEnd = Date.now(); passTook = passEnd - t0; upkeepPasses.end() }
   }
   async function tickOnce () {
     {
@@ -1754,7 +1781,7 @@ async function main () {
     if (req.method === 'OPTIONS') return send(res, 200, {})
     let asked = null
     try {
-      if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash })
+      if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash, period_ms: (cfg.sync_seconds ?? 20) * 1000, upkeep: upkeepPasses.now(), sync: syncPasses.now() })
       if (req.method === 'GET' && p === '/v1/quotes') {
         // A taker reading quotes asks for a firm offer next: the upkeep's next commands wait 90 s
         // so the offer finds the library free, at most once every three minutes so a reader that
@@ -1916,7 +1943,7 @@ async function main () {
   // the first sync pass, so that its first pass (which settles every coin the maker already holds)
   // reads coins the sync has brought up to date.
   const sync = syncLoop(cmd, log, (name) => lastRan.get(name) ?? null,
-    { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs: Number(cfg.sync_pass_bound_ms ?? SYNC_PASS_BOUND_MS) })
+    { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs: Number(cfg.sync_pass_bound_ms ?? SYNC_PASS_BOUND_MS), record: syncPasses })
   setInterval(sync, (cfg.sync_seconds ?? 20) * 1000)
   sync().finally(() => {
     tick()

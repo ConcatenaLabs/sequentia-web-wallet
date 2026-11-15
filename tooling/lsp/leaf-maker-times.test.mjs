@@ -145,3 +145,21 @@ test('the maker reads slice_ms and sync_pass_bound_ms from its configuration', a
   }
   assert.doesNotMatch(src, /sync_tick_ms/)
 })
+
+test('passRecord: passes, their longest, the longest gap between two ends, and the time since the last', async () => {
+  const { passRecord, syncLoop } = await import('./leaf-maker.mjs')
+  let now = 1000
+  const r = passRecord(() => now, now)
+  assert.deepEqual(r.now(), { passes: 0, last_start: null, last_end: null, last_ms: null, longest_ms: 0, longest_gap_ms: 0, ago_ms: 0, under_way_ms: null })
+  now = 5000; r.begin(); now = 8000
+  assert.equal(r.now().under_way_ms, 3000, 'a pass under way says how long it has run')
+  r.end()
+  now = 30000; r.begin(); now = 31000; r.end()
+  now = 40000
+  assert.deepEqual(r.now(), { passes: 2, last_start: 30000, last_end: 31000, last_ms: 1000, longest_ms: 3000, longest_gap_ms: 23000, ago_ms: 9000, under_way_ms: null })
+  // The sync loop keeps one when given it, a pass that failed included.
+  const rec = passRecord()
+  const run = syncLoop(async () => { throw new Error('down') }, () => {}, null, { sliceMs: 0, record: rec })
+  await run()
+  assert.equal(rec.now().passes, 1)
+})
