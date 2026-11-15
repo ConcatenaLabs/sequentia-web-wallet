@@ -168,8 +168,11 @@ export async function startMaker (H, st, dir, { pairs, fund, port, lwk, settleSe
   return launchMaker(H, dir, port, fund)
 }
 
+// The maker of this checkout (lsp/leaf-maker.mjs), or the one LEAF_MAKER_SCRIPT names: another
+// checkout's, to run the same case on an earlier maker.
 export async function launchMaker (H, dir, port, fund) {
-  const proc = spawn(process.execPath, [join(here, 'lsp', 'leaf-maker.mjs'), '--config', join(dir, 'maker.json')], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const script = process.env.LEAF_MAKER_SCRIPT || join(here, 'lsp', 'leaf-maker.mjs')
+  const proc = spawn(process.execPath, [script, '--config', join(dir, 'maker.json')], { stdio: ['ignore', 'pipe', 'pipe'] })
   const log = []
   const address = await new Promise((ok, no) => {
     const t = setTimeout(() => no(new Error('the maker did not start: ' + log.join(''))), 60000)
