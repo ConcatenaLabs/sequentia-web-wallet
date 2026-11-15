@@ -129,7 +129,7 @@ test('a shaped maker makes no cut and no merge while nobody trades, as rates mov
       exit_delay_units: 1, min_exit_delay_units: 1, pairs, fee_margin: '2000', sync_seconds: 3, settle_seconds: 60, offer_ttl_seconds: 300,
       board_keep: '100000', instant_budget: '0.5', max_coins: 8 }
     writeFileSync(join(mdir, 'maker.json'), JSON.stringify(cfg, null, 2))
-    await H.rpc('setfeeexchangerates', [ratesAt(0), false])
+    await H.rpc('setfeeexchangerates', [ratesAt(0)])
     maker = await launchMaker(H, mdir, port, [[X, 2_000_000], [A, 2_000_000], [B, 2_000_000]])
     stops.push(() => maker.stop())
     const stopPump = pumpLoop(H); stops.push(stopPump)
@@ -146,7 +146,7 @@ test('a shaped maker makes no cut and no merge while nobody trades, as rates mov
     // Nobody trades; the rates move a reading a minute.
     const from = maker.log.length
     for (let k = 1; k <= MINUTES; k++) {
-      await H.rpc('setfeeexchangerates', [ratesAt(k), false])
+      await H.rpc('setfeeexchangerates', [ratesAt(k)])
       await sleep(60_000)
       if (k % 5 === 0) console.log(at(), `minute ${k}: ${lines(maker, from, RESHAPE).length} cuts and merges so far`)
     }
@@ -168,10 +168,10 @@ test('a shaped maker makes no cut and no merge while nobody trades, as rates mov
       const r = await trade(maker, T.t, g, w, v)
       done.push({ pair: name(g) + '->' + name(w), give: v, ...r })
       console.log(at(), 'trade', name(g), 'for', name(w), v, JSON.stringify(r))
-      await H.rpc('setfeeexchangerates', [ratesAt(MINUTES + done.length), false])
+      await H.rpc('setfeeexchangerates', [ratesAt(MINUTES + done.length)])
       await sleep(30_000)
     }
-    for (let k = 1; k <= 10; k++) { await H.rpc('setfeeexchangerates', [ratesAt(MINUTES + plan.length + k), false]); await sleep(60_000) }
+    for (let k = 1; k <= 10; k++) { await H.rpc('setfeeexchangerates', [ratesAt(MINUTES + plan.length + k)]); await sleep(60_000) }
     const traded = done.filter((d) => !d.refused).length
     const after = lines(maker, from2, /cutting a coin|merging \d+ coins|settling \d+/)
     const count = (re) => after.filter((l) => re.test(l)).length
@@ -183,7 +183,7 @@ test('a shaped maker makes no cut and no merge while nobody trades, as rates mov
     assert.ok(count(/merging/) <= traded, `at most a merge a trade (${count(/merging/)} for ${traded})`)
   } finally {
     if (process.env.LEAF_MAKER_LOG && maker) writeFileSync(process.env.LEAF_MAKER_LOG + '.log', maker.log.join(''))
-    try { await H.rpc('setfeeexchangerates', [ratesAt(0), false]) } catch {}
+    try { await H.rpc('setfeeexchangerates', [ratesAt(0)]) } catch {}
     for (const s of stops.reverse()) { try { await s() } catch {} }
     rmSync(dir, { recursive: true, force: true })
   }
