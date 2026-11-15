@@ -29,7 +29,15 @@
 //   the testnet's reserve-holding maker: it passes on a library before arca #911 as well.
 // - A firm offer asked while the maker syncs (e): answered within one slice of the sync, not after
 //   the whole pass (`budget_ms`, the maker's `sync in N slices` line).
-// LEAF_MAKER_CASES (a, c, d; every one when unset; b, e and n, only when named) picks the cases.
+// - A maker of a large store (f), as a busy maker's on the testnet: some 700 coins on X and Y, the
+//   operator behind a proxy that holds each request (LEAF_MAKER_OPERATOR_DELAY_MS, 250 ms). A firm
+//   offer asked during a sync (one every LEAF_MAKER_PROBE_MS, 15 s) is answered within a slice, every
+//   pass of the sync ends within its bound (`sync_pass_bound_ms`), and the rest of the upkeep (BTC
+//   purchases completed, received coins settled), whose commands run between the sync's slices, is
+//   done. It needs the harness's Lightning legs and Bitcoin side, as b does.
+// - A maker of a large store through an hour of trades (g): its upkeep, its sync's passes and ten
+//   sales of an asset for BTC, each to Settled, at the box's link and settings (see the case).
+// LEAF_MAKER_CASES (a, c, d; every one when unset; b, e, f, g and n, only when named) picks the cases.
 //
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 node --test tooling/lsp/leaf-maker-headroom-library.test.mjs
 import test from 'node:test'
@@ -629,18 +637,27 @@ test('b: a BTC purchase\'s lock of a few units leaves the maker\'s book offered,
 // slices. -> { url, close() }.
 async function slowProxy (target, delayMs) {
   const to = new URL(target)
+  const held = { ms: delayMs }
+  // Every request passed on, as [when it came (ms), its path, the operator's time on it (ms), its
+  // status]: what the maker asked of the operator, and when.
+  const calls = []
   const srv = http.createServer((req, res) => {
     const chunks = []
+    const came = Date.now()
     req.on('data', (d) => chunks.push(d))
     req.on('end', () => setTimeout(() => {
-      const up = http.request({ host: to.hostname, port: to.port, path: req.url, method: req.method, headers: { ...req.headers, host: to.host } }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res) })
+      const sent = Date.now()
+      const up = http.request({ host: to.hostname, port: to.port, path: req.url, method: req.method, headers: { ...req.headers, host: to.host } }, (r) => {
+        res.writeHead(r.statusCode, r.headers); r.pipe(res)
+        r.on('end', () => calls.push([came, String(req.url).replace(/^.*\/v1\//, '').replace(/\?.*$/, ''), Date.now() - sent, r.statusCode]))
+      })
       up.on('error', (e) => { try { res.writeHead(502); res.end(e.message) } catch {} })
       up.end(Buffer.concat(chunks))
-    }, delayMs))
+    }, held.ms))
   })
   const port = await freePort()
   await new Promise((ok) => srv.listen(port, '127.0.0.1', ok))
-  return { url: `http://127.0.0.1:${port}${to.pathname === '/' ? '' : to.pathname}`, close: () => new Promise((ok) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(() => ok()) }) }
+  return { url: `http://127.0.0.1:${port}${to.pathname === '/' ? '' : to.pathname}`, calls, delay: (ms) => { held.ms = ms }, close: () => new Promise((ok) => { srv.closeAllConnections && srv.closeAllConnections(); srv.close(() => ok()) }) }
 }
 
 // The maker's `sync in N slices: T ms, the longest S ms` lines as intervals: [start, end, longest] (ms).
@@ -712,6 +729,392 @@ test('e: a firm offer asked while the maker syncs is answered within a slice of 
     assert.deepEqual(late.map((p) => [p.ms, p.pass.end - p.pass.start, p.pass.longest]), [], 'each answered within a slice')
   } finally {
     await dumpMaker(makerOf, 'e')
+    for (const s of stops.reverse()) { try { await s() } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// A maker of a large store (f). The maker's store is made first: X and Y boarded as one coin of
+// 8,000,000 each, each refreshed into fourteen pieces and a reserve, and each of those into
+// fourteen pieces and a reserve again (225 coins of each asset), and ten of each asset's smallest
+// into fourteen more (some 730 live coins in all); `max_coins` keeps the maker from merging them.
+test('f: a maker of a large store answers within a slice, and its upkeep waits on no pass without bound', { skip: skipCase('f'), timeout: 10_800_000 }, async (tc) => {
+  const { H, st, lwk } = await stack(0)
+  if (!(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length)) return tc.skip('needs the harness\'s Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING, ARCA_OPERATOR_BTC_LIGHTNING)')
+  const X = st.x, Y = st.y
+  const name = (a) => (a === X ? 'X' : a === Y ? 'Y' : a === 'BTC' ? 'BTC' : a.slice(0, 6))
+  const rates = await H.rpc('getfeeexchangerates')
+  if (!rates[Y]) await H.rpc('setfeeexchangerates', [{ ...rates, [Y]: 100000000 }])
+  const dir = mkdtempSync(join(tmpdir(), 'maker-large-f-'))
+  const stops = []
+  let makerOf = null
+  try {
+    const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
+    const port = await freePort()
+    const assets = [X, Y]
+    const pairs = []
+    for (const g of assets) for (const w of assets) if (g !== w) pairs.push({ give: g, want: w, rate_num: '1', rate_den: '1', min_give: '10000' })
+    const btc = { rpc: st.btc_lightning.hub, keep_sats: '200000', invoice_seconds: 3600, pairs: [{ give: X, want: 'BTC', rate_num: '11', rate_den: '20', min_give: '10000' }] }
+    const delay = Number(process.env.LEAF_MAKER_OPERATOR_DELAY_MS || 250)
+    const proxy = await slowProxy(st.server, 0)
+    stops.push(() => proxy.close())
+    const boundMs = 300000
+    // Its command times every minute (`times`): how long each of the upkeep's commands waited in the
+    // queue.
+    const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', exit_delay_units: 3, btc, max_coins: 2000,
+      sync_pass_bound_ms: boundMs, times_seconds: 60 })
+    writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
+    // The store, through the proxy (no delay while it is made).
+    const seed = await wallet(H, st, lwk, cfg.store_dir, mnemonic, [[X, 8000000], [Y, 8000000]], { server: proxy.url, exit_delay_units: 3 })
+    const live = async () => { await seed.t('sync').catch(() => {}); return (await seed.t('coins')).filter((c) => c.state === 'live') }
+    const split = async (coins, piece) => {
+      for (const c of coins) {
+        const args = { leaves: [c.leaf_id], piece: String(piece), pieces: 14 }
+        const q = await seed.t('quote', args)
+        await seed.t('participate', { ...args, shown: q.coins })
+      }
+      const want = (await live()).length + coins.length * 14
+      for (let i = 0; i < 300; i++) { await H.pump().catch(() => {}); if ((await live()).length >= want) break; await sleep(1000) }
+    }
+    const value = (c) => BigInt(c.value)
+    await split(await live(), 500000)
+    await split(await live(), 30000)
+    const small = (await live()).filter((c) => value(c) === 30000n)
+    await split(assets.flatMap((a) => small.filter((c) => c.asset === a).slice(0, 10)), 2000)
+    const made = await live()
+    console.log(at(), 'the maker\'s store:', made.length, 'live coins:', assets.map((a) => name(a) + ' ' + made.filter((c) => c.asset === a).length).join(', '))
+    assert.ok(made.length >= 600, 'a store as large as a busy maker\'s: ' + made.length)
+    await seed.stop()
+    proxy.delay(delay)
+    const maker = await launchMaker(H, join(dir, 'maker'), port, null)
+    maker.url = `http://127.0.0.1:${port}`
+    makerOf = maker
+    stops.push(() => maker.stop())
+    const stopPump = pumpLoop(H); stops.push(stopPump)
+    // A firm offer and its release cost the library seconds on a store this large (each command's
+    // start re-checks every coin), and go ahead of the upkeep: asked every second they would hold
+    // the library from the upkeep for good. One every LEAF_MAKER_PROBE_MS (15 s), as takers come.
+    const probeMs = Number(process.env.LEAF_MAKER_PROBE_MS || 15000)
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const asked = Date.now()
+        try {
+          const f = await post(maker.url + '/v1/firm', { give_asset: Y, want_asset: X, give: '10000' })
+          probes.push({ asked, ms: Date.now() - asked, status: f.status })
+          if (f.status === 200) await post(maker.url + '/v1/release', { swap: f.body.swap }).catch(() => {})
+        } catch (e) { probes.push({ asked, ms: Date.now() - asked, error: e.message }) }
+        await sleep(probeMs)
+      }
+    })()
+    stops.push(async () => { probing = false; await prober })
+    for (const a of assets) await makerReady(H, maker, a, 300000)
+    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 800000], [Y, 800000]], { exit_delay_units: 3 })
+    stops.push(() => T.stop())
+    const ln = clnRpc(st.btc_lightning.wallets[0])
+    // Trades both ways (the maker settles what it receives, settle_seconds 30), and purchases with
+    // BTC between them.
+    // Takers come one every LEAF_MAKER_TRADE_GAP_MS (20 s): back to back, each command costing the
+    // library seconds on this store and going ahead of the upkeep, they would hold it for minutes.
+    const gapMs = Number(process.env.LEAF_MAKER_TRADE_GAP_MS || 20000)
+    const purchases = []
+    for (let k = 0; k < 2; k++) {
+      for (const [g, w] of [[X, Y], [Y, X], [X, Y]]) {
+        try { console.log(at(), 'trade', name(g) + '->' + name(w), JSON.stringify(await trade(maker, T.t, g, w, 30000, 120))) } catch (e) { console.log(at(), 'trade taker:', e.message.slice(0, 160)) }
+        await sleep(gapMs)
+      }
+      await refreshChange(H, T)
+      const p = await btcPurchase(maker, T, ln, X, 20000)
+      purchases.push(p)
+      console.log(at(), 'purchase', k + 1, JSON.stringify({ lock_ms: p.lock_ms, ready_ms: p.ready_ms, received_ms: p.received_ms }))
+    }
+    await sleep(180000)
+    probing = false; await prober
+    const passes = slicePasses(maker)
+    const during = probes.filter((p) => p.status).map((p) => ({ ...p, pass: passes.find((x) => p.asked >= x.start && p.asked <= x.end) })).filter((p) => p.pass)
+    const outside = probes.filter((p) => p.status && !passes.some((x) => p.asked >= x.start && p.asked <= x.end)).map((p) => p.ms).sort((a, b) => a - b)
+    const q = (v, f) => (v.length ? v[Math.min(v.length - 1, Math.floor(v.length * f))] : null)
+    // The longest wait in the queue of each of the upkeep's own commands (not the sync's, not a
+    // taker's), over the `times` lines.
+    const TAKERS = new Set(['sync', 'deposits', 'swap_offer', 'swap_complete', 'swap_cancel', 'swap_read', 'lightning_pay', 'lightning_pay_quote', 'hand_over_forfeits'])
+    const waited = {}
+    for (const l of logLines(maker, 0, / times \{/)) {
+      for (const [k, v] of Object.entries(JSON.parse(l.slice(l.indexOf('times ') + 6)))) if (!TAKERS.has(k)) waited[k] = Math.max(waited[k] || 0, v.waited_max || 0)
+    }
+    const errors = logLines(maker, 0, /\berror: /)
+    const settles = logLines(maker, 0, /settling \d+ received coins/)
+    console.log(`passes in slices: ${passes.length}; their time in all, most ${Math.max(0, ...passes.map((x) => x.end - x.start))} ms; the longest slice ${Math.max(0, ...passes.map((x) => x.longest))} ms; slices most ${Math.max(0, ...passes.map((x) => x.slices))}`)
+    console.log(`the upkeep's commands, the longest wait in the queue of each: ${JSON.stringify(waited)}; errors: ${errors.length}; settles: ${settles.length}`)
+    console.log(`firm offers: ${probes.length} asked, ${probes.filter((p) => p.status === 200).length} answered with an offer; outside a pass p50 ${q(outside, 0.5)} ms, p95 ${q(outside, 0.95)}, most ${outside[outside.length - 1] ?? null}; during a pass most ${Math.max(0, ...during.map((p) => p.ms))} ms (${during.length})`)
+    console.log('purchases:', JSON.stringify(purchases.map((p) => ({ lock_ms: p.lock_ms, ready_ms: p.ready_ms, received_ms: p.received_ms }))))
+    console.log('the maker said:\n' + logLines(maker, 0, /slices|error|settling|btc/).map((l) => l.slice(0, 300)).join('\n'))
+    const longest = Math.max(0, ...passes.map((x) => x.longest))
+    // Each firm offer during a pass answered within a slice and its own run.
+    const late = during.filter((p) => p.ms > p.pass.longest + (q(outside, 0.95) ?? 1000) + 500)
+    assert.deepEqual(late.map((p) => [p.ms, p.pass.end - p.pass.start, p.pass.longest]), [], 'each answered within a slice')
+    // No pass past its bound.
+    assert.deepEqual(errors, [], 'no pass past its bound')
+    // Every purchase received, and the coins the maker received settled.
+    for (const p of purchases) assert.ok(p.received_ms != null, 'each purchase is received')
+    assert.ok(settles.length > 0, 'the maker settled the coins it received')
+  } finally {
+    await dumpMaker(makerOf, 'f')
+    for (const s of stops.reverse()) { try { await s() } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// The store of a busy maker (g): X and Y boarded as one coin of 8,000,000 each, each refreshed
+// into fourteen pieces and a reserve, each of those into fourteen again, and twelve of each asset's
+// smallest into fourteen more (some 760 live coins). Made through `server` (the proxy, no delay
+// while it is made). -> the live coins.
+async function largeStore (H, st, lwk, storeDir, mnemonic, server, assets) {
+  const seed = await wallet(H, st, lwk, storeDir, mnemonic, assets.map((a) => [a, 8000000]), { server, exit_delay_units: 3 })
+  const live = async () => { await seed.t('sync').catch(() => {}); return (await seed.t('coins')).filter((c) => c.state === 'live') }
+  const split = async (coins, piece) => {
+    for (const c of coins) {
+      const args = { leaves: [c.leaf_id], piece: String(piece), pieces: 14 }
+      const q = await seed.t('quote', args)
+      await seed.t('participate', { ...args, shown: q.coins })
+    }
+    const want = (await live()).length + coins.length * 14
+    for (let i = 0; i < 300; i++) { await H.pump().catch(() => {}); if ((await live()).length >= want) break; await sleep(1000) }
+  }
+  await split(await live(), 500000)
+  await split(await live(), 30000)
+  const small = (await live()).filter((c) => BigInt(c.value) === 30000n)
+  await split(assets.flatMap((a) => small.filter((c) => c.asset === a).slice(0, 12)), 2000)
+  const made = await live()
+  await seed.stop()
+  return made
+}
+
+// One sale of an asset for BTC, as the page makes it (user-trade-btc.js, selling): the wallet's
+// Bitcoin invoice for `sats`, the maker's firm offer under its hash (`give_asset` BTC), the wallet's
+// leaf paying the operator's invoice for the asset, and the nudge (`/v1/btc/paid`). Then followed as
+// the page follows it: the BTC on the wallet's invoice is "Received", and once the wallet's payment
+// of the asset is settled with the preimage (the maker's claim, or the wallet's own hand-over of the
+// preimage, which the operator refuses while the maker's leaf is still being made) it is "Settled".
+// -> the times of each step (ms after the firm offer was asked).
+async function btcSale (maker, T, ln, asset, sats, boundMs) {
+  const t0 = Date.now()
+  const label = `sale-${t0}-${Math.random().toString(16).slice(2, 8)}`
+  const inv = await ln('invoice', { amount_msat: sats * 1000, label, description: 'trade', expiry: 3600 })
+  const f = await post(maker.url + '/v1/btc/firm', { give_asset: 'BTC', want_asset: asset, give: String(sats), invoice: inv.bolt11 })
+  const offerMs = Date.now() - t0
+  if (f.status !== 200) return { offer_ms: offerMs, refused: JSON.stringify(f.body).slice(0, 200) }
+  const q = await T.t('lightning_pay_quote', { invoice: f.body.invoice, asset })
+  assert.equal(q.payment_hash, inv.payment_hash, 'the maker\'s invoice is under the wallet\'s hash')
+  const r = await T.t('lightning_pay', { invoice: f.body.invoice, asset, shown: q })
+  const sentMs = Date.now() - t0
+  post(maker.url + '/v1/btc/paid', { swap: f.body.swap }).catch(() => {})
+  let received = null, settled = null, preimage = null, posted = 0
+  const refusals = new Set()
+  while (Date.now() - t0 < boundMs * 3) {
+    await T.t('sync').catch(() => {})
+    if (received == null) {
+      const i = ((await ln('listinvoices', { label })).invoices || [])[0] || {}
+      if (i.status === 'paid') { received = Date.now() - t0; preimage = i.payment_preimage }
+    }
+    if (received != null) {
+      const p = ((await T.t('lightning_payments')) || {})[inv.payment_hash] || {}
+      if (p.state === 'paid') { settled = Date.now() - t0; break }
+      try { await T.t('lightning_post_preimage', { hash: inv.payment_hash, preimage }); posted++ } catch (e) { refusals.add(String(e.message).slice(0, 120)) }
+    }
+    await sleep(2000)
+  }
+  return { swap: f.body.swap, sats, give: f.body.want, change: r.change || '0', offer_ms: offerMs, sent_ms: sentMs, received_ms: received, settled_ms: settled,
+    preimage_posts: posted, preimage_refusals: [...refusals] }
+}
+
+// The maker's passes of its sync, from its log: a pass in slices is its `sync in N slices` line; a
+// whole sync (one slice, or a library without slices) is its `slow sync` line. Each with the
+// operator calls its slices made (`slow sync` lines, logged for every command at `slow_ms` 1).
+// -> [{ start, end, ms, slices, longest, operator }]
+function syncPasses (maker) {
+  const lines = maker.log.join('').split('\n')
+  const slices = lines.map((l) => l.match(/^(\S+Z) slow sync (\d+) ms (\{.*\})$/)).filter(Boolean).map((m) => {
+    let c = {}; try { c = JSON.parse(m[3]).cost || {} } catch {}
+    const end = Date.parse(m[1])
+    return { end, ms: Number(m[2]), operator: ((c.command && c.command.operator) || 0) + ((c.start && c.start.operator) || 0) }
+  })
+  const sliced = slicePasses(maker)
+  const passes = sliced.map((p) => {
+    const in_ = slices.filter((x) => x.end >= p.start - 50 && x.end <= p.end + 50)
+    return { start: p.start, end: p.end, ms: p.end - p.start, slices: p.slices, longest: p.longest, operator: in_.reduce((n, x) => n + x.operator, 0) }
+  })
+  for (const x of slices) if (!sliced.some((p) => x.end >= p.start - 50 && x.end <= p.end + 50)) passes.push({ start: x.end - x.ms, end: x.end, ms: x.ms, slices: 1, longest: x.ms, operator: x.operator })
+  return passes.sort((a, b) => a.start - b.start)
+}
+const stats = (v) => {
+  const s = [...v].sort((a, b) => a - b)
+  const q = (f) => (s.length ? s[Math.min(s.length - 1, Math.floor(s.length * f))] : null)
+  return { n: s.length, p50: q(0.5), p95: q(0.95), most: s.length ? s[s.length - 1] : null }
+}
+
+// A maker of a large store through an hour of trades (g), as the testnet's makers run: the store as
+// f makes it, the operator behind a proxy at the box's link (LEAF_MAKER_OPERATOR_DELAY_MS, 140 ms: a
+// maker there reaches its operator through the public address), the BTC desk as the BTC maker's
+// (both ways, paying a small purchase on the operator's acceptance), `sync_seconds` 20 and
+// `settle_seconds` 600 as the box's, and slices of LEAF_MAKER_SLICE_MS (1000; 0, whole syncs). The
+// sync's passes are read alone first (LEAF_MAKER_QUIET_MINUTES, 5), then for
+// LEAF_MAKER_TRADE_MINUTES (60): a firm offer every LEAF_MAKER_PROBE_MS (15 s), a trade every
+// LEAF_MAKER_TRADE_GAP_MS (20 s), and a sale of X for BTC every tenth of the time (ten sales). The
+// box's busiest maker made four swap offers in ten minutes (2026-11-15): 60 s and 120 s are some
+// three times that, the defaults some twenty times. Read: each pass of the sync (time, slices, the longest slice,
+// operator calls), the upkeep's period and its longest gap (`/health`, read every 2 s), each firm
+// offer's answer during a pass and outside one, each sale from its offer to Received and Settled,
+// and every call the maker made of the operator by path (the proxy). The figures go to
+// LEAF_MAKER_FIGURES (a path) as JSON. LEAF_MAKER_SCRIPT runs another checkout's maker on the same
+// case. It passes when no upkeep gap and no pass is past `sync_pass_bound_ms`, and every sale is
+// Settled within SALE_SETTLED_MS of its offer.
+const SALE_SETTLED_MS = 10 * 60_000
+test('g: a maker of a large store through an hour of trades: its upkeep, its sync, and ten sales for BTC', { skip: skipCase('g'), timeout: 4 * 3_600_000 }, async (tc) => {
+  const { H, st, lwk } = await stack(0)
+  if (!(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length)) return tc.skip('needs the harness\'s Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING, ARCA_OPERATOR_BTC_LIGHTNING)')
+  const X = st.x, Y = st.y
+  const name = (a) => (a === X ? 'X' : a === Y ? 'Y' : a === 'BTC' ? 'BTC' : a.slice(0, 6))
+  const rates = await H.rpc('getfeeexchangerates')
+  if (!rates[Y]) await H.rpc('setfeeexchangerates', [{ ...rates, [Y]: 100000000 }])
+  const dir = mkdtempSync(join(tmpdir(), 'maker-large-g-'))
+  const stops = []
+  let makerOf = null
+  const env = (k, d) => Number(process.env[k] ?? d)
+  const sliceMs = env('LEAF_MAKER_SLICE_MS', 1000), delay = env('LEAF_MAKER_OPERATOR_DELAY_MS', 140)
+  const quietMin = env('LEAF_MAKER_QUIET_MINUTES', 5), tradeMin = env('LEAF_MAKER_TRADE_MINUTES', 60)
+  const probeMs = env('LEAF_MAKER_PROBE_MS', 15000), gapMs = env('LEAF_MAKER_TRADE_GAP_MS', 20000)
+  const boundMs = 300000
+  try {
+    const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
+    const port = await freePort()
+    const assets = [X, Y]
+    const pairs = []
+    for (const g of assets) for (const w of assets) if (g !== w) pairs.push({ give: g, want: w, rate_num: '1', rate_den: '1', min_give: '10000' })
+    const btc = { rpc: st.btc_lightning.hub, keep_sats: '20000', invoice_seconds: 3600, max_route_fee_sats: '1000',
+      unfinal_max_sats: '50000', unfinal_total_sats: '500000', unfinal_window_seconds: 7200,
+      pairs: [{ give: X, want: 'BTC', rate_num: '11', rate_den: '20', min_give: '10000' }, { give: 'BTC', want: X, rate_num: '20', rate_den: '11', min_give: '5000' }] }
+    const proxy = await slowProxy(st.server, 0)
+    stops.push(() => proxy.close())
+    const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', exit_delay_units: 3, btc, max_coins: 2000,
+      sync_seconds: 20, settle_seconds: 600, slice_ms: sliceMs, sync_pass_bound_ms: boundMs, times_seconds: 60, slow_ms: 1 })
+    writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
+    const made = await largeStore(H, st, lwk, cfg.store_dir, mnemonic, proxy.url, assets)
+    console.log(at(), 'the maker\'s store:', made.length, 'live coins:', assets.map((a) => name(a) + ' ' + made.filter((c) => c.asset === a).length).join(', '))
+    assert.ok(made.length >= 720, 'a store as large as the testnet\'s makers\': ' + made.length)
+    proxy.delay(delay)
+    const callsFrom = proxy.calls.length
+    const maker = await launchMaker(H, join(dir, 'maker'), port, null)
+    maker.url = `http://127.0.0.1:${port}`
+    makerOf = maker
+    stops.push(() => maker.stop())
+    const started = Date.now()
+    const stopPump = pumpLoop(H); stops.push(stopPump)
+    // The upkeep's and the sync's records, every 2 s.
+    const health = []
+    let watching = true
+    const watcher = (async () => { while (watching) { try { health.push({ at: Date.now(), ...(await getJson(maker.url + '/health')) }) } catch {} await sleep(2000) } })()
+    stops.push(async () => { watching = false; await watcher })
+    for (const a of assets) await makerReady(H, maker, a, 300000)
+    console.log(at(), 'the maker quotes; its passes read alone for', quietMin, 'min')
+    await sleep(quietMin * 60_000)
+    const quietEnd = Date.now()
+    const T = await wallet(H, st, lwk, join(dir, 'taker'), lwk.Mnemonic.fromRandom(12).toString(), [[X, 3000000], [Y, 800000]], { exit_delay_units: 3 })
+    stops.push(() => T.stop())
+    // The taker's coins in pieces, as a wallet that trades holds them: its sales and its trades run
+    // side by side, each paying from a coin of its own.
+    {
+      const coins = (await T.t('coins')).filter((c) => c.state === 'live')
+      for (const [a, piece] of [[X, 200000], [Y, 100000]]) {
+        const c = coins.find((x) => x.asset === a)
+        const args = { leaves: [c.leaf_id], piece: String(piece), pieces: a === X ? 14 : 7 }
+        const q = await T.t('quote', args)
+        await T.t('participate', { ...args, shown: q.coins })
+      }
+      for (let i = 0; i < 300; i++) { await H.pump().catch(() => {}); await T.t('sync').catch(() => {}); if ((await T.t('coins')).filter((c) => c.state === 'live').length >= 20) break; await sleep(1000) }
+      console.log(at(), 'the taker holds', (await T.t('coins')).filter((c) => c.state === 'live').length, 'live coins')
+    }
+    const ln = clnRpc(st.btc_lightning.wallets[0])
+    // A firm offer every 15 s, released at once.
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const asked = Date.now()
+        try {
+          const f = await post(maker.url + '/v1/firm', { give_asset: Y, want_asset: X, give: '10000' })
+          probes.push({ asked, ms: Date.now() - asked, status: f.status })
+          if (f.status === 200) await post(maker.url + '/v1/release', { swap: f.body.swap }).catch(() => {})
+        } catch (e) { probes.push({ asked, ms: Date.now() - asked, error: e.message }) }
+        await sleep(probeMs)
+      }
+    })()
+    stops.push(async () => { probing = false; await prober })
+    const tradeStart = Date.now()
+    const callsTrading = proxy.calls.length
+    const sales = [], trades = []
+    const salesRunning = []
+    const every = tradeMin * 60_000 / 10
+    for (let k = 0; k < 10; k++) {
+      const due = tradeStart + k * every
+      salesRunning.push(btcSale(maker, T, ln, X, 11000, SALE_SETTLED_MS).then((s) => { s.k = k + 1; s.at = due - tradeStart; sales.push(s); console.log(at(), 'sale', k + 1, JSON.stringify(s)) },
+        (e) => { sales.push({ k: k + 1, error: e.message.slice(0, 200) }); console.log(at(), 'sale', k + 1, 'error:', e.message.slice(0, 200)) }))
+      for (let i = 0; Date.now() < due + every; i++) {
+        const [g, w] = i % 2 ? [Y, X] : [X, Y]
+        try { const t = await trade(maker, T.t, g, w, 30000, 20); trades.push(t); console.log(at(), 'trade', name(g) + '->' + name(w), JSON.stringify(t)) } catch (e) { trades.push({ error: e.message.slice(0, 160) }); console.log(at(), 'trade taker:', e.message.slice(0, 160)) }
+        // The taker's change, refreshed every sixth trade, as a wallet's upkeep keeps it under the
+        // operator's depth limit.
+        if (i % 6 === 5) await refreshChange(H, T)
+        await sleep(Math.max(0, Math.min(gapMs, due + every - Date.now())))
+      }
+    }
+    const tradeEnd = Date.now()
+    await Promise.all(salesRunning)
+    probing = false; await prober
+    watching = false; await watcher
+    // The figures.
+    const passes = syncPasses(maker)
+    const quiet = passes.filter((p) => p.start >= started && p.end <= quietEnd)
+    const busy = passes.filter((p) => p.start >= tradeStart && p.end <= tradeEnd)
+    const inPass = (t) => passes.find((x) => t >= x.start && t <= x.end)
+    const during = probes.filter((p) => p.status && inPass(p.asked)), outside = probes.filter((p) => p.status && !inPass(p.asked))
+    const ends = (k) => health.map((h) => h[k] && h[k].last_end).filter(Boolean)
+    const gaps = (k) => { const e = [...new Set(ends(k))]; const g = []; for (let i = 1; i < e.length; i++) g.push(e[i] - e[i - 1]); return g }
+    const lastHealth = health[health.length - 1] || {}
+    const pick = (p) => ({ ms: p.ms, slices: p.slices, longest: p.longest, operator: p.operator })
+    const byPath = (from, to) => {
+      const m = {}
+      for (const [t, path, ms, code] of proxy.calls.slice(callsFrom)) {
+        if (t < from || t > to) continue
+        const e = m[path] || (m[path] = { calls: 0, ms: 0, failed: 0 }); e.calls++; e.ms += ms; if (code >= 400) e.failed++
+      }
+      return m
+    }
+    const figures = {
+      settings: { slice_ms: sliceMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
+      store: { live: made.length, X: made.filter((c) => c.asset === X).length, Y: made.filter((c) => c.asset === Y).length },
+      quiet: { minutes: quietMin, passes: quiet.map(pick), ms: stats(quiet.map((p) => p.ms)), operator: stats(quiet.map((p) => p.operator)) },
+      trading: { minutes: (tradeEnd - tradeStart) / 60000, passes: busy.length, ms: stats(busy.map((p) => p.ms)), slices: stats(busy.map((p) => p.slices)),
+        longest_slice: stats(busy.map((p) => p.longest)), operator: stats(busy.map((p) => p.operator)) },
+      upkeep: { period: stats(gaps('upkeep')), last: lastHealth.upkeep || null },
+      sync: { period: stats(gaps('sync')), last: lastHealth.sync || null },
+      firm: { asked: probes.length, offers: probes.filter((p) => p.status === 200).length, during: stats(during.map((p) => p.ms)), outside: stats(outside.map((p) => p.ms)) },
+      trades: { made: trades.filter((t) => t.ms != null && !t.refused).length, refused: trades.filter((t) => t.refused).length, failed: trades.filter((t) => t.error).length,
+        firm_ms: stats(trades.filter((t) => t.ms != null).map((t) => t.ms)) },
+      sales: sales.sort((a, b) => a.k - b.k),
+      sale_settled: stats(sales.filter((s) => s.settled_ms != null).map((s) => s.settled_ms)),
+      sale_received: stats(sales.filter((s) => s.received_ms != null).map((s) => s.received_ms)),
+      operator_calls_trading: byPath(tradeStart, tradeEnd),
+      errors: logLines(maker, 0, /\berror: /).map((l) => l.slice(0, 300)),
+    }
+    console.log('figures:', JSON.stringify(figures, null, 1))
+    if (process.env.LEAF_MAKER_FIGURES) writeFileSync(process.env.LEAF_MAKER_FIGURES, JSON.stringify({ figures, health, probes, calls: proxy.calls.slice(callsFrom) }, null, 1))
+    assert.equal(sales.length, 10, 'ten sales')
+    assert.deepEqual(sales.filter((s) => !(s.settled_ms <= SALE_SETTLED_MS)).map((s) => [s.k, s.received_ms, s.settled_ms, s.refused || s.error || null]), [], 'every sale Settled within ' + SALE_SETTLED_MS + ' ms of its offer')
+    assert.ok((figures.upkeep.period.most ?? Infinity) <= boundMs, 'no gap of the upkeep past the bound: ' + figures.upkeep.period.most)
+    assert.deepEqual(figures.errors, [], 'no pass past its bound')
+  } finally {
+    await dumpMaker(makerOf, 'g')
     for (const s of stops.reverse()) { try { await s() } catch {} }
     rmSync(dir, { recursive: true, force: true })
   }

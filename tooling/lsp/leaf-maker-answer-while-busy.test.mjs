@@ -87,3 +87,20 @@ test('a library without slices runs each command in one call, as before', async 
   assert.deepEqual(asked.map((a) => a[0]), ['sync', 'deposits'])
   assert.equal(asked[0][1].budget_ms, SLICE_MS)
 })
+
+test('the rest of the upkeep, on its own timer, waits for one slice of the sync at most', async () => {
+  const L = simulatedLibrary()
+  const waits = []
+  let syncing = true
+  const sync = upkeepSync(L.cmd, () => {}).finally(() => { syncing = false })
+  // The rest of the upkeep: its commands one after another, as tickOnce runs them, queued normally.
+  while (syncing) {
+    const t0 = Date.now()
+    await L.cmd('coins', {})
+    waits.push((Date.now() - t0) * SCALE)
+  }
+  await sync
+  assert.ok(waits.length >= 8, 'the upkeep ran its commands while the sync ran: ' + waits.length)
+  // One slice (a second) and the item past it (half a second), with the timers' slack.
+  assert.ok(Math.max(...waits) <= SLICE_MS + 500 + 700, `an upkeep command waited ${Math.max(...waits)} ms (box time): ${waits.join(', ')}`)
+})
