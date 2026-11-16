@@ -273,27 +273,31 @@ there, and the page says it is finding them until it has), and one that cannot (
 without and tries again every two minutes. If the operator stops answering, the coins are still
 the wallet's: Balance says so in plain words and offers **Take my coins home**, which sends every
 coin to the wallet's own address from what the wallet holds and the chain alone, its fees shown
-first (docs/DEFAULT_MODE.md, "When the service does not answer"). **Receive** gives one receive code, a BIP321 payment request
-(`BITCOIN:<ADDRESS>?ark=<ARK ADDRESS>&sequentia=<SQR1…>`, `pay-code.js`, upper case and with
-the receive request in a short form so it scans at a glance): another wallet like this one pays
-an asset at its single-use Sequentia receive request and BTC at its Bitcoin ark address, both in
-seconds, and any other wallet pays the address. An optional
-amount in BTC adds `amount=` and a `lightning=` invoice from the Bitcoin ark for it, which a
-Lightning wallet pays; an amount in an asset the operator receives over Lightning adds a
-`lightning=` invoice in that asset from the operator's node, which a wallet of another operator
-pays in seconds. Without an amount, a wallet with a payment name carries the name's LNURL-pay as
-`lightning=`, which any Lightning wallet pays in an amount it chooses. **New code** moves to an
-address not shown before, within the twenty past the last one paid that a restore reads
-(`receive-index.js`). The **Confidential** switch under the code turns it into the wallet's
-confidential address alone, saying what stays public. The address alone
-is shown in developer mode. Under the code the wallet can choose a **payment name**,
-`name@sequentiatestnet.com` (`lnaddr.js`), held by a key of its phrase: a Lightning address that
-any Lightning wallet pays in an amount it chooses while the page is open (it makes the Bitcoin ark
-invoice), and that a Sequentia wallet pays in any asset, open or closed, at one of the receive codes
-the page leaves signed with the name service (`name-stock.js`: each at its own address within what
-a restore reads, each handed out once). A wallet with a name shows the name as its QR code, with
-**Show full code** beside it; the payer's wallet checks each code's signature against the name's
-key before paying. The
+first (docs/DEFAULT_MODE.md, "When the service does not answer"). **Receive** is one card: a QR code, one line ("Scan or share to get paid in BTC or any asset."),
+**Copy**, and a payment coming in said under them as it arrives (`receive-watch.js`); the rest is
+under **More options**. Every wallet has a **payment name** by default, `name@sequentiatestnet.com`
+(`lnaddr.js`), its word name made with nothing asked when it is created or restored (a restored
+wallet gets back the name its key holds), held by a key of its phrase and changed or removed in
+Settings. The QR code holds that name alone: a Lightning address that any Lightning wallet pays in
+an amount it chooses while the page is open (it makes the Bitcoin ark invoice), and that a
+Sequentia wallet pays in any asset, open or closed, at one of the receive codes the page leaves
+signed with the name service (`name-stock.js`: each at its own address within what a restore
+reads, each handed out once); the payer's wallet checks each code's signature against the name's
+key before paying. Without a name, or while the name service does not answer, the QR code is the
+wallet's receive code, a BIP321 payment request (`BITCOIN:<ADDRESS>?ark=<ARK ADDRESS>&sequentia=<SQR1…>`,
+`pay-code.js`, upper case and with the receive request in a short form so it scans at a glance):
+another wallet like this one pays an asset at its single-use Sequentia receive request and BTC at
+its Bitcoin ark address, both in seconds, and any other wallet pays the address. More options
+holds an amount to request, **New code**, **Show full code**, **Confidential** and **Receive a
+restricted asset**. An amount in BTC adds `amount=` and a `lightning=` invoice from the Bitcoin
+ark for it, which a Lightning wallet pays; an amount in an asset the operator receives over
+Lightning adds a `lightning=` invoice in that asset from the operator's node, which a wallet of
+another operator pays in seconds. Without an amount, a wallet with a payment name carries the
+name's LNURL-pay as `lightning=`, which any Lightning wallet pays in an amount it chooses. **New
+code** moves to an address not shown before, within the twenty past the last one paid that a
+restore reads (`receive-index.js`). **Confidential** turns the QR code into the wallet's
+confidential address alone, saying what stays public. Developer mode shows the address, with the
+name under it. The
 testnet faucet pays the receive code, or the address when it does not pay that asset into
 receive codes. Coins that land at the wallet's address on the chain are boarded into the tree
 by themselves, whole less the board's fee, shown as arriving until the board is final. **Send**
@@ -877,6 +881,7 @@ server does not answer eligibility, the Trade tab trades as it does without rest
 | `word-name.js` | A wallet's word name: two words (three when two are taken) from the EFF short wordlist less every BIP39 word, derived from the name's key so a restore gets the same name, joined in lower case and shown with capitals. The list's licence is in `NOTICE`. No DOM. |
 | `name-stock.js` | The stock of signed receive codes a wallet leaves with its payment name: which addresses they use (inside the window New code cycles through, so a restore finds every payment), what a top-up makes and takes back, and the QR text of a name. No DOM. |
 | `receive-index.js` | Which address Receive shows: New code's next index, and the one kept across a reload, within what a restore from the phrase finds. No DOM. |
+| `receive-watch.js` | What Receive says while it is open about a payment coming in: "Payment arriving…", then "Received <amount> <TICKER>.", read from the figures Balance shows (a move of the wallet's own or a trade says nothing). No DOM. |
 | `btc-ark/` | The Bitcoin ark wallet's dedicated worker and its WASM build (`btc-ark/pkg/`, tracked): Bark's wallet from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `bark-wasm/`, its store in IndexedDB, its server over gRPC-web, testnet4 from Esplora. |
 | `leaves/` | The leaf wallet's dedicated worker and its WASM build (`leaves/pkg/`, tracked): the operator wallet library from [`ConcatenaLabs/arca`](https://github.com/ConcatenaLabs/arca)'s `wallet-wasm/`, as that repository's CI built it (`leaves/pkg/BUILT_FROM` names the commit). |
 | `rewards.js` | Staking-reward auto-conversion: reads which coins are rewards and converts the fee-asset tail into one asset the staker picked. |

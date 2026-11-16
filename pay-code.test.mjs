@@ -1,7 +1,7 @@
 // pay-code.js: the one receive code, written and read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildPayCode, readPayCode, compactRequest, expandRequest, readShortRequest, libraryRequest, bech32mEncode, bech32mDecode, lnurlEncode, lnurlDecode, nameLnurlUrl } from './pay-code.js'
+import { buildPayCode, readPayCode, compactRequest, expandRequest, readShortRequest, libraryRequest, bech32mEncode, bech32mDecode, lnurlEncode, lnurlDecode, nameLnurlUrl, RECORD_FORMATS } from './pay-code.js'
 
 const TB1 = 'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx'
 // Bark's testnet ark address, as the Bitcoin ark gives one (131 characters, bech32m).
@@ -59,6 +59,49 @@ test('every optional field travels: asset, value, channels; a request with anyth
   assert.equal(readShortRequest(bech32mEncode('sqr', Array.from(d.bytes).slice(0, -1))), null)
   assert.equal(readShortRequest(bech32mEncode('sqr', [...d.bytes, 0])), null)
   assert.equal(readShortRequest(bech32mEncode('xyz', Array.from(d.bytes))), null)
+})
+
+// The library writes `reads` in every request: the record formats it takes coins in
+// (arca covenant/src/batch.rs RECORD_FORMATS), which a payer must see.
+const LIVE_READS = ['leaf-2', 'leaf-3', 'accumulator-1', 'accumulator-4', 'coin-2', 'landing-2']
+
+test('reads travels in the short form: the library\'s list in two bytes, and back exactly', () => {
+  assert.deepEqual([...RECORD_FORMATS], LIVE_READS)
+  const req = { ...REQ, reads: LIVE_READS }
+  const lib = 'arca:' + hexOf(JSON.stringify(req))
+  const short = compactRequest(lib)
+  assert.ok(short, 'a request with reads goes short')
+  assert.deepEqual(libraryRequest(expandRequest(short, INFO)), req)
+  assert.equal(bech32mDecode(short).bytes.length - bech32mDecode(compactRequest(LIB)).bytes.length, 3, 'two bytes of mask, one count')
+  // A shorter list, a list with a name the table does not hold, and an empty one, each back as written.
+  for (const reads of [['leaf-2', 'coin-2'], [...LIVE_READS, 'coin-9'], ['coin-9'], []]) {
+    const r = { ...REQ, reads }
+    assert.deepEqual(libraryRequest(expandRequest(compactRequest('arca:' + hexOf(JSON.stringify(r))), INFO)), r, JSON.stringify(reads))
+  }
+  // A list the short form could not give back as written stays in the library's spelling.
+  for (const reads of [['coin-2', 'leaf-2'], ['leaf-2', 'leaf-2'], ['coin-9', 'leaf-2'], ['Leaf 2'], 'leaf-2', [7]]) {
+    assert.equal(compactRequest('arca:' + hexOf(JSON.stringify({ ...REQ, reads }))), null, JSON.stringify(reads))
+  }
+  // A mask naming a bit past the table is not read.
+  const d = Array.from(bech32mDecode(short).bytes)
+  d[d.length - 3] |= 0x80
+  assert.equal(readShortRequest(bech32mEncode('sqr', d)), null)
+})
+
+// A receive request exactly as the live leaf library made it (the testnet's operator and chain, the
+// page's leaves/pkg), read back from a wallet's kept code.
+const LIVE = 'request:7b22657869745f64656c61795f756e697473223a3235342c2267656e657369735f68617368223a2264646431316435346338376132626439343430306664333163653035643865313131306262346237386537313033663733383334323038366663346561393265222c226b696e64223a2272657175657374222c226c616e64696e67223a2236313039643437353038663732613036613162303533303561303637326339653430383530663332222c226d61696c626f78223a2230353966656533663030383630393164376439623562393138383539613331383130626132353466363661366662353061353865636138623438656630643234222c226f70657261746f72223a2262366634633539323461643831393437363538636638356262393364393236376566633534633766636232653435373765386339353463363866613038376262222c226f776e6572223a2230356139613531613236653363303463363035393231353339393362383664343231386438386566343566386361376639613139633132306630383031316634222c226f776e65725f6e6f6e6365223a2234343938353938326433313135623661313063366234313265373835393865633966623332623232653962316564313933633161656536303738393164316134222c227265616473223a5b226c6561662d32222c226c6561662d33222c22616363756d756c61746f722d31222c22616363756d756c61746f722d34222c22636f696e2d32222c226c616e64696e672d32225d2c22756e74696c223a313739373139353238327d'
+
+test('the live library\'s request goes short, under 300 characters, and comes back exactly', () => {
+  const r = libraryRequest(LIVE)
+  assert.deepEqual(r.reads, LIVE_READS)
+  const short = compactRequest(LIVE)
+  assert.ok(short, 'the live request has nothing the short form leaves out')
+  assert.ok(short.length < 300, `short form ${short.length} chars`)
+  assert.ok(LIVE.length > 4 * short.length, `library ${LIVE.length} vs short ${short.length}`)
+  assert.deepEqual(libraryRequest(expandRequest(short, { operator: r.operator, genesis_hash: r.genesis_hash })), r)
+  const code = buildPayCode({ address: TB1, ark: ARK, sequentia: LIVE })
+  assert.match(code, /&sequentia=SQR1[0-9A-Z]+$/)
 })
 
 test('the code is upper case wherever a QR code can hold it so; read back in lower case', () => {

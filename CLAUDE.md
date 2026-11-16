@@ -209,10 +209,14 @@ Root is flat: production modules and tests sit side by side.
   finds every payment). Send resolves a name before routing (`resolveLnAddress`): ours to a signed
   code, refused unless it verifies against the name's key and the key the payer kept from paying the
   name before (`namePins` in `index.html`); another service's to its invoice, BTC only. Default
-  mode's Receive shows the name as the QR code (`nameQrText`) when the wallet has one. **Get a
-  name** registers the wallet's word name (`word-name.js`, derived from the name key: the same
-  after a restore); a word name is shown with capitals (`display`) and is lower case everywhere
-  else.
+  mode gives every wallet a name with nothing asked (`ensure`: the name its key holds, else its
+  word name; never again by itself after the person removed it, `removed`), shows it as Receive's
+  QR code (`nameQrText`) while the service answers (`unreachable`), and keeps it in Settings to
+  change or remove. **Get a name** registers the wallet's word name (`word-name.js`, derived from
+  the name key: the same after a restore); a word name is shown with capitals (`display`) and is
+  lower case everywhere else.
+- `receive-watch.js` — what Receive says while it is open about a payment coming in ("Payment
+  arriving…", then "Received <amount> <TICKER>."), read from the figures Balance shows. No DOM.
 - `instant-history.js` — History's rows for what is paid and received in seconds and for the Trade
   tab's trades: a per-wallet log the page writes as payments happen (`leafArrived`, `payCode`,
   `offboard`), merged with the composer's own trade records, never copied from them.

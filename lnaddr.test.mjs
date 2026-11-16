@@ -134,7 +134,7 @@ test('another service\'s address is paid in BTC over LNURL-pay, for exactly the 
 });
 
 test('default mode\'s words name no protocol', async () => {
-  const shown = Object.entries(NAME_WORDS).filter(([k]) => !k.startsWith('dev')).map(([, v]) => v);
+  const shown = Object.entries(NAME_WORDS).filter(([k]) => !k.startsWith('dev')).map(([, v]) => (typeof v === 'function' ? v('AmberFalcon@sequentiatestnet.com') : v));
   shown.push(String(nameProblem('x')));
   for (const w of shown) assert.deepEqual(forbiddenIn(w), [], w);
   // The resolver's sentences, which Send shows.
@@ -214,6 +214,6 @@ test('the payer checks the signature, keeps the key it paid, and drops a spent o
 });
 
 test('the new words name no protocol', () => {
-  for (const k of ['qrTip', 'public', 'copyName', 'copiedName', 'showFull', 'showName', 'fullTip', 'unsigned', 'changed', 'busy', 'getName', 'getting', 'useWords', 'noWordName', 'choose', 'none'])
+  for (const k of ['showFull', 'change', 'newBusy', 'showName', 'fullTip', 'unsigned', 'changed', 'busy', 'getName', 'getting', 'useWords', 'noWordName', 'choose', 'none'])
     assert.deepEqual(forbiddenIn(NAME_WORDS[k]), [], k);
 });

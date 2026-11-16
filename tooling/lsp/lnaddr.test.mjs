@@ -374,3 +374,73 @@ test('end to end with a stock: closed, a payer still gets new codes; open, the w
     assert.equal(pins.get('alice@sequentiatestnet.com'), k.pub);
   } finally { wallet.stop(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
+
+// Every wallet holds a name by default (lnaddr.js `ensure`), against the service itself.
+test('the default name: the word name with nothing asked, the same one back after a restore, none after Remove', async () => {
+  const s = await serveAt();
+  const k = nameKey(PHRASE);
+  const mk = (store = new Map(), base = s.base, fetchFn = undefined) => mountLnAddress({
+    base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
+    store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
+    retryMs: 50, ...(fetchFn ? { fetch: fetchFn } : {}),
+  });
+  try {
+    const w = mk();
+    const name = await w.ensure();
+    assert.match(name, /^[a-z]+$/, 'a word name');
+    assert.equal(w.isWordName(), true);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.name, name);
+    // Restored elsewhere (a fresh store): the name its key holds, not another.
+    const again = mk();
+    assert.equal(await again.ensure(), name);
+    // Not in developer mode (`want` says no): nothing is registered by itself.
+    await post(`${s.base}/lnaddr/-/release`, rel(k, name));
+    assert.equal(await mk().ensure({ want: () => false }), null);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.name, null);
+    // Removed by the person: never given again by itself, until the person takes one.
+    const store = new Map(); const w2 = mk(store);
+    await w2.ensure(); await w2.release();
+    assert.equal(w2.removed(), true);
+    assert.equal(await w2.ensure(), null);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.name, null);
+    await w2.claimWordName();
+    assert.equal(w2.removed(), false);
+    w.stop(); again.stop(); w2.stop();
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('the default name while the service does not answer: unreachable, asked again, the name once it answers', async () => {
+  const s = await serveAt();
+  const k = nameKey(PHRASE);
+  let down = true, changes = 0;
+  const store = new Map();
+  const flaky = (...a) => (down ? Promise.reject(new TypeError('fetch failed')) : fetch(...a));
+  const w = mountLnAddress({
+    base: s.base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
+    store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
+    retryMs: 40, fetch: flaky, onChange: () => { changes++ },
+  });
+  try {
+    const ensured = w.ensure();
+    await new Promise((ok) => setTimeout(ok, 150));
+    assert.equal(w.unreachable(), true); assert.equal(w.name(), null);
+    down = false;
+    const name = await ensured;
+    assert.ok(name); assert.equal(w.unreachable(), false); assert.equal(w.name(), name);
+    assert.ok(changes >= 2, 'the page is told both times, so it redraws without a reload');
+    w.stop();
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('new names are limited per network; a key re-registering its own name is not', async () => {
+  const s = await serveAt({ cfg: { newBurst: 2, newEveryMs: 60_000 } });
+  try {
+    const keys = ['a', 'b', 'c'].map((x) => nameKey(`${PHRASE.split(' ').slice(0, 11).join(' ')} ${x === 'a' ? 'about' : x === 'b' ? 'abstract' : 'absurd'}`));
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(keys[0], 'one'))).status, 200);
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(keys[1], 'two'))).status, 200);
+    const r = await post(`${s.base}/lnaddr/-/register`, reg(keys[2], 'three'));
+    assert.equal(r.status, 429); assert.equal(r.body.code, 'busy');
+    assert.equal(r.body.error, 'Too many names were made from your network just now. Try again in a few minutes.');
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(keys[0], 'one'))).status, 200, 'its own name again');
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
