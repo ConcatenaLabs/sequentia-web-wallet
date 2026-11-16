@@ -1031,9 +1031,12 @@ const stats = (v) => {
 // offer's answer during a pass and outside one, each sale from its offer to Received and Settled,
 // and every call the maker made of the operator by path (the proxy). The figures go to
 // LEAF_MAKER_FIGURES (a path) as JSON. LEAF_MAKER_SCRIPT runs another checkout's maker on the same
-// case. It passes when no upkeep gap and no pass is past `sync_pass_bound_ms`, and every sale is
-// Settled within SALE_SETTLED_MS of its offer.
+// case. It passes when no upkeep gap and no pass is past `sync_pass_bound_ms`, every sale is
+// Settled within SALE_SETTLED_MS of its offer, and the firm offers asked during a pass are answered
+// in FIRM_DURING_P50_MS at the median. LEAF_MAKER_OPERATOR_BUILD names the operator's build in the
+// figures (a debug build answers `holding_back` several times slower than a release one).
 const SALE_SETTLED_MS = 10 * 60_000
+const FIRM_DURING_P50_MS = 5000
 test('g: a maker of a large store through an hour of trades: its upkeep, its sync, and ten sales for BTC', { skip: skipCase('g'), timeout: 4 * 3_600_000 }, async (tc) => {
   const { H, st, lwk } = await stack(0)
   if (!(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length)) return tc.skip('needs the harness\'s Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING, ARCA_OPERATOR_BTC_LIGHTNING)')
@@ -1159,7 +1162,7 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
       return m
     }
     const figures = {
-      settings: { history: process.env.LEAF_MAKER_STORE_HISTORY || null, slice_ms: sliceMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
+      settings: { operator_build: process.env.LEAF_MAKER_OPERATOR_BUILD || null, history: process.env.LEAF_MAKER_STORE_HISTORY || null, slice_ms: sliceMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
       store: { live: made.length, X: made.filter((c) => c.asset === X).length, Y: made.filter((c) => c.asset === Y).length },
       quiet: { minutes: quietMin, passes: quiet.map(pick), ms: stats(quiet.map((p) => p.ms)), library: stats(quiet.map((p) => p.library)), operator: stats(quiet.map((p) => p.operator)) },
       trading: { minutes: (tradeEnd - tradeStart) / 60000, passes: busy.length, ms: stats(busy.map((p) => p.ms)), library: stats(busy.map((p) => p.library)),
@@ -1191,6 +1194,8 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
     assert.ok((figures.sync.gaps.most ?? Infinity) <= boundMs, 'no gap between two sync passes past the bound: ' + figures.sync.gaps.most)
     assert.equal(figures.health.not_ok, 0, 'the maker never stopped quoting')
     assert.deepEqual(figures.errors, [], 'no pass past its bound')
+    // A person's firm offer asked during a pass waits for no slice it does not need.
+    assert.ok((figures.firm.during.p50 ?? 0) <= FIRM_DURING_P50_MS, 'firm offers during a pass p50 within ' + FIRM_DURING_P50_MS + ' ms: ' + figures.firm.during.p50)
   } finally {
     await dumpMaker(makerOf, 'g')
     for (const s of stops.reverse()) { try { await s() } catch {} }

@@ -47,7 +47,8 @@ test('the sync runs on a loop of its own, and the rest of the upkeep does not wa
   const pass = src.slice(src.indexOf('async function tickOnce ()'))
   assert.ok(pass.length < src.length, 'tickOnce is there')
   assert.doesNotMatch(pass.slice(0, pass.indexOf('\n  }\n')), /upkeepSync|syncLoop/, 'the upkeep pass waits for no sync')
-  assert.match(src, /const sync = syncLoop\(cmd, log, /, 'the maker runs the sync loop')
+  assert.match(src, /const sync = syncLoop\(syncCmd, log, /, 'the maker runs the sync loop')
+  assert.match(src, /const syncCmd = .*\{ unheld: true \}\)/, 'its slices queued unheld')
   assert.match(src, /setInterval\(sync, \(cfg\.sync_seconds \?\? 20\) \* 1000\)/, 'on its own timer')
 })
 
@@ -228,3 +229,4 @@ test('a maker whose every sync fails goes stale and stops quoting', async () => 
   assert.equal(st.ok, false, 'not ok after 800 s of failed syncs')
   assert.match(st.why, /completed no sync pass in the 800 s since it started/)
 })
+

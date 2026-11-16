@@ -2080,7 +2080,10 @@ async function main () {
   // bound `sync_pass_bound_ms` (syncLoop); the rest of the upkeep on its own timer, from the end of
   // the first sync pass, so that its first pass (which settles every coin the maker already holds)
   // reads coins the sync has brought up to date, or from the bound when that pass has not ended.
-  const sync = syncLoop(cmd, log, (name) => lastRan.get(name) ?? null,
+  // The sync's slices are queued `unheld`: the hold after a quote read keeps the rest of the upkeep
+  // back, not the sync, which a person's command overtakes between any two slices anyway.
+  const syncCmd = (name, args) => w.command(name, commandArgs(args, false), { unheld: true })
+  const sync = syncLoop(syncCmd, log, (name) => lastRan.get(name) ?? null,
     { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs, record: syncPasses })
   setInterval(sync, (cfg.sync_seconds ?? 20) * 1000)
   // The upkeep starts when the first pass ends, or after the pass bound when it has not: a maker
