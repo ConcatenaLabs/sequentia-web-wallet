@@ -213,6 +213,9 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
     exists: (mnemonic) => call(() => mod.arcaWalletExists(mnemonic)),
     create: (mnemonic, config) => wrap(call(() => mod.ArcaWallet.create(mnemonic, JSON.stringify(config || {})))),
     open: (mnemonic, nodePassword) => wrap(call(() => mod.ArcaWallet.open(mnemonic, nodePassword || undefined))),
+    // What a pass of the sync in slices would cost on the store named `name` in this storage, read
+    // only (arcaSyncSize); undefined in a library without it.
+    syncSize: typeof mod.arcaSyncSize === 'function' ? (name) => call(() => JSON.parse(mod.arcaSyncSize(name))) : undefined,
     // One pause as the library makes it, through this module's wait (null: a library without one).
     pause: typeof mod.pause === 'function' ? (ms) => mod.pause(ms) : null,
   }
@@ -221,8 +224,15 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
 }
 
 // Which queued job the thread runs next, at `now`: the first that is `first`, else the oldest,
-// unless the queue is held (`holdUntil`), when only a `first` job runs. -> an index, or -1 to wait.
-export function nextJob (queue, now, holdUntil = 0) {
+// unless the queue is held (`holdUntil`), when only a `first` job runs. Fair turns: right after a
+// `first` job (`afterFirst`), the oldest job that is not first runs before the next `first` one,
+// held or not, so a stream of `first` jobs (takers' commands) never holds the rest back: each of
+// them costs the rest one job's wait at most. -> an index, or -1 to wait.
+export function nextJob (queue, now, holdUntil = 0, afterFirst = false) {
+  if (afterFirst) {
+    const k = queue.findIndex((q) => !q.first)
+    if (k >= 0) return k
+  }
   const i = queue.findIndex((q) => q.first)
   if (i >= 0) return i
   if (!queue.length || now < holdUntil) return -1
@@ -232,12 +242,13 @@ export function nextJob (queue, now, holdUntil = 0) {
 // The same library on a thread of its own, so a program that serves requests (the leaf maker)
 // keeps answering while a long command (a sync behind the node's scan lock) runs. Commands run
 // one at a time, in order of priority, then of arrival: `command(name, args, { first: true })`
-// goes ahead of every queued command that is not first. `hold(ms)` keeps every command that is
+// goes ahead of every queued command that is not first, but for one waiting command that is not
+// first after each (nextJob's fair turns). `hold(ms)` keeps every command that is
 // not first queued for that long, so one a person is about to ask for (a firm offer after a
 // quote) finds the library free rather than behind the program's own upkeep; a command already
 // running still ends first. `onSlow(name, ms, detail)` is told of each command that took over
-// `slowMs` (five seconds unless named); `onTime(name, ms, waited)` of every command, with how long it ran and how long it waited
-// in the queue before it started.
+// `slowMs` (five seconds unless named); `onTime(name, ms, waited, first)` of every command, with how long it ran, how long it
+// waited in the queue before it started, and whether it was `first`.
 //   const lib = await leafLibraryThread(storeRoot)
 //   const w = await lib.open(mnemonic, nodePassword)   // or create(mnemonic, config)
 //   await w.command('sync')
@@ -263,19 +274,20 @@ export async function leafLibraryThread (storeRoot, opts = {}) {
 // job at a time, in nextJob's order. -> { call(op, args, first), hold(ms) }.
 export function libraryQueue (run, { onSlow = null, onTime = null, slowMs = 5000 } = {}) {
   const queue = []
-  let next = 1, busy = false, holdUntil = 0, timer = null
+  let next = 1, busy = false, holdUntil = 0, timer = null, afterFirst = false
   function done (p, m) {
     busy = false
     if (onSlow && Date.now() - p.started > slowMs) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
-    if (onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued) } catch {} }
+    if (onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued, !!p.first) } catch {} }
     if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) }
     pump()
   }
   function pump () {
     if (busy || !queue.length) return
-    const i = nextJob(queue, Date.now(), holdUntil)
+    const i = nextJob(queue, Date.now(), holdUntil, afterFirst)
     if (i < 0) { if (!timer) timer = setTimeout(() => { timer = null; pump() }, Math.max(1, holdUntil - Date.now())); return }
     const job = queue.splice(i, 1)[0]
+    afterFirst = !!job.first
     job.started = Date.now()
     busy = true
     Promise.resolve().then(() => run(job)).then((m) => done(job, m), (e) => done(job, { ok: false, error: { message: (e && e.message) || String(e) } }))

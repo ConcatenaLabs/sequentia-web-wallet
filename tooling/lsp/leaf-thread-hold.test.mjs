@@ -22,3 +22,29 @@ test('first commands keep their order: a release cancel runs before the next fir
   while (q.length) { const i = nextJob(q, 1000, 0); order.push(q.splice(i, 1)[0].name) }
   assert.deepEqual(order, ['swap_cancel', 'swap_offer', 'sync', 'balance'])
 })
+
+// Fair turns: right after a first command, the oldest command that is not first runs before the
+// next first one, held or not. A stream of takers' commands then costs the sync's next slice one
+// taker command's wait at most, never the whole stream (web #795).
+test('after a first command, a waiting ordinary command takes its turn, held or not', () => {
+  const q = [{ id: 1, name: 'sync' }, { id: 2, name: 'swap_offer', first: true }, { id: 3, name: 'swap_offer', first: true }]
+  assert.equal(nextJob(q, 1000, 0, true), 0, 'the slice after a first command')
+  assert.equal(nextJob(q, 1000, 5000, true), 0, 'held too')
+  assert.equal(nextJob(q, 1000, 0, false), 1, 'after an ordinary command, first goes ahead')
+  assert.equal(nextJob([{ id: 2, first: true }], 1000, 0, true), 0, 'no ordinary command waits: the first runs')
+})
+
+test('a steady stream of first commands lets every queued slice run, one between two of them', async () => {
+  const { libraryQueue } = await import('../leaf-node.mjs')
+  const ran = []
+  const q = libraryQueue(async (job) => { ran.push(job.args.name); await new Promise((r) => setTimeout(r, 2)); return { ok: true, value: null } })
+  const slices = [], firms = []
+  // A taker command queued ahead and three more queued behind it, all before any slice.
+  firms.push(q.call('command', { name: 'firm' }, true))
+  for (let i = 0; i < 3; i++) slices.push(q.call('command', { name: 'slice' }))
+  for (let i = 0; i < 6; i++) firms.push(q.call('command', { name: 'firm' }, true))
+  await Promise.all([...slices, ...firms])
+  // Never two takers' commands in a row while a slice waits.
+  assert.deepEqual(ran.slice(0, 6), ['firm', 'slice', 'firm', 'slice', 'firm', 'slice'])
+  assert.equal(ran.length, 10)
+})
