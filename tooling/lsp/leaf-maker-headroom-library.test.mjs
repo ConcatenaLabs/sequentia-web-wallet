@@ -1203,7 +1203,8 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
 // default), the operator behind the box's link (140 ms). The maker's service is not started: its
 // one-shot `--pass-time` runs passes of its sync on the store, in a process of its own for each
 // library in turn (this checkout's, LEAVES_PKG, and LEAF_MAKER_OLD_PKG), whole passes then passes in
-// slices of a second, each run cut at LEAF_MAKER_PASS_LIMIT_MS (600 s) and said so; `--size` sizes the
+// slices of a second (LEAF_MAKER_S_ROUNDS more rounds of one each, in turn), each run cut at
+// LEAF_MAKER_PASS_LIMIT_MS (600 s) and said so; `--size` sizes the
 // store. The figures go to LEAF_MAKER_FIGURES. It passes when this library's passes are no slower than
 // the other's (within a tenth), whole and in slices, and its passes in slices end within the bound.
 test('s: a pass\'s time on a store with a maker\'s history, library against library', { skip: skipCase('s'), timeout: 4 * 3_600_000 }, async () => {
@@ -1244,9 +1245,13 @@ test('s: a pass\'s time on a store with a maker\'s history, library against libr
     })
     const libs = { new: PKG, old: OLD }
     const runs = []
-    // Whole passes, then passes in slices, each library in turn, the old one first and last.
-    for (const [lib, args] of [['old', ['--pass-time', '3', '--slice-ms', '0']], ['new', ['--pass-time', '3', '--slice-ms', '0']], ['old', ['--pass-time', '1', '--slice-ms', '0']],
-      ['new', ['--pass-time', '2', '--slice-ms', '1000']], ['old', ['--pass-time', '1', '--slice-ms', '1000']]]) {
+    // Whole passes, then passes in slices, each library in turn, the old one first and last; then
+    // LEAF_MAKER_S_ROUNDS (1) rounds of one pass in slices by each, in turn.
+    const rounds = Number(process.env.LEAF_MAKER_S_ROUNDS || 1)
+    const plan = [['old', ['--pass-time', '3', '--slice-ms', '0']], ['new', ['--pass-time', '3', '--slice-ms', '0']], ['old', ['--pass-time', '1', '--slice-ms', '0']],
+      ['new', ['--pass-time', '2', '--slice-ms', '1000']], ['old', ['--pass-time', '1', '--slice-ms', '1000']]]
+    for (let k = 1; k < rounds; k++) plan.push(['new', ['--pass-time', '1', '--slice-ms', '1000']], ['old', ['--pass-time', '1', '--slice-ms', '1000']])
+    for (const [lib, args] of plan) {
       const r = await run(libs[lib], args)
       runs.push({ lib, args: args.join(' '), ...r })
       console.log(at(), lib, args.join(' '), JSON.stringify(r).slice(0, 600))

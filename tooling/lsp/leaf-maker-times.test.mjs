@@ -203,9 +203,28 @@ test('passRecord: passes, their longest, the longest gap between two ends, and t
   now = 30000; r.begin(); now = 31000; r.end()
   now = 40000
   assert.deepEqual(r.now(), { passes: 2, last_start: 30000, last_end: 31000, last_ms: 1000, longest_ms: 3000, longest_gap_ms: 23000, ago_ms: 9000, under_way_ms: null })
-  // The sync loop keeps one when given it, a pass that failed included.
+  // The sync loop keeps one when given it: a pass whose sync answered counts, one whose sync threw does not.
   const rec = passRecord()
-  const run = syncLoop(async () => { throw new Error('down') }, () => {}, null, { sliceMs: 0, record: rec })
-  await run()
+  await syncLoop(async (name) => (name === 'sync' ? {} : []), () => {}, null, { sliceMs: 0, record: rec })()
   assert.equal(rec.now().passes, 1)
+  const logged = []
+  await syncLoop(async () => { throw new Error('down') }, (...a) => logged.push(a.join(' ')), null, { sliceMs: 0, record: rec })()
+  assert.equal(rec.now().passes, 1, 'a failed pass is not counted')
+  assert.equal(rec.now().under_way_ms, null)
+  assert.ok(logged.some((l) => l.startsWith('sync pass failed')), JSON.stringify(logged))
+})
+
+test('a maker whose every sync fails goes stale and stops quoting', async () => {
+  const { syncLoop, passRecord, syncStanding } = await import('./leaf-maker.mjs')
+  let t = 1_000_000
+  const since = t
+  const rec = passRecord(() => t, since)
+  const run = syncLoop(async (name) => { if (name === 'sync') throw new Error('the operator cannot be reached'); return [] }, () => {}, null,
+    { sliceMs: 1000, record: rec, clock: () => t })
+  // A failing sync every 20 s for 800 s.
+  for (let k = 0; k < 40; k++) { await run(); t += 20_000 }
+  assert.equal(rec.now().passes, 0)
+  const st = syncStanding(rec.now(), 600_000, since, t)
+  assert.equal(st.ok, false, 'not ok after 800 s of failed syncs')
+  assert.match(st.why, /completed no sync pass in the 800 s since it started/)
 })

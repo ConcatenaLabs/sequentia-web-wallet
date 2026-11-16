@@ -212,7 +212,7 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
   const sliceMs = opts.sliceMs ?? SLICE_MS, boundMs = opts.boundMs ?? SYNC_PASS_BOUND_MS
   const clock = opts.clock ?? Date.now
   const start = clock()
-  let slices = 0, library = 0, longest = 0, over = false
+  let slices = 0, library = 0, longest = 0, over = false, synced = true
   const figures = () => `${slices} slices, ${clock() - start} ms in all, the library ${library} ms of it, the longest slice ${longest} ms`
   for (const [name, args] of [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]) {
     const cmdStart = clock()
@@ -222,6 +222,7 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
       const s0 = clock()
       try { r = await cmd(name, sliceMs > 0 ? { ...args, budget_ms: sliceMs } : { ...args }) } catch (e) {
         failed = true
+        if (name === 'sync') synced = false
         if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message)
       }
       const own = ran ? ran(name) : null
@@ -234,7 +235,7 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
     if (n > 1) log(`${name} in ${n} slices: ${clock() - cmdStart} ms, the longest ${most} ms`)
   }
   if (clock() - start > boundMs) log(`error: the sync took longer than its bound (${boundMs} ms): ${figures()}`)
-  return { start, end: clock(), slices, library, longest }
+  return { start, end: clock(), slices, library, longest, synced }
 }
 // The sync and its deposits on a loop of their own (`sync_seconds`), apart from the rest of the
 // upkeep, as the forfeits are (forfeitPass): each slice is a command of its own in the library's
@@ -245,7 +246,9 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
 // whole sync (`slice_ms: 0`) is one command, which the rest waits for. -> a function that starts a
 // pass unless one is under way; it resolves when that pass ends (null when it did not start one).
 // Each pass that ends is logged as one record of the maker's own (`sync pass {n, start, end, ms,
-// slices, library, longest}`, ms), from which its figures are read.
+// slices, library, longest}`, ms), from which its figures are read. Only a pass whose sync answered
+// to its end ends a pass in the record (`synced`): a sync that throws ends none, and is logged
+// `sync pass failed`, so a maker whose every sync fails goes stale (syncStanding) and stops quoting.
 export function syncLoop (cmd, log, ran = null, opts = {}) {
   let running = false, n = 0
   return async () => {
@@ -255,8 +258,13 @@ export function syncLoop (cmd, log, ran = null, opts = {}) {
     let r = null
     try { r = await upkeepSync(cmd, log, ran, opts); return r } finally {
       running = false
-      if (opts.record) opts.record.end()
-      if (r) log('sync pass ' + JSON.stringify({ n: ++n, start: r.start, end: r.end, ms: r.end - r.start, slices: r.slices, library: r.library, longest: r.longest }))
+      if (r && r.synced) {
+        if (opts.record) opts.record.end()
+        log('sync pass ' + JSON.stringify({ n: ++n, start: r.start, end: r.end, ms: r.end - r.start, slices: r.slices, library: r.library, longest: r.longest }))
+      } else {
+        if (opts.record) opts.record.abort()
+        log('sync pass failed ' + JSON.stringify(r ? { start: r.start, end: r.end, slices: r.slices } : {}))
+      }
     }
   }
 }
@@ -276,6 +284,8 @@ export function passRecord (clock = Date.now, since = clock()) {
       r.longest_ms = Math.max(r.longest_ms, r.last_ms); r.longest_gap_ms = Math.max(r.longest_gap_ms, now - end)
       end = now; start = null
     },
+    // A pass that did not end (its sync failed): forgotten, nothing counted.
+    abort () { start = null },
     // -> the record now, `ago_ms` the time since the last end (since the start before the first),
     // `under_way_ms` how long the pass under way has run (null when none is).
     now () { const now = clock(); return { ...r, ago_ms: now - end, under_way_ms: start == null ? null : now - start } },
