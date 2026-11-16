@@ -241,9 +241,9 @@ const explain = async (maker, label) => {
     return e
   } catch (x) { console.log(at(), 'explain', label + ': none (' + x.message + ')'); return null }
 }
-const pumpLoop = (H) => {
+const pumpLoop = (H, every = 2000) => {
   let on = true
-  const run = (async () => { while (on) { try { await H.pump() } catch {} await sleep(2000) } })()
+  const run = (async () => { while (on) { try { await H.pump() } catch {} await sleep(every) } })()
   return async () => { on = false; await run }
 }
 // A trade with the maker: the taker asks a firm offer of `give` of `give_asset`, takes it, and the
@@ -1052,6 +1052,10 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
   const quietMin = env('LEAF_MAKER_QUIET_MINUTES', 5), tradeMin = env('LEAF_MAKER_TRADE_MINUTES', 60)
   const probeMs = env('LEAF_MAKER_PROBE_MS', 15000), gapMs = env('LEAF_MAKER_TRADE_GAP_MS', 20000)
   const boundMs = 300000
+  // How often the chain moves on (a round built, a block made and buried): every 2 s by default;
+  // LEAF_MAKER_PUMP_MS 60000 is the testnet's block spacing, where most commands find the tip their
+  // last re-check ran at and re-check only the lineages.
+  const pumpMs = env('LEAF_MAKER_PUMP_MS', 2000)
   try {
     const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
     const port = await freePort()
@@ -1080,7 +1084,7 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
     makerOf = maker
     stops.push(() => maker.stop())
     const started = Date.now()
-    const stopPump = pumpLoop(H); stops.push(stopPump)
+    const stopPump = pumpLoop(H, pumpMs); stops.push(stopPump)
     // The upkeep's and the sync's records, every 2 s.
     const health = []
     let watching = true
@@ -1162,7 +1166,7 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
       return m
     }
     const figures = {
-      settings: { operator_build: process.env.LEAF_MAKER_OPERATOR_BUILD || null, history: process.env.LEAF_MAKER_STORE_HISTORY || null, slice_ms: sliceMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
+      settings: { operator_build: process.env.LEAF_MAKER_OPERATOR_BUILD || null, history: process.env.LEAF_MAKER_STORE_HISTORY || null, slice_ms: sliceMs, pump_ms: pumpMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
       store: { live: made.length, X: made.filter((c) => c.asset === X).length, Y: made.filter((c) => c.asset === Y).length },
       quiet: { minutes: quietMin, passes: quiet.map(pick), ms: stats(quiet.map((p) => p.ms)), library: stats(quiet.map((p) => p.library)), operator: stats(quiet.map((p) => p.operator)) },
       trading: { minutes: (tradeEnd - tradeStart) / 60000, passes: busy.length, ms: stats(busy.map((p) => p.ms)), library: stats(busy.map((p) => p.library)),

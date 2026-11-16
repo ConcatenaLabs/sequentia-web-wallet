@@ -172,6 +172,9 @@ export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
 // whole command in one call and answers without `more`, as before; `slice_ms: 0` asks for that
 // (whole syncs, a firm offer waiting for all of one).
 export const SLICE_MS = 1000
+// A sync slice waits SYNC_TURN_MS (10 s) behind takers' commands before it takes its turn; once its
+// pass has run half `sync_pass_bound_ms`, LATE_TURN_MS.
+export const LATE_TURN_MS = 2000
 // A pass of the sync and deposits that takes longer than SYNC_PASS_BOUND_MS (`sync_pass_bound_ms`,
 // from its first slice to its last) is logged as an error, with its figures: a library whose pass
 // costs this much holds the maker's reading of the chain and the operator that far behind. A pass
@@ -207,7 +210,10 @@ export const upkeepDue = (now, passEnd, libraryMs) => now - passEnd >= libraryMs
 // else from the call to its answer): what a firm offer asked meanwhile waited for at most is one
 // slice, not T. A pass longer than `boundMs` is logged as an error once it passes the bound, and
 // again when it ends, with its figures (its slices, its time, the library's time on it and its
-// longest slice).
+// longest slice). With `opts.lateTurnMs`, each slice is asked for as `cmd(name, args, { turnMs })`:
+// once the pass has run half its bound, its slices take their turn ahead of the takers' commands
+// after `lateTurnMs` rather than the queue's usual turn, so a pass under a steady stream of takers
+// still ends within its bound.
 export async function upkeepSync (cmd, log, ran = null, opts = {}) {
   const sliceMs = opts.sliceMs ?? SLICE_MS, boundMs = opts.boundMs ?? SYNC_PASS_BOUND_MS
   const clock = opts.clock ?? Date.now
@@ -220,7 +226,10 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
     for (;;) {
       let r = null, failed = false
       const s0 = clock()
-      try { r = await cmd(name, sliceMs > 0 ? { ...args, budget_ms: sliceMs } : { ...args }) } catch (e) {
+      // A pass that has run half its bound takes its turns sooner (opts.lateTurnMs).
+      const late = opts.lateTurnMs != null && clock() - start > boundMs / 2
+      const a = sliceMs > 0 ? { ...args, budget_ms: sliceMs } : { ...args }
+      try { r = await (opts.lateTurnMs != null ? cmd(name, a, { turnMs: late ? opts.lateTurnMs : undefined }) : cmd(name, a)) } catch (e) {
         failed = true
         if (name === 'sync') synced = false
         if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message)
@@ -2082,9 +2091,9 @@ async function main () {
   // reads coins the sync has brought up to date, or from the bound when that pass has not ended.
   // The sync's slices are queued `unheld`: the hold after a quote read keeps the rest of the upkeep
   // back, not the sync, which a person's command overtakes between any two slices anyway.
-  const syncCmd = (name, args) => w.command(name, commandArgs(args, false), { unheld: true })
+  const syncCmd = (name, args, o = {}) => w.command(name, commandArgs(args, false), { unheld: true, turnMs: o.turnMs })
   const sync = syncLoop(syncCmd, log, (name) => lastRan.get(name) ?? null,
-    { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs, record: syncPasses })
+    { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs, record: syncPasses, lateTurnMs: LATE_TURN_MS })
   setInterval(sync, (cfg.sync_seconds ?? 20) * 1000)
   // The upkeep starts when the first pass ends, or after the pass bound when it has not: a maker
   // whose first pass never ends still keeps itself (its coins settled, its offers renewed).

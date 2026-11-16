@@ -248,8 +248,9 @@ command at a time, and a command that has started runs to its end, so the upkeep
 first point past it where the command can stop, answers `more: true` and goes on at the next call).
 A firm offer or an acceptance goes ahead of every queued command and runs between two slices; a
 command of the maker's own (a slice, an upkeep command) runs ahead of the takers' only once it has
-waited ten seconds, so a person's command waits for no slice it does not need and a stream of
-takers still lets the sync move. After each of a taker's commands the library waits a quarter of a
+waited ten seconds (a sync pass that has run half its bound, two seconds), so a person's command
+waits for no slice it does not need and a stream of takers still lets the sync end its pass in
+time. After each of a taker's commands the library waits a quarter of a
 second for that taker's next one (a firm offer is several commands in a row), so no slice starts
 in between. A library without slices runs each in one call, and a firm offer then waits
 for it. A pass that took more than one slice is logged (`sync in <n> slices: <ms> ms, the longest

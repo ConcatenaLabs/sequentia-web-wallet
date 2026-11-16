@@ -48,7 +48,7 @@ test('the sync runs on a loop of its own, and the rest of the upkeep does not wa
   assert.ok(pass.length < src.length, 'tickOnce is there')
   assert.doesNotMatch(pass.slice(0, pass.indexOf('\n  }\n')), /upkeepSync|syncLoop/, 'the upkeep pass waits for no sync')
   assert.match(src, /const sync = syncLoop\(syncCmd, log, /, 'the maker runs the sync loop')
-  assert.match(src, /const syncCmd = .*\{ unheld: true \}\)/, 'its slices queued unheld')
+  assert.match(src, /const syncCmd = .*\{ unheld: true, turnMs: o.turnMs \}\)/, 'its slices queued unheld')
   assert.match(src, /setInterval\(sync, \(cfg\.sync_seconds \?\? 20\) \* 1000\)/, 'on its own timer')
 })
 
@@ -230,3 +230,14 @@ test('a maker whose every sync fails goes stale and stops quoting', async () => 
   assert.match(st.why, /completed no sync pass in the 800 s since it started/)
 })
 
+
+// A pass that has run half its bound asks for its slices with a shorter turn (lateTurnMs), so a
+// steady stream of takers cannot hold it past its bound; before that, the queue's own turn.
+test('a pass past half its bound takes its turns sooner', async () => {
+  const { upkeepSync } = await import('./leaf-maker.mjs')
+  let t = 0, k = 0
+  const turns = []
+  const cmd = async (name, args, o) => { turns.push([name, o && o.turnMs]); if (name !== 'sync') return []; t += 40_000; return ++k < 4 ? { more: true } : {} }
+  await upkeepSync(cmd, () => {}, null, { sliceMs: 1000, boundMs: 100_000, clock: () => t, lateTurnMs: 2000 })
+  assert.deepEqual(turns, [['sync', undefined], ['sync', undefined], ['sync', 2000], ['sync', 2000], ['deposits', 2000]])
+})

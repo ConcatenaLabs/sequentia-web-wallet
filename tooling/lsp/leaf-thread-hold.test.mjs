@@ -83,3 +83,11 @@ test('a held queue still runs unheld jobs; the follow-on hold keeps every job', 
   assert.equal(nextWake(q, 1000, 50_000, 10_000, 1200), 200, 'woken when the follow-on hold ends')
   assert.equal(nextJob([{ id: 3, first: true }, ...q], 1000, 50_000, 10_000, 1200), 0, 'their next command runs at once')
 })
+
+// A job may name its own turn (a sync pass late on its bound).
+test('a job\'s own turnMs takes the place of the queue\'s', () => {
+  const q = [{ id: 1, name: 'slice', queued: 0, turnMs: 2000 }, { id: 2, name: 'firm', first: true, queued: 100 }]
+  assert.equal(nextJob(q, 1999, 0, 10_000), 1, 'the takers first before its turn')
+  assert.equal(nextJob(q, 2000, 0, 10_000), 0, 'the slice at its own turn')
+  assert.equal(nextWake([q[0]], 500, 9000, 10_000), 1500, 'woken at its own turn')
+})
