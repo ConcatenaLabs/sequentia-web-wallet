@@ -35,7 +35,9 @@
 //
 // Where node:sqlite is missing (a Node before 22.5, or one started without --experimental-sqlite) the
 // names are kept in memory and the JSON file at the store's path is written whole when something
-// changed, at most every `flushMs`. With no store path, in memory only (the tests).
+// changed, at most every `flushMs`; but never once a SQLite store exists beside it, whose names
+// that file does not hold: opening then fails. Opening also fails when the names file is there and
+// cannot be read. With no store path, in memory only (the tests).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -92,7 +94,8 @@ function connect (lib, file) {
 function memoryStore ({ jsonPath = null, flushMs = 5_000, log = () => {}, nameOk = () => true, now = () => Date.now() } = {}) {
   const names = new Map(), byKey = new Map(), declined = new Map();
   if (jsonPath) {
-    const j = readJson(jsonPath, log) || {};
+    const j = fs.existsSync(jsonPath) ? readJson(jsonPath, log) : {};
+    if (!j) throw new Error(`the names file ${jsonPath} cannot be read; refusing to start with no names`);
     const at = Math.floor(now() / 1000);
     for (const [n, v] of Object.entries(j.names || {})) if (nameOk(n) && validRec(v)) { if (v.seen == null) v.seen = at; names.set(n, JSON.stringify(v)); if (!v.released) byKey.set(v.pubkey, n); }
     for (const [k, at] of Object.entries(j.declined || {})) declined.set(k, Number(at) || 0);
@@ -115,13 +118,14 @@ function memoryStore ({ jsonPath = null, flushMs = 5_000, log = () => {}, nameOk
     },
     del (n) { const v = names.get(n); if (!v) return; const o = JSON.parse(v); if (byKey.get(o.pubkey) === n) byKey.delete(o.pubkey); names.delete(n); changed(); },
     nameOf: (pk) => byKey.get(pk) || null,
-    count: () => names.size,
+    count: () => byKey.size,
     declined: (pk) => declined.has(pk),
     decline (pk, at) { declined.set(pk, at); changed(); },
     undecline (pk) { if (declined.delete(pk)) changed(); },
-    dropIdleStock (cutoffS) {
+    dropIdleStock (cutoffS, limit = Infinity) {
       let n = 0;
       for (const [name, v] of names) {
+        if (n >= limit) break;
         const r = JSON.parse(v);
         if ((r.seen ?? r.at ?? 0) < cutoffS && ((r.stock && r.stock.length) || (r.served && r.served.length))) { delete r.stock; delete r.served; names.set(name, JSON.stringify(r)); n++; }
       }
@@ -156,12 +160,14 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
     put: db.prepare('INSERT INTO names (name, pubkey, rec, seen, stocked, live) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET pubkey = excluded.pubkey, rec = excluded.rec, seen = excluded.seen, stocked = excluded.stocked, live = excluded.live'),
     del: db.prepare('DELETE FROM names WHERE name = ?'),
     nameOf: db.prepare('SELECT name FROM names WHERE pubkey = ? AND live = 1 LIMIT 1'),
-    count: db.prepare('SELECT count(*) AS n FROM names'),
+    // The names in use: a released name is kept for good but takes no place under the cap.
+    count: db.prepare('SELECT count(*) AS n FROM names WHERE live = 1'),
     declined: db.prepare('SELECT 1 AS d FROM declined WHERE pubkey = ?'),
     decline: db.prepare('INSERT INTO declined (pubkey, at) VALUES (?, ?) ON CONFLICT (pubkey) DO UPDATE SET at = excluded.at'),
     undecline: db.prepare('DELETE FROM declined WHERE pubkey = ?'),
-    // Only the rows that hold a stock are read: the index holds no other.
-    idle: db.prepare('SELECT name, rec FROM names WHERE stocked = 1 AND seen < ?'),
+    // A batch of idle names' stock dropped in SQL, never read into the service: only the rows that
+    // hold a stock are looked at (the index holds no other).
+    idle: db.prepare("UPDATE names SET rec = json_remove(rec, '$.stock', '$.served'), stocked = 0 WHERE rowid IN (SELECT rowid FROM names WHERE stocked = 1 AND seen < ? LIMIT ?)"),
     meta: db.prepare('SELECT v FROM meta WHERE k = ?'),
     setMeta: db.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v'),
   };
@@ -178,8 +184,12 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
   const parse = (bytes) => { try { return JSON.parse(bytes.toString('utf8')) || {}; } catch (e) { log('[lnaddr] JSON store unreadable:', e.message); return null; } };
 
   // The JSON file of the code before this store, imported once and left in place.
+  // A names file that is there and cannot be read stops the store: starting on no names, or on
+  // fewer than the file holds, is how a payer is sent to another key.
+  const unreadable = () => new Error(`the names file ${storePath} cannot be read; refusing to start without the names it holds`);
   if (!q.meta.get('imported')) {
     const bytes = fs.existsSync(storePath) ? readBytes() : null, j = bytes && parse(bytes);
+    if (fs.existsSync(storePath) && !j) throw unreadable();
     let n = 0, d = 0;
     tx(() => {
       if (j) {
@@ -196,8 +206,10 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
     // The code before ran on the JSON file since this store last read or wrote it: what it did is
     // taken back (the head of this file).
     const seen = jsonSeen(), bytes = fs.existsSync(storePath) ? readBytes() : null;
+    if (fs.existsSync(storePath) && !bytes) throw unreadable();
     if (bytes && (!seen || seen.sha !== shaOf(bytes))) {
       const j = seen ? parse(bytes) : null;
+      if (seen && !j) throw unreadable();
       const c = j ? tx(() => mergeBack(j, seen.by === 'export')) : null;
       q.setMeta.run('json', JSON.stringify({ by: 'merge', sha: shaOf(bytes) }));
       if (c) log(`[lnaddr] took back from ${path.basename(storePath)}, written by the code before this store: ${c.added} names made, ${c.ended} released or moved away, ${c.updated} stocks`);
@@ -239,10 +251,10 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
     declined: (pk) => !!q.declined.get(pk),
     decline: (pk, at) => { retrying(() => q.decline.run(pk, at)); },
     undecline: (pk) => { retrying(() => q.undecline.run(pk)); },
-    dropIdleStock (cutoffS) {
-      const rows = q.idle.all(cutoffS);
-      tx(() => { for (const { name, rec } of rows) { const r = JSON.parse(rec); delete r.stock; delete r.served; putRow(name, r); } });
-      return rows.length;
+    // -> how many names lost their stock: at most `limit`, so a caller runs it again until it
+    // drops fewer.
+    dropIdleStock (cutoffS, limit = 500) {
+      return Number(retrying(() => q.idle.run(cutoffS, Number.isFinite(limit) ? limit : -1)).changes);
     },
     all: () => Object.fromEntries(db.prepare('SELECT name, rec FROM names').all().map((r) => [r.name, JSON.parse(r.rec)])),
     allDeclined: () => Object.fromEntries(db.prepare('SELECT pubkey, at FROM declined').all().map((r) => [r.pubkey, r.at])),
@@ -255,6 +267,9 @@ export function openNameStore ({ storePath = null, log = () => {}, nameOk = () =
   if (!storePath) return memoryStore({ log, nameOk });
   const lib = sqlite === undefined ? loadSqlite() : sqlite;
   if (lib) return sqliteStore(lib, { storePath, log, nameOk, now });
+  // The names are in SQLite already: the JSON file is older than they are, and serving it would
+  // free every name made since.
+  if (fs.existsSync(sqlitePathOf(storePath))) throw new Error(`the names are in ${sqlitePathOf(storePath)}, and this Node cannot load node:sqlite (Node 22.13 or later, or 22.5 to 22.12 with --experimental-sqlite); refusing to serve the older ${path.basename(storePath)}`);
   log('[lnaddr] node:sqlite is not available in this Node; names are kept in the JSON file, written whole when they change');
   return memoryStore({ jsonPath: storePath, flushMs, log, nameOk, now });
 }

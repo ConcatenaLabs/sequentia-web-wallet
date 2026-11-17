@@ -268,10 +268,10 @@ test('a name idle for months loses its stock, never the name', async () => {
     assert.equal(r.body.held.length, add.length);
     assert.equal((await get(`${s.base}/lnaddr/fred`)).body.fresh, true);
     // 89 days on: kept.
-    clock += 89 * 86400_000; s.svc.__test__.pruneIdle();
+    clock += 89 * 86400_000; s.svc.__test__.pruneAll();
     assert.equal(s.svc.store.get('fred').stock.length, add.length - 1);
     // 91 days on: the stock goes, the name and its last code stay.
-    clock += 2 * 86400_000; s.svc.__test__.pruneIdle();
+    clock += 2 * 86400_000; s.svc.__test__.pruneAll();
     const rec = s.svc.store.get('fred');
     assert.equal(rec.stock, undefined); assert.equal(rec.served, undefined); assert.equal(rec.pubkey, k.pub);
     const again = await get(`${s.base}/lnaddr/fred`);
@@ -280,7 +280,7 @@ test('a name idle for months loses its stock, never the name', async () => {
     // Its wallet speaks again: seen moves, and the stock it leaves is kept.
     t = Math.floor(clock / 1000);
     await post(`${s.base}/lnaddr/-/stock`, { name: 'fred', ts: t, add: [c2], drop: [], sig: signWith(k.priv, signedDigest('stock', DOMAIN, 'fred', t, c2.id, '')) });
-    s.svc.__test__.pruneIdle();
+    s.svc.__test__.pruneAll();
     assert.deepEqual(s.svc.store.get('fred').stock.map((c) => c.id), [c2.id]);
     assert.equal(s.svc.store.get('fred').seen, t);
   } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
@@ -343,5 +343,88 @@ test('the store as the deployed service wrote it: imported whole, and the file l
       assert.equal((await post(`${s.base}/lnaddr/-/register`, { name: n, pubkey: other.pub, ts: t2, sig: signWith(other.priv, signedDigest('register', DOMAIN, n, other.pub, t2)) })).status, 200, n);
     }
     assert.deepEqual(fs.readFileSync(file), bytes, 'the JSON file is untouched');
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// RV80 F3: never fewer names than the store holds.
+test('names in SQLite and a Node without node:sqlite: the store refuses to open on the older JSON', SQLITE, async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  fs.writeFileSync(file, JSON.stringify({ names: {} }));
+  const s = await serve(file);
+  try { assert.equal(await at(s.base).reg(KEYS.a, 'madehere'), 200); } finally { await s.close(); }
+  assert.throws(() => openNameStore({ storePath: file, sqlite: null }), /the names are in .*lnaddr-names\.sqlite, and this Node cannot load node:sqlite .*refusing to serve the older lnaddr-names\.json/);
+  // Where no SQLite store exists yet, the JSON file still serves (a Node before node:sqlite).
+  const other = path.join(dir, 'other.json');
+  assert.equal(openNameStore({ storePath: other, sqlite: null }).kind, 'json');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a names file that cannot be read: the service answers 503 and imports nothing, then imports it once it reads', SQLITE, async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  fs.writeFileSync(file, '{"names": {"alice": {"pubkey": "' + KEYS.a.pub + '", "at": 1}');   // cut short
+  const logs = [];
+  let s = await serve(file, { log: (...a) => logs.push(a.join(' ')) });
+  try {
+    assert.match(logs.join('\n'), /REFUSING to serve payment names: the names file .* cannot be read/);
+    assert.match(s.svc.broken(), /cannot be read/);
+    for (const u of ['/lnaddr/alice', '/lnaddr/-/mine?pubkey=' + KEYS.a.pub, '/.well-known/lnurlp/alice']) assert.equal((await get(s.base + u)).status, 503, u);
+    assert.equal(await at(s.base).reg(KEYS.x, 'alice'), 503, 'nobody registers while the names are unknown');
+    await s.close();
+    // The same file with no SQLite store beside it (a Node without node:sqlite): refused too.
+    const alone = path.join(dir, 'alone.json'); fs.copyFileSync(file, alone);
+    assert.throws(() => openNameStore({ storePath: alone, sqlite: null }), /the names file .*alone\.json cannot be read/);
+    fs.writeFileSync(file, JSON.stringify({ names: { alice: { pubkey: KEYS.a.pub, at: 1 } } }));
+    s = await serve(file);
+    assert.equal((await at(s.base).mine(KEYS.a)).name, 'alice', 'imported once the file reads');
+    assert.equal(await at(s.base).reg(KEYS.x, 'alice'), 409);
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a names file changed since and cut short: refused, never skipped', SQLITE, async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  fs.writeFileSync(file, JSON.stringify({ names: {} }));
+  let s = await serve(file);
+  try { assert.equal(await at(s.base).reg(KEYS.a, 'madehere'), 200); } finally { await s.close(); }
+  fs.writeFileSync(file, '{"names": {');
+  s = await serve(file);
+  try { assert.equal((await get(`${s.base}/lnaddr/madehere`)).status, 503); } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// RV80 F5: the idle stock dropped in batches, the service answering between them.
+test('idle stock: dropped a batch at a time, the service answering between batches', SQLITE, async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  const st = openNameStore({ storePath: file });
+  const code = signCode(KEYS.a.priv, DOMAIN, 'n0', buildPayCode({ address: ADDRESS }));
+  for (let i = 0; i < 1_200; i++) st.put('n' + i, { pubkey: i.toString(16).padStart(64, '0'), at: 1, seen: 1, stock: [{ ...code, until: null }], served: ['x'] });
+  assert.equal(st.dropIdleStock(1_000, 500), 500, 'one batch');
+  st.close();
+  const logs = [];
+  const s = await serve(file, { pruneBatch: 300, pruneGapMs: 20, pruneEveryMs: 0, log: (...a) => logs.push(a.join(' ')) });
+  try {
+    // Between batches a lookup is answered.
+    await new Promise((ok) => setTimeout(ok, 30));
+    const mid = readStoreNames(file), left = Object.values(mid).filter((r) => r.stock).length;
+    assert.ok(left > 0 && left < 700, `pruning under way: ${left} names still stocked`);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${(5).toString(16).padStart(64, '0')}`)).body.name, 'n5');
+    const t0 = Date.now();
+    while (Object.values(readStoreNames(file)).some((r) => r.stock) && Date.now() - t0 < 5_000) await new Promise((ok) => setTimeout(ok, 20));
+    const after = readStoreNames(file);
+    assert.equal(Object.values(after).filter((r) => r.stock || r.served).length, 0);
+    assert.equal(Object.keys(after).length, 1_200, 'every name kept');
+    assert.match(logs.join('\n'), /dropped the stock of 700 names idle for 90 days/);
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// RV80 F6: the cap counts names in use; released names are kept outside it.
+test('the cap on names counts the names in use, not the released ones', async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  const s = await serve(file, { maxNames: 2 });
+  try {
+    const n = at(s.base);
+    assert.equal(await n.reg(KEYS.a, 'first'), 200); assert.equal(await n.rel(KEYS.a, 'first'), 200);
+    assert.equal(await n.reg(KEYS.b, 'second'), 200);
+    assert.equal(await n.reg(KEYS.c, 'third'), 200, 'the released name takes no place');
+    assert.equal(await n.reg(KEYS.d, 'fourth'), 503, 'two names in use: full');
+    assert.equal(await n.reg(KEYS.x, 'first'), 409, 'and the released name is still nobody else\'s');
   } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

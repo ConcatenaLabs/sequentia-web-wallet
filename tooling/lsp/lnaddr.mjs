@@ -10,8 +10,11 @@
 //   GET  /lnaddr/-/pay/<name>?amount=<msat> its callback: { pr, routes: [] }
 //   GET  /lnaddr/<name>                    { pubkey, code, id, sig, fresh, reused }: a receive code
 //                                          of the wallet's, signed by the name's key (`pubkey`)
-//   GET  /lnaddr/-/mine?pubkey=<hex>       { name, declined }: the name a key holds, and whether its
-//                                          person removed it (the wallet then makes none by itself)
+//   GET  /lnaddr/-/mine?pubkey=<hex>[&ts=<s>&sig=<hex>]
+//                                          { name, declined }: the name a key holds, and whether its
+//                                          person removed it (the wallet then makes none by itself);
+//                                          signed by that key, it is the wallet's own and has budgets
+//                                          of its own, apart from the payers'
 //   POST /lnaddr/-/register                { name, pubkey, ts, sig }
 //   POST /lnaddr/-/release                 { name, ts, sig }: the name answers no lookup any more, stays
 //                                          its key's, and the key is marked as declined until it
@@ -35,7 +38,9 @@
 // past the network's it is refused for a minute. A lookup of a name nobody holds costs the network
 // the same as one that finds a name, on both the Sequentia and the LNURL-pay routes, so walking
 // the names is as slow as the network limit. New names are limited per network too (ten at
-// once, then one every ten minutes), since every wallet registers one by itself. The client's address is the one the proxy in
+// once, then one every ten minutes), since every wallet registers one by itself. A wallet's signed
+// `/mine` counts against its key (six at once, then one every ten seconds) and a per-network
+// budget of its own, never against the payers' lookups. The client's address is the one the proxy in
 // front adds last to X-Forwarded-For when the request comes from the loopback, else the socket's.
 //
 // A name is 3 to 32 of a-z 0-9 - _ (`-` alone never is one, so `/lnaddr/-/…` never names a name).
@@ -46,7 +51,11 @@
 // that declined a name are kept in lnaddr-store.mjs (SQLite beside `storePath`, one row per name,
 // written only when that name changes); who is online is kept in memory only. A name whose wallet
 // has not been heard from for `idleStockS` loses its stock (never the name, so a payer who paid it
-// before never pays a stranger at it): a payer then gets its most recent code again.
+// before never pays a stranger at it): a payer then gets its most recent code again. That is done
+// `pruneBatch` names a tick, so the service answers between batches. `maxNames` counts the names
+// in use; released names are kept for good outside it, each one made at the pace new names are.
+// When the store will not open, every request of this service is answered 503 and the rest of
+// the LSP runs on: it never serves fewer names than it holds.
 //
 // `makeLnaddr(cfg).handle(req, res, url)` answers a request it owns and returns true, or returns
 // false and leaves it alone; lsp-server.mjs calls it before its token check.
@@ -91,11 +100,17 @@ export function clientNet (req) {
 export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), waitMs = 10_000, holdMs = 25_000,
   onlineMs = 60_000, minSat = 1, maxSat = null, maxNames = 100_000, maxPending = 20, log = () => {},
   stockMax = 20, serveMarginS = 2 * 3600, nameBurst = 5, nameEveryMs = 30_000, netBurst = 20, netEveryMs = 6_000,
-  newBurst = 10, newEveryMs = 10 * 60_000, idleStockS = 90 * 86400, seenEveryS = 86400, pruneEveryMs = 6 * 3600_000 } = {}) {
+  newBurst = 10, newEveryMs = 10 * 60_000, idleStockS = 90 * 86400, seenEveryS = 86400, pruneEveryMs = 6 * 3600_000,
+  pruneBatch = 100, pruneGapMs = 50, mineBurst = 6, mineEveryMs = 10_000, mineNetBurst = 120, mineNetEveryMs = 500 } = {}) {
   if (!domain || !base) throw new Error('lnaddr needs a domain and a base URL');
   // name -> { pubkey, at, seen, stock?: [{ id, code, sig, until }], last?, served?: [id] }; `seen`: when
   // the wallet itself last spoke (to the day, so an open wallet's link does not write every wait).
-  const store = openNameStore({ storePath, log, now, nameOk: (n) => !nameProblem(n) });
+  // A store that will not open (its names unreadable, or in SQLite this Node cannot load) is never
+  // replaced by fewer names: the service answers every request of its own 503 instead, and the
+  // rest of the LSP runs on (lnaddr-store.mjs).
+  let store = null, broken = null;
+  try { store = openNameStore({ storePath, log, now, nameOk: (n) => !nameProblem(n) }); }
+  catch (e) { broken = e && e.message || String(e); log('[lnaddr] REFUSING to serve payment names:', broken); }
   const online = new Map();         // name -> { seen, min_sat, max_sat }
   const waiters = new Map();        // name -> Set of (requests) => void
   const pending = new Map();        // name -> Map id -> { id, kind, msat?, at, done }
@@ -105,6 +120,11 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   // New names per network: every wallet registers one by itself, so one network making wallets
   // by the thousand would fill `maxNames` for everyone else.
   const newTake = bucket({ burst: newBurst, everyMs: newEveryMs, now });
+  // A wallet asking for its own name (`/mine` signed by its key, which every open page does every
+  // 30 s): a budget per key, and one per network apart from the payers', so wallets open on one
+  // network never hide their names nor use up their payers' lookups.
+  const mineTake = bucket({ burst: mineBurst, everyMs: mineEveryMs, now });
+  const mineNetTake = bucket({ burst: mineNetBurst, everyMs: mineNetEveryMs, now });
   const nowS = () => Math.floor(now() / 1000);
   // A name in use: held and not released. A released name stays its key's (a tombstone), so a payer
   // who kept it is told nobody goes by it, never sent to another wallet.
@@ -117,12 +137,28 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   }
   // The wallet spoke: `seen` moves, at most once a day. -> whether the record changed.
   const touch = (rec) => { if (nowS() - (rec.seen ?? rec.at ?? 0) < seenEveryS) return false; rec.seen = nowS(); return true; };
-  function pruneIdle () {
-    try { const n = store.dropIdleStock(nowS() - idleStockS); if (n) log(`[lnaddr] dropped the stock of ${n} names idle for ${Math.round(idleStockS / 86400)} days`); }
-    catch (e) { log('[lnaddr] prune:', e && e.message); }
+  // The stock of names idle for `idleStockS`, dropped `pruneBatch` names at a time in SQL, one batch
+  // a tick (`pruneGapMs` apart), so the service answers between batches. Measured on Node 22.11 with
+  // 100,000 idle names of ten codes each: batches of 100 held the service at most 96 ms (500: 1.1 s,
+  // the database's own checkpoints), and memory did not grow.
+  let pruning = null, pruned = 0;
+  function pruneBatchNow () {
+    try { return store.dropIdleStock(nowS() - idleStockS, pruneBatch); } catch (e) { log('[lnaddr] prune:', e && e.message); return 0; }
   }
+  function pruneIdle () {
+    if (pruning || !store) return;
+    const step = () => {
+      const n = pruneBatchNow(); pruned += n;
+      if (n >= pruneBatch) { pruning = setTimeout(step, pruneGapMs); pruning.unref?.(); return; }
+      if (pruned) log(`[lnaddr] dropped the stock of ${pruned} names idle for ${Math.round(idleStockS / 86400)} days`);
+      pruning = null; pruned = 0;
+    };
+    pruning = setTimeout(step, 0); pruning.unref?.();
+  }
+  // Every batch at once (tests).
+  function pruneAll () { let n, all = 0; do { n = pruneBatchNow(); all += n; } while (n >= pruneBatch); return all; }
   pruneIdle();
-  const pruner = pruneEveryMs ? setInterval(pruneIdle, pruneEveryMs) : null;
+  const pruner = pruneEveryMs && store ? setInterval(pruneIdle, pruneEveryMs) : null;
   pruner?.unref?.();
   const freshTs = (ts) => Number.isSafeInteger(Number(ts)) && Math.abs(Number(ts) - now() / 1000) <= SKEW_S;
   const isOnline = (n) => { const o = online.get(n); return !!o && (now() - o.seen <= onlineMs || (waiters.get(n)?.size || 0) > 0); };
@@ -265,10 +301,16 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       return send(res, 200, { ok: true, held: rec.stock.map((c) => c.id) });
     },
     async mine (req, res, url) {
-      // Each page start asks it: limited per network as lookups are.
-      if (!netTake(clientNet(req))) return fail(res, 429, BUSY, { code: 'busy' });
       const pk = String(url.searchParams.get('pubkey') || '').toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
+      // Signed by the key it asks about (`ts`, `sig`): the wallet's own, on its own budgets.
+      // Unsigned: anyone's, limited per network with the payers' lookups.
+      const ts = url.searchParams.get('ts'), sig = url.searchParams.get('sig');
+      if (sig != null) {
+        if (!freshTs(ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
+        if (!verifySig(pk, signedDigest('mine', domain, '-', pk, ts), sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
+        if (!mineNetTake(clientNet(req)) || !mineTake(pk)) return fail(res, 429, BUSY, { code: 'busy' });
+      } else if (!netTake(clientNet(req))) return fail(res, 429, BUSY, { code: 'busy' });
       return send(res, 200, { ok: true, name: store.nameOf(pk), declined: store.declined(pk) });
     },
     async register (req, res, b) {
@@ -383,6 +425,10 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   async function handle (req, res, url) {
     const p = url.pathname;
     let m;
+    if (broken && (p.startsWith('/.well-known/lnurlp/') || p.startsWith('/lnaddr/'))) {
+      send(res, 503, { ok: false, status: 'ERROR', reason: 'Payment names are not available here now.', error: 'Payment names are not available here now.' }, { cors: true });
+      return true;
+    }
     if (req.method === 'OPTIONS' && (p.startsWith('/.well-known/lnurlp/') || p.startsWith('/lnaddr/'))) {
       res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET', 'access-control-allow-headers': 'accept' });
       res.end(); return true;
@@ -400,6 +446,6 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
     return false;
   }
 
-  function close () { if (pruner) clearInterval(pruner); store.close(); }
-  return { handle, store, isOnline, close, __test__: { pending, pruneIdle } };
+  function close () { if (pruner) clearInterval(pruner); if (pruning) clearTimeout(pruning); if (store) store.close(); }
+  return { handle, store, broken: () => broken, isOnline, close, __test__: { pending, pruneIdle, pruneAll } };
 }

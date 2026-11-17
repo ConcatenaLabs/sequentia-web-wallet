@@ -56,7 +56,7 @@ const unhex = (h) => {
 export const NAME_WORDS = Object.freeze({
   label: 'Your payment name',
   // Said beside the name, since every wallet holds one: who can pay it, and what they see.
-  tip: 'Anyone who has this name can pay you at it, in any amount they choose, and can see the address each payment goes to. A Sequentia wallet can pay it while this wallet is closed; other wallets, while it is open.',
+  tip: 'Anyone can look this name up and pay you at it, in any amount they choose, and see the address each payment goes to. A Sequentia wallet can pay it while this wallet is closed; other wallets, while it is open.',
   none: 'Get a name other wallets can pay you at, in any amount they choose.',
   choose: 'Choose your own',
   change: 'Change name',
@@ -334,12 +334,17 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
   // The name this wallet's key holds at the service, if any (a wallet restored elsewhere finds it),
   // and whether its person removed it on any device (`declined`), which this device then keeps too.
   // Bounded by `lookUpTimeoutMs`: a name is never shown on the strength of a request that hangs.
+  // Signed by the wallet's key, so the service counts it against that key and not against the
+  // lookups of payers on the same network. A refusal for too many requests (429) is not the service
+  // being unreachable: what is shown stays as it is, and the next check asks again.
   async function lookUp () {
     const k = key(); if (!k) return false;
     const ctl2 = typeof AbortController === 'function' ? new AbortController() : null;
     const t = ctl2 ? setTimeout(() => ctl2.abort(), lookUpTimeoutMs) : null;
     try {
-      const r = await fetchFn(`${base}/lnaddr/-/mine?pubkey=${k.pub}`, ctl2 ? { signal: ctl2.signal } : undefined);
+      const ts0 = ts(), sig = signWith(k.priv, signedDigest('mine', domain, '-', k.pub, ts0));
+      const r = await fetchFn(`${base}/lnaddr/-/mine?pubkey=${k.pub}&ts=${ts0}&sig=${sig}`, ctl2 ? { signal: ctl2.signal } : undefined);
+      if (r.status === 429) return false;
       const j = await r.json();
       if (r.ok && j && j.ok) {
         reach(true);

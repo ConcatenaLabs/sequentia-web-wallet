@@ -331,8 +331,8 @@ its own view: the address, New address, Show blinded address, Show xpub, and the
     ignore case, so a name typed with capitals pays the same wallet. Names are unique as the joined
     lower-case string. The words are the EFF short wordlist less every BIP39 word, so no word of a
     recovery phrase is ever part of a public name.
-  - **Settings** holds it: the label **Your payment name**, "Anyone who has this name can pay you at
-    it, in any amount they choose, and can see the address each payment goes to. A Sequentia wallet
+  - **Settings** holds it: the label **Your payment name**, "Anyone can look this name up and pay you
+    at it, in any amount they choose, and see the address each payment goes to. A Sequentia wallet
     can pay it while this wallet is closed; other wallets, while it is open.", the name, **Copy**,
     **Change name** and **Remove name**, and **Use a
     word name instead** for a name of the person's own choosing. **Change name** opens a field ending

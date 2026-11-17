@@ -628,3 +628,64 @@ test('the name a key holds (/mine) is looked up by an index and limited per netw
     assert.equal(r.status, 429); assert.equal(r.body.code, 'busy');
   } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
+
+// RV80 F4: open wallets asking for their own name never hide it, nor use up their payers' lookups.
+const signedMine = (k, t = ts()) => `pubkey=${k.pub}&ts=${t}&sig=${signWith(k.priv, signedDigest('mine', DOMAIN, '-', k.pub, t))}`;
+test('a wallet\'s own /mine, signed: a budget per key, apart from the payers\' lookups', async () => {
+  const s = await serveAt({ cfg: { netBurst: 3, netEveryMs: 60_000 } });
+  const keys = Array.from({ length: 8 }, (_, i) => nameKey(`${PHRASE.split(' ').slice(0, 11).join(' ')} ${['about', 'abstract', 'absurd', 'access', 'accident', 'account', 'accuse', 'achieve'][i]}`));
+  try {
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(keys[0], 'heldname'))).status, 200);
+    // Eight wallets on one network, each asking six times at once: all answered.
+    for (const k of keys) for (let i = 0; i < 6; i++) assert.equal((await get(`${s.base}/lnaddr/-/mine?${signedMine(k)}`)).status, 200);
+    // A seventh at once for one key: that key waits; the others and the payers do not.
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?${signedMine(keys[0])}`)).status, 429);
+    // The payers' budget is whole: three lookups, then the network's limit.
+    for (let i = 0; i < 3; i++) assert.equal((await get(`${s.base}/.well-known/lnurlp/heldname`)).status, 200);
+    assert.equal((await get(`${s.base}/.well-known/lnurlp/heldname`)).status, 429);
+    // Unsigned, or signed by another key, it is the payers' budget (spent now) or refused.
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${keys[1].pub}`)).status, 429);
+    const t = ts(), forged = `pubkey=${keys[1].pub}&ts=${t}&sig=${signWith(keys[2].priv, signedDigest('mine', DOMAIN, '-', keys[1].pub, t))}`;
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?${forged}`)).status, 403);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?${signedMine(keys[1], t - 3600)}`)).status, 400);
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('eight wallets open on one network for ten minutes, each checking its name every 30 s: no name hidden, no payer refused', async () => {
+  let clock = Date.now();
+  const s = await serveAt({ cfg: { now: () => clock } });
+  const keys = Array.from({ length: 8 }, (_, i) => nameKey(`${PHRASE.split(' ').slice(0, 11).join(' ')} ${['about', 'abstract', 'absurd', 'access', 'accident', 'account', 'accuse', 'achieve'][i]}`));
+  try {
+    for (let i = 0; i < 8; i++) assert.equal((await post(`${s.base}/lnaddr/-/register`, { ...reg(keys[i], 'wallet' + i, Math.floor(clock / 1000)) })).status, 200);
+    let refusedOwn = 0, refusedPayer = 0, asks = 0, pays = 0;
+    // Each wallet's check as the page makes it: once at start, then every 30 s; a payer every 30 s.
+    for (let sec = 0; sec <= 600; sec += 5) {
+      clock += 5_000;
+      for (let i = 0; i < 8; i++) if ((sec + i * 5) % 30 === 0) { asks++; if ((await get(`${s.base}/lnaddr/-/mine?${signedMine(keys[i], Math.floor(clock / 1000))}`)).status !== 200) refusedOwn++; }
+      if (sec % 30 === 15) { pays++; if ((await get(`${s.base}/.well-known/lnurlp/wallet${(sec / 30) % 8 | 0}`)).status === 429) refusedPayer++; }
+    }
+    assert.deepEqual({ refusedOwn, refusedPayer }, { refusedOwn: 0, refusedPayer: 0 }, `${asks} checks, ${pays} payer lookups`);
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('a check refused for too many requests (429) leaves the name shown, and is not the service unreachable', async () => {
+  const s = await serveAt();
+  const k = nameKey(PHRASE);
+  let busy = false;
+  const store = new Map();
+  const f = (url, opts) => (busy && String(url).includes('/mine') ? Promise.resolve(new Response('{"ok":false,"error":"busy","code":"busy"}', { status: 429 })) : fetch(url, opts));
+  const w = mountLnAddress({ base: s.base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
+    store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) }, fetch: f });
+  try {
+    await post(`${s.base}/lnaddr/-/register`, reg(k, 'shownname'));
+    await w.recover();
+    assert.deepEqual([w.name(), w.verified(), w.unreachable()], ['shownname', true, false]);
+    busy = true;
+    await w.recover();
+    assert.deepEqual([w.name(), w.verified(), w.unreachable()], ['shownname', true, false]);
+  } finally { w.stop(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('Settings says the name can be looked up by anyone, and what a payer sees (#805)', () => {
+  assert.match(NAME_WORDS.tip, /^Anyone can look this name up and pay you at it, in any amount they choose, and see the address each payment goes to\./);
+});
