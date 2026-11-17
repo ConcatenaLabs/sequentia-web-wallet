@@ -241,11 +241,15 @@ export const FOLLOW_MS = 250
 // between any two of them). Turns: a job that is not first and has waited `turnMs` since it was
 // queued (`queued`) runs ahead of the next first one, held or not, so neither side starves: a
 // person's command waits for no slice it does not need, and the rest gets a turn at least every
-// `turnMs` (a job's own `turnMs` when it names one). -> an index, or -1 to wait.
-export function nextJob (queue, now, holdUntil = 0, turnMs = SYNC_TURN_MS, followUntil = 0) {
+// `turnMs` (a job's own `turnMs` when it names one). Turns alternate: `turnTaken` (the job before
+// ran ahead of a waiting first job) gives a waiting first job the next run, so two busy loops of the
+// rest, each with a job always past its turn, still let a person's command through after one of
+// theirs. -> an index, or -1 to wait.
+export function nextJob (queue, now, holdUntil = 0, turnMs = SYNC_TURN_MS, followUntil = 0, turnTaken = false) {
+  const i = queue.findIndex((q) => q.first)
+  if (turnTaken && i >= 0) return i
   const k = queue.findIndex((q) => !q.first)
   if (k >= 0 && queue[k].queued != null && now - queue[k].queued >= (queue[k].turnMs ?? turnMs)) return k
-  const i = queue.findIndex((q) => q.first)
   if (i >= 0) return i
   if (now < followUntil) return -1
   return queue.findIndex((q) => q.unheld || now >= holdUntil)
@@ -296,7 +300,7 @@ export async function leafLibraryThread (storeRoot, opts = {}) {
 // job at a time, in nextJob's order. -> { call(op, args, first, unheld, turnMs), hold(ms) }.
 export function libraryQueue (run, { onSlow = null, onTime = null, slowMs = 5000, turnMs = SYNC_TURN_MS, followMs = FOLLOW_MS } = {}) {
   const queue = []
-  let next = 1, busy = false, holdUntil = 0, followUntil = 0, timer = null
+  let next = 1, busy = false, holdUntil = 0, followUntil = 0, timer = null, turnTaken = false
   function done (p, m) {
     busy = false
     if (p.first) followUntil = Date.now() + followMs
@@ -308,9 +312,11 @@ export function libraryQueue (run, { onSlow = null, onTime = null, slowMs = 5000
   function pump () {
     if (busy || !queue.length) return
     const now = Date.now()
-    const i = nextJob(queue, now, holdUntil, turnMs, followUntil)
+    const i = nextJob(queue, now, holdUntil, turnMs, followUntil, turnTaken)
     if (i < 0) { if (!timer) timer = setTimeout(() => { timer = null; pump() }, nextWake(queue, now, holdUntil, turnMs, followUntil)); return }
     const job = queue.splice(i, 1)[0]
+    // A job that is not first, run while a first one waits, took a turn: the first one runs next.
+    turnTaken = !job.first && queue.some((q) => q.first)
     job.started = Date.now()
     busy = true
     Promise.resolve().then(() => run(job)).then((m) => done(job, m), (e) => done(job, { ok: false, error: { message: (e && e.message) || String(e) } }))

@@ -2,7 +2,7 @@
 // (a taker is about to ask for a firm offer) it starts no other.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { nextJob, nextWake } from '../leaf-node.mjs'
+import { nextJob, nextWake, libraryQueue } from '../leaf-node.mjs'
 
 test('first goes ahead; a held queue starts only first commands; the hold ends', () => {
   const q = [{ id: 1 }, { id: 2 }, { id: 3, first: true }]
@@ -90,4 +90,28 @@ test('a job\'s own turnMs takes the place of the queue\'s', () => {
   assert.equal(nextJob(q, 1999, 0, 10_000), 1, 'the takers first before its turn')
   assert.equal(nextJob(q, 2000, 0, 10_000), 0, 'the slice at its own turn')
   assert.equal(nextWake([q[0]], 500, 9000, 10_000), 1500, 'woken at its own turn')
+})
+
+test('after a turn taken ahead of it, a waiting first command runs before another aged one', () => {
+  const q = [{ op: 'sync', queued: 0, turnMs: 20 }, { op: 'taker', first: true, queued: 900 }]
+  assert.equal(nextJob(q, 1000, 0, 20, 0, false), 0, 'the aged slice takes its turn')
+  assert.equal(nextJob(q, 1000, 0, 20, 0, true), 1, 'and then the taker runs, though the slice is aged too')
+})
+
+test('two busy loops of ordinary commands never keep a first command waiting past one of theirs', async () => {
+  const ran = []
+  const q = libraryQueue(async (job) => { ran.push(job.op); await new Promise((r) => setTimeout(r, 30)); return { ok: true, value: null } }, { turnMs: 20, followMs: 2 })
+  let stop = false
+  const loop = async (name) => { while (!stop) await q.call(name, {}, false) }
+  const a = loop('upkeep'), b = loop('sync')
+  await new Promise((r) => setTimeout(r, 120))
+  const mark = ran.length
+  const taker = q.call('taker', {}, true)
+  const ran2 = await Promise.race([taker.then(() => true), new Promise((r) => setTimeout(() => r(false), 1000))])
+  const after = ran.slice(mark)
+  stop = true
+  await Promise.all([a, b, taker])
+  assert.ok(ran2, `the taker ran within a second while both loops stayed busy: ${after.join(',')}`)
+  const before = after.indexOf('taker')
+  assert.ok(before >= 0 && before <= 1, `the taker ran after at most one ordinary command: ${after.join(',')}`)
 })
