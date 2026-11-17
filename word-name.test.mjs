@@ -59,7 +59,7 @@ async function serveAt (dir) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const svc = makeLnaddr({ domain: DOMAIN, base, storePath: path.join(dir, 'names.json'), holdMs: 300, waitMs: 500 });
   server.on('request', async (req, res) => { if (await svc.handle(req, res, new URL(req.url, 'http://x'))) return; res.writeHead(404); res.end('{}'); });
-  return { base, close: () => new Promise((ok) => { server.closeAllConnections(); server.close(ok); }) };
+  return { base, close: () => new Promise((ok) => { server.closeAllConnections(); server.close(ok); }).finally(() => svc.close()) };
 }
 function wallet (base, phrase, store = new Map()) {
   const k = nameKey(phrase);
@@ -89,7 +89,7 @@ test('over the service: a third word only when two are taken; a restore gets the
     again.stop();
     // The service lost its record: the wallet gets the same name again, since the other still
     // holds the first.
-    await s.close(); fs.rmSync(path.join(dir, 'names.json'));
+    await s.close(); for (const f of fs.readdirSync(dir)) if (f.startsWith('names.')) fs.rmSync(path.join(dir, f));
     s = await serveAt(dir);
     const r2 = await fetch(`${s.base}/lnaddr/-/register`, { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: mine[0].name, pubkey: o.pub, ts: t, sig: signWith(o.priv, signedDigest('register', DOMAIN, mine[0].name, o.pub, t)) }) });

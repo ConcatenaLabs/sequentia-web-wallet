@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeLnaddr, OFFLINE } from './lnaddr.mjs';
+import { readStoreNames, sqlitePathOf } from './lnaddr-store.mjs';
 import { nameKey, signedDigest, signWith, mountLnAddress, resolveLnAddress } from '../../lnaddr.js';
 import { decodeBolt11 } from '../../bolt11.js';
 import { buildPayCode, readPayCode } from '../../pay-code.js';
@@ -40,7 +41,7 @@ async function serveAt (opts = {}) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const svc = makeLnaddr({ domain: DOMAIN, base, storePath: path.join(dir, 'lnaddr-names.json'), waitMs: 1500, holdMs: 800, onlineMs: 3000, ...(opts.cfg || {}) });
   server.on('request', async (req, res) => { if (await svc.handle(req, res, new URL(req.url, 'http://x'))) return; res.writeHead(401); res.end('{"ok":false}'); });
-  return { svc, base, dir, close: () => new Promise((ok) => { server.closeAllConnections(); server.close(ok); }) };
+  return { svc, base, dir, close: () => new Promise((ok) => { server.closeAllConnections(); server.close(ok); }).finally(() => svc.close()) };
 }
 const get = async (url) => { const r = await fetch(url); return { status: r.status, cors: r.headers.get('access-control-allow-origin'), body: await r.json() }; };
 const post = async (url, body) => { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; };
@@ -73,21 +74,32 @@ test('names: first come first served, held and released by their key', async () 
     r = await post(`${s.base}/lnaddr/-/register`, reg(a, 'alice2'));
     assert.equal(r.status, 200);
     assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${a.pub}`)).body.name, 'alice2');
-    assert.equal((await get(`${s.base}/.well-known/lnurlp/alice`)).status, 404, 'the first is free again');
+    assert.equal((await get(`${s.base}/.well-known/lnurlp/alice`)).status, 404, 'the first answers no lookup');
+    assert.equal((await get(`${s.base}/lnaddr/alice`)).status, 404);
+    // ... and is never another key's: a payer who kept it is never sent to another wallet.
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(b, 'alice'))).status, 409);
     // Release only by the holder.
     r = await post(`${s.base}/lnaddr/-/release`, rel(b, 'alice2'));
     assert.equal(r.status, 403);
     r = await post(`${s.base}/lnaddr/-/release`, rel(a, 'alice2'));
     assert.deepEqual(r, { status: 200, body: { ok: true } });
     r = await post(`${s.base}/lnaddr/-/register`, reg(b, 'alice2'));
-    assert.equal(r.status, 200, 'a released name is anyone\'s');
+    assert.equal(r.status, 409, 'a released name is never another key\'s');
+    assert.equal((await get(`${s.base}/lnaddr/alice2`)).status, 404, 'a released name answers no lookup');
+    r = await post(`${s.base}/lnaddr/-/register`, reg(a, 'alice2'));
+    assert.equal(r.status, 200, 'its own key takes it back');
+    r = await post(`${s.base}/lnaddr/-/register`, reg(b, 'bobby'));
+    assert.equal(r.status, 200);
     // The store outlives a restart.
     await s.close();
     const s2 = await serveAt({ dir: s.dir });
     try {
-      assert.equal((await get(`${s2.base}/lnaddr/-/mine?pubkey=${b.pub}`)).body.name, 'alice2');
-      assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, 'lnaddr-names.json'), 'utf8')).names.alice2.pubkey, b.pub);
-      assert.equal((fs.statSync(path.join(s.dir, 'lnaddr-names.json')).mode & 0o777), 0o600);
+      assert.equal((await get(`${s2.base}/lnaddr/-/mine?pubkey=${b.pub}`)).body.name, 'bobby');
+      assert.equal((await get(`${s2.base}/lnaddr/-/mine?pubkey=${a.pub}`)).body.name, 'alice2');
+      const file = path.join(s.dir, 'lnaddr-names.json');
+      assert.equal(readStoreNames(file).alice2.pubkey, a.pub);
+      assert.equal(readStoreNames(file).alice.released > 0, true, 'kept as released');
+      assert.equal((fs.statSync(sqlitePathOf(file)).mode & 0o777), 0o600);
     } finally { await s2.close(); }
   } finally { await s.close().catch(() => {}); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
@@ -375,15 +387,26 @@ test('end to end with a stock: closed, a payer still gets new codes; open, the w
   } finally { wallet.stop(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
 
-// Every wallet holds a name by default (lnaddr.js `ensure`), against the service itself.
+// Every wallet holds a name by default (lnaddr.js `ensure`), against the service itself. Each wallet
+// made here is stopped in `finally`, so a failing assertion fails the test instead of leaving a
+// wallet's link running and the test hanging.
+function walletsAt (s, k) {
+  const made = [];
+  const mk = (store = new Map(), { base = s.base, fetch: fetchFn } = {}) => {
+    const w = mountLnAddress({
+      base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
+      store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
+      retryMs: 50, log: (...a) => process.env.RX2DBG && console.log(...a), ...(fetchFn ? { fetch: fetchFn } : {}),
+    });
+    made.push(w); return w;
+  };
+  return { mk, stopAll: () => { for (const w of made) w.stop(); } };
+}
+
 test('the default name: the word name with nothing asked, the same one back after a restore, none after Remove', async () => {
   const s = await serveAt();
   const k = nameKey(PHRASE);
-  const mk = (store = new Map(), base = s.base, fetchFn = undefined) => mountLnAddress({
-    base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
-    store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
-    retryMs: 50, ...(fetchFn ? { fetch: fetchFn } : {}),
-  });
+  const { mk, stopAll } = walletsAt(s, k);
   try {
     const w = mk();
     const name = await w.ensure();
@@ -394,19 +417,75 @@ test('the default name: the word name with nothing asked, the same one back afte
     const again = mk();
     assert.equal(await again.ensure(), name);
     // Not in developer mode (`want` says no): nothing is registered by itself.
-    await post(`${s.base}/lnaddr/-/release`, rel(k, name));
-    assert.equal(await mk().ensure({ want: () => false }), null);
-    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.name, null);
+    await w.release();
+    await post(`${s.base}/lnaddr/-/register`, reg(k, 'devname'));
+    await post(`${s.base}/lnaddr/-/release`, rel(k, 'devname'));
+    await post(`${s.base}/lnaddr/-/register`, reg(k, 'devname2'));
+    await post(`${s.base}/lnaddr/-/release`, rel(k, 'devname2'));
     // Removed by the person: never given again by itself, until the person takes one.
     const store = new Map(); const w2 = mk(store);
-    await w2.ensure(); await w2.release();
-    assert.equal(w2.removed(), true);
     assert.equal(await w2.ensure(), null);
     assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.name, null);
     await w2.claimWordName();
     assert.equal(w2.removed(), false);
-    w.stop(); again.stop(); w2.stop();
-  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.declined, false, 'taking a name clears the mark');
+    await w2.release();
+    assert.equal(w2.removed(), true);
+    assert.equal(await w2.ensure(), null);
+  } finally { stopAll(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('a removal holds on every device and after a restore: the service keeps it per key', async () => {
+  const s = await serveAt();
+  const k = nameKey(PHRASE), other = nameKey(OTHER);
+  const { mk, stopAll } = walletsAt(s, k);
+  try {
+    // Device A takes its default name and removes it.
+    const a = mk();
+    const name = await a.ensure();
+    assert.ok(name);
+    await a.release();
+    let mine = (await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body;
+    assert.deepEqual([mine.name, mine.declined], [null, true]);
+    // Device B, a fresh browser with the same phrase (or a restore): no name made by itself, and
+    // it keeps the removal as its own from then on.
+    const bStore = new Map(); const b = mk(bStore);
+    assert.equal(await b.ensure(), null);
+    assert.equal(b.removed(), true);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.name, null);
+    // The name stays the key's: no other key takes it, and nobody is sent anywhere at it.
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(other, name))).status, 409);
+    assert.equal((await get(`${s.base}/lnaddr/${name}`)).status, 404);
+    // Releasing a name marks that key too.
+    await post(`${s.base}/lnaddr/-/register`, reg(other, 'othername'));
+    await post(`${s.base}/lnaddr/-/release`, rel(other, 'othername'));
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${other.pub}`)).body.declined, true);
+    // A wallet that never had a name still gets one.
+    const fresh = nameKey('legal winner thank year wave sausage worth useful legal winner thank yellow');
+    const { mk: mkOther, stopAll: stopOther } = walletsAt(s, fresh);
+    try { assert.ok(await mkOther().ensure(), 'another key: its word name'); } finally { stopOther(); }
+    // The person takes a name again on B: every device then keeps it, A included.
+    const chosen = await b.claimWordName();
+    assert.equal(await mk().ensure(), chosen);
+  } finally { stopAll(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('a removal only this device knows of (the service never saw it) is told to the service', async () => {
+  const s = await serveAt();
+  const k = nameKey(PHRASE);
+  const { mk, stopAll } = walletsAt(s, k);
+  try {
+    // The flag this device kept when its person removed the name, the service holding nothing.
+    const store = new Map([['lnaddr.removed', '1']]);
+    assert.equal(await mk(store).ensure(), null);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${k.pub}`)).body.declined, true);
+    // Another device then makes none either.
+    assert.equal(await mk().ensure(), null);
+    // The mark is signed by the key: nobody else can set it.
+    const t = ts(), forged = { pubkey: k.pub, ts: t, sig: signWith(nameKey(OTHER).priv, signedDigest('decline', DOMAIN, '-', k.pub, t)) };
+    const r = await post(`${s.base}/lnaddr/-/decline`, forged);
+    assert.equal(r.status, 403);
+  } finally { stopAll(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
 
 test('the default name while the service does not answer: unreachable, asked again, the name once it answers', async () => {
@@ -442,5 +521,109 @@ test('new names are limited per network; a key re-registering its own name is no
     assert.equal(r.status, 429); assert.equal(r.body.code, 'busy');
     assert.equal(r.body.error, 'Too many names were made from your network just now. Try again in a few minutes.');
     assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(keys[0], 'one'))).status, 200, 'its own name again');
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('the default name while new names from the network are limited: refused() says so, and it is asked again', async () => {
+  const s = await serveAt({ cfg: { newBurst: 1, newEveryMs: 400 } });
+  let key = nameKey(PHRASE), changes = 0;
+  const store = new Map();
+  // Another wallet on the same network takes the one new name allowed now.
+  assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(nameKey(OTHER), 'first'))).status, 200);
+  const w = mountLnAddress({
+    base: s.base, domain: DOMAIN, key: () => key, invoice: async () => { throw new Error('none') }, code: async () => null,
+    store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
+    retryMs: 100, onChange: () => { changes++ },
+  });
+  try {
+    const ensured = w.ensure();
+    await new Promise((ok) => setTimeout(ok, 60));
+    assert.equal(w.refused(), 'busy'); assert.equal(w.name(), null); assert.equal(w.unreachable(), false);
+    const name = await ensured;
+    assert.ok(name, 'the name once the network may make one again');
+    assert.equal(w.refused(), null);
+    assert.ok(changes >= 2);
+  } finally { key = null; w.stop(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+// A name released or moved on one device, while another shows it (web #809): the open wallet hears
+// it at once, a kept name is shown only once the service confirms it, and nobody else ever gets it.
+test('a released or moved name: the open wallet hears it at once, and no other key ever gets it', async () => {
+  const s = await serveAt({ cfg: { holdMs: 20_000 } });
+  const k = nameKey(PHRASE), thief = nameKey(OTHER);
+  const made = [];
+  const mk = (store = new Map(), extra = {}) => {
+    const w = mountLnAddress({
+      base: s.base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
+      limits: () => ({ min_sat: 1, max_sat: 1000 }), store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
+      retryMs: 50, ...extra,
+    });
+    made.push(w); return w;
+  };
+  const until = async (f, ms = 3000) => { const t = Date.now(); while (Date.now() - t < ms) { if (f()) return true; await new Promise((ok) => setTimeout(ok, 20)); } return f(); };
+  try {
+    // Device A shows the name, its link to the service open (a wait held for 20 s).
+    const aStore = new Map(); const a = mk(aStore);
+    const name = await a.ensure(); a.start();
+    assert.equal(a.verified(), true);
+    await new Promise((ok) => setTimeout(ok, 150));
+    // Device B removes it: A's wait ends at once and A stops showing it, long before 20 s.
+    const t0 = Date.now();
+    await post(`${s.base}/lnaddr/-/release`, rel(k, name));
+    assert.equal(await until(() => a.name() === null), true);
+    assert.ok(Date.now() - t0 < 2000, `heard in ${Date.now() - t0} ms`);
+    assert.equal(a.verified(), false);
+    // Another key cannot take it, and a payer holding it is sent nowhere.
+    assert.equal((await post(`${s.base}/lnaddr/-/register`, reg(thief, name))).status, 409);
+    assert.equal((await get(`${s.base}/lnaddr/${name}`)).status, 404);
+    assert.equal((await get(`${s.base}/.well-known/lnurlp/${name}`)).status, 404);
+    // A page reloaded with the name still kept from before: not confirmed, so not shown.
+    const stale = mk(new Map([['lnaddr.name', name]]));
+    assert.equal(stale.name(), name); assert.equal(stale.verified(), false);
+    await stale.recover();
+    assert.equal(stale.name(), null); assert.equal(stale.verified(), false);
+    // The name changed on another device while A is open: A drops the old one and finds the new.
+    await post(`${s.base}/lnaddr/-/register`, reg(k, 'firstname'));
+    const c = mk(new Map()); await c.recover(); c.start();
+    assert.equal(c.name(), 'firstname'); assert.equal(c.verified(), true);
+    await new Promise((ok) => setTimeout(ok, 150));
+    await post(`${s.base}/lnaddr/-/register`, reg(k, 'secondname'));
+    assert.equal(await until(() => c.name() === 'secondname' && c.verified()), true, `now ${c.name()}`);
+    assert.equal((await get(`${s.base}/lnaddr/firstname`)).status, 404);
+  } finally { for (const w of made) w.stop(); await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('a kept name is shown only once the service confirms it, and a lookup that hangs is cut short', async () => {
+  const s = await serveAt();
+  const k = nameKey(PHRASE);
+  let hang = true;
+  const slow = (url, opts) => (hang && String(url).includes('/mine')
+    ? new Promise((_, no) => opts && opts.signal && opts.signal.addEventListener('abort', () => no(Object.assign(new Error('aborted'), { name: 'AbortError' }))))
+    : fetch(url, opts));
+  try {
+    await post(`${s.base}/lnaddr/-/register`, reg(k, 'keptname'));
+    const store = new Map([['lnaddr.name', 'keptname']]);
+    const w = mountLnAddress({ base: s.base, domain: DOMAIN, key: () => k, invoice: async () => { throw new Error('none') }, code: async () => null,
+      store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) }, fetch: slow, lookUpTimeoutMs: 200 });
+    assert.equal(w.verified(), false, 'not shown before the service answers');
+    const t0 = Date.now();
+    await w.recover();
+    assert.ok(Date.now() - t0 < 1500, 'the lookup is bounded');
+    assert.equal(w.unreachable(), true); assert.equal(w.verified(), false);
+    hang = false;
+    await w.recover();
+    assert.equal(w.verified(), true); assert.equal(w.unreachable(), false);
+    w.stop();
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('the name a key holds (/mine) is looked up by an index and limited per network', async () => {
+  const s = await serveAt({ cfg: { netBurst: 2, netEveryMs: 60_000 } });
+  try {
+    const pk = nameKey(PHRASE).pub;
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${pk}`)).status, 200);
+    assert.equal((await get(`${s.base}/lnaddr/-/mine?pubkey=${pk}`)).status, 200);
+    const r = await get(`${s.base}/lnaddr/-/mine?pubkey=${pk}`);
+    assert.equal(r.status, 429); assert.equal(r.body.code, 'busy');
   } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });

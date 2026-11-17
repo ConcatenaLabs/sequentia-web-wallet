@@ -50,3 +50,21 @@ test('not watching (Receive closed): nothing is said; opening again starts afres
   assert.equal(w.start({ [USDX]: { settled: 9 } }), null)
   assert.equal(w.state(), null)
 })
+
+test('coins of the wallet\'s own coming home say nothing: only value it did not hold is received', () => {
+  // The change of a payment sent before Receive opened, on its way, then counted.
+  let w = makeReceiveWatch()
+  w.start({ [USDX]: { settled: 0, arriving: 890 } })
+  assert.equal(w.update({ [USDX]: { settled: 890 } }), null)
+  // A move of its own with a fee in the asset: down, on its way, then counted.
+  w = makeReceiveWatch()
+  w.start({ [USDX]: { settled: 1000 } })
+  assert.equal(w.update({ [USDX]: { settled: 0, arriving: 990 } }), null)
+  assert.equal(w.update({ [USDX]: { settled: 990 } }), null)
+  // A payment that lands while coins of its own come home: only the payment.
+  assert.deepEqual(w.update({ [USDX]: { settled: 990, arriving: 300 } }), { kind: 'arriving', asset: USDX })
+  assert.deepEqual(w.update({ [USDX]: { settled: 1290 } }), { kind: 'received', asset: USDX, atoms: 300n })
+  w = makeReceiveWatch()
+  w.start({ [USDX]: { settled: 0, arriving: 500 } })
+  assert.deepEqual(w.update({ [USDX]: { settled: 700 } }), { kind: 'received', asset: USDX, atoms: 200n })
+})

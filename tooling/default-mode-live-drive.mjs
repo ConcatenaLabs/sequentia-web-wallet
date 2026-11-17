@@ -665,7 +665,8 @@ async function main () {
     const { NAME_WORDS } = await import('../lnaddr.js')
     const { STOCK_SIZE } = await import('../name-stock.js')
     const { RECEIVE_GAP } = await import('../receive-index.js')
-    const store = () => { try { return JSON.parse(readFileSync(join(lnaddrDir, 'lnaddr-names.json'), 'utf8')).names || {} } catch { return {} } }
+    const { readStoreNames } = await import('./lsp/lnaddr-store.mjs')
+    const store = () => { try { return readStoreNames(join(lnaddrDir, 'lnaddr-names.json')) } catch { return {} } }
     // The stock the service holds: from the local store, or asked of the service itself with the
     // named wallet's key (an empty stock message answers the ids it holds).
     const { nameKey, signWith, signedDigest } = await import('../lnaddr.js')

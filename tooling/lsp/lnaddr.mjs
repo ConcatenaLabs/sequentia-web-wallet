@@ -10,9 +10,13 @@
 //   GET  /lnaddr/-/pay/<name>?amount=<msat> its callback: { pr, routes: [] }
 //   GET  /lnaddr/<name>                    { pubkey, code, id, sig, fresh, reused }: a receive code
 //                                          of the wallet's, signed by the name's key (`pubkey`)
-//   GET  /lnaddr/-/mine?pubkey=<hex>       the name a key holds
+//   GET  /lnaddr/-/mine?pubkey=<hex>       { name, declined }: the name a key holds, and whether its
+//                                          person removed it (the wallet then makes none by itself)
 //   POST /lnaddr/-/register                { name, pubkey, ts, sig }
-//   POST /lnaddr/-/release                 { name, ts, sig }
+//   POST /lnaddr/-/release                 { name, ts, sig }: the name answers no lookup any more, stays
+//                                          its key's, and the key is marked as declined until it
+//                                          registers a name again
+//   POST /lnaddr/-/decline                 { pubkey, ts, sig }: the same mark for a key with no name
 //   POST /lnaddr/-/stock                   { name, ts, add: [{ id, code, sig }], drop: [id], sig }
 //                                          -> { held: [id] }: the wallet's stock of signed codes
 //   POST /lnaddr/-/wait                    { name, ts, min_sat, max_sat, sig }: held until a payer
@@ -28,22 +32,28 @@
 //
 // Lookups are limited per name and per network (an IPv4 /24, an IPv6 /48), so nobody drains a
 // stock: past the name's limit a lookup gets the most recent code again rather than a new one, and
-// past the network's it is refused for a minute. New names are limited per network too (ten at
+// past the network's it is refused for a minute. A lookup of a name nobody holds costs the network
+// the same as one that finds a name, on both the Sequentia and the LNURL-pay routes, so walking
+// the names is as slow as the network limit. New names are limited per network too (ten at
 // once, then one every ten minutes), since every wallet registers one by itself. The client's address is the one the proxy in
 // front adds last to X-Forwarded-For when the request comes from the loopback, else the socket's.
 //
 // A name is 3 to 32 of a-z 0-9 - _ (`-` alone never is one, so `/lnaddr/-/…` never names a name).
-// One name per key: registering another releases the first. The names and their stocks are kept in
-// one JSON file (`storePath`), written whole and renamed into place; who is online is kept in
-// memory only.
+// One name per key: registering another releases the first. A released name is never given to
+// another key: it stays its key's (which may take it back) and every lookup of it fails, so a payer
+// holding it, or a page still showing it, never reaches another wallet; the open wallet's wait ends
+// at once with 404. The names, their stocks and the keys
+// that declined a name are kept in lnaddr-store.mjs (SQLite beside `storePath`, one row per name,
+// written only when that name changes); who is online is kept in memory only. A name whose wallet
+// has not been heard from for `idleStockS` loses its stock (never the name, so a payer who paid it
+// before never pays a stranger at it): a payer then gets its most recent code again.
 //
 // `makeLnaddr(cfg).handle(req, res, url)` answers a request it owns and returns true, or returns
 // false and leaves it alone; lsp-server.mjs calls it before its token check.
-import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { nameProblem, signedDigest, verifySig, verifyCode, codeId, requestUntil, lnurlMetadata, SKEW_S, NAME_WORDS } from '../../lnaddr.js';
 import { decodeBolt11 } from '../../bolt11.js';
+import { openNameStore } from './lnaddr-store.mjs';
 import { readPayCode } from '../../pay-code.js';
 
 export const OFFLINE = "The recipient's wallet is offline. Try again when it is open.";
@@ -81,32 +91,39 @@ export function clientNet (req) {
 export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), waitMs = 10_000, holdMs = 25_000,
   onlineMs = 60_000, minSat = 1, maxSat = null, maxNames = 100_000, maxPending = 20, log = () => {},
   stockMax = 20, serveMarginS = 2 * 3600, nameBurst = 5, nameEveryMs = 30_000, netBurst = 20, netEveryMs = 6_000,
-  newBurst = 10, newEveryMs = 10 * 60_000 } = {}) {
+  newBurst = 10, newEveryMs = 10 * 60_000, idleStockS = 90 * 86400, seenEveryS = 86400, pruneEveryMs = 6 * 3600_000 } = {}) {
   if (!domain || !base) throw new Error('lnaddr needs a domain and a base URL');
-  const names = new Map();          // name -> { pubkey, at, stock?: [{ id, code, sig, until }], last?, served?: [id] }
+  // name -> { pubkey, at, seen, stock?: [{ id, code, sig, until }], last?, served?: [id] }; `seen`: when
+  // the wallet itself last spoke (to the day, so an open wallet's link does not write every wait).
+  const store = openNameStore({ storePath, log, now, nameOk: (n) => !nameProblem(n) });
   const online = new Map();         // name -> { seen, min_sat, max_sat }
   const waiters = new Map();        // name -> Set of (requests) => void
   const pending = new Map();        // name -> Map id -> { id, kind, msat?, at, done }
 
-  if (storePath) {
-    try {
-      const j = JSON.parse(fs.readFileSync(storePath, 'utf8'));
-      for (const [n, v] of Object.entries((j && j.names) || {})) if (!nameProblem(n) && v && typeof v.pubkey === 'string') names.set(n, v);
-    } catch (e) { if (e.code !== 'ENOENT') log('[lnaddr] store unreadable, starting empty:', e.message); }
-  }
   const nameTake = bucket({ burst: nameBurst, everyMs: nameEveryMs, now });
   const netTake = bucket({ burst: netBurst, everyMs: netEveryMs, now });
   // New names per network: every wallet registers one by itself, so one network making wallets
   // by the thousand would fill `maxNames` for everyone else.
   const newTake = bucket({ burst: newBurst, everyMs: newEveryMs, now });
-  function save () {
-    if (!storePath) return;
-    const tmp = `${storePath}.${process.pid}.tmp`;
-    fs.mkdirSync(path.dirname(storePath), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify({ names: Object.fromEntries(names) }), { mode: 0o600 });
-    fs.renameSync(tmp, storePath);
+  const nowS = () => Math.floor(now() / 1000);
+  // A name in use: held and not released. A released name stays its key's (a tombstone), so a payer
+  // who kept it is told nobody goes by it, never sent to another wallet.
+  const live = (n) => { if (nameProblem(n)) return null; const r = store.get(n); return r && !r.released ? r : null; };
+  // The open wallet behind `n` hears at once when its name is released or moved: its wait ends.
+  const wake = (n) => { for (const w of waiters.get(n) || []) w(); };
+  function tombstone (n, rec) {
+    const t = { pubkey: rec.pubkey, at: rec.at, seen: rec.seen ?? nowS(), released: nowS() };
+    store.put(n, t); online.delete(n); wake(n);
   }
-  const nameOf = (pubkey) => { for (const [n, v] of names) if (v.pubkey === pubkey) return n; return null; };
+  // The wallet spoke: `seen` moves, at most once a day. -> whether the record changed.
+  const touch = (rec) => { if (nowS() - (rec.seen ?? rec.at ?? 0) < seenEveryS) return false; rec.seen = nowS(); return true; };
+  function pruneIdle () {
+    try { const n = store.dropIdleStock(nowS() - idleStockS); if (n) log(`[lnaddr] dropped the stock of ${n} names idle for ${Math.round(idleStockS / 86400)} days`); }
+    catch (e) { log('[lnaddr] prune:', e && e.message); }
+  }
+  pruneIdle();
+  const pruner = pruneEveryMs ? setInterval(pruneIdle, pruneEveryMs) : null;
+  pruner?.unref?.();
   const freshTs = (ts) => Number.isSafeInteger(Number(ts)) && Math.abs(Number(ts) - now() / 1000) <= SKEW_S;
   const isOnline = (n) => { const o = online.get(n); return !!o && (now() - o.seen <= onlineMs || (waiters.get(n)?.size || 0) > 0); };
   const satBounds = (n) => {
@@ -165,8 +182,9 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   }
 
   const routes = {
-    async payRequest (res, n) {
-      if (nameProblem(n) || !names.has(n)) return lnErr(res, 404, 'No wallet goes by that name here.');
+    async payRequest (req, res, n) {
+      if (!netTake(clientNet(req))) return lnErr(res, 429, BUSY);
+      if (!live(n)) return lnErr(res, 404, 'No wallet goes by that name here.');
       if (!isOnline(n)) return lnErr(res, 200, OFFLINE);
       const { lo, hi } = satBounds(n);
       if (hi < lo) return lnErr(res, 200, "The recipient's wallet can't take a payment over Lightning right now.");
@@ -175,7 +193,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
     },
     async callback (req, res, n, url) {
       if (!netTake(clientNet(req))) return lnErr(res, 429, BUSY);
-      if (nameProblem(n) || !names.has(n)) return lnErr(res, 404, 'No wallet goes by that name here.');
+      if (!live(n)) return lnErr(res, 404, 'No wallet goes by that name here.');
       const a = url.searchParams.get('amount');
       if (!/^[1-9][0-9]{0,17}$/.test(a || '')) return lnErr(res, 400, 'The amount is missing or not a number of millisatoshis.');
       const msat = BigInt(a);
@@ -191,30 +209,33 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
     },
     async code (req, res, n) {
       if (!netTake(clientNet(req))) return send(res, 429, { status: 'ERROR', reason: BUSY }, { cors: true });
-      if (nameProblem(n) || !names.has(n)) return send(res, 404, { status: 'ERROR', reason: 'No wallet goes by that name.' }, { cors: true });
-      const rec = names.get(n);
+      const rec = live(n);
+      if (!rec) return send(res, 404, { status: 'ERROR', reason: 'No wallet goes by that name.' }, { cors: true });
       const again = () => { if (!rec.last) return false; send(res, 200, codeOut(n, rec, rec.last, { fresh: false, reused: true }), { cors: true }); return true; };
       // Past the name's limit: the most recent code again, never a new one.
       if (!nameTake(n)) return again() || send(res, 429, { status: 'ERROR', reason: BUSY }, { cors: true });
-      if (liveStock(rec)) save();
+      const lapsed = liveStock(rec);
       if (rec.stock.length) {
         const c = rec.stock.shift();
-        remember(rec, c); save();
+        remember(rec, c); store.put(n, rec);
         for (const w of waiters.get(n) || []) w();      // the open wallet hears its stock went down
         return send(res, 200, codeOut(n, rec, c, { fresh: true, reused: false }), { cors: true });
       }
+      if (lapsed) store.put(n, rec);
       if (isOnline(n)) {
         const ans = await ask(n, { kind: 'code' });
-        if (ans && ans.code) {
+        // Read again: the record may have changed while the wallet answered.
+        const now2 = ans && ans.code ? live(n) : null;
+        if (now2 && now2.pubkey === rec.pubkey) {
           const c = { id: ans.id, code: ans.code, sig: ans.sig, until: requestUntil(ans.code) };
-          remember(rec, c); save();
-          return send(res, 200, codeOut(n, rec, c, { fresh: true, reused: false }), { cors: true });
+          remember(now2, c); store.put(n, now2);
+          return send(res, 200, codeOut(n, now2, c, { fresh: true, reused: false }), { cors: true });
         }
       }
       return again() || send(res, 200, { status: 'ERROR', reason: OFFLINE }, { cors: true });
     },
     async stock (res, b) {
-      const n = b && b.name, rec = !nameProblem(n) && names.get(n);
+      const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
       const add = Array.isArray(b.add) ? b.add : null, drop = Array.isArray(b.drop) ? b.drop.map(String) : null;
@@ -237,13 +258,18 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
         if (stock.length >= stockMax) break;
         stock.push({ id: c.id, code: c.code, sig: c.sig, until: requestUntil(c.code) }); have.add(c.id);
       }
-      rec.stock = stock; liveStock(rec); save();
+      const before = JSON.stringify(rec.stock || []);
+      rec.stock = stock; liveStock(rec);
+      // An empty message (each top-up starts with one) changes nothing and writes nothing.
+      if (touch(rec) || JSON.stringify(rec.stock) !== before) store.put(n, rec);
       return send(res, 200, { ok: true, held: rec.stock.map((c) => c.id) });
     },
-    async mine (res, url) {
+    async mine (req, res, url) {
+      // Each page start asks it: limited per network as lookups are.
+      if (!netTake(clientNet(req))) return fail(res, 429, BUSY, { code: 'busy' });
       const pk = String(url.searchParams.get('pubkey') || '').toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
-      return send(res, 200, { ok: true, name: nameOf(pk) });
+      return send(res, 200, { ok: true, name: store.nameOf(pk), declined: store.declined(pk) });
     },
     async register (req, res, b) {
       const n = b && b.name, pk = String((b && b.pubkey) || '').toLowerCase();
@@ -251,32 +277,56 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
       if (!verifySig(pk, signedDigest('register', domain, n, pk, b.ts), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
-      const had = names.get(n);
+      // A name released by another key is still taken: it is never anyone else's.
+      const had = store.get(n);
       if (had && had.pubkey !== pk) return fail(res, 409, 'That name is taken. Choose another.', { code: 'taken' });
-      if (!had && names.size >= maxNames) return fail(res, 503, 'No more names can be registered here now.', { code: 'full' });
+      if (!had && store.count() >= maxNames) return fail(res, 503, 'No more names can be registered here now.', { code: 'full' });
       if (!had && !newTake(clientNet(req))) return fail(res, 429, NEW_BUSY, { code: 'busy' });
-      const old = nameOf(pk);
-      if (old && old !== n) { names.delete(old); online.delete(old); }
-      names.set(n, had || { pubkey: pk, at: Math.floor(now() / 1000) });
-      save();
+      const old = store.nameOf(pk);
+      if (old && old !== n) tombstone(old, store.get(old));
+      if (!had) store.put(n, { pubkey: pk, at: nowS(), seen: nowS() });
+      // Its own name again (a released one taken back, or one held already).
+      else if (had.released) { delete had.released; had.seen = nowS(); store.put(n, had); }
+      else if (touch(had)) store.put(n, had);
+      // A name taken by the key's own wallet: the person wants one again.
+      store.undecline(pk);
       return send(res, 200, { ok: true, name: n, address: `${n}@${domain}` });
     },
     async release (res, b) {
-      const n = b && b.name, rec = !nameProblem(n) && names.get(n);
+      const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
       if (!verifySig(rec.pubkey, signedDigest('release', domain, n, b.ts), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
-      names.delete(n); online.delete(n); save();
+      tombstone(n, rec);
+      // Removed by its person: no wallet of this key makes one again by itself, on any device.
+      store.decline(rec.pubkey, nowS());
+      return send(res, 200, { ok: true });
+    },
+    // A key with no name whose person does not want one (a removal this service never saw).
+    async decline (req, res, b) {
+      const pk = String((b && b.pubkey) || '').toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
+      if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
+      if (!verifySig(pk, signedDigest('decline', domain, '-', pk, b.ts), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
+      if (!store.declined(pk)) {
+        // Each mark is a row: limited per network as new names are.
+        if (!newTake(clientNet(req))) return fail(res, 429, NEW_BUSY, { code: 'busy' });
+        const held = store.nameOf(pk);
+        if (held) tombstone(held, store.get(held));
+        store.decline(pk, nowS());
+      }
       return send(res, 200, { ok: true });
     },
     async wait (req, res, b) {
-      const n = b && b.name, rec = !nameProblem(n) && names.get(n);
+      const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
       if (!/^[0-9]{1,16}$/.test(String(b.min_sat)) || !/^[0-9]{1,16}$/.test(String(b.max_sat))) return fail(res, 400, 'min_sat and max_sat are whole numbers');
       if (!verifySig(rec.pubkey, signedDigest('wait', domain, n, b.ts, b.min_sat, b.max_sat), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
       online.set(n, { seen: now(), min_sat: String(b.min_sat), max_sat: String(b.max_sat) });
-      const held = () => { liveStock(rec); return (rec.stock || []).map((c) => c.id); };
+      if (touch(rec)) store.put(n, rec);
+      // Read when answered: payers may have taken codes meanwhile.
+      const held = () => { const r = live(n); if (!r || r.pubkey !== rec.pubkey) return []; if (liveStock(r)) store.put(n, r); return r.stock.map((c) => c.id); };
       if (undelivered(n).length) return send(res, 200, { ok: true, requests: deliver(undelivered(n)), held: held() });
       const set = waiters.get(n) || new Set(); waiters.set(n, set);
       await new Promise((resolve) => {
@@ -287,12 +337,15 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
         // The response's close, not the request's: Node closes a request once its body is read.
         res.on('close', finish);
       });
-      online.set(n, { ...(online.get(n) || {}), seen: now() });
       if (res.writableEnded || res.destroyed) return;
+      // Released or moved while it waited: the wallet is told now, not at its next wait.
+      const still = live(n);
+      if (!still || still.pubkey !== rec.pubkey) return fail(res, 404, 'No wallet goes by that name.');
+      online.set(n, { ...(online.get(n) || {}), seen: now() });
       return send(res, 200, { ok: true, requests: deliver(undelivered(n)), held: held() });
     },
     async answer (res, b) {
-      const n = b && b.name, rec = !nameProblem(n) && names.get(n);
+      const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       const q = pending.get(n), entry = q && q.get(String(b.id || ''));
       if (!entry) return fail(res, 410, 'That request has ended.');
@@ -334,18 +387,19 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET', 'access-control-allow-headers': 'accept' });
       res.end(); return true;
     }
-    if (req.method === 'GET' && (m = /^\/\.well-known\/lnurlp\/([^/]+)$/.exec(p))) { await routes.payRequest(res, bareName(m[1])); return true; }
+    if (req.method === 'GET' && (m = /^\/\.well-known\/lnurlp\/([^/]+)$/.exec(p))) { await routes.payRequest(req, res, bareName(m[1])); return true; }
     if (req.method === 'GET' && (m = /^\/lnaddr\/-\/pay\/([^/]+)$/.exec(p))) { await routes.callback(req, res, decodeURIComponent(m[1]).toLowerCase(), url); return true; }
-    if (req.method === 'GET' && p === '/lnaddr/-/mine') { await routes.mine(res, url); return true; }
-    if (req.method === 'POST' && (m = /^\/lnaddr\/-\/(register|release|stock|wait|answer)$/.exec(p))) {
+    if (req.method === 'GET' && p === '/lnaddr/-/mine') { await routes.mine(req, res, url); return true; }
+    if (req.method === 'POST' && (m = /^\/lnaddr\/-\/(register|release|decline|stock|wait|answer)$/.exec(p))) {
       const b = await readBody(req);
       if (!b) { fail(res, 400, 'the body is not JSON'); return true; }
-      if (m[1] === 'wait' || m[1] === 'register') await routes[m[1]](req, res, b); else await routes[m[1]](res, b);
+      if (m[1] === 'wait' || m[1] === 'register' || m[1] === 'decline') await routes[m[1]](req, res, b); else await routes[m[1]](res, b);
       return true;
     }
     if (req.method === 'GET' && (m = /^\/lnaddr\/([^/]+)$/.exec(p)) && m[1] !== '-') { await routes.code(req, res, decodeURIComponent(m[1]).toLowerCase()); return true; }
     return false;
   }
 
-  return { handle, names, isOnline, __test__: { pending } };
+  function close () { if (pruner) clearInterval(pruner); store.close(); }
+  return { handle, store, isOnline, close, __test__: { pending, pruneIdle } };
 }
