@@ -199,6 +199,9 @@ async function regtestStack () {
   const btcDesk = BTC ? { rpc: st.btc_lightning.hub, keep_sats: '200000', invoice_seconds: 3600, ...(NO_LOCKS ? { htlc2: false } : {}),
     pairs: [{ give: 'BTC', want: X, rate_num: '21', rate_den: '10', min_give: '5000' }, { give: X, want: 'BTC', rate_num: '11', rate_den: '20', min_give: '10000' }] } : null
   const lwk = await lwkFrom()
+  // A maker gives out of round only within the instant budget the operator's bond stands for: an
+  // operator with no bond leaves it no room, and it quotes nothing. The drill's operator posts one.
+  if (!st.bond) { await H.c('/bond_post', { amount: 50000000 }); note('posted the operator\'s bond of 50,000,000 X') }
   const relay = await startRelay(SEQOBD, st, await freePort()); children.push(relay.proc)
   note(`relay seqobd pid ${relay.proc.pid}`)
   // One live maker quoting both directions, holding both assets.
@@ -215,7 +218,10 @@ async function regtestStack () {
   const RATES = { [`${Y}:${X}`]: [6, 5], [`${X}:${Y}`]: [3, 4] }
   const order = async (sell, want, amount) => { const [n, d] = RATES[`${sell}:${want}`]; return placeOrder(H, relay.url, { assetA: sell, assetB: want, sell: amount, rateNum: n, rateDen: d, minLot: 10000 }) }
   await order(Y, X, 1500000); await order(X, Y, 1500000)
-  await makerReady(H, maker, Y); await makerReady(H, maker, X)
+  // The BTC directions alone need only X of the maker (the harness's node prices no Y, and the maker
+  // gives nothing its node does not price).
+  if (!BTC_ONLY) await makerReady(H, maker, Y)
+  await makerReady(H, maker, X)
   // The operator fronts every coin a round refreshes from its own: give it enough to start.
   await H.c('/fund_server', { asset: X, amount: 200000000 }); await H.c('/fund_server', { asset: Y, amount: 200000000 }); await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
