@@ -579,10 +579,11 @@ async function main () {
     }
     check('the wallet holds a payment name', /@/.test(named), named)
     // With a name, Receive shows the name: the picture holds it alone, in lower case.
-    const nameView = await page.waitFor(`(()=>{ const a=document.querySelector('#addr').textContent; return a===${JSON.stringify(named)} && !document.querySelector('#btnRecvFull').classList.contains('hide') ? a : false })()`, 120000).catch(() => null)
-    check('Receive shows the name, with Show full code beside it', !!nameView, nameView)
+    // Receive is one card: the QR code holds the name alone; Show full code is under More options.
+    const nameView = await page.waitFor(`(()=>{ const a=(document.querySelector('#qr').dataset.text||''); return a===${JSON.stringify(named.toLowerCase())} && !document.querySelector('#btnRecvFull').classList.contains('hide') ? a : false })()`, 120000).catch(() => null)
+    check('Receive shows the name as its QR code, with Show full code under More options', !!nameView, nameView)
     { const q = await qrRead(); check('the picture reads back as the name alone', !!q && q.data === named.toLowerCase(), q && { data: q.data, version: q.version }) }
-    check('under the name: lookups are public, in plain words', await page.eval("!document.querySelector('#recvNamePublic').classList.contains('hide') && document.querySelector('#recvNamePublic').textContent"), await page.eval("document.querySelector('#recvNamePublic').textContent"))
+    check('under the QR code, one line', await page.eval("document.querySelector('#recvLine').textContent") === 'Scan or share to get paid in BTC or any asset.', await page.eval("document.querySelector('#recvLine').textContent"))
     check('no New code with the name shown', await page.eval("document.querySelector('#btnNewAddr').classList.contains('hide')"))
     await shot(page, `${name}-receive-3a-name-qr.png`)
     await noWords('Receive showing the name')
@@ -695,7 +696,7 @@ async function main () {
     const n = named.split('@')[0]
     writeFileSync(join(work, name + '.name'), named + '\n')
     check('B holds a payment name', /@/.test(named), named)
-    const nv = await pb.waitFor(`document.querySelector('#addr').textContent===${JSON.stringify(named)} ? true : false`, 60000).catch(() => false)
+    const nv = await pb.waitFor(`(document.querySelector('#qr').dataset.text||'')===${JSON.stringify(named.toLowerCase())} ? true : false`, 60000).catch(() => false)
     const q = await pb.eval(`(async()=>{ const img=document.querySelector('#qr'); if(!img.getAttribute('src')) return null; if(!img.complete) await new Promise(r=>img.onload=r);
       const c=document.createElement('canvas'); const k=Math.max(1, Math.ceil(600/img.naturalWidth)); c.width=img.naturalWidth*k+80; c.height=img.naturalHeight*k+80; const x=c.getContext('2d'); x.fillStyle='#fff'; x.fillRect(0,0,c.width,c.height); x.imageSmoothingEnabled=false; x.drawImage(img,40,40,img.naturalWidth*k,img.naturalHeight*k);
       const d=x.getImageData(0,0,c.width,c.height); const r=window.jsQR(d.data,d.width,d.height); return r ? { data: r.data, version: r.version } : { data: null } })()`)
@@ -784,7 +785,7 @@ async function main () {
     note('console B: ' + pb2.console.filter((l) => /lnaddr|leaves|board/i.test(l)).slice(-8).join(' | '))
   } else if (step === 'namescreen') {
     // node … namescreen B: wallet B's Receive with its payment name, as the owner sees it: the name
-    // view (said once), Show full code, and back. Screenshots only, and the checks that go with them.
+    // as the QR code, Show full code, and back. Screenshots only, and the checks that go with them.
     // `namescreen B words`: the wallet takes its word name first (Get a name, or Use a word name
     // instead), and the picture must hold it in lower case while the name reads with capitals.
     const page = await openWallet(name)
@@ -796,7 +797,7 @@ async function main () {
       note('word name: ' + (btn || 'held already'))
       if (btn) await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return /^[A-Z][a-z]+[A-Z]/.test(t) ? t : false })()", 120000).catch(() => null)
     }
-    const named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return t && document.querySelector('#addr').textContent===t ? t : false })()", 120000).catch(() => null)
+    const named = await page.waitFor("(()=>{ const t=document.querySelector('#nameAddr').textContent; return t && (document.querySelector('#qr').dataset.text||'')===t.toLowerCase() ? t : false })()", 120000).catch(() => null)
     check('Receive shows the name', !!named, named)
     if (rest[0] === 'words') {
       check('a word name, each word with its capital', /^([A-Z][a-z]{2,4}){2,3}@/.test(named || ''), named)
@@ -819,13 +820,13 @@ async function main () {
       const want = readFileSync(join(work, exp.slice(7) + '.name'), 'utf8').trim()
       check(`the name is ${exp.slice(7)}'s, shown the same`, named === want, `${named} (want ${want})`)
     }
-    const once = await page.eval("[...document.querySelectorAll('section[data-panel=\"receive\"] *')].filter(e=>e.children.length===0 && e.offsetParent!==null && e.textContent.trim()===document.querySelector('#addr').textContent).length")
-    check('the name is said once', once === 1, once)
-    check('Remove name is a quiet link at the foot', await page.eval("document.querySelector('#btnNameRemove').classList.contains('quiet') && document.querySelector('#btnNameRemove').offsetParent!==null"))
+    const code = await page.eval("document.querySelector('#addr').offsetParent!==null")
+    check('Receive writes no code text, only the QR code', !code, code)
+    check('Change name and Remove name are in Settings', await page.eval("!!document.querySelector('#setNameCard #btnNameRemove') && !!document.querySelector('#setNameCard #btnNameChoose')"))
     const w = forbiddenIn(await visibleText(page)).filter((x) => !['on-chain', 'lightning', 'channel', 'channels'].includes(x))
     check('none of the words default mode never says', !w.length, w)
     await shot(page, `${name}-namescreen-1-name.png`)
-    await click(page, '#btnRecvFull'); await sleep(1000)
+    await click(page, '#btnRecvMore'); await click(page, '#btnRecvFull'); await sleep(1000)
     await shot(page, `${name}-namescreen-2-full-code.png`)
     await click(page, '#btnRecvFull'); await sleep(500)
     await page.stop()

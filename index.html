@@ -78,6 +78,9 @@
   .recv-switch input:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
   .recv-amt-row{display:flex;gap:8px;margin:0 0 10px}
   .recv-amt-row.hide{display:none}
+  .recv-simple .recv-btns,.recv-simple .recv-more-toggle{justify-content:center;text-align:center}
+  .recv-simple .recv-arrive{text-align:center;margin-top:10px}
+  .recv-simple #recvMore{border-top:1px solid var(--line);padding-top:12px}
   /* user mode's Trade tab: the user composer only (user-composer.js) */
   .uc-dev-hidden{display:none!important}
   .ucomp{display:flex;flex-direction:column;gap:12px;max-width:520px}
@@ -870,22 +873,32 @@
       <div class="card">
         <label class="lbl" id="recvLbl">Receive</label>
         <p class="sub" id="recvTip" style="margin:0 0 10px">Your address for BTC and every Sequentia asset: the same tb1 address on both chains.</p>
-        <div id="recvAmtRow" class="recv-amt-row hide"><input id="recvAmt" class="mono" inputmode="decimal" style="flex:1 1 auto;min-width:0"><select id="recvAsset" style="flex:0 0 auto;width:auto"></select></div>
-        <img class="qr" id="qr" alt="address QR">
+        <img class="qr" id="qr" alt="Receive QR code">
+        <p class="sub hide" id="recvLine" style="margin:10px 0 0;text-align:center"></p>
         <div class="mono" id="addr" style="margin-top:12px">—</div>
-        <p class="sub hide" id="recvNamePublic" style="margin:6px 0 0"></p>
-        <div class="row" style="margin-top:12px">
+        <div class="status recv-arrive hide" id="recvArrive" role="status" aria-live="polite"></div>
+        <div class="row recv-btns" id="recvBtns" style="margin-top:12px">
           <button id="btnCopy">Copy</button>
           <button id="btnNewAddr">New address</button>
           <button class="ghost" id="btnConf">Show blinded address</button>
           <button class="ghost hide" id="btnRecvMode">Show address</button>
-          <button class="ghost hide" id="btnRecvFull">Show full code</button>
           <button class="ghost dev-only" id="btnXpub">Show xpub</button>
         </div>
-        <div id="recvConfRow" class="hide" style="margin-top:14px">
-          <label class="recv-switch"><input type="checkbox" role="switch" id="recvConfChk"><span id="recvConfLbl">Confidential</span></label>
-          <p class="sub" id="recvConfTip" style="margin:6px 0 0"></p>
-          <p class="sub hide" id="recvConfNote" style="margin:6px 0 0"></p>
+        <div class="recv-more-toggle hide" id="recvMoreToggle"><button class="quiet" id="btnRecvMore" aria-expanded="false" aria-controls="recvMore">More options</button></div>
+        <div id="recvMore" class="hide" style="margin-top:6px">
+          <p class="sub hide" id="recvMoreName" style="margin:0 0 10px"></p>
+          <label class="lbl hide" id="recvAmtLbl" for="recvAmt">Request a specific amount</label>
+          <div id="recvAmtRow" class="recv-amt-row hide"><input id="recvAmt" class="mono" inputmode="decimal" style="flex:1 1 auto;min-width:0"><select id="recvAsset" style="flex:0 0 auto;width:auto"></select></div>
+          <div class="row" id="recvMoreBtns">
+            <button class="ghost" id="btnRecvNew">New code</button>
+            <button class="ghost hide" id="btnRecvFull">Show full code</button>
+          </div>
+          <div id="recvConfRow" class="hide" style="margin-top:14px">
+            <label class="recv-switch"><input type="checkbox" role="switch" id="recvConfChk"><span id="recvConfLbl">Confidential</span></label>
+            <p class="sub" id="recvConfTip" style="margin:6px 0 0"></p>
+            <p class="sub hide" id="recvConfNote" style="margin:6px 0 0"></p>
+          </div>
+          <div class="hide" id="recvOampToggle" style="margin-top:10px"><button class="quiet" id="btnRecvOamp" aria-expanded="false">Receive a restricted asset</button></div>
         </div>
         <div id="nameBox" class="hide" style="margin-top:18px">
           <label class="lbl" id="nameLbl">Your payment name</label>
@@ -1731,6 +1744,7 @@
         <div class="kv"><span class="k">Network</span><span class="v" id="setNet"></span></div>
         <div class="kv"><span class="k">Policy asset (tSEQ)</span><span class="v" id="setPolicy"></span></div>
       </div>
+      <div class="card hide" id="setNameCard"></div>
       <div class="card">
         <label class="lbl">Recovery phrase</label>
         <p class="sub" style="margin:0 0 10px">Keep it safe; it's the only way to restore this wallet.</p>
@@ -1867,6 +1881,7 @@ import { DEFAULT_WORDS, settleWords, arrivingRows, boardMinutes, roundMinutes, c
 import { mountLightningToArk, allowanceAtoms, CLOSE_UNILATERAL_S } from './lightning-to-ark.js';
 import { buildPayCode, readPayCode, nameLnurlUrl } from './pay-code.js';
 import { nextReceiveIndex, shownReceiveIndex } from './receive-index.js';
+import { makeReceiveWatch } from './receive-watch.js';
 import { confidentialPlan, ownShare, liveFromRefusal, feeMarginAtoms as confidentialMargin } from './confidential-pay.js';
 import { faucetWalletId, faucetClaimed, faucetLabel, faucetAlreadyPaid, FAUCET_WORDS } from './faucet-wallet.js';
 import { assetLightningRoute, lightningLimitUsd, receivableAssets, receiveState, receivePlan, statusMovesOn, isRouteRefusal, lnMaxPayment, fitsMax } from './asset-lightning.js';
@@ -4084,7 +4099,7 @@ function renderRoomStepper(host){
 }
 function tab(name){
   // Receive's Confidential switch is a choice for one payment: it is off again once Receive is left.
-  if(name!=='receive'){ _codeConf=false; _showFull=false; }
+  if(name!=='receive'){ _codeConf=false; _showFull=false; _recvMore=false; _recvOamp=false; }
   // The open tab is kept for the browser tab's session: a reload opens on it again.
   try{ sessionStorage.setItem('swk.tab', name); }catch{}
   document.querySelectorAll('#tabs button[data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
@@ -4096,7 +4111,7 @@ function tab(name){
   if($('btnGear')) $('btnGear').classList.toggle('active', name==='settings');
   document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hide', p.dataset.panel!==name));
   if(name==='balance'){ try{ paintFaucet(); }catch{} }
-  if(name==='receive'){ renderReceive(); try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
+  if(name==='receive'){ try{ recvWatch.stop(); }catch{} renderReceive(); try{ recvWatchTick(); }catch{} try{ initLnSendReceive(); refreshLnSendReceive(); }catch(e){ console.warn('[ln] send/receive cards:', e?.message??e); } }
   if(name==='sign' && !keySignStarted){ keySignStarted=true; $('keySignIndex').value = addrIndex ?? 0; renderKeySign(); }
   if(name==='history') renderHistory();
   if(name==='stake'){ refreshStakes(); refreshDelegation(); refreshRewards().catch(()=>{}); }
@@ -4583,7 +4598,7 @@ function initLeaves(){
     lnFor: (kind)=>{ if(!lnOn()) return 0n; try { return BigInt(Math.round(lnSpendableFor(kind).units||0)); } catch { return 0n; } },
     lnAssets: ()=> ((lnLastStatus && lnLastStatus.channels) || []).filter(c=>c.node_key && c.asset && c.leg!=='btc' && String(c.state||'').startsWith('CHANNELD')).map(c=>c.asset),
     onChange: ()=>{ try{ renderBalance(); }catch{} try{ refreshRecipientAssets(); refreshAllAvail(); }catch{} try{ if(_syncState && _syncState[0]==='ok') setSyncStatus('ok'); }catch{} },
-    onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
+    onModeChange: (m)=>{ const on = m==='developer'; applyModeClass(); show('tabLeaves', on); show('tabContracts', on); try{ applyTradeMode(); }catch{} if(!on && ['leaves','contracts'].includes(document.querySelector('#tabs button.active')?.dataset.tab)) tab('balance'); try{ renderBalance(); }catch{} try{ if(!on) ensureDefaultName(); renderReceive(); }catch{} try{ const n=$('lnHelpNote'); if(n && seqlnState().deployed) n.classList.toggle('hide', !on); lnPaintRecvRoom(); }catch{} if(pageApi) pageApi.modeChanged(m); },
     onEvent: (name, data)=>{ if(name==='codeUsed' || name==='channelsChanged'){ _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='leafArrived'){ try{ if(noteArrival(localStorage, walletTag(), data)) renderHistory(); }catch{} try{ faucetArrived(data); }catch{} _recvCode=null; _recvArk=null; _recvInv=null; _recvInvWatch++; try{ renderReceive(); }catch{} } if(name==='restoring'){ try{ if(_syncState) setSyncStatus(_syncState[0], _syncState[1]); else setSyncStatus('syncing'); }catch{} try{ renderReceive(); }catch{} } if(pageApi) pageApi.leafEvent(name, data); },
     // The testnet faucet pays a receive request as a leaf (sequentia-faucet's "Asking for a leaf").
     askFaucet: async (body)=>{ const j=await askFaucetFor(body); try{ markFaucet(); }catch{} return j; },
@@ -5087,7 +5102,14 @@ function initLnAddress(){
     onChange: ()=>{ try{ renderReceive(); }catch{} },
     log: (...a)=> console.log(...a),
   });
-  lnAddr.recover().then(()=>{ lnAddr.start(); try{ renderNameBox(); }catch{} });
+  lnAddr.recover().then(()=>{ lnAddr.start(); try{ renderNameBox(); }catch{} ensureDefaultName(); });
+}
+// Default mode gives every wallet a payment name with nothing asked (lnaddr.js `ensure`): the name
+// its key holds, else its word name; never again by itself once the person removed it. While the
+// service does not answer, Receive shows the code, and the name once it answers.
+function ensureDefaultName(){
+  if(!lnAddr || devMode()) return;
+  lnAddr.ensure({ want: ()=> !devMode() }).then(()=>{ lnAddr.start(); try{ renderNameBox(); }catch{} try{ renderReceive(); }catch{} }).catch(()=>{});
 }
 // A payment to the name is claimed as soon as the server holds it, as Receive's own invoice is.
 function watchNameInvoice(inv){
@@ -5101,32 +5123,32 @@ function watchNameInvoice(inv){
 }
 function renderNameBox(){
   const box=$('nameBox'); if(!box) return;
+  // Default mode keeps the name in Settings, where it is changed or removed (Receive shows it in
+  // its QR code); developer mode keeps it on Receive, under the address.
+  const setCard=$('setNameCard'), recvCard=$('recvLbl').closest('.card');
+  if(!devMode()){ if(box.parentNode!==setCard) setCard.appendChild(box); }
+  else if(box.parentNode!==recvCard) recvCard.insertBefore(box, $('xpubReveal'));
+  setCard.classList.toggle('hide', devMode() || !lnAddr);
   if(!lnAddr){ box.classList.add('hide'); return; }
   box.classList.remove('hide');
   const dev=devMode(), name=lnAddr.name();
   $('nameLbl').textContent = dev ? NAME_WORDS.devLabel : NAME_WORDS.label;
   $('nameTip').textContent = name ? (dev ? NAME_WORDS.devTip : NAME_WORDS.tip) : NAME_WORDS.none;
   $('nameAddr').textContent = name ? lnAddr.display() : '';
-  // Receive above shows the name already, with its line: here only Remove name, a quiet link at the
-  // foot of the one card.
-  const above = !!name && nameViewOn();
-  $('nameLbl').style.display = above ? 'none' : '';      // label.lbl's display outranks .hide
-  $('nameTip').classList.toggle('hide', above);
-  $('nameAddr').classList.toggle('hide', !name || _nameEditing || above);
-  $('btnNameRemove').classList.toggle('quiet', above);
-  $('btnNameRemove').classList.toggle('ghost', !above);
-  $('nameBox').style.marginTop = above ? '10px' : '18px';
+  $('nameAddr').classList.toggle('hide', !name || _nameEditing);
+  $('nameBox').style.marginTop = dev ? '18px' : '0';
   $('nameForm').classList.toggle('hide', !_nameEditing);
   $('nameDomain').textContent = '@'+lnaddrDomain();
   $('nameInput').placeholder = NAME_WORDS.hint;
-  show('btnNameGet', !name && !_nameEditing); show('btnNameChoose', !name && !_nameEditing);
+  // Default mode changes a name in place (registering another releases the first).
+  show('btnNameGet', !name && !_nameEditing); show('btnNameChoose', (!name || !dev) && !_nameEditing);
   // A name that is not one of this wallet's word names can become one with one tap.
   show('btnNameWords', !!name && !_nameEditing && !lnAddr.isWordName());
   $('btnNameWords').textContent=NAME_WORDS.useWords;
   if(!_nameBusy) $('btnNameGet').textContent=NAME_WORDS.getName;
   show('btnNameSave', _nameEditing); show('btnNameCancel', _nameEditing);
-  show('btnNameCopy', !!name && !_nameEditing && !above); show('btnNameRemove', !!name && !_nameEditing);
-  $('btnNameChoose').textContent=NAME_WORDS.choose; $('btnNameCancel').textContent=NAME_WORDS.cancel;
+  show('btnNameCopy', !!name && !_nameEditing); show('btnNameRemove', !!name && !_nameEditing);
+  $('btnNameChoose').textContent= name ? NAME_WORDS.change : NAME_WORDS.choose; $('btnNameCancel').textContent=NAME_WORDS.cancel;
   $('btnNameCopy').textContent=NAME_WORDS.copy;
   if(!_nameBusy){ $('btnNameSave').textContent=NAME_WORDS.save; $('btnNameRemove').textContent=NAME_WORDS.remove; }
 }
@@ -8278,6 +8300,7 @@ function refreshComposerHeld(){
 }
 function renderBalance(){
   queueMicrotask(refreshComposerHeld);
+  queueMicrotask(()=>{ try{ recvWatchTick(); }catch{} });
   try{ populateFeeAssets(); populateIssueFeeAssets(); fillReissuePick(); }catch{}   // keep the fee and reissue pickers in sync as balances load
   let live = {}; try{ live = balObj(); }catch{}   // wollet.balance() can throw before the first scan
   let b = live, btcBal = btcOnchainShown(btcBalance);
@@ -8913,6 +8936,12 @@ function paintConfSwitch(on){
   $('recvConfNote').textContent = DEFAULT_WORDS.confidentialNote;
   $('recvConfNote').classList.toggle('hide', !_codeConf);
 }
+// Receive's QR code, and what it holds (`data-text`, which the regression checks read).
+function setRecvQr(text){
+  const img=$('qr');
+  try{ if(!text) throw 0; img.src = stringToQr(text); img.dataset.text = text; }
+  catch{ img.removeAttribute('src'); delete img.dataset.text; }
+}
 // The confidential code: the wallet's confidential address at the index shown, in its own spelling
 // (a Sequentia wallet reads it as it reads any address). It carries no other way to pay: a payment
 // that arrives in seconds is never confidential, and BTC never is.
@@ -8926,7 +8955,7 @@ function renderConfidentialCode(){
   $('recvTip').textContent = DEFAULT_WORDS.receiveTipConf;
   const code = confidentialCode();
   $('addr').textContent = code || DEFAULT_WORDS.receiveWait;
-  try{ if(!code) throw 0; $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
+  setRecvQr(code);
 }
 // The amount, and what it is in: BTC, or an asset the operator receives in over Lightning.
 function paintRecvAmount(){
@@ -8938,16 +8967,13 @@ function paintRecvAmount(){
   $('recvAmt').placeholder = sel.value==='BTC' ? BTC_WORDS.amountHint : DEFAULT_WORDS.amountHint;
 }
 function renderReceiveCode(){
-  $('recvLbl').textContent = DEFAULT_WORDS.codeLabel;
-  $('recvTip').textContent = _showFull && lnAddr && lnAddr.name() ? NAME_WORDS.fullTip : DEFAULT_WORDS.receiveTip;
   $('btnNewAddr').textContent = DEFAULT_WORDS.newCode;
-  $('btnCopy').textContent = DEFAULT_WORDS.copyCode;
   $('btnConf').classList.add('hide');
   $('addr').classList.add('recv-code');
   paintConfSwitch(true);
   if(_codeConf){ renderConfidentialCode(); return; }
   if(!_recvCode){
-    $('addr').textContent = DEFAULT_WORDS.receiveWait; $('qr').removeAttribute('src');
+    $('addr').textContent = DEFAULT_WORDS.receiveWait; setRecvQr(null);
     if(!_recvCodeRetry) askReceiveCode();
     return;
   }
@@ -8955,39 +8981,43 @@ function renderReceiveCode(){
   paintRecvAmount();
   const code = payCodeText();
   $('addr').textContent = code;
-  try{ $('qr').src = stringToQr(code); }catch{ $('qr').removeAttribute('src'); }
+  setRecvQr(code);
 }
 // Default mode with a payment name: the picture is the name (name-stock.js's nameQrText), which a
 // payer's wallet looks up for a new full code of this wallet's. An amount typed, Confidential, or
 // "Show full code" give the full code instead, as without a name.
 function nameViewOn(){
-  return !devMode() && !!lnAddr && !!lnAddr.name() && !_codeConf && !_showFull && recvAmountAtoms()===0n;
+  return recvNamed() && !_codeConf && !_showFull && recvAmountAtoms()===0n;
+}
+// Default mode's name, while the name service answers: a name it cannot be reached at is not shown,
+// and the card gives the code instead until it answers again (lnaddr.js `unreachable`).
+function recvNamed(){
+  return !devMode() && !!lnAddr && !!lnAddr.name() && !lnAddr.unreachable();
 }
 function renderNameView(){
   const name = lnAddr.address();          // the name itself, lower case: the QR code and Copy
   const shown = lnAddr.display() || name;  // with capitals for a word name: what the person reads
-  $('recvLbl').textContent = NAME_WORDS.label;
-  $('recvTip').textContent = NAME_WORDS.qrTip;
-  $('addr').classList.remove('recv-code');
-  $('addr').textContent = shown;
-  $('recvNamePublic').textContent = NAME_WORDS.public; show('recvNamePublic', true);
-  $('btnCopy').textContent = NAME_WORDS.copyName;
+  // The full code stays in the page beside the name (More options shows it), made as without a name.
+  if(!_recvCode && !_recvCodeRetry) askReceiveCode();
+  const full = _recvCode ? payCodeText() : null;
+  $('addr').classList.toggle('recv-code', !!full);
+  $('addr').textContent = full || shown;
   show('btnNewAddr', false); $('btnConf').classList.add('hide');
   $('btnRecvFull').textContent = NAME_WORDS.showFull; show('btnRecvFull', true);
   // An amount turns it into the full code with an invoice: the field stays while the code can carry one.
   $('recvAmtRow').classList.toggle('hide', !receiveCodeMode());
   if(receiveCodeMode()) paintRecvAmount();
   paintConfSwitch(true);
-  try{ $('qr').src = stringToQr(nameQrText(name)); }catch{ $('qr').removeAttribute('src'); }
+  setRecvQr(nameQrText(name));
 }
 function renderReceive(){
   try{ renderNameBox(); }catch(e){ console.warn('[lnaddr] render:', e?.message??e); }
-  show('recvNamePublic', false); show('btnNewAddr', true);
-  // With a name, the full code can be shown, and the name again from it.
-  const named = !devMode() && !!lnAddr && !!lnAddr.name() && !_codeConf && recvAmountAtoms()===0n;
-  show('btnRecvFull', named && _showFull); $('btnRecvFull').textContent = NAME_WORDS.showName;
+  renderReceiveView();
+  try{ paintRecvSimple(); }catch(e){ console.warn('[receive] default view:', e?.message??e); }
+}
+function renderReceiveView(){
+  show('btnNewAddr', true);
   if(nameViewOn()){ renderNameView(); renderOampReceive(); return; }
-  const codeOn = !devMode() && !!leavesApi && leavesApi.isOpen();
   // Default mode shows the one receive code only; the address is developer mode's.
   $('btnRecvMode').classList.toggle('hide', true);
   $('btnRecvMode').textContent = showAddrDefault ? DEFAULT_WORDS.showCode : DEFAULT_WORDS.showAddress;
@@ -8999,7 +9029,6 @@ function renderReceive(){
   $('btnConf').classList.toggle('hide', defaultMode);
   if(defaultMode && _codeConf){
     $('addr').classList.add('recv-code');
-    $('recvLbl').textContent = DEFAULT_WORDS.codeLabel; $('btnCopy').textContent = DEFAULT_WORDS.copyCode;
     $('btnNewAddr').textContent = DEFAULT_WORDS.newCode;
     renderConfidentialCode(); renderOampReceive(); return;
   }
@@ -9008,23 +9037,96 @@ function renderReceive(){
   $('btnNewAddr').textContent = 'New address';
   const a = currentAddress();
   $('addr').textContent = a.toString();   // the shown/copied text is ALWAYS the bare tb1/tsqb1 address (correct on both chains)
-  // TODO(browser-verify / qr.rs): QRCodeUri() returns a QR image whose PAYLOAD is a Liquid
-  // `liquidnetwork:<ADDR>` URI (SWK/lwk_common/src/qr.rs:16-20), which brands Sequentia as Liquid
-  // and hands external scanners a wrong-network scheme. The dual-chain-correct payload is the BARE
-  // address (universally scannable on Bitcoin AND Sequentia). A pure-JS fix needs a QR ENCODER, but
-  // the wallet only ships jsqr.js (a decoder); there is none. So the real fix is in qr.rs (emit the
-  // bare address, or a `sequentia:` scheme) and a wasm rebuild — out of scope for a JS-only change.
-  // Until then the visible/copied address above is correct; only the encoded QR carries the scheme.
-  try{ $('qr').src = a.QRCodeUri(); }catch{ $('qr').removeAttribute('src'); }
+  // The QR code holds the bare address, which a Bitcoin wallet and a Sequentia wallet both read.
+  setRecvQr(a.toString());
   $('btnConf').textContent = showConf ? 'Show usual address' : 'Show blinded address';
   $('btnXpub').textContent = showXpub ? 'Hide xpub' : 'Show xpub';
   $('xpubReveal').classList.toggle('hide', !showXpub);
   if(showXpub) renderXpubForm();
   $('recvTip').textContent = showConf
     ? 'Blinded address (tsqb1…): what it receives on Sequentia has its amount and asset hidden on the chain. BTC always arrives at your usual tb1 address.'
-    : (codeOn ? DEFAULT_WORDS.addressTip : (!devMode() && leavesApi && leavesApi.restoring && leavesApi.restoring()) ? DEFAULT_WORDS.findingTip
-      : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.');
+    : 'Your address for BTC and every Sequentia asset: the same tb1 address on both chains.';
   renderOampReceive();
+}
+// Default mode's Receive (docs/DEFAULT_MODE.md, "Receive"): one card of three things, the QR code,
+// one line and Copy, with a payment's arrival said under them; the rest behind More options (an
+// amount, a new code, the full code, Confidential, a restricted asset). The views above draw the
+// QR code and keep the code in #addr; this lays the card out over them. Developer mode keeps its
+// own view.
+let _recvMore = false, _recvOamp = false;
+function paintRecvSimple(){
+  const dm = !devMode(), card = $('recvLbl').closest('.card');
+  card.classList.toggle('recv-simple', dm);
+  $('recvLbl').style.display = dm ? 'none' : '';      // label.lbl's display outranks .hide
+  show('recvTip', !dm); show('recvLine', dm); show('recvMoreToggle', dm); show('recvMore', dm && _recvMore);
+  if(!dm){ show('recvArrive', false); show('addr', true); show('btnRecvFull', false); return; }
+  const named = recvNamed(), nameView = nameViewOn();
+  const codeMode = receiveCodeMode();
+  let line = DEFAULT_WORDS.receiveLine;
+  if(_codeConf) line = DEFAULT_WORDS.receiveTipConf;
+  else if(_showFull && named) line = NAME_WORDS.fullTip;
+  else if(codeMode && !_recvCode && !nameView) line = DEFAULT_WORDS.receiveWait;
+  // The address, while a wallet opened here for the first time finds what it holds.
+  else if(!codeMode && !nameView && leavesApi && leavesApi.restoring && leavesApi.restoring()) line = DEFAULT_WORDS.findingTip;
+  $('recvLine').textContent = line;
+  // The code's text is shown only when asked for: the full code, for a wallet that can't look names up.
+  show('addr', _showFull && named && !!_recvCode && !_codeConf);
+  $('btnCopy').textContent = DEFAULT_WORDS.copy;
+  show('btnNewAddr', false); $('btnConf').classList.add('hide'); show('btnRecvMode', false);
+  $('btnRecvMore').textContent = _recvMore ? DEFAULT_WORDS.fewerOptions : DEFAULT_WORDS.moreOptions;
+  $('btnRecvMore').setAttribute('aria-expanded', String(_recvMore));
+  const nm = named ? (lnAddr.display() || lnAddr.address()) : null;
+  $('recvMoreName').textContent = nm ? NAME_WORDS.settingsLine(nm) : ''; show('recvMoreName', !!nm);
+  const amount = codeMode && !_codeConf;
+  $('recvAmtLbl').style.display = amount ? '' : 'none'; show('recvAmtRow', amount);
+  if(amount) paintRecvAmount();
+  $('btnRecvNew').textContent = DEFAULT_WORDS.newCode;
+  show('btnRecvFull', named && !_codeConf && recvAmountAtoms()===0n);
+  $('btnRecvFull').textContent = _showFull ? NAME_WORDS.showName : NAME_WORDS.showFull;
+  paintConfSwitch(true);
+  const oamp = !!OAMP_AID && Object.keys(oampAssets).length > 0;
+  show('recvOampToggle', oamp);
+  $('btnRecvOamp').textContent = DEFAULT_WORDS.restrictedReceive;
+  $('btnRecvOamp').setAttribute('aria-expanded', String(_recvOamp));
+  paintRecvArrive();
+}
+// A payment coming in while Receive is open (receive-watch.js): "Payment arriving…", then
+// "Received <amount> <TICKER>.". Each asset's figure as Balance shows it, and what is on its way.
+const recvWatch = makeReceiveWatch();
+function recvSnapshot(){
+  const snap = {};
+  const assets = new Set(['BTC']);
+  try{ for(const h of Object.keys(balObj()||{})) assets.add(h); }catch{}
+  try{ if(leavesApi) for(const h of (leavesApi.leafAssets ? leavesApi.leafAssets() : [])) assets.add(h); }catch{}
+  try{ for(const h of onItsWayAssets()) assets.add(h); }catch{}
+  try{ for(const h of chainUnconfirmed().keys()) assets.add(h); }catch{}
+  for(const h of assets){
+    let settled = 0n, arriving = 0n;
+    try{ settled = assetFigure(h); }catch{}
+    if(h !== 'BTC'){
+      try{ const inFig = leavesApi ? (leavesApi.arriving(h) || 0n) : 0n; settled -= inFig; arriving += inFig; }catch{}
+      try{ arriving += onItsWay(h); }catch{}
+      try{ arriving += chainUnconfirmed().get(h) || 0n; }catch{}
+    }
+    snap[h] = { settled: settled > 0n ? settled : 0n, arriving };
+  }
+  return snap;
+}
+function recvWatchTick(){
+  const open = !devMode() && !!$('recvLbl') && !$('recvLbl').closest('section').classList.contains('hide');
+  if(!open){ if(recvWatch.watching()) recvWatch.stop(); return; }
+  if(!recvWatch.watching()) recvWatch.start(recvSnapshot()); else recvWatch.update(recvSnapshot());
+  paintRecvArrive();
+}
+function paintRecvArrive(){
+  const st = recvWatch.state(), box = $('recvArrive');
+  if(!st || devMode()){ box.textContent = ''; show('recvArrive', false); return; }
+  if(st.kind === 'arriving'){ box.className = 'status recv-arrive'; box.textContent = DEFAULT_WORDS.paymentArriving; }
+  else {
+    const m = st.asset === 'BTC' ? { ticker:'BTC', precision:8 } : assetMeta(st.asset);
+    box.className = 'status ok recv-arrive'; box.textContent = DEFAULT_WORDS.faucetReceived(fmtAmount(st.atoms, m.precision||0)+' '+m.ticker);
+  }
+  show('recvArrive', true);
 }
 // Restricted-asset (OpenAMP) receive panel: show the wallet's AID plus the enclave deposit address
 // for a chosen restricted asset. Only visible once an AID is registered and assets exist.
@@ -9032,6 +9134,8 @@ function renderOampReceive(){
   const card=$('recvOampCard'); if(!card) return;
   const ids=Object.keys(oampAssets);
   if(!OAMP_AID || !ids.length){ card.classList.add('hide'); return; }
+  // Default mode keeps it behind More options, "Receive a restricted asset"; developer mode shows it.
+  if(!devMode() && !_recvOamp){ card.classList.add('hide'); return; }
   card.classList.remove('hide');
   $('recvOampAid').textContent=OAMP_AID;
   // WW-7: QR-encode the AID (bare string payload; scannable, no network scheme). Pure-in-wasm encoder.
@@ -10905,6 +11009,9 @@ $('btnReview').onclick=async()=>{ $('sendErr').textContent='';
 // With the name shown, Copy gives the name in lower case, as the QR code holds it.
 $('btnCopy').onclick=()=>copyToClipboard(nameViewOn() ? nameQrText(lnAddr.address()) : $('addr').textContent, $('btnCopy'));
 $('btnRecvFull').onclick=()=>{ _showFull=!_showFull; renderReceive(); };
+$('btnRecvMore').onclick=()=>{ _recvMore=!_recvMore; renderReceive(); };
+$('btnRecvNew').onclick=()=> $('btnNewAddr').click();
+$('btnRecvOamp').onclick=()=>{ _recvOamp=!_recvOamp; renderReceive(); if(_recvOamp) try{ $('recvOampCard').scrollIntoView({ block:'nearest', behavior:'smooth' }); }catch{} };
 // New code (New address in developer mode) moves to an address not shown before, within what a
 // restore from the phrase finds (receive-index.js); the code's other parts are made new with it.
 $('btnNewAddr').onclick=()=>{

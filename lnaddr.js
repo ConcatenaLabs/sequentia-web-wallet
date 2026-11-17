@@ -58,6 +58,7 @@ export const NAME_WORDS = Object.freeze({
   tip: 'Other wallets can pay you at this name, in any amount they choose. A Sequentia wallet can pay it while this wallet is closed; other wallets, while it is open.',
   none: 'Get a name other wallets can pay you at, in any amount they choose.',
   choose: 'Choose your own',
+  change: 'Change name',
   getName: 'Get a name',
   getting: 'Getting a name…',
   useWords: 'Use a word name instead',
@@ -70,18 +71,16 @@ export const NAME_WORDS = Object.freeze({
   copied: 'Copied',
   remove: 'Remove name',
   removing: 'Removing…',
-  // Receive, when the wallet has a name: the picture is the name.
-  qrTip: 'Any asset, any amount, a new receive code of yours for each payer. A Sequentia wallet can pay this name while this wallet is closed; other wallets, while it is open.',
-  public: 'Anyone who has your name can look it up and get a receive code of yours.',
-  copyName: 'Copy name',
-  copiedName: 'Name copied',
   showFull: 'Show full code',
   showName: 'Show name',
+  // Receive's More options, with a name: where it is changed.
+  settingsLine: (name) => `Your payment name is ${name}. You can change or remove it in Settings.`,
   fullTip: 'For a wallet that can\'t look names up, or to pay without a connection. Each code is paid once; a new one shows when it is.',
   // What Send says when a name's code does not check out. Nothing is sent.
   unsigned: 'This name gave a receive code its wallet did not sign, so nothing was sent. Ask the recipient for their full code.',
   changed: 'This name now belongs to another wallet than the one you paid before, so nothing was sent. Ask the recipient for their full code.',
   busy: 'Too many lookups from your network. Try again in a minute.',
+  newBusy: 'Too many names were made from your network just now. Try again in a few minutes.',
   devLabel: 'Lightning address',
   devTip: 'LNURL-pay (LUD-06, LUD-16) at this service: a payer picks the amount and this page makes the invoice on the Bitcoin ark while it is open. A Sequentia wallet paying it is given one of the signed receive codes this page leaves with the service.',
 });
@@ -254,6 +253,10 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
   let name = null; try { name = store.get('lnaddr.name') || null; } catch {}
   let running = false, stopped = true, ctl = null;
   let topping = null, toppedAt = 0;
+  // Whether the service failed to answer the last time it was asked (cleared by its next answer),
+  // and the one run of `ensure` under way.
+  let unreachable = false, ensuring = null;
+  function reach (ok) { if (unreachable === !ok) return; unreachable = !ok; try { onChange(name) } catch {} }
   const ts = () => Math.floor(now() / 1000);
   const keyOrThrow = () => { const k = key(); if (!k) throw new Error('Your wallet is locked; unlock it and try again.'); return k; };
 
@@ -317,22 +320,50 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
   }
 
   // The name this wallet's key holds at the service, if any (a wallet restored elsewhere finds it).
-  async function recover () {
-    const k = key(); if (!k) return name;
+  async function lookUp () {
+    const k = key(); if (!k) return false;
     try {
       const r = await fetchFn(`${base}/lnaddr/-/mine?pubkey=${k.pub}`);
       const j = await r.json();
-      if (r.ok && j && j.ok) { if ((j.name || null) !== name) keep(j.name || null); }
+      if (r.ok && j && j.ok) { reach(true); if ((j.name || null) !== name) keep(j.name || null); return true; }
     } catch {}
-    return name;
+    reach(false);
+    return false;
   }
+  async function recover () { await lookUp(); return name; }
+  // Every wallet holds a name by default: the name its key holds at the service (a wallet restored
+  // from its phrase gets its name back), else its word name, registered with nothing asked. Not
+  // while `want()` says no (developer mode, or a wallet whose person removed its name), and never
+  // when the service is full or holds no word name free for this key. While the service does not
+  // answer it asks again, at `retryMs` growing to a minute, until it does: the name then shows
+  // without a reload (`onChange`). -> the name, or null.
+  function ensure ({ want = () => true } = {}) {
+    if (ensuring) return ensuring;
+    ensuring = (async () => {
+      for (let wait = retryMs; ; wait = Math.min(wait * 2, 60_000)) {
+        if (!key()) return name;
+        if (await lookUp()) {
+          if (name || removed() || !want()) return name;
+          try { return await claimWordName(); } catch (e) {
+            if (e && (e.code === 'full' || e.code === 'taken' || e.message === NAME_WORDS.noWordName || e.status === 400 || e.status === 403)) { log('[lnaddr] no default name:', e.message); return name; }
+            reach(false);
+          }
+        }
+        await new Promise((ok) => setTimeout(ok, wait));
+      }
+    })().finally(() => { ensuring = null; });
+    return ensuring;
+  }
+  // Whether the person removed this wallet's name: it is then not given one again by itself.
+  function removed () { try { return store.get('lnaddr.removed') === '1'; } catch { return false; } }
 
   async function register (wanted) {
     const n = String(wanted || '').trim().toLowerCase();
     const p = nameProblem(n); if (p) throw new Error(p);
     const k = keyOrThrow(), t = ts();
     await post('register', { name: n, pubkey: k.pub, ts: t, sig: signWith(k.priv, signedDigest('register', domain, n, k.pub, t)) });
-    keep(n); start(); topUp();
+    try { store.set('lnaddr.removed', null); } catch {}
+    reach(true); keep(n); start(); topUp();
     return n;
   }
   // The wallet's word name (word-name.js): the first of its key's candidates the service does not
@@ -359,6 +390,7 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
     if (!name) return;
     const k = keyOrThrow(), t = ts(), n = name;
     await post('release', { name: n, ts: t, sig: signWith(k.priv, signedDigest('release', domain, n, t)) });
+    try { store.set('lnaddr.removed', '1'); } catch {}
     keep(null); stop();
   }
 
@@ -401,10 +433,12 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
           if (stopped) break;
           // The service no longer knows the name under this key: it was released elsewhere.
           if (e && (e.status === 404 || e.status === 403)) { keep(null); break; }
+          if (!e || e.status == null || e.status >= 500) reach(false);
           log('[lnaddr] wait:', e && e.message);
           await new Promise((ok) => setTimeout(ok, retryMs));
           continue;
         }
+        reach(true);
         for (const req of (j && j.requests) || []) {
           if (seen.has(req.id)) continue;
           seen.add(req.id); if (seen.size > 200) seen.delete(seen.values().next().value);
@@ -421,5 +455,5 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
   function start () { stopped = false; if (!running && name) { loop(); topUp(); } }
   function stop () { stopped = true; try { if (ctl) ctl.abort(); } catch {} }
 
-  return { name: () => name, address: () => (name ? `${name}@${domain}` : null), display, isWordName, register, claimWordName, release, recover, start, stop, topUp, stock: () => stockRec(), running: () => running };
+  return { name: () => name, address: () => (name ? `${name}@${domain}` : null), display, isWordName, register, claimWordName, release, recover, ensure, removed, unreachable: () => unreachable, start, stop, topUp, stock: () => stockRec(), running: () => running };
 }

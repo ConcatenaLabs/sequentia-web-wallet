@@ -28,7 +28,8 @@
 //
 // Lookups are limited per name and per network (an IPv4 /24, an IPv6 /48), so nobody drains a
 // stock: past the name's limit a lookup gets the most recent code again rather than a new one, and
-// past the network's it is refused for a minute. The client's address is the one the proxy in
+// past the network's it is refused for a minute. New names are limited per network too (ten at
+// once, then one every ten minutes), since every wallet registers one by itself. The client's address is the one the proxy in
 // front adds last to X-Forwarded-For when the request comes from the loopback, else the socket's.
 //
 // A name is 3 to 32 of a-z 0-9 - _ (`-` alone never is one, so `/lnaddr/-/…` never names a name).
@@ -47,6 +48,7 @@ import { readPayCode } from '../../pay-code.js';
 
 export const OFFLINE = "The recipient's wallet is offline. Try again when it is open.";
 export const BUSY = NAME_WORDS.busy;
+export const NEW_BUSY = NAME_WORDS.newBusy;
 
 // A token bucket per key: `burst` at once, then one every `everyMs`. -> take(key) true while allowed.
 export function bucket ({ burst, everyMs, now = () => Date.now(), max = 50_000 }) {
@@ -78,7 +80,8 @@ export function clientNet (req) {
 
 export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), waitMs = 10_000, holdMs = 25_000,
   onlineMs = 60_000, minSat = 1, maxSat = null, maxNames = 100_000, maxPending = 20, log = () => {},
-  stockMax = 20, serveMarginS = 2 * 3600, nameBurst = 5, nameEveryMs = 30_000, netBurst = 20, netEveryMs = 6_000 } = {}) {
+  stockMax = 20, serveMarginS = 2 * 3600, nameBurst = 5, nameEveryMs = 30_000, netBurst = 20, netEveryMs = 6_000,
+  newBurst = 10, newEveryMs = 10 * 60_000 } = {}) {
   if (!domain || !base) throw new Error('lnaddr needs a domain and a base URL');
   const names = new Map();          // name -> { pubkey, at, stock?: [{ id, code, sig, until }], last?, served?: [id] }
   const online = new Map();         // name -> { seen, min_sat, max_sat }
@@ -93,6 +96,9 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   }
   const nameTake = bucket({ burst: nameBurst, everyMs: nameEveryMs, now });
   const netTake = bucket({ burst: netBurst, everyMs: netEveryMs, now });
+  // New names per network: every wallet registers one by itself, so one network making wallets
+  // by the thousand would fill `maxNames` for everyone else.
+  const newTake = bucket({ burst: newBurst, everyMs: newEveryMs, now });
   function save () {
     if (!storePath) return;
     const tmp = `${storePath}.${process.pid}.tmp`;
@@ -239,7 +245,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
       return send(res, 200, { ok: true, name: nameOf(pk) });
     },
-    async register (res, b) {
+    async register (req, res, b) {
       const n = b && b.name, pk = String((b && b.pubkey) || '').toLowerCase();
       const p = nameProblem(n); if (p) return fail(res, 400, p, { code: 'invalid' });
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
@@ -248,6 +254,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       const had = names.get(n);
       if (had && had.pubkey !== pk) return fail(res, 409, 'That name is taken. Choose another.', { code: 'taken' });
       if (!had && names.size >= maxNames) return fail(res, 503, 'No more names can be registered here now.', { code: 'full' });
+      if (!had && !newTake(clientNet(req))) return fail(res, 429, NEW_BUSY, { code: 'busy' });
       const old = nameOf(pk);
       if (old && old !== n) { names.delete(old); online.delete(old); }
       names.set(n, had || { pubkey: pk, at: Math.floor(now() / 1000) });
@@ -333,7 +340,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
     if (req.method === 'POST' && (m = /^\/lnaddr\/-\/(register|release|stock|wait|answer)$/.exec(p))) {
       const b = await readBody(req);
       if (!b) { fail(res, 400, 'the body is not JSON'); return true; }
-      if (m[1] === 'wait') await routes.wait(req, res, b); else await routes[m[1]](res, b);
+      if (m[1] === 'wait' || m[1] === 'register') await routes[m[1]](req, res, b); else await routes[m[1]](res, b);
       return true;
     }
     if (req.method === 'GET' && (m = /^\/lnaddr\/([^/]+)$/.exec(p)) && m[1] !== '-') { await routes.code(req, res, decodeURIComponent(m[1]).toLowerCase()); return true; }

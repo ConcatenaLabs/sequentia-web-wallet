@@ -60,9 +60,9 @@ In practice:
   from a payment it made counts at once.
 - A wallet opened in a browser for the first time (a restored phrase, a new device, a cleared
   profile) first finds what it holds. Until it has, the line under the total reads "Syncing…
-  finding everything this wallet holds." rather than any figure as of a time, Receive shows the
-  address with "Your address, the same tb1 address on both chains. Your receive code shows here
-  once the wallet has found everything it holds.", and a payment or a trade asked meanwhile reads "Your wallet
+  finding everything this wallet holds." rather than any figure as of a time, Receive's QR code
+  holds the address, under "Scan or share to get paid in BTC or any asset. Your wallet is still
+  finding everything it holds.", and a payment or a trade asked meanwhile reads "Your wallet
   is still opening; this goes on by itself once it has." and goes on once it has. A wallet with a
   long history takes a few minutes: after two, the line reads "Syncing… this wallet has a long
   history, so finding everything it holds takes a few minutes. Nothing has moved, and it opens by
@@ -195,74 +195,82 @@ modes (`asset-picker.js`):
 
 ## Receive
 
-- **With a payment name** (below), Receive shows the name: the card's label is **Your payment
-  name**, the QR code holds `name@sequentiatestnet.com` in lower case and nothing else, and the
-  name is written under it (a word name with a capital for each word, `AmberFalcon@…`); **Copy
-  name** copies it in lower case, as the QR code holds it. Under the label: "Any asset, any amount, a new receive code of yours
-  for each payer. A Sequentia wallet can pay this name while this wallet is closed; other wallets,
-  while it is open." Under the name: "Anyone who has your name can look it up and get a receive
-  code of yours." Buttons: **Copy name** and **Show full code**; there is no New code, since every
-  payer gets a new code anyway. Under them the Confidential switch, and at the foot of the same card
-  **Remove name** as a quiet link: one card, the name said once. The amount field and the Confidential
-  switch stay: an amount typed, or Confidential on, shows the full code as below, and so does
-  **Show full code** (for a wallet that can't look names up, or to pay without a connection), whose
-  line reads "For a wallet that can't look names up, or to pay without a connection. Each code is
-  paid once; a new one shows when it is." and whose **Show name** goes back. Leaving Receive
-  shows the name again next time.
-  - Why the bare name in the QR code: it is the one spelling every wallet that pays names reads
-    from a scan. `lightning:name@domain` is refused by some wallets' scanners (more of them in upper
-    case, which LUD-16 does not allow), and BIP353's `₿name@domain` needs a DNS record that is not
-    published. Every Concatena wallet reads all three, from a scan or typed.
-  - A payer's wallet that looks the name up gets a full receive code of this wallet's, signed by the
-    name's key, and checks the signature before paying (Send, below). The codes come from a stock
-    the wallet leaves with the name service (`name-stock.js`): ten at a time, each at an address of
-    its own within the twenty New code cycles through, each handed out once. The wallet tops the
-    stock up whenever it is open, so a payer is never turned away while the wallet is closed: when
-    the stock runs out, the most recent code is handed out again, and is paid at its address or its
-    ark address (its single-use part is left out). No code ever uses an address past those twenty,
-    so a wallet restored from its phrase finds every payment.
-  - Lookups are limited per name and per network, so nobody can empty the stock: past a name's
-    limit a lookup gets the most recent code again, and past a network's it is refused for a minute
-    ("Too many lookups from your network. Try again in a minute.").
-- Without a name, the card's label is **Receive code**. Under it: "Any asset, any amount. A payment from another
-  Sequentia wallet arrives in seconds. Each code is paid once; a new one shows when it is."
-- The code is one payment request for everything the wallet takes, BTC included:
+Receive is one card of three things, so a person can hold the screen up to be paid at once: **the
+QR code**, one line, "Scan or share to get paid in BTC or any asset.", and **Copy**. No label, no
+code text, no address, no switch: everything else is one tap away under **More options** (which
+reads **Fewer options** while open). A payment coming in is said on the same card, under the line,
+so whoever holds up the QR code sees it land without leaving the screen: "Payment arriving…" while
+it is on its way, then "Received <amount> <TICKER>." once it counts (`receive-watch.js`: from the
+figures Balance shows, so a move of the wallet's own or a trade says nothing). Developer mode keeps
+its own view: the address, New address, Show blinded address, Show xpub, and the name under them.
+
+- **The QR code holds the wallet's payment name** (below), `name@sequentiatestnet.com` in lower
+  case and nothing else, about 30 characters: the smallest QR code, scanned from another screen at a
+  glance. **Copy** copies the name as the QR code holds it. A payer's wallet that looks the name up
+  gets a full receive code of this wallet's, a new one for each payer, so a Sequentia wallet can
+  pay it in any asset while this wallet is closed; a Lightning wallet pays it in BTC while it is
+  open.
+  - Why the bare name: it is the one spelling every wallet that pays names reads from a scan.
+    `lightning:name@domain` is refused by some wallets' scanners (more of them in upper case, which
+    LUD-16 does not allow), and BIP353's `₿name@domain` needs a DNS record that is not published.
+    Every Concatena wallet reads all three, from a scan or typed.
+- **Without a name** (the person removed it, or the name service is not answering), the QR code is
+  the full receive code (below), and **Copy** copies it. When the service answers again, or a name
+  is taken in Settings, the QR code turns into the name on the open screen, without a reload. A
+  name the service cannot be reached at is never shown: payers could not look it up.
+- **More options**, in this order:
+  - "Your payment name is AmberFalcon@sequentiatestnet.com. You can change or remove it in
+    Settings." (with a name);
+  - **Request a specific amount**: one field, "Amount in BTC (optional)", with a menu beside it of
+    what the amount is in (below); with an amount the QR code is the full code for it;
+  - **New code**, and **Show full code** (with a name): the full code in the QR code and written
+    under it, for a wallet that can't look names up, or to pay without a connection. The line then
+    reads "For a wallet that can't look names up, or to pay without a connection. Each code is paid
+    once; a new one shows when it is.", and **Show name** goes back;
+  - **Confidential** (below);
+  - **Receive a restricted asset**, when the wallet holds an account for restricted assets: it opens
+    the card with the wallet's account id and the deposit address for one asset, under the first
+    card. Nothing else on Receive in default mode shows a hex identifier.
+  Leaving Receive closes More options and turns Show full code, Confidential and Receive a
+  restricted asset off again.
+- **The full receive code** is one payment request for everything the wallet takes, BTC included:
   `BITCOIN:<ADDRESS>?ark=<ARK ADDRESS>&sequentia=<RECEIVE REQUEST>` (`pay-code.js`, whose header
   describes the format). The address is the wallet's own, the same tb1 address on both chains;
   `ark` is an address of the wallet's on the Bitcoin ark, where BTC arrives in seconds;
-  `sequentia` is the single-use Sequentia receive request, in its short form (`SQR1…`). Neither
-  extra part is required, so any Bitcoin wallet reads the code as a plain request for the address.
-- The code is made to be scanned at a glance from another screen: upper case, so the QR code
-  holds it in its alphanumeric mode, with error correction at level M. Every wallet reads codes in
-  either case, and codes made before the short form.
+  `sequentia` is the single-use Sequentia receive request, in its short form (`SQR1…`, about 230
+  characters; the leaf library's own spelling is about 1,200). The short form carries every field of
+  the library's request, `reads` (the record formats the wallet takes coins in) included, and
+  gives it back exactly. Neither extra part is required, so any Bitcoin wallet reads the code as a
+  plain request for the address. Without an amount the code is about 420 characters, and about
+  540 with a name, whose LNURL-pay it then carries (below).
+- The code is made to be scanned from another screen: upper case, so the QR code holds it in its
+  alphanumeric mode, with error correction at level M. Every wallet reads codes in either case, and
+  codes made before the short form.
 - The code shows at once from what the wallet last drew, syncing or not, and stays until it is
   paid or its request lapses; a way to pay it that opens later is added to it in place.
 - A new code the operator cannot give at that moment (a restart, a dropped connection) is asked
   for again by itself: twice at once, under "Making your receive code…", then with a growing pause
-  of up to a minute, showing the wallet's address meanwhile so a payer can still pay. The code
-  comes back as soon as the operator answers.
-- Above the code, one optional field, empty by default: "Amount in BTC (optional)", with a menu
-  beside it of what the amount is in: **BTC**, and each asset the operator receives over
-  Lightning (the menu shows only when there is more than BTC; for an asset the field reads
-  "Amount (optional)"). With an amount in BTC the code also names it (`amount=`) and carries an
-  invoice of the wallet's on the Bitcoin ark for exactly that amount (`lightning=`), which a
-  Lightning wallet pays. With an amount in an asset the code carries instead an invoice in that
-  asset of the operator's node (`lightning=`, the leaf library's `lightning_receive`), which a
-  wallet of another operator pays in seconds; `amount=` is left out, since it counts BTC. Either
-  invoice is claimed while the wallet is open, and a new one is made with the code. A payment of
-  an invoice in an asset reaches the wallet in the operator's next round (about a minute) and only
-  through a sync of its leaves, so the page follows each such receive itself, whatever the Receive
-  card shows and with the tab in front or behind: while nothing is paid it asks the operator how
-  the receive stands (every 3 seconds for an invoice under ten minutes old, every 30 after that),
-  and once a payment is held it syncs every 10 seconds until the payment is in the balance; a
-  step of something the person asked for under way holds those syncs back. Without an
-  amount, a wallet with a payment name (below) carries that name in the code instead, as its
-  LNURL-pay (`lightning=LNURL1…`, the LUD-01 form of `https://<domain>/.well-known/lnurlp/<name>`),
-  which any Lightning wallet pays in an amount it chooses; a wallet without a name carries no
-  Lightning part. Readers take an LNURL in `lightning=` as the name it is, never as an invoice, so
-  a Sequentia wallet pays such a code at its other parts as it pays any code.
-- Buttons: **Copy receive code** (confirmation: "Receive code copied") and **New code**. The
-  address alone is shown in developer mode.
+  of up to a minute, the QR code holding the wallet's address meanwhile so a payer can still pay.
+  The code comes back as soon as the operator answers.
+- **An amount**: the menu beside the field holds **BTC** and each asset the operator receives over
+  Lightning (it shows only when there is more than BTC; for an asset the field reads "Amount
+  (optional)"). With an amount in BTC the code also names it (`amount=`) and carries an invoice of
+  the wallet's on the Bitcoin ark for exactly that amount (`lightning=`), which a Lightning wallet
+  pays. With an amount in an asset the code carries instead an invoice in that asset of the
+  operator's node (`lightning=`, the leaf library's `lightning_receive`), which a wallet of another
+  operator pays in seconds; `amount=` is left out, since it counts BTC. Either invoice is claimed
+  while the wallet is open, and a new one is made with the code. A payment of an invoice in an
+  asset reaches the wallet in the operator's next round (about a minute) and only through a sync of
+  its leaves, so the page follows each such receive itself, whatever Receive shows and with the tab
+  in front or behind: while nothing is paid it asks the operator how the receive stands (every 3
+  seconds for an invoice under ten minutes old, every 30 after that), and once a payment is held it
+  syncs every 10 seconds until the payment is in the balance; a step of something the person asked
+  for under way holds those syncs back. Without an amount, a wallet with a payment name carries
+  that name in the code as its LNURL-pay (`lightning=LNURL1…`, the LUD-01 form of
+  `https://<domain>/.well-known/lnurlp/<name>`), which any Lightning wallet pays in an amount it
+  chooses; a wallet without a name carries no Lightning part. Readers take an LNURL in `lightning=`
+  as the name it is, never as an invoice, so a Sequentia wallet pays such a code at its other parts
+  as it pays any code.
 - **New code** moves the code to an address it has not shown, with a new receive request, ark
   address and invoice. It starts from the first address neither chain has seen paid and goes
   through the twenty after it, then begins again from the first: a wallet restored from its phrase
@@ -270,20 +278,19 @@ modes (`asset-picker.js`):
   The address shown is kept, so a reload shows the same code while it is unpaid; once it is paid,
   the next code moves past it. Developer mode's **New address** follows the same rule
   (`receive-index.js`).
-- **Confidential**, a switch under the buttons, off whenever Receive is opened: "Asks the payer
-  to hide the amount, and the asset where it can, from everyone but you and them." It asks: what
-  is hidden is made by the payer's wallet (a Concatena wallet pays it as under Send, below). On, the code is the wallet's
-  confidential address alone (`tsqb1…`, as Sequentia wallets read any address), with no amount
-  field and no other part, and the line under the card reads "Any Sequentia asset, any amount,
-  paid to your confidential address."; under the switch: "Everyone can still see that a payment
-  was made. A payment that arrives in seconds is never confidential, so this one arrives after the
-  next block, in about a minute. BTC is never confidential: to receive BTC, turn this off." A
-  payment in seconds is never confidential because the operator publishes every leaf of a round
-  with its asset and value; BTC has no confidential form on Bitcoin. New code moves it to a new
-  address as it does the code. The same switch shows under the address while the wallet cannot
-  hold coins with the operator. Developer mode keeps its own address view.
+- **Confidential**, a switch, off whenever Receive is opened: "Asks the payer to hide the amount,
+  and the asset where it can, from everyone but you and them." It asks: what is hidden is made by
+  the payer's wallet (a Concatena wallet pays it as under Send, below). On, the QR code is the
+  wallet's confidential address alone (`tsqb1…`, as Sequentia wallets read any address), with no
+  amount and no other part, and the line reads "Any Sequentia asset, any amount, paid to your
+  confidential address."; under the switch: "Everyone can still see that a payment was made. A
+  payment that arrives in seconds is never confidential, so this one arrives after the next block,
+  in about a minute. BTC is never confidential: to receive BTC, turn this off." A payment in
+  seconds is never confidential because the operator publishes every leaf of a round with its asset
+  and value; BTC has no confidential form on Bitcoin. New code moves it to a new address as it does
+  the code.
 - If the wallet cannot hold coins with the operator (the operator is unreachable, or its server
-  shows another key than the one pinned), the address is shown instead and nothing is said about
+  shows another key than the one pinned), the QR code holds the address and nothing is said about
   why. The wallet tries again on its own, and once it can, the code takes the address's place on
   the screen without the person leaving it.
 - **Faucet** (testnet): the faucet pays the receive code. Once it says it has sent the payment,
@@ -303,31 +310,56 @@ modes (`asset-picker.js`):
   is the faucet's own sentence ("This wallet has already received its <TICKER> from the faucet.
   The faucet pays each asset once per wallet. To get more, trade for it in the wallet."), with
   no second try at the address.
-- **Your payment name**, under the code or the name: a name of the wallet's own at the site's domain
+- **Your payment name**: every wallet has one by default, a name of its own at the site's domain
   (`name@sequentiatestnet.com`), which another wallet pays in an amount it chooses, a Lightning
-  wallet included (it is a Lightning address, LNURL-pay, `lnaddr.js`). Without a name the card
-  reads "Get a name other wallets can pay you at, in any amount they choose." with **Get a name**,
-  and **Choose your own** as a quiet link. **Get a name** gives the wallet its word name in one
-  tap (`word-name.js`): two words from a list, written together and shown with a capital for each
-  word (`AmberFalcon@sequentiatestnet.com`), derived from the key that holds the name, so a wallet
-  restored from its phrase gets the same name back. A third word is added only when the two-word
-  name is taken; never more. The QR code, Copy and every payer's lookup use the name in lower case
-  (`amberfalcon@sequentiatestnet.com`), since some wallets refuse capitals in a name; lookups ignore
-  case, so a name typed with capitals pays the same wallet. Names are unique as the joined lower-case
-  string. The words are the EFF short wordlist less every BIP39 word, so no word of a recovery phrase
-  is ever part of a public name. **Choose your own** opens a field ending in "@sequentiatestnet.com"
-  with **Save** and **Cancel**. A wallet holding a name of its own choosing sees **Use a word name
-  instead**, a quiet link that swaps it for its word name in one tap. With one it shows the name, "Other wallets can pay you at this name, in any amount
-  they choose. A Sequentia wallet can pay it while this wallet is closed; other wallets, while it is
-  open.", **Copy** and **Remove name**. A name is 3 to 32
-  lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to 32 characters: lowercase
-  letters, digits, - and _." and "That name is taken. Choose another.". The name is held by a key
-  of the wallet's phrase, so a wallet restored from the phrase shows it again. A Sequentia wallet
-  paying it gets one of the signed codes of the stock, open or closed. A Lightning wallet paying it
-  picks the amount first, so the invoice can only be made by the open wallet, on the Bitcoin ark;
-  while the wallet is closed such a payer is told "The recipient's wallet is offline. Try again
-  when it is open." and nothing is held for it by anyone. Developer mode calls it **Lightning
-  address** and says how it works. A wallet with no phrase has no name.
+  wallet included (it is a Lightning address, LNURL-pay, `lnaddr.js`). It is made with nothing
+  asked when the wallet is created or restored, or first opened in default mode (`ensure`): the name
+  the wallet's key holds at the name service if there is one, so a wallet restored from its phrase
+  gets its name back; else its word name (`word-name.js`): two words from a list, written together
+  and shown with a capital for each word (`AmberFalcon@sequentiatestnet.com`), derived from the key
+  that holds the name, so a restore gets the same one. A third word is added only when the two-word
+  name is taken; never more. While the service does not answer, the wallet asks again, after five
+  seconds and then at a pause growing to a minute, and the name shows once it answers. No name is
+  made when the service is full, when no word name is free for the key, or for a wallet whose person
+  removed its name; developer mode makes none by itself.
+  - The QR code, Copy and every payer's lookup use the name in lower case
+    (`amberfalcon@sequentiatestnet.com`), since some wallets refuse capitals in a name; lookups
+    ignore case, so a name typed with capitals pays the same wallet. Names are unique as the joined
+    lower-case string. The words are the EFF short wordlist less every BIP39 word, so no word of a
+    recovery phrase is ever part of a public name.
+  - **Settings** holds it: the label **Your payment name**, "Other wallets can pay you at this name,
+    in any amount they choose. A Sequentia wallet can pay it while this wallet is closed; other
+    wallets, while it is open.", the name, **Copy**, **Change name** and **Remove name**, and **Use a
+    word name instead** for a name of the person's own choosing. **Change name** opens a field ending
+    in "@sequentiatestnet.com" with **Save** and **Cancel**; registering a name releases the one the
+    key held. A name is 3 to 32 lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to
+    32 characters: lowercase letters, digits, - and _." and "That name is taken. Choose another.".
+    After **Remove name** the card reads "Get a name other wallets can pay you at, in any amount they
+    choose." with **Get a name** (the word name, in one tap) and **Choose your own**, and the wallet
+    makes none again by itself.
+  - A payer's wallet that looks the name up gets a full receive code of this wallet's, signed by the
+    name's key, and checks the signature before paying (Send, below). The codes come from a stock
+    the wallet leaves with the name service (`name-stock.js`): ten at a time, each at an address of
+    its own within the twenty New code cycles through, each handed out once. The wallet tops the
+    stock up whenever it is open, so a payer is never turned away while the wallet is closed: when
+    the stock runs out, the most recent code is handed out again, and is paid at its address or its
+    ark address (its single-use part is left out). No code ever uses an address past those twenty,
+    so a wallet restored from its phrase finds every payment. A Lightning wallet paying the name
+    picks the amount first, so the invoice can only be made by the open wallet, on the Bitcoin ark;
+    while the wallet is closed such a payer is told "The recipient's wallet is offline. Try again
+    when it is open." and nothing is held for it by anyone.
+  - Lookups are limited per name and per network, so nobody can empty the stock: past a name's
+    limit a lookup gets the most recent code again, and past a network's it is refused for a minute
+    ("Too many lookups from your network. Try again in a minute."). New names are limited per
+    network too, ten at once and then one every ten minutes ("Too many names were made from your
+    network just now. Try again in a few minutes."), so one network making wallets by the thousand
+    cannot take every name; a wallet refused this way asks again by itself.
+  - A name nobody uses stays its key's: it is never given to another wallet, since a payer who
+    kept it would pay a stranger. Its stocked codes lapse with their requests, and the service then
+    hands out the most recent one without its single-use part, paid at its address or its ark
+    address. The service holds at most 100,000 names; past that no new name is made and Receive
+    shows the code. Developer mode calls the name **Lightning address**, keeps it on Receive under
+    the address and says how it works. A wallet with no phrase has no name.
 
 ## Send
 
