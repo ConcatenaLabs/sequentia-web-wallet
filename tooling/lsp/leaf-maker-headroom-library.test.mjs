@@ -37,13 +37,18 @@
 //   done. It needs the harness's Lightning legs and Bitcoin side, as b does.
 // - A maker of a large store through an hour of trades (g): its upkeep, its sync's passes and ten
 //   sales of an asset for BTC, each to Settled, at the box's link and settings (see the case).
-// LEAF_MAKER_CASES (a, c, d; every one when unset; b, e, f, g and n, only when named) picks the cases.
+// - A pass's time on a store with a long-running maker's history (s): the large store, with the
+//   participations one of the testnet's makers holds (LEAF_MAKER_STORE_HISTORY, main by default),
+//   its sync run in whole passes and in slices by one library and another in turn (LEAVES_PKG and
+//   LEAF_MAKER_OLD_PKG), and sized (`--size`). See the case.
+// LEAF_MAKER_CASES (a, c, d; every one when unset; b, e, f, g, n and s, only when named) picks the cases.
 //
 //   SEQ_LEAF_HARNESS=127.0.0.1:18640 node --test tooling/lsp/leaf-maker-headroom-library.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
 import { leafLibraryThread } from '../leaf-node.mjs'
@@ -236,9 +241,9 @@ const explain = async (maker, label) => {
     return e
   } catch (x) { console.log(at(), 'explain', label + ': none (' + x.message + ')'); return null }
 }
-const pumpLoop = (H) => {
+const pumpLoop = (H, every = 2000) => {
   let on = true
-  const run = (async () => { while (on) { try { await H.pump() } catch {} await sleep(2000) } })()
+  const run = (async () => { while (on) { try { await H.pump() } catch {} await sleep(every) } })()
   return async () => { on = false; await run }
 }
 // A trade with the maker: the taker asks a firm offer of `give` of `give_asset`, takes it, and the
@@ -890,6 +895,56 @@ async function largeStore (H, st, lwk, storeDir, mnemonic, server, assets) {
   return made
 }
 
+// The history a long-running maker's store holds beside its coins, as the testnet's main maker's
+// held it (read from its store file: 2,089 participations the operator refused, each giving up 53
+// coins on average with a body of 13.7 kB, from a library that gave up more than 16 coins in one;
+// 6,264 void ones, 2.6 coins and 2.3 kB each; 43 expired). The library reads these rows (the coins
+// whose refresh was refused) in its sync and its schedule. They are written into a store the
+// harness made (its coins, the given lists naming them), with the maker stopped, by
+// `storeHistory`. LEAF_MAKER_STORE_HISTORY: 'main' for this shape, or a JSON of the same form.
+export const MAIN_MAKER_HISTORY = Object.freeze({ refused: { n: 2089, given: 53, body: 13738 }, void: { n: 6264, given: 2.6, body: 2345 },
+  expired: { n: 43, given: 2, body: 2450 } })
+// The same of the testnet's two other leaf makers ('agents', 'btc' in LEAF_MAKER_STORE_HISTORY).
+export const MAKER_HISTORIES = Object.freeze({ main: MAIN_MAKER_HISTORY,
+  agents: { refused: { n: 156, given: 3, body: 1384 }, void: { n: 2068, given: 8.2, body: 2549 } },
+  btc: { refused: { n: 68, given: 2.8, body: 1336 }, void: { n: 448, given: 8.5, body: 2628 } } })
+const historyOf = (v) => MAKER_HISTORIES[v] || JSON.parse(v)
+export async function storeHistory (storeDir, shape) {
+  const { readdirSync, readFileSync, writeFileSync, statSync } = await import('node:fs')
+  const { DatabaseSync } = await import('node:sqlite')
+  const opaque = join(storeDir, '.leaf-wallet', '.opaque')
+  const HEADER = 4096
+  const file = readdirSync(opaque).map((n) => join(opaque, n)).filter((f) => {
+    const b = readFileSync(f); return b.length > HEADER + 16 && b.subarray(HEADER, HEADER + 15).toString() === 'SQLite format 3'
+  }).sort((a, b) => statSync(b).size - statSync(a).size)[0]
+  if (!file) throw new Error('no store file in ' + opaque)
+  const img = readFileSync(file)
+  const tmp = file + '.history.db'
+  writeFileSync(tmp, img.subarray(HEADER))
+  const db = new DatabaseSync(tmp)
+  const coins = db.prepare('SELECT leaf_id FROM coin ORDER BY created_at').all().map((r) => r.leaf_id)
+  const add = db.prepare("INSERT INTO participation (id, body, given, wanted, state, created_at) VALUES (?, ?, ?, '[]', ?, ?)")
+  let k = 0, made = 0
+  const now = Math.floor(Date.now() / 1000)
+  db.exec('BEGIN')
+  for (const [state, s] of Object.entries(shape)) {
+    for (let i = 0; i < s.n; i++) {
+      // A whole number of coins, the mean over the rows `given`.
+      const n = Math.max(1, Math.floor((i + 1) * s.given) - Math.floor(i * s.given))
+      const given = []
+      for (let j = 0; j < n; j++) given.push(coins[(k++) % coins.length])
+      const id = createHash('sha256').update(`history ${state} ${i}`).digest('hex')
+      add.run(id, JSON.stringify({ history: 'x'.repeat(Math.max(0, s.body - 14)) }), JSON.stringify(given), state, now - 86400 * 7 + made)
+      made++
+    }
+  }
+  db.exec('COMMIT')
+  db.close()
+  writeFileSync(file, Buffer.concat([img.subarray(0, HEADER), readFileSync(tmp)]))
+  rmSync(tmp, { force: true })
+  return { participations: made, coins: coins.length }
+}
+
 // One sale of an asset for BTC, as the page makes it (user-trade-btc.js, selling): the wallet's
 // Bitcoin invoice for `sats`, the maker's firm offer under its hash (`give_asset` BTC), the wallet's
 // leaf paying the operator's invoice for the asset, and the nudge (`/v1/btc/paid`). Then followed as
@@ -928,24 +983,33 @@ async function btcSale (maker, T, ln, asset, sats, boundMs) {
     preimage_posts: posted, preimage_refusals: [...refusals] }
 }
 
-// The maker's passes of its sync, from its log: a pass in slices is its `sync in N slices` line; a
-// whole sync (one slice, or a library without slices) is its `slow sync` line. Each with the
-// operator calls its slices made (`slow sync` lines, logged for every command at `slow_ms` 1).
-// -> [{ start, end, ms, slices, longest, operator }]
+// The maker's passes of its sync, from its own records: each `sync pass {n, start, end, ms, slices,
+// library, longest}` line the maker logs as a pass ends, with the operator calls its slices made
+// (`slow sync` lines, logged for every command at `slow_ms` 1). -> [{ start, end, ms, slices,
+// longest, library, operator }]
 function syncPasses (maker) {
   const lines = maker.log.join('').split('\n')
   const slices = lines.map((l) => l.match(/^(\S+Z) slow sync (\d+) ms (\{.*\})$/)).filter(Boolean).map((m) => {
     let c = {}; try { c = JSON.parse(m[3]).cost || {} } catch {}
-    const end = Date.parse(m[1])
-    return { end, ms: Number(m[2]), operator: ((c.command && c.command.operator) || 0) + ((c.start && c.start.operator) || 0) }
+    return { end: Date.parse(m[1]), operator: ((c.command && c.command.operator) || 0) + ((c.start && c.start.operator) || 0) }
   })
-  const sliced = slicePasses(maker)
-  const passes = sliced.map((p) => {
-    const in_ = slices.filter((x) => x.end >= p.start - 50 && x.end <= p.end + 50)
-    return { start: p.start, end: p.end, ms: p.end - p.start, slices: p.slices, longest: p.longest, operator: in_.reduce((n, x) => n + x.operator, 0) }
-  })
-  for (const x of slices) if (!sliced.some((p) => x.end >= p.start - 50 && x.end <= p.end + 50)) passes.push({ start: x.end - x.ms, end: x.end, ms: x.ms, slices: 1, longest: x.ms, operator: x.operator })
-  return passes.sort((a, b) => a.start - b.start)
+  return passRecords(maker, 'sync').map((p) => ({ ...p, operator: slices.filter((x) => x.end >= p.start && x.end <= p.end + 50).reduce((n, x) => n + x.operator, 0) }))
+}
+// The maker's own records of the passes of one of its loops (`sync` or `upkeep`), in order.
+function passRecords (maker, loop) {
+  return maker.log.join('').split('\n').map((l) => l.match(new RegExp('^\\S+Z ' + loop + ' pass (\\{.*\\})$'))).filter(Boolean)
+    .map((m) => JSON.parse(m[1])).sort((a, b) => a.start - b.start)
+}
+// The passes overlapping [from, to]: a pass that crosses the window's edge counts in it.
+const overlapping = (passes, from, to) => passes.filter((p) => p.end >= from && p.start <= to)
+// The gaps between the ends of the passes overlapping [from, to], and the last one up to `to` (the
+// gap still open when the window ends).
+function gapsIn (passes, from, to) {
+  const ends = passes.map((p) => p.end).filter((e) => e <= to)
+  const g = []
+  for (let i = 1; i < ends.length; i++) if (ends[i] >= from) g.push(ends[i] - ends[i - 1])
+  if (ends.length) g.push(to - ends[ends.length - 1])
+  return g
 }
 const stats = (v) => {
   const s = [...v].sort((a, b) => a - b)
@@ -967,9 +1031,12 @@ const stats = (v) => {
 // offer's answer during a pass and outside one, each sale from its offer to Received and Settled,
 // and every call the maker made of the operator by path (the proxy). The figures go to
 // LEAF_MAKER_FIGURES (a path) as JSON. LEAF_MAKER_SCRIPT runs another checkout's maker on the same
-// case. It passes when no upkeep gap and no pass is past `sync_pass_bound_ms`, and every sale is
-// Settled within SALE_SETTLED_MS of its offer.
+// case. It passes when no upkeep gap and no pass is past `sync_pass_bound_ms`, every sale is
+// Settled within SALE_SETTLED_MS of its offer, and the firm offers asked during a pass are answered
+// in FIRM_DURING_P50_MS at the median. LEAF_MAKER_OPERATOR_BUILD names the operator's build in the
+// figures (a debug build answers `holding_back` several times slower than a release one).
 const SALE_SETTLED_MS = 10 * 60_000
+const FIRM_DURING_P50_MS = 5000
 test('g: a maker of a large store through an hour of trades: its upkeep, its sync, and ten sales for BTC', { skip: skipCase('g'), timeout: 4 * 3_600_000 }, async (tc) => {
   const { H, st, lwk } = await stack(0)
   if (!(st.lightning && st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length)) return tc.skip('needs the harness\'s Lightning legs and Bitcoin side (ARCA_OPERATOR_LIGHTNING, ARCA_OPERATOR_BTC_LIGHTNING)')
@@ -985,6 +1052,10 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
   const quietMin = env('LEAF_MAKER_QUIET_MINUTES', 5), tradeMin = env('LEAF_MAKER_TRADE_MINUTES', 60)
   const probeMs = env('LEAF_MAKER_PROBE_MS', 15000), gapMs = env('LEAF_MAKER_TRADE_GAP_MS', 20000)
   const boundMs = 300000
+  // How often the chain moves on (a round built, a block made and buried): every 2 s by default;
+  // LEAF_MAKER_PUMP_MS 60000 is the testnet's block spacing, where most commands find the tip their
+  // last re-check ran at and re-check only the lineages.
+  const pumpMs = env('LEAF_MAKER_PUMP_MS', 2000)
   try {
     const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
     const port = await freePort()
@@ -1002,6 +1073,10 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
     const made = await largeStore(H, st, lwk, cfg.store_dir, mnemonic, proxy.url, assets)
     console.log(at(), 'the maker\'s store:', made.length, 'live coins:', assets.map((a) => name(a) + ' ' + made.filter((c) => c.asset === a).length).join(', '))
     assert.ok(made.length >= 720, 'a store as large as the testnet\'s makers\': ' + made.length)
+    // The history of a long-running maker's store, written in with the store closed (storeHistory).
+    const historyShape = process.env.LEAF_MAKER_STORE_HISTORY
+    if (historyShape) console.log(at(), 'history written into the maker\'s store:',
+      JSON.stringify(await storeHistory(cfg.store_dir, historyOf(historyShape))))
     proxy.delay(delay)
     const callsFrom = proxy.calls.length
     const maker = await launchMaker(H, join(dir, 'maker'), port, null)
@@ -1009,7 +1084,7 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
     makerOf = maker
     stops.push(() => maker.stop())
     const started = Date.now()
-    const stopPump = pumpLoop(H); stops.push(stopPump)
+    const stopPump = pumpLoop(H, pumpMs); stops.push(stopPump)
     // The upkeep's and the sync's records, every 2 s.
     const health = []
     let watching = true
@@ -1073,15 +1148,15 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
     probing = false; await prober
     watching = false; await watcher
     // The figures.
-    const passes = syncPasses(maker)
-    const quiet = passes.filter((p) => p.start >= started && p.end <= quietEnd)
-    const busy = passes.filter((p) => p.start >= tradeStart && p.end <= tradeEnd)
+    const passes = syncPasses(maker), upkeeps = passRecords(maker, 'upkeep')
+    const quiet = overlapping(passes, started, quietEnd)
+    const busy = overlapping(passes, tradeStart, tradeEnd)
     const inPass = (t) => passes.find((x) => t >= x.start && t <= x.end)
     const during = probes.filter((p) => p.status && inPass(p.asked)), outside = probes.filter((p) => p.status && !inPass(p.asked))
-    const ends = (k) => health.map((h) => h[k] && h[k].last_end).filter(Boolean)
-    const gaps = (k) => { const e = [...new Set(ends(k))]; const g = []; for (let i = 1; i < e.length; i++) g.push(e[i] - e[i - 1]); return g }
     const lastHealth = health[health.length - 1] || {}
-    const pick = (p) => ({ ms: p.ms, slices: p.slices, longest: p.longest, operator: p.operator })
+    const pick = (p) => ({ ms: p.ms, slices: p.slices, longest: p.longest, library: p.library, operator: p.operator })
+    const hours = (tradeEnd - tradeStart) / 3_600_000
+    const offersMade = probes.filter((p) => p.status === 200).length + trades.filter((t) => t.ms != null && !t.refused).length + sales.filter((x) => x.swap).length
     const byPath = (from, to) => {
       const m = {}
       for (const [t, path, ms, code] of proxy.calls.slice(callsFrom)) {
@@ -1091,13 +1166,19 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
       return m
     }
     const figures = {
-      settings: { slice_ms: sliceMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
+      settings: { operator_build: process.env.LEAF_MAKER_OPERATOR_BUILD || null, history: process.env.LEAF_MAKER_STORE_HISTORY || null, slice_ms: sliceMs, pump_ms: pumpMs, operator_delay_ms: delay, probe_ms: probeMs, trade_gap_ms: gapMs, sync_seconds: 20, bound_ms: boundMs, maker: process.env.LEAF_MAKER_SCRIPT || 'this checkout', library: PKG },
       store: { live: made.length, X: made.filter((c) => c.asset === X).length, Y: made.filter((c) => c.asset === Y).length },
-      quiet: { minutes: quietMin, passes: quiet.map(pick), ms: stats(quiet.map((p) => p.ms)), operator: stats(quiet.map((p) => p.operator)) },
-      trading: { minutes: (tradeEnd - tradeStart) / 60000, passes: busy.length, ms: stats(busy.map((p) => p.ms)), slices: stats(busy.map((p) => p.slices)),
-        longest_slice: stats(busy.map((p) => p.longest)), operator: stats(busy.map((p) => p.operator)) },
-      upkeep: { period: stats(gaps('upkeep')), last: lastHealth.upkeep || null },
-      sync: { period: stats(gaps('sync')), last: lastHealth.sync || null },
+      quiet: { minutes: quietMin, passes: quiet.map(pick), ms: stats(quiet.map((p) => p.ms)), library: stats(quiet.map((p) => p.library)), operator: stats(quiet.map((p) => p.operator)) },
+      trading: { minutes: (tradeEnd - tradeStart) / 60000, passes: busy.length, ms: stats(busy.map((p) => p.ms)), library: stats(busy.map((p) => p.library)),
+        slices: stats(busy.map((p) => p.slices)), longest_slice: stats(busy.map((p) => p.longest)), operator: stats(busy.map((p) => p.operator)),
+        // A pass still under way when the run ends, from /health.
+        under_way_at_end_ms: lastHealth.sync ? lastHealth.sync.under_way_ms : null },
+      upkeep: { gaps: stats(gapsIn(upkeeps, tradeStart, tradeEnd)), library: stats(overlapping(upkeeps, tradeStart, tradeEnd).map((p) => p.library)), last: lastHealth.upkeep || null },
+      sync: { gaps: stats(gapsIn(passes, tradeStart, tradeEnd)), last: lastHealth.sync || null },
+      health: { not_ok: health.filter((h) => h.ok === false).length, readings: health.length },
+      // The records parsed against the maker's own count of its passes (/health at the end).
+      records: { sync: passes.length, sync_health: lastHealth.sync ? lastHealth.sync.passes : null, upkeep: upkeeps.length, upkeep_health: lastHealth.upkeep ? lastHealth.upkeep.passes : null },
+      workload: { firm_offers_made: offersMade, per_hour: hours > 0 ? Math.round(offersMade / hours) : null },
       firm: { asked: probes.length, offers: probes.filter((p) => p.status === 200).length, during: stats(during.map((p) => p.ms)), outside: stats(outside.map((p) => p.ms)) },
       trades: { made: trades.filter((t) => t.ms != null && !t.refused).length, refused: trades.filter((t) => t.refused).length, failed: trades.filter((t) => t.error).length,
         firm_ms: stats(trades.filter((t) => t.ms != null).map((t) => t.ms)) },
@@ -1111,11 +1192,98 @@ test('g: a maker of a large store through an hour of trades: its upkeep, its syn
     if (process.env.LEAF_MAKER_FIGURES) writeFileSync(process.env.LEAF_MAKER_FIGURES, JSON.stringify({ figures, health, probes, calls: proxy.calls.slice(callsFrom) }, null, 1))
     assert.equal(sales.length, 10, 'ten sales')
     assert.deepEqual(sales.filter((s) => !(s.settled_ms <= SALE_SETTLED_MS)).map((s) => [s.k, s.received_ms, s.settled_ms, s.refused || s.error || null]), [], 'every sale Settled within ' + SALE_SETTLED_MS + ' ms of its offer')
-    assert.ok((figures.upkeep.period.most ?? Infinity) <= boundMs, 'no gap of the upkeep past the bound: ' + figures.upkeep.period.most)
+    assert.equal(figures.records.sync, figures.records.sync_health, 'one record a sync pass, as /health counts them')
+    assert.equal(figures.records.upkeep, figures.records.upkeep_health, 'one record an upkeep pass, as /health counts them')
+    assert.ok((figures.upkeep.gaps.most ?? Infinity) <= boundMs, 'no gap of the upkeep past the bound, the last one open included: ' + figures.upkeep.gaps.most)
+    assert.ok((figures.sync.gaps.most ?? Infinity) <= boundMs, 'no gap between two sync passes past the bound: ' + figures.sync.gaps.most)
+    assert.equal(figures.health.not_ok, 0, 'the maker never stopped quoting')
     assert.deepEqual(figures.errors, [], 'no pass past its bound')
+    // A person's firm offer asked during a pass waits for no slice it does not need.
+    assert.ok((figures.firm.during.p50 ?? 0) <= FIRM_DURING_P50_MS, 'firm offers during a pass p50 within ' + FIRM_DURING_P50_MS + ' ms: ' + figures.firm.during.p50)
   } finally {
     await dumpMaker(makerOf, 'g')
     for (const s of stops.reverse()) { try { await s() } catch {} }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// A pass's time, library against library (s): the store g makes, with the participation history of
+// one of the testnet's makers written in (LEAF_MAKER_STORE_HISTORY: main, agents or btc; main by
+// default), the operator behind the box's link (140 ms). The maker's service is not started: its
+// one-shot `--pass-time` runs passes of its sync on the store, in a process of its own for each
+// library in turn (this checkout's, LEAVES_PKG, and LEAF_MAKER_OLD_PKG), whole passes then passes in
+// slices of a second (LEAF_MAKER_S_ROUNDS more rounds of one each, in turn), each run cut at
+// LEAF_MAKER_PASS_LIMIT_MS (600 s) and said so; `--size` sizes the
+// store. The figures go to LEAF_MAKER_FIGURES. It passes when this library's passes are no slower than
+// the other's (within a tenth), whole and in slices, and its passes in slices end within the bound.
+test('s: a pass\'s time on a store with a maker\'s history, library against library', { skip: skipCase('s'), timeout: 4 * 3_600_000 }, async () => {
+  const { H, st, lwk } = await stack(0)
+  const X = st.x, Y = st.y
+  const rates = await H.rpc('getfeeexchangerates')
+  if (!rates[Y]) await H.rpc('setfeeexchangerates', [{ ...rates, [Y]: 100000000 }])
+  const OLD = process.env.LEAF_MAKER_OLD_PKG
+  assert.ok(OLD && existsSync(join(OLD, 'leaf_wallet_bg.wasm')), 'LEAF_MAKER_OLD_PKG names the library to compare with')
+  const shape = process.env.LEAF_MAKER_STORE_HISTORY || 'main'
+  const limitMs = Number(process.env.LEAF_MAKER_PASS_LIMIT_MS || 600_000)
+  const dir = mkdtempSync(join(tmpdir(), 'maker-pass-s-'))
+  const { spawn } = await import('node:child_process')
+  const proxy = await slowProxy(st.server, 0)
+  try {
+    const mnemonic = lwk.Mnemonic.fromRandom(12).toString()
+    const port = await freePort()
+    const pairs = [{ give: X, want: Y, rate_num: '1', rate_den: '1', min_give: '10000' }]
+    const cfg = makerConfig(join(dir, 'maker'), st, port, mnemonic, pairs, { instant_budget: '0.5', exit_delay_units: 3, max_coins: 2000,
+      sync_seconds: 20, settle_seconds: 600 })
+    writeFileSync(join(dir, 'maker', 'maker.json'), JSON.stringify({ ...cfg, operator: { ...cfg.operator, server: proxy.url } }, null, 2))
+    const made = await largeStore(H, st, lwk, cfg.store_dir, mnemonic, proxy.url, [X, Y])
+    console.log(at(), 'the store:', made.length, 'live coins; history', shape, JSON.stringify(await storeHistory(cfg.store_dir, historyOf(shape))))
+    proxy.delay(Number(process.env.LEAF_MAKER_OPERATOR_DELAY_MS || 140))
+    const script = new URL('./leaf-maker.mjs', import.meta.url).pathname
+    const run = (pkg, args) => new Promise((ok) => {
+      const t0 = Date.now()
+      const p = spawn(process.execPath, [script, '--config', join(dir, 'maker', 'maker.json'), ...args], { env: { ...process.env, LEAVES_PKG: pkg }, stdio: ['ignore', 'pipe', 'pipe'] })
+      let out = '', err = ''
+      p.stdout.on('data', (d) => { out += d }); p.stderr.on('data', (d) => { err += d })
+      const cut = setTimeout(() => p.kill('SIGTERM'), limitMs)
+      p.on('exit', () => {
+        clearTimeout(cut)
+        const line = out.split('\n').reverse().find((l) => l.startsWith('{'))
+        let v = null; try { v = JSON.parse(line) } catch {}
+        ok(v && v.passes ? { ...v, wall_ms: Date.now() - t0 } : { cut: Date.now() - t0 >= limitMs, wall_ms: Date.now() - t0, error: (err || out).slice(-300) })
+      })
+    })
+    const libs = { new: PKG, old: OLD }
+    const runs = []
+    // Whole passes, then passes in slices, each library in turn, the old one first and last; then
+    // LEAF_MAKER_S_ROUNDS (1) rounds of one pass in slices by each, in turn.
+    const rounds = Number(process.env.LEAF_MAKER_S_ROUNDS || 1)
+    const plan = [['old', ['--pass-time', '3', '--slice-ms', '0']], ['new', ['--pass-time', '3', '--slice-ms', '0']], ['old', ['--pass-time', '1', '--slice-ms', '0']],
+      ['new', ['--pass-time', '2', '--slice-ms', '1000']], ['old', ['--pass-time', '1', '--slice-ms', '1000']]]
+    for (let k = 1; k < rounds; k++) plan.push(['new', ['--pass-time', '1', '--slice-ms', '1000']], ['old', ['--pass-time', '1', '--slice-ms', '1000']])
+    for (const [lib, args] of plan) {
+      const r = await run(libs[lib], args)
+      runs.push({ lib, args: args.join(' '), ...r })
+      console.log(at(), lib, args.join(' '), JSON.stringify(r).slice(0, 600))
+    }
+    const size = await new Promise((ok) => {
+      const p = spawn(process.execPath, [script, '--config', join(dir, 'maker', 'maker.json'), '--size'], { env: { ...process.env, LEAVES_PKG: PKG } })
+      let out = ''; p.stdout.on('data', (d) => { out += d }); p.on('exit', () => { try { ok(JSON.parse(out)) } catch { ok({ error: out.slice(-300) }) } })
+    })
+    console.log(at(), 'size:', JSON.stringify(size))
+    const passesOf = (lib, slice) => runs.filter((r) => r.lib === lib && r.args.endsWith(' ' + slice)).flatMap((r) => r.passes || [])
+    const figures = { history: shape, store: { live: made.length }, size, runs,
+      whole: { new: stats(passesOf('new', 0).map((p) => p.ms)), old: stats(passesOf('old', 0).map((p) => p.ms)) },
+      sliced: { new: stats(passesOf('new', 1000).map((p) => p.ms)), new_slices: stats(passesOf('new', 1000).map((p) => p.slices)),
+        old: stats(passesOf('old', 1000).map((p) => p.ms)), old_cut: runs.some((r) => r.lib === 'old' && r.args.endsWith(' 1000') && r.cut) } }
+    console.log('figures:', JSON.stringify(figures, null, 1))
+    if (process.env.LEAF_MAKER_FIGURES) writeFileSync(process.env.LEAF_MAKER_FIGURES, JSON.stringify(figures, null, 1))
+    assert.ok(figures.whole.new.n >= 3 && figures.sliced.new.n >= 2, 'this library ended its passes')
+    assert.ok(figures.whole.new.p50 <= figures.whole.old.p50 * 1.1, 'whole passes no slower')
+    assert.ok(figures.sliced.new.most <= 300_000, 'passes in slices within the bound: ' + figures.sliced.new.most)
+    // Within a tenth: on a store whose history costs an older library little, both libraries' passes are the operator's time.
+    assert.ok(figures.sliced.old.n === 0 || figures.sliced.new.p50 <= figures.sliced.old.p50 * 1.1, 'passes in slices no slower')
+  } finally {
+    proxy.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

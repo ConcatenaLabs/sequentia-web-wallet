@@ -213,6 +213,9 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
     exists: (mnemonic) => call(() => mod.arcaWalletExists(mnemonic)),
     create: (mnemonic, config) => wrap(call(() => mod.ArcaWallet.create(mnemonic, JSON.stringify(config || {})))),
     open: (mnemonic, nodePassword) => wrap(call(() => mod.ArcaWallet.open(mnemonic, nodePassword || undefined))),
+    // What a pass of the sync in slices would cost on the store named `name` in this storage, read
+    // only (arcaSyncSize); undefined in a library without it.
+    syncSize: typeof mod.arcaSyncSize === 'function' ? (name) => call(() => JSON.parse(mod.arcaSyncSize(name))) : undefined,
     // One pause as the library makes it, through this module's wait (null: a library without one).
     pause: typeof mod.pause === 'function' ? (ms) => mod.pause(ms) : null,
   }
@@ -220,24 +223,58 @@ export async function leafLibrary (storeRoot, { pkgDir = process.env.LEAVES_PKG 
   return api
 }
 
-// Which queued job the thread runs next, at `now`: the first that is `first`, else the oldest,
-// unless the queue is held (`holdUntil`), when only a `first` job runs. -> an index, or -1 to wait.
-export function nextJob (queue, now, holdUntil = 0) {
+// How long a command that is not `first` (a sync slice, the upkeep's own) waits behind `first`
+// ones (takers' commands) before it takes its turn ahead of them: takers go first, and the sync
+// still moves through a steady stream of them, by one job every SYNC_TURN_MS at least.
+export const SYNC_TURN_MS = 10_000
+// A person's request is several commands one after another (a firm offer reads the room, the coins
+// and the plans, then makes the offer), so between two of them the queue holds none of theirs.
+// After a `first` command ends, the queue is held FOLLOW_MS for the next one, so no slice starts in
+// that gap (each would cost the request a whole slice).
+export const FOLLOW_MS = 250
+
+// Which queued job the thread runs next, at `now`: a `first` job (a person's command) ahead of
+// every other, in their order; else the oldest that may run. Two holds keep the rest waiting:
+// `followUntil`, just after a first job, for the same person's next command (FOLLOW_MS), which
+// holds every job; and `holdUntil` (hold(ms): a firm offer is about to be asked), which holds
+// every job but those queued `unheld` (the sync's slices, which a person's command overtakes
+// between any two of them). Turns: a job that is not first and has waited `turnMs` since it was
+// queued (`queued`) runs ahead of the next first one, held or not, so neither side starves: a
+// person's command waits for no slice it does not need, and the rest gets a turn at least every
+// `turnMs` (a job's own `turnMs` when it names one). Turns alternate: `turnTaken` (the job before
+// ran ahead of a waiting first job) gives a waiting first job the next run, so two busy loops of the
+// rest, each with a job always past its turn, still let a person's command through after one of
+// theirs. -> an index, or -1 to wait.
+export function nextJob (queue, now, holdUntil = 0, turnMs = SYNC_TURN_MS, followUntil = 0, turnTaken = false) {
   const i = queue.findIndex((q) => q.first)
+  if (turnTaken && i >= 0) return i
+  const k = queue.findIndex((q) => !q.first)
+  if (k >= 0 && queue[k].queued != null && now - queue[k].queued >= (queue[k].turnMs ?? turnMs)) return k
   if (i >= 0) return i
-  if (!queue.length || now < holdUntil) return -1
-  return 0
+  if (now < followUntil) return -1
+  return queue.findIndex((q) => q.unheld || now >= holdUntil)
+}
+// When a queue that `nextJob` left waiting may move again, at `now`: the end of a hold, or sooner
+// the oldest job's turn.
+export function nextWake (queue, now, holdUntil, turnMs = SYNC_TURN_MS, followUntil = 0) {
+  const k = queue.findIndex((q) => !q.first)
+  const turn = k >= 0 && queue[k].queued != null ? queue[k].queued + (queue[k].turnMs ?? turnMs) : Infinity
+  const hold = now < followUntil ? followUntil : holdUntil
+  return Math.max(1, Math.min(now < hold ? hold : Infinity, turn) - now)
 }
 
 // The same library on a thread of its own, so a program that serves requests (the leaf maker)
 // keeps answering while a long command (a sync behind the node's scan lock) runs. Commands run
 // one at a time, in order of priority, then of arrival: `command(name, args, { first: true })`
-// goes ahead of every queued command that is not first. `hold(ms)` keeps every command that is
-// not first queued for that long, so one a person is about to ask for (a firm offer after a
+// goes ahead of every queued command that is not first, but for one that has waited `turnMs`
+// (SYNC_TURN_MS unless named; nextJob's turns), and after it the queue waits `followMs`
+// (FOLLOW_MS) for the same person's next command; `{ turnMs }` names a command's own turn.
+// `hold(ms)` keeps every command that is
+// not first, nor queued `{ unheld: true }`, queued for that long, so one a person is about to ask for (a firm offer after a
 // quote) finds the library free rather than behind the program's own upkeep; a command already
 // running still ends first. `onSlow(name, ms, detail)` is told of each command that took over
-// `slowMs` (five seconds unless named); `onTime(name, ms, waited)` of every command, with how long it ran and how long it waited
-// in the queue before it started.
+// `slowMs` (five seconds unless named); `onTime(name, ms, waited, first)` of every command, with how long it ran, how long it
+// waited in the queue before it started, and whether it was `first`.
 //   const lib = await leafLibraryThread(storeRoot)
 //   const w = await lib.open(mnemonic, nodePassword)   // or create(mnemonic, config)
 //   await w.command('sync')
@@ -248,7 +285,7 @@ export async function leafLibraryThread (storeRoot, opts = {}) {
   worker.on('message', (m) => { const r = waiting.get(m.id); waiting.delete(m.id); if (r) r(m) })
   worker.on('error', (e) => { for (const r of waiting.values()) r({ ok: false, error: { message: e.message } }); waiting.clear() })
   const q = libraryQueue((job) => new Promise((r) => { waiting.set(job.id, r); worker.postMessage({ id: job.id, op: job.op, args: job.args }) }), opts)
-  const wallet = { command: (name, args = {}, o = {}) => q.call('command', { name, args }, !!o.first) }
+  const wallet = { command: (name, args = {}, o = {}) => q.call('command', { name, args }, !!o.first, !!o.unheld, o.turnMs) }
   return {
     hold: q.hold,
     exists: (mnemonic) => q.call('exists', { mnemonic }),
@@ -260,27 +297,31 @@ export async function leafLibraryThread (storeRoot, opts = {}) {
 
 // The queue of leafLibraryThread, apart from its thread: `run(job)` runs one job ({ id, op, args })
 // and answers { ok, value } or { ok: false, error }, with `detail` for onSlow; the queue runs one
-// job at a time, in nextJob's order. -> { call(op, args, first), hold(ms) }.
-export function libraryQueue (run, { onSlow = null, onTime = null, slowMs = 5000 } = {}) {
+// job at a time, in nextJob's order. -> { call(op, args, first, unheld, turnMs), hold(ms) }.
+export function libraryQueue (run, { onSlow = null, onTime = null, slowMs = 5000, turnMs = SYNC_TURN_MS, followMs = FOLLOW_MS } = {}) {
   const queue = []
-  let next = 1, busy = false, holdUntil = 0, timer = null
+  let next = 1, busy = false, holdUntil = 0, followUntil = 0, timer = null, turnTaken = false
   function done (p, m) {
     busy = false
+    if (p.first) followUntil = Date.now() + followMs
     if (onSlow && Date.now() - p.started > slowMs) { try { onSlow((p.args && p.args.name) || p.op, Date.now() - p.started, m.detail || null) } catch {} }
-    if (onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued) } catch {} }
+    if (onTime) { try { onTime((p.args && p.args.name) || p.op, Date.now() - p.started, p.started - p.queued, !!p.first) } catch {} }
     if (m.ok) p.ok(m.value); else { const e = new Error(m.error.message); Object.assign(e, m.error); p.no(e) }
     pump()
   }
   function pump () {
     if (busy || !queue.length) return
-    const i = nextJob(queue, Date.now(), holdUntil)
-    if (i < 0) { if (!timer) timer = setTimeout(() => { timer = null; pump() }, Math.max(1, holdUntil - Date.now())); return }
+    const now = Date.now()
+    const i = nextJob(queue, now, holdUntil, turnMs, followUntil, turnTaken)
+    if (i < 0) { if (!timer) timer = setTimeout(() => { timer = null; pump() }, nextWake(queue, now, holdUntil, turnMs, followUntil)); return }
     const job = queue.splice(i, 1)[0]
+    // A job that is not first, run while a first one waits, took a turn: the first one runs next.
+    turnTaken = !job.first && queue.some((q) => q.first)
     job.started = Date.now()
     busy = true
     Promise.resolve().then(() => run(job)).then((m) => done(job, m), (e) => done(job, { ok: false, error: { message: (e && e.message) || String(e) } }))
   }
-  const call = (op, args, first = false) => new Promise((ok, no) => { queue.push({ id: next++, op, args, first, ok, no, queued: Date.now() }); pump() })
+  const call = (op, args, first = false, unheld = false, turn = undefined) => new Promise((ok, no) => { queue.push({ id: next++, op, args, first, unheld, turnMs: turn, ok, no, queued: Date.now() }); pump() })
   return { call, hold: (ms) => { holdUntil = Math.max(holdUntil, Date.now() + ms) } }
 }
 

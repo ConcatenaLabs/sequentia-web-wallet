@@ -47,7 +47,8 @@ test('the sync runs on a loop of its own, and the rest of the upkeep does not wa
   const pass = src.slice(src.indexOf('async function tickOnce ()'))
   assert.ok(pass.length < src.length, 'tickOnce is there')
   assert.doesNotMatch(pass.slice(0, pass.indexOf('\n  }\n')), /upkeepSync|syncLoop/, 'the upkeep pass waits for no sync')
-  assert.match(src, /const sync = syncLoop\(cmd, log, /, 'the maker runs the sync loop')
+  assert.match(src, /const sync = syncLoop\(syncCmd, log, /, 'the maker runs the sync loop')
+  assert.match(src, /const syncCmd = .*\{ unheld: true, turnMs: o.turnMs \}\)/, 'its slices queued unheld')
   assert.match(src, /setInterval\(sync, \(cfg\.sync_seconds \?\? 20\) \* 1000\)/, 'on its own timer')
 })
 
@@ -99,7 +100,10 @@ test('the sync loop runs one pass at a time, each to its end', async () => {
   assert.equal(L.asked.filter((a) => a[0] === 'sync').length, 30)
   assert.equal(L.asked.filter((a) => a[0] === 'deposits').length, 5)
   assert.ok(L.asked.every((a) => a[1].budget_ms === 1000))
-  assert.deepEqual(logged, ['sync in 30 slices: 36000 ms, the longest 1200 ms', 'deposits in 5 slices: 6000 ms, the longest 1200 ms'])
+  assert.deepEqual(logged.slice(0, 2), ['sync in 30 slices: 36000 ms, the longest 1200 ms', 'deposits in 5 slices: 6000 ms, the longest 1200 ms'])
+  // The pass's own record, from which its figures are read.
+  const rec = JSON.parse(logged[2].replace(/^sync pass /, ''))
+  assert.deepEqual({ n: rec.n, ms: rec.ms, slices: rec.slices, library: rec.library, longest: rec.longest }, { n: 1, ms: 42000, slices: 35, library: 42000, longest: 1200 })
   L.asked.length = 0
   await sync()
   assert.deepEqual(L.asked[0], ['sync', { catch_up: false, deposits: false, budget_ms: 1000 }], 'the next start runs a new pass')
@@ -128,12 +132,55 @@ test('slice_ms 0 runs whole syncs: no budget, one call each', async () => {
   assert.deepEqual(L.asked, [['sync', { catch_up: false, deposits: false }], ['deposits', {}]])
 })
 
-test('a pass is given up after SLICES_MOST slices, and logged', async () => {
-  const { upkeepSync, SLICES_MOST } = await import('./leaf-maker.mjs')
+test('a pass goes on to its end however many slices it takes, and is never given up', async () => {
+  const { upkeepSync } = await import('./leaf-maker.mjs')
   const asked = [], logged = []
-  await upkeepSync(async (name) => { asked.push(name); return name === 'sync' ? { more: true } : [] }, (...a) => logged.push(a.join(' ')), null, { boundMs: 1e9 })
-  assert.equal(asked.filter((n) => n === 'sync').length, SLICES_MOST)
-  assert.ok(logged.some((l) => l.startsWith('error: sync given up after 600 slices')), JSON.stringify(logged))
+  let n = 0
+  await upkeepSync(async (name) => { asked.push(name); return name === 'sync' ? (++n < 1500 ? { more: true } : {}) : [] }, (...a) => logged.push(a.join(' ')), null, { boundMs: 1e9 })
+  assert.equal(asked.filter((x) => x === 'sync').length, 1500, 'every slice of the pass, past 600')
+  assert.ok(!logged.some((l) => /given up/.test(l)), JSON.stringify(logged.slice(0, 3)))
+  assert.ok(logged.some((l) => l.startsWith('sync in 1500 slices')))
+})
+
+test('syncStanding: ok while a pass ended within the stale time, counted from the start before the first', async () => {
+  const { syncStanding, syncStaleMs, passRecord } = await import('./leaf-maker.mjs')
+  assert.equal(syncStaleMs({}), 600_000, 'twice the pass bound by default')
+  assert.equal(syncStaleMs({ sync_pass_bound_ms: 100_000 }), 200_000)
+  assert.equal(syncStaleMs({ sync_stale_ms: 5_000 }), 5_000)
+  let t = 1_000_000
+  const rec = passRecord(() => t, t)
+  rec.begin()
+  t += 599_000
+  assert.deepEqual(syncStanding(rec.now(), 600_000, 1_000_000, t), { ok: true }, 'starting up')
+  t += 2_000
+  const s = syncStanding(rec.now(), 600_000, 1_000_000, t)
+  assert.equal(s.ok, false)
+  assert.match(s.why, /completed no sync pass in the 601 s since it started, a pass under way for 601 s/)
+  rec.end()
+  assert.deepEqual(syncStanding(rec.now(), 600_000, 1_000_000, t), { ok: true }, 'a pass ended: quotes again by itself')
+  t += 600_001
+  assert.match(syncStanding(rec.now(), 600_000, 1_000_000, t).why, /last sync pass ended 600 s ago, more than 600 s/)
+})
+
+test('upkeepDue: the upkeep waits for the library time of its last pass, not its wall time', async () => {
+  const { upkeepDue } = await import('./leaf-maker.mjs')
+  // A pass of 400 s wall time, 60 s of it the library's: due 60 s after its end, not 400 s.
+  assert.equal(upkeepDue(1_060_000, 1_000_000, 60_000), true)
+  assert.equal(upkeepDue(1_059_999, 1_000_000, 60_000), false)
+})
+
+test('the maker wires its standing into /health, its quotes and its firm offers, and starts its upkeep by the bound', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
+  assert.match(src, /p === '\/health'[^\n]*stoppedNow\(\) \? \{ ok: false, why: stoppedNow\(\) \}/, '/health says ok: false with why')
+  const quotes = src.slice(src.indexOf("p === '/v1/quotes'"))
+  assert.match(quotes.slice(0, 400), /const stopped = stoppedNow\(\)\s+if \(stopped\) return send\(res, 200, \{[^}]*quotes: \[\], stopped \}/, 'quotes empty with stopped')
+  const firm = src.slice(src.indexOf("if (p === '/v1/firm' || p === '/v1/btc/firm') {"))
+  assert.match(firm.slice(0, 300), /if \(stopped\) return send\(res, 503, \{ error: stopped, stopped: true \}\)/, 'firm offers refused with why')
+  assert.match(src, /setTimeout\(\(\) => startUpkeep\(`error: the first sync pass has not ended within \$\{boundMs\} ms/, 'the upkeep starts by the bound')
+  assert.match(src, /if \(busy \|\| !upkeepDue\(Date\.now\(\), passEnd, passLibrary\)\) return/, 'paced by library time')
+  assert.doesNotMatch(src, /passTook/)
+  assert.match(src.slice(0, src.indexOf('import ')), /"sync_stale_ms"/, 'sync_stale_ms in the header')
 })
 
 test('the maker reads slice_ms and sync_pass_bound_ms from its configuration', async () => {
@@ -157,9 +204,40 @@ test('passRecord: passes, their longest, the longest gap between two ends, and t
   now = 30000; r.begin(); now = 31000; r.end()
   now = 40000
   assert.deepEqual(r.now(), { passes: 2, last_start: 30000, last_end: 31000, last_ms: 1000, longest_ms: 3000, longest_gap_ms: 23000, ago_ms: 9000, under_way_ms: null })
-  // The sync loop keeps one when given it, a pass that failed included.
+  // The sync loop keeps one when given it: a pass whose sync answered counts, one whose sync threw does not.
   const rec = passRecord()
-  const run = syncLoop(async () => { throw new Error('down') }, () => {}, null, { sliceMs: 0, record: rec })
-  await run()
+  await syncLoop(async (name) => (name === 'sync' ? {} : []), () => {}, null, { sliceMs: 0, record: rec })()
   assert.equal(rec.now().passes, 1)
+  const logged = []
+  await syncLoop(async () => { throw new Error('down') }, (...a) => logged.push(a.join(' ')), null, { sliceMs: 0, record: rec })()
+  assert.equal(rec.now().passes, 1, 'a failed pass is not counted')
+  assert.equal(rec.now().under_way_ms, null)
+  assert.ok(logged.some((l) => l.startsWith('sync pass failed')), JSON.stringify(logged))
+})
+
+test('a maker whose every sync fails goes stale and stops quoting', async () => {
+  const { syncLoop, passRecord, syncStanding } = await import('./leaf-maker.mjs')
+  let t = 1_000_000
+  const since = t
+  const rec = passRecord(() => t, since)
+  const run = syncLoop(async (name) => { if (name === 'sync') throw new Error('the operator cannot be reached'); return [] }, () => {}, null,
+    { sliceMs: 1000, record: rec, clock: () => t })
+  // A failing sync every 20 s for 800 s.
+  for (let k = 0; k < 40; k++) { await run(); t += 20_000 }
+  assert.equal(rec.now().passes, 0)
+  const st = syncStanding(rec.now(), 600_000, since, t)
+  assert.equal(st.ok, false, 'not ok after 800 s of failed syncs')
+  assert.match(st.why, /completed no sync pass in the 800 s since it started/)
+})
+
+
+// A pass that has run half its bound asks for its slices with a shorter turn (lateTurnMs), so a
+// steady stream of takers cannot hold it past its bound; before that, the queue's own turn.
+test('a pass past half its bound takes its turns sooner', async () => {
+  const { upkeepSync } = await import('./leaf-maker.mjs')
+  let t = 0, k = 0
+  const turns = []
+  const cmd = async (name, args, o) => { turns.push([name, o && o.turnMs]); if (name !== 'sync') return []; t += 40_000; return ++k < 4 ? { more: true } : {} }
+  await upkeepSync(cmd, () => {}, null, { sliceMs: 1000, boundMs: 100_000, clock: () => t, lateTurnMs: 2000 })
+  assert.deepEqual(turns, [['sync', undefined], ['sync', undefined], ['sync', 2000], ['sync', 2000], ['deposits', 2000]])
 })

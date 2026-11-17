@@ -234,9 +234,9 @@ fees, and it boards what it holds on the chain of an asset it gives above `board
 
 | Method | Path | What it does |
 | --- | --- | --- |
-| `GET` | `/health` | `{ok, operator, genesis_hash, period_ms, upkeep, sync}`, read without the library: `upkeep` and `sync` each say what that loop has done (`passes`, `last_start`, `last_end`, `last_ms`, `longest_ms`, `longest_gap_ms`, `ago_ms`, `under_way_ms`, in ms), so a check sees a maker that quotes and no longer keeps itself by `upkeep.ago_ms` against `period_ms` |
-| `GET` | `/v1/quotes` | `{quotes: [{give_asset, want_asset, rate_num, rate_den, min_give, max_give}]}`: it gives `give_asset` and wants `ceil(give × rate_num / rate_den)` of `want_asset` |
-| `POST` | `/v1/firm` `{give_asset, want_asset, give}` | an in-tree swap offer of the library's, its coins held until it is completed, released or lapses (`offer_ttl_seconds`, 300 by default): `{swap, offer, give, want, expires_at}` |
+| `GET` | `/health` | `{ok, why?, operator, genesis_hash, period_ms, upkeep, sync}`, read without the library: `upkeep` and `sync` each say what that loop has done (`passes`, `last_start`, `last_end`, `last_ms`, `longest_ms`, `longest_gap_ms`, `ago_ms`, `under_way_ms`, in ms), so a check sees a maker that quotes and no longer keeps itself by `upkeep.ago_ms` against `period_ms`. `ok` is `false`, with `why`, while no sync pass has ended within `sync_stale_ms` (twice `sync_pass_bound_ms`, ten minutes, unless named; counted from the start before the first pass): the maker then quotes nothing and makes no firm offer, and starts again by itself when a pass ends |
+| `GET` | `/v1/quotes` | `{quotes: [{give_asset, want_asset, rate_num, rate_den, min_give, max_give}]}`: it gives `give_asset` and wants `ceil(give × rate_num / rate_den)` of `want_asset`; `{quotes: [], stopped}` while `/health` says `ok: false`, `stopped` saying why |
+| `POST` | `/v1/firm` `{give_asset, want_asset, give}` | an in-tree swap offer of the library's, its coins held until it is completed, released or lapses (`offer_ttl_seconds`, 300 by default): `{swap, offer, give, want, expires_at}`; `503 {error, stopped: true}` while `/health` says `ok: false` (the BTC desk's `/v1/btc/firm` too); an offer already made is still completed |
 | `POST` | `/v1/accept` `{swap, accept}` | completes the swap (the operator co-signs): `{swap, state: "done"}`, the same when asked again. When the operator refuses the completion, nothing is co-signed and the offer is gone: `409 {error, swap, gone: true, code, whose, coin, offer?}`, where `whose` names the side whose coin the operator refused (`"taker"` when the wallet's own coin was spent elsewhere) and `offer` is a new firm offer of the same give, priced and checked as `/v1/firm` prices and checks one and made only when the live price asks no more than the gone offer did, shaped as `/v1/firm`'s answer; without it the taker asks for a new price. The same answer when asked again |
 | `POST` | `/v1/release` `{swap}` | cancels a firm offer nobody took; answers `{swap, state: "releasing"}` at once and cancels ahead of the maker's upkeep and of any later firm offer |
 | `GET` | `/v1/swap/<id>` | where a swap stands |
@@ -246,17 +246,26 @@ It answers a taker within a second or two whatever its upkeep is doing. The leaf
 command at a time, and a command that has started runs to its end, so the upkeep asks for its
 `sync` and its `deposits` in slices of a second (`budget_ms`; a library that takes it stops at the
 first point past it where the command can stop, answers `more: true` and goes on at the next call).
-A firm offer or an acceptance goes ahead of every queued command and runs between two slices. A
-library without slices runs each in one call, and a firm offer then waits for it. A pass that took
-more than one slice is logged (`sync in <n> slices: <ms> ms, the longest <ms> ms`): a firm offer
-asked meanwhile waited for one slice at most, not the whole pass.
+A firm offer or an acceptance goes ahead of every queued command and runs between two slices; a
+command of the maker's own (a slice, an upkeep command) runs ahead of the takers' only once it has
+waited ten seconds (a sync pass that has run half its bound, two seconds), so a person's command
+waits for no slice it does not need and a stream of takers still lets the sync end its pass in
+time. After each of a taker's commands the library waits a quarter of a
+second for that taker's next one (a firm offer is several commands in a row), so no slice starts
+in between. A library without slices runs each in one call, and a firm offer then waits
+for it. A pass that took more than one slice is logged (`sync in <n> slices: <ms> ms, the longest
+<ms> ms`): a firm offer asked meanwhile waited for one slice at most, not the whole pass.
 
 The rest of its upkeep never waits on a sync without bound: the sync runs on a loop of its own,
 every `sync_seconds`, and the rest of the upkeep (a swap for BTC completed, received coins settled,
 offers renewed, boards, merges) on its own timer, so each of its commands runs between two slices
-and waits for one slice at most, however long a pass takes. A sync whose pass takes longer than
-`sync_pass_bound_ms` (five minutes) is logged as an error with its slices, its time, the library's
-time and its longest slice. `slice_ms` sets the slice (a second); `slice_ms: 0` runs whole syncs,
+and waits for one slice at most, however long a pass takes. The upkeep starts when the first pass
+ends, or after `sync_pass_bound_ms` when it has not, and after each of its passes leaves the library
+free for as long as the library ran that pass's commands (not the pass's wall time, of which waiting
+behind slices and takers is no work of its own). A sync whose pass takes longer than
+`sync_pass_bound_ms` (five minutes), or a gap between two upkeep passes longer than it, is logged as
+an error with its figures. A pass goes on slice after slice to its end: the library keeps its place
+while its slices keep coming. `slice_ms` sets the slice (a second); `slice_ms: 0` runs whole syncs,
 which a firm offer and the rest of the upkeep wait for.
 
 Between two readings of its coins, its book is what it knows it holds: the last reading, less the
@@ -418,8 +427,9 @@ offer, in-tree or at the BTC desk, is sized on that reading too, while it is und
 It then asks the library for one command, the offer, which goes ahead of every queued command
 (the library refuses an offer it cannot pay). An acceptance goes ahead the same way, and the
 reading taken after either waits its turn in the upkeep. A read of `/v1/quotes` holds the
-upkeep's next commands for 90 s (at most once every three minutes), so the firm offer that
-follows finds the library free. The upkeep leaves the library idle at least as long as its last
+upkeep's next commands for 90 s (at most once every three minutes; a command held ten seconds
+still takes its turn, and the sync's slices are not held), so the firm offer that follows finds
+the library free. The upkeep leaves the library idle at least as long as its last
 pass held it. The resting desk follows the orders it keeps resting by their ids, up to 64 a
 command, each command one read of the operator; its own orders' records come from the library's
 store (`order_resting` with `brief`), never by asking the operator after every order it ever

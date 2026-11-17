@@ -10,9 +10,11 @@
 // quoted.
 //
 // HTTP (JSON; CORS open, since a page may reach it from another origin):
-//   GET  /health              -> { ok, operator, genesis_hash, period_ms, upkeep, sync }: `upkeep` and `sync`
+//   GET  /health              -> { ok, why?, operator, genesis_hash, period_ms, upkeep, sync }: `upkeep` and `sync`
 //                                  each { passes, last_start, last_end, last_ms, longest_ms, longest_gap_ms,
-//                                  ago_ms, under_way_ms } (ms; passRecord), read without the library
+//                                  ago_ms, under_way_ms } (ms; passRecord), read without the library; `ok`
+//                                  false, with `why`, while no sync pass has ended within `sync_stale_ms`
+//                                  (syncStanding), when it quotes nothing and makes no firm offer
 //   GET  /v1/quotes           -> { operator, genesis_hash, as_of, quotes: [{ give_asset, want_asset, rate_num, rate_den,
 //                                  min_give, max_give }] }   (the maker gives give_asset and wants
 //                                  ceil(give × rate_num / rate_den) of want_asset; with a ladder, one
@@ -45,13 +47,18 @@
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --ask-faucet URL ASSET TICKER
 //            (a receive request paid by the testnet faucet as a leaf; prints what came, exits)
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --address    (its on-chain address)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --size    (what a pass of its sync in slices
+//            would cost on its store, by this checkout's library, from a private copy of the store:
+//            for each step its items and the reads before them; safe while the service runs)
+//       node tooling/lsp/leaf-maker.mjs --config maker.json --pass-time N [--slice-ms M]   (N passes
+//            of its sync on its store, each one's time, slices and library time; stop the service first)
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --held ASSET (atoms it holds in leaves)
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --pay FILE   (pays the receive
 //            requests in FILE from its leaves, in the tree; for a drill's wallets)
 //       node tooling/lsp/leaf-maker.mjs --config maker.json --receive ASSET ATOMS   (a receive
 //            request for at most ATOMS of ASSET, cut to its instant budget's room; another
 //            maker's --pay then moves those coins to it in the tree)
-// The one-shot modes open the maker's store: stop its service first.
+// The one-shot modes but --size open the maker's store: stop its service first.
 //
 // The configuration (JSON) names the maker's own wallet and nothing else's:
 //   { "wallet": "leaf-maker-1",                 a name of the maker's own; a service or treasury
@@ -83,8 +90,16 @@
 //     "slice_ms": 1000,                          optional: the maker syncs on a loop of its own, in
 //     "sync_pass_bound_ms": 300000,              slices of `slice_ms` (0: in whole calls), the rest of
 //                                                its upkeep running between two slices; a sync pass
-//                                                longer than the bound is logged as an error with its
-//                                                figures
+//                                                longer than the bound, or a gap between two upkeep
+//                                                passes longer than it, is logged as an error with its
+//                                                figures. The upkeep starts after the first sync pass,
+//                                                or after the bound when that pass is not over by then
+//     "sync_stale_ms": 600000,                   optional (twice the bound unless named): when no sync
+//                                                pass has ended for this long (since the start, before
+//                                                the first), `/health` answers ok: false with why, the
+//                                                quotes are empty with `stopped` saying why, and firm
+//                                                offers are refused with it; all of it ends by itself
+//                                                when a pass ends
 //     "board_keep": "100000",                    on-chain atoms of each asset it gives that it keeps
 //                                                (for exit fees); what it holds above that is boarded.
 //                                                This, coin_size and fee_margin each take one figure
@@ -157,14 +172,37 @@ export const UPKEEP_SYNC_ARGS = Object.freeze({ ...SYNC_ARGS, deposits: false })
 // whole command in one call and answers without `more`, as before; `slice_ms: 0` asks for that
 // (whole syncs, a firm offer waiting for all of one).
 export const SLICE_MS = 1000
-// SLICES_MOST bounds one pass: past it the pass is given up and logged, and the next starts afresh.
-export const SLICES_MOST = 600
+// A sync slice waits SYNC_TURN_MS (10 s) behind takers' commands before it takes its turn; once its
+// pass has run half `sync_pass_bound_ms`, LATE_TURN_MS.
+export const LATE_TURN_MS = 2000
 // A pass of the sync and deposits that takes longer than SYNC_PASS_BOUND_MS (`sync_pass_bound_ms`,
 // from its first slice to its last) is logged as an error, with its figures: a library whose pass
-// costs this much holds the maker's reading of the chain and the operator that far behind. Five
-// minutes: half the time the library keeps a pass's place (ten minutes of median time), past which
-// the pass starts again.
+// costs this much holds the maker's reading of the chain and the operator that far behind. A pass
+// goes on slice after slice to its end, however many it takes: the library keeps a pass's place
+// for ten minutes of median time after its last slice. A pass that never ends is seen by the
+// maker's standing (syncStanding), which stops its quotes.
 export const SYNC_PASS_BOUND_MS = 300_000
+// How long since a sync pass last ended (since the start, before the first) the maker still quotes
+// and makes firm offers, unless `sync_stale_ms` names another: twice the pass bound. Past it the
+// maker's reading of its coins, the chain and the operator is too old to quote from.
+export const syncStaleMs = (cfg = {}) => Number(cfg.sync_stale_ms ?? 2 * Number(cfg.sync_pass_bound_ms ?? SYNC_PASS_BOUND_MS))
+// The maker's standing from its sync's pass record (passRecord(...).now(), or null before the loop
+// starts) at `now`: { ok: true }, or { ok: false, why } once no pass has ended within `staleMs`,
+// counted from `since` (the maker's start) before the first pass ends.
+export function syncStanding (rec, staleMs, since, now = Date.now()) {
+  const last = rec && rec.last_end != null ? rec.last_end : null
+  const ago = now - (last ?? since)
+  if (ago <= staleMs) return { ok: true }
+  const under = rec && rec.under_way_ms != null ? `, a pass under way for ${Math.round(rec.under_way_ms / 1000)} s` : ''
+  return { ok: false, why: last == null
+    ? `the maker has completed no sync pass in the ${Math.round(ago / 1000)} s since it started${under}: it quotes again once one ends`
+    : `the maker's last sync pass ended ${Math.round(ago / 1000)} s ago, more than ${Math.round(staleMs / 1000)} s${under}: it quotes again once one ends` }
+}
+// Whether the upkeep may start its next pass at `now`: it leaves the library free for as long as
+// its last pass held the library (`libraryMs`, the time the library ran that pass's commands), not
+// for the pass's wall time, of which the time queued behind the sync's slices and the takers'
+// commands is no work of the upkeep's.
+export const upkeepDue = (now, passEnd, libraryMs) => now - passEnd >= libraryMs
 // The sync, then its deposits as a command of their own (UPKEEP_SYNC_ARGS), each in slices of
 // `sliceMs` (none: whole calls), to the pass's end; each failure logged, a library without the
 // deposits command passed over in silence. A command that took more than one slice is logged (`sync
@@ -172,12 +210,15 @@ export const SYNC_PASS_BOUND_MS = 300_000
 // else from the call to its answer): what a firm offer asked meanwhile waited for at most is one
 // slice, not T. A pass longer than `boundMs` is logged as an error once it passes the bound, and
 // again when it ends, with its figures (its slices, its time, the library's time on it and its
-// longest slice).
+// longest slice). With `opts.lateTurnMs`, each slice is asked for as `cmd(name, args, { turnMs })`:
+// once the pass has run half its bound, its slices take their turn ahead of the takers' commands
+// after `lateTurnMs` rather than the queue's usual turn, so a pass under a steady stream of takers
+// still ends within its bound.
 export async function upkeepSync (cmd, log, ran = null, opts = {}) {
   const sliceMs = opts.sliceMs ?? SLICE_MS, boundMs = opts.boundMs ?? SYNC_PASS_BOUND_MS
   const clock = opts.clock ?? Date.now
   const start = clock()
-  let slices = 0, library = 0, longest = 0, over = false
+  let slices = 0, library = 0, longest = 0, over = false, synced = true
   const figures = () => `${slices} slices, ${clock() - start} ms in all, the library ${library} ms of it, the longest slice ${longest} ms`
   for (const [name, args] of [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]) {
     const cmdStart = clock()
@@ -185,21 +226,25 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
     for (;;) {
       let r = null, failed = false
       const s0 = clock()
-      try { r = await cmd(name, sliceMs > 0 ? { ...args, budget_ms: sliceMs } : { ...args }) } catch (e) {
+      // A pass that has run half its bound takes its turns sooner (opts.lateTurnMs).
+      const late = opts.lateTurnMs != null && clock() - start > boundMs / 2
+      const a = sliceMs > 0 ? { ...args, budget_ms: sliceMs } : { ...args }
+      try { r = await (opts.lateTurnMs != null ? cmd(name, a, { turnMs: late ? opts.lateTurnMs : undefined }) : cmd(name, a)) } catch (e) {
         failed = true
+        if (name === 'sync') synced = false
         if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message)
       }
       const own = ran ? ran(name) : null
       const took = own != null ? own : clock() - s0
       n++; slices++; library += took; most = Math.max(most, took); longest = Math.max(longest, took)
       const more = !failed && sliceMs > 0 && r && typeof r === 'object' && !Array.isArray(r) && r.more === true
-      if (more && n >= SLICES_MOST) log(`error: ${name} given up after ${n} slices: ${figures()}`)
-      if (!more || n >= SLICES_MOST) break
+      if (!more) break
       if (!over && clock() - start > boundMs) { over = true; log(`error: the sync is past its bound (${boundMs} ms) and goes on: ${figures()}`) }
     }
     if (n > 1) log(`${name} in ${n} slices: ${clock() - cmdStart} ms, the longest ${most} ms`)
   }
   if (clock() - start > boundMs) log(`error: the sync took longer than its bound (${boundMs} ms): ${figures()}`)
+  return { start, end: clock(), slices, library, longest, synced }
 }
 // The sync and its deposits on a loop of their own (`sync_seconds`), apart from the rest of the
 // upkeep, as the forfeits are (forfeitPass): each slice is a command of its own in the library's
@@ -209,13 +254,27 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
 // two slices the library sees every command run there (its steps read the store when they run). A
 // whole sync (`slice_ms: 0`) is one command, which the rest waits for. -> a function that starts a
 // pass unless one is under way; it resolves when that pass ends (null when it did not start one).
+// Each pass that ends is logged as one record of the maker's own (`sync pass {n, start, end, ms,
+// slices, library, longest}`, ms), from which its figures are read. Only a pass whose sync answered
+// to its end ends a pass in the record (`synced`): a sync that throws ends none, and is logged
+// `sync pass failed`, so a maker whose every sync fails goes stale (syncStanding) and stops quoting.
 export function syncLoop (cmd, log, ran = null, opts = {}) {
-  let running = false
+  let running = false, n = 0
   return async () => {
     if (running) return null
     running = true
     if (opts.record) opts.record.begin()
-    try { return await upkeepSync(cmd, log, ran, opts) } finally { running = false; if (opts.record) opts.record.end() }
+    let r = null
+    try { r = await upkeepSync(cmd, log, ran, opts); return r } finally {
+      running = false
+      if (r && r.synced) {
+        if (opts.record) opts.record.end()
+        log('sync pass ' + JSON.stringify({ n: ++n, start: r.start, end: r.end, ms: r.end - r.start, slices: r.slices, library: r.library, longest: r.longest }))
+      } else {
+        if (opts.record) opts.record.abort()
+        log('sync pass failed ' + JSON.stringify(r ? { start: r.start, end: r.end, slices: r.slices } : {}))
+      }
+    }
   }
 }
 // What a loop of the maker's (its upkeep, its sync) has done, as `/health` answers it: its passes
@@ -234,12 +293,45 @@ export function passRecord (clock = Date.now, since = clock()) {
       r.longest_ms = Math.max(r.longest_ms, r.last_ms); r.longest_gap_ms = Math.max(r.longest_gap_ms, now - end)
       end = now; start = null
     },
+    // A pass that did not end (its sync failed): forgotten, nothing counted.
+    abort () { start = null },
     // -> the record now, `ago_ms` the time since the last end (since the start before the first),
     // `under_way_ms` how long the pass under way has run (null when none is).
     now () { const now = clock(); return { ...r, ago_ms: now - end, under_way_ms: start == null ? null : now - start } },
   }
 }
 export const HELD_COINS = Object.freeze({ held: true, brief: true })
+
+// What a pass of the sync in slices would cost on the store in `storeDir`, by the library this
+// checkout runs (`arcaSyncSize`: for each step a slice can stop inside, its items and the store reads
+// before its first, timed), without touching the store: its files are copied into a private
+// directory (0700, removed after), and the library opens the copy, read-only, under the name its
+// storage file carries. It reads the store's files and nothing else; no phrase, operator or node.
+// So it runs beside a running maker; a copy taken while the maker writes is read as it stands (the
+// figures are of sizes, not of balances). -> { copied_ms, ...arcaSyncSize's answer }
+export async function sizeStore (storeDir, { pkgDir } = {}) {
+  const { mkdtempSync, cpSync, readdirSync, rmSync, openSync, readSync, closeSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const tmp = mkdtempSync(join(tmpdir(), 'leaf-maker-size-'))
+  try {
+    const t0 = Date.now()
+    cpSync(storeDir, join(tmp, 'store'), { recursive: true })
+    const copied = Date.now() - t0
+    // The database's file: the one whose header's name the library opens (the name, then zeros).
+    const opaque = join(tmp, 'store', '.leaf-wallet', '.opaque')
+    let name = null
+    for (const f of readdirSync(opaque)) {
+      const fd = openSync(join(opaque, f), 'r'), b = Buffer.alloc(4112)
+      const n = readSync(fd, b, 0, 4112, 0); closeSync(fd)
+      if (n === 4112 && b.subarray(4096, 4111).toString() === 'SQLite format 3') { name = b.subarray(0, b.indexOf(0)).toString(); break }
+    }
+    if (!name) throw new Error('no database in the store at ' + storeDir)
+    const { leafLibrary } = await import('../leaf-node.mjs')
+    const lib = await leafLibrary(join(tmp, 'store'), pkgDir ? { pkgDir } : {})
+    if (!lib.syncSize) throw new Error('this checkout\'s leaf library cannot size a store (no arcaSyncSize)')
+    return { copied_ms: copied, ...lib.syncSize(name) }
+  } finally { rmSync(tmp, { recursive: true, force: true }) }
+}
 
 // The live coins of an asset the maker keeps by default (`max_coins` per asset overrides it): enough
 // for its offers at once, few enough that the library reads its store quickly before each command.
@@ -1275,6 +1367,9 @@ async function main () {
   // --reporter-key: the key the maker signs its trade reports and listings with, for the relay's
   // -trade-reporters; exits.
   if (process.argv.includes('--reporter-key')) { console.log(makerRelayKey(cfg.store_dir).pub); return }
+  // --size: what a pass of the sync in slices would cost on the maker's store, by the library of this
+  // checkout (sizeStore); safe beside the running maker. Prints it as JSON and exits.
+  if (process.argv.includes('--size')) { console.log(JSON.stringify(await sizeStore(cfg.store_dir), null, 1)); return }
   const mnemonic = readFileSync(cfg.mnemonic_file, 'utf8').trim()
   const op = cfg.operator
   const nodePassword = op.node_password_file ? readFileSync(op.node_password_file, 'utf8').trim() : (op.node_password || '')
@@ -1283,11 +1378,18 @@ async function main () {
   // A command slower than `slow_ms` (two seconds) is logged by name: the upkeep's long ones are what a
   // firm offer waits behind.
   const times = commandTimes()
+  let upkeepLibrary = null   // ms the library ran the upkeep's pass under way (null between passes)
+  const startedAt = Date.now()
   const lastRan = new Map()   // command -> how long the library ran its last call (ms), for upkeepSync
   const lib = await leafLibraryThread(cfg.store_dir, {
     slowMs: Number(cfg.slow_ms ?? SLOW_MS),
     onSlow: (name, ms, detail) => log('slow', name, ms, 'ms', detail ? JSON.stringify(detail) : ''),
-    onTime: (name, ms, waited) => { times.add(name, ms, waited); lastRan.set(name, ms) },
+    onTime: (name, ms, waited, first) => {
+      times.add(name, ms, waited); lastRan.set(name, ms)
+      // The library time of the upkeep's pass under way: its own commands, not the sync's slices
+      // (a loop of its own) nor the takers' (first).
+      if (upkeepLibrary != null && !first && name !== 'sync' && name !== 'deposits') upkeepLibrary += ms
+    },
   })
   setInterval(() => { const l = times.line(); if (l) log(l) }, (cfg.times_seconds ?? TIMES_SECONDS) * 1000).unref()
   const w = (await lib.exists(mnemonic)) ? await lib.open(mnemonic, nodePassword) : await lib.create(mnemonic, {
@@ -1298,6 +1400,28 @@ async function main () {
   const pause = (ms) => new Promise((r) => setTimeout(r, ms))
   const cmd = (name, args, first = false) => w.command(name, commandArgs(args, first), { first })
   const info = await cmd('info')
+  // --pass-time N: runs N passes of the maker's sync on its store, as its sync loop runs them
+  // (`slice_ms`; --slice-ms M names another, 0 whole syncs), and prints each pass's time, slices and
+  // library time as JSON; exits. It acts as the maker (the sync hands the operator what is due):
+  // stop the service first.
+  const pt = process.argv.indexOf('--pass-time')
+  if (pt > 0) {
+    const sliceMs = arg('--slice-ms') != null ? Number(arg('--slice-ms')) : Number(cfg.slice_ms ?? SLICE_MS)
+    const out = []
+    for (let k = 0; k < Number(process.argv[pt + 1] || 1); k++) {
+      // Each step's time over the whole pass, in ms: the sync's last answer's `cost_by_step`.
+      let steps = {}
+      const timed = async (name, args) => {
+        const v = await cmd(name, args)
+        if (name === 'sync' && v && !v.more && v.cost_by_step) steps = Object.fromEntries(Object.entries(v.cost_by_step).map(([st, c]) => [st, c && c.operator_calls ? { ms: c.ms, operator_calls: c.operator_calls } : c && c.ms]))
+        return v
+      }
+      const r = await upkeepSync(timed, () => {}, (name) => lastRan.get(name) ?? null, { sliceMs, boundMs: Infinity })
+      out.push({ ms: r.end - r.start, slices: r.slices, library: r.library, longest: r.longest, steps })
+    }
+    console.log(JSON.stringify({ slice_ms: sliceMs, passes: out }))
+    process.exit(0)
+  }
   // --address: the maker's on-chain address (to fund what it boards), then exits.
   if (process.argv.includes('--address')) { console.log(JSON.stringify({ address: (await cmd('address')).address })); process.exit(0) }
   // --held ASSET: what the maker holds of an asset in leaves (every state), after a sync; exits.
@@ -1537,11 +1661,22 @@ async function main () {
 
   async function swapState (id, first = false) { return swapStates(await cmd('swaps', swapsArgs([id]), first), [id]).get(id) }
 
-  // The upkeep leaves the library free at least as long as its last pass held it, so a taker's
-  // firm offer or acceptance is as likely to find it idle as busy.
-  let passEnd = 0, passTook = 0, lastHold = 0
+  // The upkeep leaves the library free at least as long as its last pass held it (the library's
+  // time on its commands, upkeepDue), so a taker's firm offer or acceptance is as likely to find it
+  // idle as busy.
+  let passEnd = 0, passLibrary = 0, lastHold = 0
   // The upkeep's passes and the sync's, as `/health` answers them (passRecord).
   const upkeepPasses = passRecord(), syncPasses = passRecord()
+  const boundMs = Number(cfg.sync_pass_bound_ms ?? SYNC_PASS_BOUND_MS), staleMs = syncStaleMs(cfg)
+  // Whether the maker quotes: a sync pass ended within `sync_stale_ms` (syncStanding).
+  const standing = () => syncStanding(syncPasses.now(), staleMs, startedAt)
+  let stoppedSaid = false
+  const stoppedNow = () => {
+    const st = standing()
+    if (!st.ok && !stoppedSaid) { stoppedSaid = true; log('error: quotes and firm offers stopped:', st.why) }
+    if (st.ok && stoppedSaid) { stoppedSaid = false; log('quotes and firm offers again: a sync pass has ended') }
+    return st.ok ? null : st.why
+  }
   const HOLDINGS_FOR_FIRM_MS = 5 * 60 * 1000
   // What a firm offer is sized on: the upkeep's last reading while it is fresh, else a reading
   // asked ahead of the queue.
@@ -1585,11 +1720,18 @@ async function main () {
   }
   const HOLD_MS = 90_000, HOLD_EVERY_MS = 180_000
   async function tick () {
-    if (busy || Date.now() - passEnd < passTook) return
+    if (busy || !upkeepDue(Date.now(), passEnd, passLibrary)) return
     busy = true
     const t0 = Date.now()
     upkeepPasses.begin()
-    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally { busy = false; passEnd = Date.now(); passTook = passEnd - t0; upkeepPasses.end() }
+    upkeepLibrary = 0
+    try { await tickOnce() } catch (e) { log('tick:', e.message) } finally {
+      busy = false; passEnd = Date.now(); passLibrary = upkeepLibrary; upkeepLibrary = null
+      const gapBefore = upkeepPasses.now().ago_ms
+      upkeepPasses.end()
+      log('upkeep pass ' + JSON.stringify({ n: upkeepPasses.now().passes, start: t0, end: passEnd, ms: passEnd - t0, library: passLibrary, gap: gapBefore }))
+      if (gapBefore > boundMs) log(`error: the upkeep's gap was ${gapBefore} ms, past its bound (${boundMs} ms); its pass held the library ${passLibrary} ms`)
+    }
   }
   async function tickOnce () {
     {
@@ -1781,8 +1923,11 @@ async function main () {
     if (req.method === 'OPTIONS') return send(res, 200, {})
     let asked = null
     try {
-      if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ok: true, operator: info.operator, genesis_hash: info.genesis_hash, period_ms: (cfg.sync_seconds ?? 20) * 1000, upkeep: upkeepPasses.now(), sync: syncPasses.now() })
+      if (req.method === 'GET' && (p === '/health' || p === '')) return send(res, 200, { ...(stoppedNow() ? { ok: false, why: stoppedNow() } : { ok: true }), operator: info.operator, genesis_hash: info.genesis_hash, period_ms: (cfg.sync_seconds ?? 20) * 1000, upkeep: upkeepPasses.now(), sync: syncPasses.now() })
       if (req.method === 'GET' && p === '/v1/quotes') {
+        // A maker whose sync has ended no pass for too long quotes nothing, and says why.
+        const stopped = stoppedNow()
+        if (stopped) return send(res, 200, { operator: info.operator, genesis_hash: info.genesis_hash, as_of: null, quotes: [], stopped })
         // A taker reading quotes asks for a firm offer next: the upkeep's next commands wait 90 s
         // so the offer finds the library free, at most once every three minutes so a reader that
         // polls cannot stop the upkeep.
@@ -1836,6 +1981,8 @@ async function main () {
       if (!b) return send(res, 400, { error: 'the body is not JSON' })
       asked = b
       if (p === '/v1/firm' || p === '/v1/btc/firm') {
+        const stopped = stoppedNow()
+        if (stopped) return send(res, 503, { error: stopped, stopped: true })
         if (b.want_asset && capped.has(b.want_asset)) return send(res, 409, { error: cappedRefusal(tickerOf(b.want_asset)), capped: true })
       }
       if (desk && p.startsWith('/v1/btc/')) {
@@ -1941,14 +2088,25 @@ async function main () {
   // The sync and its deposits on a loop of their own, in slices of `slice_ms` (0: whole syncs), its
   // bound `sync_pass_bound_ms` (syncLoop); the rest of the upkeep on its own timer, from the end of
   // the first sync pass, so that its first pass (which settles every coin the maker already holds)
-  // reads coins the sync has brought up to date.
-  const sync = syncLoop(cmd, log, (name) => lastRan.get(name) ?? null,
-    { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs: Number(cfg.sync_pass_bound_ms ?? SYNC_PASS_BOUND_MS), record: syncPasses })
+  // reads coins the sync has brought up to date, or from the bound when that pass has not ended.
+  // The sync's slices are queued `unheld`: the hold after a quote read keeps the rest of the upkeep
+  // back, not the sync, which a person's command overtakes between any two slices anyway.
+  const syncCmd = (name, args, o = {}) => w.command(name, commandArgs(args, false), { unheld: true, turnMs: o.turnMs })
+  const sync = syncLoop(syncCmd, log, (name) => lastRan.get(name) ?? null,
+    { sliceMs: Number(cfg.slice_ms ?? SLICE_MS), boundMs, record: syncPasses, lateTurnMs: LATE_TURN_MS })
   setInterval(sync, (cfg.sync_seconds ?? 20) * 1000)
-  sync().finally(() => {
+  // The upkeep starts when the first pass ends, or after the pass bound when it has not: a maker
+  // whose first pass never ends still keeps itself (its coins settled, its offers renewed).
+  let upkeepOn = false
+  const startUpkeep = (why) => {
+    if (upkeepOn) return
+    upkeepOn = true
+    if (why) log(why)
     tick()
     setInterval(tick, (cfg.sync_seconds ?? 20) * 1000)
-  })
+  }
+  const firstWait = setTimeout(() => startUpkeep(`error: the first sync pass has not ended within ${boundMs} ms: the upkeep starts without it`), boundMs)
+  sync().finally(() => { clearTimeout(firstWait); startUpkeep(null) })
   setInterval(forfeitPass(cmd, log), (cfg.forfeit_seconds ?? FORFEIT_SECONDS) * 1000)
   const stop = () => { log('stopping'); srv.close(); lib.stop(); process.exit(0) }
   process.on('SIGTERM', stop); process.on('SIGINT', stop)
