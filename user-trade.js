@@ -658,7 +658,7 @@ const FEED_REACH = 2
 // The least time between two syncs the engine asks for.
 const SYNC_EVERY_MS = 10000
 // Minutes after which a received trade still settling is said to be slow.
-const SLOW_SETTLE_MIN = 10
+export const SLOW_SETTLE_MIN = 10
 
 // The library's commands the engine runs that only read, which it runs one after another for a
 // quote or a pass over its trades: each asks the library to answer from a look at the chain made
