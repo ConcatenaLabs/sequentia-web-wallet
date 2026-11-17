@@ -109,3 +109,21 @@ test('an operator not read at the approval: the defaults\' bound until the libra
   p.at(10_000); await p.T.advance(rec)
   assert.equal(tradeStateWord(rec, p.now()), USER_WORDS.waitingOther(25))
 })
+
+// A trade of two assets in the tree whose coins settle in the operator's next round states the wait
+// the wallet gives that round (settleMinutes), never the minutes since it was sent, which read as a
+// promise: "(2 min)" on a settle that takes up to four on the testnet. Past it by SETTLE_LATE_MS it
+// says that settling takes longer, the coins being the wallet's all along.
+test('a trade settling in a round states the wait for the round, then that it takes longer', () => {
+  const r = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0, settle: { coins: ['c'], participations: ['p'] },
+    settleState: ['pending'], settleMin: 6, settleSince: T0 + 5000 }
+  assert.equal(tradeStateWord(r, T0 + 10000), 'Received, settling (within about 6 min)')
+  r.settleState = ['forfeiting']
+  assert.equal(tradeStateWord(r, T0 + 2.5 * min), 'Received, settling (within about 6 min)', 'no minutes count')
+  assert.equal(tradeStateWord(r, T0 + 5000 + 6 * min + SETTLE_LATE_MS + 1), USER_WORDS.receivedSlow)
+  r.settleState = ['released']; r.state = 'settled'
+  assert.equal(tradeStateWord(r, T0 + 3 * min), 'Settled')
+  // A settle started before the wait was recorded says no time at all.
+  const old = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0, settle: { coins: ['c'], participations: ['p'] }, settleState: ['pending'] }
+  assert.equal(tradeStateWord(old, T0 + 2.5 * min), 'Received, settling')
+})
