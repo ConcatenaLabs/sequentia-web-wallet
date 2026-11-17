@@ -339,7 +339,9 @@ its own view: the address, New address, Show blinded address, Show xpub, and the
     in "@sequentiatestnet.com" with **Save** and **Cancel**; registering a name releases the one the
     key held. A released name, by a change or by **Remove name**, answers no payer from then on and
     is never given to another wallet: only the same wallet can take it back. So a payer who kept it,
-    or a screen that still shows it, never pays someone else. A name kept from an earlier visit
+    or a screen that still shows it, never pays someone else. The one exception is a name released
+    or changed before the name service kept released names: the service holds no record of it, so
+    another wallet can take it, and a payer who never paid it before would then pay that wallet. A name kept from an earlier visit
     shows on Receive and in Settings only once the name service has confirmed, since the page
     opened, that the wallet still holds it (Receive shows the full code meanwhile), and an open
     wallet stops showing a name the moment it is released or changed on another device. A name is 3 to 32 lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to
