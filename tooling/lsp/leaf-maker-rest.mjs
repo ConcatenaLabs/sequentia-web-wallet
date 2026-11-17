@@ -45,7 +45,9 @@ import { makerRelayKey } from './trade-report.mjs'
 const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
 const hex = (b) => Buffer.from(b).toString('hex')
-const DONE = new Set(['filled', 'cancelled', 'expired', 'refunded', 'landed', 'exited'])
+// `lost`: the round of its refresh left the chain for good; the operator names the coin whose exit
+// brings its value home whole (`exit_coin`), and the level is rested again from other coins.
+const DONE = new Set(['filled', 'cancelled', 'expired', 'refunded', 'landed', 'exited', 'lost'])
 
 // How close to the operator's depth limit an order's coin comes before the desk refreshes it: two
 // reassignments, as the maker refreshes its other coins (REFRESH_WITHIN_HOPS in arca
@@ -203,7 +205,11 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
       // A refresh under way: the order's coin is given up in a round for a fresh coin of the same
       // order, which the operator may read as cancelled until the new coin is published.
       if (served.state === 'refreshing' || refreshing.has(rec.rested_by)) continue
-      if (DONE.has(served.state)) { rec.done = served.state; log('rest', rec.slot, rec.order.slice(0, 12), served.state); continue }
+      if (DONE.has(served.state)) {
+        rec.done = served.state
+        log('rest', rec.slot, rec.order.slice(0, 12), served.state === 'lost' ? `lost: its value is whole in coin ${served.exit_coin}, home by its exit` : served.state)
+        continue
+      }
       if (served.state !== 'resting' && served.state !== 'exhausted') continue
       const p = (r.pairs || []).find((x) => x.give + ':' + x.want === rec.slot.split('#')[0])
       const rate = p && (p.price ? rates.get(p.give + ':' + p.want) : p)

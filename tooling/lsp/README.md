@@ -447,7 +447,9 @@ the desk refreshes an order whose coin is within two reassignments of the limit 
 (`order_refresh_resting`): the order keeps its id, terms and amount at a fresh coin, a round's leaf
 with four fills ahead of it, and is listed at that coin once it rests there. While the refresh runs
 the order reads `refreshing` and the desk leaves it alone; an order due for a cancel its depth no
-longer allows is refreshed first and cancelled on a later pass. Every command slower than
+longer allows is refreshed first and cancelled on a later pass. An order whose refresh round left the
+chain for good reads `lost`: the desk logs the coin whose exit brings its value home whole
+(`exit_coin`) and rests the level again from other coins. Every command slower than
 `slow_ms` (2,000 by default) is logged (`slow <command> <ms> ms {detail}`), answered or refused, which names what a slow firm offer
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the

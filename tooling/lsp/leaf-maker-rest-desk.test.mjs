@@ -108,6 +108,8 @@ test('a pass refreshes the order stuck at the limit instead of asking for a canc
     { slot: `${G}:${W}#1`, rested_by: 'r1', order: 'o1', offer_id: 'f1', amount: '1000', rate_num: '1100', rate_den: '1000', at: now },
   ]))
   const calls = []
+  const logs = []
+  let lostNow = false
   const terms = { asset_b: W, rate_num: '1100', rate_den: '1000', min_lot: '10', expiry: 9e9 }
   const cmd = async (name, args) => {
     calls.push([name, args])
@@ -116,9 +118,10 @@ test('a pass refreshes the order stuck at the limit instead of asking for a canc
       // o0 is the testnet's: five reassignments deep, off the feed's price; o1's refresh is under way,
       // its old coin read as cancelled by the operator until the new one is published
       // the library's answer: its own orders as its store holds them, and the operator's view of those asked
-      return { orders: [{ rested_by: 'r0', order: 'o0', state: 'published' }, { rested_by: 'r1', order: 'o1', state: 'refreshing' }],
+      return { orders: [{ rested_by: 'r0', order: 'o0', state: 'published' }, { rested_by: 'r1', order: 'o1', state: lostNow ? 'lost' : 'refreshing' }],
         others: [{ order: 'o0', state: 'resting', hops: 5, whole_only: true, value: '1000', coin: 'c0', asset: G, terms },
-          { order: 'o1', state: 'cancelled', hops: 1, value: '1000', coin: 'c1', asset: G, terms }] }
+          lostNow ? { order: 'o1', state: 'lost', exit_coin: 'c1old', hops: 0, value: '1000', coin: 'c1', asset: G, terms }
+            : { order: 'o1', state: 'cancelled', hops: 1, value: '1000', coin: 'c1', asset: G, terms }] }
     }
     if (name === 'order_refresh_resting_quote') return { coin: 'c0', fee: { amount: '0' }, gives: ['c0'] }
     if (name === 'order_refresh_resting') return { state: 'refreshing' }
@@ -130,7 +133,7 @@ test('a pass refreshes the order stuck at the limit instead of asking for a canc
     const cfg = { store_dir: dir, prices: { spread_bps: 0 }, rest: { relay: 'http://relay', interval_seconds: 0, guard_bps: 10, reprice_bps: 300, max_new_per_pass: 0,
       pairs: [{ give: G, want: W, price: true, ladder: { levels: 2, step_bps: 25, growth: 1, first: '1000' } }] } }
     const rates = new Map([[`${G}:${W}`, { rate_num: '1000', rate_den: '1000' }]])
-    const desk = await restDesk({ cfg, cmd, log: () => {}, liveRates: () => rates, spendable: async () => new Map([[G, 10n ** 9n]]) })
+    const desk = await restDesk({ cfg, cmd, log: (...a) => logs.push(a.join(' ')), liveRates: () => rates, spendable: async () => new Map([[G, 10n ** 9n]]) })
     await desk.tick()
     const names = calls.map((c) => c[0])
     assert.ok(!names.includes('order_cancel_resting'), 'no cancel of an order at the limit')
@@ -138,5 +141,10 @@ test('a pass refreshes the order stuck at the limit instead of asking for a canc
     assert.equal(calls.find((c) => c[0] === 'order_refresh_resting')[1].shown.coin, 'c0')
     assert.equal(desk.records().find((r) => r.order === 'o0').done, undefined, 'o0 is still the level\'s order')
     assert.equal(desk.records().find((r) => r.order === 'o1').done, undefined, 'o1, mid-refresh, is not taken for cancelled')
+    // o1's refresh round then leaves the chain for good: the operator reads it lost and names its exit coin
+    lostNow = true
+    await desk.tick()
+    assert.equal(desk.records().find((r) => r.order === 'o1').done, 'lost', 'a lost order ends its level, rested again later')
+    assert.ok(logs.some((l) => l.includes('lost') && l.includes('c1old')), 'the exit coin is logged')
   } finally { globalThis.fetch = realFetch }
 })
