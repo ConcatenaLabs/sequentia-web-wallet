@@ -201,7 +201,8 @@ code text, no address, no switch: everything else is one tap away under **More o
 reads **Fewer options** while open). A payment coming in is said on the same card, under the line,
 so whoever holds up the QR code sees it land without leaving the screen: "Payment arriving…" while
 it is on its way, then "Received <amount> <TICKER>." once it counts (`receive-watch.js`: from the
-figures Balance shows, so a move of the wallet's own or a trade says nothing). Developer mode keeps
+figures Balance shows: only value the wallet did not hold counts, so a move of the wallet's own,
+coins of its own coming home, or a trade says nothing). Developer mode keeps
 its own view: the address, New address, Show blinded address, Show xpub, and the name under them.
 
 - **The QR code holds the wallet's payment name** (below), `name@sequentiatestnet.com` in lower
@@ -321,22 +322,38 @@ its own view: the address, New address, Show blinded address, Show xpub, and the
   name is taken; never more. While the service does not answer, the wallet asks again, after five
   seconds and then at a pause growing to a minute, and the name shows once it answers. No name is
   made when the service is full, when no word name is free for the key, or for a wallet whose person
-  removed its name; developer mode makes none by itself.
+  removed its name on any device; developer mode makes none by itself. While the service is limiting
+  new names from the wallet's network, Settings reads "Too many names were made from your network
+  just now. Try again in a few minutes." in place of the card's line, and the wallet asks again by
+  itself.
   - The QR code, Copy and every payer's lookup use the name in lower case
     (`amberfalcon@sequentiatestnet.com`), since some wallets refuse capitals in a name; lookups
     ignore case, so a name typed with capitals pays the same wallet. Names are unique as the joined
     lower-case string. The words are the EFF short wordlist less every BIP39 word, so no word of a
     recovery phrase is ever part of a public name.
-  - **Settings** holds it: the label **Your payment name**, "Other wallets can pay you at this name,
-    in any amount they choose. A Sequentia wallet can pay it while this wallet is closed; other
-    wallets, while it is open.", the name, **Copy**, **Change name** and **Remove name**, and **Use a
+  - **Settings** holds it: the label **Your payment name**, "Anyone can look this name up and pay you
+    at it, in any amount they choose, and see the address each payment goes to. A Sequentia wallet
+    can pay it while this wallet is closed; other wallets, while it is open.", the name, **Copy**,
+    **Change name** and **Remove name**, and **Use a
     word name instead** for a name of the person's own choosing. **Change name** opens a field ending
     in "@sequentiatestnet.com" with **Save** and **Cancel**; registering a name releases the one the
-    key held. A name is 3 to 32 lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to
+    key held. A released name, by a change or by **Remove name**, answers no payer from then on and
+    is never given to another wallet: only the same wallet can take it back. So a payer who kept it,
+    or a screen that still shows it, never pays someone else. The one exception is a name released
+    or changed before the name service kept released names: the service holds no record of it, so
+    another wallet can take it, and a payer who never paid it before would then pay that wallet. A name kept from an earlier visit
+    shows on Receive and in Settings only once the name service has confirmed, since the page
+    opened, that the wallet still holds it (Receive shows the full code meanwhile), and an open
+    wallet stops showing a name the moment it is released or changed on another device. A name is 3 to 32 lowercase letters, digits, `-` and `_`; refusals: "A name has 3 to
     32 characters: lowercase letters, digits, - and _." and "That name is taken. Choose another.".
     After **Remove name** the card reads "Get a name other wallets can pay you at, in any amount they
     choose." with **Get a name** (the word name, in one tap) and **Choose your own**, and the wallet
-    makes none again by itself.
+    makes none again by itself, on this device or any other holding the same phrase, a restore
+    included: the name service keeps the removal with the wallet's key, until the person takes a
+    name again. A removal made before the service kept it, in a browser that remembers it, is told
+    to the service the next time that browser opens the wallet; a removal no browser remembers
+    cannot be told apart from a wallet that never had a name, so that wallet gets its name again
+    and can remove it once more.
   - A payer's wallet that looks the name up gets a full receive code of this wallet's, signed by the
     name's key, and checks the signature before paying (Send, below). The codes come from a stock
     the wallet leaves with the name service (`name-stock.js`): ten at a time, each at an address of
@@ -353,9 +370,12 @@ its own view: the address, New address, Show blinded address, Show xpub, and the
     ("Too many lookups from your network. Try again in a minute."). New names are limited per
     network too, ten at once and then one every ten minutes ("Too many names were made from your
     network just now. Try again in a few minutes."), so one network making wallets by the thousand
-    cannot take every name; a wallet refused this way asks again by itself.
+    cannot take every name; a wallet refused this way asks again by itself. A lookup of a name
+    nobody holds counts against the network's limit exactly as one that finds a name does, so
+    trying names one after another is as slow as that limit.
   - A name nobody uses stays its key's: it is never given to another wallet, since a payer who
-    kept it would pay a stranger. Its stocked codes lapse with their requests, and the service then
+    kept it would pay a stranger. When its wallet has not been opened for 90 days the service drops
+    the stock it holds (never the name). Its stocked codes lapse with their requests, and the service then
     hands out the most recent one without its single-use part, paid at its address or its ark
     address. The service holds at most 100,000 names; past that no new name is made and Receive
     shows the code. Developer mode calls the name **Lightning address**, keeps it on Receive under

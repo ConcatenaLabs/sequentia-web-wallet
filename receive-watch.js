@@ -8,8 +8,10 @@
 //
 //   - an asset whose settled and arriving parts together went up while some of it is still on its
 //     way: a payment is arriving;
-//   - an asset whose settled part went up with nothing of it on its way any more: received, the
-//     amount being what its settled part rose by;
+//   - an asset whose settled and arriving parts together went up, with nothing of it on its way any
+//     more: received, the amount being what they rose by. Only value the wallet did not hold is a
+//     payment: coins of its own that come home (counted as arriving while they do) or that were on
+//     their way when Receive opened only move from arriving to settled, and say nothing;
 //   - an asset that went down (a payment out): its new figure is the base from then on, so a
 //     payment received after it is still seen whole;
 //   - one asset down and another up in the same reading: a trade settling, not a payment: nothing
@@ -48,7 +50,7 @@ export function makeReceiveWatch () {
       for (const a of assets) {
         const b = base.get(a) || zero, n = now.get(a) || zero
         const d = (n.settled + n.arriving) - (b.settled + b.arriving)
-        if (d > 0n || n.settled > b.settled) up.push(a)
+        if (d > 0n) up.push(a)
         if (d < 0n) down.push(a)
       }
       if (down.length && up.some((a) => !down.includes(a))) { base = now; return state }
@@ -58,7 +60,8 @@ export function makeReceiveWatch () {
         if (down.includes(a)) continue
         const b = base.get(a) || zero, n = now.get(a) || zero
         if (n.arriving > 0n) { arriving = arriving || a; continue }
-        if (n.settled > b.settled && (!received || n.settled - b.settled > received.atoms)) received = { asset: a, atoms: n.settled - b.settled }
+        const rise = (n.settled + n.arriving) - (b.settled + b.arriving)
+        if (!received || rise > received.atoms) received = { asset: a, atoms: rise }
       }
       if (received) {
         state = { kind: 'received', asset: received.asset, atoms: received.atoms }
