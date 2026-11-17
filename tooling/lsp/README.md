@@ -353,8 +353,9 @@ A coin of a round is refreshed again only when it has to be, since each such ref
 operator's capital out until the lowest node the coin leaves comes back: the operator fronts the
 new coin meanwhile, and that counts against the asset's in-flight cap. It keeps about `max_coins`
 live coins of an asset (32 by default, or per asset), not counting its resting orders, which it
-never merges: a refresh of an order's coin cancels the order, and the resting desk would rest it
-again from another coin, which the operator fronts anew. Past that it merges coins in the operator's
+never merges: a plain refresh of an order's coin cancels the order, and the resting desk would rest
+it again from another coin, which the operator fronts anew. The desk refreshes its orders itself,
+in the way that keeps them (below). Past that it merges coins in the operator's
 next round, 64 at most a pass: boards first, since merging one fronts nothing (the operator's
 forfeit of a board pays it back at once), then coins of a round of at most `coin_size`, down to
 three quarters of the cap. A merge's own coin is larger, and is not merged again at every coin that
@@ -439,7 +440,14 @@ on-chain book taken together, and it cancels, to rest again at the feed's rate, 
 feed's mid has moved to within `rest.guard_bps` of. A level cancelled to be repriced is rested
 again at what its coin came back with (its value less the cancel's fee, when that is within a
 thousandth of the level), so the library rests it from that coin alone and the operator fronts no
-change beside the order. Every command slower than
+change beside the order. Each part fill puts what rests one reassignment deeper, and the operator
+co-signs no part fill that would leave it at its depth limit, so an order can always be cancelled;
+the desk refreshes an order whose coin is within two reassignments of the limit (the operator's
+`hops` for it), or whose four fills are used (`exhausted`), in the operator's next round
+(`order_refresh_resting`): the order keeps its id, terms and amount at a fresh coin, a round's leaf
+with four fills ahead of it, and is listed at that coin once it rests there. While the refresh runs
+the order reads `refreshing` and the desk leaves it alone; an order due for a cancel its depth no
+longer allows is refreshed first and cancelled on a later pass. Every command slower than
 `slow_ms` (2,000 by default) is logged (`slow <command> <ms> ms {detail}`), answered or refused, which names what a slow firm offer
 waited behind; the detail is the library's cost of the command (milliseconds and requests to
 the node and to the operator, for the re-check before it and for the command itself) and the

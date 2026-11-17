@@ -10,6 +10,13 @@
 //     follows), or that fills have brought below `refill_pct` (25) percent of its size, is cancelled
 //     (`order_cancel_resting_quote`, `order_cancel_resting`, and its relay listing cancelled), and
 //     rested again on a later pass;
+//   - an order whose coin is within two reassignments of the operator's depth limit (`hops`, its
+//     info's `depth_limit`), or that has used its four fills (`exhausted`), is refreshed in the
+//     operator's next round (`order_refresh_resting_quote`, `order_refresh_resting`): it keeps its
+//     id, terms and amount at a fresh coin, a round's leaf with four fills ahead of it. While the
+//     refresh runs the order reads `refreshing` and is left alone; once it rests at its new coin it
+//     is listed there. An order due for a cancel that its depth no longer allows is refreshed first
+//     and cancelled on a later pass;
 //   - an order that rests at the operator and has no live listing (never posted, or the relay
 //     restarted and lost it, or its listing is near its end) is posted to the relay.
 // A level is never rested at a rate that crosses the pair's combined best bid on the relay, or comes
@@ -39,6 +46,28 @@ const big = (v) => { try { return BigInt(v ?? 0) } catch { return 0n } }
 const ceilDiv = (a, b) => (a + b - 1n) / b
 const hex = (b) => Buffer.from(b).toString('hex')
 const DONE = new Set(['filled', 'cancelled', 'expired', 'refunded', 'landed', 'exited'])
+
+// How close to the operator's depth limit an order's coin comes before the desk refreshes it: two
+// reassignments, as the maker refreshes its other coins (REFRESH_WITHIN_HOPS in arca
+// bark/src/arca/resting.rs).
+export const REFRESH_WITHIN_HOPS = 2
+
+// What the desk does with an order the operator serves as `served` (its `state`, `hops`): 'cancel'
+// when it is due for one (`wantsCancel`) and a cancel, one reassignment more, is within
+// `depthLimit`; 'refresh' when the operator keeps an order through a refresh (`refreshKeeps`) and
+// it has used its fills, or its coin is within REFRESH_WITHIN_HOPS of the limit, or it is due for a
+// cancel its depth no longer allows; null otherwise. -> 'cancel' | 'refresh' | null
+export function restUpkeep (served, { depthLimit = null, refreshKeeps = false, wantsCancel = false } = {}) {
+  if (!served || !['resting', 'exhausted'].includes(served.state)) return null
+  const hops = Number(served.hops ?? 0)
+  const canCancel = depthLimit == null || hops + 1 <= depthLimit
+  if (wantsCancel && canCancel) return 'cancel'
+  const due = served.state === 'exhausted' || (depthLimit != null && hops + REFRESH_WITHIN_HOPS >= depthLimit)
+  if (refreshKeeps && (due || wantsCancel)) return 'refresh'
+  // An older operator keeps no order through a refresh: an exhausted order is cancelled instead.
+  if (served.state === 'exhausted' && canCancel) return 'cancel'
+  return null
+}
 
 // The size of each level of a pair's resting ladder, in atoms of `give`.
 export function restSizes (p, cfg) {
@@ -143,6 +172,8 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
     const info = await cmd('info')
     const op = { server: info.server, operator: info.operator }
     const margin = Number(((info.server_info || {}).fills || {}).order_margin_seconds || 0)
+    const depthLimit = Number.isFinite((info.server_info || {}).depth_limit) ? info.server_info.depth_limit : null
+    const refreshKeeps = (((info.server_info || {}).fills || {}).refresh_keeps_order) === true
     const now = Math.floor(Date.now() / 1000)
     // What the library's store says of the orders it rested (restingArgs: its own as stored, not
     // asked of the operator), and what the operator says of each still followed, by its id.
@@ -150,10 +181,12 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
     const first = await cmd('order_resting', restingArgs(ids0.slice(0, RESTING_PER_READ)))
     const mine = first.orders || []
     let changed = false
+    const refreshing = new Set()
     for (const rec of recs) {
       const m = mine.find((o) => o.rested_by === rec.rested_by)
       if (m && m.order && !rec.order) { rec.order = m.order }
       if (m && m.state === 'not_rested') { rec.done = 'not_rested' }
+      if (m && m.state === 'refreshing') refreshing.add(rec.rested_by)
     }
     const ids = recs.filter((x) => x.order && !x.done).map((x) => x.order)
     const others = [...(first.others || [])]
@@ -167,15 +200,29 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
       if (rec.done || !rec.order) continue
       const served = others.find((o) => o.order === rec.order)
       if (!served) continue
+      // A refresh under way: the order's coin is given up in a round for a fresh coin of the same
+      // order, which the operator may read as cancelled until the new coin is published.
+      if (served.state === 'refreshing' || refreshing.has(rec.rested_by)) continue
       if (DONE.has(served.state)) { rec.done = served.state; log('rest', rec.slot, rec.order.slice(0, 12), served.state); continue }
-      if (served.state !== 'resting') continue
+      if (served.state !== 'resting' && served.state !== 'exhausted') continue
       const p = (r.pairs || []).find((x) => x.give + ':' + x.want === rec.slot.split('#')[0])
       const rate = p && (p.price ? rates.get(p.give + ':' + p.want) : p)
       // A level filled down to a small remainder is rested again at its whole size, as a level
       // filled whole is: what is left of it is too little for the trades it is there for.
       const low = big(served.value || 0) * 100n < big(rec.amount) * BigInt(r.refill_pct ?? 25)
       const through = p && p.price && rate && throughMid(rec, rate, (cfg.prices || {}).spread_bps, r.guard_bps)
-      if ((rate && offPrice(rec, rate, r.reprice_bps ?? 300)) || through || low) {
+      const wantsCancel = !!((rate && offPrice(rec, rate, r.reprice_bps ?? 300)) || through || low)
+      const upkeep = restUpkeep(served, { depthLimit, refreshKeeps, wantsCancel })
+      if (upkeep === 'refresh') {
+        try {
+          const q = await cmd('order_refresh_resting_quote', { order: rec.order })
+          await cmd('order_refresh_resting', { order: rec.order, shown: q })
+          changed = true
+          log('rest', rec.slot, rec.order.slice(0, 12), `refreshed in the next round: ${served.state === 'exhausted' ? 'its fills are used' : `its coin is ${served.hops} reassignments deep, the limit ${depthLimit}`}`)
+        } catch (e) { log('rest refresh', rec.slot, e.message) }
+        continue
+      }
+      if (upkeep === 'cancel') {
         try {
           const q = await cmd('order_cancel_resting_quote', { order: rec.order })
           await cmd('order_cancel_resting', { order: rec.order, shown: q })
@@ -188,6 +235,8 @@ export async function restDesk ({ cfg, cmd, log, liveRates, spendable }) {
         } catch (e) { log('rest cancel', rec.slot, e.message) }
         continue
       }
+      // An order whose fills are used takes none: it is not listed until a refresh renews them.
+      if (served.state !== 'resting') continue
       // listed again when the relay has no live listing of it (a restart), or the listing is near its end
       const due = !listed.has(rec.offer_id) || !rec.relay_expires || Number(rec.relay_expires) - now < 3600 || rec.posted_coin !== served.coin
       if (!due) continue
