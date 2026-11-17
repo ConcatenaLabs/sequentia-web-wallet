@@ -363,7 +363,7 @@ export function mountLeafRail(ctx) {
     }
     const q = S.quote;
     b.appendChild(rowsBox([...takeRows(q, fmt, S.op), ['Operator', String(S.op.operator || '?')]], 'swLeafTakeRows'));
-    b.appendChild(el('div', 'sub', 'The fill is final once the round’s block is certified and its Bitcoin anchor buried; if Bitcoin reorganises below it, so does Sequentia, and the fill is undone until the round is mined again. The take goes ahead only on what is shown.'));
+    b.appendChild(el('div', 'sub', 'The fill is final once the round’s block is certified and its Bitcoin anchor buried as deep as the operator asks, which may be no Bitcoin block at all. Final is not beyond Bitcoin: if Bitcoin reorganises below it, so does Sequentia, and the fill is undone until the round is mined again. The take goes ahead only on what is shown.'));
     const row = el('div', 'row');
     row.appendChild(btn('Take it', 'swLeafTakeGo', () => step('take', async () => {
       const r = await run('take', { order: S.order.offer._relayJson || S.order.offer, amount: q.filled, shown: q });

@@ -2250,7 +2250,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       t.appendChild(tr)
     }
     c.appendChild(t)
-    c.appendChild(el('p', 'sub', 'On-chain is what the leaf wallet reads from its node. A coin received out of round and not yet refreshed is operator-confirmed: it relies on the operator and its sender not colluding until a round settles it. A round is final once its block is certified and its Bitcoin anchor is buried two blocks.'))
+    c.appendChild(el('p', 'sub', 'On-chain is what the leaf wallet reads from its node. A coin received out of round and not yet refreshed is operator-confirmed: it relies on the operator and its sender not colluding until a round settles it. A round is final once its block is certified and its Bitcoin anchor buried as deep as the operator asks, which may be no Bitcoin block at all. Final is not beyond Bitcoin: if Bitcoin reorganises below it, so does Sequentia, and the round is undone until it is mined again.'))
     root.appendChild(c)
   }
 
