@@ -14,7 +14,11 @@
 //
 //   node tooling/lsp/lnaddr-store.mjs export <store path>
 //
-// Where node:sqlite is missing (a Node before 22.5, or one that needs --experimental-sqlite) the
+// It uses only what node:sqlite has in Node 22.11 run with --experimental-sqlite, the Node the
+// testnet's LSP runs (its unit passes the flag; Node 22.13 and later need none): DatabaseSync,
+// exec, prepare, and a statement's run, get and all; never iterate, nor the constructor's options.
+//
+// Where node:sqlite is missing (a Node before 22.5, or one started without --experimental-sqlite) the
 // names are kept in memory and the JSON file at the store's path is written whole when something
 // changed, at most every `flushMs`. With no store path, in memory only (the tests).
 import fs from 'node:fs';
@@ -24,6 +28,9 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 export const sqlitePathOf = (storePath) => storePath.replace(/\.json$/i, '') + '.sqlite';
+// Whether this Node can load node:sqlite as it was started (22.13 and later, or 22.5 to 22.12 with
+// --experimental-sqlite).
+export const sqliteAvailable = () => !!loadSqlite();
 
 function loadSqlite () {
   // node:sqlite warns once that it is experimental; that warning says nothing to an operator.
@@ -170,11 +177,20 @@ export function openNameStore ({ storePath = null, log = () => {}, nameOk = () =
   return memoryStore({ jsonPath: storePath, flushMs, log, nameOk, now });
 }
 
+// The store opened only to be read. Node 22.11 ignores DatabaseSync's `readOnly` option (it
+// opens, creates and writes as if it were not given), so the connection is made read-only with a
+// pragma instead, which every SQLite honours.
+function openToRead (lib, file) {
+  const db = new lib.DatabaseSync(file);
+  db.exec('PRAGMA query_only = ON');
+  return db;
+}
+
 // Every name the store at `storePath` holds, as { <name>: record }.
 export function readStoreNames (storePath) {
   const lib = loadSqlite();
   if (lib && fs.existsSync(sqlitePathOf(storePath))) {
-    const db = new lib.DatabaseSync(sqlitePathOf(storePath), { readOnly: true });
+    const db = openToRead(lib, sqlitePathOf(storePath));
     try { return Object.fromEntries(db.prepare('SELECT name, rec FROM names').all().map((r) => [r.name, JSON.parse(r.rec)])); } finally { db.close(); }
   }
   return (readJson(storePath, () => {}) || {}).names || {};
@@ -184,7 +200,7 @@ export function readStoreNames (storePath) {
 export function exportJson (storePath) {
   const lib = loadSqlite();
   if (!lib || !fs.existsSync(sqlitePathOf(storePath))) throw new Error(`no SQLite store at ${sqlitePathOf(storePath)}`);
-  const db = new lib.DatabaseSync(sqlitePathOf(storePath), { readOnly: true });
+  const db = openToRead(lib, sqlitePathOf(storePath));
   try {
     // A released name is left out: the code before reads every record as a name in use.
     const names = Object.fromEntries(db.prepare('SELECT name, rec FROM names WHERE live = 1').all().map((r) => [r.name, JSON.parse(r.rec)]));

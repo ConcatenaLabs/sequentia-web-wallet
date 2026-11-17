@@ -9,13 +9,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeLnaddr } from './lnaddr.mjs';
-import { openNameStore, readStoreNames, exportJson, sqlitePathOf } from './lnaddr-store.mjs';
+import { openNameStore, readStoreNames, exportJson, sqlitePathOf, sqliteAvailable } from './lnaddr-store.mjs';
 import { nameKey, signedDigest, signWith, signCode } from '../../lnaddr.js';
 import { buildPayCode } from '../../pay-code.js';
 
 const DOMAIN = 'sequentiatestnet.com';
 const PHRASE = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const ADDRESS = 'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx';
+// The SQLite store's own tests need node:sqlite as this Node was started; without it the service
+// keeps the JSON file, which the test of that path checks.
+const SQLITE = sqliteAvailable() ? {} : { skip: 'node:sqlite is not in this Node (22.13 and later, or 22.5 to 22.12 with --experimental-sqlite)' };
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lnaddr-store-'));
 
 async function serve (storePath, cfg = {}) {
@@ -37,7 +40,7 @@ function oldJson (k) {
   return { names: { alice: { pubkey: k.pub, at: 1_700_000_000, stock: [{ ...c, until: null }] }, bob: { pubkey: 'ab'.repeat(32), at: 1_700_000_001 }, 'Not A Name': { pubkey: 'cd'.repeat(32) } } };
 }
 
-test('the JSON file of before: imported once on the first start, and left as it was', async () => {
+test('the JSON file of before: imported once on the first start, and left as it was', SQLITE, async () => {
   const dir = tmp(), file = path.join(dir, 'lnaddr-names.json'), k = nameKey(PHRASE);
   fs.writeFileSync(file, JSON.stringify(oldJson(k)), { mode: 0o600 });
   const bytes = fs.readFileSync(file);
@@ -61,7 +64,7 @@ test('the JSON file of before: imported once on the first start, and left as it 
   } finally { await s.close().catch(() => {}); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('export: the JSON file the code before reads, written from the store, for a rollback', async () => {
+test('export: the JSON file the code before reads, written from the store, for a rollback', SQLITE, async () => {
   const dir = tmp(), file = path.join(dir, 'lnaddr-names.json'), k = nameKey(PHRASE);
   const s = await serve(file);
   try {
@@ -173,7 +176,7 @@ test('a lookup of a name nobody holds costs the network what a lookup that finds
 // testdata/lnaddr-names-before.json was written by the name service as deployed before this store
 // (web aee65e85): alicename with a stock, one code handed out (`last`, `served`); bobname, its key's
 // second name (the first, oldbob, moved away from); gonename registered and then released.
-test('the store as the deployed service wrote it: imported whole, and the file left for the way back', async () => {
+test('the store as the deployed service wrote it: imported whole, and the file left for the way back', SQLITE, async () => {
   const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
   fs.copyFileSync(new URL('./testdata/lnaddr-names-before.json', import.meta.url), file);
   const bytes = fs.readFileSync(file);

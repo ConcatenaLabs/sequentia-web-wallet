@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeLnaddr, OFFLINE } from './lnaddr.mjs';
-import { readStoreNames, sqlitePathOf } from './lnaddr-store.mjs';
+import { readStoreNames, sqlitePathOf, sqliteAvailable } from './lnaddr-store.mjs';
 import { nameKey, signedDigest, signWith, mountLnAddress, resolveLnAddress } from '../../lnaddr.js';
 import { decodeBolt11 } from '../../bolt11.js';
 import { buildPayCode, readPayCode } from '../../pay-code.js';
@@ -99,7 +99,8 @@ test('names: first come first served, held and released by their key', async () 
       const file = path.join(s.dir, 'lnaddr-names.json');
       assert.equal(readStoreNames(file).alice2.pubkey, a.pub);
       assert.equal(readStoreNames(file).alice.released > 0, true, 'kept as released');
-      assert.equal((fs.statSync(sqlitePathOf(file)).mode & 0o777), 0o600);
+      // Kept in SQLite where this Node has it, else in the JSON file (lnaddr-store.mjs); private either way.
+      assert.equal((fs.statSync(sqliteAvailable() ? sqlitePathOf(file) : file).mode & 0o777), 0o600);
     } finally { await s2.close(); }
   } finally { await s.close().catch(() => {}); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
