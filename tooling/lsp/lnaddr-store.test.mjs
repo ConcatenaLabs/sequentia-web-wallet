@@ -13,9 +13,9 @@ import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { makeLnaddr } from './lnaddr.mjs';
 import { makeLnaddr as makeLnaddrBefore } from './testdata/lnaddr-before.mjs';
-import { openNameStore, readStoreNames, exportJson, sqlitePathOf, sqliteAvailable, GONE } from './lnaddr-store.mjs';
+import { openNameStore, readStoreNames, exportJson, resolveJson, sqlitePathOf, lockPathOf, sqliteAvailable, GONE } from './lnaddr-store.mjs';
 import { nameKey, signedDigest, signWith, signCode } from '../../lnaddr.js';
-import { buildPayCode } from '../../pay-code.js';
+import { buildPayCode, readPayCode } from '../../pay-code.js';
 
 const DOMAIN = 'sequentiatestnet.com';
 const PHRASE = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -32,7 +32,11 @@ async function serve (storePath, cfg = {}, make = makeLnaddr) {
   await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
   const base = `http://127.0.0.1:${server.address().port}`;
   const svc = make({ domain: DOMAIN, base, storePath, waitMs: 500, holdMs: 300, onlineMs: 1000, ...cfg });
-  server.on('request', async (req, res) => { if (await svc.handle(req, res, new URL(req.url, 'http://x'))) return; res.writeHead(401); res.end('{}'); });
+  // As lsp-server.mjs: a request the service fails is answered 500.
+  server.on('request', async (req, res) => {
+    try { if (await svc.handle(req, res, new URL(req.url, 'http://x'))) return; } catch (e) { if (!res.headersSent) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e && e.message) })); } return; }
+    res.writeHead(401); res.end('{}');
+  });
   return { svc, base, close: () => new Promise((ok) => { server.closeAllConnections(); server.close(ok); }).finally(() => svc.close && svc.close()) };
 }
 const get = async (url) => { const r = await fetch(url); return { status: r.status, body: await r.json() }; };
@@ -84,6 +88,8 @@ const KEYS = {
   c: nameKey('legal winner thank year wave sausage worth useful legal winner thank yellow'),
   d: nameKey('letter advice cage absurd amount doctor acoustic avoid letter advice cage above'),
   x: nameKey('scheme spot photo card baby mountain device kick cradle pact join borrow'),
+  f: nameKey('fig fig fig fig fig fig fig fig fig fig fig fig'),
+  g: nameKey('gas gas gas gas gas gas gas gas gas gas gas gas'),
 };
 const at = (base) => ({
   reg: (k, name) => { const t = ts(); return post(`${base}/lnaddr/-/register`, { name, pubkey: k.pub, ts: t, sig: signWith(k.priv, signedDigest('register', DOMAIN, name, k.pub, t)) }).then((r) => r.status); },
@@ -195,36 +201,168 @@ test('rolled back without an export: names the service before made are added, no
   } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-// Several processes on one store (KR59): each waits for another's write instead of failing.
-test('several processes open and write one store at once: each waits, none fails', SQLITE, async () => {
+// A name that changed hands while rolled back (web #814): after an export, the file is the truth
+// for that time. C releases X there and F takes it; D moves Y to Y2 and G takes Y.
+test('back from the rollback: a name another key took there is that key\'s, and ended for the one before', SQLITE, async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  let s = await serve(file);
+  try {
+    const n = at(s.base);
+    assert.equal(await n.reg(KEYS.c, 'xname'), 200); assert.equal(await n.stock(KEYS.c, 'xname', ADDRESSES[0]), 200);
+    assert.equal(await n.reg(KEYS.d, 'yname'), 200); assert.equal(await n.stock(KEYS.d, 'yname', ADDRESSES[1]), 200);
+  } finally { await s.close(); }
+  exportJson(file);
+  s = await serve(file, {}, makeLnaddrBefore);
+  try {
+    const old = at(s.base);
+    assert.equal(await old.rel(KEYS.c, 'xname'), 200); assert.equal(await old.reg(KEYS.f, 'xname'), 200);
+    assert.equal(await old.stock(KEYS.f, 'xname', ADDRESSES[2]), 200);
+    assert.equal(await old.reg(KEYS.d, 'yname2'), 200); assert.equal(await old.reg(KEYS.g, 'yname'), 200);
+    assert.equal(await old.stock(KEYS.g, 'yname', ADDRESSES[0]), 200);
+  } finally { await s.close(); }
+  const logs = [];
+  s = await serve(file, { log: (...a) => logs.push(a.join(' ')) });
+  try {
+    const now = at(s.base);
+    // The payers of X and Y reach F and G, from their own stocks.
+    const px = await now.pay('xname'), py = await now.pay('yname');
+    assert.equal(px.pubkey, KEYS.f.pub); assert.ok(px.code); assert.equal(py.pubkey, KEYS.g.pub); assert.ok(py.code);
+    assert.equal(readPayCodeAddress(px.code), ADDRESSES[2], 'F\'s code, not C\'s');
+    // F and G hold them; C and D hold one name each or none.
+    assert.deepEqual(await now.mine(KEYS.f), { ok: true, name: 'xname', declined: false });
+    assert.deepEqual(await now.mine(KEYS.g), { ok: true, name: 'yname', declined: false });
+    assert.deepEqual(await now.mine(KEYS.c), { ok: true, name: null, declined: true }, 'C released its name');
+    assert.deepEqual(await now.mine(KEYS.d), { ok: true, name: 'yname2', declined: false }, 'D moved: one name');
+    assert.equal(Object.values(readStoreNames(file)).filter((r) => r.pubkey === KEYS.d.pub && !r.released).length, 1);
+    // Neither C nor D can take its old name back, nor stock it; F and G keep theirs.
+    assert.equal(await now.reg(KEYS.c, 'xname'), 409); assert.equal(await now.reg(KEYS.d, 'yname'), 409);
+    assert.equal(await now.stock(KEYS.c, 'xname', ADDRESSES[1]), 403);
+    assert.equal(await now.reg(KEYS.f, 'xname'), 200); assert.equal(await now.reg(KEYS.g, 'yname'), 200);
+    // Each name that changed hands is logged.
+    const log = logs.join('\n');
+    assert.match(log, /took back .*: 1 names made, 0 released or moved away, 2 changed hands/);
+    assert.match(log, new RegExp(`conflict: xname was ${KEYS.c.pub.slice(0, 16)}'s here and is ${KEYS.f.pub.slice(0, 16)}'s in the file: now ${KEYS.f.pub.slice(0, 16)}'s, and ended for ${KEYS.c.pub.slice(0, 16)}`));
+    assert.match(log, new RegExp(`conflict: yname was ${KEYS.d.pub.slice(0, 16)}'s here and is ${KEYS.g.pub.slice(0, 16)}'s in the file`));
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+const readPayCodeAddress = (code) => readPayCode(code).address;
+
+// Rolled back without the export (web #814): only the file's key or this store's can be right, and
+// the store cannot tell which, so it refuses to open and names the command that settles it.
+test('rolled back without an export, a name held by different keys: refused, then settled either way', SQLITE, async () => {
+  for (const side of ['file', 'store']) {
+    const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+    fs.writeFileSync(file, JSON.stringify({ names: {} }));
+    let s = await serve(file);
+    try {
+      assert.equal(await at(s.base).reg(KEYS.c, 'xname'), 200);
+      assert.equal(await at(s.base).reg(KEYS.d, 'keptname'), 200);
+    } finally { await s.close(); }
+    // The code before, on the file as imported, gives xname to F; D also takes another name there.
+    s = await serve(file, {}, makeLnaddrBefore);
+    try {
+      assert.equal(await at(s.base).reg(KEYS.f, 'xname'), 200);
+      assert.equal(await at(s.base).reg(KEYS.d, 'dthere'), 200);
+    } finally { await s.close(); }
+    const logs = [];
+    s = await serve(file, { log: (...a) => logs.push(a.join(' ')) });
+    try {
+      assert.match(s.svc.broken(), new RegExp(`2 of its names are held by other keys here: xname \\(${KEYS.c.pub.slice(0, 16)}'s here, ${KEYS.f.pub.slice(0, 16)}'s in the file\\); ${KEYS.d.pub.slice(0, 16)} holds keptname here and dthere in the file`));
+      assert.match(s.svc.broken(), /node --experimental-sqlite tooling\/lsp\/lnaddr-store\.mjs resolve .*lnaddr-names\.json file .*resolve .*lnaddr-names\.json store/);
+      assert.equal((await get(`${s.base}/lnaddr/xname`)).status, 503, 'nobody is paid while it is unsettled');
+      assert.equal(await at(s.base).reg(KEYS.x, 'newname'), 503);
+    } finally { await s.close(); }
+    const rlogs = [];
+    resolveJson(file, side, { log: (...a) => rlogs.push(a.join(' ')) });
+    assert.match(rlogs.join('\n'), /conflict: xname/);
+    s = await serve(file, { log: (...a) => logs.push(a.join(' ')) });
+    try {
+      const now = at(s.base);
+      assert.equal(s.svc.broken(), null);
+      if (side === 'file') {
+        assert.equal((await now.mine(KEYS.f)).name, 'xname'); assert.equal(readStoreNames(file).xname.pubkey, KEYS.f.pub);
+        assert.deepEqual(await now.mine(KEYS.c), { ok: true, name: null, declined: false }, 'C did not remove it: its wallet makes another');
+        assert.equal((await now.mine(KEYS.d)).name, 'dthere'); assert.equal((await now.pay('keptname')).status, 404);
+      } else {
+        assert.equal((await now.mine(KEYS.c)).name, 'xname'); assert.equal(readStoreNames(file).xname.pubkey, KEYS.c.pub);
+        assert.equal((await now.mine(KEYS.f)).name, null);
+        assert.equal((await now.mine(KEYS.d)).name, 'keptname'); assert.equal((await now.pay('dthere')).status, 404);
+      }
+      assert.equal(Object.values(readStoreNames(file)).filter((r) => r.pubkey === KEYS.d.pub && !r.released).length, 1, 'one name a key');
+      assert.equal(await now.reg(KEYS.x, side === 'file' ? 'keptname' : 'dthere'), 409, 'the ended one stays its key\'s');
+    } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+// One writer (web #816): a second is refused at open, at once and saying why, never waited on; the
+// lock ends with its process however it ends.
+test('one process writes the store: a second is refused at open, at once; the lock goes with its process', SQLITE, async () => {
   const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
   const script = path.join(dir, 'writer.mjs');
   fs.writeFileSync(script, `
     import { openNameStore } from ${JSON.stringify(new URL('./lnaddr-store.mjs', import.meta.url).href)};
     const [file, who, hold] = process.argv.slice(2);
-    const st = openNameStore({ storePath: file });
-    if (hold) { st.put('holder', { pubkey: 'ff'.repeat(32), at: 1, seen: 1 }); }
-    for (let i = 0; i < 100; i++) st.put(who + i, { pubkey: who.padEnd(64, '0'), at: i, seen: i });
-    st.close();
+    let st;
+    try { st = openNameStore({ storePath: file }); } catch (e) { console.log('refused: ' + e.message); process.exit(3); }
+    st.put(who, { pubkey: who.padEnd(64, '0'), at: 1, seen: 1 });
+    console.log('wrote ' + who);
+    if (hold) setInterval(() => {}, 1000); else st.close();
   `);
+  const flags = process.execArgv.filter((x) => x.startsWith('--experimental-sqlite'));
   const run = (...a) => new Promise((ok) => {
-    const p = spawn(process.execPath, [...process.execArgv.filter((x) => x.startsWith('--experimental-sqlite')), script, file, ...a], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let err = ''; p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', (code) => ok({ code, err: err.split('\n').filter((l) => !/ExperimentalWarning|trace-warnings/.test(l)).join('\n').trim() }));
+    const t0 = Date.now(), p = spawn(process.execPath, [...flags, script, file, ...a], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = ''; p.stdout.on('data', (d) => { out += d; });
+    p.on('exit', (code) => ok({ code, out: out.trim(), ms: Date.now() - t0 }));
   });
+  let holder = null;
   try {
-    const out = await Promise.all(['aa', 'bb', 'cc', 'dd'].map((w) => run(w)));
-    for (const o of out) assert.deepEqual(o, { code: 0, err: '' });
-    // One process holds the write lock for a second while two others open and write.
-    const lib = createRequire(import.meta.url)('node:sqlite');
-    const db = new lib.DatabaseSync(sqlitePathOf(file));
+    assert.deepEqual((await run('aa')).out, 'wrote aa');
+    // A service holds the store in this process: a second opener here and in another process is refused.
+    const st = openNameStore({ storePath: file });
+    assert.throws(() => openNameStore({ storePath: file }), /the name store .*lnaddr-names\.sqlite is open in another process \(the LSP, an export or a resolve\); one process writes it at a time/);
+    const r = await run('bb');
+    assert.equal(r.code, 3); assert.match(r.out, /^refused: the name store .* is open in another process/);
+    assert.throws(() => exportJson(file), /is open in another process/, 'no export while the service runs');
+    assert.throws(() => resolveJson(file, 'file'), /is open in another process/);
+    st.close();
+    assert.equal(fs.statSync(lockPathOf(file)).mode & 0o777, 0o600);
+    // A writer killed while it holds the store leaves no lock behind.
+    holder = spawn(process.execPath, [...flags, script, file, 'cc', 'hold'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    await new Promise((ok) => holder.stdout.once('data', ok));
+    assert.equal((await run('dd')).code, 3, 'refused while it runs');
+    holder.kill('SIGKILL'); await new Promise((ok) => holder.once('exit', ok)); holder = null;
+    assert.equal((await run('ee')).out, 'wrote ee');
+    assert.deepEqual(Object.keys(readStoreNames(file)).sort(), ['aa', 'cc', 'ee']);
+  } finally { if (holder) holder.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// No request waits on a lock (web #816): a tool holding the file's write lock makes the one write
+// that meets it fail at once, and the service answers everything else meanwhile.
+test('a write that meets a lock fails its request at once; the event loop never waits', SQLITE, async () => {
+  const dir = tmp(), file = path.join(dir, 'lnaddr-names.json');
+  const s = await serve(file);
+  const lib = createRequire(import.meta.url)('node:sqlite');
+  const db = new lib.DatabaseSync(sqlitePathOf(file));
+  try {
+    const n = at(s.base);
+    assert.equal(await n.reg(KEYS.a, 'alice'), 200);
     db.exec('BEGIN IMMEDIATE');
-    const waiting = Promise.all(['ee', 'ff'].map((w) => run(w)));
-    await new Promise((ok) => setTimeout(ok, 1000));
-    db.exec('COMMIT'); db.close();
-    for (const o of await waiting) assert.deepEqual(o, { code: 0, err: '' });
-    assert.equal(Object.keys(readStoreNames(file)).length, 600);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    let ticks = 0; const iv = setInterval(() => ticks++, 5);
+    const t0 = Date.now();
+    const t = ts();
+    const r = await fetch(`${s.base}/lnaddr/-/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'bobname', pubkey: KEYS.b.pub, ts: t, sig: signWith(KEYS.b.priv, signedDigest('register', DOMAIN, 'bobname', KEYS.b.pub, t)) }) }).catch((e) => ({ status: 'error ' + e.message }));
+    const ms = Date.now() - t0;
+    assert.ok(ms < 500, `the write failed at once (${ms} ms), not after a wait`);
+    assert.notEqual(r.status, 200);
+    // Reads go on while the lock is held.
+    assert.equal((await n.mine(KEYS.a)).name, 'alice');
+    await new Promise((ok) => setTimeout(ok, 50));
+    clearInterval(iv);
+    assert.ok(ticks >= 5, `the event loop ran meanwhile (${ticks} ticks)`);
+    db.exec('ROLLBACK');
+    assert.equal(await n.reg(KEYS.b, 'bobname'), 200, 'and the next write goes through');
+  } finally { try { db.close(); } catch {} await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('one record written per change; a lookup or an empty stock message writes nothing', async () => {
