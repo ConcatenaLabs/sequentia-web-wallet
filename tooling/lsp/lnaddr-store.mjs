@@ -20,14 +20,32 @@
 // held by), hands payers no code for it (it holds none), and never answers it as a wallet's own
 // name, so neither a payer nor a removal is undone by a rollback. When this store opens again and
 // the JSON file has changed since it last read or wrote it (the code before ran meanwhile), it
-// takes back what that code did: a name made then is added, a name it released or moved away from
-// is ended as here (and its key marked as declined when it holds no other name), and a held name's
-// stock is taken from the file. Only a file this store exported tells a release apart from a name
-// made here after the file was last read, so only then are names ended.
+// takes back what that code did. After an export, the file is the truth for the time rolled back:
+// a name made then is added; a name the code before released or moved away from is ended as here
+// (and its key marked as declined when it holds no other name); a name another key took there is
+// that key's here too, and ended for the key that held it (declined likewise); a held name's
+// stock is taken from the file. A name released here before the rollback stays ended whatever the
+// file says, since that code refuses it to every key. Each name that changed hands is logged.
 //
-// Several processes may open the store (the service, `export`, a reader): each waits up to
-// BUSY_MS for another's write, and opening or writing tries again a few times after that before it
-// fails with SQLite's own "database is locked".
+// Only a file this store exported tells a release apart from a name made here after the file was
+// last read, so after any other write of the file (a rollback without the export) no name is
+// ended, and a name the file and this store give to different keys, or a key holding a name in
+// each, stops the store from opening (the service answers 503) with the command that settles it,
+// run with the service stopped and the service started again afterwards:
+//
+//   node --experimental-sqlite tooling/lsp/lnaddr-store.mjs resolve <store path> file|store
+//
+// `file`: each such name is the file's key's, and a key's other name ends; `store`: each stays as
+// this store has it, and the file's other name for the key ends. Either way an ended name stays
+// its key's, and a name released here is never given to another key.
+//
+// One process writes the store at a time: the service, or an export or a resolve run with it
+// stopped. Each holds the lock file beside the store (`<store>.sqlite.lock`, an SQLite file held
+// in an exclusive transaction, so the lock is the operating system's and ends with its process
+// however that ends) while the store is open, and a second writer is refused at once with a
+// message that says so. Past opening, the service never waits for a lock: a write that meets one
+// (a reader's tool holding the file) fails that one request at once, so no request holds the
+// service's event loop.
 //
 // It uses only what node:sqlite has in Node 22.11 run with --experimental-sqlite, the Node the
 // testnet's LSP runs (its unit passes the flag; Node 22.13 and later need none): DatabaseSync,
@@ -71,21 +89,31 @@ const validRec = (v) => v && typeof v === 'object' && typeof v.pubkey === 'strin
 export const GONE = 'released:';
 const shaOf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
-// How long a connection waits for another's write, and how often opening or a write tries again
-// after that wait (SQLite's busy and locked results, codes 5 and 6).
+// How long a connection waits for another's write while the store opens, before the service
+// serves (an export and a resolve wait so throughout): only a reader's tool can hold one then.
 export const BUSY_MS = 5_000;
-const TRIES = 3;
 const isBusy = (e) => !!e && (e.errcode === 5 || e.errcode === 6 || /database (table )?is locked/.test(String(e.message)));
-const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-function retrying (fn, tries = TRIES) {
-  for (let i = 1; ; i++) {
-    try { return fn(); } catch (e) { if (!isBusy(e) || i >= tries) throw e; pause(100 * 2 ** i); }
-  }
-}
 // A connection to the store's file that waits for others' writes.
 function connect (lib, file) {
   const db = new lib.DatabaseSync(file);
   db.exec(`PRAGMA busy_timeout = ${BUSY_MS}`);
+  return db;
+}
+// The lock file of the one process that writes the store (the head of this file). -> the
+// connection holding it, whose close() lets it go.
+export const lockPathOf = (storePath) => sqlitePathOf(storePath) + '.lock';
+function takeLock (lib, storePath) {
+  const file = lockPathOf(storePath);
+  let db = null;
+  try {
+    db = new lib.DatabaseSync(file);
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE');
+  } catch (e) {
+    try { if (db) db.close(); } catch {}
+    if (isBusy(e)) throw new Error(`the name store ${sqlitePathOf(storePath)} is open in another process (the LSP, an export or a resolve); one process writes it at a time, so stop that one first`);
+    throw e;
+  }
+  try { if ((fs.statSync(file).mode & 0o077) !== 0) fs.chmodSync(file, 0o600); } catch {}
   return db;
 }
 
@@ -140,13 +168,19 @@ function memoryStore ({ jsonPath = null, flushMs = 5_000, log = () => {}, nameOk
 
 function sqliteStore (sqlite, opts) {
   fs.mkdirSync(path.dirname(sqlitePathOf(opts.storePath)), { recursive: true });
-  // Opening, the schema, the import and the merge, tried again while another process writes.
-  return retrying(() => {
-    const db = connect(sqlite, sqlitePathOf(opts.storePath));
-    try { return openedStore(db, opts); } catch (e) { try { db.close(); } catch {} throw e; }
-  });
+  const lock = takeLock(sqlite, opts.storePath);
+  let db = null;
+  try {
+    db = connect(sqlite, sqlitePathOf(opts.storePath));
+    const st = openedStore(db, opts);
+    // Serving: a write that meets a lock fails its request at once (the head of this file).
+    db.exec('PRAGMA busy_timeout = 0');
+    const close = st.close;
+    st.close = () => { close(); try { lock.close(); } catch {} };
+    return st;
+  } catch (e) { try { if (db) db.close(); } catch {} try { lock.close(); } catch {} throw e; }
 }
-function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now = () => Date.now() }) {
+function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now = () => Date.now(), onConflict = null }) {
   const file = sqlitePathOf(storePath);
   try { if ((fs.statSync(file).mode & 0o077) !== 0) fs.chmodSync(file, 0o600); } catch {}
   db.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;
@@ -160,6 +194,7 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
     put: db.prepare('INSERT INTO names (name, pubkey, rec, seen, stocked, live) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET pubkey = excluded.pubkey, rec = excluded.rec, seen = excluded.seen, stocked = excluded.stocked, live = excluded.live'),
     del: db.prepare('DELETE FROM names WHERE name = ?'),
     nameOf: db.prepare('SELECT name FROM names WHERE pubkey = ? AND live = 1 LIMIT 1'),
+    namesOf: db.prepare('SELECT name FROM names WHERE pubkey = ? AND live = 1'),
     // The names in use: a released name is kept for good but takes no place under the cap.
     count: db.prepare('SELECT count(*) AS n FROM names WHERE live = 1'),
     declined: db.prepare('SELECT 1 AS d FROM declined WHERE pubkey = ?'),
@@ -174,8 +209,8 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
   const seenOf = (rec) => Math.floor(Number(rec.seen ?? rec.at ?? 0)) || 0;
   const stockedOf = (rec) => ((rec.stock && rec.stock.length) || (rec.served && rec.served.length) ? 1 : 0);
   const putRow = (name, rec) => q.put.run(name, rec.pubkey, JSON.stringify(rec), seenOf(rec), stockedOf(rec), rec.released ? 0 : 1);
-  // A write transaction, its lock taken at BEGIN so it waits (busy_timeout) rather than fails later.
-  const tx = (fn) => retrying(() => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; } });
+  // A write transaction, its lock taken at BEGIN.
+  const tx = (fn) => { db.exec('BEGIN IMMEDIATE'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; } };
   const nowS = () => Math.floor(now() / 1000);
   const getRec = (n) => { const r = q.get.get(n); return r ? JSON.parse(r.rec) : null; };
   // The JSON file as this store last read or wrote it: { by: 'import' | 'export' | 'merge', sha }.
@@ -212,30 +247,74 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
       if (seen && !j) throw unreadable();
       const c = j ? tx(() => mergeBack(j, seen.by === 'export')) : null;
       q.setMeta.run('json', JSON.stringify({ by: 'merge', sha: shaOf(bytes) }));
-      if (c) log(`[lnaddr] took back from ${path.basename(storePath)}, written by the code before this store: ${c.added} names made, ${c.ended} released or moved away, ${c.updated} stocks`);
-    }
+      if (c) {
+        log(`[lnaddr] took back from ${path.basename(storePath)}, written by the code before this store: ${c.added} names made, ${c.ended} released or moved away, ${c.moved} changed hands, ${c.updated} stocks`);
+        for (const t of c.conflicts) log(`[lnaddr] conflict: ${t}`);
+      }
+    } else if (onConflict) log(`[lnaddr] ${path.basename(storePath)} is as this store last read or wrote it: nothing to resolve`);
   }
+  // What the code before did to the JSON file `j`, taken back (the head of this file).
+  // -> { added, ended, moved, updated, conflicts: [text] }. A merge not from an export throws on a
+  // name the file and this store give to different keys, unless `onConflict` chose a side.
   function mergeBack (j, fromExport) {
-    const names = j.names || {}, c = { added: 0, ended: 0, updated: 0 };
-    const held = new Set(Object.values(names).filter((v) => validRec(v) && !v.released && !v.pubkey.startsWith(GONE)).map((v) => v.pubkey));
+    const names = j.names || {}, c = { added: 0, ended: 0, moved: 0, updated: 0, conflicts: [] };
+    const side = fromExport ? 'file' : onConflict, open = [], ended = new Set();
+    const k8 = (k) => k.slice(0, 16);
+    const end = (n, r) => { putRow(n, { pubkey: r.pubkey, at: r.at, seen: r.seen ?? nowS(), released: nowS() }); ended.add(r.pubkey); };
+    // The file's name for each key: the first it holds (the code before answers a key with it).
+    const fileOf = new Map();
     for (const [n, v] of Object.entries(names)) {
       if (!nameOk(n) || !validRec(v) || v.released || v.pubkey.startsWith(GONE)) continue;
+      if (!fileOf.has(v.pubkey)) { fileOf.set(v.pubkey, n); continue; }
+      // A second name of one key, which the code before never makes: ended, and kept its key's.
       const row = getRec(n);
-      if (!row) { putRow(n, { ...v, seen: v.seen ?? nowS() }); c.added++; continue; }
-      // A name ended here stays ended: the code before kept its row as it was given.
-      if (row.released || row.pubkey !== v.pubkey) continue;
-      const r = { ...row };
-      for (const k of ['stock', 'last', 'served']) { if (v[k] === undefined) delete r[k]; else r[k] = v[k]; }
-      putRow(n, r); c.updated++;
+      if (!row || row.pubkey === v.pubkey) { if (!row || !row.released) { end(n, { ...v, seen: v.seen ?? nowS() }); c.ended++; } }
+      c.conflicts.push(`${n} is a second name of ${k8(v.pubkey)} in the file (beside ${fileOf.get(v.pubkey)}): ended`);
+    }
+    for (const [k, n] of fileOf) {
+      const v = names[n], row = getRec(n);
+      if (!row) { putRow(n, { ...v, seen: v.seen ?? nowS() }); q.undecline.run(k); c.added++; continue; }
+      if (row.pubkey === k) {
+        // A name ended here stays ended: the code before kept its row as it was given.
+        if (row.released) continue;
+        const r = { ...row };
+        for (const f of ['stock', 'last', 'served']) { if (v[f] === undefined) delete r[f]; else r[f] = v[f]; }
+        putRow(n, r); c.updated++; continue;
+      }
+      // Held by one key here and by another in the file.
+      if (row.released) { c.conflicts.push(`${n} is ${k8(k)}'s in the file and was released here by ${k8(row.pubkey)}: it stays ended, never another key's`); continue; }
+      if (!side) { open.push(`${n} (${k8(row.pubkey)}'s here, ${k8(k)}'s in the file)`); continue; }
+      if (side === 'file') {
+        putRow(n, { ...v, seen: v.seen ?? nowS() }); q.undecline.run(k); c.moved++;
+        if (fromExport) ended.add(row.pubkey);
+        c.conflicts.push(`${n} was ${k8(row.pubkey)}'s here and is ${k8(k)}'s in the file: now ${k8(k)}'s, and ended for ${k8(row.pubkey)}`);
+      } else c.conflicts.push(`${n} is ${k8(row.pubkey)}'s here and was ${k8(k)}'s in the file: kept ${k8(row.pubkey)}'s`);
+    }
+    // One name a key: a key holding its file name and another here.
+    for (const [k, n] of fileOf) {
+      const mine = getRec(n);
+      if (!mine || mine.pubkey !== k || mine.released) continue;
+      const others = q.namesOf.all(k).map((r) => r.name).filter((x) => x !== n && !Object.prototype.hasOwnProperty.call(names, x));
+      if (!others.length || fromExport) continue;      // after an export the loop below ends them
+      if (!side) { open.push(`${k8(k)} holds ${others.join(', ')} here and ${n} in the file`); continue; }
+      const drop = side === 'file' ? others : [n];
+      for (const x of drop) end(x, getRec(x));
+      c.ended += drop.length;
+      c.conflicts.push(`${k8(k)} held ${others.join(', ')} here and ${n} in the file: ${drop.join(', ')} ended`);
+    }
+    if (open.length) {
+      throw new Error(`the names file ${storePath} changed since this store last read it, not by an export, and ${open.length} of its names are held by other keys here: ${open.slice(0, 5).join('; ')}${open.length > 5 ? '; …' : ''}. ` +
+        `Settle it with the service stopped, then start the service again: node --experimental-sqlite tooling/lsp/lnaddr-store.mjs resolve ${storePath} file (each goes as the file has it) or ... resolve ${storePath} store (each stays as this store has it)`);
     }
     if (fromExport) {
       for (const { name, rec } of db.prepare('SELECT name, rec FROM names WHERE live = 1').all()) {
         if (Object.prototype.hasOwnProperty.call(names, name)) continue;
-        const r = JSON.parse(rec);
-        putRow(name, { pubkey: r.pubkey, at: r.at, seen: r.seen, released: nowS() }); c.ended++;
-        if (!held.has(r.pubkey)) q.decline.run(r.pubkey, nowS());
+        end(name, JSON.parse(rec)); c.ended++;
       }
     }
+    // A key that lost its name here and holds none now: its person released it (the code before
+    // gives a name to another key only once it is released or moved away from).
+    if (fromExport) for (const k of ended) if (!q.nameOf.get(k)) q.decline.run(k, nowS());
     return c;
   }
 
@@ -244,17 +323,17 @@ function openedStore (db, { storePath, log = () => {}, nameOk = () => true, now 
     file,
     get: getRec,
     has: (n) => !!q.get.get(n),
-    put: (n, rec) => { retrying(() => putRow(n, rec)); },
-    del: (n) => { retrying(() => q.del.run(n)); },
+    put: (n, rec) => { putRow(n, rec); },
+    del: (n) => { q.del.run(n); },
     nameOf: (pk) => { const r = q.nameOf.get(pk); return r ? r.name : null; },
     count: () => Number(q.count.get().n),
     declined: (pk) => !!q.declined.get(pk),
-    decline: (pk, at) => { retrying(() => q.decline.run(pk, at)); },
-    undecline: (pk) => { retrying(() => q.undecline.run(pk)); },
+    decline: (pk, at) => { q.decline.run(pk, at); },
+    undecline: (pk) => { q.undecline.run(pk); },
     // -> how many names lost their stock: at most `limit`, so a caller runs it again until it
     // drops fewer.
     dropIdleStock (cutoffS, limit = 500) {
-      return Number(retrying(() => q.idle.run(cutoffS, Number.isFinite(limit) ? limit : -1)).changes);
+      return Number(q.idle.run(cutoffS, Number.isFinite(limit) ? limit : -1).changes);
     },
     all: () => Object.fromEntries(db.prepare('SELECT name, rec FROM names').all().map((r) => [r.name, JSON.parse(r.rec)])),
     allDeclined: () => Object.fromEntries(db.prepare('SELECT pubkey, at FROM declined').all().map((r) => [r.pubkey, r.at])),
@@ -303,12 +382,13 @@ export function exportJson (storePath) {
   const lib = loadSqlite();
   const file = sqlitePathOf(storePath);
   if (!lib || !fs.existsSync(file)) throw new Error(`no SQLite store at ${file}`);
-  const db = connect(lib, file);
+  const lock = takeLock(lib, storePath);
+  let db = null;
   try {
-    const rows = retrying(() => {
-      db.exec('BEGIN');
-      try { return db.prepare('SELECT name, rec, live FROM names ORDER BY live DESC, name').all(); } finally { db.exec('COMMIT'); }
-    });
+    db = connect(lib, file);
+    db.exec('BEGIN');
+    let rows;
+    try { rows = db.prepare('SELECT name, rec, live FROM names ORDER BY live DESC, name').all(); } finally { db.exec('COMMIT'); }
     const names = {}, c = { live: 0, ended: 0 };
     for (const { name, rec, live } of rows) {
       const r = JSON.parse(rec);
@@ -317,14 +397,32 @@ export function exportJson (storePath) {
     const declined = Object.fromEntries(db.prepare('SELECT pubkey, at FROM declined').all().map((r) => [r.pubkey, r.at]));
     const out = JSON.stringify({ names, declined });
     writeJsonAtomic(storePath, null, out);
-    retrying(() => db.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v').run('json', JSON.stringify({ by: 'export', sha: shaOf(Buffer.from(out)) })));
+    db.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v').run('json', JSON.stringify({ by: 'export', sha: shaOf(Buffer.from(out)) }));
     return c;
-  } finally { db.close(); }
+  } finally { try { if (db) db.close(); } catch {} lock.close(); }
+}
+
+// A names file the store refused to take back, settled (the head of this file): `side` 'file' or
+// 'store' says whose key keeps each name the two give to different keys. Run with the service
+// stopped; it logs what it did.
+export function resolveJson (storePath, side, { log = () => {}, nameOk = () => true } = {}) {
+  if (side !== 'file' && side !== 'store') throw new Error("say which side keeps a name held by different keys: 'file' or 'store'");
+  const lib = loadSqlite();
+  if (!lib || !fs.existsSync(sqlitePathOf(storePath))) throw new Error(`no SQLite store at ${sqlitePathOf(storePath)}`);
+  sqliteStore(lib, { storePath, log, nameOk, onConflict: side }).close();
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
-  const [cmd, file] = process.argv.slice(2);
-  if (cmd !== 'export' || !file) { console.error('usage: node lnaddr-store.mjs export <store path (the .json)>'); process.exit(2); }
-  const c = exportJson(path.resolve(file));
-  console.log(`wrote ${c.live} names in use and ${c.ended} released or moved-away names to ${path.resolve(file)}`);
+  const [cmd, file, side] = process.argv.slice(2);
+  const usage = 'usage: node --experimental-sqlite lnaddr-store.mjs export <store path (the .json)>\n       node --experimental-sqlite lnaddr-store.mjs resolve <store path (the .json)> file|store';
+  if (!file || (cmd !== 'export' && cmd !== 'resolve')) { console.error(usage); process.exit(2); }
+  try {
+    if (cmd === 'export') {
+      const c = exportJson(path.resolve(file));
+      console.log(`wrote ${c.live} names in use and ${c.ended} released or moved-away names to ${path.resolve(file)}`);
+    } else {
+      const { nameProblem } = await import('../../lnaddr.js');
+      resolveJson(path.resolve(file), side, { log: (...a) => console.log(...a), nameOk: (n) => !nameProblem(n) });
+    }
+  } catch (e) { console.error(`Error: ${e.message}`); process.exit(1); }
 }

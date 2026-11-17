@@ -668,6 +668,51 @@ test('eight wallets open on one network for ten minutes, each checking its name 
   } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
 });
 
+// Signature checks paid for first (web #815): a request from network `net` (the proxy's
+// X-Forwarded-For, as on the box).
+const fromNet = (net) => ({ 'x-forwarded-for': net });
+const getFrom = async (url, net) => { const r = await fetch(url, { headers: fromNet(net) }); return r.status; };
+const postFrom = async (url, body, net) => { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...fromNet(net) }, body: JSON.stringify(body) }); return r.status; };
+test('every signature check is paid for first, per network: wrong signatures are limited, payers and other networks never', async () => {
+  const s = await serveAt({ cfg: { sigBurst: 10, sigEveryMs: 60_000, netBurst: 1_000, newBurst: 1_000 } });
+  const a = nameKey(PHRASE), b = nameKey(OTHER), t = ts(), bad = '1'.repeat(128);
+  const A = '203.0.113.7', B = '198.51.100.20';
+  try {
+    assert.equal(await postFrom(`${s.base}/lnaddr/-/register`, reg(a, 'alice'), B), 200);
+    // Ten checks from A's network, each refused for its signature; then 429 before any check, on
+    // /mine and on every signed POST route.
+    for (let i = 0; i < 9; i++) assert.equal(await getFrom(`${s.base}/lnaddr/-/mine?pubkey=${a.pub}&ts=${t}&sig=${bad}`, A), 403);
+    assert.equal(await postFrom(`${s.base}/lnaddr/-/register`, { name: 'mallory', pubkey: b.pub, ts: t, sig: bad }, A), 403);
+    assert.equal(await getFrom(`${s.base}/lnaddr/-/mine?pubkey=${a.pub}&ts=${t}&sig=${bad}`, A), 429);
+    assert.equal(await getFrom(`${s.base}/lnaddr/-/mine?${signedMine(a)}`, A), 429, 'a valid one too: the network\'s budget is spent');
+    for (const [route, body] of [['register', { name: 'mallory', pubkey: b.pub, ts: t, sig: bad }], ['release', { name: 'alice', ts: t, sig: bad }],
+      ['decline', { pubkey: b.pub, ts: t, sig: bad }], ['stock', { name: 'alice', ts: t, add: [], drop: [], sig: bad }],
+      ['wait', { name: 'alice', ts: t, min_sat: 1, max_sat: 2, sig: bad }]]) {
+      assert.equal(await postFrom(`${s.base}/lnaddr/-/${route}`, body, A), 429, route);
+    }
+    // Payers on that network are not touched: their lookups check no signature.
+    assert.equal(await getFrom(`${s.base}/lnaddr/alice`, A), 200);
+    assert.equal(await getFrom(`${s.base}/.well-known/lnurlp/alice`, A), 200);
+    assert.equal(await getFrom(`${s.base}/lnaddr/-/mine?pubkey=${a.pub}`, A), 200, 'an unsigned /mine is a payer\'s lookup');
+    // Another network's wallets are not touched either.
+    assert.equal(await getFrom(`${s.base}/lnaddr/-/mine?${signedMine(a)}`, B), 200);
+    assert.equal(await postFrom(`${s.base}/lnaddr/-/register`, reg(b, 'bobname'), B), 200);
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
+test('a wallet\'s signed /mine replayed from another network spends that network\'s budget, never the wallet\'s', async () => {
+  const s = await serveAt({ cfg: { mineBurst: 3, mineEveryMs: 60_000 } });
+  const a = nameKey(PHRASE), url = `${s.base}/lnaddr/-/mine?${signedMine(a)}`;
+  try {
+    // The same URL, ten times from another network: its key's budget there runs out.
+    const there = []; for (let i = 0; i < 10; i++) there.push(await getFrom(url, `198.51.100.${i}`));
+    assert.deepEqual(there.filter((x) => x === 200).length, 3); assert.deepEqual(there.filter((x) => x === 429).length, 7);
+    // The wallet's own network: its whole budget is there.
+    for (let i = 0; i < 3; i++) assert.equal(await getFrom(url, '203.0.113.10'), 200, `the wallet's own check ${i + 1}`);
+    assert.equal(await getFrom(url, '203.0.113.10'), 429);
+  } finally { await s.close(); fs.rmSync(s.dir, { recursive: true, force: true }); }
+});
+
 test('a check refused for too many requests (429) leaves the name shown, and is not the service unreachable', async () => {
   const s = await serveAt();
   const k = nameKey(PHRASE);

@@ -38,10 +38,15 @@
 // past the network's it is refused for a minute. A lookup of a name nobody holds costs the network
 // the same as one that finds a name, on both the Sequentia and the LNURL-pay routes, so walking
 // the names is as slow as the network limit. New names are limited per network too (ten at
-// once, then one every ten minutes), since every wallet registers one by itself. A wallet's signed
-// `/mine` counts against its key (six at once, then one every ten seconds) and a per-network
-// budget of its own, never against the payers' lookups. The client's address is the one the proxy in
-// front adds last to X-Forwarded-For when the request comes from the loopback, else the socket's.
+// once, then one every ten minutes), since every wallet registers one by itself. Every signature
+// the service checks (the signed `/mine` and every POST route; about 1 ms each) is paid for before
+// it is checked, from a per-network budget (240 at once, then 20 a second) that payers' lookups,
+// which check none, never touch: so a flood of signatures, good or forged, costs only the network
+// it comes from. A wallet's signed `/mine` counts besides against its key on its network (six at
+// once, then one every ten seconds), so its URL replayed from elsewhere never spends the wallet's
+// own budget, and against a per-network budget of its own, never against the payers' lookups. The
+// client's address is the one the proxy in front adds last to X-Forwarded-For when the request
+// comes from the loopback, else the socket's.
 //
 // A name is 3 to 32 of a-z 0-9 - _ (`-` alone never is one, so `/lnaddr/-/…` never names a name).
 // One name per key: registering another releases the first. A released name is never given to
@@ -69,16 +74,17 @@ export const OFFLINE = "The recipient's wallet is offline. Try again when it is 
 export const BUSY = NAME_WORDS.busy;
 export const NEW_BUSY = NAME_WORDS.newBusy;
 
-// A token bucket per key: `burst` at once, then one every `everyMs`. -> take(key) true while allowed.
+// A token bucket per key: `burst` at once, then one every `everyMs`. -> take(key, cost = 1) true
+// while allowed (and then `cost` is taken).
 export function bucket ({ burst, everyMs, now = () => Date.now(), max = 50_000 }) {
   const m = new Map();
-  return function take (k) {
+  return function take (k, cost = 1) {
     const t = now();
     let b = m.get(k);
     if (!b) { if (m.size >= max) m.delete(m.keys().next().value); b = { n: burst, at: t }; m.set(k, b); }
     b.n = Math.min(burst, b.n + (t - b.at) / everyMs); b.at = t;
-    if (b.n < 1) return false;
-    b.n -= 1; return true;
+    if (b.n < cost) return false;
+    b.n -= cost; return true;
   };
 }
 // The network a request comes from: an IPv4 /24 or an IPv6 /48.
@@ -101,7 +107,8 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   onlineMs = 60_000, minSat = 1, maxSat = null, maxNames = 100_000, maxPending = 20, log = () => {},
   stockMax = 20, serveMarginS = 2 * 3600, nameBurst = 5, nameEveryMs = 30_000, netBurst = 20, netEveryMs = 6_000,
   newBurst = 10, newEveryMs = 10 * 60_000, idleStockS = 90 * 86400, seenEveryS = 86400, pruneEveryMs = 6 * 3600_000,
-  pruneBatch = 100, pruneGapMs = 50, mineBurst = 6, mineEveryMs = 10_000, mineNetBurst = 120, mineNetEveryMs = 500 } = {}) {
+  pruneBatch = 100, pruneGapMs = 50, mineBurst = 6, mineEveryMs = 10_000, mineNetBurst = 120, mineNetEveryMs = 500,
+  sigBurst = 240, sigEveryMs = 50 } = {}) {
   if (!domain || !base) throw new Error('lnaddr needs a domain and a base URL');
   // name -> { pubkey, at, seen, stock?: [{ id, code, sig, until }], last?, served?: [id] }; `seen`: when
   // the wallet itself last spoke (to the day, so an open wallet's link does not write every wait).
@@ -123,8 +130,16 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   // A wallet asking for its own name (`/mine` signed by its key, which every open page does every
   // 30 s): a budget per key, and one per network apart from the payers', so wallets open on one
   // network never hide their names nor use up their payers' lookups.
+  // Its key's budget is kept per network too, so a signed URL replayed from elsewhere spends only
+  // the budget of the network it comes from, never the wallet's own.
   const mineTake = bucket({ burst: mineBurst, everyMs: mineEveryMs, now });
   const mineNetTake = bucket({ burst: mineNetBurst, everyMs: mineNetEveryMs, now });
+  // Every signature checked (about 1 ms each) is paid for first, per network, whether it verifies
+  // or not: nobody makes the service verify without limit. Payers' lookups check none and never
+  // touch it. -> false when the network's budget is spent (the request is answered 429).
+  const sigNetTake = bucket({ burst: sigBurst, everyMs: sigEveryMs, now });
+  const sigTake = (req, n = 1) => sigNetTake(clientNet(req), n);
+  const sigBusy = (res) => fail(res, 429, BUSY, { code: 'busy' });
   const nowS = () => Math.floor(now() / 1000);
   // A name in use: held and not released. A released name stays its key's (a tombstone), so a payer
   // who kept it is told nobody goes by it, never sent to another wallet.
@@ -270,16 +285,18 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       }
       return again() || send(res, 200, { status: 'ERROR', reason: OFFLINE }, { cors: true });
     },
-    async stock (res, b) {
+    async stock (req, res, b) {
       const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
       const add = Array.isArray(b.add) ? b.add : null, drop = Array.isArray(b.drop) ? b.drop.map(String) : null;
       if (!add || !drop || add.length > stockMax || drop.length > 200) return fail(res, 400, 'add and drop are lists');
       for (const c of add) if (!c || typeof c.id !== 'string' || typeof c.code !== 'string' || typeof c.sig !== 'string') return fail(res, 400, 'each code is { id, code, sig }');
+      if (!sigTake(req)) return sigBusy(res);
       if (!verifySig(rec.pubkey, signedDigest('stock', domain, n, b.ts, add.map((c) => c.id).join(','), drop.join(',')), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
       // Each code: the name key's signature over it, its own id, a code the payer can read, and not one
       // handed out before (a replayed message must not put a code back).
+      if (add.length && !sigTake(req, add.length)) return sigBusy(res);
       for (const c of add) {
         if (c.id !== codeId(c.code)) return fail(res, 400, 'a code\'s id is not its hash');
         if (!verifyCode(rec.pubkey, domain, n, c)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
@@ -308,8 +325,10 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       const ts = url.searchParams.get('ts'), sig = url.searchParams.get('sig');
       if (sig != null) {
         if (!freshTs(ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
+        if (!sigTake(req)) return sigBusy(res);
         if (!verifySig(pk, signedDigest('mine', domain, '-', pk, ts), sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
-        if (!mineNetTake(clientNet(req)) || !mineTake(pk)) return fail(res, 429, BUSY, { code: 'busy' });
+        const net = clientNet(req);
+        if (!mineNetTake(net) || !mineTake(`${pk} ${net}`)) return fail(res, 429, BUSY, { code: 'busy' });
       } else if (!netTake(clientNet(req))) return fail(res, 429, BUSY, { code: 'busy' });
       return send(res, 200, { ok: true, name: store.nameOf(pk), declined: store.declined(pk) });
     },
@@ -318,6 +337,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       const p = nameProblem(n); if (p) return fail(res, 400, p, { code: 'invalid' });
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
+      if (!sigTake(req)) return sigBusy(res);
       if (!verifySig(pk, signedDigest('register', domain, n, pk, b.ts), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
       // A name released by another key is still taken: it is never anyone else's.
       const had = store.get(n);
@@ -334,10 +354,11 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       store.undecline(pk);
       return send(res, 200, { ok: true, name: n, address: `${n}@${domain}` });
     },
-    async release (res, b) {
+    async release (req, res, b) {
       const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
+      if (!sigTake(req)) return sigBusy(res);
       if (!verifySig(rec.pubkey, signedDigest('release', domain, n, b.ts), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
       tombstone(n, rec);
       // Removed by its person: no wallet of this key makes one again by itself, on any device.
@@ -349,6 +370,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       const pk = String((b && b.pubkey) || '').toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(pk)) return fail(res, 400, 'pubkey is 32 bytes of hex');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
+      if (!sigTake(req)) return sigBusy(res);
       if (!verifySig(pk, signedDigest('decline', domain, '-', pk, b.ts), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
       if (!store.declined(pk)) {
         // Each mark is a row: limited per network as new names are.
@@ -364,6 +386,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       if (!freshTs(b.ts)) return fail(res, 400, "The wallet's clock is off; set it right and try again.", { code: 'clock' });
       if (!/^[0-9]{1,16}$/.test(String(b.min_sat)) || !/^[0-9]{1,16}$/.test(String(b.max_sat))) return fail(res, 400, 'min_sat and max_sat are whole numbers');
+      if (!sigTake(req)) return sigBusy(res);
       if (!verifySig(rec.pubkey, signedDigest('wait', domain, n, b.ts, b.min_sat, b.max_sat), b.sig)) return fail(res, 403, 'The signature does not verify.', { code: 'signature' });
       online.set(n, { seen: now(), min_sat: String(b.min_sat), max_sat: String(b.max_sat) });
       if (touch(rec)) store.put(n, rec);
@@ -386,11 +409,12 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       online.set(n, { ...(online.get(n) || {}), seen: now() });
       return send(res, 200, { ok: true, requests: deliver(undelivered(n)), held: held() });
     },
-    async answer (res, b) {
+    async answer (req, res, b) {
       const n = b && b.name, rec = live(n);
       if (!rec) return fail(res, 404, 'No wallet goes by that name.');
       const q = pending.get(n), entry = q && q.get(String(b.id || ''));
       if (!entry) return fail(res, 410, 'That request has ended.');
+      if (!sigTake(req)) return sigBusy(res);
       let out;
       if (b.refused) {
         if (!verifySig(rec.pubkey, signedDigest('refuse', domain, n, entry.id), b.sig)) return fail(res, 403, 'The signature does not verify.');
@@ -439,7 +463,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
     if (req.method === 'POST' && (m = /^\/lnaddr\/-\/(register|release|decline|stock|wait|answer)$/.exec(p))) {
       const b = await readBody(req);
       if (!b) { fail(res, 400, 'the body is not JSON'); return true; }
-      if (m[1] === 'wait' || m[1] === 'register' || m[1] === 'decline') await routes[m[1]](req, res, b); else await routes[m[1]](res, b);
+      await routes[m[1]](req, res, b);
       return true;
     }
     if (req.method === 'GET' && (m = /^\/lnaddr\/([^/]+)$/.exec(p)) && m[1] !== '-') { await routes.code(req, res, decodeURIComponent(m[1]).toLowerCase()); return true; }
