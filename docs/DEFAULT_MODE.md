@@ -844,7 +844,7 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   your BTC is paid once what you buy is held for you, within about N minutes. Nothing has left
   your wallet yet. If the page closes first, nothing is traded." (only an open page pays the BTC).
   N is the wait the leaf library states for that asset. When the maker locks the asset straight to
-  the wallet (`lock_ready`), it is the maker's lock, which no round bounds: a minute at most, and
+  the wallet (`lock_ready`), it is the maker's lock, which no round bounds: usually about a minute, and
   a round's wait only while the coins the lock rests on wait for theirs. When the asset comes
   through the operator (`lightning_receive_ready`), it is the time the maker has to lock its side
   while it has not, then the operator's round, block and release as the library counts them; and

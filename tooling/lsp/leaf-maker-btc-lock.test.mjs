@@ -36,6 +36,7 @@ test('a payment that never completes is offered again, and the next lock pays it
     if (name === 'lightning_pay_quote') return { payment_hash: HASH, asset: X, amount: '50000' }
     if (name === 'lightning_pay') { pays++; if (hang) return new Promise((ok, no) => hung.push(no)); return { ok: true } }
     if (name === 'lightning_payments' || name === 'lightning_receives') return {}
+    if (name === 'locks') return []
     throw new Error('no operator here')
   }
   try {

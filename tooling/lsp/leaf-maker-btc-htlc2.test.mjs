@@ -32,26 +32,36 @@ function fakeNode (st) {
 const request = (over = {}) => ({ kind: 'arca-lock-request', payment_hash: HASH, asset: X, value: '50000', min_timeout: 1800000000, owner: 'k', ...over })
 
 async function desk (st, { info = { templates: { list: ['htlc-1', 'htlc-2'] } }, htlc2 } = {}) {
+  st.info = info
   const n = await fakeNode(st)
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'btcdesk-htlc2-store-'))
   const cmd = async (name, a) => {
     st.calls.push([name, a])
     if (name === 'lock_to') {
       if (st.lockRefused) { st.locks = [{ role: 'payer', hash: HASH, state: 'refused' }]; throw new Error('refused: the wallet\'s coins that cover this lock are too deep') }
-      if (st.lockUnanswered) { st.locks = [{ role: 'payer', hash: HASH, state: 'locking' }]; throw new Error('the operator did not answer') }
+      if (st.lockUnanswered) { st.locks = [{ role: 'payer', hash: HASH, state: 'locking' }]; if (st.readsFailAfterLock) st.readsFail = true; throw new Error('the operator did not answer') }
       st.locks = [{ role: 'payer', hash: HASH, state: 'locked', leaf_id: 'L1' }]
       return { payment_hash: HASH, leaf_id: 'L1', inputs: ['c1'], change: '10' }
     }
-    if (name === 'locks') return st.locks
+    // The library's records, unreadable while `readsFail` (a worker gone, a store error).
+    if (name === 'locks') { if (st.readsFail) throw new Error('the leaf library\'s worker is gone'); return st.locks }
+    if (name === 'lightning_payments') { if (st.readsFail) throw new Error('the leaf library\'s worker is gone'); return st.pays || {} }
     if (name === 'lightning_pay_quote') return { payment_hash: HASH, asset: X, amount: '50000' }
-    if (name === 'lightning_pay') { st.paidThrough = true; return { ok: true } }
-    if (name === 'lightning_payments' || name === 'lightning_receives') return {}
+    if (name === 'lightning_pay') {
+      st.paidThrough = (st.paidThrough || 0) + 1
+      st.pays = { [HASH]: { state: 'requested' } }
+      // No answer: the library keeps its send record standing and posts it again at its sync.
+      if (st.payUnanswered) throw Object.assign(new Error('cannot reach the server: lightning_send'), { kind: 'unreachable' })
+      st.pays = { [HASH]: { state: 'paying' } }
+      return { ok: true }
+    }
+    if (name === 'lightning_receives') return {}
     if (name === 'lightning_receive') throw new Error('probe refused')
     throw new Error('no command ' + name)
   }
   const cfg = { store_dir: store, offer_ttl_seconds: 300,
     btc: { rpc: n.sock, keep_sats: '20000', locking_seconds: 0.2, ...(htlc2 === undefined ? {} : { htlc2 }), pairs: [{ give: X, want: 'BTC', rate_num: '1', rate_den: '1', min_give: '1000' }] } }
-  const d = await btcDesk({ cfg, cmd, log: () => {}, liveRates: () => new Map(), opInfo: () => info,
+  const d = await btcDesk({ cfg, cmd, log: () => {}, liveRates: () => new Map(), opInfo: () => st.info,
     postOp: async (p, b) => { st.opPosts.push([p, b]); return {} }, onPaid: (s, a) => { st.onPaid = a } })
   const [code, f] = await d.route('POST', '/v1/btc/firm', { give_asset: X, want_asset: 'BTC', give: '50000' }, async () => new Map([[X, 10_000_000n]]), '0')
   assert.equal(code, 200, JSON.stringify(f))
@@ -159,5 +169,76 @@ test('without a lock request the desk pays through the operator as before', asyn
     const [, r] = await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x' })
     assert.equal(r.leg, 'htlc-1'); assert.ok(st.paidThrough)
     assert.ok(!st.calls.some(([n]) => n === 'lock_to'))
+  } finally { done() }
+})
+
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms))
+const paysOrLocks = (st) => st.calls.filter(([n]) => n === 'lock_to' || n === 'lightning_pay_quote' || n === 'lightning_pay').map(([n]) => n)
+
+// KR69 high 1: an unreadable library proves nothing.
+test('a lock that got no answer, then an unreadable library: nothing is paid through the operator, nothing locked again', async () => {
+  const st = fresh(); st.lockUnanswered = true; st.readsFailAfterLock = true
+  const { d, f, done } = await desk(st)
+  try {
+    const [, r] = await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    assert.equal(r.state, 'locking'); assert.equal(r.leg, 'htlc-2')
+    assert.deepEqual(paysOrLocks(st), ['lock_to'], 'one lock asked, and no payment through the operator')
+    // Asked again while the library still cannot be read: answered, nothing more done.
+    const [code2] = await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    assert.equal(code2, 200)
+    assert.deepEqual(paysOrLocks(st), ['lock_to'])
+    assert.equal(d.swaps.get(f.swap).state, 'locking')
+  } finally { done() }
+})
+
+test('past the locking window with the library unreadable: the swap is not offered again, by an ask or by the upkeep', async () => {
+  const st = fresh(); st.lockUnanswered = true
+  const { d, f, done } = await desk(st)
+  try {
+    await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    st.readsFail = true
+    await sleep(300)   // past the window
+    await d.tick().catch(() => {})
+    assert.equal(d.swaps.get(f.swap).state, 'locking', 'the upkeep leaves it locking')
+    for (const body of [{ swap: f.swap, invoice: 'lnsqrt-x', lock: request() }, { swap: f.swap, invoice: 'lnsqrt-x' }]) {
+      const [code, r] = await d.route('POST', '/v1/btc/lock', body)
+      assert.ok(code === 200 || code === 503, String(code))
+      assert.notEqual(r.state, 'offered')
+    }
+    assert.deepEqual(paysOrLocks(st), ['lock_to'], 'no second lock, no payment through the operator')
+    // Readable again and the lock still asked: still nothing more.
+    st.readsFail = false
+    await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x' })
+    assert.deepEqual(paysOrLocks(st), ['lock_to'])
+  } finally { done() }
+})
+
+// RV84 F1 (#830): a payment through the operator that got no answer stands.
+test('a payment through the operator that got no answer stays the swap\'s leg: no lock straight once locks come on', async () => {
+  const st = fresh(); st.payUnanswered = true
+  const { d, f, done } = await desk(st, { info: { templates: { list: ['htlc-1'] } } })
+  try {
+    // The firm offer was made with locks on; the first lock asked while they are off.
+    await assert.rejects(d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() }), /cannot reach/)
+    assert.equal(d.swaps.get(f.swap).state, 'locking', 'not offered again: the send may stand')
+    st.info = { templates: { list: ['htlc-1', 'htlc-2'] } }
+    await sleep(300)
+    const [, r] = await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    assert.equal(r.leg, 'htlc-1'); assert.notEqual(r.state, 'offered')
+    assert.ok(!st.calls.some(([n]) => n === 'lock_to'), 'no lock straight while the payment stands')
+    assert.equal(st.paidThrough, 1, 'and no second payment')
+  } finally { done() }
+})
+
+// RV84 F2 (#831): the re-ask carrying only the invoice.
+test('a lock standing, asked again with the invoice only past the window: nothing is paid through the operator', async () => {
+  const st = fresh(); st.lockUnanswered = true
+  const { d, f, done } = await desk(st)
+  try {
+    await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    await sleep(300)
+    const [, r] = await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x' })
+    assert.equal(r.leg, 'htlc-2'); assert.equal(r.state, 'locking')
+    assert.ok(!st.paidThrough, 'no payment through the operator')
   } finally { done() }
 })

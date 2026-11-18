@@ -65,13 +65,17 @@ export const MAKER_LOCK_MS = 5 * 60 * 1000
 // A Bitcoin invoice the wallet pays must have at least this long to run.
 export const INVOICE_LEFT_SECONDS = 600
 // Buying with BTC on a lock straight from the maker, the wait the page states before the library's
-// first answer: the maker's lock, which no round bounds, and the wallet's read of it.
+// first answer: what the maker's lock usually takes, and the wallet's read of it. No rule bounds it:
+// past MAKER_LOCK_MS the trade comes back.
 export const LOCK_WAIT_MS = 60 * 1000
 // What a lock's timeout leaves beyond the earliest the wallet's payment can use it, for the time
 // between asking for the lock and paying (the maker's lock landing, the wallet reading it).
 export const LOCK_PAY_SLACK_SECONDS = 1800
 // What the maker adds to the earliest timeout the wallet takes (the desk's LOCK_SPARE_SECONDS).
 export const LOCK_SPARE_SECONDS = 3600
+// A purchase found ready longer ago than this, its BTC not paid yet (the page closed, the wallet's
+// Lightning did not answer), is checked to be held still before the BTC goes out.
+export const RECHECK_MS = 10 * 1000
 
 // The seconds of median time the leaf received under the hash must keep before its home date,
 // for a Bitcoin payment of an invoice whose final delta is `minFinalCltv` blocks.
@@ -421,6 +425,7 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
           return put(rec)
         }
       }
+      if (st.state === 'none' && (await beforePay(rec)) !== 'pay') return put(rec)
       if (st.state === 'none') st = await B().pay({ invoice: rec.invoiceBtc, maxFeeSats: big(rec.routeFee), maxDelay: Number(rec.routeDelay || rec.minFinalCltv || 18) + EXTRA_BLOCKS })
       if (st.state === 'failed') {
         // Nothing was paid: the leaf stays unclaimed and goes back to the maker.
@@ -466,6 +471,42 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       if ((await settleStep(rec)) === 'settled') { rec.state = 'settled'; rec.settledAt = now() }
     }
     return put(rec)
+  }
+
+  // Just before the BTC goes out. A purchase found ready a while ago (RECHECK_MS: the page closed, or
+  // the wallet's Lightning did not answer, since) is checked to be held still, as when it was found
+  // ready: a lock or a leaf that will never do returns the trade, nothing paid; one not held yet
+  // sends it back to waiting. On a lock the library then marks it paid (`lock_paid`), kept before
+  // the BTC goes out: from the lock's home date the wallet takes it on the chain unless claimed,
+  // even if the page never learns the preimage and the operator neither co-signs the claim nor
+  // serves it. A library that cannot mark it never sees the BTC paid. -> 'pay', or 'wait' (the
+  // record says why).
+  async function beforePay (rec) {
+    const refused = (e) => !!e && (e.kind === 'refused' || e.kind === 'parse' || /^refused\b/i.test(String(e.message)))
+    if (now() - (rec.sentAt ?? rec.at ?? 0) > RECHECK_MS) {
+      const need = needSeconds(rec.routeDelay || rec.minFinalCltv)
+      let r
+      try { r = await run(rec.leg === 'htlc-2' ? 'lock_ready' : 'lightning_receive_ready', { hash: rec.hash, need_seconds: need }) } catch (e) {
+        if (!refused(e)) { log('[user trade] not checked again yet:', e.message); return 'wait' }
+        log('[user trade] no longer held:', e.message)
+        release(rec.maker, rec.swap)
+        rec.state = 'returned'; rec.returnedAt = now(); rec.why = e.message; return 'wait'
+      }
+      if (!r.ready) {
+        log('[user trade] not held any more, waiting again:', r.why || '')
+        rec.state = 'waiting'; rec.paying = false; rec.notReady = r.why || ''; return 'wait'
+      }
+      rec.sentAt = now(); put(rec)
+    }
+    if (rec.leg === 'htlc-2' && !rec.markedPaid) {
+      try { await run('lock_paid', { hash: rec.hash }); rec.markedPaid = true; put(rec) } catch (e) {
+        if (!refused(e)) { log('[user trade] the lock is not marked paid yet:', e.message); return 'wait' }
+        log('[user trade] the lock cannot be marked paid, so nothing is paid:', e.message)
+        release(rec.maker, rec.swap)
+        rec.state = 'returned'; rec.returnedAt = now(); rec.why = 'the wallet could not mark its lock paid: ' + e.message; return 'wait'
+      }
+    }
+    return 'pay'
   }
 
   // Hands the library the preimage of a purchase on a lock whose BTC is paid (`lock_preimage`: kept,

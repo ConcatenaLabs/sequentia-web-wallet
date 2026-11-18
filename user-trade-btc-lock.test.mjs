@@ -38,6 +38,7 @@ function standIn () {
         case 'lightning_receives': return s.receives
         case 'lightning_receive_ready':
           assert.equal(a.need_seconds, needSeconds(18))
+          if (s.receiveNever) { const e = new Error('refused: ' + s.receiveNever); e.kind = 'refused'; throw e }
           return s.ready ? { ready: true } : { ready: false, why: 'the received leaf\'s round is not final' }
         case 'lightning_receive_preimage': s.receives[a.hash].preimage = a.preimage; s.receives[a.hash].state = 'received'; s.receives[a.hash].leaf = 'r1'; s.coins.push({ leaf_id: 'r1', asset: X, value: s.claimed, state: 'live' }); return {}
         case 'quote': return { coins: (a.leaves || []).map((l) => ({ leaf_id: l, fee: '3' })) }
@@ -60,6 +61,12 @@ function standIn () {
           return { payment_hash: a.hash, state: 'claimed' }
         }
         case 'locks': return s.locks
+        case 'lock_paid': {
+          if (s.lockPaidRefuse) throw Object.assign(new Error('unknown command: lock_paid'), { kind: 'parse' })
+          s.lockPaidAt = s.btcPaid.length
+          const l = s.locks.find((x) => x.hash === a.hash); l.paid = true
+          return { payment_hash: a.hash, paid: true }
+        }
         default: throw new Error('no command ' + cmd)
       }
     },
@@ -82,7 +89,7 @@ function standIn () {
     invoiceStatus: async (h) => (s.invoices[h] && s.invoices[h].status === 'paid' ? { status: 'paid', preimage: P } : { status: 'unpaid' }),
     cancelInvoice: async () => {},
     pay: async ({ invoice }) => { s.btcPaid.push(invoice); return { state: 'complete', preimage: P } },
-    payStatus: async () => (s.btcPaid.length ? { state: 'complete', preimage: P } : { state: 'none' }),
+    payStatus: async () => (s.payStatusSays ? s.payStatusSays : s.btcPaid.length ? { state: 'complete', preimage: P } : { state: 'none' }),
   }
   return s
 }
@@ -212,4 +219,61 @@ test('buying with BTC on a lock: a claim that fails is handed on again, and the 
   r = await eng.advance(eng.records()[0])
   assert.equal(r.posted, true); assert.equal(r.receiveState, 'received')
   assert.equal(s.btcPaid.length, 1, 'paid once')
+})
+
+// KR69 high 2 (arca #962): the lock marked paid before the BTC goes out.
+test('buying with BTC on a lock: the library marks the lock paid before the BTC goes out', async () => {
+  const s = standIn()
+  const { eng } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  await eng.advance(eng.records()[0])
+  assert.equal(s.btcPaid.length, 1)
+  assert.equal(s.lockPaidAt, 0, 'lock_paid ran with no BTC paid yet')
+  assert.equal(s.locks[0].paid, true)
+  assert.equal(eng.records()[0].markedPaid, true)
+  assert.ok(s.calls.indexOf('lock_paid') < s.calls.lastIndexOf('lock_preimage'))
+})
+
+test('buying with BTC on a lock: a library that cannot mark the lock paid never sees the BTC paid', async () => {
+  const s = standIn(); s.lockPaidRefuse = true
+  const { eng } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(s.btcPaid.length, 0, 'nothing paid')
+  assert.equal(r.state, 'returned')
+  assert.match(r.why, /could not mark its lock paid/)
+})
+
+// RV84 F3 (#832): a purchase resumed long after it was found ready is checked again before paying.
+test('buying with BTC on a lock: resumed an hour after it was found ready, a lock no longer held is not paid for', async () => {
+  const s = standIn()
+  const { eng, step } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  // The wallet's Lightning does not answer: its payment reads as pending, nothing goes out.
+  s.payStatusSays = { state: 'pending' }
+  let r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'sent'); assert.equal(s.btcPaid.length, 0)
+  // An hour later the service answers (no payment), and the lock is past what the payment needs.
+  step(3600_000); s.payStatusSays = null
+  s.lockNever = 'the lock under hash … must start home in 900 s, and the other side can take 32400 s'
+  r = await eng.advance(eng.records()[0])
+  assert.equal(s.btcPaid.length, 0, 'not paid')
+  assert.equal(r.state, 'returned')
+})
+
+test('buying with BTC through the operator: resumed after a pause, a leaf not held any more sends the trade back to waiting, unpaid', async () => {
+  const s = standIn()
+  const { eng, step } = await bought(s)
+  s.receives[H].state = 'issuing'
+  await eng.advance(eng.records()[0])
+  s.ready = true; s.payStatusSays = { state: 'pending' }
+  let r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'sent'); assert.equal(r.leg, 'htlc-1'); assert.equal(s.btcPaid.length, 0)
+  step(600_000); s.payStatusSays = null; s.ready = false
+  r = await eng.advance(eng.records()[0])
+  assert.equal(s.btcPaid.length, 0, 'not paid')
+  assert.equal(r.state, 'waiting')
+  s.ready = true
+  r = await eng.advance(eng.records()[0])
+  assert.equal(s.btcPaid.length, 1, 'paid once it is held again')
 })
