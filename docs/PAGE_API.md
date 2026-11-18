@@ -76,7 +76,8 @@ anything is registered or broadcast:
 
 Events, in developer mode only:
 
-- `leafArrived`: `{ leaf_id, asset, value, kind }` for each coin a sync took from the mailbox.
+- `leafArrived`: `{ leaf_id, asset, value, kind }` for each coin a read of the mailbox took in,
+  and each a catch-up took in for a payment to a code another wallet of the phrase handed out.
 - `leafSyncDue`: `{ now, next_sync_at, why }` when the library's schedule falls due.
 
 ## Example

@@ -119,7 +119,9 @@ once to the end (`RESTORED_KEY`; a page closed mid-restore restores at its next 
 as open only after it, so the page works on the chain alone meanwhile. The worker answers one
 command at a time, so in user mode on the page's operator the wallet's own work never stands in
 a person's way: the pass that syncs at open, care, boards and the mailbox read (every ten seconds,
-`watchMailbox`) wait for twenty quiet seconds after the page opens or a person asks anything (a
+`watchMailbox`; in developer mode at every tick while a request it handed out waits,
+`requestWaits`; a coin the read refuses as paid to another store's code has the page sync once the
+library's catch-up is due, `catchUpWait`) wait for twenty quiet seconds after the page opens or a person asks anything (a
 trade's quote asks the library several times); the bond's watch, which holds the worker for most
 of a minute, runs at most hourly after two quiet minutes; and the Trade tab follows a trade older
 than two minutes every half minute, and never while a price is asked. The one exception is the channel read (`watchChannels`): with a

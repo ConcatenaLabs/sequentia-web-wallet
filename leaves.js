@@ -734,6 +734,76 @@ export function syncDecision (schedule, held, moving) {
   return { sync: false, why: null, held: at }
 }
 
+// Whether a receive request this wallet handed out still waits, however long ago: the codes the
+// payment name leaves with the name service are such requests, handed out to payers up to a day
+// after they were made. While one waits, developer mode reads the mailbox at every tick (user mode
+// reads it every few seconds anyway), so a payment to the name or to an older code shows within a
+// tick instead of at the library's next daily sync. The extension's src/leaf-schedule.js holds the
+// same rule.
+export function requestWaits (schedule) {
+  if (!schedule || typeof schedule.now !== 'number') return false
+  return (schedule.receive_requests || []).some((r) => r.state === 'waiting' && r.owner !== 'restored' &&
+    (typeof r.lapses_at !== 'number' || r.lapses_at > schedule.now))
+}
+
+// A coin paid to a receive request that another store of the phrase handed out (the phrase open in
+// another browser, in Ambra or in the extension, or a store this browser held before: the payment
+// name's stock keeps their codes until each is handed out or lapses). Every store of the phrase
+// reads it in its mailbox, and each one that never drew its owner nonce refuses it there; only the
+// library's catch-up between stores of one phrase, a step of `sync` that runs at most every ten
+// minutes, takes it in. So such a refusal is the sign that a payment to this wallet waits for a
+// catch-up: the page syncs once the catch-up is due (at once, unless it saw one run within the last
+// CATCH_UP_EVERY_MS), and again every CATCH_UP_POLL_MS until a sync's catch-up has run to its end,
+// for at most CATCH_UP_WAIT_MS. The library's words for the refusal: "a coin for owner nonce …,
+// which this wallet never drew". The extension's src/leaf-schedule.js holds the same rules.
+export const NEVER_DREW = /which this wallet never drew/
+export const CATCH_UP_POLL_MS = 30_000
+export const CATCH_UP_WAIT_MS = 15 * 60_000
+// The library's CATCH_UP_EVERY (600 median-time seconds), less a minute for the median time's
+// steps: before then a sync runs no catch-up.
+export const CATCH_UP_EVERY_MS = 9 * 60_000
+export function phraseCoinRefused (mailbox) {
+  return listOf(mailbox && mailbox.refused).some((r) => r && NEVER_DREW.test(String(r.reason || '')))
+}
+// Whether a sync's catch-up ran to its end: its `caught_up` is the catch-up's answer (null when
+// none ran), `{ error }` when it failed, and carries `more` when its time ran out before the end.
+export function caughtUpWhole (syncResult) {
+  const c = syncResult && syncResult.caught_up
+  return !!c && typeof c === 'object' && c.error == null && !c.more
+}
+// The page's wait for a catch-up (`w`: null, or { since, syncedAt }), after a mailbox read
+// (`mailbox`) or a sync (`sync`, the library's answer) at `now` (ms): a phrase coin refused starts
+// it (keeping the start of one under way), a sync whose catch-up ran whole ends it, and it ends by
+// itself CATCH_UP_WAIT_MS after it started. A sync's own mailbox step runs before its catch-up, so
+// a coin that sync refused and took in at once leaves nothing to wait for.
+export function catchUpWait (w, { mailbox = null, sync = null, now }) {
+  if (w && now - w.since >= CATCH_UP_WAIT_MS) w = null
+  if (sync) {
+    if (caughtUpWhole(sync)) return null
+    if (phraseCoinRefused(sync.mailbox)) return { since: w ? w.since : now, syncedAt: now }
+    return w ? { ...w, syncedAt: now } : null
+  }
+  if (phraseCoinRefused(mailbox)) return w || { since: now, syncedAt: null }
+  return w
+}
+// When the page last saw a sync run a catch-up to its end (`ranAt`, ms), after a sync's answer at
+// `now`: the library's ten minutes count from there. One cut short (`more`) reads on at the next
+// sync, so it is due at once again; one that failed is tried again at the next sync too.
+export function catchUpRanAt (ranAt, syncResult, now) {
+  const c = syncResult && syncResult.caught_up
+  if (!c || typeof c !== 'object') return ranAt
+  return c.more || c.error != null ? null : now
+}
+// How long until the page syncs for the catch-up the wait holds (0: now; Infinity: no wait): once
+// the library's catch-up is due again (CATCH_UP_EVERY_MS after `ranAt`, the last one seen run), and
+// every CATCH_UP_POLL_MS after the last sync, until the wait ends.
+export function catchUpSyncIn (w, now, ranAt = null) {
+  if (!w || now - w.since >= CATCH_UP_WAIT_MS) return Infinity
+  const due = ranAt == null ? 0 : ranAt + CATCH_UP_EVERY_MS - now
+  const poll = w.syncedAt == null ? 0 : w.syncedAt + CATCH_UP_POLL_MS - now
+  return Math.max(0, due, poll)
+}
+
 // When the page next asks: the schedule's own time when it is near, otherwise the
 // next tick. A schedule that is due is due now.
 export function nextAskMs (schedule, tickMs = TICK_MS) {
@@ -1041,7 +1111,33 @@ export function mountLeaves (ctx, root, settingsRoot) {
     emit('codeUsed', { owner: kept.owner })
   }
   // Every sync's answer: what arrived, what the catch-up changed, and whether the operator answered.
-  const synced = (v) => { arrivals(v && v.mailbox); caughtUp(v && v.caught_up); noteUnreachable(unreachableOf(v, 'sync')) }
+  const synced = (v) => {
+    const waited = !!S.catchUp
+    arrivals(v && v.mailbox)
+    caughtUp(v && v.caught_up)
+    S.catchUpRanAt = catchUpRanAt(S.catchUpRanAt, v, now())
+    noteCatchUp({ sync: v || {} })
+    // What the catch-up took in for a payment the page waited on is said as an arrival, as a mailbox's.
+    const c = v && v.caught_up
+    if (waited && c && typeof c === 'object' && !c.error) {
+      for (const r of listOf(c.restored)) {
+        S.arrived = [...(S.arrived || []).slice(-49), { asset: String(r.asset || '').toLowerCase(), at: now() }]
+        emit('leafArrived', { leaf_id: r.leaf_id, asset: r.asset, value: String(r.value ?? ''), kind: r.kind })
+      }
+    }
+    noteUnreachable(unreachableOf(v, 'sync'))
+  }
+  // A coin paid to a code another store of the phrase handed out waits for the library's catch-up
+  // (catchUpWait): a mailbox read that refused one has the page sync once the catch-up is due.
+  function noteCatchUp (x) {
+    const was = S.catchUp
+    S.catchUp = catchUpWait(S.catchUp, { ...x, now: now() })
+    if (!was && S.catchUp && S.open) {
+      const ms = catchUpSyncIn(S.catchUp, now(), S.catchUpRanAt)
+      log(`[leaves] a payment to a code another wallet of the phrase handed out: the catch-up that takes it in runs in ${Math.round(ms / 1000)} s`)
+      clearTimeout(S.timer); S.timer = setTimeout(autoSync, ms)
+    }
+  }
   function noteUnreachable (u) {
     if (u === undefined) return
     const was = !!S.unreachable
@@ -1058,6 +1154,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.arrived = [...(S.arrived || []).slice(-49), { asset: String(c.asset || '').toLowerCase(), at: now() }]
       emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind })
     }
+    noteCatchUp({ mailbox: mb })
   }
   // What the sync's catch-up with the phrase's other wallets changed (the library runs one at most
   // every ten minutes): coins they made taken in, coins of this store they gave up dropped.
@@ -1185,8 +1282,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try {
           const v = await run('mailbox')
           if (now() - t0 > 2000) log(`[leaves] mailbox read: ${now() - t0} ms`)
+          // Its refusals too: one of a coin paid to another store's code has the page sync for it.
+          arrivals(v)
           if (v && ((v.accepted || []).length || (v.pending || []).length)) {
-            arrivals(v)
             try { await reload() } catch {}
           }
         } catch {} finally { S.busy = false }
@@ -1839,7 +1937,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
   function schedule () {
     clearTimeout(S.timer)
     if (!S.open) return
-    const wait = inFlight(S.coins, S.participations) ? Math.min(tickMs, 30_000) : nextAskMs(S.schedule, tickMs)
+    const wait = Math.min(inFlight(S.coins, S.participations) ? Math.min(tickMs, 30_000) : nextAskMs(S.schedule, tickMs),
+      catchUpSyncIn(S.catchUp, now(), S.catchUpRanAt))
     S.nextAsk = now() + wait
     S.timer = setTimeout(autoSync, wait)
     render()
@@ -1891,13 +1990,18 @@ export function mountLeaves (ctx, root, settingsRoot) {
       const s = await run('schedule')
       readSchedule(s, t)
       if (s.due) emit('leafSyncDue', { now: s.now, next_sync_at: s.next_sync_at, why: s.why ?? null })
-      const d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
+      let d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
       S.heldFor = d.held
+      // A payment to a code another store of the phrase handed out, which only the catch-up takes in:
+      // a sync without the watchtowers' step, which nobody waits on.
+      S.catchUp = catchUpWait(S.catchUp, { now: now() })
+      const forCatchUp = !d.sync && catchUpSyncIn(S.catchUp, now(), S.catchUpRanAt) === 0
+      if (forCatchUp) d = { ...d, sync: true }
       if (S.asked) { S.timer = setTimeout(autoSync, 2000); return }
       if (d.sync && !S.busy) {
         S.busy = true; render()
         try {
-          const v = await run('sync')
+          const v = await run('sync', forCatchUp ? { deposits: false } : {})
           synced(v)
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
@@ -1908,7 +2012,16 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try { await careIfDue() } finally { S.busy = false }
       } else if (!S.busy) {
         S.busy = true
-        try { await claimsIfDue() } finally { S.busy = false }
+        try {
+          // Developer mode has no mailbox watch: while a request it handed out waits (the receive
+          // code, the name's stocked codes), the mailbox is read at every tick.
+          if (dev() && requestWaits(s)) {
+            const v = await run('mailbox')
+            arrivals(v)
+            if (v && ((v.accepted || []).length || (v.pending || []).length)) { try { await reload() } catch {} }
+          }
+          await claimsIfDue()
+        } finally { S.busy = false }
       }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
     schedule()
