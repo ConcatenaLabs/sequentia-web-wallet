@@ -569,7 +569,7 @@ test('a trade whose coins are held settles in a minute or two at anchor depth 0'
   const T0 = 1_000_000
   const r = { source: 'leaf-maker', state: 'sent', sentAt: T0, swapState: 'done' }
   assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.received)
-  assert.equal(tradeStateWord(r, T0 + 3 * 60000), 'Received, settling (3 min)')
+  assert.equal(tradeStateWord(r, T0 + 3 * 60000), 'Received, settling')
   assert.equal(tradeStateWord(r, T0 + 30000), USER_WORDS.received)
 })
 

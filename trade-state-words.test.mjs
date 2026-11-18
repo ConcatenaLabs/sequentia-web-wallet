@@ -2,7 +2,7 @@
 // brings is held, with the minutes it has waited; and none of the words default mode never says.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { tradeStateWord, heldAlready, USER_WORDS, forbiddenIn } from './user-trade.js'
+import { tradeStateWord, heldAlready, USER_WORDS, forbiddenIn, SLOW_SETTLE_MIN } from './user-trade.js'
 import { btcTrades, MAKER_LOCK_MS } from './user-trade-btc.js'
 import { settleMinutesOf, SETTLE_LATE_MS } from './default-arca.js'
 
@@ -17,7 +17,7 @@ test('a purchase with BTC: keep the page open, then paying, then received and se
   Object.assign(r, { preimage: 'ab', receiveState: 'received' })
   assert.ok(heldAlready(r))
   assert.equal(tradeStateWord(r, T0 + 26 * min + 30000), USER_WORDS.received)
-  assert.equal(tradeStateWord(r, T0 + 76 * min), 'Received, settling (50 min)')
+  assert.equal(tradeStateWord(r, T0 + 76 * min), USER_WORDS.receivedSlow, 'no count; late after ten minutes')
   r.state = 'settled'
   assert.equal(tradeStateWord(r, T0 + 90 * min), 'Settled')
 })
@@ -126,4 +126,33 @@ test('a trade settling in a round states the wait for the round, then that it ta
   // A settle started before the wait was recorded says no time at all.
   const old = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0, settle: { coins: ['c'], participations: ['p'] }, settleState: ['pending'] }
   assert.equal(tradeStateWord(old, T0 + 2.5 * min), 'Received, settling')
+  // ... and still says it takes longer, by the SLOW_SETTLE_MIN rule (#819).
+  assert.equal(tradeStateWord(old, T0 + SLOW_SETTLE_MIN * min + 1), USER_WORDS.receivedSlow)
+})
+
+test('before its round starts a received trade counts no minutes, and says it takes longer in time (#820)', () => {
+  const r = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0 }
+  assert.equal(tradeStateWord(r, T0 + 3 * min), 'Received, settling')
+  assert.equal(tradeStateWord(r, T0 + 9 * min), 'Received, settling')
+  assert.equal(tradeStateWord(r, T0 + SLOW_SETTLE_MIN * min + 1), USER_WORDS.receivedSlow)
+})
+
+test('between the stated wait and the late mark the row no longer says within about (#821)', () => {
+  const r = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0, settle: { coins: ['c'], participations: ['p'] },
+    settleState: ['pending'], settleMin: 6, settleSince: T0 }
+  assert.equal(tradeStateWord(r, T0 + 6 * min), USER_WORDS.receivedWithin(6), 'at the stated wait')
+  assert.equal(tradeStateWord(r, T0 + 7 * min), USER_WORDS.receivedDue)
+  assert.equal(tradeStateWord(r, T0 + 6 * min + SETTLE_LATE_MS + 1), USER_WORDS.receivedSlow)
+  assert.deepEqual(forbiddenIn(USER_WORDS.receivedDue), [])
+})
+
+test('a round the library no longer lists still counts as settling, with or without a stated wait', () => {
+  for (const st of [[null], [undefined], ['released', null]]) {
+    const old = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0, settle: { coins: ['c'], participations: ['p'] }, settleState: st }
+    assert.equal(tradeStateWord(old, T0 + SLOW_SETTLE_MIN * min + 1), USER_WORDS.receivedSlow, 'no wait stated, ' + JSON.stringify(st))
+    const r = { ...old, settleMin: 6, settleSince: T0 }
+    assert.equal(tradeStateWord(r, T0 + 3 * min), USER_WORDS.receivedWithin(6), 'stated wait, ' + JSON.stringify(st))
+    assert.equal(tradeStateWord(r, T0 + 7 * min), USER_WORDS.receivedDue, 'past the wait, ' + JSON.stringify(st))
+    assert.equal(tradeStateWord(r, T0 + 6 * min + SETTLE_LATE_MS + 1), USER_WORDS.receivedSlow, 'late, ' + JSON.stringify(st))
+  }
 })

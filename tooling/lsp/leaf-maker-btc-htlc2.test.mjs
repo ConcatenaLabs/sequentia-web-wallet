@@ -163,6 +163,34 @@ test('a lock nobody paid for comes back from its timeout: the swap is void and t
   } finally { done() }
 })
 
+test('a lock taken home on the chain by its refund (record locked, coin exited) ends the swap (#833)', async () => {
+  const st = fresh(); const { d, f, done } = await desk(st)
+  try {
+    await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    st.locks = [{ role: 'payer', hash: HASH, state: 'locked', leaf_id: 'L1', coin_state: 'exiting' }]
+    await d.tick()
+    assert.equal(d.swaps.get(f.swap).state, 'locked', 'an exit not yet final ends nothing')
+    st.locks = [{ role: 'payer', hash: HASH, state: 'locked', leaf_id: 'L1', coin_state: 'exited' }]
+    await d.tick()
+    assert.equal(d.swaps.get(f.swap).state, 'void')
+    await new Promise((r) => setTimeout(r, 50))
+    assert.ok(st.cancelled, 'the Bitcoin invoice is cancelled')
+    assert.ok(!st.calls.some(([n]) => n === 'coins'), 'no coin listing read for a lock straight to the wallet')
+  } finally { done() }
+})
+
+test('a paid lock taken home on the chain is done, as one refunded out of round', async () => {
+  const st = fresh(); const { d, f, done } = await desk(st)
+  try {
+    await d.route('POST', '/v1/btc/lock', { swap: f.swap, invoice: 'lnsqrt-x', lock: request() })
+    st.paid = true
+    st.locks = [{ role: 'payer', hash: HASH, state: 'locked', leaf_id: 'L1', coin_state: 'exited' }]
+    await d.tick()
+    assert.equal(d.swaps.get(f.swap).state, 'done')
+    assert.ok(!st.cancelled, 'a paid invoice is not cancelled')
+  } finally { done() }
+})
+
 test('without a lock request the desk pays through the operator as before', async () => {
   const st = fresh(); const { d, f, done } = await desk(st)
   try {

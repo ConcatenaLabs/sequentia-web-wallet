@@ -412,6 +412,21 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
   let turn = Promise.resolve(), stepping = false
   const inTurn = (fn) => { const t = turn.then(fn, fn); turn = t.catch(() => {}); return t }
 
+  // The leaves the library has taken home on the chain (coin `exited`: a refund, or an exit, final),
+  // read only when a swap of the desk's holds a lock. A lock taken home that way never reaches a
+  // `returned` payment record, which only an out-of-round refund sets.
+  async function homeLeaves (open) {
+    const home = new Set()
+    // Only a lock through the operator (htlc-1) needs this: a lock straight to the wallet (htlc-2)
+    // carries its coin's state in the library's lock record.
+    if (!open.some((s) => s.give_asset !== 'BTC' && s.state === 'locked' && s.leg !== 'htlc-2')) return home
+    // The brief listing: the full one reads every coin's record and chain facts and holds the
+    // library (one command at a time) for seconds ahead of every firm offer.
+    const coins = await cmd('coins', { brief: true }).catch((e) => { log('btc coins:', e.message); return [] })
+    for (const c of Array.isArray(coins) ? coins : []) if (c && c.state === 'exited' && c.leaf_id) home.add(c.leaf_id)
+    return home
+  }
+
   // Each open swap, moved on as far as it goes now (the caller syncs the library first).
   const tick = () => inTurn(tickNow)
   async function tickNow () {
@@ -421,6 +436,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     if (!open.length) return
     const receives = (await cmd('lightning_receives')) || {}
     const pays = (await cmd('lightning_payments')) || {}
+    const home = await homeLeaves(open)
     const straight = open.some((s) => s.leg === 'htlc-2' || s.state === 'locking') ? await cmd('locks').catch(() => null) : null
     const payerLocks = new Map((Array.isArray(straight) ? straight : []).filter((l) => l && l.role === 'payer').map((l) => [l.hash, l]))
     // A swap 'locking' on the operator's leg is offered again only with the locks read too.
@@ -429,7 +445,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       const was = s.state
       // A lock straight to the wallet is followed only from the library's record of it: unread now,
       // it waits for the next pass rather than be taken for a payment that never began.
-      try { await (s.leg !== 'htlc-2' ? step(s, receives[s.hash] || {}, pays[s.hash] || {}, { locksRead, lock: payerLocks.get(s.hash) || null }) : straight ? stepStraight(s, payerLocks.get(s.hash) || null, pays[s.hash] || null) : null) } catch (e) { log('btc swap', s.swap, e.message) }
+      try { await (s.leg !== 'htlc-2' ? step(s, receives[s.hash] || {}, pays[s.hash] || {}, { locksRead, lock: payerLocks.get(s.hash) || null }, home) : straight ? stepStraight(s, payerLocks.get(s.hash) || null, pays[s.hash] || null) : null) } catch (e) { log('btc swap', s.swap, e.message) }
       // A swap settled: the trade it made goes to the market's trade log.
       if (was !== 'done' && s.state === 'done' && onTrade) onTrade(s)
     }
@@ -484,12 +500,18 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       try { await postOp('/v1/lock_preimage', { payment_hash: s.hash, preimage: inv.preimage }); s.posted = true } catch (e) { log('post lock preimage:', e.message) }
     }
     if (l && l.state === 'claimed') { s.state = 'done'; log('btc done', s.swap, 'the wallet claimed the lock'); return }
-    if (l && l.state === 'refunded') {
+    // The lock back with the desk: refunded out of round (`refunded`), or taken home on the chain by
+    // its refund, final, which leaves the record `locked` beside its coin `exited` (#833). With the
+    // invoice unpaid the desk never revealed the preimage, so nobody but the desk could have taken it.
+    // Paid, it is done: on this leg the wallet held the preimage and could claim for itself, unlike
+    // a lock through the operator (htlc-1), which step() keeps standing with an error instead.
+    const back = l && (l.state === 'refunded' || (l.state === 'locked' && l.coin_state === 'exited'))
+    if (back) {
       if (paid) { s.state = 'done'; log('btc done', s.swap, 'paid, and the lock came back to the desk from its timeout unclaimed') } else { s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'the lock came back to the desk from its timeout, unpaid') }
     }
   }
 
-  async function step (s, rcv, pay, straight = { locksRead: false, lock: null }) {
+  async function step (s, rcv, pay, straight = { locksRead: false, lock: null }, home = new Set()) {
     if (s.give_asset === 'BTC') {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
       if (s.state === 'offered') {
@@ -555,7 +577,18 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       return
     }
     if (pay.state === 'returned') { s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'returned'); return }
+    // The lock's coin came home on the chain (its refund final), not paid: the lock stands no more,
+    // and the Bitcoin invoice is closed, as for a lock returned out of round.
     const inv = await node.invoiceStatus(s.hash)
+    if (pay.state !== 'paid' && pay.htlc_leaf_id && home.has(pay.htlc_leaf_id)) {
+      // Paid in BTC while its lock went home: the desk owes the buyer the asset. Never voided (that
+      // would hide a sale it owes); kept as it stands, for its operator to see, and said once.
+      if (inv.status === 'paid') {
+        if (!s.home_but_paid) { s.home_but_paid = true; log('btc swap', s.swap, 'ERROR: its lock was taken home on the chain but its Bitcoin invoice is paid: the buyer is owed the asset') }
+        return
+      }
+      s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'void: its lock was taken home on the chain'); return
+    }
     if (inv.status === 'paid' && inv.preimage) {
       if (pay.state !== 'paid') await cmd('lightning_post_preimage', { hash: s.hash, preimage: inv.preimage }).catch((e) => log('post preimage:', e.message))
       if (pay.state === 'paid') { s.state = 'done'; log('btc done', s.swap) }

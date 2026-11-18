@@ -241,3 +241,43 @@ test('a pass past half its bound takes its turns sooner', async () => {
   await upkeepSync(cmd, () => {}, null, { sliceMs: 1000, boundMs: 100_000, clock: () => t, lateTurnMs: 2000 })
   assert.deepEqual(turns, [['sync', undefined], ['sync', undefined], ['sync', 2000], ['sync', 2000], ['deposits', 2000]])
 })
+
+// The library's sync answers an operator it cannot reach without throwing (`unreachable`,
+// `answering: false`); such a pass has read nothing and ends no pass (web #801).
+test('a sync answering unreachable ends no pass, and the standing says the operator cannot be reached', async () => {
+  const { syncLoop, passRecord, syncStanding, syncUnreachable } = await import('./leaf-maker.mjs')
+  assert.equal(syncUnreachable({ answering: true, unreachable: null }), null)
+  assert.equal(syncUnreachable({ cost_by_step: {} }), null)
+  assert.equal(syncUnreachable({ answering: false }), 'the operator did not answer')
+  assert.equal(syncUnreachable({ answering: false, unreachable: 'cannot reach the server' }), 'cannot reach the server')
+  let t = 1_000_000
+  const since = t
+  const rec = passRecord(() => t, since)
+  const logged = []
+  const run = syncLoop(async (name) => (name === 'sync' ? { answering: false, unreachable: 'cannot reach the server' } : []), (...a) => logged.push(a.join(' ')), null,
+    { sliceMs: 1000, record: rec, clock: () => t })
+  for (let k = 0; k < 40; k++) { await run(); t += 20_000 }
+  assert.equal(rec.now().passes, 0)
+  const st = syncStanding(rec.now(), 600_000, since, t)
+  assert.equal(st.ok, false, 'not ok after 800 s of an operator out of reach')
+  assert.match(st.why, /the operator cannot be reached \(cannot reach the server\)/)
+  assert.ok(logged.some((l) => l.startsWith('sync pass failed')))
+  // An operator that answers again ends a pass, and the reason is forgotten.
+  const ok = syncLoop(async (name) => (name === 'sync' ? { answering: true, unreachable: null } : []), () => {}, null, { sliceMs: 0, record: rec, clock: () => t })
+  await ok()
+  assert.equal(rec.now().passes, 1)
+  assert.equal('unreachable' in rec.now(), false)
+  assert.deepEqual(syncStanding(rec.now(), 600_000, since, t), { ok: true })
+})
+
+// A refused completion's new offer is a new firm price: it is made only while the sync stands (web #802).
+test('the re-offer after a refused completion checks the maker\'s standing as the firm routes do', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('./leaf-maker.mjs', import.meta.url), 'utf8')
+  const acc = src.slice(src.indexOf("if (p === '/v1/accept') {"))
+  const at = acc.indexOf('const t = await firmTerms(')
+  assert.ok(at > 0)
+  const before = acc.slice(0, at)
+  assert.match(before.slice(before.lastIndexOf('if (f) {')), /const stopped = stoppedNow\(\)\s+if \(stopped\) throw new Error\('stopped: ' \+ stopped\)/, 'stopped before any firm terms or swap_offer')
+  assert.ok(acc.indexOf('swap_offer') > at)
+})
