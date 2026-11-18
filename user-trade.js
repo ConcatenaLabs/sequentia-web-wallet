@@ -430,7 +430,9 @@ export function tradeStateWord (r, now = Date.now()) {
   // Received, its settling still waiting with the network after ten minutes (the network had no
   // room for it yet): said so, the coins being the wallet's all along.
   const held = heldAlready(r)
-  const settling = held && (r.settleState || []).some((x) => x && x !== 'released')
+  // A round the library no longer lists (null, as settleStep records it) is still waited on, so it
+  // counts as settling; a trade's rounds are through only when every one is released.
+  const settling = held && (r.settleState || []).some((x) => x !== 'released')
   // Settling in a round: the wait stated (settleMin, set when the settle started), and past it by
   // SETTLE_LATE_MS that it takes longer, as a payment settling first says it. A minutes count since
   // the trade was sent would read as a promise it is not.
@@ -444,7 +446,7 @@ export function tradeStateWord (r, now = Date.now()) {
   // recorded. No count of minutes (it would read as a promise); after SLOW_SETTLE_MIN since it was
   // sent, that it takes longer, unless every round is already through.
   if (held) {
-    const through = (r.settleState || []).length > 0 && !settling
+    const through = (r.settleState || []).length > 0 && r.settleState.every((x) => x === 'released')
     return m >= SLOW_SETTLE_MIN && !through ? W.receivedSlow : W.received
   }
   const word = r.source === 'btc-gateway' && r.dir === 'sell' ? W.btcOnItsWay

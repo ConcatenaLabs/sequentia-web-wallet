@@ -145,3 +145,14 @@ test('between the stated wait and the late mark the row no longer says within ab
   assert.equal(tradeStateWord(r, T0 + 6 * min + SETTLE_LATE_MS + 1), USER_WORDS.receivedSlow)
   assert.deepEqual(forbiddenIn(USER_WORDS.receivedDue), [])
 })
+
+test('a round the library no longer lists still counts as settling, with or without a stated wait', () => {
+  for (const st of [[null], [undefined], ['released', null]]) {
+    const old = { source: 'leaf-maker', swapState: 'done', state: 'sent', at: T0, sentAt: T0, settle: { coins: ['c'], participations: ['p'] }, settleState: st }
+    assert.equal(tradeStateWord(old, T0 + SLOW_SETTLE_MIN * min + 1), USER_WORDS.receivedSlow, 'no wait stated, ' + JSON.stringify(st))
+    const r = { ...old, settleMin: 6, settleSince: T0 }
+    assert.equal(tradeStateWord(r, T0 + 3 * min), USER_WORDS.receivedWithin(6), 'stated wait, ' + JSON.stringify(st))
+    assert.equal(tradeStateWord(r, T0 + 7 * min), USER_WORDS.receivedDue, 'past the wait, ' + JSON.stringify(st))
+    assert.equal(tradeStateWord(r, T0 + 6 * min + SETTLE_LATE_MS + 1), USER_WORDS.receivedSlow, 'late, ' + JSON.stringify(st))
+  }
+})
