@@ -814,7 +814,9 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   was entered, and a price being asked for, is kept when the wallet goes to the background, is
   locked or is reopened.
 - Statuses, the same in Your trades, in History and on every surface: "Sending…", **Sent**,
-  "Received, settling", then **Settled**. If a trade is undone: "Returned: nothing traded." or
+  "Received, settling", then **Settled**. The settling line states the wait for the operator's
+  round ("within about 6 min"), then "about to finish" once that wait has passed, then that it
+  is taking longer than usual; before the round has started it counts no minutes. If a trade is undone: "Returned: nothing traded." or
   "Returned: nothing traded. Fees of <fees> were paid." A purchase with BTC whose other side's
   offer ran out while it waited, and was not renewed, says "Returned: nothing traded. The other
   side's offer ran out while the trade waited." A trade that settled and then never completed on
