@@ -78,6 +78,7 @@ function library ({ rate = 1, request = null, lastCatchUpAgo = null } = {}) {
       }
       case 'balance': return { arca: {} }
       case 'care': return { claims: [], planned: [], cancelled: [] }
+      case 'claims': return L.claimsAnswer || []
       case 'info': return {}
       default: return []
     }
@@ -344,4 +345,34 @@ test('stopped while a catch-up wait has a schedule read or a sync under way: not
     // The fake library's sync reads the mailbox inside it, as the real one does.
     assert.deepEqual(more, held === 'sync' ? ['sync', 'mailbox'] : ['schedule'], 'only the call under way, nothing after it')
   }
+}))
+
+// Stopped means stopped on every path, not only the scheduler's: what is under way at the stop
+// ends, and nothing it would have started next asks the library (KR79).
+async function stopWith (held, { claimsAnswer = null, wait = 400, step = 250 } = {}) {
+  const { L, api } = await opened(false)
+  if (claimsAnswer) L.claimsAnswer = claimsAnswer
+  L.hold = held
+  for (let i = 0; i < wait && !L.release; i++) await advance(step, step)
+  assert.ok(L.release, `a ${held} is under way`)
+  api.stop()
+  const n = L.calls.length
+  L.release()
+  await advance(3 * 60_000)
+  const more = L.calls.slice(n).map((c) => c.command)
+  console.log(`stopped with a ${held} under way: ${more.length} call(s) after it returned: ${more.join(', ')}`)
+  return more
+}
+test('stopped while the mailbox watch reads: that read only, and the watch does not come back', timed(async () => {
+  assert.deepEqual(await stopWith('mailbox'), ['mailbox'])
+}))
+test('stopped: the library is asked nothing more, whatever asks (care\'s claims and bond, a vested claim\'s upkeep)', timed(async () => {
+  const { L, api } = await opened(false)
+  api.stop()
+  const n = L.calls.length
+  for (const cmd of ['claims', 'care', 'watch_bond', 'info']) {
+    await assert.rejects(api.own(cmd, {}), (e) => e.kind === 'stopped', cmd + ' is refused')
+  }
+  await advance(3 * 60_000)
+  assert.deepEqual(L.calls.slice(n).map((c) => c.command), [], 'nothing reached the library')
 }))

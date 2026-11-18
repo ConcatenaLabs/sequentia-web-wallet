@@ -1009,6 +1009,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // The wallet read again after an action, once nothing else runs: a command asked meanwhile (the
   // next step of what a person asked) goes first, and the read waits for the next free moment.
   function reloadAfter (ms = 0) {
+    if (S.stopped) return
     S.reloadDue = true
     clearTimeout(S.reloadTimer)
     S.reloadTimer = setTimeout(async () => {
@@ -1035,7 +1036,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return { own, waited: took - own, said: known ? waitedWords(own, took - own, behind) : '' }
   }
 
+  // A stopped wallet asks the library nothing more: a call under way at the stop ends as it would,
+  // and whatever its answer would have started next is refused here (care's claims and bond, a
+  // claim's upkeep, the mailbox watch's next read).
   async function run (command, args) {
+    if (S.stopped) throw Object.assign(new Error('the wallet is stopped'), { kind: 'stopped' })
     const t0 = now()
     const behind = (S.inflight || []).map((x) => x.command)
     const me = { command }
@@ -1124,7 +1129,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // The balance read again soon, once nothing else is running: a trade that brought coins in.
   function refreshSoon () {
-    if (!S.open) return
+    if (!S.open || S.stopped) return
     clearTimeout(S.refreshTimer)
     S.refreshTimer = setTimeout(async () => {
       if (S.busy) { refreshSoon(); return }
@@ -1325,7 +1330,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.open = false
       S.joinError = e
       log('[leaves] could not open' + (auto ? ' (tried again in two minutes)' : '') + ': ' + ((e && e.message) || e))
-      if (auto) S.joinTimer = setTimeout(() => { start().catch(() => {}) }, JOIN_RETRY_MS)
+      if (auto && !S.stopped) S.joinTimer = setTimeout(() => { start().catch(() => {}) }, JOIN_RETRY_MS)
       render()
       throw e
     } finally { S.starting = false }
@@ -1390,7 +1395,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // never while the wallet is busy or a person waits on it; what it takes shows at once.
   function watchMailbox () {
     clearTimeout(S.mailTimer)
-    if (!S.open || dev() || !pinned()) return
+    if (!S.open || S.stopped || dev() || !pinned()) return
     S.mailTimer = setTimeout(async () => {
       // Not while a person waits on the wallet, nor between the steps of what they asked (a
       // trade's quote asks the library several times, with the network in between).
@@ -1561,10 +1566,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   function upkeepSoon (ms) {
     clearTimeout(S.upkeepTimer)
+    if (S.stopped) return
     S.upkeepTimer = setTimeout(() => { upkeep().catch(() => {}) }, ms)
   }
   async function upkeep () {
-    if (!S.open) return
+    if (!S.open || S.stopped) return
     // At the wallet's opening the rule is asked at once: a payment that arrived while it was closed
     // goes into the next round now, not after the timer's first turn.
     if (!S.needTimer) needSoon(0)
