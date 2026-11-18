@@ -316,7 +316,7 @@ library has taken it. A payment to a code another wallet of the same phrase hand
 phrase open in the extension or Ambra too: the payment name hands out codes of each) is taken in
 by the library's catch-up between the phrase's wallets: the page keeps waiting for it and runs
 that catch-up whenever the library allows one (once every ten minutes of the chain's median time)
-until it holds the coin. Where the operator makes channel leaves, a payment between two such
+until it holds the coin, for at most six catch-ups or a day. Where the operator makes channel leaves, a payment between two such
 wallets arrives at once instead (below, Payments that arrive at once). The logic is `default-arca.js`; the Leaves tab is developer mode's view of the same
 coins. User mode carries no developer vocabulary: the xpub,
 the Settings backend card, the staker key, the order book's unblinded/blinded switch (shown in

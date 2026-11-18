@@ -106,6 +106,12 @@ async function opened (developer, { lib = {}, store = null, L = null } = {}) {
   const events = []
   const w = {}
   w.postMessage = (m) => {
+    // `L.hold`: the next call of that command answers only when the test calls `L.release()`.
+    if (L.hold && m.args && m.args.command === L.hold) {
+      L.hold = null
+      L.release = () => { L.release = null; w.postMessage(m) }
+      return
+    }
     let value
     if (m.op === 'exists') value = true
     else if (m.op === 'open') value = {}
@@ -318,5 +324,24 @@ test('idle with nothing paid: no sync beyond the open one', timed(async () => {
     console.log(`${developer ? 'developer' : 'user'} mode, idle 30 min: ${L.syncs.length} sync(s), ${(L.mailboxReads - reads0) / 30} mailbox read(s) a minute`)
     assert.equal(L.syncs.length, 1)
     api.stop()
+  }
+}))
+
+test('stopped while a catch-up wait has a schedule read or a sync under way: nothing more is asked', timed(async () => {
+  for (const held of ['schedule', 'sync']) {
+    const { L, api } = await opened(false)
+    await advance(11 * 60_000)
+    L.hold = held
+    L.pay('coin-stop-' + held)
+    for (let i = 0; i < 400 && !L.release; i++) await advance(250)
+    assert.ok(L.release, `a ${held} is under way`)
+    api.stop()
+    const n = L.calls.length
+    L.release()
+    await advance(3 * 60_000)
+    const more = L.calls.slice(n).map((c) => c.command)
+    console.log(`stopped with a ${held} under way: ${more.length} call(s) after it returned: ${more.join(', ')}`)
+    // The fake library's sync reads the mailbox inside it, as the real one does.
+    assert.deepEqual(more, held === 'sync' ? ['sync', 'mailbox'] : ['schedule'], 'only the call under way, nothing after it')
   }
 }))

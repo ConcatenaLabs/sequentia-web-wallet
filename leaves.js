@@ -2053,7 +2053,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- the schedule: sync by itself while the page is open ----
   function schedule () {
     clearTimeout(S.timer)
-    if (!S.open) return
+    // Stopped is for good: nothing that returns after the stop (a sync, a schedule read) asks again.
+    if (!S.open || S.stopped) return
     catchUpLoad()
     // Never sooner than ASK_FLOOR_MS: whatever the wait's answer, the page never asks back to back.
     const wait = Math.max(ASK_FLOOR_MS, Math.min(inFlight(S.coins, S.participations) ? Math.min(tickMs, 30_000) : nextAskMs(S.schedule, tickMs),
@@ -2063,6 +2064,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   function askIn (ms) {
     clearTimeout(S.timer)
+    if (S.stopped) return
     S.nextAsk = now() + ms
     S.timer = setTimeout(autoSync, ms)
   }
@@ -2111,7 +2113,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   async function autoSync () {
-    if (!S.open || S.asking) return
+    if (!S.open || S.stopped || S.asking) return
     // A person waiting on the wallet (a trade's quote, a payment) comes first: a sync started
     // between the steps of what they asked held the next step for its whole length.
     if (S.busy || S.asked || reviewing()) { askIn(S.asked || reviewing() ? 2000 : 5000); return }
@@ -2120,6 +2122,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try {
       const t = now()
       const s = await run('schedule')
+      if (S.stopped) return
       readSchedule(s, t)
       if (s.due) emit('leafSyncDue', { now: s.now, next_sync_at: s.next_sync_at, why: s.why ?? null })
       let d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
@@ -2138,8 +2141,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
           const v = await run('sync', forCatchUp ? { deposits: false } : {})
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
+        if (S.stopped) { S.busy = false; return }
         try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
-        try { await careIfDue() } finally { S.busy = false }
+        try { if (!S.stopped) await careIfDue() } finally { S.busy = false }
       } else if (!S.busy && careDue(S.careAt, now(), careEvery)) {
         S.busy = true
         try { await careIfDue() } finally { S.busy = false }
@@ -2150,6 +2154,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           // code, the name's stocked codes), the mailbox is read at every tick.
           if (dev() && requestWaits(s)) {
             const v = await run('mailbox')
+            if (S.stopped) return
             arrivals(v)
             if (v && ((v.accepted || []).length || (v.pending || []).length)) { try { await reload() } catch {} }
           }
