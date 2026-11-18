@@ -120,8 +120,11 @@ as open only after it, so the page works on the chain alone meanwhile. The worke
 command at a time, so in user mode on the page's operator the wallet's own work never stands in
 a person's way: the pass that syncs at open, care, boards and the mailbox read (every ten seconds,
 `watchMailbox`; in developer mode at every tick while a request it handed out waits,
-`requestWaits`; a coin the read refuses as paid to another store's code has the page sync once the
-library's catch-up is due, `catchUpWait`) wait for twenty quiet seconds after the page opens or a person asks anything (a
+`requestWaits`, one with no lapse date for the 27 days every request lasts; a coin the read
+refuses as paid to another store's code is kept and synced for once the library's catch-up is open
+by its median time, a minute apart at least whatever was thrown, until held, for at most six
+catch-ups or a day, `catchUpWait`, the extension's `src/leaf-schedule.js` rules; such a refusal
+only brings the next ask forward, and every sync's answer is read once, in `run`, by `synced`) wait for twenty quiet seconds after the page opens or a person asks anything (a
 trade's quote asks the library several times); the bond's watch, which holds the worker for most
 of a minute, runs at most hourly after two quiet minutes; and the Trade tab follows a trade older
 than two minutes every half minute, and never while a price is asked. The one exception is the channel read (`watchChannels`): with a
