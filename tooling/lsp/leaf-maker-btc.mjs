@@ -145,8 +145,10 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
   // succeeded says something is not there: an unreadable library proves nothing.
   const heldUnder = async (hash) => {
     try {
-      const locks = await cmd('locks')
-      const pays = await cmd('lightning_payments')
+      // A taker waits on these, so they go first: behind the library's hold after a quote, each
+      // would wait its turn (seconds) before the lock.
+      const locks = await cmd('locks', {}, true)
+      const pays = await cmd('lightning_payments', {}, true)
       if (!Array.isArray(locks) || !pays || typeof pays !== 'object') return { ok: false }
       return { ok: true, lock: locks.find((l) => l && l.role === 'payer' && l.hash === hash) || null, pay: pays[hash] || null }
     } catch (e) { log('btc: the library could not be read:', e.message); return { ok: false } }
