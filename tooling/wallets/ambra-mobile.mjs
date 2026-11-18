@@ -17,6 +17,10 @@ const TABS = ['Balance', 'Send', 'Receive', 'Swap', 'History', 'More']
 const D = process.env.RB_DEBUG ? (s) => console.error(new Date().toISOString(), s) : () => {}
 const num = (s) => { const m = String(s).replace(/,/g, '').match(/[0-9]+(\.[0-9]+)?/); return m ? Number(m[0]) : 0 }
 
+// Swap scrolled to `re` from wherever it was left (the keyboard a picker's search opened closed
+// first): down the page first, then back up.
+const seek = async (re, tries = 8) => { await u.hideKeyboard(); return (await u.scrollTo(re, tries)) || u.scrollTo(re, tries, 'down') }
+
 export class AmbraMobile {
   constructor ({ name } = {}) { Object.assign(this, { name: name || 'mobile', kind: 'mobile' }) }
 
@@ -220,7 +224,7 @@ export class AmbraMobile {
     await this.tab('Swap')
     await u.waitFor(/^You pay: /, 60000)
     const pickSide = async (label, tk) => {
-      const n = await u.scrollTo(new RegExp('^' + label + ': '), 8)
+      const n = await seek(new RegExp('^' + label + ': '), 8)
       if (!n) throw new Error('no ' + label)
       if (n.say === `${label}: ${tk}`) return
       await u.tapNode(n); await sleep(1200)
@@ -253,29 +257,29 @@ export class AmbraMobile {
         await u.tapNode(o); await sleep(1500); lastY = null
       }
       // The sheet closed; the page may have scrolled the side out of view.
-      if (!(await u.scrollTo(`${label}: ${tk}`, 8))) { const txt = u.textOf(await u.screen()).replace(/\n/g, ' | ').slice(0, 300); if (await u.find('Scrim')) await u.back(); throw new Error('no ' + tk + ' in ' + label + ' (screen: ' + txt + ')') }
+      if (!(await seek(`${label}: ${tk}`, 8))) { const txt = u.textOf(await u.screen()).replace(/\n/g, ' | ').slice(0, 300); if (await u.find('Scrim')) await u.back(); throw new Error('no ' + tk + ' in ' + label + ' (screen: ' + txt + ')') }
     }
     // A side cannot take the asset the other side holds: when the pay asset is the one received
     // now, You receive is set first.
-    const cur = await u.scrollTo(/^You receive: /, 8)
+    const cur = await seek(/^You receive: /, 8)
     if (cur && cur.say === `You receive: ${pay}`) {
       // The sides' own swap button, as a person turns a trade around.
-      const sw = await u.scrollTo('Swap You pay and You receive', 8)
+      const sw = await seek('Swap You pay and You receive', 8)
       if (sw) { await u.tapNode(sw); await sleep(1500) }
     }
     await pickSide('You pay', pay); await pickSide('You receive', get)
-    await u.scrollTo(/^You receive: /, 8)
+    await seek(/^You receive: /, 8)
     if (!(await u.find(`You receive: ${get}`))) await pickSide('You receive', get)
     return true
   }
 
   async trade (pay, get, amount, ms = 1200000) {
     await this.sides(pay, get)
-    const pf = await u.scrollTo(/^You pay: /, 8)
+    const pf = await seek(/^You pay: /, 8)
     const f = (await u.screen()).filter((n) => n.edit && Math.abs(n.y - pf.y) < 40)[0]
     await u.clearField(f); await u.tapAt(Math.max(f.x, 700), f.y); await u.type(String(amount)); await u.hideKeyboard(); await sleep(1500)
     const before = new Set((await this.tradeRows()).map((r) => r.say))
-    const rv = await u.scrollTo('Review', 8)
+    const rv = await seek('Review', 8)
     if (!rv) throw new Error('no Review on Swap')
     const t0 = Date.now()
     await u.tapNode(rv)
@@ -283,7 +287,7 @@ export class AmbraMobile {
     while (Date.now() - t0 < 300000) {
       await u.swipeUp(); await sleep(300)
       const ns = await u.screen()
-      if (ns.some((n) => n.clickable && n.say === 'Trade')) { ticket = ns.filter((n) => /^(You pay|You receive|Fees|Price)\n/.test(n.say) || /Goes through|within about \d+ min/i.test(n.say)).map((n) => n.say.replace(/\n/g, ' ')).join(' | '); break }
+      if (ns.some((n) => n.clickable && n.say === 'Trade')) { ticket = ns.filter((n) => /^(You pay|You receive|Fees|Price)\n/.test(n.say) || (/Goes through/i.test(n.say) && !/ → /.test(n.say))).map((n) => n.say.replace(/\n/g, ' ')).join(' | '); break }
       const err = ns.find((n) => /Nothing has moved|try again|can't|cannot|Nobody|not enough|ready in|No offer|no price/i.test(n.say) && !n.clickable)
       if (err) { refused = err.say.replace(/\n/g, ' '); break }
       await sleep(1000)
