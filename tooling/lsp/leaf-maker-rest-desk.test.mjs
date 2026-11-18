@@ -7,7 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { writeFileSync } from 'node:fs'
-import { restDesk } from './leaf-maker-rest.mjs'
+import { restDesk, restUpkeep } from './leaf-maker-rest.mjs'
 
 const G = 'aa'.repeat(32), W = 'bb'.repeat(32)
 
@@ -78,5 +78,73 @@ test('a repriced level is rested again at what its cancelled coin came back with
     assert.deepEqual(rests, [String(28625282061 - 2368), String(Math.floor(28625282061 * 1.3))])
     await desk.tick()
     assert.equal(calls.filter((c) => c[0] === 'order_rest').length, 2, 'the cancelled coin is used once')
+  } finally { globalThis.fetch = realFetch }
+})
+
+// arca #908: an order the operator holds at its depth limit could be neither filled, cancelled nor
+// refreshed. The desk refreshes an order before it gets there, and never asks for a cancel its depth
+// no longer allows.
+test('the upkeep refreshes an order near the depth limit or out of fills, and cancels only what it can', () => {
+  const at = (hops, state = 'resting') => ({ state, hops })
+  const o = { depthLimit: 5, refreshKeeps: true }
+  assert.equal(restUpkeep(at(0), o), null, 'a fresh order is left alone')
+  assert.equal(restUpkeep(at(2), o), null, 'three short of the limit')
+  assert.equal(restUpkeep(at(3), o), 'refresh', 'within two reassignments of the limit')
+  assert.equal(restUpkeep(at(1, 'exhausted'), o), 'refresh', 'its four fills used')
+  assert.equal(restUpkeep(at(3), { ...o, wantsCancel: true }), 'cancel', 'a cancel it can take goes first')
+  assert.equal(restUpkeep(at(5), { ...o, wantsCancel: true }), 'refresh', 'at the limit: refreshed, cancelled on a later pass')
+  assert.equal(restUpkeep(at(4), { ...o, wantsCancel: true }), 'cancel', 'one short of the limit: the cancel lands at it')
+  assert.equal(restUpkeep(at(5), { depthLimit: 5, refreshKeeps: false, wantsCancel: true }), null, 'an older operator: nothing it can do')
+  assert.equal(restUpkeep(at(1, 'exhausted'), { depthLimit: 5 }), 'cancel', 'an older operator: an exhausted order is cancelled')
+  assert.equal(restUpkeep(at(0, 'refreshing'), o), null)
+  assert.equal(restUpkeep(at(3), { refreshKeeps: true }), null, 'no depth limit published')
+})
+
+test('a pass refreshes the order stuck at the limit instead of asking for a cancel, and leaves a refresh under way alone', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rest-desk-'))
+  const now = Math.floor(Date.now() / 1000)
+  writeFileSync(join(dir, 'rest-orders.json'), JSON.stringify([
+    { slot: `${G}:${W}#0`, rested_by: 'r0', order: 'o0', offer_id: 'f0', amount: '1000', rate_num: '1100', rate_den: '1000', at: now },
+    { slot: `${G}:${W}#1`, rested_by: 'r1', order: 'o1', offer_id: 'f1', amount: '1000', rate_num: '1100', rate_den: '1000', at: now },
+  ]))
+  const calls = []
+  const logs = []
+  let lostNow = false
+  const terms = { asset_b: W, rate_num: '1100', rate_den: '1000', min_lot: '10', expiry: 9e9 }
+  const cmd = async (name, args) => {
+    calls.push([name, args])
+    if (name === 'info') return { server: 'http://op', operator: 'k', server_info: { depth_limit: 5, fills: { refresh_keeps_order: true } } }
+    if (name === 'order_resting') {
+      // o0 is the testnet's: five reassignments deep, off the feed's price; o1's refresh is under way,
+      // its old coin read as cancelled by the operator until the new one is published
+      // the library's answer: its own orders as its store holds them, and the operator's view of those asked
+      return { orders: [{ rested_by: 'r0', order: 'o0', state: 'published' }, { rested_by: 'r1', order: 'o1', state: lostNow ? 'lost' : 'refreshing' }],
+        others: [{ order: 'o0', state: 'resting', hops: 5, whole_only: true, value: '1000', coin: 'c0', asset: G, terms },
+          lostNow ? { order: 'o1', state: 'lost', exit_coin: 'c1old', hops: 0, value: '1000', coin: 'c1', asset: G, terms }
+            : { order: 'o1', state: 'cancelled', hops: 1, value: '1000', coin: 'c1', asset: G, terms }] }
+    }
+    if (name === 'order_refresh_resting_quote') return { coin: 'c0', fee: { amount: '0' }, gives: ['c0'] }
+    if (name === 'order_refresh_resting') return { state: 'refreshing' }
+    return {}
+  }
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => new Response(JSON.stringify(String(url).includes('/ticker') ? { best_bid: 0 } : { offers: [] }))
+  try {
+    const cfg = { store_dir: dir, prices: { spread_bps: 0 }, rest: { relay: 'http://relay', interval_seconds: 0, guard_bps: 10, reprice_bps: 300, max_new_per_pass: 0,
+      pairs: [{ give: G, want: W, price: true, ladder: { levels: 2, step_bps: 25, growth: 1, first: '1000' } }] } }
+    const rates = new Map([[`${G}:${W}`, { rate_num: '1000', rate_den: '1000' }]])
+    const desk = await restDesk({ cfg, cmd, log: (...a) => logs.push(a.join(' ')), liveRates: () => rates, spendable: async () => new Map([[G, 10n ** 9n]]) })
+    await desk.tick()
+    const names = calls.map((c) => c[0])
+    assert.ok(!names.includes('order_cancel_resting'), 'no cancel of an order at the limit')
+    assert.deepEqual(calls.filter((c) => c[0] === 'order_refresh_resting').map((c) => c[1].order), ['o0'], 'o0 refreshed, as quoted')
+    assert.equal(calls.find((c) => c[0] === 'order_refresh_resting')[1].shown.coin, 'c0')
+    assert.equal(desk.records().find((r) => r.order === 'o0').done, undefined, 'o0 is still the level\'s order')
+    assert.equal(desk.records().find((r) => r.order === 'o1').done, undefined, 'o1, mid-refresh, is not taken for cancelled')
+    // o1's refresh round then leaves the chain for good: the operator reads it lost and names its exit coin
+    lostNow = true
+    await desk.tick()
+    assert.equal(desk.records().find((r) => r.order === 'o1').done, 'lost', 'a lost order ends its level, rested again later')
+    assert.ok(logs.some((l) => l.includes('lost') && l.includes('c1old')), 'the exit coin is logged')
   } finally { globalThis.fetch = realFetch }
 })
