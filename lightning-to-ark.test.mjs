@@ -281,6 +281,21 @@ test('assets: a payment refused before it left gives its receive up', async () =
   assert.equal(W.paid.length, 2)
 })
 
+test('assets: a coins read refused between the receive and the payment gives the receive up', async () => {
+  // A wallet whose leaf wallet answers through another document (the extension's) can refuse a read.
+  const W = page({ channels: [usdxCh()] })
+  let reads = 0
+  W.deps.leaves.coins = () => { reads++; if (reads === 2) throw Object.assign(new Error('the wallet was busy'), { kind: 'busy' }); return W.coins }
+  await W.m.tickAssets()
+  assert.equal(W.paid.length, 0, 'nothing paid')
+  assert.ok(W.logs.some((l) => /not moved now: the wallet was busy/.test(l)))
+  assert.equal(W.m.moving(USDX), null, 'nothing counted as moving for a receive never paid')
+  // A later pass asks again.
+  W.advance(RETRY_MS + 1)
+  await W.m.tickAssets()
+  assert.equal(W.paid.length, 1)
+})
+
 test('assets: a payment the service stopped waiting for is still on its way', async () => {
   const W = page({ channels: [usdxCh()], payImpl: async () => { throw new Error('the request timed out') } })
   W.payState = 'pending'
