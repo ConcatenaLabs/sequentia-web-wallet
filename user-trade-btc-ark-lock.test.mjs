@@ -8,6 +8,8 @@ import { createEngine, tradeStateWord, USER_WORDS } from './user-trade.js'
 import { needSeconds, PAY_SETTLE_MS } from './user-trade-btc.js'
 import { mountBtcArk, arkConfig } from './btc-ark.js'
 import { decodeBolt11 } from './bolt11.js'
+import { hostedBtcLightning } from './btc-lightning.js'
+import { payStatusOf } from './tooling/lsp/pay-final.mjs'
 
 const X = 'aa'.repeat(32)
 // A Bitcoin testnet invoice of 20,000 sat, its hash the trade's.
@@ -279,3 +281,42 @@ test('a trade that comes back from waiting after its lock was marked paid clears
   assert.equal(r.state, 'returned'); assert.equal(s.locks[0].paid, false)
   assert.equal(s.payTried, 1)
 })
+
+// The hosted node through its own adapter (btc-lightning.js), its LSP answering /node/pay-status as
+// lsp-server.mjs does (pay-final.mjs over the node's listsendpays parts): parts it cannot read are
+// answered 502, and the page keeps the lock's mark until they read as a final failure.
+function hostedLsp (node) {
+  return {
+    pay: async () => { node.pays = (node.pays || 0) + 1; node.parts = node.afterPay; throw Object.assign(new Error('pay: no route'), { status: 502 }) },
+    payStatus: async () => {
+      const st = payStatusOf(node.parts, { endedAt: node.endedAt, nowS: node.nowS })
+      if (st.state === 'unknown') throw Object.assign(new Error('pay-status: the node\'s payments could not be read'), { status: 502 })
+      return { ok: true, state: st.state, preimage: st.preimage }
+    },
+    payQuote: async () => ({ route_found: true, fee_msat: 1001, delay: 52 }),
+  }
+}
+
+for (const [name, parts] of [['an unknown status', [{ status: 'mystery', created_at: 1000 }]], ['a null part', [null]],
+  ['a part with no time', [{ status: 'failed' }]], ['no list', { payments: 'unreadable' }]]) {
+  test(`on the hosted node: parts it cannot read (${name}) keep the mark; read as a final failure, the trade comes back`, async () => {
+    const s = standIn()
+    const node = { parts: [], afterPay: parts, endedAt: null, nowS: 2000 }
+    s.btc = hostedBtcLightning({ lsp: hostedLsp(node), nodeKey: async () => 'btc:02aa', connect: async () => {}, spendable: async () => 5000000,
+      decode: decodeBolt11, store: s.store, tag: () => 't', now: () => 1_000_000 })
+    s.makerInvoice = LNTB; s.makerWant = '20000'; s.delay = 52
+    const { eng } = await bought(s, {}, '30000')
+    s.locks[0].state = 'held'; s.lockFinal = true
+    let r = await eng.advance(eng.records()[0])
+    assert.equal(node.pays, 1)
+    assert.notEqual(r.state, 'returned'); assert.equal(s.locks[0].paid, true, 'the mark stays')
+    assert.ok(!s.calls.includes('lock_unpaid'))
+    r = await eng.advance(eng.records()[0])
+    assert.notEqual(r.state, 'returned'); assert.equal(s.locks[0].paid, true)
+    // The node's parts read: every one failed, the last call ended after them.
+    node.parts = [{ status: 'failed', created_at: 1000 }]; node.endedAt = 1001
+    r = await eng.advance(eng.records()[0])
+    assert.equal(r.state, 'returned'); assert.equal(s.locks[0].paid, false)
+    assert.equal(node.pays, 1, 'paid once')
+  })
+}

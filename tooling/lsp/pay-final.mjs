@@ -12,24 +12,43 @@
 // Past CLN pay's retry_for (45 s), with room.
 export const PAY_SETTLE_S = 120
 
-// How the payments `payments` (listsendpays parts) stand: { state, preimage }. 'complete' once any
-// part completed; 'pending' while any part is in flight or a /node/pay for the hash runs here
-// (`active`); 'none' when there is no part; 'failed' once every part failed and the payment is over:
-// the last /node/pay for it ended here after its newest part (`endedAt`, seconds), or that part is
-// PAY_SETTLE_S old (`nowS`).
+// The parts `payments` (listsendpays' `payments`) as this module reads them, or null when they
+// cannot be read: not a list, or a part that is not an object with a known status (`pending`,
+// `complete`, `failed`) and a creation time, or a complete part without its preimage. An empty list
+// is read: no payment.
+export function readParts (payments) {
+  if (!Array.isArray(payments)) return null
+  for (const p of payments) {
+    if (!p || typeof p !== 'object' || !['pending', 'complete', 'failed'].includes(p.status)) return null
+    const t = p.created_at
+    if (typeof t !== 'number' || !Number.isFinite(t) || t <= 0) return null
+    if (p.status === 'complete' && !/^[0-9a-f]{64}$/i.test(String(p.payment_preimage || ''))) return null
+  }
+  return payments
+}
+
+// How the payments `payments` stand: { state, preimage }. 'unknown' when they cannot be read
+// (readParts), which says nothing of the payment; 'complete' once any part completed; 'pending'
+// while any part is in flight or a /node/pay for the hash runs here (`active`); 'none' when there
+// is no part; 'failed' once every part failed and the payment is over: the last /node/pay for it
+// ended here after its newest part (`endedAt`, seconds), or that part is PAY_SETTLE_S old (`nowS`).
 export function payStatusOf (payments, { active = false, endedAt = null, nowS = Date.now() / 1000, settleS = PAY_SETTLE_S } = {}) {
-  const ps = Array.isArray(payments) ? payments : []
-  const done = ps.find((p) => p && p.status === 'complete')
-  if (done) return { state: 'complete', preimage: done.payment_preimage || null }
-  if (active || ps.some((p) => p && p.status === 'pending')) return { state: 'pending', preimage: null }
+  const ps = readParts(payments)
+  if (!ps) return { state: 'unknown', preimage: null }
+  const done = ps.find((p) => p.status === 'complete')
+  if (done) return { state: 'complete', preimage: done.payment_preimage }
+  if (active || ps.some((p) => p.status === 'pending')) return { state: 'pending', preimage: null }
   if (!ps.length) return { state: 'none', preimage: null }
-  const newest = Math.max(...ps.map((p) => Number(p && p.created_at) || 0))
+  const newest = Math.max(...ps.map((p) => p.created_at))
   if (endedAt != null && endedAt >= newest) return { state: 'failed', preimage: null }
   return { state: nowS - newest >= settleS ? 'failed' : 'pending', preimage: null }
 }
 
 // Whether a payment under the hash went out (a part in flight or completed): a /node/pay whose `pay`
 // call did not answer then follows it instead of trying another way, and never answers it declined.
+// null when the parts cannot be read (readParts): whether it went out is not known.
 export function wentOut (payments) {
-  return (Array.isArray(payments) ? payments : []).some((p) => p && (p.status === 'pending' || p.status === 'complete'))
+  const ps = readParts(payments)
+  if (!ps) return null
+  return ps.some((p) => p.status === 'pending' || p.status === 'complete')
 }

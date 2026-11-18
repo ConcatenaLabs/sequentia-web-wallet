@@ -4973,7 +4973,9 @@ const server = http.createServer(async (req, res) => {
         let sent;
         try { sent = await lnrpcKw('listsendpays', [`payment_hash=${decHash || wantHash}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS); }
         catch (e) { return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))}; its payments could not be read: ${scrubDetail(String((e && e.message) || e))}` }); }
-        if (wentOut(sent && sent.payments)) {
+        const out = wentOut(sent && sent.payments);
+        if (out === null) return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))}; its payments could not be read` });
+        if (out) {
           const st = payStatusOf(sent.payments, { active: true });
           return send(res, 200, { ok: true, paid: st.state === 'complete', pending: st.state !== 'complete', preimage: st.preimage, via: 'in-flight' });
         }
@@ -5031,7 +5033,9 @@ const server = http.createServer(async (req, res) => {
       try {
         const sp = await lnrpcKw('listsendpays', [`payment_hash=${H}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
         const run = PAY_RUNS.get(`${nodeKey}:${H}`) || { active: 0, endedAt: null };
-        const st = payStatusOf((sp && sp.payments) || [], { active: run.active > 0, endedAt: run.endedAt });
+        const st = payStatusOf(sp && sp.payments, { active: run.active > 0, endedAt: run.endedAt });
+        // Parts it cannot read say nothing of the payment: answered as not read, never as an end.
+        if (st.state === 'unknown') return send(res, 502, { ok: false, error: 'pay-status: the node\'s payments could not be read' });
         return send(res, 200, { ok: true, state: st.state, preimage: st.preimage });
       } catch (e) { return send(res, 502, { ok: false, error: `pay-status: ${scrubDetail(String((e && e.message) || e))}` }); }
     }
