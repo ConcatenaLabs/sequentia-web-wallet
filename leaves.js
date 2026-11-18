@@ -132,6 +132,7 @@ export const BALANCE_KEY = 'swk.leaves.balance'      // + '.' + tag: the library
 export const PLACES_KEY = 'swk.leaves.places'        // + '.' + tag: the library's last coin_places, with that balance
 export const VESTING_KEY = 'swk.leaves.vesting'      // + '.' + tag: what vests later, as `claims` last listed it
 export const HOME_KEY = 'swk.leaves.home'            // + '.' + tag: the coins a person sent home, and when
+export const CATCH_UP_KEY = 'swk.leaves.catchUp'     // + '.' + tag: the wait for another wallet's coins, and the library's catch-up time
 // A receive code is shown again while it has at least this long before it lapses.
 export const CODE_MARGIN_S = 86_400
 
@@ -208,6 +209,8 @@ export const COMPOSER_READS = new Set(['address', 'balance', 'coins', 'record', 
 export const BOND_WATCH_EVERY_MS = 3600_000
 export const BOND_QUIET_MS = 120_000
 export const TICK_MS = 60_000
+// The least time between two asks of the schedule, whatever is waiting.
+export const ASK_FLOOR_MS = 1000
 // How often `care` runs at most, after a sync or a tick of the schedule.
 export const CARE_EVERY_MS = 10 * 60_000
 // A payment through a release: how often the wallet syncs while it waits for the round
@@ -734,6 +737,144 @@ export function syncDecision (schedule, held, moving) {
   return { sync: false, why: null, held: at }
 }
 
+// Whether a receive request this wallet handed out still waits, however long ago: the codes the
+// wallet's payment name leaves with the name service are such requests, handed out to payers up to
+// a day after they were made. While one waits, the page reads the mailbox at every tick in developer
+// mode (user mode reads it every few seconds anyway), so a payment to the name or to an older
+// code shows within a tick instead of at the library's next daily sync. A request handed out
+// before requests carried a lapse date (`lapses_at` null) waits, for the library, until it is paid
+// or forgotten; here it counts as waiting for REQUEST_HOLDS_S from when it was handed out, the
+// life every request now has, and after that only the library's daily sync reads for it.
+export const REQUEST_HOLDS_S = 27 * 86400
+export function requestWaits (schedule) {
+  if (!schedule || typeof schedule.now !== 'number') return false
+  return (schedule.receive_requests || []).some((r) => {
+    if (!r || r.state !== 'waiting' || r.owner === 'restored') return false
+    const lapses = typeof r.lapses_at === 'number' ? r.lapses_at : typeof r.asked_at === 'number' ? r.asked_at + REQUEST_HOLDS_S : null
+    return lapses != null && lapses > schedule.now
+  })
+}
+
+// A coin paid to a receive request that another store of the phrase handed out (the phrase open in
+// another browser, in Ambra or in the extension, or a store this browser held before: the payment
+// name's stock keeps their codes until each is handed out or lapses). Every store of the phrase
+// reads it in its mailbox, and each one that never drew its owner nonce refuses it there, once;
+// only the library's catch-up between stores of one phrase, a step of `sync`, takes it in. The
+// library runs that step at most once every CATCH_UP_EVERY_S of median time (the chain's clock,
+// the `now` of every `schedule`), and the step reads only what the operator has settled, so a
+// catch-up run seconds after the payment can end whole without it (arca #904).
+//
+// So the page keeps the refused coins (`pending`, by leaf id) and syncs for them whenever the
+// library's catch-up is open again, until each one is held: a catch-up restored it, or the
+// wallet's coins list it. Between two attempts at least CATCH_UP_RETRY_MS pass, whatever the
+// library answered or threw, and CATCH_UP_SLOW_MS once CATCH_UP_SLOW_AFTER attempts in a row ran
+// no catch-up (the operator or the node not answering). The wait ends once every coin is held,
+// after CATCH_UP_TRIES whole catch-ups without one of them (about an hour of the library's
+// cadence: an operator settles a payment within seconds to minutes, so a coin six catch-ups do not
+// find is not coming soon, and the library's own catch-ups and daily sync still look for it), or
+// at the latest CATCH_UP_LAST_MS after it began. The library's words for the refusal: "a coin for
+// owner nonce …, which this wallet never drew". The extension's src/leaf-schedule.js holds the
+// same rules.
+export const NEVER_DREW = /which this wallet never drew/
+export const CATCH_UP_EVERY_S = 600
+export const CATCH_UP_RETRY_MS = 60_000
+export const CATCH_UP_SLOW_AFTER = 10
+export const CATCH_UP_SLOW_MS = 10 * 60_000
+export const CATCH_UP_TRIES = 6
+export const CATCH_UP_LAST_MS = 24 * 3600_000
+const listed = (v) => (Array.isArray(v) ? v : [])
+
+// The leaf ids of the coins a mailbox answer refused for that reason.
+export function phraseCoinsRefused (mailbox) {
+  return listed(mailbox && mailbox.refused).filter((r) => r && r.leaf_id && NEVER_DREW.test(String(r.reason || ''))).map((r) => String(r.leaf_id))
+}
+export function phraseCoinRefused (mailbox) {
+  return phraseCoinsRefused(mailbox).length > 0
+}
+// Whether a sync's catch-up ran to its end: its `caught_up` is the catch-up's answer (null when
+// none ran), `{ error }` when it failed, and carries `more` when its time ran out before the end.
+export function caughtUpWhole (syncResult) {
+  const c = syncResult && syncResult.caught_up
+  return !!c && typeof c === 'object' && c.error == null && !c.more
+}
+
+// When the library's catch-up is open next (`openAt`, median-time seconds; 0 open now; null not
+// known), after a sync's answer, `libNow` being the library's median time then (the answer's own
+// `schedule.now` first): a whole catch-up closes it for CATCH_UP_EVERY_S; one cut short (`more`) or
+// failed is open again at once (the library has not stamped it). A sync that ran none while the
+// time was not known says one ran within the last CATCH_UP_EVERY_S: half of it is taken, so a
+// wallet opened again soon after one runs neither a burst of syncs nor the whole wait.
+export function catchUpGate (openAt, syncResult, libNow) {
+  const s = syncResult && syncResult.schedule
+  const at = s && typeof s.now === 'number' ? s.now : libNow
+  const c = syncResult && syncResult.caught_up
+  if (c && typeof c === 'object') {
+    if (c.more || c.error != null) return 0
+    return typeof at === 'number' ? at + CATCH_UP_EVERY_S : openAt
+  }
+  if (openAt == null && typeof at === 'number') return at + CATCH_UP_EVERY_S / 2
+  return openAt
+}
+
+// The wait: null, or { since, pending: [leaf id], tries, nulls, attemptAt } (`tries`: whole
+// catch-ups since it began; `nulls`: attempts in a row that ran no catch-up; times in ms).
+const ended = (w, now) => !w || !w.pending.length || w.tries >= CATCH_UP_TRIES || now - w.since >= CATCH_UP_LAST_MS
+// A mailbox answer that refused coins of the phrase adds them (a second refusal keeps the start).
+export function catchUpWait (w, { mailbox = null, now }) {
+  if (w && ended(w, now)) w = null
+  const ids = phraseCoinsRefused(mailbox)
+  if (!ids.length) return w
+  const base = w || { since: now, pending: [], tries: 0, nulls: 0, attemptAt: null }
+  return { ...base, pending: [...new Set([...base.pending, ...ids])] }
+}
+// An attempt that threw (the schedule or the sync): it counts towards the cadence.
+export function catchUpAttempt (w, now) {
+  return w ? { ...w, attemptAt: now, nulls: w.nulls + 1 } : w
+}
+// The coins of `w` the wallet now holds, from `restored` entries or `coins` (a coin the store lists
+// in any state but the operator's word `pending`), as { wait, arrived: [{ leaf_id, asset, value,
+// kind }] }.
+function take (w, found, now) {
+  if (!w) return { wait: null, arrived: [] }
+  const arrived = []
+  const pending = []
+  for (const id of w.pending) {
+    const c = found.get(id)
+    if (c) arrived.push({ leaf_id: id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind || 'caught up' })
+    else pending.push(id)
+  }
+  const next = { ...w, pending }
+  return { wait: ended(next, now) ? null : next, arrived }
+}
+// After a sync: its own mailbox's refusals join the wait first (the sync's catch-up runs after its
+// mailbox step, so one sync can refuse a coin and restore it), then what its catch-up restored is
+// taken off, and the attempt is counted.
+export function catchUpAfterSync (w, { sync, now }) {
+  w = catchUpWait(w, { mailbox: sync && sync.mailbox, now })
+  if (!w) return { wait: null, arrived: [] }
+  const c = sync && sync.caught_up
+  const ran = !!c && typeof c === 'object'
+  const counted = { ...w, attemptAt: now, tries: w.tries + (caughtUpWhole(sync) ? 1 : 0), nulls: ran ? 0 : w.nulls + 1 }
+  const found = new Map(listed(ran ? c.restored : null).filter((r) => r && r.leaf_id).map((r) => [String(r.leaf_id), r]))
+  return take(counted, found, now)
+}
+// After the wallet's coins were read.
+export function catchUpHeld (w, coins, now) {
+  const found = new Map(listed(coins).filter((c) => c && c.leaf_id && c.state !== 'pending').map((c) => [String(c.leaf_id), c]))
+  return take(w, found, now)
+}
+// How long until the page syncs for the wait (0: now; Infinity: no wait): once the library's
+// catch-up is open (`openAt` against `libNow`, the library's median time as last read, counted at
+// one second a second; the host reads the schedule again at every tick and syncs only once it is
+// open), and once the cadence since the last attempt allows.
+export function catchUpSyncIn (w, { now, libNow = null, openAt = null }) {
+  if (ended(w, now)) return Infinity
+  const gap = w.nulls >= CATCH_UP_SLOW_AFTER ? CATCH_UP_SLOW_MS : CATCH_UP_RETRY_MS
+  const retry = w.attemptAt == null ? 0 : w.attemptAt + gap - now
+  const gate = openAt == null || typeof libNow !== 'number' ? 0 : (openAt - libNow) * 1000
+  return Math.max(0, retry, gate)
+}
+
 // When the page next asks: the schedule's own time when it is near, otherwise the
 // next tick. A schedule that is due is due now.
 export function nextAskMs (schedule, tickMs = TICK_MS) {
@@ -868,6 +1009,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // The wallet read again after an action, once nothing else runs: a command asked meanwhile (the
   // next step of what a person asked) goes first, and the read waits for the next free moment.
   function reloadAfter (ms = 0) {
+    if (S.stopped) return
     S.reloadDue = true
     clearTimeout(S.reloadTimer)
     S.reloadTimer = setTimeout(async () => {
@@ -894,7 +1036,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
     return { own, waited: took - own, said: known ? waitedWords(own, took - own, behind) : '' }
   }
 
+  // A stopped wallet asks the library nothing more: a call under way at the stop ends as it would,
+  // and whatever its answer would have started next is refused here (care's claims and bond, a
+  // claim's upkeep, the mailbox watch's next read).
   async function run (command, args) {
+    if (S.stopped) throw Object.assign(new Error('the wallet is stopped'), { kind: 'stopped' })
     const t0 = now()
     const behind = (S.inflight || []).map((x) => x.command)
     const me = { command }
@@ -902,6 +1048,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     let v
     try { v = await S.client.run(command, args) } catch (e) {
       S.inflight = (S.inflight || []).filter((x) => x !== me)
+      // Every sync is an attempt at the catch-up a wait holds, one that throws too.
+      if (command === 'sync') countAttempt()
       // A command refused after holding the wallet over ten seconds is named as one that answered
       // is: a refusal holds every command behind it just as long.
       const took = now() - t0
@@ -931,6 +1079,8 @@ export function mountLeaves (ctx, root, settingsRoot) {
     else if (v && v.start && v.start.recheck && v.start.recheck.error) S.startNote = v.start.recheck.error.message
     else S.startNote = null
     if (v && v.start && v.start.recheck && Array.isArray(v.start.recheck.changes) && v.start.recheck.changes.length) S.recheckNote = v.start.recheck
+    // Every sync's answer, whoever asked it, is read once here (synced).
+    if (command === 'sync') synced(v.result)
     return v.result
   }
 
@@ -964,6 +1114,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     if (gaveWay()) return
     const [c, p, s, r] = [await read('coins'), await read('participations'), await read('schedule'), await read('refusals')]
     S.coins = c || []; S.participations = p || []; S.refusals = r || []
+    if (S.catchUp) { const h = catchUpHeld(S.catchUp, S.coins, now()); setCatchUp(h.wait); caughtIn(h.arrived) }
     readSchedule(s, t)
     if (gaveWay()) return
     // The channels, as the wallet holds them (asking nothing). When those a payer can pay
@@ -978,7 +1129,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
 
   // The balance read again soon, once nothing else is running: a trade that brought coins in.
   function refreshSoon () {
-    if (!S.open) return
+    if (!S.open || S.stopped) return
     clearTimeout(S.refreshTimer)
     S.refreshTimer = setTimeout(async () => {
       if (S.busy) { refreshSoon(); return }
@@ -1041,7 +1192,74 @@ export function mountLeaves (ctx, root, settingsRoot) {
     emit('codeUsed', { owner: kept.owner })
   }
   // Every sync's answer: what arrived, what the catch-up changed, and whether the operator answered.
-  const synced = (v) => { arrivals(v && v.mailbox); caughtUp(v && v.caught_up); noteUnreachable(unreachableOf(v, 'sync')) }
+  // Every sync's answer, read once (`run` sends each here): what arrived, what the catch-up changed,
+  // the coins of the phrase it refused or restored (both, in one sync: its catch-up runs after its
+  // mailbox step), when the library's catch-up is open next, and whether the operator answered.
+  const synced = (v) => {
+    arrivals(v && v.mailbox, false)
+    caughtUp(v && v.caught_up)
+    catchUpLoad()
+    const openAt = catchUpGate(S.catchUpOpenAt, v, libNow())
+    if (openAt !== S.catchUpOpenAt) { S.catchUpOpenAt = openAt; catchUpKeep() }
+    const a = catchUpAfterSync(S.catchUp, { sync: v || {}, now: now() })
+    setCatchUp(a.wait)
+    caughtIn(a.arrived)
+    noteUnreachable(unreachableOf(v, 'sync'))
+  }
+  // A coin paid to a code another store of the phrase handed out waits for the library's catch-up
+  // (catchUpWait): the page keeps its leaf id and syncs once the catch-up is open, until the wallet
+  // holds it. A refusal read between two ticks only ever brings the next tick forward: the
+  // schedule's own sync, what is moving, care and claims keep their times.
+  function noteCatchUp (mailbox) {
+    catchUpLoad()
+    const before = S.catchUp ? S.catchUp.pending.length : 0
+    setCatchUp(catchUpWait(S.catchUp, { mailbox, now: now() }))
+    if ((S.catchUp ? S.catchUp.pending.length : 0) > before && S.open) {
+      const ms = catchUpSyncIn(S.catchUp, { now: now(), libNow: libNow(), openAt: S.catchUpOpenAt })
+      log(`[leaves] a payment to a code another wallet of the phrase handed out: the catch-up that takes it in runs in about ${Math.round(ms / 1000)} s`)
+      askEarlier(ms)
+    }
+  }
+  // A sync or a schedule read that threw: an attempt all the same, so the wait's cadence holds while
+  // the node does not answer.
+  function countAttempt () { catchUpLoad(); setCatchUp(catchUpAttempt(S.catchUp, now())) }
+  // The wait, replaced and kept; a wait that ends with coins still out says so.
+  function setCatchUp (w) {
+    const was = S.catchUp
+    S.catchUp = w
+    if (JSON.stringify(was) !== JSON.stringify(w)) catchUpKeep()
+    if (was && !w && was.pending.length) {
+      log(`[leaves] the wait for the catch-up ends with ${was.pending.length} coin(s) not found after ${was.tries} catch-up(s); the library's own catch-ups and daily sync still look for them`)
+    }
+  }
+  // The coins of the wait the wallet now holds: each said as an arrival, as a mailbox's coin is.
+  function caughtIn (arrived) {
+    for (const c of arrived) {
+      S.arrived = [...(S.arrived || []).slice(-49), { asset: String(c.asset || '').toLowerCase(), at: now() }]
+      emit('leafArrived', c)
+    }
+    if (arrived.length) log(`[leaves] ${arrived.length} coin(s) paid to another wallet's code taken in by the catch-up`)
+  }
+  // The library's median time now, from its last schedule read, counted on at one second a second.
+  function libNow () {
+    const n = S.schedule && S.schedule.now
+    return typeof n === 'number' ? n + Math.floor((now() - (S.scheduleAt || now())) / 1000) : null
+  }
+  // The wait and when the library's catch-up is open next, kept for each wallet: a page opened
+  // again goes on waiting for the coins it was refused, and one opened soon after a catch-up knows
+  // the library runs none yet.
+  function catchUpLoad () {
+    const k = tag()
+    if (S.catchUpTag === k) return
+    let v = null
+    try { v = JSON.parse(ctx.store.getItem(tagged(CATCH_UP_KEY, k)) || 'null') } catch {}
+    S.catchUpTag = k
+    S.catchUp = v && v.wait && Array.isArray(v.wait.pending) ? v.wait : null
+    S.catchUpOpenAt = v && typeof v.openAt === 'number' ? v.openAt : null
+  }
+  function catchUpKeep () {
+    try { ctx.store.setItem(tagged(CATCH_UP_KEY, S.catchUpTag || tag()), JSON.stringify({ wait: S.catchUp || null, openAt: S.catchUpOpenAt ?? null })) } catch {}
+  }
   function noteUnreachable (u) {
     if (u === undefined) return
     const was = !!S.unreachable
@@ -1053,11 +1271,13 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   // Every coin the library takes in, by whichever read (a sync, the mailbox watch, takeIn): the
   // page told, and the asset kept with when, for takeIn.
-  const arrivals = (mb) => {
+  // `refusals`: false for a sync's own mailbox, whose refusals synced() reads with its catch-up.
+  const arrivals = (mb, refusals = true) => {
     for (const c of listOf(mb && mb.accepted)) {
       S.arrived = [...(S.arrived || []).slice(-49), { asset: String(c.asset || '').toLowerCase(), at: now() }]
       emit('leafArrived', { leaf_id: c.leaf_id, asset: c.asset, value: String(c.value ?? ''), kind: c.kind })
     }
+    if (refusals) noteCatchUp(mb)
   }
   // What the sync's catch-up with the phrase's other wallets changed (the library runs one at most
   // every ten minutes): coins they made taken in, coins of this store they gave up dropped.
@@ -1110,7 +1330,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.open = false
       S.joinError = e
       log('[leaves] could not open' + (auto ? ' (tried again in two minutes)' : '') + ': ' + ((e && e.message) || e))
-      if (auto) S.joinTimer = setTimeout(() => { start().catch(() => {}) }, JOIN_RETRY_MS)
+      if (auto && !S.stopped) S.joinTimer = setTimeout(() => { start().catch(() => {}) }, JOIN_RETRY_MS)
       render()
       throw e
     } finally { S.starting = false }
@@ -1175,7 +1395,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // never while the wallet is busy or a person waits on it; what it takes shows at once.
   function watchMailbox () {
     clearTimeout(S.mailTimer)
-    if (!S.open || dev() || !pinned()) return
+    if (!S.open || S.stopped || dev() || !pinned()) return
     S.mailTimer = setTimeout(async () => {
       // Not while a person waits on the wallet, nor between the steps of what they asked (a
       // trade's quote asks the library several times, with the network in between).
@@ -1185,8 +1405,9 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try {
           const v = await run('mailbox')
           if (now() - t0 > 2000) log(`[leaves] mailbox read: ${now() - t0} ms`)
+          // Its refusals too: one of a coin paid to another store's code has the page sync for it.
+          arrivals(v)
           if (v && ((v.accepted || []).length || (v.pending || []).length)) {
-            arrivals(v)
             try { await reload() } catch {}
           }
         } catch {} finally { S.busy = false }
@@ -1241,7 +1462,6 @@ export function mountLeaves (ctx, root, settingsRoot) {
     try {
       const v = await run('sync')
       log(`[leaves] sync at open: ${now() - tSync} ms`)
-      synced(v)
       S.lastSync = { at: now(), value: v, auto: true, why: 'open' }
     } catch (e) { S.lastSync = { at: now(), error: e, auto: true, why: 'open' } }
     try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
@@ -1346,10 +1566,11 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
   function upkeepSoon (ms) {
     clearTimeout(S.upkeepTimer)
+    if (S.stopped) return
     S.upkeepTimer = setTimeout(() => { upkeep().catch(() => {}) }, ms)
   }
   async function upkeep () {
-    if (!S.open) return
+    if (!S.open || S.stopped) return
     // At the wallet's opening the rule is asked at once: a payment that arrived while it was closed
     // goes into the next round now, not after the timer's first turn.
     if (!S.needTimer) needSoon(0)
@@ -1560,7 +1781,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
         while (S.busy) await sleep(50)
         S.busy = true
         let coins = null
-        try { try { synced(await run('sync')) } catch {} coins = await run('coins') } catch {} finally { S.busy = false }
+        try { try { await run('sync') } catch {} coins = await run('coins') } catch {} finally { S.busy = false }
         if (Array.isArray(coins)) S.coins = coins
         const pending = (coins || []).filter((c) => c && c.asset === asset && c.kind === 'board' && c.state === 'pending')
         if (Array.isArray(coins) && !pending.length) break
@@ -1838,11 +2059,27 @@ export function mountLeaves (ctx, root, settingsRoot) {
   // ---- the schedule: sync by itself while the page is open ----
   function schedule () {
     clearTimeout(S.timer)
-    if (!S.open) return
-    const wait = inFlight(S.coins, S.participations) ? Math.min(tickMs, 30_000) : nextAskMs(S.schedule, tickMs)
-    S.nextAsk = now() + wait
-    S.timer = setTimeout(autoSync, wait)
+    // Stopped is for good: nothing that returns after the stop (a sync, a schedule read) asks again.
+    if (!S.open || S.stopped) return
+    catchUpLoad()
+    // Never sooner than ASK_FLOOR_MS: whatever the wait's answer, the page never asks back to back.
+    const wait = Math.max(ASK_FLOOR_MS, Math.min(inFlight(S.coins, S.participations) ? Math.min(tickMs, 30_000) : nextAskMs(S.schedule, tickMs),
+      catchUpSyncIn(S.catchUp, { now: now(), libNow: libNow(), openAt: S.catchUpOpenAt })))
+    askIn(wait)
     render()
+  }
+  function askIn (ms) {
+    clearTimeout(S.timer)
+    if (S.stopped) return
+    S.nextAsk = now() + ms
+    S.timer = setTimeout(autoSync, ms)
+  }
+  // The next ask no later than `ms` from now, never later than it was set: an ask under way sets
+  // its own next one when it ends.
+  function askEarlier (ms) {
+    if (!S.open || S.asking) return
+    if (S.timer && typeof S.nextAsk === 'number' && S.nextAsk <= now() + ms) return
+    askIn(Math.max(ASK_FLOOR_MS, ms))
   }
 
   // ---- a restore's history: a slice at a time, while nobody asks ----
@@ -1882,35 +2119,60 @@ export function mountLeaves (ctx, root, settingsRoot) {
   }
 
   async function autoSync () {
-    if (!S.open) return
+    if (!S.open || S.stopped || S.asking) return
     // A person waiting on the wallet (a trade's quote, a payment) comes first: a sync started
     // between the steps of what they asked held the next step for its whole length.
-    if (S.busy || S.asked || reviewing()) { S.timer = setTimeout(autoSync, S.asked || reviewing() ? 2000 : 5000); return }
+    if (S.busy || S.asked || reviewing()) { askIn(S.asked || reviewing() ? 2000 : 5000); return }
+    S.asking = true
+    const started = now()
     try {
       const t = now()
       const s = await run('schedule')
+      if (S.stopped) return
       readSchedule(s, t)
       if (s.due) emit('leafSyncDue', { now: s.now, next_sync_at: s.next_sync_at, why: s.why ?? null })
-      const d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
+      let d = syncDecision(s, S.heldFor, inFlight(S.coins, S.participations))
       S.heldFor = d.held
-      if (S.asked) { S.timer = setTimeout(autoSync, 2000); return }
+      // A payment to a code another store of the phrase handed out, which only the catch-up takes in,
+      // once the library's catch-up is open by its own clock (the schedule's `now`): a sync without
+      // the watchtowers' step, which nobody waits on.
+      catchUpLoad()
+      setCatchUp(catchUpWait(S.catchUp, { now: now() }))
+      const forCatchUp = !d.sync && catchUpSyncIn(S.catchUp, { now: now(), libNow: s.now, openAt: S.catchUpOpenAt }) === 0
+      if (forCatchUp) d = { ...d, sync: true }
+      if (S.asked) { S.asking = false; askIn(2000); return }
       if (d.sync && !S.busy) {
         S.busy = true; render()
         try {
-          const v = await run('sync')
-          synced(v)
+          const v = await run('sync', forCatchUp ? { deposits: false } : {})
           S.lastSync = { at: now(), value: v, auto: true }
         } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
+        if (S.stopped) { S.busy = false; return }
         try { await reload(); S.reloadError = null } catch (e) { S.reloadError = e }
-        try { await careIfDue() } finally { S.busy = false }
+        try { if (!S.stopped) await careIfDue() } finally { S.busy = false }
       } else if (!S.busy && careDue(S.careAt, now(), careEvery)) {
         S.busy = true
         try { await careIfDue() } finally { S.busy = false }
       } else if (!S.busy) {
         S.busy = true
-        try { await claimsIfDue() } finally { S.busy = false }
+        try {
+          // Developer mode has no mailbox watch: while a request it handed out waits (the receive
+          // code, the name's stocked codes), the mailbox is read at every tick.
+          if (dev() && requestWaits(s)) {
+            const v = await run('mailbox')
+            if (S.stopped) return
+            arrivals(v)
+            if (v && ((v.accepted || []).length || (v.pending || []).length)) { try { await reload() } catch {} }
+          }
+          await claimsIfDue()
+        } finally { S.busy = false }
       }
-    } catch (e) { S.lastSync = { at: now(), error: e, auto: true } }
+    } catch (e) {
+      S.lastSync = { at: now(), error: e, auto: true }
+      // A schedule read that threw is an attempt too (a sync that threw counted itself in `run`).
+      if (S.catchUp && !(S.catchUp.attemptAt >= started)) countAttempt()
+    }
+    S.asking = false
     schedule()
   }
 
@@ -1920,7 +2182,6 @@ export function mountLeaves (ctx, root, settingsRoot) {
         try {
           const v = await run('sync')
           S.heldFor = null
-          synced(v)
           S.lastSync = { at: now(), value: v, auto: false }
           await careIfDue()
           return v
@@ -1952,7 +2213,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
           notLive++
           if (notLive === 1) log(`[leaves] ${command}: the operator does not call the coin live yet; asked again in a moment`)
           await sleep(NOT_LIVE_EVERY_MS)
-          try { synced(await run('sync')) } catch {}
+          try { await run('sync') } catch {}
           i--
           continue
         }
@@ -2089,7 +2350,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       S.busy = true
       let v = null
       try {
-        if (!first) { try { const s = await run('sync'); synced(s) } catch {} }
+        if (!first) { try { await run('sync') } catch {} }
         v = await run('settle_first', ask)
         if (v && (v.settling || []).length) log(`[leaves] ${v.settling.length} coin(s) given up in the next round to settle first`)
         if (S.releasing) { const n = nextFinalBy(S.releasing.wait || null, v, now()); if (n) { S.releasing.wait = n; S.releasing.finalBy = n.finalBy } }
@@ -2109,7 +2370,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       while (S.busy) await sleep(50)
       S.busy = true
       try {
-        try { const v = await run('sync'); synced(v) } catch {}
+        try { await run('sync') } catch {}
         try { S.coins = (await run('coins')) || S.coins } catch {}
       } finally { S.busy = false }
       if (!inRoundCoins((S.coins || []).filter((c) => coins.includes(c.leaf_id)), S.releasing ? S.releasing.asset : null).length) return
@@ -2131,7 +2392,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
     }
     for (;;) {
       while (yieldToPerson && S.asked && now() < until) await sleep(500)
-      try { const v = await turn(() => run('sync')); synced(v); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
+      try { const v = await turn(() => run('sync')); S.lastSync = { at: now(), value: v, auto: true, why: 'release' } } catch {}
       let cs = null
       try { cs = await turn(() => run('coins')); S.coins = cs || [] } catch {}
       if (cs && releaseDone(cs, coins)) return
@@ -2967,7 +3228,7 @@ export function mountLeaves (ctx, root, settingsRoot) {
       const read = COMPOSER_READS.has(String(cmd))
       const fail = (e) => { throw dev() ? devRefusal(e) : plainRefusal(e) }
       if (!S.holds && read) return run(cmd, args || {}).catch(fail)
-      if (!S.holds && cmd === 'sync') return run('sync', args || {}).then((v) => { try { synced(v) } catch {} return v }).catch(fail)
+      if (!S.holds && cmd === 'sync') return run('sync', args || {}).catch(fail)
       return asking(() => (read ? run(cmd, args || {}) : paying(cmd, args || {}))).catch(fail)
     },
     // What of an asset its issuer has frozen for this wallet, in atoms (both modes).
