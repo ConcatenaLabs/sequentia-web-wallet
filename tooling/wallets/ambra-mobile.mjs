@@ -64,6 +64,8 @@ export class AmbraMobile {
 
   // A bottom tab, from wherever the app is: a pushed screen (the faucet) is left with Back first.
   async tab (t) {
+    // A keyboard left up moves the tab bar and takes the tap.
+    await u.hideKeyboard()
     for (let i = 0; i < 4; i++) {
       const ns = await u.screen()
       const n = ns.find((n) => n.say === t && n.clickable && n.y > 2100)
