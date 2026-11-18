@@ -71,7 +71,7 @@ export class AmbraMobile {
       if (ns.some((n) => (n.say === 'Back' || n.say === 'Scrim') && n.clickable)) { await u.back(); await sleep(1000); continue }
       // Not in front (sent home by a step that failed): opened again from its icon.
       if (!/io\.sequentia\.ambra/.test(await u.shell('dumpsys activity activities | grep -m1 -E "topResumedActivity|mResumedActivity" || true'))) { await this.launch(); await sleep(3000); continue }
-      await u.shell('input keyevent 111'); await sleep(800)
+      await u.hideKeyboard(); await sleep(800)
     }
     throw new Error('no tab ' + t)
   }
@@ -114,7 +114,7 @@ export class AmbraMobile {
     D('long-pressed'); await u.tap('Paste', 10000); await sleep(1200); D('pasted')
     const f2 = await this.recipientField()
     const text = f2.say
-    await u.clearField(f2); await u.shell('input keyevent 111')
+    await u.clearField(f2); await u.hideKeyboard()
     return text
   }
   async recipientField () {
@@ -148,7 +148,7 @@ export class AmbraMobile {
       await this.tab('Receive')
       await u.waitFor('Copy', 120000, { clickable: true })
       if (!(await this.amountField())) throw new Error('no amount field on Receive')
-      await u.clearField(); await u.type(String(btc)); await u.shell('input keyevent 111')
+      await u.clearField(); await u.type(String(btc)); await u.hideKeyboard()
       await sleep(4000 + 3000 * i)
       await u.tap('Copy'); await sleep(800); await u.noSnack()
       const m = (await this.pasted()).match(/[?&]lightning=([^&\s]+)/i)
@@ -185,7 +185,7 @@ export class AmbraMobile {
     const edits = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)
     await u.clearField(edits[0]); await u.tapNode(edits[0]); await u.type(to); await sleep(500); D('recipient typed')
     const e2 = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)
-    await u.clearField(e2[1]); await u.tapNode(e2[1]); await u.type(String(amount)); await u.shell('input keyevent 111'); await sleep(800); D('amount typed')
+    await u.clearField(e2[1]); await u.tapNode(e2[1]); await u.type(String(amount)); await u.hideKeyboard(); await sleep(800); D('amount typed')
     await u.tap('Review & send'); D('review pressed')
     // The review sheet, or a refusal under the form.
     const r = await u.waitAny([/^Send .*\?/, 'Cancel', /try again|can't|cannot|not enough|still arriving|Enter |isn't|is not|No wallet/i], 120000)
@@ -269,7 +269,7 @@ export class AmbraMobile {
     await this.sides(pay, get)
     const pf = await u.scrollTo(/^You pay: /, 3)
     const f = (await u.screen()).filter((n) => n.edit && Math.abs(n.y - pf.y) < 40)[0]
-    await u.clearField(f); await u.tapAt(Math.max(f.x, 700), f.y); await u.type(String(amount)); await u.shell('input keyevent 111'); await sleep(1500)
+    await u.clearField(f); await u.tapAt(Math.max(f.x, 700), f.y); await u.type(String(amount)); await u.hideKeyboard(); await sleep(1500)
     const before = new Set((await this.tradeRows()).map((r) => r.say))
     const rv = await u.scrollTo('Review', 4)
     if (!rv) throw new Error('no Review on Swap')
@@ -279,7 +279,7 @@ export class AmbraMobile {
     while (Date.now() - t0 < 300000) {
       await u.swipeUp(); await sleep(300)
       const ns = await u.screen()
-      if (ns.some((n) => n.clickable && n.say === 'Trade')) { ticket = ns.filter((n) => /^(You pay|You receive|Fees|Price)\n/.test(n.say)).map((n) => n.say.replace(/\n/g, ' ')).join(' | '); break }
+      if (ns.some((n) => n.clickable && n.say === 'Trade')) { ticket = ns.filter((n) => /^(You pay|You receive|Fees|Price)\n/.test(n.say) || /Goes through|within about \d+ min/i.test(n.say)).map((n) => n.say.replace(/\n/g, ' ')).join(' | '); break }
       const err = ns.find((n) => /Nothing has moved|try again|can't|cannot|Nobody|not enough|ready in|No offer|no price/i.test(n.say) && !n.clickable)
       if (err) { refused = err.say.replace(/\n/g, ' '); break }
       await sleep(1000)

@@ -104,6 +104,11 @@ export async function clearField (node) {
   }
   throw new Error('a field would not empty')
 }
+// Closes the soft keyboard when it is shown: Back, which is what closes it on every image
+// (Escape leaves it up on some).
+export async function hideKeyboard () {
+  if (/mInputShown=true/.test(await shell('dumpsys input_method | grep -m1 mInputShown || true'))) { await shell('input keyevent 4'); await sleep(500) }
+}
 // Waits until no passing note ("… copied") lies over the tabs.
 export async function noSnack (ms = 8000) {
   const until = Date.now() + ms

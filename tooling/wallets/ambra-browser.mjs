@@ -125,7 +125,10 @@ export class AmbraBrowser {
   async send (to, tk, amount) {
     const p = this.page
     await this.tab('send')
-    await p.waitFor(`[...document.querySelectorAll('#sendDAsset option')].some(o=>o.textContent.trim()===${JSON.stringify(tk)})`, 180000)
+    // Send lists what the wallet holds as last read; a list drawn before a reading is drawn again
+    // by leaving the tab and coming back.
+    const listed = `[...document.querySelectorAll('#sendDAsset option')].some(o=>o.textContent.trim()===${JSON.stringify(tk)})`
+    if (!(await p.waitFor(listed, 90000).catch(() => false))) { await this.tab('balance'); await sleep(2000); await this.tab('send'); await p.waitFor(listed, 90000) }
     await this.set('sendDTo', to)
     await p.eval(`(()=>{ const s=document.querySelector('#sendDAsset'); const o=[...s.options].find(o=>o.textContent.trim()===${JSON.stringify(tk)}); s.value=o.value; s.dispatchEvent(new Event('change')); return true })()`)
     await this.set('sendDAmt', String(amount))
