@@ -91,7 +91,7 @@ export class AmbraMobile {
     await this.tab('Receive'); D('on Receive')
     await u.waitFor('Copy', 120000, { clickable: true })
     await this.more()
-    if (fresh) { await u.tap('New code'); await sleep(3000) }
+    if (fresh) { const nc = await seek(/^New code$/, 3); if (!nc) throw new Error('no New code on Receive'); await u.tapNode(nc); await sleep(3000) }
     // A named wallet's card shares the name: the code is behind Show full code.
     const full = await u.scrollTo(/^Show full code$/, 2)
     if (full) { await u.tapNode(full); await sleep(2000) }

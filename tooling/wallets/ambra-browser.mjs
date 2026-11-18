@@ -83,11 +83,11 @@ export class AmbraBrowser {
     const until = Date.now() + 300000
     while (Date.now() < until) {
       await this.full(true)
-      const t = String(await this.copy()).trim()
+      const t = String(await this.copy()).trim(); this.lastCopied = t
       if (/^bitcoin:.*sequentia=/i.test(t) && t !== old) { this.lastCode = t; await this.full(false); return t }
       await sleep(2000)
     }
-    throw new Error('no new receive code in 5 min')
+    throw new Error('no new receive code in 5 min; Copy gave: ' + String(this.lastCopied || '').slice(0, 60))
   }
 
   // What the card's Copy gives as it first shows: the payment name while the wallet holds one,
@@ -134,16 +134,19 @@ export class AmbraBrowser {
     await this.set('sendDAmt', String(amount))
     await sleep(500)
     await p.eval(CLOSE_MODALS)
+    // The review is waited for as long as it takes (it has taken from 1 s to minutes) and timed.
+    const tr = Date.now()
     await this.click('#btnDReview')
-    const review = await p.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendDErr').innerText; return /\\S/.test(e) ? 'ERR '+e : false })()", 120000)
+    const review = await p.waitFor("(()=>{ const m=document.querySelector('.modal'); if(m) return m.innerText; const e=document.querySelector('#sendDErr').innerText; return /\\S/.test(e) ? 'ERR '+e : false })()", 900000)
+    this.reviewSeconds = (Date.now() - tr) / 1000
     const flat = review.replace(/\s+/g, ' ').trim()
-    if (review.startsWith('ERR')) return { refused: flat.slice(4) }
+    if (review.startsWith('ERR')) return { refused: flat.slice(4), reviewSeconds: this.reviewSeconds }
     const t = Date.now()
     await pressPrimary(p)
     const status = await p.waitFor(LAST_STATUS, 600000).catch(() => 'no answer in 10 min')
     const seconds = (Date.now() - t) / 1000
     await p.eval(CLOSE_MODALS).catch(() => {})
-    return { review: flat, status: status.replace(/\s+/g, ' ').trim(), seconds, clickedAt: t }
+    return { review: flat, status: status.replace(/\s+/g, ' ').trim(), seconds, clickedAt: t, reviewSeconds: this.reviewSeconds }
   }
 
   async trade (pay, get, amount, ms = 1200000) {
