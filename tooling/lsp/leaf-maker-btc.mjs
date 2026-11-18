@@ -305,7 +305,9 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
   async function homeLeaves (open) {
     const home = new Set()
     if (!open.some((s) => s.give_asset !== 'BTC' && s.state === 'locked')) return home
-    const coins = await cmd('coins').catch((e) => { log('btc coins:', e.message); return [] })
+    // The brief listing: the full one reads every coin's record and chain facts and holds the
+    // library (one command at a time) for seconds ahead of every firm offer.
+    const coins = await cmd('coins', { brief: true }).catch((e) => { log('btc coins:', e.message); return [] })
     for (const c of Array.isArray(coins) ? coins : []) if (c && c.state === 'exited' && c.leaf_id) home.add(c.leaf_id)
     return home
   }
@@ -426,10 +428,16 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     if (pay.state === 'returned') { s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'returned'); return }
     // The lock's coin came home on the chain (its refund final), not paid: the lock stands no more,
     // and the Bitcoin invoice is closed, as for a lock returned out of round.
+    const inv = await node.invoiceStatus(s.hash)
     if (pay.state !== 'paid' && pay.htlc_leaf_id && home.has(pay.htlc_leaf_id)) {
+      // Paid in BTC while its lock went home: the desk owes the buyer the asset. Never voided (that
+      // would hide a sale it owes); kept as it stands, for its operator to see, and said once.
+      if (inv.status === 'paid') {
+        if (!s.home_but_paid) { s.home_but_paid = true; log('btc swap', s.swap, 'ERROR: its lock was taken home on the chain but its Bitcoin invoice is paid: the buyer is owed the asset') }
+        return
+      }
       s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'void: its lock was taken home on the chain'); return
     }
-    const inv = await node.invoiceStatus(s.hash)
     if (inv.status === 'paid' && inv.preimage) {
       if (pay.state !== 'paid') await cmd('lightning_post_preimage', { hash: s.hash, preimage: inv.preimage }).catch((e) => log('post preimage:', e.message))
       if (pay.state === 'paid') { s.state = 'done'; log('btc done', s.swap) }
