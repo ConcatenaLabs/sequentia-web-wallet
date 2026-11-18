@@ -67,6 +67,13 @@ function standIn () {
           const l = s.locks.find((x) => x.hash === a.hash); l.paid = true
           return { payment_hash: a.hash, paid: true }
         }
+        case 'lock_unpaid': {
+          if (s.unpaidSilent) throw new Error('the library did not answer in time')
+          if (s.unpaidRefuse) { const e = new Error('refused: ' + s.unpaidRefuse); e.kind = 'refused'; throw e }
+          const l = s.locks.find((x) => x.hash === a.hash); const was = l.paid === true; l.paid = false
+          s.unpaidAt = s.btcPaid.length
+          return { payment_hash: a.hash, paid: false, was_paid: was }
+        }
         default: throw new Error('no command ' + cmd)
       }
     },
@@ -88,7 +95,10 @@ function standIn () {
     decode: async () => ({ sats: s.makerSats, payment_hash: H, expires_at: 4e9, min_final_cltv: 18 }),
     invoiceStatus: async (h) => (s.invoices[h] && s.invoices[h].status === 'paid' ? { status: 'paid', preimage: P } : { status: 'unpaid' }),
     cancelInvoice: async () => {},
-    pay: async ({ invoice }) => { s.btcPaid.push(invoice); return { state: 'complete', preimage: P } },
+    pay: async ({ invoice }) => {
+      if (s.paySays) { s.payTried = (s.payTried || 0) + 1; return s.paySays }
+      s.btcPaid.push(invoice); return { state: 'complete', preimage: P }
+    },
     payStatus: async () => (s.payStatusSays ? s.payStatusSays : s.btcPaid.length ? { state: 'complete', preimage: P } : { state: 'none' }),
   }
   return s
@@ -276,4 +286,85 @@ test('buying with BTC through the operator: resumed after a pause, a leaf not he
   s.ready = true
   r = await eng.advance(eng.records()[0])
   assert.equal(s.btcPaid.length, 1, 'paid once it is held again')
+})
+
+// #839 (arca #969): a lock marked paid whose BTC payment then fails for good loses the
+// mark before the trade comes back, so the wallet never takes it on the chain at its home date.
+test('buying with BTC on a lock: a payment refused before it went out clears the lock\'s paid mark, then the trade comes back', async () => {
+  const s = standIn()
+  const { eng } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  s.paySays = { state: 'failed', reason: 'refused before anything was sent' }
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(s.payTried, 1); assert.equal(s.btcPaid.length, 0, 'nothing paid')
+  assert.equal(r.state, 'returned'); assert.match(r.why, /refused before anything was sent/)
+  assert.ok(s.calls.indexOf('lock_paid') < s.calls.indexOf('lock_unpaid'), 'marked before the payment, cleared after its failure')
+  assert.equal(s.locks[0].paid, false, 'the library\'s mark is cleared')
+  assert.equal(r.markedPaid, false)
+})
+
+test('buying with BTC on a lock: a payment failed back later (read on a later step) clears the mark too', async () => {
+  const s = standIn()
+  const { eng } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  s.paySays = { state: 'pending' }
+  let r = await eng.advance(eng.records()[0])
+  s.payStatusSays = { state: 'pending' }
+  assert.equal(r.state, 'sent'); assert.equal(r.markedPaid, true)
+  assert.ok(!s.calls.includes('lock_unpaid'), 'in flight: the mark stays')
+  s.payStatusSays = { state: 'failed', reason: 'no route paid it' }
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned'); assert.equal(s.locks[0].paid, false); assert.equal(r.markedPaid, false)
+  assert.equal(s.payTried, 1, 'paid once, never again')
+})
+
+test('buying with BTC on a lock: a payment in flight or of unknown state keeps the mark, and the row reads as today', async () => {
+  const s = standIn()
+  const { eng, step } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  s.paySays = { state: 'pending' }
+  let r = await eng.advance(eng.records()[0])
+  s.payStatusSays = { state: 'pending' }
+  for (let i = 0; i < 3; i++) { step(60_000); r = await eng.advance(eng.records()[0]) }
+  assert.equal(r.state, 'sent'); assert.equal(tradeStateWord(r, r.sentAt), USER_WORDS.btcPaying)
+  assert.equal(s.locks[0].paid, true); assert.equal(r.markedPaid, true)
+  assert.ok(!s.calls.includes('lock_unpaid'))
+})
+
+test('buying with BTC on a lock: a library that does not answer the clearing is asked again, and only then the trade comes back', async () => {
+  const s = standIn()
+  const { eng } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  s.paySays = { state: 'failed', reason: 'refused' }
+  s.unpaidSilent = true
+  let r = await eng.advance(eng.records()[0])
+  s.payStatusSays = { state: 'failed', reason: 'refused' }
+  assert.equal(r.markedPaid, true)
+  assert.notEqual(r.state, 'returned', 'not back while the lock is marked'); assert.equal(s.locks[0].paid, true)
+  s.unpaidSilent = false
+  r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned'); assert.equal(s.locks[0].paid, false)
+  assert.equal(s.payTried, 1, 'the failed payment is not made again')
+})
+
+test('buying with BTC on a lock: a library that refuses the clearing (the preimage known) leaves the mark; the trade still comes back', async () => {
+  const s = standIn()
+  const { eng } = await bought(s)
+  s.locks[0].state = 'held'; s.lockFinal = true
+  s.paySays = { state: 'failed', reason: 'refused' }
+  s.unpaidRefuse = 'the preimage of hash … is known: the payment went through, and the lock is claimed with it'
+  const r = await eng.advance(eng.records()[0])
+  assert.equal(r.state, 'returned'); assert.equal(s.locks[0].paid, true, 'the mark stays')
+  assert.match(r.unmarkRefused, /preimage/)
+})
+
+test('buying with BTC through the operator: a failed payment asks nothing of the locks', async () => {
+  const s = standIn(); s.makerLocks = []
+  const { eng } = await bought(s)
+  s.receives[H].state = 'issuing'
+  await eng.advance(eng.records()[0])
+  s.ready = true; s.paySays = { state: 'failed', reason: 'refused' }
+  const r = await eng.advance(eng.records()[0])
+  assert.notEqual(r.leg, 'htlc-2'); assert.equal(r.state, 'returned'); assert.equal(s.payTried, 1)
+  assert.ok(!s.calls.includes('lock_paid') && !s.calls.includes('lock_unpaid'))
 })

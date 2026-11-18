@@ -119,6 +119,7 @@ import { fundingProblem, btcFundingProblem, fundingTxidOf } from './external-fun
 import { rateOf, assetInboundLimits, feeReuseProblem, inboundFundAtoms, inboundRoomFundable, lpFreeAtoms, paidWaitingFee, feePaidAtoms, heldFeeDue, feeDueAccepted, roomAlreadyThere } from './inbound-limits.mjs';
 import { MONTHS_ALLOWED, annualBpsFor, parseMonths, quoteRoom, expiresAt } from './inbound-price.mjs';
 import { payAssetVerdict, hostedInvoiceArgs, payFailureReason, inboundRequestAsset } from './invoice-asset.mjs';
+import { payStatusOf, wentOut } from './pay-final.mjs';
 import { withPaymentHash } from './hold-bolt11.mjs';
 import { buildInboundStats } from './inbound-stats.mjs';
 import { fileURLToPath } from 'node:url';
@@ -361,6 +362,16 @@ function relayForOffer(hint) {
 // SeqLN nodes are single-asset, so "move ANY asset into Lightning" needs a hosted node
 // per asset spun up on demand, keyed to the connecting device. This is that mechanism.
 let PROV = null;
+// The /node/pay calls running in this process and when the last one ended, by `node_key:hash`: a
+// payment is final only once none runs (pay-final.mjs).
+const PAY_RUNS = new Map();
+function payRunStart(key) { const r = PAY_RUNS.get(key) || { active: 0, endedAt: null }; r.active += 1; PAY_RUNS.set(key, r); }
+function payRunEnd(key) {
+  const now = Date.now() / 1000;
+  const r = PAY_RUNS.get(key) || { active: 1, endedAt: null }; r.active = Math.max(0, r.active - 1); r.endedAt = now; PAY_RUNS.set(key, r);
+  // An hour on, a payment's parts are all PAY_SETTLE_S old: what ended then is no longer needed.
+  for (const [k, v] of PAY_RUNS) if (!v.active && v.endedAt != null && now - v.endedAt > 3600) PAY_RUNS.delete(k);
+}
 if (CFG.provDir && CFG.lightningd && CFG.hsmdProxy && CFG.wsRelay && CFG.elementsCli && CFG.seqRpcPort) {
   // Per-chain backends. 'seq' (elements) is always configured; 'btc' (testnet4) is
   // added only when BTC_RPC_PORT + BTC_CLI are set, enabling per-user BTC nodes.
@@ -4941,6 +4952,9 @@ const server = http.createServer(async (req, res) => {
       const payAsset = (rec.chain || 'seq') !== 'btc' && /^[0-9a-f]{64}$/i.test(String(rec.asset_id || '')) ? String(rec.asset_id).toLowerCase() : null;
       if ((rec.chain || 'seq') !== 'btc' && !payAsset) return send(res, 500, { ok: false, error: 'this hosted node has no asset on record, so it cannot pay' });
       const declined = (amountMsat) => send(res, 403, { ok: false, declined: true, error: declinedMessage({ amountMsat, assetId: payAsset }) });
+      const runKey = `${nodeKey}:${decHash || wantHash}`;
+      payRunStart(runKey);
+      try {
       try {
         const args = [`bolt11=${bolt11}`, 'retry_for=45'];
         if (maxCltv != null) args.push(`maxdelay=${maxCltv}`);
@@ -4953,6 +4967,18 @@ const server = http.createServer(async (req, res) => {
         // The device declined it (over its payment limit): final, and nothing was sent. The direct
         // hop below would only be declined again.
         if (isDeclined(payErr)) return declined(decMsat != null ? decMsat : wantMsat);
+        // A `pay` whose call did not answer (60 s) has an HTLC out: the payment is followed
+        // (pay-status), never tried another way nor answered declined, which reads as final. One
+        // whose parts cannot be read is answered as not known.
+        let sent;
+        try { sent = await lnrpcKw('listsendpays', [`payment_hash=${decHash || wantHash}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS); }
+        catch (e) { return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))}; its payments could not be read: ${scrubDetail(String((e && e.message) || e))}` }); }
+        const out = wentOut(sent && sent.payments);
+        if (out === null) return send(res, 502, { ok: false, error: `pay: ${scrubDetail(String((payErr && payErr.message) || payErr))}; its payments could not be read` });
+        if (out) {
+          const st = payStatusOf(sent.payments, { active: true });
+          return send(res, 200, { ok: true, paid: st.state === 'complete', pending: st.state !== 'complete', preimage: st.preimage, via: 'in-flight' });
+        }
         // FALLBACK: decode + direct-hop sendpay + waitsendpay. The hosted-leaf
         // topology (private asset channels, no public gossip) defeats CLN pay's
         // route search — seen live killing every wallet-maker lift at the
@@ -4989,12 +5015,13 @@ const server = http.createServer(async (req, res) => {
             error: `pay: ${scrubDetail(payMsg)} (direct-hop fallback: ${scrubDetail(String((e2 && e2.message) || e2))})` });
         }
       }
+      } finally { payRunEnd(runKey); }
     }
 
     // GET /node/pay-status?node=<key>&payment_hash=<H> -> { state: 'none'|'pending'|'complete'|'failed', preimage }.
-    // How the node's payments under H stand (listpays): complete with its preimage once any part of
-    // one completed, pending while any is in flight, failed only when every attempt failed and none
-    // is in flight. A payer whose /node/pay answered nothing it could read asks this before it
+    // How the node's payments under H stand (listsendpays): complete with its preimage once any part
+    // of one completed, pending while any is in flight or a /node/pay for it runs here, failed only
+    // once every attempt failed and none can follow (pay-final.mjs). A payer asks this before it
     // calls a payment failed.
     if (req.method === 'GET' && url.pathname === '/node/pay-status') {
       if (!PROV) return send(res, 501, { ok: false, error: 'provisioning not enabled' });
@@ -5005,10 +5032,11 @@ const server = http.createServer(async (req, res) => {
       if (!rec || !rec.rpc) return send(res, 404, { ok: false, error: 'unknown node key' });
       try {
         const sp = await lnrpcKw('listsendpays', [`payment_hash=${H}`], rec.rpc, SIGNER_RPC_TIMEOUT_MS);
-        const ps = (sp && sp.payments) || [];
-        const done = ps.find((p) => p.status === 'complete');
-        const state = !ps.length ? 'none' : done ? 'complete' : ps.some((p) => p.status === 'pending') ? 'pending' : 'failed';
-        return send(res, 200, { ok: true, state, preimage: done ? (done.payment_preimage || null) : null });
+        const run = PAY_RUNS.get(`${nodeKey}:${H}`) || { active: 0, endedAt: null };
+        const st = payStatusOf(sp && sp.payments, { active: run.active > 0, endedAt: run.endedAt });
+        // Parts it cannot read say nothing of the payment: answered as not read, never as an end.
+        if (st.state === 'unknown') return send(res, 502, { ok: false, error: 'pay-status: the node\'s payments could not be read' });
+        return send(res, 200, { ok: true, state: st.state, preimage: st.preimage });
       } catch (e) { return send(res, 502, { ok: false, error: `pay-status: ${scrubDetail(String((e && e.message) || e))}` }); }
     }
 
