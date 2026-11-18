@@ -328,3 +328,34 @@ test('a pair asked again is given up at the Trade tab\'s bound, with its words',
   await assert.rejects(S2.quote({ type: 'market', base: B, quote: Q, side: 'buy', amount: String(10n ** 8n) }, 'https://s/dex/'), (e) => e.message === USER_WORDS.notOffered('GOLD', 'USDX'))
   assert.equal(waited, 0)
 })
+
+test('an order placed while its page closed is matched on its asset, amount and price, never on its amount alone', async () => {
+  const rev = (h) => h.match(/../g).reverse().join('')
+  const lib = [
+    // Another placement of the same amount, of another asset (another site's, the person's own).
+    { order: 'oOther', state: 'resting', amount: '5000', holds: '5000', refund_from: 87400, rests_at: 't:1', terms: { asset_a: rev(Q), asset_b: rev(B), rate_num: '9', rate_den: '1' } },
+    // This placement's own order.
+    { order: 'oMine', state: 'resting', amount: '5000', holds: '5000', refund_from: 87400, rests_at: 't:2', terms: { asset_a: rev(B), asset_b: rev(Q), rate_num: '2', rate_den: '1' } },
+  ]
+  const run = async (orders) => {
+    const store = mem()
+    const tag = 'w1'
+    store.setItem('swk.siteorders.' + tag, JSON.stringify({ trades: {}, orders: {}, placing: { p1: { origin: 'https://a.example', market: { base: B, quote: Q }, side: 'sell',
+      price: '200000000', amount: '5000', sell: B, sold: '5000', rate_num: '2', rate_den: '1', offer_id: 'p1', at: 1 } } }))
+    const leaves = { command: async (c) => { if (c === 'orders') return orders; throw new Error('no ' + c) } }
+    const so = makeSiteOrders({ engine: fakeEngine(), leaves, assetMeta: meta, fmtAtoms, store, tag: () => tag })
+    return { listed: await so.orders('https://a.example'), db: JSON.parse(store.getItem('swk.siteorders.' + tag)) }
+  }
+  // Only the other asset's order of the same amount: not claimed; the placement still waits.
+  let r = await run([lib[0]])
+  assert.deepEqual(Object.keys(r.db.orders), [])
+  assert.deepEqual(Object.keys(r.db.placing), ['p1'])
+  assert.deepEqual(r.listed.orders.map((o) => o.state), ['placing'])
+  // Its own order there too: that one is claimed, the other left alone.
+  r = await run(lib)
+  assert.deepEqual(Object.keys(r.db.orders), ['oMine'])
+  assert.deepEqual(r.db.placing, {})
+  // The same asset and amount at another price is not it either.
+  r = await run([{ ...lib[1], order: 'oPrice', terms: { ...lib[1].terms, rate_num: '3' } }])
+  assert.deepEqual(Object.keys(r.db.orders), [])
+})
