@@ -1611,7 +1611,14 @@ async function main () {
     noteChange('done', leavesOf(paid), [{ asset: sw.give_asset, value: String(sw.give) }, ...(paid && paid.change ? [{ asset: sw.give_asset, value: String(paid.change) }] : [])], 'btc:' + sw.swap)
     readHoldings(true).catch(() => {})
   }
-  const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onPaid, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
+  // A POST to the operator, straight from the desk (a lock's preimage, which anyone may post).
+  const postOp = async (path, body) => {
+    const r = await fetch(String(op.server).replace(/\/+$/, '') + path, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(10000) })
+    if (!r.ok) throw new Error(`the operator answered HTTP ${r.status} to ${path}`)
+    return r.json()
+  }
+  const desk = await btcDesk({ cfg, cmd, log, liveRates, lookup, onPaid, opInfo: () => lastInfo, postOp, onTrade: (s) => reportTrade({ rail: 'btc-gateway', id: s.swap, give_asset: s.give_asset, give: s.give, want_asset: s.want_asset, want: s.want }) })
   if (desk) setInterval(() => { desk.stepNow().catch((e) => log('btc:', e.message)) }, Number(cfg.btc.step_seconds ?? 2) * 1000)
   if (desk) log('the BTC desk is open')
 

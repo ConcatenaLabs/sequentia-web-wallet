@@ -845,10 +845,12 @@ part of BTC's one figure. Its address there is part of the receive code. The wor
   already true. Buying with BTC, until the asset is held for the wallet: "Keep this page open:
   your BTC is paid once what you buy is held for you, within about N minutes. Nothing has left
   your wallet yet. If the page closes first, nothing is traded." (only an open page pays the BTC).
-  N is the wait the leaf library states for that asset (`lightning_receive_ready`: the time the
-  maker has to lock its side while it has not, then the operator's round, block and release as
-  the library counts them); before the library's first answer, its figure for the operator's next
-  round. Past that wait by two minutes: "Keep this page open: this is taking longer than usual.
+  N is the wait the leaf library states for that asset. When the maker locks the asset straight to
+  the wallet (`lock_ready`), it is the maker's lock, which no round bounds: usually about a minute, and
+  a round's wait only while the coins the lock rests on wait for theirs. When the asset comes
+  through the operator (`lightning_receive_ready`), it is the time the maker has to lock its side
+  while it has not, then the operator's round, block and release as the library counts them; and
+  before the library's first answer, its figure for the operator's next round. Past that wait by two minutes: "Keep this page open: this is taking longer than usual.
   Your BTC is paid once what you buy is held for you, and nothing has left your wallet yet. If
   the page closes first, nothing is traded.";
   while the BTC is paid, "Paying your BTC. Keep this page open a moment more."; once it is paid,

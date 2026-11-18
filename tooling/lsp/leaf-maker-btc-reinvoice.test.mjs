@@ -44,6 +44,7 @@ test('a locked swap whose invoice runs out is given a new one under the same has
     if (name === 'lightning_pay_quote') return { payment_hash: state.inv.hash, asset: X, amount: '50000' }
     if (name === 'lightning_pay') return { ok: true }
     if (name === 'lightning_payments' || name === 'lightning_receives') return {}
+    if (name === 'locks') return []
     throw new Error('no operator here')
   }
   try {

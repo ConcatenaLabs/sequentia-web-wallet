@@ -38,6 +38,7 @@ async function lockedDesk (coinState, inv) {
     if (name === 'lightning_pay') return { ok: true }
     if (name === 'lightning_payments') return { [HASH]: { state: 'paying', htlc_leaf_id: LEAF } }
     if (name === 'lightning_receives') return {}
+    if (name === 'locks') return []
     if (name === 'coins') { coinsArgs.push(args); return [{ leaf_id: LEAF, state: coinState.v, asset: X }] }
     throw new Error('no operator here')
   }

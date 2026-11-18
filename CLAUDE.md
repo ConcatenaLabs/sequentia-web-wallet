@@ -244,7 +244,9 @@ Root is flat: production modules and tests sit side by side.
   (`order_fill_resting`), or BTC for an asset in one hash-lock with a
   maker's BTC desk, `user-trade-btc.js`), never a bridge and never a second route. In a BTC trade
   the hash is always the BTC receiver's and BTC is paid only once the coin received under it is
-  held for good (`lightning_receive_ready`); keep that order whatever else changes. On the page
+  held for good: a lock straight from the maker (`htlc-2`, `lock_ready`), held out of round at
+  once, or a receive through the operator (`htlc-1`, `lightning_receive_ready`), held once its
+  round is final; keep that order whatever else changes. On the page
   the wallet's Bitcoin Lightning is `btc-lightning.js` over its own hosted Bitcoin node: a sale's
   hold is under a hash whose preimage the page draws and keeps, and the page gives it to the node
   only to settle a payment held there for the whole amount; never let the node make that
