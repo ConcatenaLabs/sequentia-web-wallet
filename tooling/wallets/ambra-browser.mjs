@@ -2,7 +2,7 @@
 // the lane's browser, its popup open as a tab, every step through the popup as a person takes it.
 // The same calls as web.mjs. Its faucet requests leave from its service worker, which gets the
 // faucet token as the web wallet's page does (cdp-page.mjs).
-import { followTrade, CLOSE_MODALS, pressPrimary, LAST_STATUS } from './web.mjs'
+import { followTrade, CLOSE_MODALS, pressPrimary, LAST_STATUS, copied } from './web.mjs'
 import { pickExpr } from '../picker-drive.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -39,7 +39,8 @@ export class AmbraBrowser {
     }
     await p.waitFor("!document.querySelector('#vApp').classList.contains('hide')", 180000)
     await this.tab('receive')
-    await p.waitFor("/^bitcoin:.*sequentia=/i.test(document.querySelector('#recvDCode').innerText)", 600000)
+    // Receive is one card: the code is in its picture and behind Copy.
+    await p.waitFor("!!document.querySelector('#recvDQr').getAttribute('src')", 600000)
     return this
   }
 
@@ -54,19 +55,64 @@ export class AmbraBrowser {
   set (id, v) { return this.page.eval(`(()=>{ const e=document.getElementById(${JSON.stringify(id)}); e.value=${JSON.stringify(v)}; e.dispatchEvent(new Event('input')); e.dispatchEvent(new Event('change')); return true })()`) }
   async tab (t) { await this.click(`[data-tab=${t}]`); await sleep(400) }
 
+  // More options, opened (New code, Show full code and the amount live there).
+  async more () {
+    if (await this.page.eval("document.querySelector('#recvMore').classList.contains('hide')")) { await this.click('#btnRecvMore'); await sleep(300) }
+  }
+  // The card's Copy, once the card has a code: -> the text copied.
+  async copy () {
+    await this.page.waitFor("!!document.querySelector('#recvDQr').getAttribute('src')", 300000)
+    return copied(this.page, () => this.click('#btnDCopy'))
+  }
+  // The full code is shown (Show full code) or the name is (its toggle back), as `full` asks.
+  async full (want) {
+    const t = await this.page.eval("(()=>{ const b=document.querySelector('#btnDFull'); return b && !b.classList.contains('hide') ? b.textContent.trim() : '' })()")
+    if (!t) return false
+    const showingFull = !/full code/i.test(t)
+    if (showingFull !== want) { await this.click('#btnDFull'); await sleep(1500) }
+    return true
+  }
+
   async code () {
     await this.tab('receive')
     const p = this.page
     if (await p.eval("document.querySelector('#recvDAmt').value !== ''")) { await this.set('recvDAmt', ''); await sleep(1200) }
-    const old = await p.eval("document.querySelector('#recvDCode').innerText")
-    await this.click('#btnDNew')
-    return p.waitFor(`(()=>{ const t=document.querySelector('#recvDCode').innerText.trim(); return /^bitcoin:.*sequentia=/i.test(t) && t!==${JSON.stringify(old)} ? t : false })()`, 300000)
+    await this.more()
+    const old = this.lastCode || null
+    await this.click('#btnDNew'); await sleep(1500)
+    const until = Date.now() + 300000
+    while (Date.now() < until) {
+      await this.full(true)
+      const t = String(await this.copy()).trim()
+      if (/^bitcoin:.*sequentia=/i.test(t) && t !== old) { this.lastCode = t; await this.full(false); return t }
+      await sleep(2000)
+    }
+    throw new Error('no new receive code in 5 min')
+  }
+
+  // What the card's Copy gives as it first shows: the payment name while the wallet holds one,
+  // else the receive code.
+  async shared () {
+    await this.tab('receive')
+    if (await this.page.eval("document.querySelector('#recvDAmt').value !== ''")) { await this.set('recvDAmt', ''); await sleep(1200) }
+    await this.full(false)
+    return String(await this.copy()).trim()
   }
 
   async invoice (btc) {
     await this.tab('receive')
+    await this.more()
     await this.set('recvDAmt', String(btc))
-    return this.page.waitFor("(()=>{ const t=document.querySelector('#recvDCode').innerText; const m=t.match(/[?&]lightning=([^&\\s]+)/i); return m ? decodeURIComponent(m[1]) : false })()", 120000)
+    const until = Date.now() + 120000
+    let inv = null
+    while (!inv && Date.now() < until) {
+      await sleep(2000)
+      const t = String(await this.copy())
+      const m = t.match(/[?&]lightning=([^&\s]+)/i); if (m) inv = decodeURIComponent(m[1])
+    }
+    await this.set('recvDAmt', ''); await sleep(800)
+    if (!inv) throw new Error('no invoice in the receive code in 2 min')
+    return inv
   }
 
   async figure (tk, { quiet = false } = {}) {

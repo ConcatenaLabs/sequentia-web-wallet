@@ -34,7 +34,7 @@ export function boundOf (said) {
   const s = String(said || '')
   if (/in seconds/i.test(s)) return 60
   if (/next block, in about a minute|about a minute/i.test(s)) return 180
-  const w = s.match(/within (\d+) minutes/i); if (w) return 60 * Number(w[1])
+  const w = s.match(/within (?:about )?(\d+) minutes?/i); if (w) return 60 * Number(w[1])
   const m = s.match(/in about (\d+) minutes/i); if (m) return Math.max(600, 120 * Number(m[1]))
   if (/few minutes/i.test(s)) return 600
   if (/after a Bitcoin block/i.test(s)) return 3600
@@ -46,7 +46,7 @@ const PAIRS = ['GOLD', 'SILVR', 'OILX', 'EURX', 'tSEQ', 'BTC']
 function rng (seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32 } }
 
 // The plan: what each operation is, for `ops` records in all. `mix` gives the share of each kind.
-export function plan (wallets, ops, seed = 1) {
+export function plan (wallets, ops, seed = 1, mix = 'rb1') {
   const r = rng(seed)
   const names = wallets.map((w) => w.name)
   const mobile = wallets.find((w) => w.kind === 'mobile')
@@ -59,10 +59,24 @@ export function plan (wallets, ops, seed = 1) {
   // paid every time, the phone asks as any tester does, so it asks once for each asset it lacks.
   // tSEQ is left out: the faucet pays it from a covenant that releases one payment at a time.
   const FAUCET = ['USDX', 'EURX', 'GOLD', 'SILVR', 'OILX', 'BTC']
-  if (mobile) for (const a of ['EURX', 'GOLD', 'SILVR', 'OILX']) { out.push({ id: out.length + 1, op: 'faucet', wallet: mobile.name, asset: a }); recs++ }
+  if (mobile && mix === 'rb1') for (const a of ['EURX', 'GOLD', 'SILVR', 'OILX']) { out.push({ id: out.length + 1, op: 'faucet', wallet: mobile.name, asset: a }); recs++ }
   while (recs < ops) {
     const x = r()
     let op
+    // `rb6`: the faucet's place goes to BTC paid on the chain to another wallet's address (BTC out
+    // of one wallet, in to the other), and a share of the code payments to what the receiver's
+    // Copy gives (its payment name while it holds one).
+    if (mix === 'rb6' && x >= 0.42 && x < 0.75) {
+      const [from, to] = pairs[i % pairs.length]
+      const asset = r() < 0.75 ? 'USDX' : ['GOLD', 'EURX', 'SILVR'][Math.floor(r() * 3)]
+      op = { op: 'payment', how: x < 0.60 ? 'code' : 'name', from, to, asset }
+      recs += 2; out.push({ id: out.length + 1, ...op }); i++; continue
+    }
+    if (mix === 'rb6' && x >= 0.89) {
+      const [from, to] = pairs[(i * 3) % pairs.length]
+      op = { op: 'payment', how: 'btc-address', from, to, asset: 'BTC', amount: '0.00002' }
+      recs += 2; out.push({ id: out.length + 1, ...op }); i++; continue
+    }
     if (x < 0.42) {
       const w = names[i % names.length]; const k = tradeLeg[w]++
       const asset = PAIRS[Math.floor(k / 2) % PAIRS.length]
@@ -128,7 +142,7 @@ export function unfinished (lines) {
       said: 'drive: the drive stopped while it watched for this payment; not timed', seconds: 0, drive_error: true }))
 }
 
-export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say, startMb = 9000, pauseMb = 3500, resumeMb = 5000 }) {
+export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say, startMb = 9000, pauseMb = 3500, resumeMb = 5000, mix = 'rb1' }) {
   const out = join(work, 'reliability-mix.jsonl')
   const had = existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []
   for (const l of unfinished(had)) { appendFileSync(out, JSON.stringify({ n: null, at: new Date().toISOString(), ...l }) + '\n'); say(`resumed: [${l.id}] ${l.from}→${l.to} ${l.how} receive not timed (the drive stopped while watching it)`) }
@@ -177,8 +191,8 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say,
       say(`${kind} ${name} open`)
     }
     const byName = Object.fromEntries(wallets.map((w) => [w.name, w]))
-    const todo = plan(wallets, ops, seed).filter((o) => !done.has(o.id))
-    writeFileSync(join(work, 'plan.json'), JSON.stringify(plan(wallets, ops, seed), null, 1))
+    const todo = plan(wallets, ops, seed, mix).filter((o) => !done.has(o.id))
+    writeFileSync(join(work, 'plan.json'), JSON.stringify(plan(wallets, ops, seed, mix), null, 1))
     const busy = new Set(); const watches = []
     // What each wallet's last purchase of an asset brought: its sale sells that back.
     const got = {}
@@ -195,7 +209,8 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say,
       } finally { names.forEach((w) => wanted.set(w, wanted.get(w) - 1)) }
       try { return await fn() } finally { names.forEach((w) => busy.delete(w)) }
     }
-    const free = (o) => needs(o).every((w) => !busy.has(w) && !wanted.get(w)) && !(o.how === 'address' && watched.has(o.to))
+    const movesBtc = (o) => o.asset === 'BTC' || o.pay === 'BTC' || o.get === 'BTC'
+    const free = (o) => needs(o).every((w) => !busy.has(w) && !wanted.get(w)) && !(o.how === 'address' && watched.has(o.to)) && !(movesBtc(o) && needs(o).some((w) => watched.has('BTC:' + w)))
     const take = () => { const i = todo.findIndex(free); return i < 0 ? null : todo.splice(i, 1)[0] }
     // Short of memory, no new operation starts (those running go on) until enough is free again,
     // and the browser is asked to let go of what it can: a pause, rather than the guard's kill.
@@ -313,12 +328,16 @@ async function run (o, W, record, trace, later, got, lock, watched) {
     }
     const r = await S('trade', w.trade(o.pay, o.get, amount))
     if (r.refused) { record({ id: o.id, op: 'trade', wallet: o.wallet, kind: kindOf(w), pair: `${o.pay}→${o.get}`, amount, outcome: 'refused', said: r.refused, seconds: r.priceSeconds, price_seconds: r.priceSeconds }); return }
-    const bought = String(r.ticket).match(/You receive ([0-9.,]+) /)
+    const bought = String(r.ticket).match(/You receive (?:about )?([0-9.,]+) /)
     if (!o.sell && bought) got[o.wallet + ':' + o.get] = Number(bought[1].replace(/,/g, ''))
     const outcome = /Settled/.test(r.final || '') ? 'settled' : /Returned/.test(r.final || '') ? 'returned' : /Failed|failed/.test(r.final || '') ? 'failed' : r.received != null ? 'received' : 'pending'
     const usable = r.received != null ? r.received : outcome === 'returned' ? r.seconds : null
+    // A ticket that states its wait ("Goes through within about 6 minutes") is held to it; one that
+    // states none to the 10 minutes after which the wallet says settling takes longer than usual.
+    const stated = boundOf(r.ticket)
+    const tb = stated || 600
     record({ id: o.id, op: 'trade', wallet: o.wallet, kind: kindOf(w), pair: `${o.pay}→${o.get}`, amount, outcome, said: r.ticket.slice(0, 300), states: r.states, final: r.final,
-      price_seconds: r.priceSeconds, received_seconds: r.received, seconds: usable ?? r.seconds, bound: 600, within: usable != null ? usable <= 600 : false, row: r.row })
+      price_seconds: r.priceSeconds, received_seconds: r.received, seconds: usable ?? r.seconds, bound: tb, stated: stated ? r.ticket.match(/(Goes through[^.]*|within about \d+ minutes?)/i)?.[0] || null : null, within: usable != null ? usable <= tb : false, row: r.row })
     return
   }
   // A payment, and the receiver's side of it.
@@ -330,16 +349,22 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   // Above the operator's smallest leaf in each asset (SILVR's is about 0.00017): an amount below
   // it is refused as the drive's choice, not the wallet's failure.
   let recipient; const amount = o.amount || (o.asset === 'USDX' ? '1' : o.asset === 'EURX' ? '1' : o.asset === 'SILVR' ? '0.001' : '0.0001')
+  let named = null
   if (o.how === 'invoice') recipient = await S('invoice ' + o.to, to.invoice(amount))
-  else {
+  else if (o.how === 'name') {
+    // What the receiver's card shares: its name while it holds one, else its code (the card's
+    // state, which is what a payer is given).
+    recipient = await S('shared ' + o.to, to.shared())
+    named = /^[^\s:@]+@[a-z0-9.-]+\.[a-z]+$/i.test(recipient)
+  } else {
     const code = await S('code ' + o.to, to.code())
-    recipient = o.how === 'address' ? decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]).toLowerCase() : code
+    recipient = (o.how === 'address' || o.how === 'btc-address') ? decodeURIComponent(code.replace(/^bitcoin:/i, '').split('?')[0]).toLowerCase() : code
   }
   const before = await S('figure ' + o.to, to.figure(o.asset))
   let closedAt = null
   let closedHow = null
   if (o.how === 'closed') { const c = await S('close', to.close()); closedAt = Date.now(); closedHow = c.process; if (!c.killed) throw new Error('the app did not close') }
-  const base = { id: o.id, from: o.from, to: o.to, how: o.how, asset: o.asset, amount, kind: kindOf(from) }
+  const base = { id: o.id, from: o.from, to: o.to, how: o.how, asset: o.asset, amount, kind: kindOf(from), ...(named != null ? { named, to_text: named ? recipient : 'code' } : {}) }
   const s = await S('send ' + o.from, from.send(recipient, o.asset, amount), 2400000)
   if (s.refused) {
     record({ ...base, op: 'payment', outcome: 'refused', said: s.refused, seconds: 0 })
@@ -357,20 +382,22 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   const silent = /^no answer/.test(s.status)
   // A payment refused before anything moved: its receiver had nothing coming either.
   if (!sent && !silent) { if (o.how === 'closed') await to.open(); record({ ...base, op: 'receive', kind: kindOf(to), outcome: payOutcome === 'refused' || /came back|nothing/i.test(s.status) ? 'refused' : 'failed', said: 'the payer said: ' + s.status, seconds: 0 }); return }
-  if (o.how === 'address') {
+  if (o.how === 'address' || o.how === 'btc-address') {
     const t0 = s.clickedAt
-    watched.add(o.to)
+    const key = o.how === 'btc-address' ? 'BTC:' + o.to : o.to
+    const rise = Number(amount) * 0.9
+    watched.add(key)
     later((async () => {
       // Arrival: the figure 0.9 or more above the lowest it has read since the payment (a sale of
       // OILX in the meantime lowers it; a purchase adds a few hundredths).
       let low = before; let seen = null
       while (Date.now() - t0 < 7200000) {
         const f = await lock([o.to], () => to.figure(o.asset)).catch(() => null)
-        if (f != null) { low = Math.min(low, f); if (f - low >= 0.9) { seen = f; break } }
+        if (f != null) { low = Math.min(low, f); if (f - low >= rise) { seen = f; break } }
         await sleep(30000)
       }
       const secs = (Date.now() - t0) / 1000
-      watched.delete(o.to)
+      watched.delete(key)
       record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (lowest since the payment ${low}, was ${before})` : `${o.to} never showed it in two hours (was ${before})`,
         seconds: secs, bound, within: seen != null && bound ? secs <= bound : false })
     })())

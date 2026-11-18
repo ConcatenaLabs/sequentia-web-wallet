@@ -4,6 +4,8 @@
 //
 //   open()                       the wallet shown, joined, its receive code on screen
 //   code()                       a fresh receive code (New code), as the wallet shows it
+//   shared()                     what Receive's Copy gives: the payment name while the wallet holds
+//                                one the service confirms, else the receive code
 //   invoice(btc)                 a BTC invoice for the amount: the receive code's `lightning=` part
 //   figure(ticker)               the asset's figure in the balance, as a number
 //   send(to, ticker, amount)     Send, its review, Send: -> { review, status, seconds } or { refused }
@@ -54,6 +56,15 @@ export class WebWallet {
     const old = await p.eval("document.querySelector('#addr').textContent")
     await this.click('#btnNewAddr')
     return p.waitFor(`(()=>{ const t=document.querySelector('#addr').textContent; return ${CODE_RE}.test(t) && t!==${JSON.stringify(old)} && /sequentia=/i.test(t) ? t : false })()`, 300000)
+  }
+
+  // Receive's Copy, as a person shares the card: what it put on the clipboard.
+  async shared () {
+    await this.tab('receive')
+    const p = this.page
+    await p.eval("(()=>{ const i=document.querySelector('#recvAmt'); if(i && i.value){ i.value=''; i.dispatchEvent(new Event('input')) } return true })()")
+    await p.waitFor(`(()=>{ const q=document.querySelector('#qr'); return !!(q && q.dataset.text) })()`, 300000)
+    return copied(p, () => this.click('#btnCopy'))
   }
 
   async invoice (btc) {
@@ -119,6 +130,16 @@ export class WebWallet {
     await this.tab('swap'); await sleep(1500)
     return this.page.eval("[...document.querySelectorAll('#ucTrades .uc-trade')].map(r=>r.innerText.replace(/\\n+/g,' '))")
   }
+}
+
+// What a Copy button puts on the clipboard: the page's clipboard is read where it is written (a
+// headless browser has no clipboard of its own to read back). -> the text copied.
+export async function copied (p, press, ms = 60000) {
+  await p.eval(`(()=>{ if(!window.__rbCopyHooked){ window.__rbCopyHooked=true; const w=(t)=>{ window.__rbCopied=String(t); return Promise.resolve() };
+    try{ Object.defineProperty(navigator, 'clipboard', { configurable:true, value:{ writeText:w, readText:()=>Promise.resolve(window.__rbCopied||'') } }) }catch{ try{ navigator.clipboard.writeText=w }catch{} } }
+    window.__rbCopied=null; return true })()`)
+  await press()
+  return p.waitFor('window.__rbCopied', ms)
 }
 
 // A modal left on screen by an earlier step (a trade's "Trade complete", a sent payment's) is
