@@ -6,8 +6,9 @@
 //   paid       the maker locks at once and the buyer holds the lock before anything of its own
 //              moved; meanwhile the operator knows no preimage, the maker's invoice is unpaid, a
 //              claim with any other preimage is refused, and so is a wrong preimage posted to the
-//              operator; the buyer pays, the preimage comes out with the BTC payment, the buyer
-//              claims, and the maker's swap is done;
+//              operator; the library marks the lock paid before the BTC goes out (so it goes home at
+//              its home date unless claimed); the buyer pays, the preimage comes out with the BTC
+//              payment, the buyer claims, and the maker's swap is done;
 //   abandoned  the maker locks, and the buyer (its page closed) never pays: the lock stays the
 //              buyer's to claim only with a preimage nobody revealed, the maker's coin is not
 //              refunded before the timeout, and comes back to the maker from it; no BTC moved.
@@ -109,6 +110,8 @@ async function main () {
   const ls2 = await op('/v1/lock_status', { payment_hash: a.r.hash })
   check('the BTC was paid once, and the preimage came out with it', (await pays(a.r.hash)) === 1 && rec.preimage && sha(rec.preimage) === a.r.hash && ls2.body.preimage === rec.preimage && (await makerInvoice(a.r.hash)) === 'paid',
     { pays: await pays(a.r.hash), lock_status: ls2.body.locks })
+  const payeeLock = (w.command('locks') || []).find((l) => l.role === 'payee' && l.hash === a.r.hash) || {}
+  check('the library marked the lock paid before the BTC went out', payeeLock.paid === true && rec.markedPaid === true, { paid: payeeLock.paid, state: payeeLock.state })
   check('the buyer claimed the lock and settled the claimed coin', rec.receiveState === 'received' && (rec.settleTargets || [])[0] && !!rec.settleTargets[0].leaf_id, { settle: rec.settleTargets })
   await until('the maker\'s swap done', async () => (await swapOf(a.r.swap)) === 'done', 120000, 2000)
   check('the maker\'s swap is done', true)
