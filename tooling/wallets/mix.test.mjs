@@ -78,3 +78,27 @@ test('a resumed run gives each payment watched when the drive stopped a line of 
   // Not counted: the verdict leaves them out.
   assert.equal(summarize([...lines, ...u]).driveErrors, 2)
 })
+
+// The reliability run of 2026-11-18: two phone trades were recorded as refused "no ticket in 5 min".
+// In one the app had said "That amount is too small to trade." within a minute, which the drive
+// did not read; in the other it was never asked a price. Every answer Ambra mobile's Swap gives in
+// place of a ticket is read as the wallet's words.
+test('every refusal Ambra mobile\'s Swap shows is read as its answer, and no ticket line is', async () => {
+  const { PHONE_REFUSAL } = await import('./ambra-mobile.mjs')
+  for (const w of [
+    'That amount is too small to trade.',
+    'Enter how much you pay.',
+    'You have no USDX to trade.',
+    'Your USDX is on its way: it is ready to trade in a minute or two. Nothing has moved.',
+    'Your USDX is held by an order you placed, and can be traded once it is filled or cancelled. Nothing has moved.',
+    'Your wallet is still opening: try again in a moment. Nothing has moved.',
+    'Nobody could confirm a price for this just now. Nothing has moved: try again in a moment.',
+    'Your wallet is still finishing something it started, so it could not get a price in time. Nothing has moved: try again in a moment.',
+    'Not offered right now: nobody offers GOLD for USDX in one step.',
+    'GOLD for USDX is not offered.',
+    'Only 1 USDX of your USDX can be traded now, too little for any offer: the rest is on its way, ready in a minute or two. Nothing has moved.',
+  ]) assert.ok(PHONE_REFUSAL.test(w), w)
+  for (const t of ['Up to 3 USDX can be traded now.', 'You pay\n3 USDX', 'You receive\nabout 0.0007 GOLD', 'Fees\nincluded above', 'Price\n1 GOLD = 3800 USDX', 'Goes through within about 2 minutes']) {
+    assert.ok(!PHONE_REFUSAL.test(t), t)
+  }
+})

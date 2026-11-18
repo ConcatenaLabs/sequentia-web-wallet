@@ -17,6 +17,12 @@ const TABS = ['Balance', 'Send', 'Receive', 'Swap', 'History', 'More']
 const D = process.env.RB_DEBUG ? (s) => console.error(new Date().toISOString(), s) : () => {}
 const num = (s) => { const m = String(s).replace(/,/g, '').match(/[0-9]+(\.[0-9]+)?/); return m ? Number(m[0]) : 0 }
 
+// What Ambra mobile's Swap says in place of a ticket (its UserWords: too small, enter an amount,
+// none held, not ready, held by an order, being redone or freed, still opening, no firm price,
+// wallet busy, not offered or listed, part ready, BTC being moved or ahead): read as the wallet's
+// answer, so the record carries its words, never a five-minute wait for a ticket that cannot come.
+export const PHONE_REFUSAL = /Nothing has moved|try again|can't|cannot|Nobody|not enough|ready in|No offer|no price|too small|Enter how much|You have no|is not offered|Not offered/i
+
 // Swap scrolled to `re` from wherever it was left (the keyboard a picker's search opened closed
 // first): down the page first, then back up.
 const seek = async (re, tries = 8) => { await u.hideKeyboard(); return (await u.scrollTo(re, tries)) || u.scrollTo(re, tries, 'down') }
@@ -296,12 +302,15 @@ export class AmbraMobile {
       await u.swipeUp(); await sleep(300)
       const ns = await u.screen()
       if (ns.some((n) => n.clickable && n.say === 'Trade')) { ticket = ns.filter((n) => /^(You pay|You receive|Fees|Price)\n/.test(n.say) || (/Goes through/i.test(n.say) && !/ → /.test(n.say))).map((n) => n.say.replace(/\n/g, ' ')).join(' | '); break }
-      const err = ns.find((n) => /Nothing has moved|try again|can't|cannot|Nobody|not enough|ready in|No offer|no price/i.test(n.say) && !n.clickable)
+      const err = ns.find((n) => PHONE_REFUSAL.test(n.say) && !n.clickable)
       if (err) { refused = err.say.replace(/\n/g, ' '); break }
       await sleep(1000)
     }
     const priceSeconds = (Date.now() - t0) / 1000
-    if (!ticket) return { refused: refused || 'no ticket in 5 min', priceSeconds }
+    if (refused) return { refused, priceSeconds }
+    // The app answers a price within 45 s whatever its library does (kReviewAtMost): five minutes
+    // with neither a ticket nor words read is the drive's, never counted as the wallet's refusal.
+    if (!ticket) throw new Error('no answer read on Swap in 5 min (the app answers within 45 s); screen: ' + u.textOf(await u.screen()).replace(/\n/g, ' | ').slice(0, 300))
     const tC = Date.now()
     await u.tap('Trade', 10000)
     let received = null; let final = null; const states = []; let row = null
