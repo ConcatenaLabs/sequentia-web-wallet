@@ -23,7 +23,9 @@
 //                                script from its timeout. It is the wallet's at once, out of
 //                                round, so the wallet pays once `lock_ready` says it is held (its
 //                                record the request's, its rounds final, its home date far
-//                                enough off): no round is waited for;
+//                                enough off): no round is waited for. Just before it pays, the
+//                                library marks the lock paid (`lock_paid`), so it is taken home
+//                                at its home date unless claimed;
 //                              - a receive through the operator (`htlc-1`), which the maker's leaf
 //                                pays: the wallet's leaf is made in the operator's next round, and
 //                                the wallet pays once that leaf is held and final, with its home

@@ -551,9 +551,12 @@ past the earliest the wallet takes. The wallet claims it with the preimage and t
 back by script from its timeout, so the wallet holds it at once and pays without waiting for a
 round. Otherwise, or when the library refuses the lock before signing anything (no coin shallow
 enough, a timeout the operator does not take), the maker's leaves pay the wallet's receive
-through the operator, and the wallet waits for its leaf's round. A lock asked and not answered
-stands (the library posts it again at its sync), and nothing goes through the operator while it
-does. Once the maker's node is paid, it posts the preimage to the operator
+through the operator, and the wallet waits for its leaf's round. One swap takes one leg. A lock
+asked and not answered stands, and so does a payment through the operator that got no answer: the
+library posts either again at its sync. While one stands the desk takes no other leg and does not
+offer the swap again. It decides this only from its library's records read at that moment (`locks`,
+`lightning_payments`). A library it cannot read proves nothing, so the swap stays where it is and is
+read again. Once the maker's node is paid, it posts the preimage to the operator
 (`/v1/lock_preimage`), and the swap is done when the wallet has claimed; a lock nobody paid for
 comes back from its timeout and the swap is void. The asset must be one the operator serves over Lightning.
 Swaps are kept in the store directory (`btc-swaps.json`), so a restart follows every one it
