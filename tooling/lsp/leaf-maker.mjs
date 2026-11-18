@@ -193,7 +193,8 @@ export function syncStanding (rec, staleMs, since, now = Date.now()) {
   const last = rec && rec.last_end != null ? rec.last_end : null
   const ago = now - (last ?? since)
   if (ago <= staleMs) return { ok: true }
-  const under = rec && rec.under_way_ms != null ? `, a pass under way for ${Math.round(rec.under_way_ms / 1000)} s` : ''
+  const under = (rec && rec.under_way_ms != null ? `, a pass under way for ${Math.round(rec.under_way_ms / 1000)} s` : '')
+    + (rec && rec.unreachable ? `, the operator cannot be reached (${rec.unreachable})` : '')
   return { ok: false, why: last == null
     ? `the maker has completed no sync pass in the ${Math.round(ago / 1000)} s since it started${under}: it quotes again once one ends`
     : `the maker's last sync pass ended ${Math.round(ago / 1000)} s ago, more than ${Math.round(staleMs / 1000)} s${under}: it quotes again once one ends` }
@@ -214,11 +215,18 @@ export const upkeepDue = (now, passEnd, libraryMs) => now - passEnd >= libraryMs
 // once the pass has run half its bound, its slices take their turn ahead of the takers' commands
 // after `lateTurnMs` rather than the queue's usual turn, so a pass under a steady stream of takers
 // still ends within its bound.
+// Why a sync's answer says the operator was not reached (its `unreachable`, or `answering: false`),
+// or null when it was.
+export function syncUnreachable (r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null
+  if (r.unreachable != null && r.unreachable !== false) return typeof r.unreachable === 'string' ? r.unreachable : JSON.stringify(r.unreachable)
+  return r.answering === false ? 'the operator did not answer' : null
+}
 export async function upkeepSync (cmd, log, ran = null, opts = {}) {
   const sliceMs = opts.sliceMs ?? SLICE_MS, boundMs = opts.boundMs ?? SYNC_PASS_BOUND_MS
   const clock = opts.clock ?? Date.now
   const start = clock()
-  let slices = 0, library = 0, longest = 0, over = false, synced = true
+  let slices = 0, library = 0, longest = 0, over = false, synced = true, unreachable = null
   const figures = () => `${slices} slices, ${clock() - start} ms in all, the library ${library} ms of it, the longest slice ${longest} ms`
   for (const [name, args] of [['sync', UPKEEP_SYNC_ARGS], ['deposits', {}]]) {
     const cmdStart = clock()
@@ -234,6 +242,12 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
         if (name === 'sync') synced = false
         if (name === 'sync' || !/no command/.test(String(e && e.message))) log(name + ':', e.message)
       }
+      // A sync that cannot reach the operator does not throw: it answers `answering: false` with
+      // `unreachable` set. Such a pass has read nothing, so it ends no pass.
+      if (name === 'sync' && !failed) {
+        const why = syncUnreachable(r)
+        if (why) { synced = false; unreachable = why; log('sync: the operator cannot be reached:', why) }
+      }
       const own = ran ? ran(name) : null
       const took = own != null ? own : clock() - s0
       n++; slices++; library += took; most = Math.max(most, took); longest = Math.max(longest, took)
@@ -244,7 +258,7 @@ export async function upkeepSync (cmd, log, ran = null, opts = {}) {
     if (n > 1) log(`${name} in ${n} slices: ${clock() - cmdStart} ms, the longest ${most} ms`)
   }
   if (clock() - start > boundMs) log(`error: the sync took longer than its bound (${boundMs} ms): ${figures()}`)
-  return { start, end: clock(), slices, library, longest, synced }
+  return { start, end: clock(), slices, library, longest, synced, unreachable }
 }
 // The sync and its deposits on a loop of their own (`sync_seconds`), apart from the rest of the
 // upkeep, as the forfeits are (forfeitPass): each slice is a command of its own in the library's
@@ -271,7 +285,7 @@ export function syncLoop (cmd, log, ran = null, opts = {}) {
         if (opts.record) opts.record.end()
         log('sync pass ' + JSON.stringify({ n: ++n, start: r.start, end: r.end, ms: r.end - r.start, slices: r.slices, library: r.library, longest: r.longest }))
       } else {
-        if (opts.record) opts.record.abort()
+        if (opts.record) opts.record.abort(r && r.unreachable)
         log('sync pass failed ' + JSON.stringify(r ? { start: r.start, end: r.end, slices: r.slices } : {}))
       }
     }
@@ -284,20 +298,20 @@ export function syncLoop (cmd, log, ran = null, opts = {}) {
 // which a check compares with its period (`sync_seconds`) and its longest gap.
 export function passRecord (clock = Date.now, since = clock()) {
   const r = { passes: 0, last_start: null, last_end: null, last_ms: null, longest_ms: 0, longest_gap_ms: 0 }
-  let start = null, end = since
+  let start = null, end = since, unreachable = null
   return {
     begin () { start = clock() },
     end () {
       const now = clock()
       r.passes++; r.last_start = start ?? now; r.last_end = now; r.last_ms = now - r.last_start
       r.longest_ms = Math.max(r.longest_ms, r.last_ms); r.longest_gap_ms = Math.max(r.longest_gap_ms, now - end)
-      end = now; start = null
+      end = now; start = null; unreachable = null
     },
     // A pass that did not end (its sync failed): forgotten, nothing counted.
-    abort () { start = null },
+    abort (why = null) { start = null; unreachable = why || null },
     // -> the record now, `ago_ms` the time since the last end (since the start before the first),
     // `under_way_ms` how long the pass under way has run (null when none is).
-    now () { const now = clock(); return { ...r, ago_ms: now - end, under_way_ms: start == null ? null : now - start } },
+    now () { const now = clock(); return { ...r, ago_ms: now - end, under_way_ms: start == null ? null : now - start, ...(unreachable ? { unreachable } : {}) } },
   }
 }
 export const HELD_COINS = Object.freeze({ held: true, brief: true })
@@ -2026,6 +2040,9 @@ async function main () {
           let again = null
           if (f) {
             try {
+              // A maker whose sync is stale makes no new price, as the firm routes make none.
+              const stopped = stoppedNow()
+              if (stopped) throw new Error('stopped: ' + stopped)
               // Priced as a firm offer is now, with its checks; made only when the live price asks
               // no more than the gone offer did, so a refused acceptance never holds a price.
               const t = await firmTerms({ give_asset: f.give_asset, want_asset: f.want_asset, give: String(f.give) })

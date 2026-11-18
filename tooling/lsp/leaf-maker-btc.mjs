@@ -299,6 +299,17 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
   let turn = Promise.resolve(), stepping = false
   const inTurn = (fn) => { const t = turn.then(fn, fn); turn = t.catch(() => {}); return t }
 
+  // The leaves the library has taken home on the chain (coin `exited`: a refund, or an exit, final),
+  // read only when a swap of the desk's holds a lock. A lock taken home that way never reaches a
+  // `returned` payment record, which only an out-of-round refund sets.
+  async function homeLeaves (open) {
+    const home = new Set()
+    if (!open.some((s) => s.give_asset !== 'BTC' && s.state === 'locked')) return home
+    const coins = await cmd('coins').catch((e) => { log('btc coins:', e.message); return [] })
+    for (const c of Array.isArray(coins) ? coins : []) if (c && c.state === 'exited' && c.leaf_id) home.add(c.leaf_id)
+    return home
+  }
+
   // Each open swap, moved on as far as it goes now (the caller syncs the library first).
   const tick = () => inTurn(tickNow)
   async function tickNow () {
@@ -308,9 +319,10 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     if (!open.length) return
     const receives = (await cmd('lightning_receives')) || {}
     const pays = (await cmd('lightning_payments')) || {}
+    const home = await homeLeaves(open)
     for (const s of open) {
       const was = s.state
-      try { await step(s, receives[s.hash] || {}, pays[s.hash] || {}) } catch (e) { log('btc swap', s.swap, e.message) }
+      try { await step(s, receives[s.hash] || {}, pays[s.hash] || {}, home) } catch (e) { log('btc swap', s.swap, e.message) }
       // A swap settled: the trade it made goes to the market's trade log.
       if (was !== 'done' && s.state === 'done' && onTrade) onTrade(s)
     }
@@ -347,7 +359,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     } finally { stepping = false }
   }
 
-  async function step (s, rcv, pay) {
+  async function step (s, rcv, pay, home = new Set()) {
     if (s.give_asset === 'BTC') {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
       if (s.state === 'offered') {
@@ -412,6 +424,11 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       return
     }
     if (pay.state === 'returned') { s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'returned'); return }
+    // The lock's coin came home on the chain (its refund final), not paid: the lock stands no more,
+    // and the Bitcoin invoice is closed, as for a lock returned out of round.
+    if (pay.state !== 'paid' && pay.htlc_leaf_id && home.has(pay.htlc_leaf_id)) {
+      s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'void: its lock was taken home on the chain'); return
+    }
     const inv = await node.invoiceStatus(s.hash)
     if (inv.status === 'paid' && inv.preimage) {
       if (pay.state !== 'paid') await cmd('lightning_post_preimage', { hash: s.hash, preimage: inv.preimage }).catch((e) => log('post preimage:', e.message))
