@@ -214,11 +214,13 @@ export class AmbraMobile {
   }
 
   // Swap's two sides set to pay and get, through their pickers as a person sets them.
+  // The market card above the sides can be long (its recent trades), so each side is scrolled to
+  // with room to spare.
   async sides (pay, get) {
     await this.tab('Swap')
     await u.waitFor(/^You pay: /, 60000)
     const pickSide = async (label, tk) => {
-      const n = await u.scrollTo(new RegExp('^' + label + ': '), 4)
+      const n = await u.scrollTo(new RegExp('^' + label + ': '), 8)
       if (!n) throw new Error('no ' + label)
       if (n.say === `${label}: ${tk}`) return
       await u.tapNode(n); await sleep(1200)
@@ -251,29 +253,29 @@ export class AmbraMobile {
         await u.tapNode(o); await sleep(1500); lastY = null
       }
       // The sheet closed; the page may have scrolled the side out of view.
-      if (!(await u.scrollTo(`${label}: ${tk}`, 4))) { const txt = u.textOf(await u.screen()).replace(/\n/g, ' | ').slice(0, 300); if (await u.find('Scrim')) await u.back(); throw new Error('no ' + tk + ' in ' + label + ' (screen: ' + txt + ')') }
+      if (!(await u.scrollTo(`${label}: ${tk}`, 8))) { const txt = u.textOf(await u.screen()).replace(/\n/g, ' | ').slice(0, 300); if (await u.find('Scrim')) await u.back(); throw new Error('no ' + tk + ' in ' + label + ' (screen: ' + txt + ')') }
     }
     // A side cannot take the asset the other side holds: when the pay asset is the one received
     // now, You receive is set first.
-    const cur = await u.scrollTo(/^You receive: /, 4)
+    const cur = await u.scrollTo(/^You receive: /, 8)
     if (cur && cur.say === `You receive: ${pay}`) {
       // The sides' own swap button, as a person turns a trade around.
-      const sw = await u.scrollTo('Swap You pay and You receive', 3)
+      const sw = await u.scrollTo('Swap You pay and You receive', 8)
       if (sw) { await u.tapNode(sw); await sleep(1500) }
     }
     await pickSide('You pay', pay); await pickSide('You receive', get)
-    await u.scrollTo(/^You receive: /, 4)
+    await u.scrollTo(/^You receive: /, 8)
     if (!(await u.find(`You receive: ${get}`))) await pickSide('You receive', get)
     return true
   }
 
   async trade (pay, get, amount, ms = 1200000) {
     await this.sides(pay, get)
-    const pf = await u.scrollTo(/^You pay: /, 3)
+    const pf = await u.scrollTo(/^You pay: /, 8)
     const f = (await u.screen()).filter((n) => n.edit && Math.abs(n.y - pf.y) < 40)[0]
     await u.clearField(f); await u.tapAt(Math.max(f.x, 700), f.y); await u.type(String(amount)); await u.hideKeyboard(); await sleep(1500)
     const before = new Set((await this.tradeRows()).map((r) => r.say))
-    const rv = await u.scrollTo('Review', 4)
+    const rv = await u.scrollTo('Review', 8)
     if (!rv) throw new Error('no Review on Swap')
     const t0 = Date.now()
     await u.tapNode(rv)
