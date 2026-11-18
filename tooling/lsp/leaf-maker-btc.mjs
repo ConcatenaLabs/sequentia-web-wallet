@@ -417,7 +417,9 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
   // `returned` payment record, which only an out-of-round refund sets.
   async function homeLeaves (open) {
     const home = new Set()
-    if (!open.some((s) => s.give_asset !== 'BTC' && s.state === 'locked')) return home
+    // Only a lock through the operator (htlc-1) needs this: a lock straight to the wallet (htlc-2)
+    // carries its coin's state in the library's lock record.
+    if (!open.some((s) => s.give_asset !== 'BTC' && s.state === 'locked' && s.leg !== 'htlc-2')) return home
     // The brief listing: the full one reads every coin's record and chain facts and holds the
     // library (one command at a time) for seconds ahead of every firm offer.
     const coins = await cmd('coins', { brief: true }).catch((e) => { log('btc coins:', e.message); return [] })
@@ -498,7 +500,13 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       try { await postOp('/v1/lock_preimage', { payment_hash: s.hash, preimage: inv.preimage }); s.posted = true } catch (e) { log('post lock preimage:', e.message) }
     }
     if (l && l.state === 'claimed') { s.state = 'done'; log('btc done', s.swap, 'the wallet claimed the lock'); return }
-    if (l && l.state === 'refunded') {
+    // The lock back with the desk: refunded out of round (`refunded`), or taken home on the chain by
+    // its refund, final, which leaves the record `locked` beside its coin `exited` (#833). With the
+    // invoice unpaid the desk never revealed the preimage, so nobody but the desk could have taken it.
+    // Paid, it is done: on this leg the wallet held the preimage and could claim for itself, unlike
+    // a lock through the operator (htlc-1), which step() keeps standing with an error instead.
+    const back = l && (l.state === 'refunded' || (l.state === 'locked' && l.coin_state === 'exited'))
+    if (back) {
       if (paid) { s.state = 'done'; log('btc done', s.swap, 'paid, and the lock came back to the desk from its timeout unclaimed') } else { s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'the lock came back to the desk from its timeout, unpaid') }
     }
   }

@@ -32,7 +32,7 @@ function fakeNode (paid, failedAt = 0, payError = null) {
       c.end(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }))
     })
   })
-  return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => srv.close() })))
+  return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }) } })))
 }
 
 async function run (btcCaps, holdSeconds, fast = null, failedAt = 0, payError = null) {
@@ -62,7 +62,7 @@ async function run (btcCaps, holdSeconds, fast = null, failedAt = 0, payError = 
     asked.length = 0
     await (fast ? desk.stepNow() : desk.tick())
     return { paid, asked, state: desk.swaps.get(f.swap).state }
-  } finally { n.close() }
+  } finally { n.close(); fs.rmSync(store, { recursive: true, force: true }) }
 }
 
 test('within the caps a BTC purchase is paid on the operator\'s acceptance', async () => {

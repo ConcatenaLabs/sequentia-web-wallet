@@ -33,7 +33,7 @@ function fakeNode (calls, state) {
       c.end(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }))
     })
   })
-  return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => srv.close() })))
+  return new Promise((ok) => srv.listen(sock, () => ok({ sock, close: () => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }) } })))
 }
 
 test('a locked swap whose invoice runs out is given a new one under the same hash; an unlocked one is not', async () => {
@@ -67,5 +67,5 @@ test('a locked swap whose invoice runs out is given a new one under the same has
     // An invoice with time to run is answered as it is.
     const [, r3] = await desk.route('POST', '/v1/btc/invoice', { swap: f.swap })
     assert.equal(r3.invoice, 'lntb1inv2')
-  } finally { n.close() }
+  } finally { n.close(); fs.rmSync(store, { recursive: true, force: true }) }
 })
