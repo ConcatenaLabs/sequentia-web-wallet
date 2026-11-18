@@ -189,7 +189,15 @@ export class AmbraMobile {
     await u.waitFor('Review & send', 60000, { clickable: true })
     await this.pickAsset(tk); D('asset picked')
     const edits = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)
-    await u.clearField(edits[0]); await u.tapNode(edits[0]); await u.type(to); await sleep(500); D('recipient typed')
+    // Typed, then read back: a first key lost before the field takes focus makes another name.
+    let typed = null
+    for (let i = 0; i < 3 && typed !== to; i++) {
+      const f = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)[0]
+      await u.clearField(f); await u.tapNode(f); await sleep(400); await u.type(to); await sleep(500)
+      typed = ((await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)[0] || {}).say
+    }
+    if (typed !== to) throw new Error('the recipient field would not take ' + to.slice(0, 40) + ' (read ' + String(typed).slice(0, 40) + ')')
+    D('recipient typed')
     const e2 = (await u.screen()).filter((n) => n.edit).sort((a, b) => a.y - b.y)
     await u.clearField(e2[1]); await u.tapNode(e2[1]); await u.type(String(amount)); await u.hideKeyboard(); await sleep(800); D('amount typed')
     await u.tap('Review & send'); D('review pressed')
