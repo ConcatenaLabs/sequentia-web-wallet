@@ -377,7 +377,7 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   const sent = /^(Sent|Paid)/.test(s.status)
   const payOutcome = sent ? 'settled' : /try again|nothing was sent|not sent|came back|couldn't/i.test(s.status) ? 'refused' : 'failed'
   record({ ...base, op: 'payment', outcome: payOutcome,
-    said: s.review.slice(0, 200) + ' → ' + s.status, stated: s.review.match(/It arrives[^.]*\./)?.[0] || null, seconds: s.seconds, bound, within: sent && bound ? s.seconds <= bound : null })
+    said: s.review.slice(0, 200) + ' → ' + s.status, review_seconds: s.reviewSeconds ?? null, stated: s.review.match(/It arrives[^.]*\./)?.[0] || null, seconds: s.seconds, bound, within: sent && bound ? s.seconds <= bound : null })
   // A payer that never answered may still have paid: its receiver is watched as for a sent one.
   const silent = /^no answer/.test(s.status)
   // A payment refused before anything moved: its receiver had nothing coming either.
