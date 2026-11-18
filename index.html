@@ -5595,6 +5595,12 @@ function initUserComposer(){
         return (pp / pr) * Math.pow(10, dr - dp);
       } catch { return null; }
     },
+    // What `atoms` of `asset` are worth in reference atoms at the node's fee rate, the measure of the
+    // leaf library's instant limit (null when the node gives no rate for it).
+    refAtoms: (hex, atoms)=>{
+      try { const e = feeRateEntry(hex); const r = e && e.rate; return r > 0 ? BigInt(atoms) * BigInt(Math.round(r)) / 100000000n : null; }
+      catch { return null; }
+    },
     // The relay's fill records of the pair, both orientations: a fill of an order resting in the
     // tree is Settled once its record (keyed by the operator's transfer id) is final.
     relayFills: async (pay, receive)=>{

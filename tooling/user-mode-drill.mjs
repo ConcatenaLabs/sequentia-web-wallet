@@ -29,7 +29,10 @@
 // set to the number of wallets, BTC trades join: the maker's BTC desk runs on the harness's hub
 // node and each wallet on a Bitcoin Lightning node of its own, and the trades cycle X for Y, Y for
 // X, X for BTC and BTC for X (the operator's Lightning leg is in X). --btc-only runs those last
-// two directions alone, and admits only the BTC pairs.
+// two directions alone, and admits only the BTC pairs. A purchase paid in BTC takes the asset as a
+// lock straight from the maker (htlc-2) while the operator co-signs locks, and the report counts
+// each leg and the wait from confirm to the BTC paid; --btc-no-locks runs the maker without
+// locks, so every purchase takes the leg through the operator (htlc-1).
 // With --every-pair tooling/user-mode-every-pair.json, on a harness started with
 // ARCA_OPERATOR_MORE_ASSETS=7 ARCA_OPERATOR_SUPERVISED=2, it trades every directed pair of the
 // testnet's assets on regtest (everyPairStack below), admits each pair with the sources that
@@ -67,6 +70,9 @@ const BTC_ONLY = argv.includes('--btc-only')
 // only, as a new wallet that never joined an operator does.
 const ONCHAIN = argv.includes('--onchain')
 const BTC = argv.includes('--btc') || BTC_ONLY
+// The maker's BTC desk never locks straight to a wallet (its `htlc2: false`): every purchase takes
+// the leg through the operator.
+const NO_LOCKS = argv.includes('--btc-no-locks')
 const control = process.env.ARCA_OPERATOR_CONTROL || '127.0.0.1:18640'
 const SEQOBD = process.env.SEQOBD
 if (!SEQOBD && !opt('--stack', null)) { console.error('SEQOBD must name the relay binary'); process.exit(2) }
@@ -190,9 +196,12 @@ async function regtestStack () {
   const X = st.x, Y = st.y
   if (BTC && !(st.btc_lightning && st.btc_lightning.wallets && st.btc_lightning.wallets.length >= K)) throw new Error(`--btc needs the harness's Bitcoin side with ${K} wallets' nodes (ARCA_OPERATOR_BTC_LIGHTNING)`)
   // BTC is quoted in satoshis: the maker gives a satoshi for 2.1 atoms of X, and 0.55 of one for an atom.
-  const btcDesk = BTC ? { rpc: st.btc_lightning.hub, keep_sats: '200000', invoice_seconds: 3600,
+  const btcDesk = BTC ? { rpc: st.btc_lightning.hub, keep_sats: '200000', invoice_seconds: 3600, ...(NO_LOCKS ? { htlc2: false } : {}),
     pairs: [{ give: 'BTC', want: X, rate_num: '21', rate_den: '10', min_give: '5000' }, { give: X, want: 'BTC', rate_num: '11', rate_den: '20', min_give: '10000' }] } : null
   const lwk = await lwkFrom()
+  // A maker gives out of round only within the instant budget the operator's bond stands for: an
+  // operator with no bond leaves it no room, and it quotes nothing. The drill's operator posts one.
+  if (!st.bond) { await H.c('/bond_post', { amount: 50000000 }); note('posted the operator\'s bond of 50,000,000 X') }
   const relay = await startRelay(SEQOBD, st, await freePort()); children.push(relay.proc)
   note(`relay seqobd pid ${relay.proc.pid}`)
   // One live maker quoting both directions, holding both assets.
@@ -209,7 +218,10 @@ async function regtestStack () {
   const RATES = { [`${Y}:${X}`]: [6, 5], [`${X}:${Y}`]: [3, 4] }
   const order = async (sell, want, amount) => { const [n, d] = RATES[`${sell}:${want}`]; return placeOrder(H, relay.url, { assetA: sell, assetB: want, sell: amount, rateNum: n, rateDen: d, minLot: 10000 }) }
   await order(Y, X, 1500000); await order(X, Y, 1500000)
-  await makerReady(H, maker, Y); await makerReady(H, maker, X)
+  // The BTC directions alone need only X of the maker (the harness's node prices no Y, and the maker
+  // gives nothing its node does not price).
+  if (!BTC_ONLY) await makerReady(H, maker, Y)
+  await makerReady(H, maker, X)
   // The operator fronts every coin a round refreshes from its own: give it enough to start.
   await H.c('/fund_server', { asset: X, amount: 200000000 }); await H.c('/fund_server', { asset: Y, amount: 200000000 }); await H.produce()
   const walletConfig = { operator: { server: st.server, node_url: st.node_url, node_user: st.node_user, node_password: st.node_password },
@@ -578,9 +590,20 @@ async function main () {
       const after = await quietBalance(w)
       const d = (a) => big(after[a]) - big(before[a])
       res.moved = { pay: String(d(pay)), receive: String(d(receive)) }
+      // A BTC purchase: the asset's leg it took (a lock straight from the maker, or a leaf through
+      // the operator), and how long the wallet waited, from its confirm to paying the BTC.
+      if (rec && rec.source === 'btc-gateway' && rec.dir === 'buy') {
+        res.leg = rec.leg || 'htlc-1'
+        if (rec.sentAt && rec.waitingSince) res.waitMs = rec.sentAt - rec.waitingSince
+      }
       if (res.state === 'settled') {
-        const ok = d(pay) === -big(r.ticket.amountIn) && d(receive) === big(r.ticket.amountOut)
+        // On a lock straight from the maker the ticket's amount out is the least the wallet gets: it
+        // is priced before the maker locks, at the receive's fee through the operator, which a lock
+        // does not pay. Exact otherwise.
+        const atLeast = res.leg === 'htlc-2'
+        const ok = d(pay) === -big(r.ticket.amountIn) && (atLeast ? d(receive) >= big(r.ticket.amountOut) : d(receive) === big(r.ticket.amountOut))
         res.outcome = ok ? 'settled' : 'failed'
+        if (ok && atLeast && d(receive) > big(r.ticket.amountOut)) res.note = `${d(receive) - big(r.ticket.amountOut)} more came than the ticket's least`
         if (!ok) res.note = `the ticket said ${r.ticket.amountIn} in and ${r.ticket.amountOut} out; ${-d(pay)} left and ${d(receive)} came`
       } else if (res.state === 'returned') {
         // Nothing traded: what left is at most the fees the return names (a take's payment to
@@ -605,7 +628,7 @@ async function main () {
     }
     results.push(res)
     appendFileSync(tradesFile, JSON.stringify(res) + '\n')
-    note(`trade ${id} wallet ${w.i} ${res.pay}→${S.pairs ? res.receive : ''} ${amount}: ${res.outcome}${res.source ? ' via ' + res.source : ''}${res.settledMs ? ` in ${(res.settledMs / 1000).toFixed(0)} s` : ''}${res.disruption ? ' [' + res.disruption.join('; ') + ']' : ''}${res.note ? ' — ' + res.note : ''}`)
+    note(`trade ${id} wallet ${w.i} ${res.pay}→${S.pairs ? res.receive : ''} ${amount}: ${res.outcome}${res.source ? ' via ' + res.source : ''}${res.leg ? ` (${res.leg}${res.waitMs != null ? `, BTC paid ${(res.waitMs / 1000).toFixed(0)} s after confirm` : ''})` : ''}${res.settledMs ? ` in ${(res.settledMs / 1000).toFixed(0)} s` : ''}${res.disruption ? ' [' + res.disruption.join('; ') + ']' : ''}${res.note ? ' — ' + res.note : ''}`)
     if (id % 25 === 0) await topUp()
   }
 
@@ -650,6 +673,15 @@ async function main () {
   lines.push(`- The web wallet at \`${commit}\`, its leaf library (\`leaves/pkg\`) in Node, each wallet a process of its own running \`user-trade.js\`, the code the page runs.`)
   for (const l of S.describe) lines.push(l)
   lines.push('', '## Failures', '')
+  const buys = traded.filter((r) => r.leg)
+  if (buys.length) {
+    const med = (xs) => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null }
+    for (const leg of ['htlc-2', 'htlc-1']) {
+      const rs = buys.filter((r) => r.leg === leg), w = rs.filter((r) => r.waitMs != null).map((r) => r.waitMs / 1000)
+      lines.push(`- Purchases paid in BTC on ${leg === 'htlc-2' ? 'a lock straight from the maker (htlc-2)' : 'a leaf through the operator (htlc-1)'}: ${rs.length}, settled ${rs.filter((r) => r.outcome === 'settled').length}, returned ${rs.filter((r) => r.outcome === 'returned').length}, failed ${rs.filter((r) => r.outcome === 'failed').length}` +
+        (w.length ? `; from confirm to the BTC paid, median ${med(w).toFixed(0)} s, longest ${Math.max(...w).toFixed(0)} s.` : '.'))
+    }
+  }
   const fails = traded.filter((r) => r.outcome === 'failed')
   if (!fails.length) lines.push('None.')
   for (const f of fails) lines.push(`- Trade ${f.trade} (wallet ${f.wallet}, ${f.source || '?'}): ${f.note}${f.disruption ? ' [' + f.disruption.join('; ') + ']' : ''}`)

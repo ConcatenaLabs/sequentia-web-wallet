@@ -541,14 +541,31 @@ the same hash. The hash is always the BTC receiver's and the asset's giver locks
 neither side can take what it gets before paying: the leaf received under the hash opens only
 with the preimage, which comes out only when the BTC is paid. The maker pays BTC only once its
 leaf under the wallet's hash is held for good (`lightning_receive_ready`); a wallet pays BTC to
-the maker only once its own is. The asset must be one the operator serves over Lightning.
+the maker only once its own is.
+
+When the maker gives the asset, it locks it one of two ways. A wallet that asks for a lock (its
+`lock_request`, sent with `/v1/btc/lock`) gets one straight from the maker's coins, out of round,
+while the operator co-signs locks (`templates.list` names `htlc-2`) and the desk allows it
+(`"htlc2": false` in the `btc` section turns it off): the library's `lock_to`, timing out an hour
+past the earliest the wallet takes. The wallet claims it with the preimage and the maker takes it
+back by script from its timeout, so the wallet holds it at once and pays without waiting for a
+round. Otherwise, or when the library refuses the lock before signing anything (no coin shallow
+enough, a timeout the operator does not take), the maker's leaves pay the wallet's receive
+through the operator, and the wallet waits for its leaf's round. One swap takes one leg. A lock
+asked and not answered stands, and so does a payment through the operator that got no answer: the
+library posts either again at its sync. While one stands the desk takes no other leg and does not
+offer the swap again. It decides this only from its library's records read at that moment (`locks`,
+`lightning_payments`). A library it cannot read proves nothing, so the swap stays where it is and is
+read again. Once the maker's node is paid, it posts the preimage to the operator
+(`/v1/lock_preimage`), and the swap is done when the wallet has claimed; a lock nobody paid for
+comes back from its timeout and the swap is void. The asset must be one the operator serves over Lightning.
 Swaps are kept in the store directory (`btc-swaps.json`), so a restart follows every one it
 began.
 
 | Method | Path | What it does |
 | --- | --- | --- |
-| `POST` | `/v1/btc/firm` `{give_asset, want_asset, give, invoice?}` | `give_asset: "BTC"`: `invoice` is the wallet's Bitcoin invoice for `give` sat, and the answer's `invoice` the operator's, for `want` of the asset under the same hash. `want_asset: "BTC"`: the answer's `invoice` is the maker's Bitcoin invoice for `want` sat |
-| `POST` | `/v1/btc/lock` `{swap, invoice}` | the maker gives the asset: `invoice` is the operator's, for the wallet's receive under the maker's hash, and the maker's leaves pay it; logged with the coins the library paid it from and its change (`btc locked <swap> <amount> <asset> from <leaves> change <atoms>`) |
+| `POST` | `/v1/btc/firm` `{give_asset, want_asset, give, invoice?}` | `give_asset: "BTC"`: `invoice` is the wallet's Bitcoin invoice for `give` sat, and the answer's `invoice` the operator's, for `want` of the asset under the same hash. `want_asset: "BTC"`: the answer's `invoice` is the maker's Bitcoin invoice for `want` sat, and `lock` the ways it locks the asset straight to the wallet (`["htlc-2"]` while the operator co-signs locks, `[]` otherwise) |
+| `POST` | `/v1/btc/lock` `{swap, invoice, lock?}` | the maker gives the asset: with `lock`, the wallet's lock request under the maker's hash for `give` of the asset, the maker locks straight to the wallet; else `invoice`, the operator's for the wallet's receive under the hash, and the maker's leaves pay it. `{swap, state, leg}`, `leg` `htlc-2` or `htlc-1`; logged with the coins the library spent and its change (`btc locked <swap> <amount> <asset> straight to the wallet (htlc-2) until median time <t> from <leaves> change <atoms>`, or `through the operator (htlc-1)`) |
 | `POST` | `/v1/btc/paid` `{swap}` | the wallet paid: the maker follows at once |
 | `POST` | `/v1/btc/release` `{swap}` | a firm offer nobody took |
 | `POST` | `/v1/btc/invoice` `{swap}` | the maker gives the asset and has locked: a new Bitcoin invoice under the same hash and for the same amount when the one given runs out within half an hour, `{swap, invoice, expires_at}` |

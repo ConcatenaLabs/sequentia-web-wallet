@@ -861,7 +861,7 @@ server does not answer eligibility, the Trade tab trades as it does without rest
 | `stake-records.js` | Joining, moving and leaving a staking pool, and unbonding: finds the wallet's delegation record, and its stakes on the chain for a browser that does not remember them (a restore), and drives the transactions SWK builds over the staking key's bare scripts. |
 | `leaves.js` | The mode setting, and developer mode's Leaves tab, which shows what the leaf wallet answers. |
 | `user-trade.js` | The user-mode composer's engine: the ticket for a trade from the single-step book, priced by the leaf library, the trade's record written before anything is signed, and the trade followed to Settled or Returned. No DOM: the page and the drill run the same code. |
-| `user-trade-btc.js` | The engine's BTC trades: an asset for BTC or BTC for an asset in one hash-lock with a maker's BTC desk, BTC paid only once the coin received under the hash is held for good. |
+| `user-trade-btc.js` | The engine's BTC trades: an asset for BTC or BTC for an asset in one hash-lock with a maker's BTC desk, BTC paid only once the coin received under the hash is held for good: a lock straight from the maker, held out of round at once, or a leaf through the operator, held once its round is final. |
 | `user-onchain.js` | The engine's on-chain coins: a transparent covenant order taken on the chain in one FILL from the wallet's own coins (`onchain-fill`), its fee in the asset paid. |
 | `user-composer.js` | The Trade tab in user mode: the two pickers, the amount, the ticket's three lines, the button, and the trades' Sent and Settled. |
 | `user-mode/` | `pairs.json`, the pairs (and their sources) user mode offers on each chain, and the reports of the drill runs that admitted them (`REPORT.md` and the like). |
@@ -1106,7 +1106,10 @@ and, when every trade passed, the chain's entry for `user-mode/pairs.json`. With
 harness started with `ARCA_OPERATOR_LIGHTNING` and `ARCA_OPERATOR_BTC_LIGHTNING`, BTC trades with
 the maker's BTC desk join, each wallet on a Bitcoin Lightning node of its own
 (`tooling/cln-rpc.mjs`); `--btc-only` runs the BTC directions alone and admits only the BTC
-pairs. With `--every-pair tooling/user-mode-every-pair.json`, on a harness started with
+pairs. A purchase paid in BTC takes the asset as a lock straight from the maker (htlc-2) while the
+operator co-signs locks, and the report counts each leg and the wait from confirm to the BTC paid;
+`--btc-no-locks` runs the maker without locks, so every purchase takes the leg through the
+operator. With `--every-pair tooling/user-mode-every-pair.json`, on a harness started with
 `ARCA_OPERATOR_MORE_ASSETS=7 ARCA_OPERATOR_SUPERVISED=2`, it trades every directed pair of the
 testnet's assets, each standing in as a harness asset priced the same per atom: a pair with a
 supervised asset through the live maker only, the others through the maker, covenant orders and
@@ -1128,6 +1131,14 @@ the wallet's own payment among them), and gives up what it received out of round
 operator's next round every two minutes, each between trades, so the operator's fronted value
 comes back. `GET /upkeep` says when each last ran and what it answered. `"upkeep": false` in its
 configuration turns this off, as the drill and the drive do: they count every coin a trade moves.
+
+`node tooling/btc-lock-drive.mjs <evidence-dir>`, on the same harness with `ARCA_OPERATOR_LIGHTNING=1`
+and `ARCA_OPERATOR_BTC_LIGHTNING=1`, drives a purchase paid in BTC on a lock straight from the
+maker through the page's engine, and checks that neither side can take what it has not paid for.
+The buyer holds the lock before anything of its own moves. The operator knows no preimage until
+the BTC is paid, and a wrong preimage is refused by the library and by the operator. A lock its
+buyer never pays for stays the maker's until its timeout and comes back to the maker from it,
+with no BTC moved.
 
 `node tooling/user-mode-btc-drive.mjs <evidence-dir>` drives user mode's BTC trades in headless
 Chromium against the same harness started with `ARCA_OPERATOR_LIGHTNING=1` and

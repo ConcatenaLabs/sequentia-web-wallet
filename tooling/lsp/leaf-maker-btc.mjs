@@ -7,18 +7,33 @@
 //     invoice, and, once the wallet's leaf has paid it and the leaf received under the hash is
 //     held for good (`lightning_receive_ready`), pays the wallet's invoice, learns the preimage
 //     and claims.
-//   The maker gives an asset: it makes a Bitcoin invoice of its own node's; the wallet asks to
-//     receive the asset under its hash and sends the operator's invoice; the maker's leaf pays it
-//     (`lightning_pay`, on the terms `lightning_pay_quote` read); when its node is paid it hands
-//     the preimage to the operator, which settles its payment.
+//   The maker gives an asset: it makes a Bitcoin invoice of its own node's; the wallet asks for
+//     the asset under its hash, and the maker locks it one of two ways:
+//     - straight to the wallet (`htlc-2`), when the wallet sends a lock request and the operator
+//       co-signs locks (its `templates.list` names `htlc-2`): one transfer of the maker's coins
+//       into a leaf the wallet claims with the preimage and the maker takes back by script from
+//       its timeout (`lock_to`). The wallet holds it at once, out of round, so it pays the BTC
+//       without waiting for a round;
+//     - through the operator (`htlc-1`), otherwise, or when the library refuses the lock before
+//       signing anything (no coin shallow enough, a timeout the operator does not take): the
+//       maker's leaf pays the operator's invoice for the wallet's receive (`lightning_pay`, on
+//       the terms `lightning_pay_quote` read), and the wallet waits for its received leaf's round.
+//     When its node is paid it hands the preimage to the operator: for a lock, as anyone may
+//     (`lock_preimage`), so the wallet's claim has a second source; for a payment, which the
+//     operator then settles.
 //
 // HTTP, beside the maker's in-tree endpoints:
-//   POST /v1/btc/firm {give_asset, want_asset, give, invoice?} -> { swap, invoice, give, want, expires_at }
+//   POST /v1/btc/firm {give_asset, want_asset, give, invoice?} -> { swap, invoice, give, want, expires_at, lock? }
 //        give_asset 'BTC': `invoice` is the wallet's Bitcoin invoice for `give` sat; the answer's
 //        invoice is the operator's, for `want` of the asset under the same hash.
-//        want_asset 'BTC': the answer's invoice is the maker's Bitcoin invoice for `want` sat.
-//   POST /v1/btc/lock {swap, invoice}  (the maker gives an asset) the operator's invoice for the
-//        wallet's receive under the maker's hash: the maker's leaf pays it.
+//        want_asset 'BTC': the answer's invoice is the maker's Bitcoin invoice for `want` sat, and
+//        `lock` the ways it locks the asset beyond the operator's invoice: ["htlc-2"] while the
+//        operator co-signs locks, [] otherwise.
+//   POST /v1/btc/lock {swap, invoice, lock?}  (the maker gives an asset) `lock`, the wallet's lock
+//        request (the library's `lock_request`, under the maker's hash, for `give` of the asset):
+//        the maker locks straight to it; `invoice`, the operator's invoice for the wallet's receive
+//        under the hash: the maker's leaf pays it when it does not lock straight. -> { swap,
+//        state, leg } (leg 'htlc-2' or 'htlc-1', once chosen).
 //   POST /v1/btc/paid {swap}           a nudge: the wallet paid; the maker follows at once.
 //   POST /v1/btc/release {swap}        a firm offer nobody took.
 //   POST /v1/btc/invoice {swap}        (the maker gives an asset, the swap locked) a new Bitcoin
@@ -31,7 +46,8 @@
 //   "1000" (the most it pays to route a payment to a wallet's node),
 //   "unfinal_max_sats": "0", "unfinal_total_sats": "0", "unfinal_window_seconds": 7200 (see below),
 //   "step_seconds": 2 (how often, between the maker's upkeep passes, a purchase the operator has
-//   accepted is paid within those caps, and a payment begun is followed),
+//   accepted is paid within those caps, and a payment begun is followed), "htlc2": true (false: the
+//   desk never locks straight to a wallet, only through the operator),
 //   "pairs": [ { "give": "BTC", "want": "<hex>", "rate_num", "rate_den", "min_give" },
 //              { "give": "<hex>", "want": "BTC", … } ] } — or "price": true with the maker's price
 // feed, its "assets" naming "BTC" too. Swaps are kept in the store directory (btc-swaps.json), so a
@@ -67,6 +83,25 @@ const INVOICE_SECONDS = 4 * 3600
 const PAY_AGAIN_MS = 30000
 // What a node answers when the invoice paid is not its own, or no longer open.
 const UNKNOWN_INVOICE = /incorrect_or_unknown_payment_details|doesn't know invoice/
+// A lock straight to a wallet times out this long after the earliest the wallet takes (its
+// request's `min_timeout`), as the library's own swap does: the wallet's lock is then held even
+// if the maker's lock lands a while after it was asked.
+export const LOCK_SPARE_SECONDS = 3600
+
+// Whether the operator, by its `info`, co-signs locks between two holders (`htlc-2`).
+export function operatorLocks (info) {
+  const l = info && info.templates && info.templates.list
+  return Array.isArray(l) && l.includes('htlc-2')
+}
+
+// Whether `req` is a lock request for swap `s` (the maker's hash, asset and amount), with the
+// earliest timeout it takes: the reason when not.
+export function lockRequestRefusal (req, s) {
+  if (!req || typeof req !== 'object' || req.kind !== 'arca-lock-request') return 'the lock request is not one'
+  if (req.payment_hash !== s.hash || req.asset !== s.give_asset || String(req.value) !== String(s.give)) return 'the lock request is not for this swap'
+  if (!(Number(req.min_timeout) > 0)) return 'the lock request names no earliest timeout'
+  return null
+}
 
 // Whether a swap's BTC (`s.give` sat) may be paid before the asset received for it is final, under
 // the desk's caps `b` (unfinal_max_sats per swap, unfinal_total_sats in all, a payment counting for
@@ -95,10 +130,29 @@ export function checkBtcConfig (b) {
 // `onPaid(swap, answer)`, when given: told of each payment the desk made from the maker's coins (the
 // library's lightning_pay answer, which names the coins it spent and its change), so the maker's
 // book leaves those coins out before it reads its coins again.
-export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPaid = null }) {
+// `opInfo()`, when given: the operator's `info` as last read (null while unread), which says
+// whether it co-signs locks. `postOp(path, body)`, when given: a POST to the operator, for the
+// preimage of a lock the desk made (`/v1/lock_preimage`, which anyone may post).
+export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPaid = null, opInfo = null, postOp = null }) {
   const b = checkBtcConfig(cfg.btc)
   if (!b) return null
   const lockingMs = Number(b.locking_seconds ?? LOCKING_SECONDS) * 1000
+  // Whether the desk locks straight to a wallet that asks it to, now.
+  const locksStraight = () => b.htlc2 !== false && !!opInfo && operatorLocks(opInfo())
+  // What the library holds of the desk's own under `hash`, read now: { ok: true, lock, pay } (its
+  // lock as payer, from `locks`, and its payment through the operator, from `lightning_payments`,
+  // each null when there is none), or { ok: false } when either could not be read. Only a read that
+  // succeeded says something is not there: an unreadable library proves nothing.
+  const heldUnder = async (hash) => {
+    try {
+      // A taker waits on these, so they go first: behind the library's hold after a quote, each
+      // would wait its turn (seconds) before the lock.
+      const locks = await cmd('locks', {}, true)
+      const pays = await cmd('lightning_payments', {}, true)
+      if (!Array.isArray(locks) || !pays || typeof pays !== 'object') return { ok: false }
+      return { ok: true, lock: locks.find((l) => l && l.role === 'payer' && l.hash === hash) || null, pay: pays[hash] || null }
+    } catch (e) { log('btc: the library could not be read:', e.message); return { ok: false } }
+  }
   const node = clnBitcoinWallet(clnRpc(b.rpc))
   const file = join(cfg.store_dir, 'btc-swaps.json')
   const swaps = new Map(existsSync(file) ? Object.entries(JSON.parse(readFileSync(file, 'utf8'))) : [])
@@ -221,18 +275,45 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
       state: 'offered', at: Date.now(), expires: Date.now() + ttl * 1000 }
     swaps.set(id, s); save()
     log('btc firm', id, 'gives', String(give), p.give.slice(0, 8), 'for', String(want), 'sat')
-    return [200, { swap: id, invoice: inv.invoice, give: String(give), want: String(want), expires_at: Math.floor(s.expires / 1000) }]
+    return [200, { swap: id, invoice: inv.invoice, give: String(give), want: String(want), expires_at: Math.floor(s.expires / 1000),
+      lock: locksStraight() ? ['htlc-2'] : [] }]
   }
 
-  // The wallet's receive under the maker's hash: paid from the maker's leaves, on the terms read.
+  // Whether the library's record `h` (heldUnder) shows nothing of the desk's standing under the
+  // hash: read, with no lock of its but one refused before anything was locked, and no payment
+  // through the operator but one whose coin came back. A lock asked and not answered, or a payment
+  // not refused, can still land (the library posts it again at its sync): a second lock, or a
+  // payment by the other leg, would give the asset twice.
+  const nothingStands = (h) => h.ok && (!h.lock || h.lock.state === 'refused') && (!h.pay || h.pay.state === 'returned')
+
+  // Whether a swap 'locking' past the window may be offered again: only once the library says
+  // nothing of the desk's stands under its hash.
+  async function mayOfferAgain (s) {
+    return nothingStands(await heldUnder(s.hash))
+  }
+
+  // The wallet's asset under the maker's hash: locked straight to the wallet when it asks and the
+  // operator co-signs locks, else its receive paid from the maker's leaves, on the terms read.
   async function lock (body) {
     const s = swaps.get(String(body.swap || ''))
     if (!s || s.give_asset === 'BTC') return [404, { error: 'no such swap' }]
     // A payment begun and not recorded within LOCKING_SECONDS is offered again (tick), and a lock
     // asked while one is under way answers its state: the swap is paid once.
-    if (s.state === 'locking' && Date.now() - (s.locking_at || 0) > lockingMs) s.state = 'offered'
-    if (s.state !== 'offered') return [200, { swap: s.swap, state: s.state }]
+    if (s.state === 'locking' && Date.now() - (s.locking_at || 0) > lockingMs && await mayOfferAgain(s)) { s.state = 'offered'; s.leg = null }
+    if (s.state !== 'offered') return [200, { swap: s.swap, state: s.state, leg: s.leg || null }]
     if (Date.now() > s.expires) return [409, { error: 'the offer lapsed' }]
+    // Each leg only while nothing of the other stands under the hash, read from the library now: a
+    // payment through the operator left standing by an attempt that got no answer, or a lock, is
+    // the swap's leg already.
+    const h = await heldUnder(s.hash)
+    if (!h.ok) return [503, { error: 'the desk cannot read its library now; ask again', swap: s.swap, state: s.state }]
+    if (h.lock && h.lock.state !== 'refused') { s.state = h.lock.state === 'locking' ? 'locking' : 'locked'; s.leg = 'htlc-2'; s.locking_at = Date.now(); save(); return [200, { swap: s.swap, state: s.state, leg: s.leg }] }
+    if (h.pay && h.pay.state !== 'returned') { s.state = 'locked'; s.leg = 'htlc-1'; save(); return [200, { swap: s.swap, state: s.state, leg: s.leg }] }
+    if (body.lock && locksStraight() && !s.straight_refused) {
+      const r = await lockStraight(s, body.lock)
+      if (r) return r
+    }
+    if (!body.invoice) return [409, { error: 'the desk does not lock straight to the wallet now, and the wallet sent no invoice to pay' }]
     // The maker's own coins can move between its quote and its payment (a board, a settle, another
     // swap): the payment is then quoted again, for the same invoice, and made on the new quote.
     // The swap is 'locking' while the library pays, and 'locked' only once it has: a payment that
@@ -240,7 +321,7 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     // Each attempt carries its own token: a call that returns or fails after a later attempt took
     // over changes nothing.
     const attempt = Date.now() + ':' + Math.random().toString(16).slice(2, 8)
-    s.state = 'locking'; s.locking_at = Date.now(); s.attempt = attempt; s.invoice_x = body.invoice; save()
+    s.state = 'locking'; s.locking_at = Date.now(); s.attempt = attempt; s.invoice_x = body.invoice; s.leg = 'htlc-1'; save()
     const mine = () => s.attempt === attempt && s.state === 'locking'
     const back = () => { if (mine()) { s.state = 'offered'; save() } }
     let paid = null
@@ -255,14 +336,46 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
         break
       } catch (e) {
         if (i < 2 && /changed since it was shown/.test(String(e.message)) && mine()) continue
-        back(); throw e
+        // Offered again only when the library recorded no payment: one it recorded stands (no answer,
+        // or an answer it did not accept after the operator co-signed), and is posted again by its
+        // sync; and an unreadable library proves nothing. The swap stays 'locking' then.
+        if (nothingStands(await heldUnder(s.hash))) back()
+        else log('btc swap', s.swap, 'the payment through the operator may stand:', e.message, '- the swap stays locking')
+        throw e
       }
     }
     if (mine() || s.state === 'offered') { s.state = 'locked'; save() }
     // The coins the library chose to pay it from, and its change: which coin a lock takes decides
     // what of the maker's is out of round after it.
-    log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8), 'from', ((paid && paid.inputs) || []).map((l) => String(l).slice(0, 12)).join(',') || '?', 'change', (paid && paid.change) || '0')
-    return [200, { swap: s.swap, state: s.state }]
+    log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8), 'through the operator (htlc-1) from', ((paid && paid.inputs) || []).map((l) => String(l).slice(0, 12)).join(',') || '?', 'change', (paid && paid.change) || '0')
+    return [200, { swap: s.swap, state: s.state, leg: s.leg }]
+  }
+
+  // The lock straight to the wallet (`lock_to`), its timeout an hour past the earliest the wallet
+  // takes. -> the answer, or null when the library refused it before signing anything (the swap
+  // then locks through the operator, as the library's own swap does).
+  async function lockStraight (s, req) {
+    const why = lockRequestRefusal(req, s)
+    if (why) return [409, { error: why }]
+    const timeout = Number(req.min_timeout) + LOCK_SPARE_SECONDS
+    const attempt = Date.now() + ':' + Math.random().toString(16).slice(2, 8)
+    s.state = 'locking'; s.locking_at = Date.now(); s.attempt = attempt; s.leg = 'htlc-2'; s.lock_timeout = timeout; save()
+    let l
+    try { l = await cmd('lock_to', { request: req, timeout }, true) } catch (e) {
+      // Asked and not answered: the library's record stands, and its sync posts the transfer again;
+      // nothing else is locked meanwhile. Refused, or never recorded: nothing was signed. An
+      // unreadable library proves neither: the swap stays 'locking' on this leg, and is read again.
+      const h = await heldUnder(s.hash)
+      if (!nothingStands(h)) { log('btc swap', s.swap, h.ok ? 'the lock is asked and not answered yet:' : 'the lock may stand (the library could not be read):', e.message); return [200, { swap: s.swap, state: s.state, leg: s.leg }] }
+      log('btc swap', s.swap, 'not locking straight to the wallet:', e.message, '- locking through the operator')
+      s.straight_refused = String(e.message || e); s.state = 'offered'; s.leg = null; save()
+      return null
+    }
+    if (onPaid) { try { onPaid(s, l) } catch {} }
+    if (s.attempt === attempt && s.state === 'locking') { s.state = 'locked'; s.lock_leaf = l && l.leaf_id; save() }
+    log('btc locked', s.swap, String(s.give), s.give_asset.slice(0, 8), 'straight to the wallet (htlc-2) until median time', timeout, 'from',
+      ((l && l.inputs) || []).map((x) => String(x).slice(0, 12)).join(',') || '?', 'change', (l && l.change) || '0')
+    return [200, { swap: s.swap, state: s.state, leg: s.leg }]
   }
 
   // A new invoice for a swap the desk has locked, under the same hash and for the same amount, when
@@ -308,9 +421,15 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     if (!open.length) return
     const receives = (await cmd('lightning_receives')) || {}
     const pays = (await cmd('lightning_payments')) || {}
+    const straight = open.some((s) => s.leg === 'htlc-2' || s.state === 'locking') ? await cmd('locks').catch(() => null) : null
+    const payerLocks = new Map((Array.isArray(straight) ? straight : []).filter((l) => l && l.role === 'payer').map((l) => [l.hash, l]))
+    // A swap 'locking' on the operator's leg is offered again only with the locks read too.
+    const locksRead = Array.isArray(straight)
     for (const s of open) {
       const was = s.state
-      try { await step(s, receives[s.hash] || {}, pays[s.hash] || {}) } catch (e) { log('btc swap', s.swap, e.message) }
+      // A lock straight to the wallet is followed only from the library's record of it: unread now,
+      // it waits for the next pass rather than be taken for a payment that never began.
+      try { await (s.leg !== 'htlc-2' ? step(s, receives[s.hash] || {}, pays[s.hash] || {}, { locksRead, lock: payerLocks.get(s.hash) || null }) : straight ? stepStraight(s, payerLocks.get(s.hash) || null, pays[s.hash] || null) : null) } catch (e) { log('btc swap', s.swap, e.message) }
       // A swap settled: the trade it made goes to the market's trade log.
       if (was !== 'done' && s.state === 'done' && onTrade) onTrade(s)
     }
@@ -347,7 +466,30 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     } finally { stepping = false }
   }
 
-  async function step (s, rcv, pay) {
+  // A swap whose asset the desk locked straight to the wallet (`htlc-2`), given the library's
+  // record of that lock (`l`, null when it holds none): locked once the library recorded it; when
+  // the desk's node is paid, the preimage handed to the operator, which serves it to the wallet's
+  // claim; done once the wallet claimed. A lock nobody paid for comes back to the desk from its
+  // timeout (the library's sync refunds it), and the swap is void.
+  async function stepStraight (s, l, pay) {
+    if (s.state === 'offered' || s.state === 'locking') {
+      if (l && ['locked', 'claimed'].includes(l.state)) { s.state = 'locked'; log('btc locked', s.swap, 'the lock is recorded'); return }
+      if (s.state === 'locking' && Date.now() - (s.locking_at || 0) > lockingMs && nothingStands({ ok: true, lock: l, pay })) { s.state = 'offered'; s.leg = null; log('btc swap', s.swap, 'its lock never landed: offered again') }
+      if (s.state === 'offered' && Date.now() > s.expires) { s.state = 'lapsed'; node.cancelInvoice(s.hash).catch(() => {}) }
+      return
+    }
+    const inv = await node.invoiceStatus(s.hash)
+    const paid = inv.status === 'paid' && inv.preimage
+    if (paid && !s.posted && postOp) {
+      try { await postOp('/v1/lock_preimage', { payment_hash: s.hash, preimage: inv.preimage }); s.posted = true } catch (e) { log('post lock preimage:', e.message) }
+    }
+    if (l && l.state === 'claimed') { s.state = 'done'; log('btc done', s.swap, 'the wallet claimed the lock'); return }
+    if (l && l.state === 'refunded') {
+      if (paid) { s.state = 'done'; log('btc done', s.swap, 'paid, and the lock came back to the desk from its timeout unclaimed') } else { s.state = 'void'; node.cancelInvoice(s.hash).catch(() => {}); log('btc swap', s.swap, 'the lock came back to the desk from its timeout, unpaid') }
+    }
+  }
+
+  async function step (s, rcv, pay, straight = { locksRead: false, lock: null }) {
     if (s.give_asset === 'BTC') {
       if (rcv.state === 'failed') { s.state = 'void'; log('btc swap', s.swap, 'void:', rcv.reason || ''); return }
       if (s.state === 'offered') {
@@ -404,7 +546,8 @@ export async function btcDesk ({ cfg, cmd, log, liveRates, onTrade, lookup, onPa
     // request); one begun and never recorded is offered again after LOCKING_SECONDS.
     if ((s.state === 'offered' || s.state === 'locking') && pay.state) { s.state = 'locked'; log('btc locked', s.swap, 'payment recorded') }
     if (s.state === 'locking') {
-      if (Date.now() - (s.locking_at || 0) > lockingMs) { s.state = 'offered'; log('btc swap', s.swap, 'its payment never began: offered again') }
+      // Offered again only once the library, read, holds nothing of the desk's under the hash.
+      if (Date.now() - (s.locking_at || 0) > lockingMs && straight.locksRead && nothingStands({ ok: true, lock: straight.lock, pay: pay.state ? pay : null })) { s.state = 'offered'; log('btc swap', s.swap, 'its payment never began: offered again') }
       return
     }
     if (s.state === 'offered') {
