@@ -25,7 +25,9 @@
 //                                record the request's, its rounds final, its home date far
 //                                enough off): no round is waited for. Just before it pays, the
 //                                library marks the lock paid (`lock_paid`), so it is taken home
-//                                at its home date unless claimed;
+//                                at its home date unless claimed; a payment that then fails for
+//                                good clears the mark (`lock_unpaid`), so the lock goes back to
+//                                the maker out of round from its timeout;
 //                              - a receive through the operator (`htlc-1`), which the maker's leaf
 //                                pays: the wallet's leaf is made in the operator's next round, and
 //                                the wallet pays once that leaf is held and final, with its home
@@ -430,7 +432,11 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       if (st.state === 'none' && (await beforePay(rec)) !== 'pay') return put(rec)
       if (st.state === 'none') st = await B().pay({ invoice: rec.invoiceBtc, maxFeeSats: big(rec.routeFee), maxDelay: Number(rec.routeDelay || rec.minFinalCltv || 18) + EXTRA_BLOCKS })
       if (st.state === 'failed') {
-        // Nothing was paid: the leaf stays unclaimed and goes back to the maker.
+        // Nothing was paid: the leaf stays unclaimed and goes back to the maker. A lock marked paid
+        // loses its mark first (`lock_unpaid`): marked, the wallet would take it on the chain at its
+        // home date, an exit it can never finish without the preimage, and the maker would have it
+        // back only on the chain; unmarked, the maker has it back out of round from its timeout.
+        if ((await unmark(rec)) === 'wait') return put(rec)
         rec.state = 'returned'; rec.returnedAt = now(); rec.why = st.reason || 'the payment failed'; return put(rec)
       }
       if (st.state !== 'complete') return put(rec)
@@ -484,7 +490,6 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
   // serves it. A library that cannot mark it never sees the BTC paid. -> 'pay', or 'wait' (the
   // record says why).
   async function beforePay (rec) {
-    const refused = (e) => !!e && (e.kind === 'refused' || e.kind === 'parse' || /^refused\b/i.test(String(e.message)))
     if (now() - (rec.sentAt ?? rec.at ?? 0) > RECHECK_MS) {
       const need = needSeconds(rec.routeDelay || rec.minFinalCltv)
       let r
@@ -509,6 +514,25 @@ export function btcTrades ({ run, deps, put, log, now, settleStep, maxFeePpm, fi
       }
     }
     return 'pay'
+  }
+
+  // The library's own refusal (or a library without the command), as against one that did not answer.
+  const refused = (e) => !!e && (e.kind === 'refused' || e.kind === 'parse' || /^refused\b/i.test(String(e.message)))
+
+  // A purchase on a lock marked paid whose BTC payment failed for good: the mark is cleared
+  // (`lock_unpaid`), so the lock goes back to the maker out of round from its timeout. Called only on a
+  // definite failure (the payment refused before it went out, or failed back): a payment in flight
+  // or of unknown state keeps the mark, as does one the wallet's Lightning knows nothing of, which
+  // may still be on its way. A library that does not answer is asked again at the next step ('wait');
+  // its refusal (the preimage known, the lock claimed or its exit started, no such command) leaves
+  // the mark, and the trade still comes back. -> 'done' or 'wait'.
+  async function unmark (rec) {
+    if (rec.leg !== 'htlc-2' || !rec.markedPaid) return 'done'
+    try { await run('lock_unpaid', { hash: rec.hash }); rec.markedPaid = false; put(rec) } catch (e) {
+      if (!refused(e)) { log('[user trade] the lock\'s paid mark is not cleared yet:', e.message); return 'wait' }
+      log('[user trade] the lock stays marked paid:', e.message); rec.unmarkRefused = e.message; put(rec)
+    }
+    return 'done'
   }
 
   // Hands the library the preimage of a purchase on a lock whose BTC is paid (`lock_preimage`: kept,
