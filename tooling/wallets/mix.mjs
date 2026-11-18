@@ -210,7 +210,7 @@ export async function runMix ({ work, specs, ops, ext, base, phrases, seed, say,
       try { return await fn() } finally { names.forEach((w) => busy.delete(w)) }
     }
     const movesBtc = (o) => o.asset === 'BTC' || o.pay === 'BTC' || o.get === 'BTC'
-    const free = (o) => needs(o).every((w) => !busy.has(w) && !wanted.get(w)) && !(o.how === 'address' && watched.has(o.to)) && !(movesBtc(o) && needs(o).some((w) => watched.has('BTC:' + w)))
+    const free = (o) => needs(o).every((w) => !busy.has(w) && !wanted.get(w)) && !(o.how === 'address' && watched.has(o.to)) && !(movesBtc(o) && needs(o).some((w) => watched.has('BTC:' + w))) && !needs(o).some((w) => [o.asset, o.pay, o.get].some((a) => a && watched.has(a + ':' + w)))
     const take = () => { const i = todo.findIndex(free); return i < 0 ? null : todo.splice(i, 1)[0] }
     // Short of memory, no new operation starts (those running go on) until enough is free again,
     // and the browser is asked to let go of what it can: a pause, rather than the guard's kill.
@@ -414,17 +414,39 @@ async function run (o, W, record, trace, later, got, lock, watched) {
   // lowest figure read since.
   let low = before
   const rise = Number(amount) * (o.asset === 'BTC' ? 0.5 : 1) - 1e-9
-  // A payer that never answered is watched for 20 minutes, a sent payment for an hour.
-  while (Date.now() - t0 < (silent ? 1200000 : 3600000)) {
+  const rb = o.how === 'closed' ? 60 : bound
+  const shown = (seen, secs) => `${o.to} shows ${seen} ${o.asset} (was ${before}${low < before ? `, lowest since ${low}` : ''}: +${Number((seen - Math.min(before, low)).toPrecision(8))} of ${amount})${opened != null ? `; opened ${opened}s, closed ${((t0 - closedAt) / 1000).toFixed(0)}s before, its process ${closedHow}` : ''}`
+  // Watched in front for the time the wallet stated, with a minute to spare (a payer that never
+  // answered: 20 minutes): past it the receive is a miss, recorded at once, and the arrival is
+  // watched on behind the run for an hour from the click, its wallet free for other operations
+  // that do not move this asset, so one late payment does not hold the run up. The arrival's line
+  // (`op: arrival`, not an operation) tells a late payment from a lost one.
+  const front = silent ? 1200000 : Math.max(120000, ((rb || 600) + 60) * 1000)
+  while (Date.now() - t0 < front) {
     const f = await S('figure ' + o.to, to.figure(o.asset))
     low = Math.min(low, f)
     if (f >= want || f - low >= rise) { seen = f; break }
-    await sleep(o.how === 'address' ? 10000 : 1500)
+    await sleep(1500)
   }
   const secs = (Date.now() - t0) / 1000
-  const rb = o.how === 'closed' ? 60 : bound
-  record({ ...base, op: 'receive', kind: kindOf(to), outcome: seen != null ? 'settled' : 'failed', said: seen != null ? `${o.to} shows ${seen} ${o.asset} (was ${before}${low < before ? `, lowest since ${low}` : ''}: +${Number((seen - Math.min(before, low)).toPrecision(8))} of ${amount})${opened != null ? `; opened ${opened}s, closed ${((t0 - closedAt) / 1000).toFixed(0)}s before, its process ${closedHow}` : ''}` : `${o.to} never showed it in ${silent ? '20 minutes' : 'an hour'} (was ${before})`,
-    seconds: secs, bound: rb, within: seen != null && rb ? secs <= rb : (seen != null ? null : false) })
+  if (seen != null) { record({ ...base, op: 'receive', kind: kindOf(to), outcome: 'settled', said: shown(seen, secs), seconds: secs, bound: rb, within: rb ? secs <= rb : null }); return }
+  record({ ...base, op: 'receive', kind: kindOf(to), outcome: 'late', said: `${o.to} had not shown it by ${secs.toFixed(0)} s (was ${before}); watched on behind the run`, seconds: secs, bound: rb, within: false })
+  const key = o.asset + ':' + o.to
+  watched.add(key)
+  later((async () => {
+    let got = null
+    while (Date.now() - t0 < (silent ? 1200000 : 3600000)) {
+      await sleep(15000)
+      const f = await lock([o.to], () => to.figure(o.asset)).catch(() => null)
+      if (f == null) continue
+      low = Math.min(low, f)
+      if (f >= want || f - low >= rise) { got = f; break }
+    }
+    watched.delete(key)
+    const at = (Date.now() - t0) / 1000
+    record({ ...base, op: 'arrival', kind: kindOf(to), outcome: got != null ? 'settled' : 'failed', drive_skip: true,
+      said: got != null ? shown(got, at) : `${o.to} never showed it in ${silent ? '20 minutes' : 'an hour'} (was ${before}): to be read again at the run's end`, seconds: at })
+  })())
 }
 
 // A refusal that is the person's own doing: an amount too small or more than held, nothing to
