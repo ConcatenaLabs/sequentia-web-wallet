@@ -76,12 +76,30 @@ export class AmbraMobile {
     throw new Error('no tab ' + t)
   }
 
+  // Receive is one card: the QR code, one line, Copy and More options (New code, the amount, Show
+  // full code while the wallet holds a payment name). Leaving the tab closes More options and
+  // turns Show full code off again.
+  async more () { if (await u.find('More options', { clickable: true })) { await u.tap('More options'); await sleep(800) } }
+
   async code ({ fresh = true } = {}) {
     await this.tab('Receive'); D('on Receive')
-    await u.waitFor('Copy receive code', 120000, { clickable: true })
+    await u.waitFor('Copy', 120000, { clickable: true })
+    await this.more()
     if (fresh) { await u.tap('New code'); await sleep(3000) }
-    await u.waitFor('Copy receive code', 120000, { clickable: true })
-    await u.tap('Copy receive code'); await sleep(800); await u.noSnack()
+    // A named wallet's card shares the name: the code is behind Show full code.
+    const full = await u.scrollTo(/^Show full code$/, 2)
+    if (full) { await u.tapNode(full); await sleep(2000) }
+    await u.waitFor('Copy', 120000, { clickable: true })
+    await u.tap('Copy'); await sleep(800); await u.noSnack()
+    return this.pasted()
+  }
+
+  // What the card's Copy gives as it first shows: the payment name while the wallet holds one,
+  // else the receive code.
+  async shared () {
+    await this.tab('Receive')
+    await u.waitFor('Copy', 120000, { clickable: true })
+    await u.tap('Copy'); await sleep(800); await u.noSnack()
     return this.pasted()
   }
 
@@ -106,35 +124,36 @@ export class AmbraMobile {
     return edits[0]
   }
 
-  // Receive's "Amount in BTC" field, under New code: the screen reads its node with bounds that
-  // cover the buttons above it, so it is found by tapping below New code until a field has focus.
+  // Receive's amount field, in More options beside its asset (BTC first): tapped until it has focus.
   async amountField () {
+    await this.more()
     const nc = await u.waitFor('New code', 120000, { clickable: true })
-    for (let dy = 150; dy <= 390; dy += 60) {
-      await u.tapAt(540, nc.y2 + dy - 60); await sleep(700)
+    const ns = await u.screen()
+    const asset = ns.filter((n) => n.clickable && n.x > 700 && n.y < nc.y && n.y > nc.y - 400).sort((a, b) => b.y - a.y)[0]
+    const ys = asset ? [asset.y] : []
+    for (let dy = 120; dy <= 300; dy += 60) ys.push(nc.y - dy)
+    for (const y of ys) {
+      await u.tapAt(380, y); await sleep(700)
       if ((await u.screen()).some((n) => n.edit && n.focused)) return true
     }
     return false
   }
 
   async invoice (btc) {
-    await this.tab('Receive')
-    await u.waitFor('Copy receive code', 120000, { clickable: true })
-    if (!(await this.amountField())) throw new Error('no amount field on Receive')
-    await u.clearField(); await u.type(String(btc)); await u.shell('input keyevent 111')
-    // The code is made again with the amount and its invoice.
+    // The code is made again with the amount and its invoice; Copy gives it while the amount stays.
+    // Reading the clipboard goes through Send, which leaves Receive and empties the amount, so each
+    // try types it again.
     let inv = null
-    for (let i = 0; i < 8 && !inv; i++) {
-      await sleep(3000)
+    for (let i = 0; i < 5 && !inv; i++) {
       await this.tab('Receive')
-      await u.tap('Copy receive code'); await sleep(800); await u.noSnack()
-      const code = await this.pasted()
-      const m = code.match(/[?&]lightning=([^&\s]+)/i)
+      await u.waitFor('Copy', 120000, { clickable: true })
+      if (!(await this.amountField())) throw new Error('no amount field on Receive')
+      await u.clearField(); await u.type(String(btc)); await u.shell('input keyevent 111')
+      await sleep(4000 + 3000 * i)
+      await u.tap('Copy'); await sleep(800); await u.noSnack()
+      const m = (await this.pasted()).match(/[?&]lightning=([^&\s]+)/i)
       if (m) inv = decodeURIComponent(m[1])
     }
-    // The field emptied again, so the next code carries no amount.
-    await this.tab('Receive')
-    if (await this.amountField()) { await u.clearField(); await u.shell('input keyevent 111') }
     if (!inv) throw new Error('no invoice in the receive code')
     return inv
   }

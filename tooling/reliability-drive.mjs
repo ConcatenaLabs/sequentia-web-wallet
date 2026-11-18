@@ -20,7 +20,10 @@
 //                 every wallet at once, Ambra browser and Ambra mobile beside the web wallet, in a
 //                 tester's mix of trades, payments (code, invoice, address, into a closed phone),
 //                 receives and the faucet: tooling/wallets/mix.mjs says what each is held to. The
-//                 phrases are read from (and a new wallet's written to, mode 600) --phrases,
+//                 `--mix rb6` replaces the faucet's share with BTC paid on the chain to another
+//                 wallet's address, and pays part of the code payments to what the receiver's
+//                 Copy gives (its payment name while it holds one, `how: name`).
+//                 The phrases are read from (and a new wallet's written to, mode 600) --phrases,
 //                 <work-dir> by default; Ambra mobile is the app installed on the one device adb sees
 //                 (AMBRA_APP=<application id> for a test build installed beside the released one).
 //                 Each wallet's console (the page; Ambra browser's popup, service worker and
@@ -63,7 +66,7 @@ const OPS = Number(flag('--ops', '250'))
 const ASSET = flag('--asset', 'USDX'); const PAY = flag('--pay', '2')
 const GET = flag('--get', 'GOLD'); const TRADE = flag('--trade', '2')
 const EXT = flag('--ext', null); const PHRASES = flag('--phrases', null); const SEED = Number(flag('--seed', '1'))
-const ASSETS = flag('--assets', null)
+const ASSETS = flag('--assets', null); const MIX = flag('--mix', 'rb1')
 const START_MB = Number(flag('--start-mb', '9000')); const PAUSE_MB = Number(flag('--pause-mb', '3500')); const RESUME_MB = Number(flag('--resume-mb', '5000'))
 const [workArg, lane, A, B] = argv
 if (!workArg || !lane || (!A && lane !== 'summary')) { console.error('usage: reliability-drive.mjs <work-dir> <pay|trade> <A> <B|->'); process.exit(2) }
@@ -206,7 +209,7 @@ async function main () {
     const { runMix } = await import('./wallets/mix.mjs')
     if (argv.slice(2).some((s) => s.startsWith('browser:')) && !EXT) throw new Error('Ambra browser needs --ext <its unpacked directory>')
     return runMix({ work, specs: argv.slice(2), ops: OPS, ext: EXT ? resolve(EXT) : null, base, phrases: PHRASES ? resolve(PHRASES) : work, seed: SEED, say,
-      startMb: START_MB, pauseMb: PAUSE_MB, resumeMb: RESUME_MB })
+      startMb: START_MB, pauseMb: PAUSE_MB, resumeMb: RESUME_MB, mix: MIX })
   }
   let n = existsSync(out) ? readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).length : 0
   say(`starting at operation ${n + 1} of ${OPS}`)
