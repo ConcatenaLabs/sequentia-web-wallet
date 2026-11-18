@@ -202,11 +202,11 @@ export class AmbraMobile {
     await u.clearField(e2[1]); await u.tapNode(e2[1]); await u.type(String(amount)); await u.hideKeyboard(); await sleep(800); D('amount typed')
     await u.tap('Review & send'); D('review pressed')
     // The review sheet, or a refusal under the form.
-    const r = await u.waitAny([/^Send .*\?/, 'Cancel', /try again|can't|cannot|not enough|still arriving|Enter |isn't|is not|No wallet/i], 120000)
+    const r = await u.waitAny([/^Send .*\?/, /^Confirm .*payment/, 'Cancel', /try again|can't|cannot|not enough|still arriving|Enter |isn't|is not|No wallet/i], 120000)
     D('review answered: ' + r.i + ' ' + r.node.say.slice(0, 60))
     const ns = await u.screen()
     const text = u.textOf(ns)
-    const sendBtn = ns.find((n) => n.clickable && n.say === 'Send' && n.y < 2100)
+    const sendBtn = ns.find((n) => n.clickable && /^(Send|Confirm & send|Pay)$/.test(n.say) && n.y < 2100)
     if (!sendBtn) return { refused: text.replace(/\n/g, ' ').replace(/Balance Send Receive Swap History More$/, '').slice(0, 400) }
     const review = ns.filter((n) => n.y < sendBtn.y + 200 && n.y > 300 && n.say && !n.edit).map((n) => n.say).join(' | ')
     const t = Date.now()
