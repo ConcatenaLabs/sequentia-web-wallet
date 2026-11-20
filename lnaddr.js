@@ -166,14 +166,16 @@ export function lnurlMetadata (name, domain) {
 }
 
 // The SHA-256 of a metadata string, as lowercase hex: what an invoice for it commits to in its `h`
-// field (LUD-06). Over the UTF-8 bytes of exactly the string served, never of a re-serialisation.
+// field, which payers that check an LNURL-pay invoice's description hash compare (LUD-06 as first
+// written; its current text no longer asks for the check). Over the UTF-8 bytes of exactly the string served, never of a re-serialisation.
 export function metadataHash (metadata) {
   return Array.from(sha256(new TextEncoder().encode(String(metadata))), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Whether an invoice (decodeBolt11's reading) may be paid for this metadata: one that commits to a
-// description hash must commit to this metadata's; one carrying a memo instead is taken, as LUD-06
-// asks of payers today and as the invoices of wallets made before names committed to theirs.
+// description hash must commit to this metadata's; one carrying a memo instead is taken: LUD-06 no
+// longer asks payers to check the hash, many services' invoices carry none, and so do the invoices of
+// wallets made before names committed to theirs.
 export function invoiceFitsMetadata (d, metadata) {
   return !d || d.descriptionHash == null || d.descriptionHash === metadataHash(metadata);
 }

@@ -5068,8 +5068,8 @@ function initLnAddress(){
   lnAddr = mountLnAddress({
     base: window.SEQ_LSP_URL, domain: lnaddrDomain(),
     key: ()=>{ const p=bip39Phrase(); if(!p) return null; if(!_nameKey || _nameKey.phrase!==p) _nameKey={ phrase:p, k:nameKey(p) }; return _nameKey.k; },
-    // The invoice commits to the LNURL-pay metadata the payer was served (LUD-06: its `h` is the
-    // sha256 of exactly that string), so a payer that checks it pays the name.
+    // The invoice commits to the LNURL-pay metadata the payer was served (its `h` is the sha256 of
+    // exactly that string), so a payer that checks the description hash pays the name.
     invoice: async (msat, metadata)=>{
       const inv = await btcArk.invoiceCommitted(msat/1000n, metadataHash(metadata));
       watchNameInvoice(inv);

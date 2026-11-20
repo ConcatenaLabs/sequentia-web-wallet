@@ -133,7 +133,7 @@ test('end to end: a payer pays alice@ in an amount it chooses; the open wallet m
   const store = new Map();
   const wallet = mountLnAddress({
     base: s.base, domain: DOMAIN, key: () => k,
-    // The invoice commits to the metadata it is handed (LUD-06), as the page's Bitcoin ark makes it.
+    // The invoice commits to the metadata it is handed, as the page's Bitcoin ark makes it.
     invoice: async (msat, metadata) => {
       asked.push(msat); metas.push(metadata);
       if (mode === 'refuse') throw new Error('the ark is closed');
@@ -165,7 +165,7 @@ test('end to end: a payer pays alice@ in an amount it chooses; the open wallet m
     const d = decodeBolt11(c.body.pr);
     assert.equal(d.chain, 'btc'); assert.equal(d.amountMsat, 21_000_000n);
     assert.deepEqual(asked, [21_000_000n]);
-    // LUD-06: the invoice commits to sha256 of exactly the metadata string the payRequest served.
+    // The invoice commits to sha256 of exactly the metadata string the payRequest served.
     assert.deepEqual(metas, [p.body.metadata], 'the wallet was handed the metadata served, byte for byte');
     assert.equal(d.descriptionHash, createHash('sha256').update(p.body.metadata, 'utf8').digest('hex'));
     console.log(`  the invoice's h is sha256(metadata served): ${d.descriptionHash}`);
@@ -179,13 +179,18 @@ test('end to end: a payer pays alice@ in an amount it chooses; the open wallet m
     // A wallet whose invoice is for another amount is never handed on: the payer is told at once.
     mode = 'short';
     assert.deepEqual((await get(`${p.body.callback}?amount=5000000`)).body, { status: 'ERROR', reason: "The recipient's wallet can't take this payment right now." });
+    // A wallet whose ark refuses to make the invoice (a server that cannot commit it): refused, and
+    // asked once: the wallet does not try again, so one payer leaves at most one invoice behind.
     mode = 'refuse';
+    const n0 = asked.length;
     assert.deepEqual((await get(`${p.body.callback}?amount=5000000`)).body, { status: 'ERROR', reason: "The recipient's wallet can't take this payment right now." });
+    await new Promise((ok) => setTimeout(ok, 700));
+    assert.equal(asked.length, n0 + 1, 'one request, one invoice asked of the ark');
     // An invoice committing to another description than the metadata served: never handed on.
     mode = 'otherhash';
     assert.deepEqual((await get(`${p.body.callback}?amount=5000000`)).body, { status: 'ERROR', reason: "The recipient's wallet can't take this payment right now." });
     // An invoice with a memo and no hash (a wallet made before names committed to their metadata):
-    // handed on, as LUD-06 asks payers to take it.
+    // handed on: payers that do not check the hash take it.
     mode = 'plain';
     const plain = await get(`${p.body.callback}?amount=5000000`);
     assert.equal(decodeBolt11(plain.body.pr).descriptionHash, null);

@@ -76,7 +76,7 @@ test('reading a Lightning address', () => {
   for (const no of ['alice', 'alice@', '@x.com', 'tb1qxyz', 'bitcoin:TB1Q?x=1', 'a@b', 'a b@c.com']) assert.equal(parseLnAddress(no), null, no);
   assert.deepEqual(JSON.parse(lnurlMetadata('alice', 'sequentiatestnet.com')),
     [['text/plain', 'Payment to alice@sequentiatestnet.com'], ['text/identifier', 'alice@sequentiatestnet.com']]);
-  // LUD-06's hash: sha256 over the UTF-8 bytes of the metadata string as served (checked against
+  // The description hash: sha256 over the UTF-8 bytes of the metadata string as served (checked against
   // Node's own sha256), so a re-serialisation hashes to something else.
   const meta = lnurlMetadata('alice', 'sequentiatestnet.com');
   assert.equal(metadataHash(meta), createHash('sha256').update(Buffer.from(meta, 'utf8')).digest('hex'));
@@ -140,8 +140,8 @@ test('another service\'s address is paid in BTC over LNURL-pay, for exactly the 
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: wrong({ pr: fakeInvoice(21_000n, { prefix: 'lntsqt' }) }) }), /does not read|not for BTC/);
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: wrong({ pr: 'garbage' }) }), /does not read/);
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: wrong({ status: 'ERROR', reason: 'Not today.' }) }), /^Error: Not today\.$/);
-  // LUD-06: an invoice that commits to a description hash must commit to the metadata served,
-  // byte for byte; one with a memo instead is paid, as LUD-06 asks of payers today.
+  // An invoice that commits to a description hash must commit to the metadata served, byte for
+  // byte; one with a memo instead is paid.
   const META = '[["text/plain","Payment to bob@wallet.example"],["text/identifier","bob@wallet.example"]]';
   const served = (body) => table({
     'https://wallet.example/.well-known/lnurlp/bob': [200, { tag: 'payRequest', callback: 'https://wallet.example/cb/bob', minSendable: 1000, maxSendable: 100_000_000, metadata: META }],

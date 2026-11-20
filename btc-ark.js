@@ -608,7 +608,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
   }
   // A Lightning invoice paid into the ark that commits to `descriptionHash` (64 hex characters) in
   // place of a memo: a payment name's, whose payer checks it against the LNURL-pay metadata it was
-  // served (LUD-06). The wallet refuses an invoice without that hash (a server that cannot make
+  // served. The wallet refuses an invoice without that hash (a server that cannot make
   // one), and so does this, so no other invoice is ever handed on. -> { invoice, payment_hash, expires_at }
   async function invoiceCommitted (sats, descriptionHash) {
     const want = String(descriptionHash || '').toLowerCase()
