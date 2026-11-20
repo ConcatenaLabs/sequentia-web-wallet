@@ -32,6 +32,10 @@ let d = decodeBolt11(SEQ_INV);
 assert.deepStrictEqual(d, { ok: true, network: 'sequentia-regtest', chain: 'seq', asset: SEQ_ASSET,
   amountMsat: 250000000n, paymentHash: SEQ_HASH, descriptionHash: null, minFinalCltv: d.minFinalCltv, timestamp: 1791447707, expiry: 604800 });
 // BOLT 11's own example: made at 1496314658, its `x` field one minute.
+// A payment name's invoice from Bark's server (regtest): its `h` is sha256 of the name's metadata.
+{ const n = decodeBolt11('lnbcrt210u1p40lt9jsp50tfqkazpg4sdstwa4gkck4t4lu3ap3jup92mjqcf0chqez3fw5mqpp5a0yv5yts6l02u95qc8vc4sfy6mlravxrcyk5fy26skyagcr5clrqhp5n2ahg7dp682k35pqu79d53de3gq9m6x4d29395vf9kmgfdwwnt2scqzru9qyysgqa79hgfqk3w72lx6up27weuth397awsntnvsjndnhdcmseqfq9pc8482nsvrhqaw8ccseqtczqj0pezn3mfcccmydqgguaw5uwl7krecp0x2x4h');
+  assert.equal(n.ok, true); assert.equal(n.network, 'regtest'); assert.equal(n.amountMsat, 21000000n);
+  assert.equal(n.descriptionHash, '9abb7479a1d1d568d020e78ada45b98a005de8d56a8b12d1892db684b5ce9ad5'); }
 { const b = decodeBolt11(BTC_INV); assert.equal(b.timestamp, 1496314658); assert.equal(b.expiry, 60); assert.equal(b.descriptionHash, null, 'a memo, no hash'); }
 assert.ok(d.minFinalCltv > 18, 'a Sequentia invoice asks for its network final CLTV');
 assert.equal(bolt11Asset(SEQ_INV), SEQ_ASSET);
