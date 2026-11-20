@@ -65,7 +65,7 @@
 // `makeLnaddr(cfg).handle(req, res, url)` answers a request it owns and returns true, or returns
 // false and leaves it alone; lsp-server.mjs calls it before its token check.
 import crypto from 'node:crypto';
-import { nameProblem, signedDigest, verifySig, verifyCode, codeId, requestUntil, lnurlMetadata, SKEW_S, NAME_WORDS } from '../../lnaddr.js';
+import { nameProblem, signedDigest, verifySig, verifyCode, codeId, requestUntil, lnurlMetadata, invoiceFitsMetadata, SKEW_S, NAME_WORDS } from '../../lnaddr.js';
 import { decodeBolt11 } from '../../bolt11.js';
 import { openNameStore } from './lnaddr-store.mjs';
 import { readPayCode } from '../../pay-code.js';
@@ -200,7 +200,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
   // The requests not handed to the wallet yet, each handed once: a wallet that asks again while it
   // makes an invoice is held, not answered the same request at once.
   const undelivered = (n) => [...(pending.get(n)?.values() || [])].filter((e) => !e.delivered);
-  const deliver = (list) => list.map((e) => { e.delivered = true; return e.kind === 'invoice' ? { id: e.id, kind: e.kind, msat: String(e.msat) } : { id: e.id, kind: e.kind }; });
+  const deliver = (list) => list.map((e) => { e.delivered = true; return e.kind === 'invoice' ? { id: e.id, kind: e.kind, msat: String(e.msat), metadata: e.metadata } : { id: e.id, kind: e.kind }; });
 
   function send (res, code, obj, { cors = false } = {}) {
     const body = JSON.stringify(obj);
@@ -232,6 +232,10 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
     rec.served = [...(rec.served || []).filter((x) => x !== c.id), c.id].slice(-200);
   }
 
+  // The LNURL-pay metadata of a name (LUD-06): the one string the payRequest serves, the invoice
+  // request hands the wallet, and the wallet's invoice commits to (its `h`, sha256 of these bytes).
+  const metadataOf = (n) => lnurlMetadata(n, domain);
+
   const routes = {
     async payRequest (req, res, n) {
       if (!netTake(clientNet(req))) return lnErr(res, 429, BUSY);
@@ -240,7 +244,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       const { lo, hi } = satBounds(n);
       if (hi < lo) return lnErr(res, 200, "The recipient's wallet can't take a payment over Lightning right now.");
       return send(res, 200, { tag: 'payRequest', callback: `${base}/lnaddr/-/pay/${n}`,
-        minSendable: Number(lo * 1000n), maxSendable: Number(hi * 1000n), metadata: lnurlMetadata(n, domain) }, { cors: true });
+        minSendable: Number(lo * 1000n), maxSendable: Number(hi * 1000n), metadata: metadataOf(n) }, { cors: true });
     },
     async callback (req, res, n, url) {
       if (!netTake(clientNet(req))) return lnErr(res, 429, BUSY);
@@ -252,7 +256,7 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
       if (msat % 1000n !== 0n) return lnErr(res, 200, 'This wallet takes whole satoshis only.');
       const { lo, hi } = satBounds(n);
       if (msat < lo * 1000n || msat > hi * 1000n) return lnErr(res, 200, `This wallet takes between ${lo} and ${hi} sats.`);
-      const ans = await ask(n, { kind: 'invoice', msat });
+      const ans = await ask(n, { kind: 'invoice', msat, metadata: metadataOf(n) });
       if (!ans) return lnErr(res, 200, OFFLINE);
       if (ans.busy) return lnErr(res, 200, "The recipient's wallet is busy. Try again in a minute.");
       if (ans.refused) return lnErr(res, 200, "The recipient's wallet can't take this payment right now.");
@@ -425,7 +429,8 @@ export function makeLnaddr ({ domain, base, storePath, now = () => Date.now(), w
         // The wallet's own answer, but not one a payer can pay as asked: the payer is told at once.
         const d = decodeBolt11(pr);
         const why = !d.ok || d.chain !== 'btc' ? 'not a Bitcoin invoice'
-          : d.amountMsat == null || BigInt(d.amountMsat) !== entry.msat ? 'the invoice is not for the amount asked' : null;
+          : d.amountMsat == null || BigInt(d.amountMsat) !== entry.msat ? 'the invoice is not for the amount asked'
+          : !invoiceFitsMetadata(d, entry.metadata) ? 'the invoice commits to another description than the metadata served' : null;
         if (why) { clearTimeout(entry.timer); q.delete(entry.id); entry.resolve({ refused: true }); return fail(res, 400, why); }
         out = { pr };
       } else {

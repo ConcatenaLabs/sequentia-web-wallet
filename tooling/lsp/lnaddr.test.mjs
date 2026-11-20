@@ -9,7 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeLnaddr, OFFLINE } from './lnaddr.mjs';
 import { readStoreNames, sqlitePathOf, sqliteAvailable } from './lnaddr-store.mjs';
-import { nameKey, signedDigest, signWith, mountLnAddress, resolveLnAddress } from '../../lnaddr.js';
+import { nameKey, signedDigest, signWith, mountLnAddress, resolveLnAddress, metadataHash, lnurlMetadata } from '../../lnaddr.js';
+import { createHash } from 'node:crypto';
 import { decodeBolt11 } from '../../bolt11.js';
 import { buildPayCode, readPayCode } from '../../pay-code.js';
 
@@ -22,10 +23,12 @@ const CS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 function toGroups (hex) { const out = []; let acc = 0, bits = 0; for (let i = 0; i < hex.length; i += 2) { acc = (acc << 8) | parseInt(hex.slice(i, i + 2), 16); bits += 8; while (bits >= 5) { bits -= 5; out.push((acc >> bits) & 31); } acc &= (1 << bits) - 1; } if (bits) out.push((acc << (5 - bits)) & 31); return out; }
 function polymod (v) { const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]; let c = 1; for (const x of v) { const b = c >>> 25; c = (((c & 0x1ffffff) << 5) ^ x) >>> 0; for (let i = 0; i < 5; i++) if ((b >>> i) & 1) c = (c ^ G[i]) >>> 0; } return c; }
 // A Bitcoin testnet invoice of `msat`, valid checksum, zero signature (as bolt11.test.mjs builds them).
-function fakeInvoice (msat, prefix = 'lntb') {
+// `dh`: a description hash (hex) carried in an `h` field, as a payment name's invoice commits to.
+function fakeInvoice (msat, prefix = 'lntb', dh = null) {
   const hrp = `${prefix}${BigInt(msat) / 100n}n`;
   const g = [0, 0, 0, 0, 0, 0, 0]; const p = toGroups('33'.repeat(32));
   g.push(1, p.length >> 5, p.length & 31, ...p);
+  if (dh) { const h = toGroups(dh); g.push(23, h.length >> 5, h.length & 31, ...h); }
   for (let i = 0; i < 104; i++) g.push(0);
   const pre = [...hrp].map((c) => c.charCodeAt(0) >> 5).concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
   const pm = polymod(pre.concat(g, [0, 0, 0, 0, 0, 0])) ^ 1;
@@ -125,12 +128,19 @@ test('LNURL-pay answers for a name nobody holds, and for a wallet that is not op
 test('end to end: a payer pays alice@ in an amount it chooses; the open wallet makes the invoice', async () => {
   const s = await serveAt();
   const k = nameKey(PHRASE);
-  const asked = [];
+  const asked = [], metas = [];
   let codes = 0, mode = 'good';
   const store = new Map();
   const wallet = mountLnAddress({
     base: s.base, domain: DOMAIN, key: () => k,
-    invoice: async (msat) => { asked.push(msat); if (mode === 'refuse') throw new Error('the ark is closed'); if (mode === 'slow') await new Promise((ok) => setTimeout(ok, 400)); return fakeInvoice(mode === 'short' ? msat - 1000n : msat); },
+    // The invoice commits to the metadata it is handed, as the page's Bitcoin ark makes it.
+    invoice: async (msat, metadata) => {
+      asked.push(msat); metas.push(metadata);
+      if (mode === 'refuse') throw new Error('the ark is closed');
+      if (mode === 'slow') await new Promise((ok) => setTimeout(ok, 400));
+      const dh = mode === 'plain' ? null : mode === 'otherhash' ? metadataHash(metadata + ' ') : metadataHash(metadata);
+      return fakeInvoice(mode === 'short' ? msat - 1000n : msat, 'lntb', dh);
+    },
     code: async () => buildPayCode({ address: ADDRESS, ark: 'tark1qexample', sequentia: `sqr1qcode${++codes}` }),
     limits: () => ({ min_sat: 1000, max_sat: 2_000_000 }),
     store: { get: (x) => store.get(x) ?? null, set: (x, v) => (v == null ? store.delete(x) : store.set(x, v)) },
@@ -155,6 +165,10 @@ test('end to end: a payer pays alice@ in an amount it chooses; the open wallet m
     const d = decodeBolt11(c.body.pr);
     assert.equal(d.chain, 'btc'); assert.equal(d.amountMsat, 21_000_000n);
     assert.deepEqual(asked, [21_000_000n]);
+    // The invoice commits to sha256 of exactly the metadata string the payRequest served.
+    assert.deepEqual(metas, [p.body.metadata], 'the wallet was handed the metadata served, byte for byte');
+    assert.equal(d.descriptionHash, createHash('sha256').update(p.body.metadata, 'utf8').digest('hex'));
+    console.log(`  the invoice's h is sha256(metadata served): ${d.descriptionHash}`);
     console.log(`  invoice for 21,000 sats from the open wallet in ${ms} ms: ${c.body.pr.slice(0, 24)}…`);
 
     // Outside the wallet's limits, or not whole satoshis: refused before the wallet is asked.
@@ -165,9 +179,33 @@ test('end to end: a payer pays alice@ in an amount it chooses; the open wallet m
     // A wallet whose invoice is for another amount is never handed on: the payer is told at once.
     mode = 'short';
     assert.deepEqual((await get(`${p.body.callback}?amount=5000000`)).body, { status: 'ERROR', reason: "The recipient's wallet can't take this payment right now." });
+    // A wallet whose ark refuses to make the invoice (a server that cannot commit it): refused, and
+    // asked once: the wallet does not try again, so one payer leaves at most one invoice behind.
     mode = 'refuse';
+    const n0 = asked.length;
     assert.deepEqual((await get(`${p.body.callback}?amount=5000000`)).body, { status: 'ERROR', reason: "The recipient's wallet can't take this payment right now." });
+    await new Promise((ok) => setTimeout(ok, 700));
+    assert.equal(asked.length, n0 + 1, 'one request, one invoice asked of the ark');
+    // An invoice committing to another description than the metadata served: never handed on.
+    mode = 'otherhash';
+    assert.deepEqual((await get(`${p.body.callback}?amount=5000000`)).body, { status: 'ERROR', reason: "The recipient's wallet can't take this payment right now." });
+    // An invoice with a memo and no hash (a wallet made before names committed to their metadata):
+    // handed on: payers that do not check the hash take it.
+    mode = 'plain';
+    const plain = await get(`${p.body.callback}?amount=5000000`);
+    assert.equal(decodeBolt11(plain.body.pr).descriptionHash, null);
     mode = 'good';
+
+    // A request naming metadata other than the name's own: the wallet commits to nothing and refuses.
+    const before = asked.length;
+    let ended = null;
+    const forged = { id: 'e'.repeat(32), kind: 'invoice', msat: 5_000_000n, metadata: lnurlMetadata('mallory', DOMAIN), at: Date.now(), resolve: (x) => { ended = x; } };
+    forged.timer = setTimeout(() => {}, 2500);
+    s.svc.__test__.pending.get('alice').set(forged.id, forged);
+    for (let i = 0; i < 300 && !ended; i++) await new Promise((ok) => setTimeout(ok, 10));
+    clearTimeout(forged.timer);
+    assert.deepEqual(ended, { refused: true });
+    assert.equal(asked.length, before, 'no invoice was made for it');
 
     // Somebody else answering alice's request, with its live id: refused; and alice's own key over
     // an invoice for another amount: refused. The payer gets the wallet's own invoice.

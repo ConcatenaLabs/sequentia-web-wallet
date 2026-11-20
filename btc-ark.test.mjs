@@ -197,6 +197,26 @@ test('a refused cosign signs nothing', async () => {
   ark.close()
 })
 
+// A payment name's invoice, made by Bark's server with the description-hash patch on regtest: it
+// commits to sha256 of the name's metadata.
+const NAME_INV = 'lnbcrt210u1p40lt9jsp50tfqkazpg4sdstwa4gkck4t4lu3ap3jup92mjqcf0chqez3fw5mqpp5a0yv5yts6l02u95qc8vc4sfy6mlravxrcyk5fy26skyagcr5clrqhp5n2ahg7dp682k35pqu79d53de3gq9m6x4d29395vf9kmgfdwwnt2scqzru9qyysgqa79hgfqk3w72lx6up27weuth397awsntnvsjndnhdcmseqfq9pc8482nsvrhqaw8ccseqtczqj0pezn3mfcccmydqgguaw5uwl7krecp0x2x4h'
+const NAME_H = '9abb7479a1d1d568d020e78ada45b98a005de8d56a8b12d1892db684b5ce9ad5'
+
+test('a committed invoice: the ark is asked for the hash, and an invoice without it is refused', async () => {
+  let answer = { invoice: NAME_INV, payment_hash: 'eb', expires_at: 1 }
+  const { w, asked } = standIn({ info: () => INFO, balance: () => ({ spendable: '0', total: '0' }), invoice: () => answer })
+  const ark = mountBtcArk({ makeWorker: () => w, mnemonic: () => 'x', config: arkConfig({ server: 'https://s', esplora: 'https://e', network: 'testnet4' }), decode: decodeBolt11 })
+  assert.equal((await ark.invoiceCommitted(21000n, NAME_H.toUpperCase())).invoice, NAME_INV)
+  assert.deepEqual(asked.find((x) => x.command === 'invoice').args, { sats: '21000', description_hash: NAME_H })
+  // An answer without that hash (a memo, or another hash) never reaches the payer.
+  answer = { invoice: LNTB, payment_hash: 'e7', expires_at: 1 }
+  await assert.rejects(ark.invoiceCommitted(21000n, NAME_H), /does not commit to the description asked for/)
+  answer = { invoice: NAME_INV, payment_hash: 'eb', expires_at: 1 }
+  await assert.rejects(ark.invoiceCommitted(21000n, '00'.repeat(32)), /does not commit to the description asked for/)
+  await assert.rejects(ark.invoiceCommitted(21000n, 'abcd'), /64 hex characters/)
+  ark.close()
+})
+
 test("the composer's deps.btc on the ark: pay within the ticket's fee and lock, statuses mapped", async () => {
   const { w, asked } = standIn({
     info: () => INFO,

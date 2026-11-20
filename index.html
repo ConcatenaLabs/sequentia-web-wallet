@@ -1855,7 +1855,7 @@ import { chainOf } from './covenant-fill-host.js';
 import { initCoinJoin, setCoinjoinBase, status as cjStatusApi, availableLanes, mix as cjMix, mixBitcoin as cjMixBtc } from './coinjoin.js';
 import { takeMarketWalk } from './swap.js';
 import { decodeBolt11 } from './bolt11.js';
-import { mountLnAddress, nameKey, parseLnAddress, resolveLnAddress, nameProblem, nameQrText, NAME_WORDS } from './lnaddr.js';
+import { mountLnAddress, nameKey, parseLnAddress, resolveLnAddress, nameProblem, nameQrText, NAME_WORDS, metadataHash } from './lnaddr.js';
 import { lnHistoryRows, swapLine as lnSwapLine, railLine as lnRailLine, plainLine as lnPlainLine } from './ln-history.js';
 import { displayPair } from './swap.js';
 import { esc, multiTxTrades, lnTradeHistory, initSwap, renderSwap, resumeCrossMakers, resumeCovenantOrders, resumePegIns, resumePegOuts, resumeMixedSwap, resumeSell, resumeBuy, resumeBridged, resumeSubswap, hasBuyInFlight, hasBridgeInFlight, hasSubswapInFlight, companionWollet, applyCompanionUpdate, resetCompanion, setConfidentialReceive, confidentialReceive, logTrade, partitionHidden, setAssetHidden, isAssetHidden, walletTag as swapWalletTag } from './swap.js';
@@ -5068,8 +5068,10 @@ function initLnAddress(){
   lnAddr = mountLnAddress({
     base: window.SEQ_LSP_URL, domain: lnaddrDomain(),
     key: ()=>{ const p=bip39Phrase(); if(!p) return null; if(!_nameKey || _nameKey.phrase!==p) _nameKey={ phrase:p, k:nameKey(p) }; return _nameKey.k; },
-    invoice: async (msat)=>{
-      const inv = await btcArk.invoice(msat/1000n, 'Payment to '+lnAddr.address());
+    // The invoice commits to the LNURL-pay metadata the payer was served (its `h` is the sha256 of
+    // exactly that string), so a payer that checks the description hash pays the name.
+    invoice: async (msat, metadata)=>{
+      const inv = await btcArk.invoiceCommitted(msat/1000n, metadataHash(metadata));
       watchNameInvoice(inv);
       return inv.invoice;
     },

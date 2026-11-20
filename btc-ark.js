@@ -606,6 +606,19 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
     await open()
     return run('invoice', { sats: String(sats), description })
   }
+  // A Lightning invoice paid into the ark that commits to `descriptionHash` (64 hex characters) in
+  // place of a memo: a payment name's, whose payer checks it against the LNURL-pay metadata it was
+  // served. The wallet refuses an invoice without that hash (a server that cannot make
+  // one), and so does this, so no other invoice is ever handed on. -> { invoice, payment_hash, expires_at }
+  async function invoiceCommitted (sats, descriptionHash) {
+    const want = String(descriptionHash || '').toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(want)) throw new Error('a description hash is 64 hex characters')
+    await open()
+    const r = await run('invoice', { sats: String(sats), description_hash: want })
+    const d = decode ? decode(String(r.invoice || '')) : null
+    if (!d || !d.ok || d.descriptionHash !== want) throw new Error('the ark made an invoice that does not commit to the description asked for')
+    return r
+  }
   // Whether it was paid: the wallet's daemon claims a payment as soon as the server holds it.
   async function received (hash) {
     const r = await run('receive_status', { hash, claim: true })
@@ -663,7 +676,7 @@ export function mountBtcArk ({ makeWorker, mnemonic, config, decode, onChange = 
 
   return {
     open, isOpen: () => isOpen, read: () => isOpen && read, refresh, renewDue, figures: () => figures, info: () => info,
-    route: (to) => routeOf(to, decode), quote, max, send, payOutcome, board, invoice, received, lightning, run,
+    route: (to) => routeOf(to, decode), quote, max, send, payOutcome, board, invoice, invoiceCommitted, received, lightning, run,
     // The last Bitcoin ark watchtower plan (covered, uncovered, not worth it), for developer mode.
     towerPlan: () => lastPlan,
     // Leaving the Ark alone: what default mode says (exitNote), whether the wallet keeps what arrives
