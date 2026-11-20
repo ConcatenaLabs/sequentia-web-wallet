@@ -115,6 +115,16 @@ export function bolt11PaymentHash(bolt11) {
   return h;
 }
 
+// bolt11DescriptionHash — the `h` field (type 23, 52 groups): the SHA-256 the invoice commits to in
+// place of a memo, as 32-byte lowercase hex, or null when it carries none (a field of another length
+// is skipped, as BOLT11 asks of a reader). The first one of the right length counts.
+export function bolt11DescriptionHash(bolt11) {
+  const p = split(bolt11);
+  if (!p) return null;
+  for (const f of fields(p.vals)) if (f.type === 23 && f.data.length === 52) return groupsToHex(f.data, 32);
+  return null;
+}
+
 // bolt11MinFinalCltv — the `c` field (type 24) as a Number, the BOLT11 default of 18 when absent,
 // or null when the invoice cannot be parsed. The first `c` counts.
 export function bolt11MinFinalCltv(bolt11) {
@@ -135,7 +145,8 @@ export function bolt11Asset(bolt11) {
 
 // decodeBolt11 — everything above in one reading:
 //   { ok: true, network, chain: 'seq'|'btc', asset (hex on 'seq', null on 'btc'), amountMsat (BigInt|null),
-//     paymentHash, minFinalCltv, timestamp (seconds), expiry (seconds) }
+//     paymentHash, descriptionHash (hex, or null when it carries a memo instead), minFinalCltv,
+//     timestamp (seconds), expiry (seconds) }
 // or { ok: false, error } for a string that is not an invoice the node would decode: an unknown
 // prefix, a broken checksum (unless { checksum: false }), no payment hash, or, on a Sequentia network,
 // no `a` field or one of the wrong length.
@@ -170,5 +181,6 @@ export function decodeBolt11(bolt11, { checksum = true } = {}) {
   let expiry = 3600;
   for (const f of fields(p.vals)) if (f.type === 6) { expiry = 0; for (const g of f.data) expiry = expiry * 32 + g; break; }
   return { ok: true, network: net.network, chain: net.chain, asset,
-    amountMsat: bolt11AmountMsat(bolt11), paymentHash, minFinalCltv: bolt11MinFinalCltv(bolt11), timestamp, expiry };
+    amountMsat: bolt11AmountMsat(bolt11), paymentHash, descriptionHash: bolt11DescriptionHash(bolt11),
+    minFinalCltv: bolt11MinFinalCltv(bolt11), timestamp, expiry };
 }

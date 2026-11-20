@@ -165,6 +165,19 @@ export function lnurlMetadata (name, domain) {
   return JSON.stringify([['text/plain', `Payment to ${name}@${domain}`], ['text/identifier', `${name}@${domain}`]]);
 }
 
+// The SHA-256 of a metadata string, as lowercase hex: what an invoice for it commits to in its `h`
+// field (LUD-06). Over the UTF-8 bytes of exactly the string served, never of a re-serialisation.
+export function metadataHash (metadata) {
+  return Array.from(sha256(new TextEncoder().encode(String(metadata))), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Whether an invoice (decodeBolt11's reading) may be paid for this metadata: one that commits to a
+// description hash must commit to this metadata's; one carrying a memo instead is taken, as LUD-06
+// asks of payers today and as the invoices of wallets made before names committed to theirs.
+export function invoiceFitsMetadata (d, metadata) {
+  return !d || d.descriptionHash == null || d.descriptionHash === metadataHash(metadata);
+}
+
 const OFFLINE_WORDS = "The recipient's wallet is offline. Try again when it is open.";
 
 async function getJson (fetchFn, url, timeoutMs, statusOnError = false) {
@@ -231,6 +244,7 @@ export async function resolveLnAddress ({ text, asset, msat = null, domain, base
   if (!d || !d.ok) throw new Error('The address answered with an invoice that does not read.');
   if (d.chain !== 'btc') throw new Error('The address answered with an invoice that is not for BTC.');
   if (d.amountMsat == null || BigInt(d.amountMsat) !== want) throw new Error('The address answered with an invoice for another amount.');
+  if (d.descriptionHash != null && (typeof p.metadata !== 'string' || !invoiceFitsMetadata(d, p.metadata))) throw new Error('The address answered with an invoice for something other than this payment.');
   return { invoice: pr };
 }
 
@@ -239,7 +253,9 @@ export async function resolveLnAddress ({ text, asset, msat = null, domain, base
 //   base       the service's root (window.SEQ_LSP_URL)
 //   domain     the names' domain (window.SEQ_LNADDR_DOMAIN)
 //   key        () -> nameKey(phrase), or null while the wallet is locked
-//   invoice    async (msat) -> a Bitcoin invoice of exactly that amount (the Bitcoin ark's)
+//   invoice    async (msat, metadata) -> a Bitcoin invoice of exactly that amount (the Bitcoin ark's)
+//              that commits to metadataHash(metadata): the LNURL-pay metadata the service served the
+//              payer, which is lnurlMetadata(name, domain), the same string byte for byte
 //   code       async () -> a receive code of the wallet's own, new for the payer
 //   limits     () -> { min_sat, max_sat } the wallet takes now, or null while it can't take any
 //   store      { get(k), set(k, v|null) } for the name, per wallet
@@ -441,7 +457,10 @@ export function mountLnAddress ({ base, domain, key, invoice, code, limits = () 
     let body;
     try {
       if (req.kind === 'invoice') {
-        const pr = await invoice(BigInt(req.msat));
+        // The metadata the payer was served: the name's own, never another string the service names.
+        const metadata = lnurlMetadata(n, domain);
+        if (req.metadata != null && req.metadata !== metadata) throw new Error('the request names metadata of another name');
+        const pr = await invoice(BigInt(req.msat), metadata);
         body = { name: n, id: req.id, pr, sig: signWith(k.priv, signedDigest('invoice', domain, n, req.id, pr)) };
       } else if (req.kind === 'code') {
         let c;

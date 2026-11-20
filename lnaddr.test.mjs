@@ -1,8 +1,9 @@
 // lnaddr.js: the name rules, the name key and its signatures, and the resolver a payment to
 // `name@domain` goes through. Under node --test.
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { NAME_WORDS, nameProblem, nameKey, signedDigest, signWith, verifySig, parseLnAddress, lnurlMetadata, resolveLnAddress, NAME_KEY_PATH, signCode, verifyCode, codeId, requestUntil, PAY_MARGIN_S } from './lnaddr.js';
+import { NAME_WORDS, nameProblem, nameKey, signedDigest, signWith, verifySig, parseLnAddress, lnurlMetadata, resolveLnAddress, NAME_KEY_PATH, signCode, verifyCode, codeId, requestUntil, PAY_MARGIN_S, metadataHash, invoiceFitsMetadata } from './lnaddr.js';
 import { buildPayCode, readPayCode, bech32mEncode } from './pay-code.js';
 import { decodeBolt11 } from './bolt11.js';
 import { HDKey, mnemonicToSeedSync, schnorr } from './btc.js';
@@ -16,11 +17,13 @@ export const OTHER = 'zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong';
 const CS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 function toGroups (hex) { const out = []; let acc = 0, bits = 0; for (let i = 0; i < hex.length; i += 2) { acc = (acc << 8) | parseInt(hex.slice(i, i + 2), 16); bits += 8; while (bits >= 5) { bits -= 5; out.push((acc >> bits) & 31); } acc &= (1 << bits) - 1; } if (bits) out.push((acc << (5 - bits)) & 31); return out; }
 function polymod (v) { const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]; let c = 1; for (const x of v) { const b = c >>> 25; c = (((c & 0x1ffffff) << 5) ^ x) >>> 0; for (let i = 0; i < 5; i++) if ((b >>> i) & 1) c = (c ^ G[i]) >>> 0; } return c; }
-export function fakeInvoice (msat, { prefix = 'lntb', hash = '22'.repeat(32) } = {}) {
+// `dh`: a description hash (hex) carried in an `h` field, as a payment name's invoice commits to.
+export function fakeInvoice (msat, { prefix = 'lntb', hash = '22'.repeat(32), dh = null } = {}) {
   const hrp = `${prefix}${BigInt(msat) / 100n}n`;
   const g = [0, 0, 0, 0, 0, 0, 0];
   const p = toGroups(hash);
   g.push(1, p.length >> 5, p.length & 31, ...p);
+  if (dh) { const h = toGroups(dh); g.push(23, h.length >> 5, h.length & 31, ...h); }
   for (let i = 0; i < 104; i++) g.push(0);
   const pre = [...hrp].map((c) => c.charCodeAt(0) >> 5).concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
   const pm = polymod(pre.concat(g, [0, 0, 0, 0, 0, 0])) ^ 1;
@@ -73,6 +76,16 @@ test('reading a Lightning address', () => {
   for (const no of ['alice', 'alice@', '@x.com', 'tb1qxyz', 'bitcoin:TB1Q?x=1', 'a@b', 'a b@c.com']) assert.equal(parseLnAddress(no), null, no);
   assert.deepEqual(JSON.parse(lnurlMetadata('alice', 'sequentiatestnet.com')),
     [['text/plain', 'Payment to alice@sequentiatestnet.com'], ['text/identifier', 'alice@sequentiatestnet.com']]);
+  // LUD-06's hash: sha256 over the UTF-8 bytes of the metadata string as served (checked against
+  // Node's own sha256), so a re-serialisation hashes to something else.
+  const meta = lnurlMetadata('alice', 'sequentiatestnet.com');
+  assert.equal(metadataHash(meta), createHash('sha256').update(Buffer.from(meta, 'utf8')).digest('hex'));
+  assert.equal(metadataHash('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(metadataHash('caf\u00e9'), createHash('sha256').update('caf\u00e9', 'utf8').digest('hex'), 'UTF-8, not UTF-16 or Latin-1');
+  assert.notEqual(metadataHash(JSON.stringify(JSON.parse(meta), null, 1)), metadataHash(meta));
+  assert.equal(invoiceFitsMetadata({ descriptionHash: metadataHash(meta) }, meta), true);
+  assert.equal(invoiceFitsMetadata({ descriptionHash: null }, meta), true, 'a memo instead: taken');
+  assert.equal(invoiceFitsMetadata({ descriptionHash: metadataHash('[]') }, meta), false);
 });
 
 // A fetch answering from a table of URL -> [status, body].
@@ -127,6 +140,27 @@ test('another service\'s address is paid in BTC over LNURL-pay, for exactly the 
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: wrong({ pr: fakeInvoice(21_000n, { prefix: 'lntsqt' }) }) }), /does not read|not for BTC/);
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: wrong({ pr: 'garbage' }) }), /does not read/);
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: wrong({ status: 'ERROR', reason: 'Not today.' }) }), /^Error: Not today\.$/);
+  // LUD-06: an invoice that commits to a description hash must commit to the metadata served,
+  // byte for byte; one with a memo instead is paid, as LUD-06 asks of payers today.
+  const META = '[["text/plain","Payment to bob@wallet.example"],["text/identifier","bob@wallet.example"]]';
+  const served = (body) => table({
+    'https://wallet.example/.well-known/lnurlp/bob': [200, { tag: 'payRequest', callback: 'https://wallet.example/cb/bob', minSendable: 1000, maxSendable: 100_000_000, metadata: META }],
+    'https://wallet.example/cb/bob': [200, body],
+  });
+  const good = fakeInvoice(21_000n, { dh: metadataHash(META) });
+  assert.equal(decodeBolt11(good).descriptionHash, metadataHash(META));
+  assert.deepEqual(await resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: served({ pr: good }) }), { invoice: good });
+  assert.deepEqual(await resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: served({ pr: pr }) }), { invoice: pr }, 'a memo, no hash: paid');
+  const respaced = JSON.stringify(JSON.parse(META), null, 1);
+  for (const other of [metadataHash(respaced), metadataHash('[]'), '00'.repeat(32)]) {
+    await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: served({ pr: fakeInvoice(21_000n, { dh: other }) }) }),
+      /^Error: The address answered with an invoice for something other than this payment\.$/);
+  }
+  const noMeta = table({
+    'https://wallet.example/.well-known/lnurlp/bob': [200, { tag: 'payRequest', callback: 'https://wallet.example/cb/bob', minSendable: 1000, maxSendable: 100_000_000 }],
+    'https://wallet.example/cb/bob': [200, { pr: good }],
+  });
+  await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: noMeta }), /something other than this payment/, 'a hash, and no metadata served to check it against');
   // A callback that is not https is not followed.
   const plain = table({ 'https://wallet.example/.well-known/lnurlp/bob': [200, { tag: 'payRequest', callback: 'http://wallet.example/cb', minSendable: 1000, maxSendable: 100_000_000, metadata: '[]' }] });
   await assert.rejects(resolveLnAddress({ ...OURS, text: 'bob@wallet.example', asset: 'BTC', msat: 21_000n, fetch: plain }), /does not take payments/);
