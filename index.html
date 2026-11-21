@@ -1867,7 +1867,7 @@ import { initSeqln, connectDevice as lnConnectDevice, disconnectDevice as lnDisc
   seqlnChannelInbound, seqlnInboundQuote, seqlnNodeInvoice, seqlnInvoiceStatus, seqlnNodeSettle, seqlnNodeReceive, seqlnNodeHistory, seqlnSwapNote, seqlnNodePay, seqlnNodePayHash, seqlnNodePayStatus, seqlnNodePayQuote, seqlnJobStatus, seqlnJobStatusRaw, seqlnBridgeFront, seqlnBridgeAsset, seqlnBridgeHold,
   seqlnChannels, seqlnFunding, fundChannel, fundChannelDirect, resumeFundChannel, approveCloseDestination, provisionAndConnect, waitNodeReady, provisionedState, signerRefusals,
   predatingChannels, dismissPredating, idleDismissed, creditNotes,
-  disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp } from './seqln.js';
+  disconnectProvisioned, deviceTransportPubkey, registerOwnStatusKeys, closeChannelLsp, setOwnCloseScripts } from './seqln.js';
 import { seqlnInboundSettle } from './seqln.js';
 import { lnDeriveNode, lnDeriveAsset } from './seqln-keys.js';
 import { noteFor, openRequest, makeOpenGuard, forgottenChannels, outpointOf } from './lnupgrade.js';
@@ -2755,6 +2755,24 @@ function btcInit(phrase, kind){
 }
 function btcNode(internal, i){ return btcRoot.derive(`${btcAccount}/${internal?1:0}/${i}`); }
 function btcAddr(internal, i){ return btc.p2wpkh(btcNode(internal,i).publicKey, btc.TEST_NETWORK).address; }
+// What a close of this wallet's own Lightning channel may pay: the scripts of its receive addresses,
+// from the first to well past the next unused one. A channel close pays the next unused receive
+// address of the device that asked for it (lnWalletCloseDestination); the Bitcoin and Sequentia
+// sides share that script. Told to every device signer (seqln.js setOwnCloseScripts), so a close
+// started on another device of the same wallet is one this device signs too.
+const OWN_CLOSE_SCRIPTS_PAST = 100;
+let _ownCloseCache = { root: null, upTo: 0, hex: [] };
+function ownCloseScripts(){
+  if(!btcRoot) return [];
+  let next = 0; try{ next = unifiedNextUnused(); }catch{}
+  const upTo = next + OWN_CLOSE_SCRIPTS_PAST;
+  const c = _ownCloseCache;
+  if(c.root !== btcRoot){ c.root = btcRoot; c.upTo = 0; c.hex = []; }
+  for(let i = c.upTo; i < upTo; i++) c.hex.push(hexOfBytes(btc.p2wpkh(btcNode(false, i).publicKey, btc.TEST_NETWORK).script));
+  c.upTo = Math.max(c.upTo, upTo);
+  return c.hex;
+}
+setOwnCloseScripts(ownCloseScripts);
 async function btcAddrInfo(a){ try{ return await fetch(`${T4_API}/address/${a}`).then(r=>r.json()); }catch{ return null; } }
 async function btcScan(){
   // BIP44-style gap scan: keep scanning GAP-wide batches until a whole batch shows no
