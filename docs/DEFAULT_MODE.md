@@ -1003,6 +1003,11 @@ What it shows beyond the Market and Trade sections above:
   with the time and, while the trade is not settled, its status. On the right are
   "-<pay> <TICKER>" and "+<get> <TICKER>", then "fee <amount> <TICKER>" when there was one.
 - A payment's row has its description (or "Received" / "Sent"), its time and its amount as +/-.
+- A status word at the start of a row's line (**Arriving**, **Coming back**, **Sending**, "Pending",
+  "Not sent", "Did not arrive", "Taking longer than usual", "Dropped by the network", and a trade's
+  "Goes through", "Settled", "Returned", "Undone") is a link to its answer in Help, under "Your
+  payments in History", which says what it means and what, if anything, the person does about it,
+  in these same words.
 - A payment made while the wallet is moving that very money (its own refresh, already in its
   round) is not refused: it says "Your money is being moved: this goes ahead by itself (about a
   minute).", with the round's time as below, and goes ahead as soon as that round has ended, made
