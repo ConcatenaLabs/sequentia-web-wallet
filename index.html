@@ -369,6 +369,7 @@
   .faq th,.faq td{border-top:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
   .faq th{color:var(--txt);font-weight:600}
   @keyframes faqflash{from{background:rgba(240,165,0,.14)}to{background:transparent}}
+  a.st-help{color:inherit;text-decoration:underline dotted;text-underline-offset:3px;cursor:help}
   .room-stepper{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:12px}
   .rs-title{font-weight:600;font-size:14px}
   .rs-labels{display:flex;justify-content:space-between;font-size:12px;color:var(--dim);margin:12px 0 4px}
@@ -1610,6 +1611,43 @@
         </details>
         <details id="faq-final"><summary>When is a payment final?</summary>
           <p>It shows at once and is confirmed in about a minute. A confirmed payment stands as long as Bitcoin does not reorganise the block it anchors to.</p>
+        </details>
+      </div>
+      <!-- History's status words link here (statusHelp): what each means, in default mode's words. -->
+      <div class="card faq" id="faqHistory">
+        <label class="lbl">Your payments in History</label>
+        <details id="faq-st-arriving"><summary>What does Arriving mean?</summary>
+          <p>A payment to you that is on its way into your balance. Most payments count the moment they arrive. A larger one, or one sent to your address, counts once it is final, usually in about a minute; the line under it says how long.</p>
+          <p>Nothing is needed from you: it joins your balance by itself.</p>
+        </details>
+        <details id="faq-st-coming-back"><summary>What does Coming back mean?</summary>
+          <p>Money of yours on its way back into your balance. Two things bring it:</p>
+          <ul class="ln-help">
+            <li><b>A trade that did not complete.</b> What you paid comes back to you, and the trade reads <i>Undone</i>.</li>
+            <li><b>Money kept safe while you were away.</b> Your wallet keeps your money ready to send in seconds by renewing it now and then while it is open. When it stays closed too long, that money is moved aside on the network, still under your own key, and the wallet brings it back the next time you open it.</li>
+          </ul>
+          <p>The line under it says how long it takes: from a few hours to about two days. It is not in your balance until it is back. Nothing is needed from you but opening the wallet: it does the rest by itself, and if it takes longer than usual it says so and keeps at it.</p>
+          <p>None of it depends on this device: a wallet restored from its recovery phrase finds what is coming back and brings it home the same way.</p>
+        </details>
+        <details id="faq-st-sending"><summary>What do Sending and Pending mean?</summary>
+          <p>A payment to an address is made at the network's next settlement, usually within a few minutes, and your wallet signs its part as it happens. Until then the payment reads <i>Sending</i> or <i>Pending</i>, and it reads <i>Sent</i> only once it is made. Keep the page open meanwhile. If you close it, the wallet makes the payment the next time it is open, with what you reviewed.</p>
+          <p>A payment waiting for a block also reads <i>Pending</i> until it is confirmed, usually in about a minute.</p>
+        </details>
+        <details id="faq-st-not-sent"><summary>What do Not sent and Did not arrive mean?</summary>
+          <p><b>Not sent</b>: the payment ended without being made, for example because the page was closed at the wrong moment. Nothing left your wallet: the amount is struck through and is still in your balance. Send it again if it is still needed.</p>
+          <p><b>Did not arrive</b>: the payment was made, then taken back before it reached the address. Use <i>Report a problem</i> so it can be put right.</p>
+        </details>
+        <details id="faq-st-slow"><summary>What does Taking longer than usual mean?</summary>
+          <p>The payment is waiting longer than it normally does, and the wallet is dealing with it by itself. A payment that has waited two blocks is sped up: the wallet sends a small payment to itself that pays a little more for both together, and pays more again each time it waits two more blocks. A trade or a payment waiting for your money to be ready goes ahead by itself once it is, or nothing is sent.</p>
+          <p>Nothing is lost while it waits.</p>
+        </details>
+        <details id="faq-st-trade"><summary>What do the states of a trade mean?</summary>
+          <ul class="ln-help">
+            <li><b>Goes through</b>: the trade is agreed and goes ahead by itself once what you pay is ready. The line says how long.</li>
+            <li><b>Settled</b>: the trade is done.</li>
+            <li><b>Returned: nothing traded</b>: the trade did not happen, and the rest of the line says why. Your money stays in your wallet, except a fee where the line says one was paid.</li>
+            <li><b>Undone</b>: the trade looked done but did not complete on the network. What you paid is <i>coming back</i> to you, within about two days, and the line says so once it is back.</li>
+          </ul>
         </details>
       </div>
       <!-- Lightning names a rail: its answers are developer mode's (docs/DEFAULT_MODE.md). -->
@@ -4080,6 +4118,29 @@ function openHelp(id){
   src.classList.remove('flash'); void src.offsetWidth; src.classList.add('flash');
 }
 function helpLink(id, text){ const a=el('a', null, text); a.href='#'; a.dataset.help=id; return a; }
+// History's status words, each opening its answer in Help (the faqHistory card). A line that starts
+// with one of them shows it as a link, the rest plain; any other line is shown as it is.
+const STATUS_HELP = {
+  [DEFAULT_WORDS.rowArriving]: 'faq-st-arriving',
+  [DEFAULT_WORDS.rowComingBack]: 'faq-st-coming-back',
+  [DEFAULT_WORDS.rowSending]: 'faq-st-sending',
+  'Pending': 'faq-st-sending',
+  [DEFAULT_WORDS.rowNotMade]: 'faq-st-not-sent',
+  [DEFAULT_WORDS.rowNotArrived]: 'faq-st-not-sent',
+  'Taking longer than usual': 'faq-st-slow',
+  'Dropped by the network': 'faq-dropped',
+  'Goes through': 'faq-st-trade', 'Settled': 'faq-st-trade', 'Returned': 'faq-st-trade',
+  'Undone': 'faq-st-trade', 'Trade undone': 'faq-st-trade',
+};
+function statusWord(text){ let w=''; for(const k of Object.keys(STATUS_HELP)) if(text.startsWith(k) && k.length>w.length) w=k; return w; }
+function statusInto(parent, text){
+  text=String(text); const w=statusWord(text);
+  if(!w){ parent.appendChild(document.createTextNode(text)); return parent; }
+  const a=helpLink(STATUS_HELP[w], w); a.className='st-help'; a.title='What does this mean?';
+  parent.appendChild(a); if(text.length>w.length) parent.appendChild(document.createTextNode(text.slice(w.length)));
+  return parent;
+}
+function statusHelp(cls, text){ return statusInto(el('div', cls), text); }
 document.addEventListener('click', (e)=>{
   const a=e.target.closest && e.target.closest('[data-help]'); if(!a) return;
   e.preventDefault(); openHelp(a.dataset.help);
@@ -11405,7 +11466,7 @@ function renderHistory(){
     const item=el('div','item instant');
     item.appendChild(el('span','badge dir b-in','IN'));
     const mid=el('div','grow');
-    mid.appendChild(el('div',null, a.kind==='coming_back' ? DEFAULT_WORDS.rowComingBack : DEFAULT_WORDS.rowArriving));
+    mid.appendChild(statusHelp(null, a.kind==='coming_back' ? DEFAULT_WORDS.rowComingBack : DEFAULT_WORDS.rowArriving));
     mid.appendChild(el('div','sub unconf', a.when));
     item.appendChild(mid);
     item.appendChild(histAmounts([{ hex:a.asset, atoms:a.atoms, out:false }], [], { out:false }));
@@ -11476,15 +11537,15 @@ function renderHistory(){
     else if(k && k.kind==='bump') mid.appendChild(el('div','kind','Same payment as '+short(k.of)+', at a higher fee'));
     else if(k && k.kind==='replace') mid.appendChild(el('div','kind','Replaces '+short(k.of)));
     if(replaced) mid.appendChild(el('div','kind','Replaced by '+short(replacedBy.get(txid))+'; it will not confirm'));
-    if(dropped) mid.appendChild(el('div','kind','Dropped by the network: it will not confirm, and its coins are spendable again'));
+    if(dropped) mid.appendChild(statusHelp('kind','Dropped by the network: it will not confirm, and its coins are spendable again'));
     // Rescues act on the live wollet, so they are offered only once this session has synced.
     let tipNow = 0; try{ tipNow = wollet.tip().height(); }catch{}
     const fresh = _sentAtTip.has(txid) && tipNow <= _sentAtTip.get(txid);
     if(dropped){}
-    else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
+    else if(!devRows && !r.height && spedUp.has(txid)) mid.appendChild(statusHelp('sub', SPEED_WORDS.spedUp));
     // Default mode: a payment received on the chain is in the balance, and can be sent and traded,
     // from the moment it is in a block; until then its row says it is arriving, and when.
-    else if(!devRows){ if(_depositTx.has(txid)) mid.appendChild(el('div','sub unconf', DEFAULT_WORDS.rowArriving+' · '+DEFAULT_WORDS.arrivingSoon)); }
+    else if(!devRows){ if(_depositTx.has(txid)) mid.appendChild(statusHelp('sub unconf', DEFAULT_WORDS.rowArriving+' · '+DEFAULT_WORDS.arrivingSoon)); }
     else if(live && !r.height && fresh) mid.appendChild(el('div','sub', r._child ? 'Waiting for the next block.' : 'Waiting for the next block. If it misses one, speed-up options appear here.'));
     else if(live && !r.height && !replaced && !spedUp.has(txid) && (type==='outgoing' || type==='incoming' || type==='self')){
       const acts=el('div','row'); acts.style.cssText='gap:6px;margin-top:6px;flex-wrap:wrap';
@@ -11563,15 +11624,15 @@ function instantItem(r){
     head=(r.trade.state==='undone' ? 'Trade undone: '+leg(tk.payAsset, tk.amountIn)+' for '+leg(tk.receiveAsset, tk.amountOut) : 'Swapped '+fmtLeg(r.legs[0])+' for '+fmtLeg(r.legs[1])); if(r.trade.state!=='settled'){ try{ status=tradeStateWord(r.trade, Date.now())||''; }catch{} } }
   else if(r.kind==='returned') head=USER_WORDS.returnedFees((r.fees||[]).map(fmtLeg).join(' and '));
   else head = r.kind==='in' ? (r.leaf && _arrivingWhen.has(r.leaf) ? DEFAULT_WORDS.rowArriving : 'Received') : r.waitingSend ? DEFAULT_WORDS.rowSending : r.stage==='not_made' ? DEFAULT_WORDS.rowNotMade : r.stage==='reclaimed' ? DEFAULT_WORDS.rowNotArrived : 'Sent';
-  mid.appendChild(el('div',null, head));
+  mid.appendChild(statusHelp(null, head));
   const when = r.at ? whenText(r.at) : '';
   // A payment to an address is pending until the library says it is made (its `stage`); one that
   // was not made took nothing from the wallet. A row written before stages were kept: its first hour.
   // A payment of the Bitcoin ark is pending while its wallet says so.
   const pending = r.pending || (r.kind==='out' && r.later && (r.offboard ? r.stage==='pending' || !r.stage : Date.now()-r.at < 3600000));
   if(r.kind==='in' && r.leaf && _arrivingWhen.has(r.leaf)) status=_arrivingWhen.get(r.leaf);
-  const sub=[when, status, pending ? 'Pending' : '', r.stage==='not_made' ? DEFAULT_WORDS.rowNotMadeSub : ''].filter(Boolean).join(' · ');
-  if(sub) mid.appendChild(el('div','sub'+(status?' unconf':''), sub));
+  const parts=[when, status, pending ? 'Pending' : '', r.stage==='not_made' ? DEFAULT_WORDS.rowNotMadeSub : ''].filter(Boolean);
+  if(parts.length){ const d=el('div','sub'+(status?' unconf':'')); parts.forEach((t, i)=>{ if(i) d.appendChild(document.createTextNode(' · ')); if(t===when) d.appendChild(document.createTextNode(t)); else statusInto(d, t); }); mid.appendChild(d); }
   item.appendChild(mid);
   const legs = r.legs.map(l=>({ hex:l.asset, atoms:l.atoms, out: r.kind==='out' || BigInt(l.atoms)<0n }));
   const fees = (r.fee ? [r.fee] : (r.kind==='swap' || r.kind==='returned' ? (r.fees||[]) : [])).map(f=>({ hex:f.asset, atoms:f.atoms }));
@@ -11674,7 +11735,7 @@ function drawBtcRows(list, rows){
     const when = t.conf ? (t.time ? new Date(t.time*1000).toLocaleString() : 'block '+t.height) : 'unconfirmed';
     { const _d=el('div'); _d.appendChild(txLink('/testnet4/tx/'+t.txid, t.txid.slice(0,20)+'…')); mid.appendChild(_d); }
     mid.appendChild(el('div','sub'+(t.conf?'':' unconf'), when+(t.mine ? ' · just sent, the explorer has not listed it yet' : ' · Bitcoin testnet4')));
-    if(!t.conf && !dev && sped.has(t.txid)) mid.appendChild(el('div','sub', SPEED_WORDS.spedUp));
+    if(!t.conf && !dev && sped.has(t.txid)) mid.appendChild(statusHelp('sub', SPEED_WORDS.spedUp));
     if(!t.conf && dev && kids[t.txid]) mid.appendChild(el('div','kind','Speeds up '+kids[t.txid].slice(0,8)+'…'));
     if(!t.conf && dev && !t.mine){
       const b=el('button','ghost','Speed up'); b.style.cssText='padding:4px 10px;font-size:12px;margin-top:6px';
