@@ -76,8 +76,10 @@ export function mountUserComposer (ctx) {
   // must not orphan the trade's card.
   const S = { pay: null, get: null, amount: '', recv: '', fixed: 'pay', ticket: null, choice: null, busy: false, note: '', error: '', timer: null,
     estTimer: null, estSeq: 0, card: null, answer: null, ended: null, progress: null, openedAt: Date.now(),
-    offered: { pay: null, list: [], at: 0, loading: false } }
+    offered: { pay: null, list: [], at: 0, loading: false, failed: false } }
   const OFFERS_MS = ctx.offersMs || 60000
+  const OFFERS_PENDING_MS = ctx.offersPendingMs || 5000
+  const OFFERS_PENDING_TRIES = 24
   // The pair and the amount typed are kept for the browser tab's session (ctx.session, a
   // sessionStorage), so a reload, or a tab the browser put to sleep, opens on them again. A ticket
   // is never kept: its price is asked again.
@@ -118,12 +120,28 @@ export function mountUserComposer (ctx) {
     const pay = S.pay
     if (!ctx.engine.offered || S.offered.loading || (S.offered.pay === pay && Date.now() - S.offered.at < OFFERS_MS)) return
     S.offered.loading = true
-    let list = []
-    try { list = await ctx.engine.offered(pay) } catch (e) { console.warn('[user composer] offers:', e && e.message) }
-    S.offered = { pay, list: list || [], at: Date.now(), loading: false }
+    let list = [], failed = false
+    try { list = await ctx.engine.offered(pay) } catch (e) { failed = true; console.warn('[user composer] offers:', e && e.message) }
+    // A list not known yet (the wallet's Bitcoin side still starting) is asked again shortly, for
+    // two minutes at most (a wallet whose Bitcoin side never starts is not asked forever).
+    const pending = !!(list && list.pending)
+    S.offeredTries = pending ? (S.offeredTries || 0) + 1 : 0
+    S.offered = { pay, list: list || [], at: pending ? 0 : Date.now(), loading: false, failed: failed || pending }
+    clearTimeout(S.offeredTimer)
+    if (pending && pay === S.pay && S.offeredTries < OFFERS_PENDING_TRIES) S.offeredTimer = setTimeout(loadOffered, OFFERS_PENDING_MS)
     // What is paid may have changed while the book was asked: ask again for that.
     if (pay === S.pay) paintGet(); else loadOffered()
   }
+  // Whether the book is known to offer nothing for `h` paid with what is paid now: only once the
+  // offers for it were read (and not when reading them failed), and never for a restricted asset,
+  // whose price comes another way. No request of its own: the offers are read anyway.
+  function noMarket (h) {
+    const o = S.offered
+    if (!h || h === S.pay || o.pay !== S.pay || o.loading || o.failed) return false
+    if (ctx.engine.isRestricted && ctx.engine.isRestricted(h)) return false
+    return !o.list.includes(h)
+  }
+  const marketNote = () => (noMarket(S.get) ? USER_WORDS.noMarket(name(S.get), name(S.pay)) : '')
   function paintGet () {
     const old = ctx.root.querySelector('#ucGet'); if (!old) return
     const gl = getList()
@@ -132,6 +150,8 @@ export function mountUserComposer (ctx) {
     old.replaceWith(chooser('ucGet', gl, S.get, pickGet))
     if (S.get !== was && !S.ticket) { S.error = ''; paintTicket() }
     if (S.get !== was && S.market) S.market.refresh().catch(() => {})
+    // The offers just read may say there is no market for what is chosen: said now.
+    if (!S.ticket && !S.busy) schedule(0)
   }
   function pickGet (v) { S.get = v; S.getChosen = true; reset(); render(); schedule(0) }
 
@@ -149,8 +169,10 @@ export function mountUserComposer (ctx) {
     let atoms
     try { atoms = ctx.parseAtoms(String(typed || '').trim(), prec(asset)) } catch { atoms = 0n }
     const other = ctx.root.querySelector(S.fixed === 'pay' ? '#ucReceive' : '#ucAmount')
-    if (!(big(atoms) > 0n)) { if (other && doc.activeElement !== other) { other.value = ''; if (S.fixed === 'pay') S.recv = ''; else S.amount = '' } S.note = ''; paintNote(); return }
+    if (!(big(atoms) > 0n)) { if (other && doc.activeElement !== other) { other.value = ''; if (S.fixed === 'pay') S.recv = ''; else S.amount = '' } S.note = marketNote(); paintNote(); return }
     const seq = ++S.estSeq
+    // No market for the pair: said at once, while the book's own answer is asked.
+    if (marketNote()) { S.note = marketNote(); paintNote() }
     const e = await ctx.engine.estimate({ payAsset: S.pay, receiveAsset: S.get, ...(S.fixed === 'pay' ? { pay: String(atoms) } : { receive: String(atoms) }) })
     if (seq !== S.estSeq || S.ticket) return
     if (!e.ok && e.why === 'restricted') { S.note = ''; paintNote(); return }
@@ -190,6 +212,7 @@ export function mountUserComposer (ctx) {
       const m = ctx.assetMeta(h) || {}
       return { hex: h, ticker: name(h), name: h === 'BTC' ? 'Bitcoin' : (m.name || ''), held: atoms > 0n,
         hidden: !!(ctx.isHidden && ctx.isHidden(h)), offered: offered.has(h), tradable: tradable.has(h), cur: h === value,
+        note: id === 'ucGet' && noMarket(h) ? USER_WORDS.noMarketRow : '',
         bal: atoms > 0n ? { b: show(atoms, prec(h)), r: ctx.refValue ? ctx.refValue(h, atoms) : '' } : null }
     }), (hex) => onchange(hex), { hint: PICKER_WORDS.hintSearch })
     return b
