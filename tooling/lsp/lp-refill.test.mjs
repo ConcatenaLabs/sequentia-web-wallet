@@ -1,7 +1,7 @@
 // The LP refill's plan: which assets it tops up, by how much, and every reason it holds back.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { planRefills, unitsString, pendingAssets, inventoryAtoms } from './lp-refill.mjs';
+import { planRefills, refillHold, unitsString, pendingAssets, inventoryAtoms } from './lp-refill.mjs';
 
 const GOLD = '3a0f9192219db59f8d7f87d93ac6311095dfe1255d149727b87baaa7d2cc71a1';
 const EURX = 'e39685e718516156679088d9400d11a1eb82bf7cc27c5b9f5a614b8c91246d13';
@@ -82,4 +82,57 @@ test('pending and inventory are read per asset, reserved and assetless coins asi
   ] };
   assert.deepEqual([...pendingAssets(lf)], [GOLD]);
   assert.deepEqual(inventoryAtoms([{ asset: GOLD, amount: 1.5 }, { asset: GOLD, amount: 0.25 }, { amount: 3 }]), { [GOLD]: 1.75 * U });
+});
+
+// ---- following a refill until it has landed for good -------------------------------------------
+
+const TX = 'ab'.repeat(32);
+const T0 = 1e12;
+const rec = (over = {}) => ({ txid: TX, address: 'tb1qlp', at: T0, seen_at: null, ...over });
+
+test('a refill in the mempool holds its asset however long it waits, and is called stuck after two hours', () => {
+  const soon = refillHold(rec(), { confirmations: 0, lpHolds: false, now: T0 + 40 * MIN });
+  assert.match(soon.hold, /in the mempool/);
+  assert.doesNotMatch(soon.hold, /stuck/);
+  const late = refillHold(rec(), { confirmations: 0, lpHolds: false, now: T0 + 3 * 60 * MIN });
+  assert.match(late.hold, /stuck: check by hand/);
+});
+
+test('the page still saying low never sends again while the last refill is in the mempool, past the cooldown', () => {
+  const s = stats([row(GOLD, 'GOLD', 4000, 200, 170)]);
+  const now = T0 + 90 * MIN;
+  const { hold } = refillHold(rec(), { confirmations: 0, lpHolds: false, now });
+  const r = planRefills({ stats: s, inventory: { [GOLD]: 50 * U }, pending: new Set(), holds: { [GOLD]: hold },
+    last: { [GOLD]: T0 }, now, cfg });
+  assert.equal(r.sends.length, 0);
+  assert.match(r.skips[0].reason, /mempool/);
+});
+
+test('confirmed but not yet a coin of the LP node: held', () => {
+  const r = refillHold(rec(), { confirmations: 3, lpHolds: false, now: T0 + 40 * MIN });
+  assert.match(r.hold, /does not hold it yet/);
+});
+
+test('once the LP node holds it, the next refill waits two minutes for the stats, then is free', () => {
+  const first = refillHold(rec(), { confirmations: 1, lpHolds: true, now: T0 + 40 * MIN });
+  assert.match(first.hold, /just reached the LP node/);
+  assert.equal(first.seen_at, T0 + 40 * MIN);
+  const after = refillHold(rec({ seen_at: first.seen_at }), { confirmations: 2, lpHolds: true, now: T0 + 43 * MIN });
+  assert.deepEqual(after, { hold: null, seen_at: first.seen_at });
+});
+
+test('a refill a rollback put back in the mempool holds its asset again', () => {
+  const r = refillHold(rec({ seen_at: T0 + 10 * MIN }), { confirmations: 0, lpHolds: false, now: T0 + 60 * MIN });
+  assert.match(r.hold, /back there after a rollback/);
+  assert.equal(r.seen_at, null);
+});
+
+test('conflicted, unknown, or sent without a recorded txid: held until a person looks', () => {
+  assert.match(refillHold(rec(), { confirmations: -2, lpHolds: false, now: T0 }).hold, /conflicted.*check by hand/);
+  assert.match(refillHold(rec(), { confirmations: null, lpHolds: false, now: T0 }).hold, /unknown.*check by hand/);
+  assert.match(refillHold(rec({ txid: null }), { confirmations: null, lpHolds: false, now: T0 + 5 * MIN }).hold, /no recorded txid/);
+});
+
+test('no record, no hold', () => {
+  assert.deepEqual(refillHold(undefined, { confirmations: null, lpHolds: false, now: T0 }), { hold: null, seen_at: null });
 });
