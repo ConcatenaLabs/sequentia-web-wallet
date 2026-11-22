@@ -318,6 +318,7 @@ export async function connectDevice({
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
     signerOpts(node));
   signer.setPolicy(policy);
+  for (const hex of namedCloseScripts(null)) { try { signer.approveCloseDestination(hex); } catch {} }
   s.signer = signer;
   signer.onStatus = (st) => {
     if (st.state === 'node_id') { s.nodeId = st.nodeId; setPhase(node, 'node_id', st.nodeId.slice(0, 14) + '…'); }
@@ -356,6 +357,18 @@ export function disconnectDevice(node) {
 // (SeqlnSigner.approveCloseDestination). The device keeps none across a start, so they are kept
 // here per node and named again whenever its signer is built.
 const CLOSE_TO_KEY = 'swk.ln.closeTo.v1';   // { [nodeKey]: [scriptHex, ...] }
+// The scripts of this wallet's own receive addresses, derived from its phrase (setOwnCloseScripts).
+// Every signer is told them when it is built, on every node: a close started on another device of
+// the same wallet pays one of them, and the list above lives only in the browser that started it.
+// Without them a signer here refused that close, and the node, which asks for it at each start,
+// never started again.
+let _ownCloseScripts = () => [];
+export function setOwnCloseScripts(fn) { _ownCloseScripts = typeof fn === 'function' ? fn : () => []; }
+function namedCloseScripts(mapKey) {
+  let own = [];
+  try { own = _ownCloseScripts() || []; } catch {}
+  return [...new Set([...(mapKey ? closeToScripts()[mapKey] || [] : []), ...own].map(h => String(h).toLowerCase()))];
+}
 function closeToScripts() {
   try { return JSON.parse(localStorage.getItem(CLOSE_TO_KEY) || '{}') || {}; } catch { return {}; }
 }
@@ -415,7 +428,7 @@ export async function connectProvisioned({ assetId, key, deviceSigningSeed, devi
   const signer = await SeqlnSigner.fromMnemonic(deviceSigningSeed,
     signerOpts(mapKey));
   signer.setPolicy(policy);
-  for (const hex of closeToScripts()[mapKey] || []) { try { signer.approveCloseDestination(hex); } catch {} }
+  for (const hex of namedCloseScripts(mapKey)) { try { signer.approveCloseDestination(hex); } catch {} }
   s.signer = signer;
   signer.onStatus = (st) => {
     if (st.state === 'node_id') { s.nodeId = st.nodeId; s.phase = 'node_id'; }
