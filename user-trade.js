@@ -170,6 +170,10 @@ export const USER_WORDS = Object.freeze({
   stays: (x) => `${x} stays in your wallet, to trade or send after this one.`,
   notOffered: (get, pay) => `Not offered right now: nobody offers ${get} for ${pay} in one step.`,
   notListed: (get, pay) => `${get} for ${pay} is not offered.`,
+  // Said as soon as an asset nobody offers for what is paid is chosen, before an amount is typed;
+  // and beside it in the receive picker.
+  noMarket: (get, pay) => `There is no market for ${get} with ${pay} right now.`,
+  noMarketRow: 'No market right now',
   // Nothing to choose under You receive: no pair admitted for what is paid, or none read yet.
   nothingOffered: (pay) => `Not offered right now: nobody offers anything for ${pay}.`,
   enter: 'Enter how much you pay.',
@@ -657,6 +661,8 @@ export const BTC_ONLY_FIRM_MS = 60000
 // How long a refresh asked to get coins ready for a resting order is waited on before it is asked
 // again: its round, and the round's block being certified.
 export const READYING_MS = 10 * 60_000
+// How long after the wallet opens its Bitcoin side is taken for still starting (estimate, offered).
+export const BTC_START_MS = 120_000
 // A pair offered within this long that nobody offers now: a maker reading its coins again after a
 // trade quotes nothing for up to about 90 s (#698), so the wallet asks again rather than saying the
 // pair is not offered, every OFFERED_AGAIN_EVERY_MS.
@@ -710,6 +716,8 @@ export function createEngine (deps) {
     }
   }
   const now = () => (deps.now ? deps.now() : Date.now())
+  // When the engine started: the wallet's Bitcoin side is taken for starting for BTC_START_MS after.
+  const startedAt = now()
   const firmMs = deps.quoteFirmMs || QUOTE_FIRM_MS
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const log = deps.log || (() => {})
@@ -1251,14 +1259,23 @@ export function createEngine (deps) {
   //  | { ok: false, why: 'part-ready', ready } (atoms payable now, too few for any offer)
   // What can be received for `payAsset` in one step now: each admitted pair's asset that some
   // source in the book offers, whatever the wallet holds. BTC counts only with the wallet's
-  // Bitcoin Lightning (the gateway pays it there).
+  // Bitcoin Lightning (the gateway pays it there). While that Lightning is not up yet (a wallet
+  // just opened) and an offer needs it, the list is marked `pending`: what it leaves out may be
+  // offered in a moment, so nobody should be told there is no market for it.
   async function offered (payAsset) {
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
     const chain = ad.pairs && ad.pairs.chains && ad.pairs.chains[ad.genesis]
     const pairs = ((chain && chain.pairs) || []).filter((p) => p.pay === payAsset && p.receive !== payAsset && (p.sources || []).length)
+    let pending = false
     const found = await Promise.all(pairs.map((p) => entries(payAsset, p.receive, p.sources)
-      .then((es) => es.some((e) => e.source !== 'btc-gateway' || deps.btc) ? p.receive : null).catch(() => null)))
-    return [...new Set(found.filter(Boolean))]
+      .then((es) => {
+        if (es.some((e) => e.source !== 'btc-gateway' || deps.btc)) return p.receive
+        if (!deps.btc && p.sources.includes('btc-gateway') && now() - startedAt < BTC_START_MS) pending = true
+        return null
+      }).catch(() => null)))
+    const list = [...new Set(found.filter(Boolean))]
+    if (pending) list.pending = true
+    return list
   }
 
   // Indicative terms in either direction, for the two amounts while a person types: the book's
@@ -1284,7 +1301,8 @@ export function createEngine (deps) {
     const ad = deps.admitted ? await deps.admitted() : { pairs: null, genesis: null }
     const sources = admittedSources(ad.pairs, ad.genesis, payAsset, receiveAsset)
     if (!sources.length) return { ok: false, why: 'not-listed' }
-    const key = payAsset + '>' + receiveAsset
+    // Entries read before the wallet's Bitcoin side was up lack what only it can take: kept apart.
+    const key = payAsset + '>' + receiveAsset + (deps.btc ? '' : '|no-btc')
     let c = estimates.get(key)
     if (!c || now() - c.at > 8000) {
       c = { at: now(), es: await entries(payAsset, receiveAsset, sources).catch(() => []) }
@@ -1293,7 +1311,11 @@ export function createEngine (deps) {
     const es = c.es.filter((e) => (e.source !== 'btc-gateway' || deps.btc) && big(e.maxReceive) > 0n)
     // A maker that takes more only after its next round (its instant budget is spent for now).
     const soon = !!c.es.soon || es.some((e) => e.soon)
-    if (!es.length) return behindBtc({ ok: false, why: soon ? 'soon' : 'not-offered', ...(c.es.again ? { again: true } : {}) }, payAsset)
+    // Offers only the wallet's Bitcoin side can take, while it is still starting (a wallet just
+    // opened): not "not offered", but a price that takes a moment, asked again by itself. Past
+    // BTC_START_MS a Bitcoin side that never came up is not waited for in words.
+    const btcStarting = !deps.btc && sources.includes('btc-gateway') && now() - startedAt < BTC_START_MS
+    if (!es.length) return behindBtc({ ok: false, why: soon ? 'soon' : 'not-offered', ...(c.es.again || btcStarting ? { again: true } : {}) }, payAsset)
     const cdiv = (a, b) => (a + b - 1n) / b
     let most = null
     for (const e of es) { const r = big(e.maxReceive); if (!most || r > most.receive) most = { receive: r, pay: cdiv(r * e.rateNum, e.rateDen) } }
@@ -2558,5 +2580,8 @@ export function createEngine (deps) {
     return out
   }
 
-  return { quote: personWaits(quote), estimate, offered, confirm: personWaits(confirm), advance, resume, records, spendable, release, drop, soon }
+  // Whether an asset is one a policy server co-signs: its price comes another way (Review), so the
+  // composer never calls it marketless from what `offered` leaves out.
+  const isRestricted = (a) => !!(deps.restricted && a !== 'BTC' && deps.restricted.isRestricted(a))
+  return { quote: personWaits(quote), estimate, offered, isRestricted, confirm: personWaits(confirm), advance, resume, records, spendable, release, drop, soon }
 }

@@ -6,7 +6,7 @@
 // assets", then the rest), the rest capped until a search narrows it.
 //
 // Rows (`items`): { hex, ticker, name, bal: { b, r }, held, hidden, offered, tradable, pin, cur, cls,
-// split (HTML), enabled, pasted }. `pin` rows always show first (the other side's asset in a
+// split (HTML), note (text, a dim line under the name), enabled, pasted }. `pin` rows always show first (the other side's asset in a
 // swap, "Any" in an anchor menu). The pure parts (pickerMatches, pickerGroups) run in Node;
 // openPicker needs a document.
 
@@ -104,6 +104,7 @@ export function openPicker (anchorEl, items, onPick, opts = {}) {
     try { const tb = opts.badge && opts.badge(it.hex); if (tb) t.appendChild(tb) } catch {}
     const mid = el('div', 'swopt-mid'); mid.appendChild(el('div', 'swopt-name', it.name || ''))
     if (it.split) { const sp = el('div', 'swopt-split'); sp.innerHTML = it.split; mid.appendChild(sp) }
+    if (it.note) mid.appendChild(el('div', 'swopt-split swopt-note', it.note))
     const bal = el('div', 'swopt-bal')
     if (it.bal && it.bal.b) bal.appendChild(el('div', 'b', it.bal.b))
     if (it.bal && it.bal.r) bal.appendChild(el('div', 'r', it.bal.r))

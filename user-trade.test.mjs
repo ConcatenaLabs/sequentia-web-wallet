@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { tradeStateWord, USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy, SHARED_VIEW_READS, worthFirming } from './user-trade.js'
+import { tradeStateWord, USER_WORDS, USER_MODE_FORBIDDEN_WORDS, forbiddenIn, costLine, pickerOrder, spendableFrom, createEngine, shortBy, SHARED_VIEW_READS, worthFirming, BTC_START_MS } from './user-trade.js'
 
 const X = 'aa'.repeat(32), Y = 'bb'.repeat(32), Z = 'cc'.repeat(32)
 const fmt = (a, n) => `${n} ${a === X ? 'XT' : a === Y ? 'YT' : 'BTC'}`
@@ -278,10 +278,47 @@ test('engine: what can be received for an asset is what the book offers on an ad
       { give_asset: 'BTC', want_asset: X, rate_num: '1', rate_den: '1', max_give: '1000000', min_give: '10000' }] }
     : s.fetchJson(url)
   const eng = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) })
-  assert.deepEqual(await eng.offered(X), [Y])
+  const got = await eng.offered(X)
+  assert.deepEqual([...got], [Y])
+  assert.equal(got.pending, true, 'BTC needs the Bitcoin side, not up here: not known yet')
   const withBtc = createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }), btc: { balance: () => 0n } })
   assert.deepEqual((await withBtc.offered(X)).sort(), ['BTC', Y].sort())
-  assert.deepEqual(await createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => [], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) }).offered(X), [], 'no maker, no order: nothing offered')
+  assert.deepEqual(await createEngine({ leaves: s.lib, fetchJson, store: s.store, makers: () => [], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) }).offered(X).then((l) => [...l]), [], 'no maker, no order: nothing offered')
+})
+
+test('engine: while the Bitcoin side of the wallet is not up, what only it could take is not known yet (pending), not unoffered', async () => {
+  const s = standIn()
+  const fetchJson = async (url) => url.endsWith('/v1/quotes')
+    ? { quotes: [{ give_asset: Y, want_asset: 'BTC', rate_num: '1', rate_den: '1', max_give: '1000000', min_give: '10000' }] }
+    : s.fetchJson(url)
+  const pairs = { chains: { g: { pairs: [{ pay: 'BTC', receive: Y, sources: ['btc-gateway'] }, { pay: 'BTC', receive: Z, sources: ['leaf-maker'] }] } } }
+  const deps = { leaves: s.lib, fetchJson, store: s.store, makers: () => ['http://m'], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }) }
+  const before = await createEngine(deps).offered('BTC')
+  assert.deepEqual([[...before], before.pending], [[], true])
+  const after = await createEngine({ ...deps, btc: { balance: () => 0n } }).offered('BTC')
+  assert.deepEqual([[...after], after.pending], [[Y], undefined])
+  // Nothing that needs it: an empty list is an answer.
+  const none = await createEngine({ ...deps, admitted: () => ({ pairs: { chains: { g: { pairs: [pairs.chains.g.pairs[1]] } } }, genesis: 'g' }) }).offered('BTC')
+  assert.equal(none.pending, undefined)
+  // Past BTC_START_MS a Bitcoin side that never came up is no longer waited for.
+  let t = 0
+  const late = createEngine({ ...deps, now: () => t })
+  t = BTC_START_MS + 1
+  assert.equal((await late.offered('BTC')).pending, undefined)
+  assert.deepEqual(forbiddenIn(USER_WORDS.noMarket('GOLD', 'BTC') + ' ' + USER_WORDS.noMarketRow), [])
+})
+
+test('engine: an estimate only the starting Bitcoin side could give takes a moment (again), not "not offered"', async () => {
+  const s = standIn()
+  const pairs = { chains: { g: { pairs: [{ pay: 'BTC', receive: Y, sources: ['btc-gateway'] }] } } }
+  let t = 0
+  const deps = { leaves: s.lib, fetchJson: s.fetchJson, store: s.store, makers: () => ['http://m'], relayBook: async () => [], admitted: () => ({ pairs, genesis: 'g' }), now: () => t }
+  const eng = createEngine(deps)
+  const e = await eng.estimate({ payAsset: 'BTC', receiveAsset: Y, pay: '50000' })
+  assert.deepEqual([e.ok, e.why, e.again], [false, 'not-offered', true])
+  t = BTC_START_MS + 10_000
+  const later = await eng.estimate({ payAsset: 'BTC', receiveAsset: Y, pay: '50000' })
+  assert.deepEqual([later.ok, later.why, later.again], [false, 'not-offered', undefined])
 })
 
 test('engine: a maker quoting levels of one pair is asked for one firm offer, at the level that gives the most', async () => {
