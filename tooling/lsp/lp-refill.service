@@ -1,0 +1,13 @@
+# The LP refill (lp-refill.mjs; tooling/lsp/README.md, "Keeping the LP node stocked"): one pass,
+# run by lp-refill.timer. It reads the LSP's own environment file for the Sequentia node, the
+# inventory wallet and the LP node's RPC, and sends from the checkout the LSP runs from.
+[Unit]
+Description=Top up the LP node of the room-to-receive service from the inventory wallet
+After=lsp-b5b1.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sequentia/lsp-b5b1.env
+WorkingDirectory=/root/sequentia/sequentia-web-wallet
+ExecStart=/root/sequentia/downloads/node22/bin/node tooling/lsp/lp-refill.mjs --apply
+NoNewPrivileges=true

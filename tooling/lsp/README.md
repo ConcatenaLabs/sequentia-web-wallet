@@ -212,6 +212,42 @@ identity via `SeqlnSigner.fromMnemonic(signingSeed)` (byte-identical hsm_secret)
 The harness takes the device's payment limits from `SEQ_LN_PAYMENT_LIMITS` in
 its environment, as JSON in the shape of `window.SEQ_LN_PAYMENT_LIMITS`.
 
+## Keeping the LP node stocked (`lp-refill.mjs`)
+
+The room-to-receive service sells room from the confirmed coins of its LP node
+(`SUBAS_LP_RPC`), and every sale locks some of them in a channel until it closes.
+`lp-refill.mjs` tops the LP node back up from the operator's inventory wallet
+(`FRONT_SEQ_WALLET`): for each asset whose room sellable now is under the low line
+of `/stats/inbound` (the same figures as `/liquidity`), it sends coins to a fresh
+address of the LP node until its free stock is back at the target, paying the fee
+in the asset sent.
+
+```sh
+node tooling/lsp/lp-refill.mjs            # says what it would send
+node tooling/lsp/lp-refill.mjs --apply    # sends
+```
+
+It reads the LSP's environment (`SEQ_RPC`, `FRONT_SEQ_WALLET`, `SUBAS_LP_RPC`,
+`LNCLI`, `LSP_PORT`) and these settings, in reference units (USD on the testnet):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LP_REFILL_LOW_REF` | the service's low line | refill an asset whose sellable room is under this |
+| `LP_REFILL_TARGET_REF` | 20000 | free stock a refill brings the asset back to |
+| `LP_REFILL_MAX_REF` | 25000 | most one refill sends |
+| `LP_REFILL_KEEP_REF` | 5000 | least the inventory keeps of each asset |
+| `LP_REFILL_COOLDOWN_MIN` | 30 | minutes between two refills of one asset |
+| `LP_REFILL_STATE` | `/root/sequentia/lsp/prov/lp-refill.json` | when each asset was last refilled |
+
+It sends nothing for an asset with a coin still unconfirmed on the LP node (the
+stats count confirmed coins only, so a refill still landing would be doubled),
+nothing inside the cooldown, nothing that would leave the inventory under its
+floor, and nothing at all while the LP node is not on the Sequentia node's chain:
+after a rollback it can sit on a dropped branch, blind to coins that did arrive.
+`lp-refill.service` and `lp-refill.timer` run one pass every five minutes as root
+from the LSP's checkout; each pass logs one line per asset it sends or holds back
+(`journalctl -u lp-refill`).
+
 ## Proof
 
 A Node end-to-end harness drives this exact API + the vendored wallet SDK: it
