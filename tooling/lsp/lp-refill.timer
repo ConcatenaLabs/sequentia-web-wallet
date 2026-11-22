@@ -1,0 +1,10 @@
+# Runs lp-refill.service every five minutes.
+[Unit]
+Description=Top up the LP node every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
