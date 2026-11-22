@@ -20,7 +20,7 @@
 // page's worker, its storage and its same-origin calls behave as they do on the public page.
 import { createServer } from 'node:http'
 import { readFileSync, existsSync, statSync } from 'node:fs'
-import { join, extname, dirname, resolve, normalize } from 'node:path'
+import { join, extname, dirname, resolve, normalize, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mkdirSync } from 'node:fs'
 
@@ -99,13 +99,13 @@ function local (path) {
     let rel = decodeURIComponent(path.slice('/dex/'.length)) || 'index.html'
     if (rel.endsWith('/')) rel += 'index.html'
     const f = normalize(join(dex, rel))
-    return f.startsWith(dex + '/') && existsSync(f) && statSync(f).isFile() ? f : null
+    return f.startsWith(dex + sep) && existsSync(f) && statSync(f).isFile() ? f : null
   }
   if (!path.startsWith('/wallet/') || path.startsWith('/wallet/pkg/')) return null
   let rel = decodeURIComponent(path.slice('/wallet/'.length)) || 'index.html'
   if (rel.endsWith('/')) rel += 'index.html'
   const f = normalize(join(root, rel))
-  if (!f.startsWith(root + '/') || !existsSync(f) || !statSync(f).isFile()) return null
+  if (!f.startsWith(root + sep) || !existsSync(f) || !statSync(f).isFile()) return null
   return f
 }
 
